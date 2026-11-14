@@ -23,6 +23,8 @@ DevCtx& DevCtx::instance()
 
 int DevCtx::get_num_sms(int device)
 {
+    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
+                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     std::lock_guard<std::mutex> lock(mtx);
     if (!num_sms[device])
         cuda_check(cudaDeviceGetAttribute(&num_sms[device], cudaDevAttrMultiProcessorCount, device));
@@ -31,6 +33,8 @@ int DevCtx::get_num_sms(int device)
 
 int DevCtx::get_cc(int device)
 {
+    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
+                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     std::lock_guard<std::mutex> lock(mtx);
     if (!cc[device])
     {
@@ -47,6 +51,8 @@ int DevCtx::get_cc(int device)
 
 void* DevCtx::get_ws(int device)
 {
+    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
+                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     std::lock_guard<std::mutex> lock(mtx);
     if (!ws[device])
     {
@@ -58,6 +64,8 @@ void* DevCtx::get_ws(int device)
 
 int* DevCtx::get_locks(int device)
 {
+    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
+                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     std::lock_guard<std::mutex> lock(mtx);
     if (!locks[device])
     {

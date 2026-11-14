@@ -667,7 +667,7 @@ __global__ void __launch_bounds__(kThreads, 1)
               uint32_t next = 0;
 #pragma unroll
               for (int j = 0; j < 4; ++j)
-                if (g[j].meta == 0u) v[j] = __ldg(t.escapes + g[j].lo0);
+                if (g[j].meta == 0u && g[j].lo0 < t.num_escapes) v[j] = __ldg(t.escapes + g[j].lo0);
 #pragma unroll
               for (int j = 0; j < 4; ++j) {
                 if (g[j].meta == 0u) {

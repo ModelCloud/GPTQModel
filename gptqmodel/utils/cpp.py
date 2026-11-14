@@ -875,6 +875,9 @@ def rocm_supplemental_device_lib_flags() -> list[str]:
 
 
 _CUDA_ARCH_TOKEN_RE = pcre.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
+_CUDA_ARCH_FLAG_TOKEN_RE = pcre.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<suffix>a?)(?P<ptx>\+PTX)?$"
+)
 
 
 def _supported_cuda_arch_pairs() -> list[tuple[int, int]]:
@@ -930,6 +933,47 @@ def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
     return ";".join(requested_tokens)
 
 
+def _cuda_arch_flags_for_list(arch_list: str) -> list[str]:
+    """Translate a ``TORCH_CUDA_ARCH_LIST`` string into explicit NVCC flags."""
+
+    flags: list[str] = []
+    seen: set[str] = set()
+    for token in pcre.split(r"[;\s,]+", arch_list.strip()):
+        if not token or token == "native":
+            continue
+        match = _CUDA_ARCH_FLAG_TOKEN_RE.match(token)
+        if not match:
+            continue
+        sm = f"{int(match.group('major'))}{int(match.group('minor'))}{match.group('suffix')}"
+        gencode = f"-gencode=arch=compute_{sm},code=sm_{sm}"
+        if gencode not in seen:
+            flags.append(gencode)
+            seen.add(gencode)
+        if match.group("ptx"):
+            ptx = f"-gencode=arch=compute_{sm},code=compute_{sm}"
+            if ptx not in seen:
+                flags.append(ptx)
+                seen.add(ptx)
+    return flags
+
+
+def _merged_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
+    """Return explicit flags for a merged override, or ``[]`` when Torch owns it.
+
+    Passing these flags through ``extra_cuda_cflags`` makes Torch skip its own
+    ``TORCH_CUDA_ARCH_LIST`` expansion, so the build never has to mutate the
+    process environment while another thread may be compiling.
+    """
+
+    override = os.getenv("TORCH_CUDA_ARCH_LIST")
+    if not override or not merge_visible_caps:
+        return []
+    merged_override = _merge_cuda_arch_override_with_visible_caps(override)
+    if merged_override == override:
+        return []
+    return _cuda_arch_flags_for_list(merged_override)
+
+
 def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
     """Return the effective NVCC arch flags Torch will emit for this host."""
 
@@ -938,35 +982,10 @@ def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
         if override and merge_visible_caps:
             merged_override = _merge_cuda_arch_override_with_visible_caps(override)
             if merged_override != override:
-                os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
-                try:
-                    return list(_get_cuda_arch_flags())
-                finally:
-                    os.environ["TORCH_CUDA_ARCH_LIST"] = override
+                return _cuda_arch_flags_for_list(merged_override)
         return list(_get_cuda_arch_flags())
     except Exception:
         return []
-
-
-@contextmanager
-def _temporary_merged_cuda_arch_override(*, enabled: bool = True):
-    """Temporarily include the visible CUDA capability in manual arch overrides."""
-
-    override = os.getenv("TORCH_CUDA_ARCH_LIST")
-    if not enabled or not override:
-        yield
-        return
-
-    merged_override = _merge_cuda_arch_override_with_visible_caps(override)
-    if merged_override == override:
-        yield
-        return
-
-    os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
-    try:
-        yield
-    finally:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = override
 
 
 def resolved_cuda_arch_flags() -> list[str]:
@@ -1784,7 +1803,7 @@ class TorchOpsJitExtension:
             )
         return ""
 
-    def load(self) -> bool:
+    def load(self, *, verbose: bool | None = None) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
 
         stable_abi_error = self._stable_abi_runtime_error()
@@ -1895,7 +1914,11 @@ class TorchOpsJitExtension:
                         "sources": resolved_sources,
                         "build_directory": str(build_root),
                         "is_python_module": False,
-                        "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
+                        "verbose": (
+                            bool(verbose)
+                            if verbose is not None
+                            else (env_flag(self.verbose_env, default=False) if self.verbose_env else False)
+                        ),
                     }
                     extra_cflags = self._resolved_extra_cflags()
                     if extra_cflags:
@@ -1908,10 +1931,15 @@ class TorchOpsJitExtension:
                     extra_ldflags = self._resolved_extra_ldflags()
                     if extra_ldflags:
                         kwargs["extra_ldflags"] = extra_ldflags
-                    with _temporary_merged_cuda_arch_override(
-                        enabled=self.merge_visible_cuda_arch_override
-                    ):
-                        load(**kwargs)
+                    arch_flags = _merged_cuda_arch_flags(
+                        merge_visible_caps=self.merge_visible_cuda_arch_override
+                    )
+                    if arch_flags:
+                        # Explicit arch flags make Torch skip its own env-based
+                        # expansion; never mutate TORCH_CUDA_ARCH_LIST for the
+                        # duration of a multi-minute JIT build.
+                        kwargs["extra_cuda_cflags"] = [*extra_cuda_cflags, *arch_flags]
+                    load(**kwargs)
                     build_invocation_succeeded = True
                 except Exception as exc:  # pragma: no cover - build depends on host toolchain
                     elapsed = time.perf_counter() - started
@@ -2190,17 +2218,11 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     try:
         from gptqmodel import extension as extension_api
 
-        previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
-        if verbose:
-            os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
-        try:
-            _PACK_BLOCK_EXTENSION = extension_api.load(name="pack_block_cpu")["pack_block_cpu"]
-        finally:
-            if verbose:
-                if previous_verbose is None:
-                    os.environ.pop("GPTQMODEL_EXT_VERBOSE", None)
-                else:
-                    os.environ["GPTQMODEL_EXT_VERBOSE"] = previous_verbose
+        # Pass verbosity explicitly instead of rewriting the process-wide
+        # environment for the duration of a JIT build.
+        _PACK_BLOCK_EXTENSION = extension_api.load(
+            name="pack_block_cpu", verbose=True if verbose else None
+        )["pack_block_cpu"]
         log.debug("pack_block_cpu extension loaded from %s", source_path)
     except Exception as exc:  # pragma: no cover - environment-specific
         log.debug("pack_block_cpu extension build failed: %s", exc)
@@ -2224,17 +2246,9 @@ def load_floatx_cpu_extension(*, verbose: bool = False) -> Optional[object]:
     try:
         from gptqmodel import extension as extension_api
 
-        previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
-        if verbose:
-            os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
-        try:
-            extension = extension_api.load(name="floatx_cpu")["floatx_cpu"]
-        finally:
-            if verbose:
-                if previous_verbose is None:
-                    os.environ.pop("GPTQMODEL_EXT_VERBOSE", None)
-                else:
-                    os.environ["GPTQMODEL_EXT_VERBOSE"] = previous_verbose
+        extension = extension_api.load(
+            name="floatx_cpu", verbose=True if verbose else None
+        )["floatx_cpu"]
         log.debug("floatx_cpu extension loaded from %s", source_path)
         return extension
     except Exception as exc:  # pragma: no cover - environment-specific

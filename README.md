@@ -168,6 +168,9 @@ save, reload, and validate a model. It also maps advanced features to their guid
 For checkpoint reshaping, see [reshard source selection](docs/reshard-source-selection.md).
 For how tensor-derived layer directories and `weight_map` shard names are kept
 inside the output directory, see [checkpoint path containment](docs/checkpoint-path-containment.md).
+For how checkpoint index tensors (`g_idx`, NF12 escapes, ParoQuant pairs, VPTQ
+outliers, EXL3 `K`) are validated before any native kernel indexes memory, see
+[checkpoint index validation](docs/checkpoint-index-validation.md).
 For checkpoint-backed module loading, see [lazy checkpoint materialization](docs/lazy-checkpoint-materialization.md).
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
@@ -1702,6 +1705,12 @@ Shutting down a device thread pool drains every task it already accepted and
 rejects any later submission; see
 [device thread pool shutdown](docs/device-thread-pool-shutdown.md) for the
 accept/drain/reject flow and the race it closes.
+
+A worker task failure propagates through its future instead of terminating the
+interpreter; see
+[device thread pool error propagation](docs/thread-pool-error-contract.md) for
+the task and warmup failure paths, the thread-local Triton autotuner state, and
+the Hessian workspace release.
 
 Saved quantization configs preserve the complete P2P policy; see
 [P2P policy persistence](docs/multi_gpu_quantization.md#p2p-policy-persistence)

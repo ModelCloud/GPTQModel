@@ -59,7 +59,7 @@ __device__ __forceinline__ void store_decoded_tile(OutT* __restrict__ out, int64
 template <WeightSource S, typename OutT, int kPerWarp>
 __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
                                             const uint4* __restrict__ escapes,
-                                            uint32_t base_x4, int64_t num_sa,
+                                            uint32_t num_escapes, uint32_t base_x4, int64_t num_sa,
                                             int64_t k_blocks,
                                             OutT* __restrict__ out, int64_t ldo,
                                             const float* __restrict__ sub = nullptr) {
@@ -75,7 +75,7 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
     const int64_t sa = warp_super_atom<kPerWarp>(i);
     if (sa >= num_sa) break;
     AtomRegs r;
-    source_planes_to_atoms<S>(planes[i], base_x4, escapes, r);
+    source_planes_to_atoms<S>(planes[i], base_x4, escapes, num_escapes, r);
     RowTile x;
     atoms_to_tile(r, x);
     // Undo the encoder's quad transpose to return to row-major. The bf16t twin
@@ -98,9 +98,9 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
 template <WeightSource S, typename OutT, int kPerWarp>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     decode_kernel(const uint4* __restrict__ packed, const uint4* __restrict__ escapes,
-                  uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
+                  uint32_t num_escapes, uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
                   OutT* __restrict__ out, int64_t ldo, const float* __restrict__ sub) {
-  decode_rows<S, OutT, kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo, sub);
+  decode_rows<S, OutT, kPerWarp>(packed, escapes, num_escapes, base_x4, num_sa, k_blocks, out, ldo, sub);
 }
 
 
@@ -187,7 +187,7 @@ __device__ __forceinline__ float bf16x2_dot(const __hip_bfloat162 a,
 template <WeightSource S, int kM>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     linear_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
-                  const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n,
+                  const uint4* __restrict__ escapes, uint32_t num_escapes, uint32_t base_x4, int64_t n,
                   int64_t k, __hip_bfloat16* __restrict__ out,
                   const __hip_bfloat16* __restrict__ bias) {
   // The warp-partial plane is sized for the tokens actually in flight, except
@@ -235,7 +235,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     uint4 planes[SourceTraits<S>::kLoads];
     load_source_planes<S>(packed, sa, lane, planes);
     AtomRegs regs;
-    source_planes_to_atoms<S>(planes, base_x4, escapes, regs);
+    source_planes_to_atoms<S>(planes, base_x4, escapes, num_escapes, regs);
 
     // regs[j][i] = R_i of atom j (SPEC 4.1):
     //   R0 -> row g,   cols 2t, 2t+1      R1 -> row g+8, cols 2t, 2t+1
@@ -331,7 +331,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 // One CTA per 16-row output block; the block itself splits K across its warps.
 template <WeightSource S>
 hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                        const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                        uint32_t num_escapes, const void* x, void* out, int64_t n, int64_t k, int64_t m,
                         const void* bias, hipStream_t stream) {
   if (m < 1 || m > kFusedMaxM) return hipErrorInvalidValue;
   // n / 16 below would otherwise round a 24-row weight down to one 16-row block
@@ -353,7 +353,7 @@ hipError_t launch_fused(const uint8_t* packed, const uint4* escapes, uint32_t ex
 #define NF12_FUSED_LAUNCH(K)                                                              \
   linear_kernel<S, K><<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>( \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed), \
-      escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out),       \
+      escapes, num_escapes, exp_base_x4(exp_base), n, k, reinterpret_cast<__hip_bfloat16*>(out), \
       reinterpret_cast<const __hip_bfloat16*>(bias))
   switch (m) {
     case 1: NF12_FUSED_LAUNCH(1); break;
@@ -387,7 +387,8 @@ namespace {
 
 template <typename OutT>
 hipError_t decode_nf12_matrix(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                              int64_t n, int64_t k, OutT* out, int64_t ldo, hipStream_t stream,
+                              uint32_t num_escapes, int64_t n, int64_t k, OutT* out, int64_t ldo,
+                              hipStream_t stream,
                               const float* sub = nullptr) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   // SPEC.md 4 geometry; n / 16 and k / 64 below would otherwise truncate and
@@ -401,7 +402,7 @@ hipError_t decode_nf12_matrix(const uint8_t* packed, const uint4* escapes, uint3
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
   decode_kernel<WeightSource::kNf12, OutT, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
-          reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa,
+          reinterpret_cast<const uint4*>(packed), escapes, num_escapes, exp_base_x4(exp_base), num_sa,
           k / kSuperAtomCols, out, ldo, sub);
   return hipGetLastError();
 }
@@ -412,26 +413,26 @@ extern "C" {
 
 // Decode a whole [N, K] NF12 matrix to row-major BF16.
 hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                          int64_t n, int64_t k, void* out, int64_t ldo,
+                          uint32_t num_escapes, int64_t n, int64_t k, void* out, int64_t ldo,
                           hipStream_t stream) {
-  return decode_nf12_matrix(packed, escapes, exp_base, n, k,
+  return decode_nf12_matrix(packed, escapes, exp_base, num_escapes, n, k,
                             reinterpret_cast<__hip_bfloat16*>(out), ldo, stream);
 }
 
 // Same elements as nf12_decode, widened to FP32 during the store.
 hipError_t nf12_decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                            int64_t n, int64_t k, void* out, int64_t ldo,
+                            uint32_t num_escapes, int64_t n, int64_t k, void* out, int64_t ldo,
                             hipStream_t stream) {
-  return decode_nf12_matrix(packed, escapes, exp_base, n, k, reinterpret_cast<float*>(out), ldo,
+  return decode_nf12_matrix(packed, escapes, exp_base, num_escapes, n, k, reinterpret_cast<float*>(out), ldo,
                             stream);
 }
 
 // out = widen(decode) - wq, fused so no FP32 source copy is materialized.
 hipError_t nf12_sub_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                         int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
+                         uint32_t num_escapes, int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
                          hipStream_t stream) {
   if (wq == nullptr || out == nullptr || wq == out) return hipErrorInvalidValue;
-  return decode_nf12_matrix(packed, escapes, exp_base, n, k, reinterpret_cast<float*>(out), ldo,
+  return decode_nf12_matrix(packed, escapes, exp_base, num_escapes, n, k, reinterpret_cast<float*>(out), ldo,
                             stream, static_cast<const float*>(wq));
 }
 
@@ -449,7 +450,7 @@ hipError_t nf12_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* 
   if (blocks > 0x7fffffffLL) return hipErrorInvalidValue;
   decode_kernel<WeightSource::kBf16t, __hip_bfloat16, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
-          reinterpret_cast<const uint4*>(packed), nullptr, 0u, num_sa, k / kSuperAtomCols,
+          reinterpret_cast<const uint4*>(packed), nullptr, 0u, 0u, num_sa, k / kSuperAtomCols,
           out_bf16, ldo, nullptr);
   return hipGetLastError();
 }
@@ -476,10 +477,10 @@ int nf12_linear_fused_small_m_supported(int64_t m) { return m >= 1 && m <= kFuse
 
 
 hipError_t nf12_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                                const void* x, void* out, int64_t n, int64_t k,
+                                uint32_t num_escapes, const void* x, void* out, int64_t n, int64_t k,
                                 int64_t m, const void* bias, hipStream_t stream) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
-  return launch_fused<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
+  return launch_fused<WeightSource::kNf12>(packed, escapes, exp_base, num_escapes, x, out, n, k, m, bias,
                                            stream);
 }
 
@@ -488,7 +489,7 @@ hipError_t nf12_linear_fused(const uint8_t* packed, const uint4* escapes, uint32
 hipError_t nf12_linear_fused_bf16t(const uint8_t* packed, const void* x, void* out,
                                       int64_t n, int64_t k, int64_t m, const void* bias,
                                       hipStream_t stream) {
-  return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias, stream);
+  return launch_fused<WeightSource::kBf16t>(packed, nullptr, 0u, 0u, x, out, n, k, m, bias, stream);
 }
 
 }  // extern "C"

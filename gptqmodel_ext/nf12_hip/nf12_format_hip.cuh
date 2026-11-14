@@ -133,9 +133,9 @@ __device__ __forceinline__ void decode_bulk(const Group& g, uint32_t base_x4, ui
 // wave-uniform on the fast path.
 __device__ __forceinline__ void decode_group(const Group& g, uint32_t base_x4,
                                              const uint4* __restrict__ escapes,
-                                             uint32_t (&r)[4]) {
+                                             uint32_t num_escapes, uint32_t (&r)[4]) {
   decode_bulk(g, base_x4, r);
-  if (g.meta == 0u) {
+  if (g.meta == 0u && g.lo0 < num_escapes) {
     const uint4 v = escapes[g.lo0];
     r[0] = v.x;
     r[1] = v.y;
@@ -349,12 +349,12 @@ __device__ __forceinline__ void load_source_planes(const uint4* __restrict__ pac
 template <WeightSource S>
 __device__ __forceinline__ void source_planes_to_atoms(
     const uint4 (&p)[SourceTraits<S>::kLoads], uint32_t base_x4,
-    const uint4* __restrict__ escapes, AtomRegs& r) {
+    const uint4* __restrict__ escapes, uint32_t num_escapes, AtomRegs& r) {
   if constexpr (S == WeightSource::kNf12) {
-    decode_group(Group{p[0].x, p[1].x, p[1].y}, base_x4, escapes, r[0]);
-    decode_group(Group{p[0].y, p[1].z, p[1].w}, base_x4, escapes, r[1]);
-    decode_group(Group{p[0].z, p[2].x, p[2].y}, base_x4, escapes, r[2]);
-    decode_group(Group{p[0].w, p[2].z, p[2].w}, base_x4, escapes, r[3]);
+    decode_group(Group{p[0].x, p[1].x, p[1].y}, base_x4, escapes, num_escapes, r[0]);
+    decode_group(Group{p[0].y, p[1].z, p[1].w}, base_x4, escapes, num_escapes, r[1]);
+    decode_group(Group{p[0].z, p[2].x, p[2].y}, base_x4, escapes, num_escapes, r[2]);
+    decode_group(Group{p[0].w, p[2].z, p[2].w}, base_x4, escapes, num_escapes, r[3]);
   } else {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {

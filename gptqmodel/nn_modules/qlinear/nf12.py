@@ -520,6 +520,15 @@ class NF12Linear(WeightOnlyQuantLinear):
                 f"NF12Linear `{self.name}`: unexpected `nf12_packed` shape "
                 f"{tuple(self.nf12_packed.shape)}"
             )
+        # Escape indices are read from the checkpoint's packed stream; reject
+        # out-of-table values at load instead of decoding arbitrary memory.
+        if self.nf12_packed.device.type != "meta":
+            from gptqmodel_nf12.api import validate_escape_indices
+
+            try:
+                validate_escape_indices(self.nf12_packed, self.nf12_escapes)
+            except ValueError as exc:
+                raise ValueError(f"NF12Linear `{self.name}`: {exc}") from exc
 
     def extra_repr(self) -> str:
         exponent = getattr(self, "nf12_exp_base", None)
