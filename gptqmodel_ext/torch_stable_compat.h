@@ -38,10 +38,31 @@
 
 #include <torch/csrc/inductor/aoti_torch/generated/c_shim_cpu.h>
 
-#if defined(USE_CUDA) || defined(__CUDACC__)
+// ---------------------------------------------------------------------------
+// Device backend selection
+// ---------------------------------------------------------------------------
+// The stable device shims are the same C symbols on both backends: a ROCm
+// build implements the `*_cuda_*` ABI inside libtorch_hip, so one source tree
+// serves CUDA and HIP. Only the runtime types (streams, device properties)
+// differ, and those are aliased below.
+#if defined(USE_ROCM) || defined(__HIP_PLATFORM_AMD__)
+#define GPTQMODEL_STABLE_HIP 1
+#include <hip/hip_runtime.h>
+#else
+#define GPTQMODEL_STABLE_HIP 0
+#endif
+
+#if defined(USE_CUDA) || defined(__CUDACC__) || GPTQMODEL_STABLE_HIP
+#define GPTQMODEL_STABLE_DEVICE 1
+// The generated "cuda" op shims are declared the same way on ROCm; the
+// symbols live in libtorch_hip there.
 #include <torch/csrc/inductor/aoti_torch/generated/c_shim_cuda.h>
+#if !GPTQMODEL_STABLE_HIP
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#endif
+#else
+#define GPTQMODEL_STABLE_DEVICE 0
 #endif
 
 #include <array>
@@ -318,6 +339,22 @@ inline Tensor to(const Tensor& self, ScalarType dtype) {
   return torch::stable::to(self, dtype);
 }
 
+inline Tensor to(const Tensor& self, Device device) {
+  return torch::stable::to(self, device);
+}
+
+inline Tensor cpu(const Tensor& self) {
+  return torch::stable::to(self, Device(DeviceType::CPU));
+}
+
+/// `Tensor::item<T>()` is not part of the stable surface. The kernels only read
+/// a single-element flag/result tensor, so copy it to the host and read it.
+template <class T>
+inline T item(const Tensor& self) {
+  const Tensor host = cpu(self);
+  return host.const_data_ptr<T>()[0];
+}
+
 inline Tensor mul(const Tensor& lhs, const Tensor& rhs) {
   std::array<StableIValue, 2> stack{
       torch::stable::detail::from(lhs), torch::stable::detail::from(rhs)};
@@ -331,7 +368,7 @@ inline Tensor add(const Tensor& lhs, const Tensor& rhs) {
   // bridge cannot marshal Scalar. Use the AOTI per-device shims (also stable
   // ABI) which take alpha as a plain double.
   AtenTensorHandle out = nullptr;
-#if defined(USE_CUDA) || defined(__CUDACC__)
+#if GPTQMODEL_STABLE_DEVICE
   if (lhs.device().is_cuda()) {
     STABLE_TORCH_ERROR_CODE_CHECK(
         aoti_torch_cuda_add_Tensor(lhs.get(), rhs.get(), 1.0, &out));
@@ -460,17 +497,27 @@ inline Tensor full(
       size, value, dtype, std::nullopt, std::nullopt, std::nullopt);
 }
 
-#if defined(USE_CUDA) || defined(__CUDACC__)
+#if GPTQMODEL_STABLE_DEVICE
 namespace cuda {
+
+// The stable shims return `void*` stream handles on both backends, so only the
+// runtime typedef differs between a CUDA and a ROCm build.
+#if GPTQMODEL_STABLE_HIP
+using DeviceStream = hipStream_t;
+using DeviceProperties = hipDeviceProp_t;
+#else
+using DeviceStream = cudaStream_t;
+using DeviceProperties = cudaDeviceProp;
+#endif
 
 class CompatibleCUDAStream {
  public:
-  explicit CompatibleCUDAStream(cudaStream_t stream) : stream_(stream) {}
-  cudaStream_t stream() const { return stream_; }
-  operator cudaStream_t() const { return stream_; }
+  explicit CompatibleCUDAStream(DeviceStream stream) : stream_(stream) {}
+  DeviceStream stream() const { return stream_; }
+  operator DeviceStream() const { return stream_; }
 
  private:
-  cudaStream_t stream_;
+  DeviceStream stream_;
 };
 
 inline CompatibleCUDAStream getCurrentCUDAStream(int32_t device_index = -1) {
@@ -480,30 +527,41 @@ inline CompatibleCUDAStream getCurrentCUDAStream(int32_t device_index = -1) {
   void* stream = nullptr;
   STABLE_TORCH_ERROR_CODE_CHECK(
       aoti_torch_get_current_cuda_stream(device_index, &stream));
-  return CompatibleCUDAStream(static_cast<cudaStream_t>(stream));
+  return CompatibleCUDAStream(static_cast<DeviceStream>(stream));
 }
 
 inline int32_t current_device_index() {
   return torch::stable::accelerator::getCurrentDeviceIndex();
 }
 
-inline void record_stream(const Tensor&, cudaStream_t) {
+inline void record_stream(const Tensor&, DeviceStream) {
   // The stable ABI does not expose Tensor::record_stream. Callers keep the
   // workspace alive for the duration of the op; this is a lifetime hint, not
   // a correctness requirement.
 }
 
+#if !GPTQMODEL_STABLE_HIP
+// ROCm builds expose the same symbol, but hipblas is not part of every ROCm
+// install (the pip runtime wheel ships no headers), so only CUDA callers get
+// the handle. No HIP kernel in this tree needs it.
 inline cublasHandle_t getCurrentCUDABlasHandle() {
   void* handle = nullptr;
   STABLE_TORCH_ERROR_CODE_CHECK(torch_get_current_cuda_blas_handle(&handle));
   return static_cast<cublasHandle_t>(handle);
 }
+#endif
 
-inline const cudaDeviceProp* getDeviceProperties(int32_t device_index) {
-  static thread_local cudaDeviceProp properties{};
+inline const DeviceProperties* getDeviceProperties(int32_t device_index) {
+  static thread_local DeviceProperties properties{};
+#if GPTQMODEL_STABLE_HIP
+  if (hipGetDeviceProperties(&properties, device_index) != hipSuccess) {
+    return nullptr;
+  }
+#else
   if (cudaGetDeviceProperties(&properties, device_index) != cudaSuccess) {
     return nullptr;
   }
+#endif
   return &properties;
 }
 
@@ -524,7 +582,7 @@ class CUDAGuard {
 using OptionalCUDAGuard = CUDAGuard;
 
 }  // namespace cuda
-#endif  // USE_CUDA || __CUDACC__
+#endif  // GPTQMODEL_STABLE_DEVICE
 
 }  // namespace at
 
@@ -559,23 +617,25 @@ inline constexpr DeviceType kCUDA = DeviceType::CUDA;
 
 using at::empty;
 using at::empty_like;
+using at::ones;
 using at::zeros;
 using at::zeros_like;
 
 }  // namespace torch
 
-#if defined(USE_CUDA) || defined(__CUDACC__)
+#if GPTQMODEL_STABLE_DEVICE
 namespace c10 {
 namespace cuda {
 using CUDAGuard = at::cuda::CUDAGuard;
 using OptionalCUDAGuard = at::cuda::OptionalCUDAGuard;
 using CUDAStream = at::cuda::CompatibleCUDAStream;
+using at::cuda::getCurrentCUDAStream;
 inline int32_t current_device() {
   return torch::stable::accelerator::getCurrentDeviceIndex();
 }
 }  // namespace cuda
 }  // namespace c10
-#endif  // USE_CUDA || __CUDACC__
+#endif  // GPTQMODEL_STABLE_DEVICE
 
 // The original ATen kernels rely on ADL to find at::device_of because their
 // tensor type lived in namespace at. torch::stable::Tensor does not, so make
@@ -593,17 +653,34 @@ using at::device_of;
   do {                  \
   } while (0)
 
-#if defined(USE_CUDA) || defined(__CUDACC__)
+#if GPTQMODEL_STABLE_DEVICE
+// The kernels keep the familiar CUDA_CHECK spelling; only the runtime entry
+// points behind it change on ROCm.
+#if GPTQMODEL_STABLE_HIP
+#define GPTQMODEL_DEVICE_ERROR_T hipError_t
+#define GPTQMODEL_DEVICE_SUCCESS hipSuccess
+#define GPTQMODEL_DEVICE_GET_ERROR_STRING hipGetErrorString
+#define GPTQMODEL_DEVICE_GET_LAST_ERROR hipGetLastError
+#define GPTQMODEL_DEVICE_ERROR_LABEL "HIP error: "
+#else
+#define GPTQMODEL_DEVICE_ERROR_T cudaError_t
+#define GPTQMODEL_DEVICE_SUCCESS cudaSuccess
+#define GPTQMODEL_DEVICE_GET_ERROR_STRING cudaGetErrorString
+#define GPTQMODEL_DEVICE_GET_LAST_ERROR cudaGetLastError
+#define GPTQMODEL_DEVICE_ERROR_LABEL "CUDA error: "
+#endif
+
 #define GPTQMODEL_CUDA_CHECK(EXPR)                                       \
   do {                                                                   \
-    cudaError_t _gptqmodel_cuda_status = (EXPR);                         \
+    GPTQMODEL_DEVICE_ERROR_T _gptqmodel_device_status = (EXPR);          \
     STD_TORCH_CHECK(                                                     \
-        _gptqmodel_cuda_status == cudaSuccess,                           \
-        "CUDA error: ",                                                  \
-        cudaGetErrorString(_gptqmodel_cuda_status));                     \
+        _gptqmodel_device_status == GPTQMODEL_DEVICE_SUCCESS,            \
+        GPTQMODEL_DEVICE_ERROR_LABEL,                                    \
+        GPTQMODEL_DEVICE_GET_ERROR_STRING(_gptqmodel_device_status));    \
   } while (0)
 
 #define C10_CUDA_CHECK(EXPR) GPTQMODEL_CUDA_CHECK(EXPR)
 #define AT_CUDA_CHECK(EXPR) GPTQMODEL_CUDA_CHECK(EXPR)
-#define C10_CUDA_KERNEL_LAUNCH_CHECK() GPTQMODEL_CUDA_CHECK(cudaGetLastError())
-#endif  // USE_CUDA || __CUDACC__
+#define C10_CUDA_KERNEL_LAUNCH_CHECK() \
+  GPTQMODEL_CUDA_CHECK(GPTQMODEL_DEVICE_GET_LAST_ERROR())
+#endif  // GPTQMODEL_STABLE_DEVICE

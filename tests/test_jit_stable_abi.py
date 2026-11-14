@@ -18,6 +18,7 @@ from gptqmodel.exllamav3 import ext as exllamav3
 from gptqmodel.quantization import gptq_cuda
 from gptqmodel.utils import (
     allspark,
+    allspark_hip,
     awq,
     cpp,
     exllamav2,
@@ -111,6 +112,10 @@ def test_allspark_uses_stable_abi():
     _assert_stable(allspark._ALLSPARK_EXTENSION)
 
 
+def test_allspark_hip_uses_stable_abi():
+    _assert_stable(allspark_hip._EXTENSION)
+
+
 def test_tt_blockfloat_cuda_uses_stable_abi():
     _assert_stable(tt_blockfloat_cuda._EXTENSION)
 
@@ -140,7 +145,6 @@ def test_every_jit_loader_declares_the_stable_abi():
 
     root = Path(__file__).resolve().parents[1] / "gptqmodel"
     rocm_only = {
-        "gptqmodel/utils/allspark_hip.py",
         "gptqmodel/utils/nf12_hip.py",
         "gptqmodel/utils/tt_blockfloat_hip.py",
     }
