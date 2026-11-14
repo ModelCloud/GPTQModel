@@ -743,8 +743,12 @@ When at least one key is configured, every path under `/v1`, `/v2` and
 `/inference` requires `Authorization: Bearer <key>`; `/health`, `/` and CORS
 preflight stay open. An explicitly passed `api_key` replaces (does not merge
 with) `GPTQMODEL_OPENAI_API_KEY`, and blank keys are ignored. Starting on a
-non-loopback host without a key only emits a warning — the server still starts.
-`/shutdown` is limited to loopback callers unless a valid key is presented.
+non-loopback host without a key is refused; pass `api_key=` to opt in. The
+default listener is `127.0.0.1`, request sizes are bounded, and a loopback
+listener validates the Host header. `/shutdown` is limited to loopback callers
+unless a valid key is presented. See
+[OpenAI server exposure and media fetch bounds](docs/openai-server-exposure.md)
+for the bind, Host, request-limit, and calibration-fetch contracts.
 
 ### Quantization 🔧
 Example: quantizing an LLM with `GPT-QModel`:

@@ -4,8 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import base64
+import ipaddress
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -13,6 +15,7 @@ import warnings
 from io import BytesIO
 from pathlib import Path
 from typing import Optional, Tuple, Union
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from PIL import Image
@@ -28,6 +31,7 @@ DEFAULT_IMAGE_FETCH_MAX_PIXELS = 64 * 1024 * 1024
 DEFAULT_IMAGE_FETCH_TOTAL_TIMEOUT = 120.0
 DEFAULT_IMAGE_FETCH_ATTEMPTS = 3
 DEFAULT_IMAGE_FETCH_BACKOFF_SECONDS = 0.5
+DEFAULT_IMAGE_FETCH_MAX_REDIRECTS = 5
 
 _IMAGE_FETCH_MAX_BYTES_ENV = "GPTQMODEL_IMAGE_FETCH_MAX_BYTES"
 _IMAGE_FETCH_MAX_PIXELS_ENV = "GPTQMODEL_IMAGE_FETCH_MAX_PIXELS"
@@ -59,7 +63,7 @@ class ImageFetchError(RuntimeError):
     def __init__(self, url: str, reason: str):
         self.url = url
         self.reason = reason
-        super().__init__(f"Failed to fetch image URL {_shorten_url(url)!r}: {reason}")
+        super().__init__(f"Failed to fetch URL {_shorten_url(url)!r}: {reason}")
 
 
 def _shorten_url(url: str, limit: int = 200) -> str:
@@ -129,6 +133,66 @@ def _clamp_timeout(
     return min(timeout, remaining)
 
 
+def _resolve_host_addresses(host: str, port: int) -> list:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise _FetchFailure(f"could not resolve host {host!r} ({exc})", retryable=False) from exc
+    addresses = []
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise _FetchFailure(f"host {host!r} resolved to no usable address", retryable=False)
+    return addresses
+
+
+def _address_is_blocked(address, *, allow_private_addresses: bool) -> Optional[str]:
+    """Return a rejection reason, or ``None`` when the destination is allowed."""
+
+    # Link-local (169.254.0.0/16, fe80::/10) is the cloud metadata range and is
+    # never a legitimate calibration source, even for an explicit private opt-in.
+    if address.is_link_local:
+        return "link-local destinations are not allowed"
+    if address.is_multicast or address.is_unspecified or address.is_reserved:
+        return f"destination address {address} is not a usable unicast address"
+    if (address.is_loopback or address.is_private) and not allow_private_addresses:
+        return (
+            f"destination address {address} is private or loopback; "
+            "pass allow_private_addresses=True to permit it"
+        )
+    return None
+
+
+def _validate_remote_url(url: str, *, allow_private_addresses: bool) -> None:
+    if not isinstance(url, str) or not url:
+        raise ImageFetchError(str(url), "URL must be a non-empty string")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ImageFetchError(url, f"unsupported URL scheme {parts.scheme!r}")
+    host = parts.hostname
+    if not host:
+        raise ImageFetchError(url, "URL has no host")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ImageFetchError(url, f"invalid URL port ({exc})") from exc
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    try:
+        addresses = _resolve_host_addresses(host, port)
+    except _FetchFailure as exc:
+        raise ImageFetchError(url, exc.reason) from exc
+    for address in addresses:
+        reason = _address_is_blocked(address, allow_private_addresses=allow_private_addresses)
+        if reason is not None:
+            raise ImageFetchError(url, reason)
+
+
 def _download_image_bytes_in_worker(
     url: str,
     *,
@@ -136,106 +200,141 @@ def _download_image_bytes_in_worker(
     max_bytes: int,
     deadline: float,
     total_timeout: float,
+    allow_private_addresses: bool = False,
+    max_redirects: int = DEFAULT_IMAGE_FETCH_MAX_REDIRECTS,
 ) -> bytes:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise _FetchFailure(
-            f"download exceeded the {total_timeout} second total time limit",
-            retryable=False,
-        )
-    try:
-        response = requests.get(url, stream=True, timeout=_clamp_timeout(timeout, remaining))
-    except requests.Timeout as exc:
-        if time.monotonic() > deadline:
-            raise _FetchFailure(
-                f"download exceeded the {total_timeout} second total time limit",
-                retryable=False,
-            ) from exc
-        # A stall on one attempt usually means the origin is unreachable; do
-        # not multiply the wall-clock cost by retrying it.
-        raise _FetchFailure(f"timed out after {timeout} seconds ({exc})", retryable=False) from exc
-    except _PERMANENT_REQUEST_ERRORS as exc:
-        raise _FetchFailure(f"request failed ({exc})", retryable=False) from exc
-    except requests.RequestException as exc:
-        raise _FetchFailure(f"request failed ({exc})", retryable=True) from exc
-
-    with response:
-        if time.monotonic() > deadline:
+    current_url = url
+    redirects = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise _FetchFailure(
                 f"download exceeded the {total_timeout} second total time limit",
                 retryable=False,
             )
-        status = response.status_code
-        if status >= 400:
-            raise _FetchFailure(
-                f"HTTP {status} {response.reason or ''}".strip(),
-                retryable=status in _RETRYABLE_STATUS_CODES,
+        # Validate every hop, not only the caller-supplied URL: a redirect can
+        # point at the cloud metadata endpoint or another private service.
+        try:
+            _validate_remote_url(current_url, allow_private_addresses=allow_private_addresses)
+        except ImageFetchError as exc:
+            raise _FetchFailure(exc.reason, retryable=False) from exc
+        try:
+            response = requests.get(
+                current_url,
+                stream=True,
+                timeout=_clamp_timeout(timeout, remaining),
+                allow_redirects=False,
             )
-
-        declared = response.headers.get("Content-Length")
-        if declared is not None:
-            try:
-                declared_bytes = int(declared)
-            except ValueError:
-                declared_bytes = None
-            if declared_bytes is not None and declared_bytes > max_bytes:
+        except requests.Timeout as exc:
+            if time.monotonic() > deadline:
                 raise _FetchFailure(
-                    f"response is {declared_bytes} bytes, exceeding the {max_bytes} byte limit",
+                    f"download exceeded the {total_timeout} second total time limit",
+                    retryable=False,
+                ) from exc
+            # A stall on one attempt usually means the origin is unreachable; do
+            # not multiply the wall-clock cost by retrying it.
+            raise _FetchFailure(f"timed out after {timeout} seconds ({exc})", retryable=False) from exc
+        except _PERMANENT_REQUEST_ERRORS as exc:
+            raise _FetchFailure(f"request failed ({exc})", retryable=False) from exc
+        except requests.RequestException as exc:
+            raise _FetchFailure(f"request failed ({exc})", retryable=True) from exc
+
+        if response.is_redirect:
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise _FetchFailure("redirect response has no Location header", retryable=False)
+            if redirects >= max_redirects:
+                raise _FetchFailure(
+                    f"exceeded the {max_redirects} redirect limit",
                     retryable=False,
                 )
+            redirects += 1
+            current_url = urljoin(current_url, location)
+            continue
 
-        buffer = BytesIO()
-        received = 0
-        try:
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if not chunk:
-                    continue
-                received += len(chunk)
-                if time.monotonic() > deadline:
+        with response:
+            if time.monotonic() > deadline:
+                raise _FetchFailure(
+                    f"download exceeded the {total_timeout} second total time limit",
+                    retryable=False,
+                )
+            status = response.status_code
+            if 300 <= status < 400:
+                raise _FetchFailure(
+                    f"HTTP {status} redirect without a Location header",
+                    retryable=False,
+                )
+            if status >= 400:
+                raise _FetchFailure(
+                    f"HTTP {status} {response.reason or ''}".strip(),
+                    retryable=status in _RETRYABLE_STATUS_CODES,
+                )
+
+            declared = response.headers.get("Content-Length")
+            if declared is not None:
+                try:
+                    declared_bytes = int(declared)
+                except ValueError:
+                    declared_bytes = None
+                if declared_bytes is not None and declared_bytes > max_bytes:
+                    raise _FetchFailure(
+                        f"response is {declared_bytes} bytes, exceeding the {max_bytes} byte limit",
+                        retryable=False,
+                    )
+
+            buffer = BytesIO()
+            received = 0
+            try:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    received += len(chunk)
+                    if time.monotonic() > deadline:
+                        raise _FetchFailure(
+                            f"download exceeded the {total_timeout} second total time limit",
+                            retryable=False,
+                        )
+                    if received > max_bytes:
+                        raise _FetchFailure(
+                            f"response exceeded the {max_bytes} byte limit",
+                            retryable=False,
+                        )
+                    buffer.write(chunk)
+                if time.monotonic() >= deadline:
                     raise _FetchFailure(
                         f"download exceeded the {total_timeout} second total time limit",
                         retryable=False,
                     )
-                if received > max_bytes:
+            except requests.Timeout as exc:
+                if time.monotonic() >= deadline:
                     raise _FetchFailure(
-                        f"response exceeded the {max_bytes} byte limit",
+                        f"download exceeded the {total_timeout} second total time limit",
                         retryable=False,
-                    )
-                buffer.write(chunk)
-            if time.monotonic() >= deadline:
-                raise _FetchFailure(
-                    f"download exceeded the {total_timeout} second total time limit",
-                    retryable=False,
-                )
-        except requests.Timeout as exc:
-            if time.monotonic() >= deadline:
-                raise _FetchFailure(
-                    f"download exceeded the {total_timeout} second total time limit",
-                    retryable=False,
-                ) from exc
-            raise _FetchFailure(f"timed out while reading the response ({exc})", retryable=False) from exc
-        except requests.RequestException as exc:
-            if time.monotonic() >= deadline:
-                raise _FetchFailure(
-                    f"download exceeded the {total_timeout} second total time limit",
-                    retryable=False,
-                ) from exc
-            raise _FetchFailure(f"failed while reading the response ({exc})", retryable=True) from exc
-        except (OSError, ValueError, AttributeError) as exc:
-            # Some response backends expose socket/file-object errors directly.
-            if time.monotonic() >= deadline:
-                raise _FetchFailure(
-                    f"download exceeded the {total_timeout} second total time limit",
-                    retryable=False,
-                ) from exc
-            raise _FetchFailure(f"failed while reading the response ({exc})", retryable=True) from exc
+                    ) from exc
+                raise _FetchFailure(f"timed out while reading the response ({exc})", retryable=False) from exc
+            except requests.RequestException as exc:
+                if time.monotonic() >= deadline:
+                    raise _FetchFailure(
+                        f"download exceeded the {total_timeout} second total time limit",
+                        retryable=False,
+                    ) from exc
+                raise _FetchFailure(f"failed while reading the response ({exc})", retryable=True) from exc
+            except (OSError, ValueError, AttributeError) as exc:
+                # Some response backends expose socket/file-object errors directly.
+                if time.monotonic() > deadline:
+                    raise _FetchFailure(
+                        f"download exceeded the {total_timeout} second total time limit",
+                        retryable=False,
+                    ) from exc
+                raise _FetchFailure(f"failed while reading the response ({exc})", retryable=True) from exc
 
-    data = buffer.getvalue()
-    if not data:
-        # An empty body is a property of the resource, not a transient fault
-        # (legitimate 204/304 responses land here too).
-        raise _FetchFailure("empty response body", retryable=False)
-    return data
+        data = buffer.getvalue()
+        if not data:
+            # An empty body is a property of the resource, not a transient fault
+            # (legitimate 204/304 responses land here too).
+            raise _FetchFailure("empty response body", retryable=False)
+        return data
 
 
 def _download_image_bytes(
@@ -245,6 +344,8 @@ def _download_image_bytes(
     max_bytes: int,
     deadline: float,
     total_timeout: float,
+    allow_private_addresses: bool = False,
+    max_redirects: int = DEFAULT_IMAGE_FETCH_MAX_REDIRECTS,
 ) -> bytes:
     """Own and reap one network attempt, including DNS, TLS and header reads.
 
@@ -265,6 +366,8 @@ def _download_image_bytes(
         "max_bytes": max_bytes,
         "deadline": deadline,
         "total_timeout": total_timeout,
+        "allow_private_addresses": allow_private_addresses,
+        "max_redirects": max_redirects,
     }).encode("utf-8")
     try:
         with subprocess.Popen(
@@ -323,6 +426,119 @@ def _image_fetch_worker() -> int:
     return 0
 
 
+def _resolve_fetch_options(
+    *,
+    timeout: Optional[Union[float, Tuple[float, float]]],
+    max_bytes: Optional[int],
+    total_timeout: Optional[float],
+    attempts: Optional[int],
+    backoff_seconds: Optional[float],
+    max_redirects: Optional[int],
+) -> dict:
+    timeout = _resolve_timeout(timeout)
+    max_bytes = _resolve_max_bytes(max_bytes)
+    if total_timeout is None:
+        total_timeout = DEFAULT_IMAGE_FETCH_TOTAL_TIMEOUT
+    total_timeout = float(total_timeout)
+    if total_timeout <= 0:
+        raise ValueError(f"total_timeout must be positive, got {total_timeout}")
+    attempts = DEFAULT_IMAGE_FETCH_ATTEMPTS if attempts is None else int(attempts)
+    if attempts < 1:
+        raise ValueError(f"attempts must be >= 1, got {attempts}")
+    if backoff_seconds is None:
+        backoff_seconds = DEFAULT_IMAGE_FETCH_BACKOFF_SECONDS
+    backoff_seconds = max(0.0, float(backoff_seconds))
+    if max_redirects is None:
+        max_redirects = DEFAULT_IMAGE_FETCH_MAX_REDIRECTS
+    max_redirects = int(max_redirects)
+    if max_redirects < 0:
+        raise ValueError(f"max_redirects must be >= 0, got {max_redirects}")
+    return {
+        "timeout": timeout,
+        "max_bytes": max_bytes,
+        "total_timeout": total_timeout,
+        "attempts": attempts,
+        "backoff_seconds": backoff_seconds,
+        "max_redirects": max_redirects,
+    }
+
+
+def _fetch_bytes_with_options(url: str, *, deadline: float, options: dict) -> bytes:
+    total_timeout = options["total_timeout"]
+    attempts = options["attempts"]
+    last_failure: Optional[_FetchFailure] = None
+    for attempt in range(1, attempts + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_failure = _FetchFailure(
+                f"download exceeded the {total_timeout} second total time limit",
+                retryable=False,
+            )
+            break
+        try:
+            data = _download_image_bytes(
+                url,
+                timeout=options["timeout"],
+                max_bytes=options["max_bytes"],
+                deadline=deadline,
+                total_timeout=total_timeout,
+                allow_private_addresses=options["allow_private_addresses"],
+                max_redirects=options["max_redirects"],
+            )
+        except _FetchFailure as failure:
+            last_failure = failure
+            if not failure.retryable or attempt == attempts:
+                break
+            delay = options["backoff_seconds"] * (2 ** (attempt - 1))
+            if time.monotonic() + delay >= deadline:
+                break
+            time.sleep(delay)
+            continue
+
+        if time.monotonic() >= deadline:
+            raise ImageFetchError(
+                url, f"download exceeded the {total_timeout} second total time limit"
+            )
+        return data
+
+    assert last_failure is not None
+    attempted = f" after {attempt} attempt(s)" if attempt > 1 else ""
+    raise ImageFetchError(url, f"{last_failure.reason}{attempted}")
+
+
+def load_bytes_from_url(
+    url: str,
+    *,
+    timeout: Optional[Union[float, Tuple[float, float]]] = None,
+    max_bytes: Optional[int] = None,
+    total_timeout: Optional[float] = None,
+    attempts: Optional[int] = None,
+    backoff_seconds: Optional[float] = None,
+    allow_private_addresses: bool = False,
+    max_redirects: Optional[int] = None,
+) -> bytes:
+    """Download ``url`` through the bounded, SSRF-filtered worker.
+
+    Returns the raw bytes so audio/video calibration can use the same network
+    policy as images: connect/read timeouts, a total wall-clock budget, a byte
+    cap, a redirect cap, and a private/link-local destination filter.
+    """
+
+    if not isinstance(url, str) or not url:
+        raise ImageFetchError(str(url), "URL must be a non-empty string")
+    options = _resolve_fetch_options(
+        timeout=timeout,
+        max_bytes=max_bytes,
+        total_timeout=total_timeout,
+        attempts=attempts,
+        backoff_seconds=backoff_seconds,
+        max_redirects=max_redirects,
+    )
+    options["allow_private_addresses"] = bool(allow_private_addresses)
+    deadline = time.monotonic() + options["total_timeout"]
+    return _fetch_bytes_with_options(url, deadline=deadline, options=options)
+
+
 def load_image_from_url(
     url: str,
     *,
@@ -332,6 +548,8 @@ def load_image_from_url(
     total_timeout: Optional[float] = None,
     attempts: Optional[int] = None,
     backoff_seconds: Optional[float] = None,
+    allow_private_addresses: bool = False,
+    max_redirects: Optional[int] = None,
 ) -> Image.Image:
     """Download ``url`` and return a decoded :class:`PIL.Image.Image`.
 
@@ -345,90 +563,49 @@ def load_image_from_url(
     if not isinstance(url, str) or not url:
         raise ImageFetchError(str(url), "image URL must be a non-empty string")
 
-    timeout = _resolve_timeout(timeout)
-    max_bytes = _resolve_max_bytes(max_bytes)
     max_pixels = _resolve_max_pixels(max_pixels)
-    if total_timeout is None:
-        total_timeout = DEFAULT_IMAGE_FETCH_TOTAL_TIMEOUT
-    total_timeout = float(total_timeout)
-    if total_timeout <= 0:
-        raise ValueError(f"total_timeout must be positive, got {total_timeout}")
-    attempts = DEFAULT_IMAGE_FETCH_ATTEMPTS if attempts is None else int(attempts)
-    if attempts < 1:
-        raise ValueError(f"attempts must be >= 1, got {attempts}")
-    if backoff_seconds is None:
-        backoff_seconds = DEFAULT_IMAGE_FETCH_BACKOFF_SECONDS
-    backoff_seconds = max(0.0, float(backoff_seconds))
-
-    last_failure: Optional[_FetchFailure] = None
-    # The wall-clock budget covers every attempt, not just one download.
+    options = _resolve_fetch_options(
+        timeout=timeout,
+        max_bytes=max_bytes,
+        total_timeout=total_timeout,
+        attempts=attempts,
+        backoff_seconds=backoff_seconds,
+        max_redirects=max_redirects,
+    )
+    options["allow_private_addresses"] = bool(allow_private_addresses)
+    total_timeout = options["total_timeout"]
     deadline = time.monotonic() + total_timeout
-    for attempt in range(1, attempts + 1):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            last_failure = _FetchFailure(
-                f"download exceeded the {total_timeout} second total time limit",
-                retryable=False,
-            )
-            break
-        try:
-            data = _download_image_bytes(
-                url,
-                timeout=timeout,
-                max_bytes=max_bytes,
-                deadline=deadline,
-                total_timeout=total_timeout,
-            )
-        except _FetchFailure as failure:
-            last_failure = failure
-            if not failure.retryable or attempt == attempts:
-                break
-            delay = backoff_seconds * (2 ** (attempt - 1))
-            if time.monotonic() + delay >= deadline:
-                break
-            time.sleep(delay)
-            continue
+    data = _fetch_bytes_with_options(url, deadline=deadline, options=options)
 
-        # The body may have finished just as the budget expired; do not start
-        # decoding an image the caller no longer has time to receive.
-        if time.monotonic() >= deadline:
-            raise ImageFetchError(
-                url, f"download exceeded the {total_timeout} second total time limit"
-            )
+    try:
+        image = Image.open(BytesIO(data))
+    except Image.DecompressionBombError as exc:
+        raise ImageFetchError(url, f"image is too large to decode safely ({exc})") from exc
+    except Exception as exc:  # PIL raises several unrelated exception types
+        raise ImageFetchError(url, f"response is not a decodable image ({exc})") from exc
 
-        try:
-            image = Image.open(BytesIO(data))
-        except Image.DecompressionBombError as exc:
-            raise ImageFetchError(url, f"image is too large to decode safely ({exc})") from exc
-        except Exception as exc:  # PIL raises several unrelated exception types
-            raise ImageFetchError(url, f"response is not a decodable image ({exc})") from exc
+    # Check the declared dimensions before ``load()`` allocates the pixel
+    # buffer: a small compressed file can still expand to a huge bitmap.
+    width, height = image.size
+    if width * height > max_pixels:
+        image.close()
+        raise ImageFetchError(
+            url,
+            f"image is {width}x{height} ({width * height} pixels), exceeding the "
+            f"{max_pixels} pixel limit",
+        )
 
-        # Check the declared dimensions before ``load()`` allocates the pixel
-        # buffer: a small compressed file can still expand to a huge bitmap.
-        width, height = image.size
-        if width * height > max_pixels:
-            image.close()
-            raise ImageFetchError(
-                url,
-                f"image is {width}x{height} ({width * height} pixels), exceeding the "
-                f"{max_pixels} pixel limit",
-            )
-
-        try:
-            image.load()
-        except Exception as exc:
-            image.close()
-            raise ImageFetchError(url, f"response is not a decodable image ({exc})") from exc
-        if time.monotonic() >= deadline:
-            image.close()
-            raise ImageFetchError(
-                url, f"image decoding exceeded the {total_timeout} second total time limit"
-            )
-        return image
-
-    assert last_failure is not None
-    attempted = f" after {attempt} attempt(s)" if attempt > 1 else ""
-    raise ImageFetchError(url, f"{last_failure.reason}{attempted}")
+    try:
+        image.load()
+    except Exception as exc:
+        image.close()
+        raise ImageFetchError(url, f"response is not a decodable image ({exc})") from exc
+    if time.monotonic() >= deadline:
+        image.close()
+        raise ImageFetchError(
+            url, f"image decoding exceeded the {total_timeout} second total time limit"
+        )
+    return image
 
 
 def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
@@ -449,9 +626,28 @@ def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[di
     return vision_infos
 
 
+def _open_local_image(source, *, label: str, max_pixels: int) -> Image.Image:
+    """Open a local/data image and reject it before a huge bitmap is allocated."""
+
+    try:
+        image = Image.open(source)
+    except Image.DecompressionBombError as exc:
+        raise ImageFetchError(label, f"image is too large to decode safely ({exc})") from exc
+    width, height = image.size
+    if width * height > max_pixels:
+        image.close()
+        raise ImageFetchError(
+            label,
+            f"image is {width}x{height} ({width * height} pixels), exceeding the "
+            f"{max_pixels} pixel limit",
+        )
+    return image
+
+
 def fetch_image(
     ele: dict[str, str | Image.Image],
     image_patch_size: int | None = None,
+    allow_private_addresses: bool = False,
 ) -> Image.Image:
     # Some multimodal model adapters forward image-related kwargs here even
     # though local image loading does not need them.
@@ -464,16 +660,18 @@ def fetch_image(
     if isinstance(image, Image.Image):
         image_obj = image
     elif image.startswith("http://") or image.startswith("https://"):
-        image_obj = load_image_from_url(image)
+        image_obj = load_image_from_url(image, allow_private_addresses=allow_private_addresses)
     elif image.startswith("file://"):
-        image_obj = Image.open(image[7:])
+        image_obj = _open_local_image(image[7:], label=image, max_pixels=_resolve_max_pixels(None))
     elif image.startswith("data:image"):
         if "base64," in image:
             _, base64_data = image.split("base64,", 1)
             data = base64.b64decode(base64_data)
-            image_obj = Image.open(BytesIO(data))
+            image_obj = _open_local_image(
+                BytesIO(data), label="data:image", max_pixels=_resolve_max_pixels(None)
+            )
     else:
-        image_obj = Image.open(image)
+        image_obj = _open_local_image(image, label=image, max_pixels=_resolve_max_pixels(None))
     if image_obj is None:
         raise ValueError(f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}")
     return image_obj

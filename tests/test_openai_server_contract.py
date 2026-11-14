@@ -13,7 +13,6 @@ These cover the three defects verified against the previous implementation:
 import asyncio
 import inspect
 import time
-import warnings
 
 import pytest
 import torch
@@ -33,6 +32,9 @@ from gptqmodel.utils.generation_result import GenerationResult
 from gptqmodel.utils.openai_server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    MAX_CHOICES,
+    MAX_COMPLETION_TOKENS,
+    MAX_REQUEST_BODY_BYTES,
     AuthenticationMiddleware,
     OpenAiServer,
     _bearer_token_matches,
@@ -148,17 +150,18 @@ def _chat(client, headers=None, **payload):
     return client.post("/v1/chat/completions", json=body, headers=headers)
 
 
-def test_defaults_are_left_to_the_caller(model):
-    # The bind address is a deployment decision, so the library keeps the
-    # historical defaults instead of silently changing where the server listens.
-    assert DEFAULT_HOST == "0.0.0.0"
+def test_defaults_bind_loopback(model):
+    # The default listener must not be reachable from the network.
+    assert DEFAULT_HOST == "127.0.0.1"
     assert DEFAULT_PORT == 80
 
     defaults = inspect.signature(BaseQModel.serve).parameters
-    assert defaults["host"].default == "0.0.0.0"
+    assert defaults["host"].default == "127.0.0.1"
     assert defaults["port"].default == 80
     # Authentication is opt-in, and the key is part of the public API.
     assert "api_key" in defaults
+    # Deployments that need a custom Host allowlist can pass it explicitly.
+    assert "allowed_hosts" in defaults
 
     # A list of keys is accepted so one deployment can rotate keys.
     server = OpenAiServer(model=model, api_key=["k1", "k2"])
@@ -166,27 +169,49 @@ def test_defaults_are_left_to_the_caller(model):
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::", "10.0.13.153"])
-def test_exposed_bind_without_key_warns(model, host):
+def test_exposed_bind_without_key_is_refused(model, host):
     server = OpenAiServer(model=model)
-    with pytest.warns(UserWarning, match="without an API key"):
-        server._warn_if_exposed(host, server.api_keys)
+    with pytest.raises(ValueError, match="without an API key"):
+        server._validate_bind(host, server.api_keys)
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
-def test_loopback_bind_does_not_warn(model, host):
+def test_loopback_bind_without_key_is_allowed(model, host):
     server = OpenAiServer(model=model)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
-        server._warn_if_exposed(host, server.api_keys)
+    server._validate_bind(host, server.api_keys)
 
 
-def test_exposed_bind_with_key_does_not_warn(model):
+def test_exposed_bind_with_key_is_allowed(model):
     server = OpenAiServer(model=model, api_key="s3cret")
+    server._validate_bind("0.0.0.0", server.api_keys)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
-        server._warn_if_exposed("0.0.0.0", server.api_keys)
+
+def test_loopback_host_validation_rejects_dns_rebinding(model):
+    server = OpenAiServer(model=model)
+    server._install_host_validation("127.0.0.1")
+
+    loopback = TestClient(server.app, base_url="http://127.0.0.1")
+    assert loopback.get("/health").status_code == 200
+
+    rebound = TestClient(server.app, base_url="http://evil.example")
+    assert rebound.get("/health").status_code == 400
+
+
+def test_max_tokens_is_capped(client):
+    assert _chat(client, max_tokens=MAX_COMPLETION_TOKENS + 1).status_code == 422
+    assert _chat(client, max_tokens=0).status_code == 422
+
+
+def test_choice_count_is_capped(client):
+    assert _chat(client, temperature=0.9, n=MAX_CHOICES + 1).status_code == 422
+
+
+def test_oversized_request_body_is_rejected(client):
+    body = {
+        "model": "stub-model",
+        "messages": [{"role": "user", "content": "x" * (MAX_REQUEST_BODY_BYTES + 1)}],
+    }
+    assert client.post("/v1/chat/completions", json=body).status_code == 413
 
 
 def test_chat_completion_uses_chat_schema(client):
