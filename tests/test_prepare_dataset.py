@@ -218,12 +218,12 @@ def test_prepare_dataset_concat_preserves_every_row_of_a_2d_item():
             "attention_mask": [[1, 1, 1], [1, 0, 1]],
         }
     ]
-    common = dict(
-        calibration_dataset_sort=None,
-        batch_size=1,
-        calibration_data_min_length=0,
-        calibration_concat_separator=None,
-    )
+    common = {
+        "calibration_dataset_sort": None,
+        "batch_size": 1,
+        "calibration_data_min_length": 0,
+        "calibration_concat_separator": None,
+    }
 
     non_concat = qmodel.prepare_dataset(
         calibration_dataset=copy.deepcopy(dataset),
