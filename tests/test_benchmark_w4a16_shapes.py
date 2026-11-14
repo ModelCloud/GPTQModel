@@ -131,3 +131,61 @@ def test_fusion_passes_interleave_parts_and_fused_call(bench, monkeypatch):
     assert len({tuple(calls[index:index + 3]) for index in (0, 3, 6)}) > 1
     assert rows[0]["parts_calls"] == 2
     assert rows[0]["speedup"] == pytest.approx(2.0)
+
+
+PROFILE = {
+    "available": True,
+    "sms": 82,
+    "max_shared_mem": 101376,
+    "capability_major": 12,
+    "capability_minor": 0,
+    "l2_cache_size": 67108864,
+    "max_threads_per_sm": 1536,
+    "has_tensor_memory": 0,
+}
+
+
+def test_device_header_names_the_limits_selection_reads(bench):
+    line = bench.format_device_header(PROFILE, "RTX 5090 Laptop")
+    assert "RTX 5090 Laptop" in line
+    assert "sms 82" in line
+    assert "shared 99 KiB" in line
+    assert "L2 64 MiB" in line
+    assert "sm 12.0" in line
+    assert "tensor memory no" in line
+
+
+def test_device_header_reports_tensor_memory_when_present(bench):
+    datacenter = {**PROFILE, "capability_major": 10, "has_tensor_memory": 1}
+    assert "tensor memory yes" in bench.format_device_header(datacenter, "B200")
+
+
+def test_device_header_says_why_the_profile_is_missing(bench):
+    unavailable = {"available": False, "reason": "RuntimeError: no CUDA"}
+    line = bench.format_device_header(unavailable, "unknown")
+    assert "profile unavailable" in line
+    assert "no CUDA" in line
+
+
+def test_json_body_carries_device_and_rows(bench):
+    rows = [{"shape": "q_proj", "k": 4096, "n": 4096, "m": 1, "cold_gbps": 600.0}]
+    payload = bench.build_payload(rows, PROFILE, "RTX 5090 Laptop")
+
+    assert payload["rows"] == rows
+    assert payload["device"]["name"] == "RTX 5090 Laptop"
+    assert payload["device"]["sms"] == 82
+    # The rows keep their own shape so existing readers do not change.
+    assert set(payload) == {"device", "rows"}
+
+
+def test_json_body_records_a_profile_outage_instead_of_dropping_it(bench):
+    payload = bench.build_payload([], {"available": False, "reason": "no CUDA"}, "unknown")
+    assert payload["device"]["available"] is False
+    assert payload["device"]["reason"] == "no CUDA"
+
+
+def test_disabled_profile_is_recorded_rather_than_omitted(bench):
+    """--no-device-profile must say so, so a reader can tell why it is missing."""
+    payload = bench.build_payload([], {"available": False, "reason": "disabled by --no-device-profile"}, "card")
+    assert payload["device"]["reason"] == "disabled by --no-device-profile"
+    assert payload["device"]["name"] == "card"
