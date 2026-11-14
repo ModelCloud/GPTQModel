@@ -45,6 +45,41 @@ Native FP8, FP4, MXFP4, and MXFP8 execution keeps its validated source path.
 When that path is unavailable, the existing floatx decoder materializes a dense
 BF16 view and `AUTO_NF12` stores that view in NF12 for calibration.
 
+## Native availability
+
+The row-major embedding layout is a native extension, so a supported compute
+capability is not evidence that it can run. `gptqmodel_nf12.available()` answers
+that question without starting a build, and `_rowmajor_ops` consults it before
+choosing a layout.
+
+```mermaid
+flowchart TD
+    A[AutoNF12Embedding.__init__] --> B[quantize_nf12_weight]
+    B --> C[_rowmajor_ops device]
+    C --> D{HIP build exposes rowmajor_pack?}
+    D -- Yes --> R[Row-major packed buffers]
+    D -- No --> E{compute capability 8.0 or newer?}
+    E -- No --> G[Generic packed buffers]
+    E -- Yes --> F{gptqmodel_nf12.available}
+    F -- Yes --> R
+    F -- No --> G
+    R --> X[torch.ops.nf12.rowmajor_embedding]
+    G --> Y[nf12.embedding when available]
+    Y --> Z[nf12_codec.decode]
+    style G fill:#fee,stroke:#c00
+    style Z fill:#fee,stroke:#c00
+```
+
+`available()` is a capability probe, not a build. It is true when
+`torch.ops.nf12` is already registered, when both native libraries ship with the
+package, when a source build for the visible GPUs is already cached, or when the
+JIT build tools (nvcc, CMake, Ninja) are present. Otherwise the generic packed
+layout is selected and decoding uses the pure-Torch codec. Both branches keep
+packed NF12 bytes resident; neither retains a dense weight cache.
+
+The probe is a property of the host, not a configuration switch. There is no
+`GPTQMODEL_*` override for it.
+
 ## Quantization handoff
 
 The processor creates its quantization task before the source is packed. The
@@ -105,6 +140,7 @@ executes the same forward behavior as the original source.
 | Quantizer input | The dense module was already present. | Exact source dtype and bits are restored before `process()`. |
 | Native floatx source | Native or decoded path selected by `AutoModuleDecoderConfig`. | Native execution remains; decoded BF16 is eligible for NF12. |
 | FP16 source | Stayed dense. | Stays dense unless the BF16 round trip is bit exact. |
+| Row-major embedding layout | Assumed from compute capability; the first cast attempted a JIT build and could raise `_MissingBuildTools`. | Probed with `gptqmodel_nf12.available()`; an unavailable extension keeps the generic packed layout. |
 
 ## Failure and ambiguity path
 
@@ -112,6 +148,13 @@ An unsupported device, unaligned shape, non-exact FP16 matrix, vector, or
 unsupported module remains dense. Packing or decoding errors are not treated as
 successful compression. Native floatx selection takes precedence over NF12
 when its capability check succeeds.
+
+An eligible embedding never aborts quantization because the row-major extension
+cannot be built. When `available()` is false, the generic packed layout is used
+and `forward()` decodes through `nf12_codec`; a dense view exists only for the
+duration of that forward. The previous failure was a `_MissingBuildTools`
+exception raised from the first embedding cast on a CUDA host without a
+toolkit or a prebuilt library.
 
 ## Measured validation
 
@@ -128,6 +171,13 @@ occupied 1,856.0 MiB and their NF12 representation occupied 1,394.532 MiB.
 The R9700 keeps the 24.9% smaller packed weights, but its calibration workspace
 dominates peak allocation. A 4090 GPTQ A/B save produced 482 state tensors on
 both policies; all 482 were bit-identical, including packed weights and scales.
+
+Layout selection on one RTX 4090 (SM 8.9) with the same 16x64 BF16 embedding:
+
+| Host state | `available()` | Layout | Buffers | Max output error |
+| --- | --- | --- | --- | ---: |
+| Toolkit on `PATH`, `CUDA_HOME` unset | True | row-major | `nf12_row_packed`, `nf12_row_escapes`, `nf12_exp_base` | 0.0 |
+| `PATH=/usr/bin:/bin`, `CUDA_HOME=/nonexistent` | False | generic packed | `nf12_packed`, `nf12_escapes`, `nf12_exp_base` | 0.0 |
 
 Full dense-model inference packed 113 linear matrices. Dense allocation was
 2,360.311 MiB and packed allocation was 2,275.021 MiB. The next-token IDs
