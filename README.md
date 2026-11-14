@@ -230,7 +230,9 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 lossless NF12 storage for eligible BF16 source matrices during calibration
 forwards and restores the exact source dtype before quantization. See
 [automatic NF12 source storage](docs/auto-nf12-dtype-cast.md) for the decision
-flow, FP16 eligibility rule, and native floatx precedence.
+flow, FP16 eligibility rule, and native floatx precedence, and
+[excluded-layer replay and AUTO_NF12](docs/auto-nf12-excluded-layers.md) for the
+`dynamic` exclusion contract and the writer's fail-closed check.
 
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
