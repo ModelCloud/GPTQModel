@@ -733,6 +733,25 @@ PYTHON_BIN="$HOME/.pyenv/versions/3.12.16/bin/python" \
   requirements/install-tenstorrent-py312.sh /path/to/gptqmodel
 ```
 
+### Torch safety gate
+
+The pinned `torch 2.11.0+cpu` is below the patch for
+[GHSA-rrmf-rvhw-rf47](https://github.com/advisories/GHSA-rrmf-rvhw-rf47)
+(CVE-2025-3000), and Tenstorrent's PJRT plugin has no newer compatible
+Torch/XLA stack. This validated environment therefore opts into the documented
+startup-gate override:
+
+```bash
+export GPTQ_BYPASS_SAFETY_CHECKS=1
+```
+
+The installer exports it, verifies that `import gptqmodel` succeeds with it, and
+warns if the import ever starts succeeding without it (which would mean the
+pinned manifest has moved past the advisory range and the override should be
+removed). The override must be set in every shell that imports GPT-QModel from
+this environment. See [PyTorch runtime safety gate](torch-runtime-safety-gate.md)
+for the affected ranges and the override contract.
+
 The validated Python pins are listed below. This records installed package
 versions; it is not permission to replace GPT-QModel's global requirements.
 

@@ -7,6 +7,12 @@
 # PyPI, and its CPU Torch 2.11 pin predates GPT-QModel's declared Torch floor.
 # GPT-QModel must therefore be installed into this isolated environment with
 # --no-deps after this manifest has pinned its runtime.
+#
+# The pinned torch 2.11.0+cpu is also below the patch for
+# GHSA-rrmf-rvhw-rf47 (CVE-2025-3000), so the companion script exports
+# GPTQ_BYPASS_SAFETY_CHECKS=1 and verifies that `import gptqmodel` works. That
+# override is required in every shell that imports GPT-QModel here; see
+# docs/torch-runtime-safety-gate.md.
 
 accelerate==1.15.0
 click==8.3.1

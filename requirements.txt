@@ -1,5 +1,9 @@
 accelerate>=1.15.0
-torch>=2.14.1; python_version < "3.11"
+# Python 3.10 has no patched Torch: 2.14.x is affected by GHSA-v32g-mr63-3j83
+# (torch.load(weights_only=True) arbitrary file read) and 2.15.0 publishes no
+# cp310 wheel, so the 2.13.x line is the only release that both installs on
+# 3.10 and clears the startup gate in gptqmodel/_torch_safety.py.
+torch>=2.13.0,<2.14.0; python_version < "3.11"
 torch>=2.15.0; python_version >= "3.11"
 safetensors>=0.8.0
 filelock>=4.1.0; python_version < "3.11"
