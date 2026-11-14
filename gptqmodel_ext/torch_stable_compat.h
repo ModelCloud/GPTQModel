@@ -343,6 +343,19 @@ inline Tensor to(const Tensor& self, Device device) {
   return torch::stable::to(self, device);
 }
 
+inline Tensor to(const Tensor& self, Device device, ScalarType dtype) {
+  return torch::stable::to(
+      self, dtype, std::nullopt, device, std::nullopt, false, false,
+      std::nullopt);
+}
+
+inline Tensor narrow(const Tensor& self, int64_t dim, int64_t start,
+                     int64_t length) {
+  // The stable narrow takes a mutable handle even though it only reads.
+  Tensor view = self;
+  return torch::stable::narrow(view, dim, start, length);
+}
+
 inline Tensor cpu(const Tensor& self) {
   return torch::stable::to(self, Device(DeviceType::CPU));
 }
@@ -384,6 +397,22 @@ inline Tensor& add_(Tensor& self, const Tensor& other) {
   const Tensor out = add(self, other);
   torch::stable::copy_(self, out);
   return self;
+}
+
+/// `aten::addmm` carries Scalar beta/alpha, which the stable IValue bridge
+/// cannot marshal. The AOTI per-device `_out` shims take plain doubles.
+inline Tensor addmm(const Tensor& self, const Tensor& mat1, const Tensor& mat2) {
+  Tensor out = empty({mat1.size(0), mat2.size(1)}, options(mat1));
+#if GPTQMODEL_STABLE_DEVICE
+  if (mat1.device().is_cuda()) {
+    STABLE_TORCH_ERROR_CODE_CHECK(aoti_torch_cuda_addmm_out(
+        out.get(), self.get(), mat1.get(), mat2.get(), 1.0, 1.0));
+    return out;
+  }
+#endif
+  STABLE_TORCH_ERROR_CODE_CHECK(aoti_torch_cpu_addmm_out(
+      out.get(), self.get(), mat1.get(), mat2.get(), 1.0, 1.0));
+  return out;
 }
 
 inline Tensor div(const Tensor& lhs, const Tensor& rhs) {
@@ -563,6 +592,10 @@ inline const DeviceProperties* getDeviceProperties(int32_t device_index) {
   }
 #endif
   return &properties;
+}
+
+inline const DeviceProperties* getCurrentDeviceProperties() {
+  return getDeviceProperties(current_device_index());
 }
 
 class CUDAGuard {
