@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import operator
 import shutil
 from collections import defaultdict
 from contextlib import ExitStack
+from functools import reduce
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
@@ -808,12 +810,18 @@ def unpack_cols(packed: torch.Tensor, bits: int, *, planar: bool = False) -> tor
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
-    packed_uint = packed.to(torch.int64) & ((1 << pack_bits) - 1)
     rows, cols = packed.shape
-    result = torch.empty(rows, cols * pack_factor, dtype=torch.int32)
-    for i in range(pack_factor):
-        result[:, i::pack_factor] = ((packed_uint >> (i * bits)) & mask).to(torch.int32)
-    return result
+    # Decode every packed field at once. The result must live on the input's
+    # device: callers (e.g. `_shift_gptq_qzeros` on a CUDA-resident qzeros)
+    # index the unpacked zeros with device-resident `g_idx`, and a host result
+    # raises "indices should be either on cpu or on the same device".
+    # An arithmetic right shift of the sign-extended word keeps the low
+    # ``bits`` bits of every field identical to the unsigned decode, so 32-bit
+    # lanes are enough for every packed width this path accepts.
+    compute_dtype = torch.int32 if pack_bits <= 32 else torch.int64
+    shifts = torch.arange(pack_factor, device=packed.device, dtype=compute_dtype) * bits
+    fields = (packed.to(compute_dtype).unsqueeze(-1) >> shifts) & mask
+    return fields.to(torch.int32).reshape(rows, cols * pack_factor)
 
 
 def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype, planar: bool = False) -> torch.Tensor:
@@ -834,11 +842,14 @@ def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype, plana
         )
 
     mask = (1 << bits) - 1
-    packed = torch.zeros(rows, cols // pack_factor, dtype=pack_dtype, device=values.device)
-    values_uint = values.to(torch.int64) & mask
-    for i in range(pack_factor):
-        packed |= (values_uint[:, i::pack_factor] << (i * bits)).to(pack_dtype)
-    return packed
+    compute_dtype = torch.int32 if pack_bits <= 32 else torch.int64
+    values_uint = values.to(compute_dtype) & mask
+    # Fields never overlap, so OR-ing the shifted fields equals adding them.
+    # OR keeps the exact bit pattern even when a 2-bit field lands in the sign
+    # bit.  Grouping the columns keeps the whole operation on-device.
+    shifts = torch.arange(pack_factor, device=values.device, dtype=compute_dtype) * bits
+    words = values_uint.reshape(rows, cols // pack_factor, pack_factor) << shifts
+    return reduce(operator.or_, words.unbind(-1)).to(pack_dtype)
 
 
 def unpack_rows(packed: torch.Tensor, bits: int, *, planar: bool = False) -> torch.Tensor:
@@ -850,12 +861,12 @@ def unpack_rows(packed: torch.Tensor, bits: int, *, planar: bool = False) -> tor
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
-    packed_uint = packed.to(torch.int64) & ((1 << pack_bits) - 1)
     rows, cols = packed.shape
-    result = torch.empty(rows * pack_factor, cols, dtype=torch.int32)
-    for i in range(pack_factor):
-        result[i::pack_factor, :] = ((packed_uint >> (i * bits)) & mask).to(torch.int32)
-    return result
+    # Row-packed variant: field `i` of packed row `r` becomes row `r * pf + i`.
+    compute_dtype = torch.int32 if pack_bits <= 32 else torch.int64
+    shifts = torch.arange(pack_factor, device=packed.device, dtype=compute_dtype) * bits
+    fields = (packed.to(compute_dtype).unsqueeze(1) >> shifts.reshape(pack_factor, 1)) & mask
+    return fields.to(torch.int32).reshape(rows * pack_factor, cols)
 
 
 def _require_int32_words_for_3bit(tensor: torch.Tensor) -> None:
