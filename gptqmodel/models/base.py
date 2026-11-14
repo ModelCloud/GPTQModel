@@ -3177,12 +3177,13 @@ class BaseQModel(nn.Module):
         return self
 
     def serve(self,
-               host: str = "0.0.0.0",
+               host: str = "127.0.0.1",
                port: int = 80,
                async_mode: bool = False,
-               api_key: Optional[Union[str, List[str]]] = None):
+               api_key: Optional[Union[str, List[str]]] = None,
+               allowed_hosts: Optional[List[str]] = None):
         from ..utils.openai_server import OpenAiServer
-        self.server = OpenAiServer(model=self, api_key=api_key)
+        self.server = OpenAiServer(model=self, api_key=api_key, allowed_hosts=allowed_hosts)
         self.server.start(host=host, port=port, async_mode=async_mode)
 
     def serve_shutdown(self):

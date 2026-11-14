@@ -10,7 +10,6 @@ import secrets
 import threading
 import time
 import uuid
-import warnings
 
 import torch
 
@@ -21,8 +20,9 @@ try:
     import uvicorn
     from fastapi import FastAPI, Header, HTTPException, Request
     from fastapi.responses import JSONResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
     from starlette.datastructures import Headers
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
 except ModuleNotFoundError as exception:
     raise type(exception)(
         "GPT-QModel OpenAi serve required dependencies are not installed.",
@@ -32,8 +32,15 @@ except ModuleNotFoundError as exception:
 # Environment fallback so the token does not have to be passed on the command line.
 API_KEY_ENV = "GPTQMODEL_OPENAI_API_KEY"
 
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 80
+
+# Request bounds. A single unauthenticated request used to be able to ask for
+# an unbounded generation or an unbounded body.
+MAX_COMPLETION_TOKENS = 4096
+MAX_CHOICES = 16
+MAX_MESSAGES = 256
+MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024
 
 # Only the inference API is authenticated. Liveness/root routes stay open so
 # probes and browsers do not need the key.
@@ -108,6 +115,65 @@ class AuthenticationMiddleware:
                 )
                 return response(scope, receive, send)
         return self.app(scope, receive, send)
+
+
+class BodySizeLimitMiddleware:
+    """Reject an HTTP request whose body exceeds ``max_bytes``.
+
+    The body is buffered only up to the limit, so a chunked request without a
+    ``Content-Length`` header is bounded too. A declared oversize body is
+    rejected before it is read.
+    """
+
+    def __init__(self, app, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        headers = Headers(scope=scope)
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > self.max_bytes:
+                    return await self._reject(scope, receive, send)
+            except ValueError:
+                # Invalid Content-Length; fall back to bounded streaming check below.
+                # This preserves behavior and still enforces max body size safely.
+                pass
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return None
+            body.extend(message.get("body", b""))
+            if len(body) > self.max_bytes:
+                return await self._reject(scope, receive, send)
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if replayed:
+                # The application consumed the request; wait for disconnect.
+                return await receive()
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        return await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _reject(scope, receive, send):
+        response = JSONResponse(
+            content={"detail": f"Request body exceeds the {MAX_REQUEST_BODY_BYTES} byte limit."},
+            status_code=413,
+        )
+        return await response(scope, receive, send)
 
 
 def _sequence_end(row, eos_token_id, pad_token_id):
@@ -187,7 +253,7 @@ def _coerce_generation_results(outputs) -> list:
 
 
 class OpenAiServer:
-    def __init__(self, model, api_key: str = None):
+    def __init__(self, model, api_key: str = None, allowed_hosts: list = None):
         self.uvicorn_server = None
         self.app = FastAPI()
         self.model = model
@@ -195,9 +261,12 @@ class OpenAiServer:
         self.model_id_or_path = model.config.name_or_path
         self.api_keys = _resolve_api_keys(api_key)
         self.api_tokens = _token_digests(self.api_keys)
+        self.allowed_hosts_override = list(allowed_hosts) if allowed_hosts is not None else None
+        self._host_validation_installed = False
         # One generation at a time: the endpoint runs in the threadpool, and a
         # single device cannot serve two concurrent generations.
         self._generation_lock = threading.Lock()
+        self.app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
         if self.api_keys:
             self.app.add_middleware(AuthenticationMiddleware, tokens=self.api_keys)
         self.setup_routes()
@@ -218,11 +287,11 @@ class OpenAiServer:
     def setup_routes(self):
         class OpenAiRequest(BaseModel):
             model: str = ""
-            messages: list = []
-            max_tokens: int = 256
+            messages: list = Field(default_factory=list, max_length=MAX_MESSAGES)
+            max_tokens: int = Field(default=256, ge=1, le=MAX_COMPLETION_TOKENS)
             temperature: float = 0.0
             top_p: float = 1.0
-            n: int = 1
+            n: int = Field(default=1, ge=1, le=MAX_CHOICES)
             stop: list | str | None = None
 
         class OpenAiResponseMessage(BaseModel):
@@ -421,32 +490,53 @@ class OpenAiServer:
             return {"message": "Server is shutting down..."}
 
     @staticmethod
-    def _warn_if_exposed(host: str, api_keys: list) -> None:
-        """Warn when an unauthenticated endpoint is reachable from other machines.
-
-        The bind address is the caller's deployment decision, so this never
-        refuses to start; it only makes the consequence explicit.
-        """
-        if api_keys:
-            return
+    def _is_loopback_host(host: str) -> bool:
         try:
-            loopback = ipaddress.ip_address(host).is_loopback
+            return ipaddress.ip_address(host).is_loopback
         except ValueError:
-            # A hostname such as "localhost" is loopback; anything else is effectively exposed.
-            loopback = host in {"localhost", "localhost.localdomain"}
-        if loopback:
+            # A hostname such as "localhost" is loopback; anything else is exposed.
+            return host in {"localhost", "localhost.localdomain"}
+
+    @classmethod
+    def _validate_bind(cls, host: str, api_keys: list) -> None:
+        """Refuse an unauthenticated listener that is reachable from the network.
+
+        Binding to a non-loopback address is an explicit deployment decision,
+        but without a key it exposes inference and `/shutdown` to every peer
+        that can reach the port. Opt in by passing `api_key=`.
+        """
+
+        if api_keys or cls._is_loopback_host(host):
             return
-        warnings.warn(
-            f"GPT-QModel OpenAI server is listening on {host} without an API key, so any "
-            "machine that can reach that address can run inference on this model and stop "
-            "the server. Pass `api_key=` (or set GPTQMODEL_OPENAI_API_KEY) before exposing "
-            "it beyond localhost, or bind to 127.0.0.1 and use an SSH tunnel.",
-            UserWarning,
-            stacklevel=3,
+        raise ValueError(
+            f"Refusing to bind the GPT-QModel OpenAI server to non-loopback host {host!r} "
+            "without an API key. Pass `api_key=` (or set GPTQMODEL_OPENAI_API_KEY), or bind "
+            "to 127.0.0.1 and use an SSH tunnel."
         )
 
+    def _allowed_hosts_for(self, host: str) -> list:
+        if self.allowed_hosts_override is not None:
+            return list(self.allowed_hosts_override)
+        if self._is_loopback_host(host):
+            # DNS rebinding presents the attacker's Host name to a loopback
+            # listener; only accept the loopback spellings.
+            return ["localhost", "127.0.0.1", "::1"]
+        # An explicit non-loopback bind already opted into network exposure and
+        # authenticated the API; accept any Host unless the caller narrows it.
+        return ["*"]
+
+    def _install_host_validation(self, host: str) -> None:
+        if self._host_validation_installed:
+            return
+        self.app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=self._allowed_hosts_for(host),
+        )
+        self._host_validation_installed = True
+
     def start(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, async_mode: bool = True):
-        self._warn_if_exposed(host, self.api_keys)
+        self._validate_bind(host, self.api_keys)
+        self._install_host_validation(host)
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         self.uvicorn_server = uvicorn.Server(config)
 
