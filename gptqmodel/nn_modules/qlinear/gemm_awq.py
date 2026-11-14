@@ -14,7 +14,13 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
-from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
+from ...utils.awq import (
+    awq_dequantize_weights,
+    awq_gemm_forward,
+    awq_gemm_forward_fp32_reduce,
+    awq_runtime_available,
+    awq_runtime_error,
+)
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.rocm import IS_ROCM
@@ -25,6 +31,10 @@ FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
     return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
+
+
+def _awq_cuda_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters):
+    return awq_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters, True)
 
 
 def _pack_awq_columns(codes: torch.Tensor, bits: int) -> torch.Tensor:

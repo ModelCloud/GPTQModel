@@ -27,7 +27,12 @@ from ...utils.paroquant import (
     is_identity_rotation,
 )
 from ._runtime_cache import tensor_cache_key
-from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
+from ._numerics import linear_wide_bias
+from .gemm_awq import (
+    FP32_ACCUM,
+    _awq_cuda_gemm_forward,
+    _awq_cuda_gemm_forward_fp32_reduce,
+)
 from .torch_awq import AwqTorchLinear
 
 
@@ -305,11 +310,22 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
-        weight = self._dequantize_weight_for_inference(x_flat, dtype=x_flat.dtype)
-        out = torch.matmul(x_flat, weight)
-        if self.bias is not None:
-            out = out + self.bias.to(device=x_flat.device, dtype=x_flat.dtype)
-        return out
+        # Keep the reconstructed grid, the reduction and the stored bias in
+        # FP32, then round once.  Decoding to the activation dtype first makes
+        # a finite FP16/BF16 result overflow before the bias can cancel it.
+        compute_dtype = (
+            torch.float32
+            if x_flat.dtype in (torch.float16, torch.bfloat16)
+            else x_flat.dtype
+        )
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
+        return linear_wide_bias(
+            x_flat,
+            # AWQ reconstructs [in_features, out_features]; the wide epilogue
+            # takes the F.linear operand order.
+            weight.t(),
+            self._bias_for_compute(device=x_flat.device),
+        )
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
@@ -330,8 +346,23 @@ class ParoLinear(AwqTorchLinear):
             compute_dtype,
             cache=use_cached_runtime_dtype,
         )
+        kernel_input_2d = kernel_input.reshape(-1, kernel_input.shape[-1])
+        if self.bias is not None and self.fp32_accum:
+            # The split-K partials are already FP32.  Ask for an FP32 result
+            # and add the stored bias there, so a finite sum that overflows the
+            # activation dtype is not rounded before the bias cancels it.
+            out = _awq_cuda_gemm_forward_fp32_reduce(
+                kernel_input_2d,
+                self.qweight,
+                kernel_scales,
+                self.qzeros,
+                _PAROQUANT_AWQ_SPLIT_K,
+            )
+            bias = self._bias_for_compute(device=x_flat.device).float()
+            return (out + bias).to(dtype=x_flat.dtype)
+
         out = _awq_cuda_gemm_forward(
-            kernel_input.reshape(-1, kernel_input.shape[-1]),
+            kernel_input_2d,
             self.qweight,
             kernel_scales,
             self.qzeros,

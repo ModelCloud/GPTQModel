@@ -121,6 +121,18 @@ def awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: 
     return _extension_api().op("awq", "gemm_forward")(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
 
 
+def awq_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters, fp32_output: bool = True):
+    """Split-K GEMM whose result stays float32 when ``fp32_output`` is set.
+
+    Callers that add a stored bias in float32 before the visible cast use this
+    to avoid rounding a finite sum that overflows the activation dtype.
+    """
+
+    return _extension_api().op("awq", "gemm_forward_fp32_reduce")(
+        input, qweight, scales, qzeros, split_k_iters, fp32_output
+    )
+
+
 def awq_dequantize_weights(qweight, scales, qzeros, split_k_iters, thx, thy, dbg):
     return _extension_api().op("awq", "dequantize_weights")(qweight, scales, qzeros, split_k_iters, thx, thy, dbg)
 
@@ -146,6 +158,7 @@ __all__ = [
     "awq_fast_gemm_forward_prefill",
     "awq_fast_gemv_forward_decode",
     "awq_gemm_forward",
+    "awq_gemm_forward_fp32_reduce",
     "awq_gemmv2_forward",
     "awq_gemv_forward",
     "awq_runtime_available",

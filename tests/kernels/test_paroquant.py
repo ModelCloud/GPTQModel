@@ -74,6 +74,7 @@ def _upstream_transformers_contract_reference(
     bits: int,
     group_size: int,
     out_features: int,
+    rotated: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reference for upstream RotateQuantizedLinear.forward().
 
@@ -83,24 +84,31 @@ def _upstream_transformers_contract_reference(
     importing or copying upstream implementation code.
     """
 
-    rotated = apply_paroquant_rotation_reference(
-        x,
-        pairs,
-        theta,
-        scales=channel_scales,
-        group_size=group_size,
-    )
+    if rotated is None:
+        rotated = apply_paroquant_rotation_reference(
+            x,
+            pairs,
+            theta,
+            scales=channel_scales,
+            group_size=group_size,
+        )
     dense_weight = dequantize_gemm(
         qweight=qweight,
         qzeros=qzeros,
-        scales=scales,
+        # Reconstruct in FP32 so the oracle describes the exact grid value the
+        # kernel multiplies, not a same-dtype rounding of it.
+        scales=scales.float(),
         bits=bits,
         group_size=group_size,
-    ).to(device=x.device, dtype=x.dtype)
-    out = torch.matmul(rotated.reshape(-1, x.shape[-1]), dense_weight).reshape(*x.shape[:-1], out_features)
+    ).to(device=x.device)
+    # ``F.linear`` accumulates in FP32 and applies the bias before the single
+    # visible cast; a same-dtype matmul plus add rounds twice and no longer
+    # describes the contract this reference is meant to model.
+    out = torch.matmul(rotated.reshape(-1, x.shape[-1]).float(), dense_weight.float())
+    out = out.reshape(*x.shape[:-1], out_features)
     if bias is not None:
-        out = out + bias.to(device=x.device, dtype=x.dtype)
-    return out
+        out = out + bias.float()
+    return out.to(x.dtype)
 
 
 def _fp32_awq_oracle(
@@ -219,6 +227,96 @@ def test_paroquant_fp32_dense_fallback_preserves_checkpoint_scale(monkeypatch):
     )
 
 
+def _cancelling_bias_module(in_features: int, out_features: int, group_size: int) -> ParoLinear:
+    """A layer whose finite FP16 result needs the FP32 reduction and bias."""
+
+    module = ParoLinear(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+        krot=1,
+    ).eval()
+    # Packed code 1 in every position: the reconstructed grid is 1 * 8 = 8.
+    module.qweight.fill_(0x11111111)
+    module.qzeros.zero_()
+    module.scales.fill_(8)
+    module.bias.fill_(-1024)
+    module.post_init()
+    return module
+
+
+def test_paroquant_dense_fallback_accumulates_reduction_and_bias_in_fp32(monkeypatch):
+    """Regression for #3866: the FP16 dot overflowed before the bias cancelled it."""
+
+    in_features, out_features, group_size = 16, 8, 16
+    module = _cancelling_bias_module(in_features, out_features, group_size)
+    # group_size 16 already skips the ATen path; pin it so a future eligibility
+    # change cannot hide the dense fallback under test.
+    monkeypatch.setattr(module, "_forward_cpu_aten", lambda _x: None)
+
+    x = torch.full((1, in_features), 516, dtype=torch.float16)
+    with torch.no_grad():
+        actual = module(x)
+
+    expected = _fp32_awq_oracle(
+        x.reshape(-1, in_features),
+        module.qweight,
+        module.qzeros,
+        module.scales,
+        module.bias,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.float16)
+
+    assert actual.dtype is torch.float16
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="native CUDA ParoQuant kernel required (unavailable on ROCm)",
+)
+def test_paroquant_cuda_kernel_adds_bias_after_the_fp32_reduction(monkeypatch):
+    """The native AWQ epilogue must not round the sum before the bias cancels it."""
+
+    in_features, out_features, group_size = 32, 64, 32
+    module = _cancelling_bias_module(in_features, out_features, group_size).cuda()
+    x = torch.full((1, in_features), 258, dtype=torch.float16, device="cuda")
+
+    # The dense fallback has its own FP32 epilogue, so fail loudly if the
+    # native kernel silently delegates to it instead of being exercised.
+    monkeypatch.setattr(
+        module,
+        "_forward_dense",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Expected the ParoQuant CUDA kernel path, got the dense fallback.")
+        ),
+    )
+
+    with torch.no_grad():
+        actual = module(x)
+
+    expected = _fp32_awq_oracle(
+        x.reshape(-1, in_features),
+        module.qweight,
+        module.qzeros,
+        module.scales,
+        module.bias,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.float16)
+
+    assert actual.dtype is torch.float16
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_paroquant_forward_matches_explicit_rotated_reference(monkeypatch):
     """Guard the dense reference contract for non-identity ParoQuant rotations."""
     bits = 4
@@ -269,11 +367,11 @@ def test_paroquant_forward_matches_explicit_rotated_reference(monkeypatch):
     dequant_weight = dequantize_gemm(
         qweight=module.qweight,
         qzeros=module.qzeros,
-        scales=module.scales,
+        scales=module.scales.float(),
         bits=bits,
         group_size=group_size,
-    ).to(dtype=x.dtype)
-    expected = torch.matmul(rotated, dequant_weight) + module.bias
+    )
+    expected = (rotated.float() @ dequant_weight.float() + module.bias.float()).to(x.dtype)
 
     torch.testing.assert_close(module(x), expected, atol=5e-3, rtol=5e-3)
 
@@ -584,6 +682,12 @@ def test_paroquant_cuda_matches_upstream_transformers_contract():
     x = torch.randn(3, 7, in_features, device="cuda", dtype=torch.float16)
 
     with torch.inference_mode():
+        # Isolate the GEMM epilogue: the fused CUDA rotation has its own
+        # exact-match contract, and using the same rotated input here keeps
+        # this comparison about the kernel, not about rotation arithmetic.
+        rotated = module._rotate_inputs(x.reshape(-1, in_features)).reshape(
+            *x.shape[:-1], in_features
+        )
         expected = _upstream_transformers_contract_reference(
             x,
             qweight=module.qweight,
@@ -596,6 +700,7 @@ def test_paroquant_cuda_matches_upstream_transformers_contract():
             bits=bits,
             group_size=group_size,
             out_features=out_features,
+            rotated=rotated,
         )
 
         original_forward_dense = module._forward_dense
