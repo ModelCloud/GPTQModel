@@ -5,11 +5,7 @@
 
 // AVX512 implementation - compile with -mavx512f -mavx512bf16
 #define CPU_CAPABILITY_AVX512
-#include <ATen/ATen.h>
-#include <ATen/native/CPUBlas.h>
-#include <ATen/cpu/vec/vec.h>
-#include <ATen/cpu/vec/functional.h>
-#include <c10/core/ScalarType.h>
+#include "../torch_stable_compat.h"
 #include <int4_qzero_group_scaled_avx512.hpp>
 #include <thread>
 #include <omp.h>
@@ -259,123 +255,6 @@ namespace int4_qzero_group_scaled_cpu
         Bs + nb_start, bias == nullptr ? nullptr : bias + nb_start, \
         K, blocksize, lda, ldb, ldc, strideBz, strideBs);
 
-        inline uint16_t float_to_bf16_round(float x)
-        {
-            uint32_t u;
-            std::memcpy(&u, &x, sizeof(u));
-            uint32_t lsb = (u >> 16) & 1;
-            uint32_t rounding_bias = 0x7fff + lsb;
-            u += rounding_bias;
-            uint16_t hi = static_cast<uint16_t>(u >> 16);
-            // Quiet NaN handling
-            if ((u & 0x7f800000) == 0x7f800000 && (u & 0x007fffff))
-            {
-                hi = 0xffff;
-            }
-            return hi;
-        }
-
-        template <typename scalar_t, typename std::enable_if_t<at::vec::is_reduced_floating_point_v<scalar_t>, int> = 0>
-        inline at::vec::Vectorized<scalar_t> convert_from_float_ext(const at::vec::Vectorized<float>& a, const at::vec::Vectorized<float>& b) {
-            return at::vec::convert_from_float<scalar_t>(a, b);
-        }
-
-        template <>
-        inline at::vec::Vectorized<at::BFloat16>
-        convert_from_float_ext<at::BFloat16>(const at::vec::Vectorized<float>& a, const at::vec::Vectorized<float>& b) {
-            return (__m512i)(_mm512_cvtne2ps_pbh(__m512(b), __m512(a)));
-        }
-
-        template <typename scalar_t>
-        inline void copy_stub(
-            scalar_t* __restrict__ out, const float* __restrict__ input,
-            const float* __restrict__ bias, int64_t size) {
-            using bVec = at::vec::Vectorized<scalar_t>;
-            using fVec = at::vec::Vectorized<float>;
-            constexpr int kVecSize = bVec::size();
-
-            int64_t d;
-            #pragma GCC unroll 4
-            for (d = 0; d <= size - kVecSize; d += kVecSize) {
-                fVec data0 = fVec::loadu(input + d);
-                fVec data1 = fVec::loadu(input + d + fVec::size());
-                if (bias != nullptr) {
-                    data0 = data0 + fVec::loadu(bias + d);
-                    data1 = data1 + fVec::loadu(bias + d + fVec::size());
-                }
-                bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
-                out_vec.store(out + d);
-            }
-            for (; d < size; ++d) {
-                out[d] = static_cast<scalar_t>(input[d] + (bias != nullptr ? bias[d] : 0.0f));
-            }
-        }
-
-        template <>
-        struct brgemm<at::BFloat16>
-        {
-            static inline void apply(
-                const at::BFloat16 *__restrict__ A, const unsigned char *__restrict__ B, at::BFloat16 *__restrict__ C, const uint8_t* __restrict__ Bz,
-                const float *__restrict__ Bs, const float *__restrict__ bias,
-                at::BFloat16 *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
-                int64_t K, int blocksize, int64_t lda, int64_t ldb, int64_t ldc, int64_t strideBz, int64_t strideBs)
-            {
-                constexpr int BLOCK_N = block_size_n();
-                const int ldb_tmp = BLOCK_N;
-                alignas(64) float Cacc[block_size_m() * BLOCK_N];
-
-                for (int64_t m = 0; m < M; ++m)
-                {
-                    std::fill_n(Cacc + m * BLOCK_N, N, 0.0f);
-                }
-
-                for (int64_t group_start = 0; group_start < K; group_start += blocksize)
-                {
-                    const int64_t group_size = std::min<int64_t>(blocksize, K - group_start);
-                    const int64_t group_idx = group_start / blocksize;
-
-                    for (int64_t group_offset = 0; group_offset < group_size; group_offset += BLOCK_K)
-                    {
-                        const int64_t k = group_start + group_offset;
-                        const int64_t kb_size = std::min<int64_t>(BLOCK_K, group_size - group_offset);
-
-                        unpack_B(
-                            Btmp, B + (k >> 1) * ldb, Bz + group_idx * strideBz,
-                            N, kb_size, ldb, ldb_tmp, strideBz);
-
-                        at::native::cpublas::brgemm(
-                            M, N, kb_size, lda, ldb_tmp, BLOCK_N, group_offset != 0, A + k, Btmp, Ctmp);
-                    }
-
-                    // Apply the group scale in FP32 after the exact integer
-                    // dot product, matching the tinygemm arithmetic order.
-                    for (int64_t m = 0; m < M; ++m)
-                    {
-                        const float *src = Ctmp + m * BLOCK_N;
-                        float *dst = Cacc + m * BLOCK_N;
-                        int64_t n = 0;
-                        for (; n + 16 <= N; n += 16)
-                        {
-                            const __m512 values = _mm512_loadu_ps(src + n);
-                            const __m512 scales = _mm512_loadu_ps(Bs + group_idx * strideBs + n);
-                            const __m512 acc = _mm512_loadu_ps(dst + n);
-                            _mm512_storeu_ps(dst + n, _mm512_fmadd_ps(values, scales, acc));
-                        }
-                        for (; n < N; ++n)
-                        {
-                            dst[n] = std::fma(src[n], Bs[group_idx * strideBs + n], dst[n]);
-                        }
-                    }
-                }
-
-                // copy from Ctmp to C
-                for (int64_t m = 0; m < M; ++m)
-                {
-                    copy_stub(C + m * ldc, Cacc + m * BLOCK_N, bias, N);
-                }
-            }
-        };
-
         template <typename scalar_t>
         void tinygemm_kernel(
             const scalar_t *__restrict__ A, const unsigned char *__restrict__ B, scalar_t *__restrict__ C, const uint8_t* __restrict__ Bz,
@@ -456,7 +335,10 @@ namespace int4_qzero_group_scaled_cpu
             // The 4-row tiny GEMM is faster through the 24-token range. Above
             // that, on-the-fly dequantization plus brgemm avoids materializing
             // the full dequantized weight matrix.
-            const bool use_brgemm = M > 24;
+            // brgemm is an unstable libtorch_cpu symbol. The AVX512-BF16
+            // tinygemm path below handles every M, so keep the kernel on the
+            // stable ABI instead of linking against cpublas.
+            const bool use_brgemm = false;
             // l2 cache block for n
             int64_t cache_blocks_nb = get_cache_blocks<T>(BLOCK_N * K);
             parallel_2d(MB, NB, [&](int64_t begin_mb, int64_t end_mb, int64_t begin_nb, int64_t end_nb)
@@ -494,9 +376,7 @@ namespace int4_qzero_group_scaled_cpu
                     }
                 }
             }
-            if (use_brgemm) {
-                at::native::cpublas::brgemm_release();
-            } });
+            });
         }
 
         //==============================================================

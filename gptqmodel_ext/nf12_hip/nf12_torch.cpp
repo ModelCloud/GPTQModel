@@ -14,21 +14,14 @@
 //
 // Host-only translation unit: the ROCm SDK here ships no thrust, so the .hip
 // files must not see torch/ATen. Mirrors allspark_torch_hip.cpp.
-#include <torch/extension.h>
-#include <torch/library.h>
-
-#include <c10/cuda/CUDAStream.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAFunctions.h>
-#include <c10/util/SmallVector.h>
-#include <ATen/ops/empty_native.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <torch_stable_compat.h>
 
 #include <hip/hip_runtime_api.h>
 
 #include <optional>
 #include <atomic>
 #include <limits>
+#include <utility>
 #include <vector>
 #include <string>
 
@@ -183,14 +176,14 @@ torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& es
   const auto [n, k] = decode_geometry(packed, escapes, exp_base, op);
 
   auto guard = device_guard(packed);
-  auto out = torch::empty({n, k}, packed.options().dtype(dtype));
+  auto out = torch::empty({n, k}, at::options(packed).dtype(dtype));
 
-  const auto* escapes_ptr = reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>());
+  const auto* escapes_ptr = reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>());
   const hipError_t status = dtype == at::kFloat
-      ? nf12_decode_fp32(packed.data_ptr<uint8_t>(), escapes_ptr,
+      ? nf12_decode_fp32(packed.const_data_ptr<uint8_t>(), escapes_ptr,
                          static_cast<uint32_t>(exp_base), n, k,
                          static_cast<void*>(out.data_ptr()), k, current_stream())
-      : nf12_decode(packed.data_ptr<uint8_t>(), escapes_ptr,
+      : nf12_decode(packed.const_data_ptr<uint8_t>(), escapes_ptr,
                     static_cast<uint32_t>(exp_base), n, k,
                     static_cast<void*>(out.data_ptr()), k, current_stream());
   TORCH_CHECK(status == hipSuccess, op, " failed: ", hipGetErrorString(status));
@@ -218,10 +211,10 @@ torch::Tensor sub_fp32_dispatch(const torch::Tensor& packed, const torch::Tensor
   TORCH_CHECK(wq.is_contiguous(), op, ": wq must be contiguous");
 
   auto guard = device_guard(packed);
-  auto out = torch::empty({n, k}, packed.options().dtype(at::kFloat));
+  auto out = torch::empty({n, k}, at::options(packed).dtype(at::kFloat));
   const hipError_t status = nf12_sub_fp32(
-      packed.data_ptr<uint8_t>(),
-      reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
+      packed.const_data_ptr<uint8_t>(),
+      reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>()),
       static_cast<uint32_t>(exp_base), n, k,
       static_cast<const void*>(wq.data_ptr()),
       static_cast<void*>(out.data_ptr()), k, current_stream());
@@ -243,21 +236,21 @@ torch::Tensor embedding_dispatch(const torch::Tensor& ids_in,
   TORCH_CHECK(ids_in.scalar_type() == at::kInt || ids_in.scalar_type() == at::kLong,
               "nf12_hip.embedding: ids must be int32 or int64");
   auto guard = device_guard(packed);
-  const torch::Tensor ids = ids_in.is_contiguous() ? ids_in : ids_in.contiguous();
-  c10::SmallVector<int64_t, 5> out_sizes(ids.sizes().begin(), ids.sizes().end());
+  const torch::Tensor ids = at::contiguous(ids_in);
+  std::vector<int64_t> out_sizes(ids.sizes().begin(), ids.sizes().end());
   out_sizes.push_back(k);
-  auto out = at::native::empty_cuda(
-      out_sizes, at::kBFloat16, std::nullopt, packed.device(), false, std::nullopt);
+  auto out = at::empty(
+      out_sizes, at::TensorOptions().dtype(at::kBFloat16).device(packed.device()));
   const int64_t num_ids = ids.numel();
   if (num_ids == 0) return out;
 
   const hipError_t status = nf12_embedding(
-      packed.data_ptr<uint8_t>(),
-      escapes.numel() ? reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()) : nullptr,
+      packed.const_data_ptr<uint8_t>(),
+      escapes.numel() ? reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>()) : nullptr,
       static_cast<uint32_t>(escapes.size(0)), static_cast<uint32_t>(exp_base),
       n, k,
-      ids.scalar_type() == at::kInt ? ids.data_ptr<int32_t>() : nullptr,
-      ids.scalar_type() == at::kLong ? ids.data_ptr<int64_t>() : nullptr,
+      ids.scalar_type() == at::kInt ? ids.const_data_ptr<int32_t>() : nullptr,
+      ids.scalar_type() == at::kLong ? ids.const_data_ptr<int64_t>() : nullptr,
       num_ids, static_cast<void*>(out.data_ptr()), current_stream());
   TORCH_CHECK(status == hipSuccess, "nf12_hip.embedding failed: ", hipGetErrorString(status));
   return out;
@@ -279,15 +272,15 @@ rowmajor_pack_dispatch(const torch::Tensor& packed,
   const int64_t tiles = (n / 16) * (k / 64);
   TORCH_CHECK(tiles > 0 && tiles <= std::numeric_limits<int32_t>::max(),
               "nf12_hip.rowmajor_pack: tile count exceeds int32 capacity");
-  auto counts = torch::empty({tiles}, packed.options().dtype(at::kInt));
-  counts.zero_();
+  auto counts = torch::empty({tiles}, at::options(packed).dtype(at::kInt));
+  torch::stable::zero_(counts);
   hipError_t status = nf12_rowmajor_count(
-      packed.data_ptr<uint8_t>(), n, k, counts.data_ptr<int32_t>(), stream);
+      packed.const_data_ptr<uint8_t>(), n, k, counts.mutable_data_ptr<int32_t>(), stream);
   TORCH_CHECK(status == hipSuccess,
               "nf12_hip.rowmajor_pack count failed: ", hipGetErrorString(status));
 
-  const torch::Tensor prefix = counts.cumsum(0, at::kLong);
-  const int64_t collisions = prefix.select(0, tiles - 1).item<int64_t>();
+  const torch::Tensor prefix = at::cumsum(counts, 0, at::kLong);
+  const int64_t collisions = at::item<int64_t>(torch::stable::select(prefix, 0, tiles - 1));
   const int64_t original = escapes.size(0);
   TORCH_CHECK(collisions >= 0 &&
                   original <= (std::numeric_limits<int64_t>::max() - collisions) / 2,
@@ -297,24 +290,24 @@ rowmajor_pack_dispatch(const torch::Tensor& packed,
               "nf12_hip.rowmajor_pack: escape index exceeds uint32 capacity");
 
   auto row_packed =
-      torch::empty({n, k * 3 / 2}, packed.options().dtype(at::kByte));
+      torch::empty({n, k * 3 / 2}, at::options(packed).dtype(at::kByte));
   auto row_escapes =
-      torch::empty({total_escapes, 4}, packed.options().dtype(at::kShort));
-  auto invalid = torch::zeros({1}, packed.options().dtype(at::kInt));
+      torch::empty({total_escapes, 4}, at::options(packed).dtype(at::kShort));
+  auto invalid = torch::zeros({1}, at::options(packed).dtype(at::kInt));
   status = nf12_rowmajor_pack(
-      packed.data_ptr<uint8_t>(),
+      packed.const_data_ptr<uint8_t>(),
       original != 0
-          ? reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>())
+          ? reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>())
           : nullptr,
       original, n, k, static_cast<uint32_t>(exp_base),
-      prefix.data_ptr<int64_t>(), row_packed.data_ptr<uint8_t>(),
+      prefix.const_data_ptr<int64_t>(), row_packed.mutable_data_ptr<uint8_t>(),
       total_escapes != 0
-          ? reinterpret_cast<uint64_t*>(row_escapes.data_ptr<int16_t>())
+          ? reinterpret_cast<uint64_t*>(row_escapes.mutable_data_ptr<int16_t>())
           : nullptr,
-      invalid.data_ptr<int32_t>(), stream);
+      invalid.mutable_data_ptr<int32_t>(), stream);
   TORCH_CHECK(status == hipSuccess,
               "nf12_hip.rowmajor_pack failed: ", hipGetErrorString(status));
-  TORCH_CHECK(invalid.item<int32_t>() == 0,
+  TORCH_CHECK(at::item<int32_t>(invalid) == 0,
               "nf12_hip.rowmajor_pack: canonical escape index out of range");
   return {row_packed, row_escapes, original, collisions};
 }
@@ -333,19 +326,19 @@ torch::Tensor rowmajor_embedding_dispatch(const torch::Tensor& ids_in,
   TORCH_CHECK(ids_in.scalar_type() == at::kInt || ids_in.scalar_type() == at::kLong,
               "nf12_hip.rowmajor_embedding: ids must be int32 or int64");
   auto guard = device_guard(packed);
-  const torch::Tensor ids = ids_in.is_contiguous() ? ids_in : ids_in.contiguous();
-  c10::SmallVector<int64_t, 5> out_sizes(ids.sizes().begin(), ids.sizes().end());
+  const torch::Tensor ids = at::contiguous(ids_in);
+  std::vector<int64_t> out_sizes(ids.sizes().begin(), ids.sizes().end());
   out_sizes.push_back(k);
-  auto out = at::native::empty_cuda(
-      out_sizes, at::kBFloat16, std::nullopt, packed.device(), false, std::nullopt);
+  auto out = at::empty(
+      out_sizes, at::TensorOptions().dtype(at::kBFloat16).device(packed.device()));
   const int64_t num_ids = ids.numel();
   if (num_ids == 0) return out;
 
   const hipError_t status = nf12_rowmajor_lookup(
       ids.data_ptr(),
-      packed.data_ptr<uint8_t>(),
+      packed.const_data_ptr<uint8_t>(),
       escapes.numel()
-          ? reinterpret_cast<const uint64_t*>(escapes.data_ptr<int16_t>())
+          ? reinterpret_cast<const uint64_t*>(escapes.const_data_ptr<int16_t>())
           : nullptr,
       static_cast<uint32_t>(escapes.size(0)), static_cast<uint32_t>(exp_base),
       n, k, num_ids, static_cast<void*>(out.data_ptr()),
@@ -368,7 +361,7 @@ std::tuple<torch::Tensor, torch::Tensor, int64_t> encode_dispatch(const torch::T
   TORCH_CHECK(w_in.scalar_type() == at::kBFloat16,
               "nf12_hip.encode: weight must be bfloat16");
   TORCH_CHECK(w_in.dim() == 2, "nf12_hip.encode: weight must be 2-D");
-  const torch::Tensor w = w_in.contiguous();
+  const torch::Tensor w = at::contiguous(w_in);
   const int64_t n = w.size(0);
   const int64_t k = w.size(1);
   TORCH_CHECK(n > 0 && n % 16 == 0 && k > 0 && k % 64 == 0,
@@ -378,7 +371,7 @@ std::tuple<torch::Tensor, torch::Tensor, int64_t> encode_dispatch(const torch::T
   const hipStream_t stream = current_stream();
   const size_t ws_bytes = nf12_encode_workspace_bytes(n, k);
   auto ws = torch::empty({static_cast<int64_t>(ws_bytes)},
-                         w.options().dtype(at::kByte));
+                         at::options(w).dtype(at::kByte));
 
   uint8_t exp_base = 0;
   uint32_t num_escapes = 0;
@@ -388,13 +381,13 @@ std::tuple<torch::Tensor, torch::Tensor, int64_t> encode_dispatch(const torch::T
   TORCH_CHECK(status == hipSuccess, "nf12_hip.encode (analyze) failed: ",
               hipGetErrorString(status));
 
-  auto packed = torch::empty({n, k * 3 / 2}, w.options().dtype(at::kByte));
+  auto packed = torch::empty({n, k * 3 / 2}, at::options(w).dtype(at::kByte));
   auto escapes = torch::empty({static_cast<int64_t>(num_escapes), 8},
-                              w.options().dtype(at::kShort));
+                              at::options(w).dtype(at::kShort));
   status = nf12_encode(
       static_cast<const void*>(w.data_ptr()), n, k, w.stride(0), exp_base,
-      packed.data_ptr<uint8_t>(),
-      num_escapes > 0 ? reinterpret_cast<uint4*>(escapes.data_ptr<int16_t>()) : nullptr,
+      packed.mutable_data_ptr<uint8_t>(),
+      num_escapes > 0 ? reinterpret_cast<uint4*>(escapes.mutable_data_ptr<int16_t>()) : nullptr,
       num_escapes, static_cast<void*>(ws.data_ptr()), ws_bytes, stream);
   TORCH_CHECK(status == hipSuccess, "nf12_hip.encode failed: ", hipGetErrorString(status));
   return {packed, escapes, static_cast<int64_t>(exp_base)};
@@ -436,7 +429,7 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
   // or padded activation (a legal torch layout) must be normalized here. The
   // kernels cannot honour a wider row stride: forwarding it silently read the
   // wrong rows. The output keeps the caller's leading dimensions.
-  const torch::Tensor x2 = x.contiguous().reshape({m, k});
+  const torch::Tensor x2 = at::reshape(at::contiguous(x), {m, k});
   std::vector<int64_t> out_sizes(x.sizes().begin(), x.sizes().end());
   out_sizes.back() = n;
   if (m < 16 && nf12_linear_fused_small_m_supported(m)) {
@@ -453,23 +446,26 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     TORCH_CHECK(escapes.scalar_type() == at::kShort && escapes.dim() == 2 &&
                     escapes.size(1) == 8,
                 "nf12_hip.linear: escapes must be int16 [E, 8]");
-    auto out = torch::empty({m, n}, x.options());
+    auto out = torch::empty({m, n}, at::options(x));
     // Bias is folded into the kernel's FP32 accumulator, not added to the
     // rounded BF16 result (see the comment in nf12_decode.hip).
     const bool has_bias = bias.has_value() && bias->defined();
     const torch::Tensor b =
-        has_bias ? bias->to(out.device(), out.scalar_type()).contiguous() : torch::Tensor();
+        has_bias
+            ? at::contiguous(at::to(*bias, out.device(), out.scalar_type()))
+            : torch::Tensor();
     if (has_bias) {
       TORCH_CHECK(b.numel() == n, "nf12_hip.linear: bias must have N elements");
     }
     const hipError_t status = nf12_linear_fused(
-        packed.data_ptr<uint8_t>(), reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
+        packed.const_data_ptr<uint8_t>(),
+        reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>()),
         static_cast<uint32_t>(exp_base), static_cast<const void*>(x2.data_ptr()),
         static_cast<void*>(out.data_ptr()), n, k, m,
         has_bias ? static_cast<const void*>(b.data_ptr()) : nullptr, current_stream());
     TORCH_CHECK(status == hipSuccess, "nf12_hip.linear (fused) failed: ",
                 hipGetErrorString(status));
-    return out.reshape(out_sizes);
+    return at::reshape(out, out_sizes);
   }
 
   // Larger M: decode the weight and hand it to rocBLAS (SPEC.md 6.5). Decode
@@ -500,27 +496,27 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     std::optional<torch::Tensor> b_opt;
     if (bias.has_value() && bias->defined()) {
       TORCH_CHECK(bias->numel() == n, "nf12_hip.linear: bias must have N elements");
-      b_opt = bias->to(x.device(), x.scalar_type()).contiguous();
+      b_opt = at::contiguous(at::to(*bias, x.device(), x.scalar_type()));
       bias_ptr = b_opt->data_ptr();
     }
-    auto out = torch::empty({m, n}, x.options());
+    auto out = torch::empty({m, n}, at::options(x));
     const size_t workspace_bytes = nf12_wmma_workspace_bytes(n, k, m);
     // PyTorch's caching allocator owns this workspace for the call and tracks
     // the current stream. Concurrent streams and devices cannot alias it.
     torch::Tensor workspace;
     if (workspace_bytes > 0) {
-      workspace = torch::empty({static_cast<int64_t>(workspace_bytes)}, x.options().dtype(at::kByte));
+      workspace = torch::empty({static_cast<int64_t>(workspace_bytes)}, at::options(x).dtype(at::kByte));
     }
     const hipError_t status = nf12_linear_wmma(
-        packed.data_ptr<uint8_t>(),
-        reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
+        packed.const_data_ptr<uint8_t>(),
+        reinterpret_cast<const uint4*>(escapes.const_data_ptr<int16_t>()),
         static_cast<uint32_t>(exp_base), static_cast<const void*>(x2.data_ptr()),
         static_cast<void*>(out.data_ptr()), n, k, m, bias_ptr,
         workspace_bytes > 0 ? workspace.data_ptr() : nullptr, workspace_bytes,
         current_stream());
     TORCH_CHECK(status == hipSuccess, "nf12_hip.linear (wmma) failed: ",
                 hipGetErrorString(status));
-    return out.reshape(out_sizes);
+    return at::reshape(out, out_sizes);
   }
 
   // Slice height: large enough that rocBLAS keeps its efficiency (a 256-row
@@ -547,7 +543,7 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     const int64_t rows = std::min(slice_rows, n - n0);
     // A row slice of an NF12 weight is the packed view [n0, n0+rows); escape
     // indices are absolute, so the full table applies (SPEC.md 6.5).
-    const torch::Tensor ps = packed.narrow(0, n0, rows);
+    const torch::Tensor ps = at::narrow(packed, 0, n0, rows);
     const torch::Tensor ws = decode_dispatch(ps, escapes, exp_base);
     if (bias.has_value() && bias->defined()) {
       // Fold the bias into the GEMM epilogue (addmm), never add it to an
@@ -556,14 +552,15 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
       // RMS relative error and only 80% bit-exact outputs on gfx1201 versus
       // 2e-5 / 99.99% for addmm. The CUDA kernel also accumulates bias in
       // FP32 before writing BF16 (csrc/linear/small_m.cu), so addmm matches it.
-      const torch::Tensor bs = bias->to(ws.device(), ws.scalar_type()).narrow(0, n0, rows);
-      slice_out.push_back(at::addmm(bs, x2, ws.t()));
+      const torch::Tensor bs = at::narrow(
+          at::to(*bias, ws.device(), ws.scalar_type()), 0, n0, rows);
+      slice_out.push_back(at::addmm(bs, x2, at::t(ws)));
     } else {
-      slice_out.push_back(at::matmul(x2, ws.t()));
+      slice_out.push_back(at::matmul(x2, at::t(ws)));
     }
   }
   const torch::Tensor dense = slice_out.size() == 1 ? slice_out[0] : at::cat(slice_out, 1);
-  return dense.reshape(out_sizes);
+  return at::reshape(dense, out_sizes);
 }
 
 // ---------------------------------------------------------------------------
@@ -572,24 +569,28 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
 bool selftest(const torch::Tensor& ref) {
   check_arch(ref);
   auto guard = device_guard(ref);
-  auto sentinel = torch::zeros({1}, ref.options().dtype(at::kInt));
+  auto sentinel = torch::zeros({1}, at::options(ref).dtype(at::kInt));
   const hipError_t status = nf12_selftest(
-      reinterpret_cast<uint32_t*>(sentinel.data_ptr<int32_t>()), current_stream());
+      reinterpret_cast<uint32_t*>(sentinel.mutable_data_ptr<int32_t>()),
+      current_stream());
   TORCH_CHECK(status == hipSuccess, "nf12_hip.selftest failed: ", hipGetErrorString(status));
-  return sentinel.cpu().data_ptr<int32_t>()[0] == 0x4E463132;
+  return at::item<int32_t>(sentinel) == 0x4E463132;
 }
 
 // ---------------------------------------------------------------------------
 // nf12_hip::arch_info() -> str
 // ---------------------------------------------------------------------------
 std::string arch_info() {
-  TORCH_CHECK(torch::cuda::is_available(), "nf12_hip.arch_info: no GPU");
+  int device_count = 0;
+  TORCH_CHECK(
+      hipGetDeviceCount(&device_count) == hipSuccess && device_count > 0,
+      "nf12_hip.arch_info: no GPU");
   return arch_name(c10::cuda::current_device());
 }
 
 }  // namespace
 
-TORCH_LIBRARY(nf12_hip, m) {
+STABLE_TORCH_LIBRARY(nf12_hip, m) {
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("decode_fp32(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("sub_fp32(Tensor packed, Tensor escapes, int exp_base, Tensor wq) -> Tensor");
@@ -605,20 +606,20 @@ TORCH_LIBRARY(nf12_hip, m) {
   m.def("arch_info() -> str");
 }
 
-TORCH_LIBRARY_IMPL(nf12_hip, CUDA, m) {
-  m.impl("decode", &decode_dispatch);
-  m.impl("decode_fp32", &decode_fp32_dispatch);
-  m.impl("sub_fp32", &sub_fp32_dispatch);
-  m.impl("embedding", &embedding_dispatch);
-  m.impl("rowmajor_pack", &rowmajor_pack_dispatch);
-  m.impl("rowmajor_embedding", &rowmajor_embedding_dispatch);
-  m.impl("linear", &linear_dispatch);
-  m.impl("encode", &encode_dispatch);
-  m.impl("selftest", &selftest);
+STABLE_TORCH_LIBRARY_IMPL(nf12_hip, CUDA, m) {
+  m.impl("decode", TORCH_BOX(&decode_dispatch));
+  m.impl("decode_fp32", TORCH_BOX(&decode_fp32_dispatch));
+  m.impl("sub_fp32", TORCH_BOX(&sub_fp32_dispatch));
+  m.impl("embedding", TORCH_BOX(&embedding_dispatch));
+  m.impl("rowmajor_pack", TORCH_BOX(&rowmajor_pack_dispatch));
+  m.impl("rowmajor_embedding", TORCH_BOX(&rowmajor_embedding_dispatch));
+  m.impl("linear", TORCH_BOX(&linear_dispatch));
+  m.impl("encode", TORCH_BOX(&encode_dispatch));
+  m.impl("selftest", TORCH_BOX(&selftest));
 }
 
 // arch_info() takes no tensor arguments, so it cannot dispatch on a key set
 // derived from inputs. CompositeExplicitAutograd makes it callable directly.
-TORCH_LIBRARY_IMPL(nf12_hip, CompositeExplicitAutograd, m) {
-  m.impl("arch_info", &arch_info);
+STABLE_TORCH_LIBRARY_IMPL(nf12_hip, CompositeExplicitAutograd, m) {
+  m.impl("arch_info", TORCH_BOX(&arch_info));
 }

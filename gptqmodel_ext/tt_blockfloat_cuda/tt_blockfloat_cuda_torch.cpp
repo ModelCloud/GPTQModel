@@ -8,11 +8,7 @@
 // deliberately carries no layout knowledge beyond the buffer sizes, so the
 // CUDA and HIP siblings expose an identical Python surface.
 
-#include <torch/extension.h>
-#include <torch/library.h>
-
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../torch_stable_compat.h"
 
 #include <optional>
 
@@ -82,7 +78,7 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
   // A sliced or transposed activation is materialised rather than rejected: the
   // dense path this replaces accepted any layout, and callers pass views such as
   // ``x[:, ::2]``.  ``contiguous()`` is a no-op when the tensor is already packed.
-  const torch::Tensor xc = x.contiguous();
+  const torch::Tensor xc = at::contiguous(x);
   const int64_t m = xc.size(0);
   const int64_t k = xc.size(1);
   TORCH_CHECK(k > 0, "x must have at least one column");
@@ -110,8 +106,8 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
   }
 
   const c10::cuda::CUDAGuard guard(xc.device());
-  ok(blockfloat_linear(xc.data_ptr(), dtype_code(xc), codes.data_ptr<uint8_t>(),
-                       exponents.data_ptr<int8_t>(), static_cast<int>(bits), m, n, k,
+  ok(blockfloat_linear(xc.data_ptr(), dtype_code(xc), codes.mutable_data_ptr<uint8_t>(),
+                       exponents.mutable_data_ptr<int8_t>(), static_cast<int>(bits), m, n, k,
                        bias_ptr, out.data_ptr(), at::cuda::getCurrentCUDAStream()),
      "blockfloat_linear");
 }
@@ -131,7 +127,7 @@ void blockfloat_dequant_out(const torch::Tensor& codes, const torch::Tensor& exp
   TORCH_CHECK(out.numel() == rows * k, "out must hold rows * k elements");
 
   const c10::cuda::CUDAGuard guard(exponents.device());
-  ok(blockfloat_dequant(codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
+  ok(blockfloat_dequant(codes.mutable_data_ptr<uint8_t>(), exponents.mutable_data_ptr<int8_t>(),
                         static_cast<int>(bits), rows, k, out.data_ptr(), dtype_code(out),
                         at::cuda::getCurrentCUDAStream()),
      "blockfloat_dequant");
@@ -145,7 +141,7 @@ void blockfloat_quantize_out(const torch::Tensor& x, int64_t bits, torch::Tensor
   TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
-  const torch::Tensor xc = x.contiguous();
+  const torch::Tensor xc = at::contiguous(x);
   const int64_t rows = xc.size(0);
   const int64_t k = xc.size(1);
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
@@ -154,8 +150,8 @@ void blockfloat_quantize_out(const torch::Tensor& x, int64_t bits, torch::Tensor
   check_exponents(exponents, xc, rows, k);
 
   const c10::cuda::CUDAGuard guard(xc.device());
-  ok(blockfloat_quantize(xc.data_ptr<float>(), static_cast<int>(bits), rows, k,
-                         codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
+  ok(blockfloat_quantize(xc.mutable_data_ptr<float>(), static_cast<int>(bits), rows, k,
+                         codes.mutable_data_ptr<uint8_t>(), exponents.mutable_data_ptr<int8_t>(),
                          at::cuda::getCurrentCUDAStream()),
      "blockfloat_quantize");
 }
@@ -165,7 +161,7 @@ void blockfloat_decompose_out(const torch::Tensor& x, int64_t bits, torch::Tenso
   TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
-  const torch::Tensor xc = x.contiguous();
+  const torch::Tensor xc = at::contiguous(x);
   const int64_t rows = xc.size(0);
   const int64_t k = xc.size(1);
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
@@ -177,9 +173,9 @@ void blockfloat_decompose_out(const torch::Tensor& x, int64_t bits, torch::Tenso
               "failed must be a one-element int32 tensor");
 
   const c10::cuda::CUDAGuard guard(xc.device());
-  ok(blockfloat_decompose(xc.data_ptr<float>(), static_cast<int>(bits), rows, k,
-                          codes.data_ptr<uint8_t>(), exponents.data_ptr<int8_t>(),
-                          failed.data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream()),
+  ok(blockfloat_decompose(xc.mutable_data_ptr<float>(), static_cast<int>(bits), rows, k,
+                          codes.mutable_data_ptr<uint8_t>(), exponents.mutable_data_ptr<int8_t>(),
+                          failed.mutable_data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream()),
      "blockfloat_decompose");
 }
 
@@ -191,7 +187,7 @@ void blockfloat_embedding_out(const torch::Tensor& ids, const torch::Tensor& cod
                               int64_t k, torch::Tensor& out) {
   TORCH_CHECK(ids.is_cuda(), "ids must be a CUDA tensor");
   TORCH_CHECK(ids.scalar_type() == at::kLong, "ids must be int64");
-  const torch::Tensor idx = ids.contiguous();
+  const torch::Tensor idx = at::contiguous(ids);
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
   TORCH_CHECK(rows > 0 && k > 0 && k % 16 == 0,
               "rows must be > 0 and K a multiple of 16");
@@ -207,8 +203,8 @@ void blockfloat_embedding_out(const torch::Tensor& ids, const torch::Tensor& cod
   if (tokens == 0) return;
 
   const c10::cuda::CUDAGuard guard(idx.device());
-  ok(blockfloat_embedding(idx.data_ptr<int64_t>(), codes.data_ptr<uint8_t>(),
-                          exponents.data_ptr<int8_t>(), static_cast<int>(bits), tokens,
+  ok(blockfloat_embedding(idx.mutable_data_ptr<int64_t>(), codes.mutable_data_ptr<uint8_t>(),
+                          exponents.mutable_data_ptr<int8_t>(), static_cast<int>(bits), tokens,
                           rows, k, out.data_ptr(), dtype_code(out),
                           at::cuda::getCurrentCUDAStream()),
      "blockfloat_embedding");
@@ -222,13 +218,13 @@ void blockfloat_selftest_out(torch::Tensor& out) {
   TORCH_CHECK(out.scalar_type() == at::kInt && out.numel() == 1,
               "out must be a one-element int32 tensor");
   const c10::cuda::CUDAGuard guard(out.device());
-  ok(blockfloat_selftest(out.data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream()),
+  ok(blockfloat_selftest(out.mutable_data_ptr<int32_t>(), at::cuda::getCurrentCUDAStream()),
      "blockfloat_selftest");
 }
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_blockfloat_cuda, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_blockfloat_cuda, m) {
   m.def(
       "blockfloat_linear(Tensor x, Tensor codes, Tensor exponents, int bits, "
       "Tensor? bias, Tensor(a!) out) -> ()");
@@ -246,11 +242,11 @@ TORCH_LIBRARY(gptqmodel_blockfloat_cuda, m) {
   m.def("blockfloat_selftest(Tensor(a!) out) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_blockfloat_cuda, CUDA, m) {
-  m.impl("blockfloat_linear", &blockfloat_linear_out);
-  m.impl("blockfloat_dequant", &blockfloat_dequant_out);
-  m.impl("blockfloat_quantize", &blockfloat_quantize_out);
-  m.impl("blockfloat_decompose", &blockfloat_decompose_out);
-  m.impl("blockfloat_embedding", &blockfloat_embedding_out);
-  m.impl("blockfloat_selftest", &blockfloat_selftest_out);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_blockfloat_cuda, CUDA, m) {
+  m.impl("blockfloat_linear", TORCH_BOX(&blockfloat_linear_out));
+  m.impl("blockfloat_dequant", TORCH_BOX(&blockfloat_dequant_out));
+  m.impl("blockfloat_quantize", TORCH_BOX(&blockfloat_quantize_out));
+  m.impl("blockfloat_decompose", TORCH_BOX(&blockfloat_decompose_out));
+  m.impl("blockfloat_embedding", TORCH_BOX(&blockfloat_embedding_out));
+  m.impl("blockfloat_selftest", TORCH_BOX(&blockfloat_selftest_out));
 }

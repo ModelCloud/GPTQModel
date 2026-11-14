@@ -1,7 +1,5 @@
+#include "../../torch_stable_compat.h"
 #include "linear.h"
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
 #include "../util.h"
 #include "../quant/exl3_gemm.cuh"
 
@@ -32,7 +30,7 @@ void bc_linear_exl3_run
     }
 
     if (bias)
-        y.add_(bias.value());
+        at::add_(y, bias.value());
 }
 
 void BC_LinearEXL3::run(const at::Tensor& x, at::Tensor& y)

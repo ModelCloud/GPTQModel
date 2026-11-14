@@ -20,7 +20,12 @@ from pathlib import Path
 
 import torch
 
-from .cpp import TorchOpsJitExtension, default_jit_cuda_cflags, default_torch_ops_build_root
+from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
+    TorchOpsJitExtension,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+)
 
 
 _ALLSPARK_HIP_OPS_NAME = "gptqmodel_allspark_hip_ops"
@@ -124,6 +129,7 @@ _EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 _SELFTESTED = False

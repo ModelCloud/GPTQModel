@@ -1,6 +1,6 @@
 #pragma once
+#include "../../torch_stable_compat.h"
 
-#include <ATen/Tensor.h>
 #include <tuple>
 
 void count_inf_nan

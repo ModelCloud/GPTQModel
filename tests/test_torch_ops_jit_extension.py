@@ -200,6 +200,23 @@ def test_torch_ops_jit_extension_auto_detected_stable_sources_keep_torch_version
     assert loader._cache_fingerprint() != first_fingerprint
 
 
+def test_torch_ops_jit_extension_stable_target_ignores_torch_version(monkeypatch, tmp_path):
+    """An explicit stable target must reuse one artifact across torch releases."""
+
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(
+        '#include <torch/csrc/stable/library.h>\nSTABLE_TORCH_LIBRARY(unit_test, m) {}\n',
+        encoding="utf-8",
+    )
+    loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 10))
+
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.10.0+cu128")
+    fingerprint = loader._cache_fingerprint()
+    for version in ("2.11.0+cu128", "2.15.0.dev20260928+cu130"):
+        monkeypatch.setattr(cpp_module.torch, "__version__", version)
+        assert loader._cache_fingerprint() == fingerprint
+
+
 def test_torch_ops_jit_extension_stable_target_rejects_older_torch(monkeypatch, tmp_path):
     loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
     monkeypatch.setattr(cpp_module.torch, "__version__", "2.9.0")

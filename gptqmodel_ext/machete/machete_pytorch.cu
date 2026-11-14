@@ -1,9 +1,8 @@
+#include "../torch_stable_compat.h"
+
 #include "machete_mm_launcher.cuh"
 #include "machete_prepack_launcher.cuh"
 #include "core/scalar_type.hpp"
-
-#include "core/registration.h"
-#include <torch/library.h>
 
 namespace machete {
 
@@ -61,20 +60,21 @@ torch::Tensor prepack_B(
        .maybe_group_scales_type = maybe_group_scales_type});
 }
 
-TORCH_LIBRARY(gptqmodel_machete, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_machete, m) {
   m.def("machete_prepack_B(Tensor B, ScalarType a_type, int b_type_id, ScalarType? group_scales_type=None) -> Tensor");
   m.def("machete_mm(Tensor A, Tensor B, int b_type_id, ScalarType? out_type=None, Tensor? group_scales=None, Tensor? group_zeros=None, int? group_size=None, Tensor? channel_scales=None, Tensor? token_scales=None, str? schedule=None) -> Tensor");
   m.def("machete_supported_schedules(ScalarType a_type, int b_type_id, ScalarType? group_scales_type=None, ScalarType? group_zeros_type=None, ScalarType? channel_scales_type=None, ScalarType? token_scales_type=None, ScalarType? out_type=None) -> str[]");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_machete, CUDA, m) {
-  m.impl("machete_prepack_B", &prepack_B);
-  m.impl("machete_mm", &mm);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_machete, CUDA, m) {
+  m.impl("machete_prepack_B", TORCH_BOX(&prepack_B));
+  m.impl("machete_mm", TORCH_BOX(&mm));
 }
 
-// use CatchAll since supported_schedules has no tensor arguments
-TORCH_LIBRARY_IMPL(gptqmodel_machete, CatchAll, m) {
-  m.impl("machete_supported_schedules", &supported_schedules);
+// supported_schedules has no tensor arguments, so register it for composite
+// dispatch instead of CatchAll (CatchAll is not stable-ABI safe).
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_machete, CompositeExplicitAutograd, m) {
+  m.impl("machete_supported_schedules", TORCH_BOX(&supported_schedules));
 }
 
 };  // namespace machete

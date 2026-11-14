@@ -4,9 +4,7 @@
 
 // #pragma once
 
-#include <c10/util/BFloat16.h>
-#include <c10/util/Half.h>
-#include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
+#include "../torch_stable_compat.h"
 
 #include "fast_hadamard_transform.h"
 #include "fast_hadamard_transform_common.h"

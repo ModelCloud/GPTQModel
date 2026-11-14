@@ -1,7 +1,4 @@
-#include <ATen/DeviceGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/types.h>
+#include "../torch_stable_compat.h"
 
 #include "marlin.cuh"
 
@@ -275,16 +272,16 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
   // Verify device and strides
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
-  TORCH_CHECK(b_q_weight.dtype() == at::kInt, "b_q_weight type is not kInt");
+  TORCH_CHECK(b_q_weight.scalar_type() == at::kInt, "b_q_weight type is not kInt");
 
   TORCH_CHECK(perm.device().is_cuda(), "perm is not on GPU");
   TORCH_CHECK(perm.is_contiguous(), "perm is not contiguous");
-  TORCH_CHECK(perm.dtype() == at::kInt, "perm type is not at::kInt");
+  TORCH_CHECK(perm.scalar_type() == at::kInt, "perm type is not at::kInt");
 
   // Alloc buffers
   const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(b_q_weight));
   auto options = torch::TensorOptions()
-                     .dtype(b_q_weight.dtype())
+                     .dtype(b_q_weight.scalar_type())
                      .device(b_q_weight.device());
   torch::Tensor out = torch::empty(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
@@ -325,13 +322,13 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 }
 
 torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
-                                      torch::Tensor& perm, c10::SymInt size_k,
-                                      c10::SymInt size_n, int64_t num_bits) {
+                                      torch::Tensor& perm, int64_t size_k,
+                                      int64_t size_n, int64_t num_bits) {
   int const pack_factor = 32 / num_bits;
   auto options = torch::TensorOptions()
-                     .dtype(b_q_weight.dtype())
+                     .dtype(b_q_weight.scalar_type())
                      .device(b_q_weight.device());
-  return torch::empty_symint(
+  return torch::empty(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
       options);
 }

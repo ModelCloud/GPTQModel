@@ -1,5 +1,5 @@
 #pragma once
-#include <torch/extension.h>
+#include "torch_stable_compat.h"
 
 torch::Tensor gemv_forward_cuda_decode(
     torch::Tensor _in_feats,

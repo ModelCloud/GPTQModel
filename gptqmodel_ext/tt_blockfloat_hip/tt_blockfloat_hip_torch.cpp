@@ -13,12 +13,7 @@
 // never does.
 // ---------------------------------------------------------------------------
 
-#include <torch/extension.h>
-#include <torch/library.h>
-
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
+#include <torch_stable_compat.h>
 
 #include <hip/hip_runtime_api.h>
 
@@ -102,8 +97,9 @@ torch::Tensor dequant_dispatch(torch::Tensor codes, torch::Tensor exponents,
                        .device(codes.device());
     auto out = torch::empty({rows, cols}, options);
     const c10::cuda::CUDAGuard guard(codes.device());
-    check_hip(ttbf_dequant(codes.data_ptr<uint8_t>(),
-                           exponents.data_ptr<int8_t>(), static_cast<int>(bits),
+    check_hip(ttbf_dequant(codes.const_data_ptr<uint8_t>(),
+                           exponents.const_data_ptr<int8_t>(),
+                           static_cast<int>(bits),
                            rows, cols, out.data_ptr(),
                            static_cast<int>(dtype),
                            at::cuda::getCurrentCUDAStream().stream()),
@@ -121,7 +117,7 @@ std::tuple<torch::Tensor, torch::Tensor> quantize_dispatch(torch::Tensor x,
     const int64_t cols = x.size(1);
     TORCH_CHECK(cols % 16 == 0,
                 "tt_blockfloat_hip: in_features must be a multiple of 16");
-    auto xc = x.contiguous();
+    auto xc = at::contiguous(x);
     const int64_t code_bytes = (bits == 4) ? rows * cols / 2 : rows * cols;
     auto codes = torch::empty(
         {code_bytes},
@@ -130,9 +126,9 @@ std::tuple<torch::Tensor, torch::Tensor> quantize_dispatch(torch::Tensor x,
         {rows, cols / 16},
         torch::TensorOptions().dtype(at::kChar).device(x.device()));
     const c10::cuda::CUDAGuard guard(x.device());
-    check_hip(ttbf_quantize(xc.data_ptr<float>(), static_cast<int>(bits), rows,
-                            cols, codes.data_ptr<uint8_t>(),
-                            exponents.data_ptr<int8_t>(),
+    check_hip(ttbf_quantize(xc.const_data_ptr<float>(), static_cast<int>(bits),
+                            rows, cols, codes.mutable_data_ptr<uint8_t>(),
+                            exponents.mutable_data_ptr<int8_t>(),
                             at::cuda::getCurrentCUDAStream().stream()),
               "ttbf_quantize");
     return {codes, exponents};
@@ -152,8 +148,8 @@ torch::Tensor embedding_dispatch(torch::Tensor ids, torch::Tensor codes,
                 "tt_blockfloat_hip: embedding tensors must be on device");
     TORCH_CHECK(ids.device() == codes.device(),
                 "tt_blockfloat_hip: ids and weight must share a device");
-    auto idc = (ids.scalar_type() == at::kLong ? ids : ids.to(at::kLong))
-                   .contiguous();
+    auto idc = at::contiguous(
+        ids.scalar_type() == at::kLong ? ids : at::to(ids, at::kLong));
     auto shape = idc.sizes().vec();
     shape.push_back(cols);
     auto out = torch::empty(
@@ -161,9 +157,10 @@ torch::Tensor embedding_dispatch(torch::Tensor ids, torch::Tensor codes,
                    .dtype(scalar_type_from_code(dtype))
                    .device(codes.device()));
     const c10::cuda::CUDAGuard guard(codes.device());
-    check_hip(ttbf_embedding(idc.data_ptr<int64_t>(),
-                             codes.data_ptr<uint8_t>(),
-                             exponents.data_ptr<int8_t>(), static_cast<int>(bits),
+    check_hip(ttbf_embedding(idc.const_data_ptr<int64_t>(),
+                             codes.const_data_ptr<uint8_t>(),
+                             exponents.const_data_ptr<int8_t>(),
+                             static_cast<int>(bits),
                              idc.numel(), rows, cols, out.data_ptr(),
                              static_cast<int>(dtype),
                              at::cuda::getCurrentCUDAStream().stream()),
@@ -181,7 +178,7 @@ std::tuple<torch::Tensor, torch::Tensor> decompose_dispatch(torch::Tensor x,
     const int64_t cols = x.size(1);
     TORCH_CHECK(cols % 16 == 0,
                 "tt_blockfloat: in_features must be a multiple of 16");
-    auto xc = x.contiguous();
+    auto xc = at::contiguous(x);
     const int64_t code_bytes = (bits == 4) ? rows * cols / 2 : rows * cols;
     auto codes = torch::empty(
         {code_bytes},
@@ -192,13 +189,13 @@ std::tuple<torch::Tensor, torch::Tensor> decompose_dispatch(torch::Tensor x,
     auto failed = torch::zeros(
         {1}, torch::TensorOptions().dtype(at::kInt).device(x.device()));
     const c10::cuda::CUDAGuard guard(x.device());
-    check_hip(ttbf_decompose(xc.data_ptr<float>(), static_cast<int>(bits), rows,
-                             cols, codes.data_ptr<uint8_t>(),
-                             exponents.data_ptr<int8_t>(),
-                             failed.data_ptr<int32_t>(),
+    check_hip(ttbf_decompose(xc.const_data_ptr<float>(), static_cast<int>(bits),
+                             rows, cols, codes.mutable_data_ptr<uint8_t>(),
+                             exponents.mutable_data_ptr<int8_t>(),
+                             failed.mutable_data_ptr<int32_t>(),
                              at::cuda::getCurrentCUDAStream().stream()),
               "ttbf_decompose");
-    TORCH_CHECK(failed.item<int32_t>() == 0,
+    TORCH_CHECK(at::item<int32_t>(failed) == 0,
                 "tt_blockfloat: weight is not exactly on the block-float grid");
     return {codes, exponents};
 }
@@ -220,7 +217,7 @@ torch::Tensor linear_dispatch(torch::Tensor x, torch::Tensor codes,
     TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf ||
                     x.scalar_type() == at::kBFloat16,
                 "tt_blockfloat: unsupported activation dtype ", x.scalar_type());
-    auto xc = x.contiguous();
+    auto xc = at::contiguous(x);
     auto out = torch::empty(
         {m, n}, torch::TensorOptions().dtype(x.scalar_type()).device(x.device()));
 
@@ -229,7 +226,7 @@ torch::Tensor linear_dispatch(torch::Tensor x, torch::Tensor codes,
     if (bias.has_value()) {
         TORCH_CHECK(bias->numel() == n, "tt_blockfloat: bias must have ", n,
                     " elements");
-        bias_c = bias->to(x.scalar_type()).contiguous();
+        bias_c = at::contiguous(at::to(*bias, x.scalar_type()));
         TORCH_CHECK(bias_c.device() == x.device(),
                     "tt_blockfloat: bias must share the activation device");
         bias_ptr = bias_c.data_ptr();
@@ -237,8 +234,9 @@ torch::Tensor linear_dispatch(torch::Tensor x, torch::Tensor codes,
 
     const c10::cuda::CUDAGuard guard(x.device());
     check_hip(ttbf_linear(xc.data_ptr(), dtype_code(x.scalar_type()),
-                          codes.data_ptr<uint8_t>(),
-                          exponents.data_ptr<int8_t>(), static_cast<int>(bits),
+                          codes.const_data_ptr<uint8_t>(),
+                          exponents.const_data_ptr<int8_t>(),
+                          static_cast<int>(bits),
                           m, n, k, bias_ptr, out.data_ptr(),
                           at::cuda::getCurrentCUDAStream().stream()),
               "ttbf_linear");
@@ -251,15 +249,15 @@ bool selftest(const torch::Tensor& ref) {
     auto flag = torch::zeros(
         {1}, torch::TensorOptions().dtype(at::kInt).device(ref.device()));
     const c10::cuda::CUDAGuard guard(ref.device());
-    check_hip(ttbf_selftest(flag.data_ptr<int32_t>(),
+    check_hip(ttbf_selftest(flag.mutable_data_ptr<int32_t>(),
                             at::cuda::getCurrentCUDAStream().stream()),
               "ttbf_selftest");
-    return flag.item<int32_t>() == 0x54544642;
+    return at::item<int32_t>(flag) == 0x54544642;
 }
 
 }  // namespace
 
-TORCH_LIBRARY(tt_blockfloat_hip, m) {
+STABLE_TORCH_LIBRARY(tt_blockfloat_hip, m) {
     m.def(
         "dequant(Tensor codes, Tensor exponents, int bits, int rows, int cols, "
         "int dtype) -> Tensor");
@@ -274,11 +272,11 @@ TORCH_LIBRARY(tt_blockfloat_hip, m) {
     m.def("selftest(Tensor ref) -> bool");
 }
 
-TORCH_LIBRARY_IMPL(tt_blockfloat_hip, CUDA, m) {
-    m.impl("dequant", &dequant_dispatch);
-    m.impl("quantize", &quantize_dispatch);
-    m.impl("embedding", &embedding_dispatch);
-    m.impl("decompose", &decompose_dispatch);
-    m.impl("linear", &linear_dispatch);
-    m.impl("selftest", &selftest);
+STABLE_TORCH_LIBRARY_IMPL(tt_blockfloat_hip, CUDA, m) {
+    m.impl("dequant", TORCH_BOX(&dequant_dispatch));
+    m.impl("quantize", TORCH_BOX(&quantize_dispatch));
+    m.impl("embedding", TORCH_BOX(&embedding_dispatch));
+    m.impl("decompose", TORCH_BOX(&decompose_dispatch));
+    m.impl("linear", TORCH_BOX(&linear_dispatch));
+    m.impl("selftest", TORCH_BOX(&selftest));
 }

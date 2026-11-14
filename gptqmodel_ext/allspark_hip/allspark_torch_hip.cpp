@@ -6,13 +6,10 @@
 // Host-only translation unit: the ROCm pip SDK has no thrust headers, so the
 // .cu files must not see torch/ATen. Note we deliberately avoid
 // <ATen/cuda/CUDAContext.h> (it pulls hipsparse, which is not installed in the
-// runtime wheel) and use c10/cuda/CUDAStream.h instead.
+// runtime wheel); the stable-ABI compatibility layer provides the stream and
+// device guard without any of those headers.
 
-#include <torch/extension.h>
-#include <torch/library.h>
-
-#include <c10/cuda/CUDAStream.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../torch_stable_compat.h"
 
 #include <optional>
 #include <limits>
@@ -140,7 +137,7 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
   const int64_t N32 = check_packed(b_qweight, b_scales, b_qzeros, K, N);
   check_activation(a, b_scales);
   const c10::cuda::CUDAGuard device_guard_ = device_guard(a);
-  auto c = torch::empty({M, N}, a.options());
+  auto c = torch::empty({M, N}, at::options(a));
   if (M == 0) return c;
 
   int splitk = allspark_hip_pick_splitk(static_cast<int>(M), static_cast<int>(N),
@@ -152,7 +149,7 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
       static_cast<int>(M), static_cast<int>(N), splitk);
   if (ws_bytes > 0) {
     ws = torch::empty({static_cast<int64_t>(ws_bytes / sizeof(float))},
-                      a.options().dtype(torch::kFloat32));
+                      at::options(a).dtype(torch::kFloat32));
     ws_ptr = ws.data_ptr();
   }
 
@@ -205,7 +202,7 @@ torch::Tensor allspark_hip_gemm_f32_dispatch(torch::Tensor a,
   const int64_t N32 = check_packed(b_qweight, b_scales, b_qzeros, K, N);
   check_activation(a, b_scales);
   const c10::cuda::CUDAGuard device_guard_ = device_guard(a);
-  auto c = torch::empty({M, N}, a.options().dtype(torch::kFloat32));
+  auto c = torch::empty({M, N}, at::options(a).dtype(torch::kFloat32));
   if (M == 0) return c;
   const int sm = static_cast<int>(sm_count);
   int splitk = allspark_hip_pick_splitk(static_cast<int>(M), static_cast<int>(N),
@@ -216,7 +213,7 @@ torch::Tensor allspark_hip_gemm_f32_dispatch(torch::Tensor a,
       static_cast<int>(M), static_cast<int>(N), splitk);
   if (ws_bytes > 0) {
     ws = torch::empty({static_cast<int64_t>(ws_bytes / sizeof(float))},
-                      a.options().dtype(torch::kFloat32));
+                      at::options(a).dtype(torch::kFloat32));
     ws_ptr = ws.data_ptr();
   }
   const void* bz = nullptr;
@@ -283,7 +280,7 @@ torch::Tensor allspark_hip_unpack_dispatch(torch::Tensor b_qweight,
   check_packed(b_qweight, b_scales, b_qzeros, k, n);
   const c10::cuda::CUDAGuard device_guard_ = device_guard(b_qweight);
   const int64_t N32 = b_qweight.numel() / k;
-  auto out = torch::empty({k, n}, b_scales.options());
+  auto out = torch::empty({k, n}, at::options(b_scales));
   const void* bz = nullptr;
   if (b_qzeros.has_value()) {
     bz = b_qzeros->data_ptr();
@@ -304,8 +301,10 @@ bool allspark_hip_selftest(torch::Tensor ref) {
   const c10::cuda::CUDAGuard device_guard_ = device_guard(ref);
   auto opts = torch::TensorOptions().dtype(torch::kHalf).device(ref.device());
   constexpr int M = 1, N = 128, K = 16;
-  auto a = torch::randn({M, K}, opts);
-  auto bq = torch::randint(1, 256, {(N / 4), K * 4}, opts.dtype(torch::kByte));
+  // The sentinel only proves the device body ran, so any deterministic data
+  // works; the stable surface has no randn/randint.
+  auto a = at::to(at::full({M, K}, 1.0, at::kHalf), ref.device());
+  auto bq = at::to(at::full({(N / 4), K * 4}, 1.0, at::kByte), ref.device());
   auto bs = torch::ones({N}, opts);
   auto c = torch::empty({M, N}, opts);
   auto ran = torch::zeros({1}, opts.dtype(torch::kInt32));
@@ -315,14 +314,13 @@ bool allspark_hip_selftest(torch::Tensor ref) {
                       current_stream(),
                       reinterpret_cast<uint32_t*>(ran.data_ptr()));
   check_launch();
-  auto host = ran.cpu();
-  const uint32_t got = static_cast<uint32_t>(host.data_ptr<int32_t>()[0]);
+  const uint32_t got = static_cast<uint32_t>(at::item<int32_t>(ran));
   return got == 0x41535350u;
 }
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_allspark_hip, m) {
+STABLE_TORCH_LIBRARY(gptqmodel_allspark_hip, m) {
   m.def(
       "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
       "Tensor? b_qzeros, int n, int group_size, int sm_count, int sm_version, "
@@ -342,11 +340,11 @@ TORCH_LIBRARY(gptqmodel_allspark_hip, m) {
   m.def("allspark_hip_selftest(Tensor ref) -> bool");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_allspark_hip, CUDA, m) {
-  m.impl("allspark_w8a16_gemm", &allspark_w8a16_gemm_dispatch);
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_allspark_hip, CUDA, m) {
+  m.impl("allspark_w8a16_gemm", TORCH_BOX(&allspark_w8a16_gemm_dispatch));
   m.impl("rearrange_kn_weight_as_n32k16_order",
-         &rearrange_kn_weight_as_n32k16_order_dispatch);
-  m.impl("allspark_hip_unpack", &allspark_hip_unpack_dispatch);
-  m.impl("allspark_hip_gemm_f32", &allspark_hip_gemm_f32_dispatch);
-  m.impl("allspark_hip_selftest", &allspark_hip_selftest);
+         TORCH_BOX(&rearrange_kn_weight_as_n32k16_order_dispatch));
+  m.impl("allspark_hip_unpack", TORCH_BOX(&allspark_hip_unpack_dispatch));
+  m.impl("allspark_hip_gemm_f32", TORCH_BOX(&allspark_hip_gemm_f32_dispatch));
+  m.impl("allspark_hip_selftest", TORCH_BOX(&allspark_hip_selftest));
 }

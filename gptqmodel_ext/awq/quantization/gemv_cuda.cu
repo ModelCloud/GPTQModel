@@ -12,10 +12,7 @@
 
 #include <cuda_fp16.h>
 #include <stdio.h>
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "torch_stable_compat.h"
 #include "gemv_cuda.h"
 #define VECTORIZE_FACTOR 8
 #define Q_VECTORIZE_FACTOR 8
@@ -261,18 +258,18 @@ torch::Tensor gemv_forward_cuda(
     // device (which may differ in multi-GPU inference).
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
     // int kernel_volume = _out_in_map.size(1);
-    auto in_feats = reinterpret_cast<float4*>(_in_feats.data_ptr<at::Half>());
-    auto kernel = reinterpret_cast<uint32_t*>(_kernel.data_ptr<int>());
-    auto zeros = reinterpret_cast<uint32_t*>(_zeros.data_ptr<int>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-    // auto out_in_map = _out_in_map.data_ptr<int>();
+    auto in_feats = reinterpret_cast<float4*>(_in_feats.mutable_data_ptr<at::Half>());
+    auto kernel = reinterpret_cast<uint32_t*>(_kernel.mutable_data_ptr<int>());
+    auto zeros = reinterpret_cast<uint32_t*>(_zeros.mutable_data_ptr<int>());
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.mutable_data_ptr<at::Half>());
+    // auto out_in_map = _out_in_map.mutable_data_ptr<int>();
     auto options =
-    torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+    torch::TensorOptions().dtype(_in_feats.scalar_type()).device(_in_feats.device());
     // kernel is [OC, IC]
     at::Tensor _out_feats = torch::empty({num_in_feats, _kernel.size(0)}, options);
     int num_out_feats = _out_feats.size(-2);
     num_out_channels = _out_feats.size(-1);
-    auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
+    auto out_feats = reinterpret_cast<half*>(_out_feats.mutable_data_ptr<at::Half>());
     int blockDim_z = num_out_feats;
     dim3 num_blocks(1, num_out_channels / 4, num_out_feats);
     dim3 num_threads(32, 4);

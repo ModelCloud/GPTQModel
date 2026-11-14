@@ -16,6 +16,7 @@ from typing import Optional
 import torch
 
 from ..utils.cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     _jit_cxx_standard,
     cuda_include_paths_with_fallback,
@@ -181,6 +182,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 

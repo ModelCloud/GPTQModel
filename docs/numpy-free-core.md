@@ -161,12 +161,13 @@ Three findings drove the implementation:
 3. **The RCO DP is compiled, not a NumPy fast path.** The inner step is a few
    hundred tiny float64 reductions where Torch's CPU dispatch and thread-pool
    overhead dominate (a 128-thread default made `max(dim=0)` up to 150x slower
-   than NumPy). `_RCO_DP_SOURCE` compiles a single C++ kernel with
-   `load_inline` on first use; it runs the whole table in one call, is 6-30x
-   faster than the NumPy loop, and falls back to `_budget_dp_torch` under
-   `threadpool_limits(1)` when no C++ toolchain is available. A test asserts
-   both paths match an independent pure-Python DP on 200 randomized cases
-   (including ties and saturation).
+   than NumPy). `gptqmodel_ext/rco/rco_dp.cpp` is compiled on first use as a
+   stable-ABI `torch.ops` extension (`gptqmodel.utils.rco_cpp`), so the
+   artifact is not tied to a torch or Python version; it runs the whole table
+   in one call, is 6-30x faster than the NumPy loop, and falls back to
+   `_budget_dp_torch` under `threadpool_limits(1)` when no C++ toolchain is
+   available. A test asserts both paths match an independent pure-Python DP on
+   200 randomized cases (including ties and saturation).
 
 ## Not in scope / follow-up
 

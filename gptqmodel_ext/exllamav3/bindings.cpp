@@ -1,8 +1,7 @@
+#include "../torch_stable_compat.h"
 #include <cuda_fp16.h>
 
 #include <optional>
-#include <torch/extension.h>
-#include <torch/library.h>
 
 #include "hadamard.h"
 #include "hgemm.cuh"
@@ -98,7 +97,7 @@ void bc_linear_exl3_run_wrapper(
 
 }  // namespace
 
-TORCH_LIBRARY(gptqmodel_exllamav3, m)
+STABLE_TORCH_LIBRARY(gptqmodel_exllamav3, m)
 {
     m.def("had_paley(Tensor(a!) h) -> ()");
     m.def("had_paley2(Tensor(a!) h) -> ()");
@@ -112,20 +111,20 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor(a!) xh, Tensor x, Tensor(b!) y) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CPU, m)
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CPU, m)
 {
-    m.impl("had_paley", &had_paley_wrapper);
-    m.impl("had_paley2", &had_paley2_wrapper);
+    m.impl("had_paley", TORCH_BOX(&had_paley_wrapper));
+    m.impl("had_paley2", TORCH_BOX(&had_paley2_wrapper));
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
+STABLE_TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CUDA, m)
 {
-    m.impl("quantize_tiles", &quantize_tiles_wrapper);
-    m.impl("pack_trellis", &pack_trellis_wrapper);
-    m.impl("unpack_trellis", &unpack_trellis_wrapper);
-    m.impl("pack_signs", &pack_signs_wrapper);
-    m.impl("reconstruct", &reconstruct_wrapper);
-    m.impl("had_r_128", &had_r_128_wrapper);
-    m.impl("hgemm", &hgemm_wrapper);
-    m.impl("bc_linear_exl3_run", &bc_linear_exl3_run_wrapper);
+    m.impl("quantize_tiles", TORCH_BOX(&quantize_tiles_wrapper));
+    m.impl("pack_trellis", TORCH_BOX(&pack_trellis_wrapper));
+    m.impl("unpack_trellis", TORCH_BOX(&unpack_trellis_wrapper));
+    m.impl("pack_signs", TORCH_BOX(&pack_signs_wrapper));
+    m.impl("reconstruct", TORCH_BOX(&reconstruct_wrapper));
+    m.impl("had_r_128", TORCH_BOX(&had_r_128_wrapper));
+    m.impl("hgemm", TORCH_BOX(&hgemm_wrapper));
+    m.impl("bc_linear_exl3_run", TORCH_BOX(&bc_linear_exl3_run_wrapper));
 }

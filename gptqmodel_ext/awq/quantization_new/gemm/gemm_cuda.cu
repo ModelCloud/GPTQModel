@@ -1,9 +1,8 @@
-#include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp16.h>
 #include "semaphore.h"
 #include "gemm_cuda.h"
 #include "../dequantize.cuh"
-#include <torch/extension.h>
+#include "torch_stable_compat.h"
 #include <cuda_pipeline_primitives.h>
 
 #define kInterleave 4
@@ -30,7 +29,7 @@
   int *semaphores = nullptr;                                                                                                                          \
   if constexpr (SPLITK > 1) {                                                                                                                        \
     _semaphores = torch::zeros({num_mn_tiles}, options_int);                                                                                           \
-    semaphores = _semaphores.data_ptr<int>();                                                                                                         \
+    semaphores = _semaphores.mutable_data_ptr<int>();                                                                                                         \
   }                                                                                                                                                  \
   constexpr int NUM_WARPS = (CTA_M / WARP_M) * (CTA_N / WARP_N) * (CTA_K / WARP_K);                                                                     \
   constexpr int SCALES_SMEM_SIZE = (G >= CTA_K) ? (CTA_N / (G / CTA_K) * STAGES * 2) : (CTA_N * (CTA_K / G) * STAGES * 2);                              \
@@ -925,25 +924,25 @@ torch::Tensor gemm_forward_cuda_prefill(
   output_shape.back() = _kernel.size(0) * kInterleave;
   int num_in_feats = _in_feats.numel() / _in_feats.size(-1);
   int num_in_channels = _in_feats.size(-1);
-  auto in_feats = reinterpret_cast<half *>(_in_feats.data_ptr<at::Half>());
-  auto kernel = reinterpret_cast<half *>(_kernel.data_ptr<int16_t>());
-  auto scales = reinterpret_cast<half *>(_scales.data_ptr<at::Half>());
-  auto zeros = reinterpret_cast<half *>(_zeros.data_ptr<at::Half>());
+  auto in_feats = reinterpret_cast<half *>(_in_feats.mutable_data_ptr<at::Half>());
+  auto kernel = reinterpret_cast<half *>(_kernel.mutable_data_ptr<int16_t>());
+  auto scales = reinterpret_cast<half *>(_scales.mutable_data_ptr<at::Half>());
+  auto zeros = reinterpret_cast<half *>(_zeros.mutable_data_ptr<at::Half>());
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(_in_feats.device());
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt32).device(_in_feats.device());
-  at::Tensor _out_feats = torch::empty(output_shape, _in_feats.options());
+  at::Tensor _out_feats = torch::empty(output_shape, at::TensorOptions().dtype(_in_feats.scalar_type()).device(_in_feats.device()));
   // Only M <= 32 uses split-K. Larger prefills write the final dtype directly.
   at::Tensor _partials;
   float *partials = nullptr;
   if (num_in_feats <= 32) {
     _partials = torch::empty(output_shape, options);
-    partials = _partials.data_ptr<float>();
+    partials = _partials.mutable_data_ptr<float>();
   }
   int num_out_feats = _out_feats.numel() / _out_feats.size(-1);
   int num_out_channels = _out_feats.size(-1);
-  auto out_feats = reinterpret_cast<half *>(_out_feats.data_ptr<at::Half>());
+  auto out_feats = reinterpret_cast<half *>(_out_feats.mutable_data_ptr<at::Half>());
 
   if (num_out_feats <= 32)
   {

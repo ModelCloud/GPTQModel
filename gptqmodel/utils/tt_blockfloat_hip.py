@@ -33,14 +33,17 @@ from pathlib import Path
 import torch
 
 from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    torch_stable_compat_include_path,
 )
 
 
 _OPS_NAME = "gptqmodel_tt_blockfloat_hip_ops"
 _NAMESPACE = "tt_blockfloat_hip"
+_COMPAT_HEADER = "torch_stable_compat.h"
 
 _SOURCE_FILES = (
     "tt_blockfloat_hip_torch.cpp",
@@ -82,7 +85,15 @@ def _sources() -> list[str]:
         if not source.exists():
             raise FileNotFoundError(f"tt_blockfloat_hip source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
+    # Stage the compat header as well: putting ``gptqmodel_ext`` on the include
+    # path makes torch's hipify walk that tree and rewrite headers in place.
+    compat = Path(torch_stable_compat_include_path()) / _COMPAT_HEADER
+    (stage / _COMPAT_HEADER).write_bytes(compat.read_bytes())
     return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
+
+
+def _include_paths() -> list[str]:
+    return [str(_staging_root())]
 
 
 def _cuda_cflags() -> list[str]:
@@ -109,10 +120,12 @@ _EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("tt_blockfloat_hip"),
     display_name="Tenstorrent bf8/bf4 (HIP)",
     extra_cuda_cflags=_cuda_cflags,
+    extra_include_paths=_include_paths,
     force_rebuild_env="GPTQMODEL_TT_BLOCKFLOAT_HIP_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 _SELFTESTED = False

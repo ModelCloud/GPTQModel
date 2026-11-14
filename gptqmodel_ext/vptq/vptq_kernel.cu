@@ -11,10 +11,7 @@
 // adapted from the reference CUDA implementation; the kernels below adapt it
 // to GPT-QModel's packed checkpoint layout and inference features.
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-#include <torch/extension.h>
+#include "../torch_stable_compat.h"
 #include <type_traits>
 
 #include "vptq.h"
@@ -358,13 +355,13 @@ void launch_dequantize(
   const int64_t n = in_features * out_features;
   const int blocks = static_cast<int>((n + kThreads - 1) / kThreads);
   vptq_dequantize_kernel<scalar_t, weight_t><<<blocks, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      output.data_ptr<scalar_t>(), indices.data_ptr<int32_t>(),
-      centroids.data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->data_ptr<weight_t>() : nullptr,
-      outlier_indices.has_value() ? outlier_indices->data_ptr<int32_t>() : nullptr,
-      outlier_centroids.has_value() ? outlier_centroids->data_ptr<weight_t>() : nullptr,
-      inverse_perm.has_value() ? inverse_perm->data_ptr<int32_t>() : nullptr,
-      weight_scale.has_value() ? weight_scale->data_ptr<weight_t>() : nullptr,
-      weight_bias.has_value() ? weight_bias->data_ptr<weight_t>() : nullptr,
+      output.mutable_data_ptr<scalar_t>(), indices.mutable_data_ptr<int32_t>(),
+      centroids.mutable_data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->mutable_data_ptr<weight_t>() : nullptr,
+      outlier_indices.has_value() ? outlier_indices->mutable_data_ptr<int32_t>() : nullptr,
+      outlier_centroids.has_value() ? outlier_centroids->mutable_data_ptr<weight_t>() : nullptr,
+      inverse_perm.has_value() ? inverse_perm->mutable_data_ptr<int32_t>() : nullptr,
+      weight_scale.has_value() ? weight_scale->mutable_data_ptr<weight_t>() : nullptr,
+      weight_bias.has_value() ? weight_bias->mutable_data_ptr<weight_t>() : nullptr,
       group_size, in_features, out_features, vector_len, outlier_size,
       outlier_vector_len, num_centroids, num_res_centroids, index_bits,
       res_bits, norm_dim, indices.size(2), outlier_indices.has_value() ? outlier_indices->size(1) : 0,
@@ -391,12 +388,12 @@ void launch_linear(
   if (vectorized) {
     const dim3 blocks((out_features + 3) / 4, batch);
     vptq_linear_vec4_kernel<scalar_t, weight_t><<<blocks, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      x.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), indices.data_ptr<int32_t>(),
-      centroids.data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->data_ptr<weight_t>() : nullptr,
-      inverse_perm.has_value() ? inverse_perm->data_ptr<int32_t>() : nullptr,
-      weight_scale.has_value() ? weight_scale->data_ptr<weight_t>() : nullptr,
-      weight_bias.has_value() ? weight_bias->data_ptr<weight_t>() : nullptr,
-      bias.has_value() ? bias->data_ptr<scalar_t>() : nullptr, batch, group_size,
+      x.mutable_data_ptr<scalar_t>(), output.mutable_data_ptr<scalar_t>(), indices.mutable_data_ptr<int32_t>(),
+      centroids.mutable_data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->mutable_data_ptr<weight_t>() : nullptr,
+      inverse_perm.has_value() ? inverse_perm->mutable_data_ptr<int32_t>() : nullptr,
+      weight_scale.has_value() ? weight_scale->mutable_data_ptr<weight_t>() : nullptr,
+      weight_bias.has_value() ? weight_bias->mutable_data_ptr<weight_t>() : nullptr,
+      bias.has_value() ? bias->mutable_data_ptr<scalar_t>() : nullptr, batch, group_size,
       in_features, out_features, outlier_size, num_centroids, num_res_centroids,
       index_bits, res_bits, indices.size(2),
       (out_features + vector_len - 1) / vector_len, norm_dim, res_centroids.has_value(),
@@ -405,14 +402,14 @@ void launch_linear(
     const int64_t n = batch * out_features;
     const int blocks = static_cast<int>(n);
     vptq_linear_kernel<scalar_t, weight_t><<<blocks, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      x.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), indices.data_ptr<int32_t>(),
-      centroids.data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->data_ptr<weight_t>() : nullptr,
-      outlier_indices.has_value() ? outlier_indices->data_ptr<int32_t>() : nullptr,
-      outlier_centroids.has_value() ? outlier_centroids->data_ptr<weight_t>() : nullptr,
-      inverse_perm.has_value() ? inverse_perm->data_ptr<int32_t>() : nullptr,
-      weight_scale.has_value() ? weight_scale->data_ptr<weight_t>() : nullptr,
-      weight_bias.has_value() ? weight_bias->data_ptr<weight_t>() : nullptr,
-      bias.has_value() ? bias->data_ptr<scalar_t>() : nullptr, batch, group_size,
+      x.mutable_data_ptr<scalar_t>(), output.mutable_data_ptr<scalar_t>(), indices.mutable_data_ptr<int32_t>(),
+      centroids.mutable_data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->mutable_data_ptr<weight_t>() : nullptr,
+      outlier_indices.has_value() ? outlier_indices->mutable_data_ptr<int32_t>() : nullptr,
+      outlier_centroids.has_value() ? outlier_centroids->mutable_data_ptr<weight_t>() : nullptr,
+      inverse_perm.has_value() ? inverse_perm->mutable_data_ptr<int32_t>() : nullptr,
+      weight_scale.has_value() ? weight_scale->mutable_data_ptr<weight_t>() : nullptr,
+      weight_bias.has_value() ? weight_bias->mutable_data_ptr<weight_t>() : nullptr,
+      bias.has_value() ? bias->mutable_data_ptr<scalar_t>() : nullptr, batch, group_size,
       in_features, out_features, vector_len, outlier_size, outlier_vector_len,
       num_centroids, num_res_centroids, index_bits, res_bits, norm_dim,
       indices.size(2), outlier_indices.has_value() ? outlier_indices->size(1) : 0,
@@ -476,15 +473,37 @@ at::Tensor vptq_dequantize_cuda(
               "VPTQ CUDA outlier buffers and outlier size must agree");
 
   c10::cuda::CUDAGuard guard(indices.device());
-  auto out = at::empty({out_features, in_features}, centroids.options());
-  AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, centroids.scalar_type(), "vptq_dequantize", [&] {
-    AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, out.scalar_type(), "vptq_dequantize_out", [&] {
-      launch_dequantize<scalar_t, scalar_t>(out, indices, centroids, res_centroids,
+  auto out = at::empty(
+      {out_features, in_features},
+      at::TensorOptions().dtype(centroids.scalar_type()).device(centroids.device()));
+  switch (centroids.scalar_type()) {
+    case at::ScalarType::Float:
+      launch_dequantize<float, float>(out, indices, centroids, res_centroids,
           outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
           group_size, in_features, out_features, vector_len, outlier_size,
           outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
-    });
-  });
+      break;
+    case at::ScalarType::Double:
+      launch_dequantize<double, double>(out, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    case at::ScalarType::Half:
+      launch_dequantize<at::Half, at::Half>(out, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    case at::ScalarType::BFloat16:
+      launch_dequantize<at::BFloat16, at::BFloat16>(out, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    default:
+      TORCH_CHECK(false, "VPTQ CUDA unsupported centroids dtype");
+  }
   return out;
 }
 
@@ -553,16 +572,40 @@ at::Tensor vptq_linear_cuda(
   }
   c10::cuda::CUDAGuard guard(x.device());
   const int64_t batch = x.numel() / in_features;
-  auto output = at::empty({batch, out_features}, x.options());
-  AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, x.scalar_type(), "vptq_linear", [&] {
-    launch_linear<scalar_t, scalar_t>(x, output, indices, centroids, res_centroids,
-        outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
-        bias, batch, group_size, in_features, out_features, vector_len, outlier_size,
-        outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
-  });
+  auto output = at::empty(
+      {batch, out_features},
+      at::TensorOptions().dtype(x.scalar_type()).device(x.device()));
+  switch (x.scalar_type()) {
+    case at::ScalarType::Float:
+      launch_linear<float, float>(x, output, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          bias, batch, group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    case at::ScalarType::Double:
+      launch_linear<double, double>(x, output, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          bias, batch, group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    case at::ScalarType::Half:
+      launch_linear<at::Half, at::Half>(x, output, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          bias, batch, group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    case at::ScalarType::BFloat16:
+      launch_linear<at::BFloat16, at::BFloat16>(x, output, indices, centroids, res_centroids,
+          outlier_indices, outlier_centroids, inverse_perm, weight_scale, weight_bias,
+          bias, batch, group_size, in_features, out_features, vector_len, outlier_size,
+          outlier_vector_len, num_centroids, num_res_centroids, index_bits, res_bits, norm_dim);
+      break;
+    default:
+      TORCH_CHECK(false, "VPTQ CUDA unsupported activation dtype");
+  }
   auto shape = x.sizes().vec();
   shape.back() = out_features;
-  return output.view(shape);
+  return at::view(output, shape);
 }
 
 }  // namespace gptqmodel::vptq
