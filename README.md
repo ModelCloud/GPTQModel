@@ -212,6 +212,8 @@ SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `
 
 Prompts and attention masks are translated before they reach vLLM or SGLang. Only boolean or 0/1 masks that remove contiguous left or right padding are accepted; an interior hole, a non-binary value, or a mask supplied with a text prompt is rejected instead of silently changing the prompt. See [runtime prompt input normalization](docs/runtime-prompt-input-normalization.md) for the contract and the vLLM/SGLang comparison.
 
+Device requests are translated per runtime: SGLang's `cuda` spelling aliases an explicit `rocm` request only on a HIP build, and an AMD request on an NVIDIA-only build is rejected rather than silently launched on NVIDIA hardware. See [external runtime device mapping](docs/external-runtime-device-mapping.md).
+
 ### Quant Method / Format / Backend Matrix 📋
 
 Canonical backend names are shown below. Method-specific aliases are only accepted where explicitly implemented by that quant method.
