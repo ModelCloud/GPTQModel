@@ -222,12 +222,17 @@ def test_dequantize_f8_e4m3_basic_conversion():
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_dequantize_f8_e4m3_with_scale_inv():
+def test_dequantize_f8_e4m3_with_inverse_scale_semantics():
     src = torch.randn(4, 6, dtype=torch.float32)
     fp8 = src.to(torch.float8_e4m3fn)
     scale_inv = torch.arange(1, 5, dtype=torch.float32)
 
-    got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=0)
+    got = dequantize_f8_e4m3(
+        fp8,
+        scale_inv=scale_inv,
+        axis=0,
+        scale_semantics="inverse",
+    )
 
     expected = (fp8.to(torch.bfloat16) / scale_inv.view(-1, 1).to(torch.bfloat16)).to(torch.bfloat16)
     diff = torch.max(torch.abs(got - expected)).item()

@@ -55,6 +55,7 @@ from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
     ensure_qwen_drive_registered,
+    get_hf_config_dtype,
     normalize_hf_config_compat,
     sanitize_generation_config_file,
     sanitize_model_config,
@@ -2161,10 +2162,11 @@ def ModelWriter(cls):
             trust_remote_code=self.trust_remote_code,
         )
         normalize_hf_config_compat(config, trust_remote_code=self.trust_remote_code)
+        model_dtype = get_hf_config_dtype(config)
 
         with suspend_hf_weight_init():
             model = self.loader.from_config(
-                config, dtype=torch.float16
+                config, dtype=model_dtype
             )
 
             modules = find_modules(model)
@@ -2221,7 +2223,7 @@ def ModelWriter(cls):
         else:
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=torch.float16,
+                dtype=model_dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=self.checkpoint_file_name,
                 # device_map=device_map,

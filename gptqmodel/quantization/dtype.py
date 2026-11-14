@@ -271,6 +271,7 @@ def _fast_scale_arg(
     *,
     scale: Optional[torch.Tensor],
     scale_inv: Optional[torch.Tensor],
+    scale_semantics: str = "heuristic",
 ) -> tuple[Optional[torch.Tensor], int]:
     if scale is not None:
         return scale.to(device="cpu", dtype=torch.float32).contiguous(), 1
@@ -278,7 +279,15 @@ def _fast_scale_arg(
         return None, 0
 
     scale_tensor = scale_inv.to(device="cpu", dtype=torch.float32).contiguous()
-    max_abs = float(torch.max(torch.abs(scale_tensor)).item()) if scale_tensor.numel() else 0.0
+    if scale_semantics == "multiplier":
+        return scale_tensor, 1
+    if scale_semantics == "inverse":
+        return scale_tensor, 2
+    max_abs = (
+        float(torch.max(torch.abs(scale_tensor)).item())
+        if scale_tensor.numel()
+        else 0.0
+    )
     return scale_tensor, 1 if max_abs <= 1.0 else 2
 
 
@@ -349,6 +358,7 @@ def _dequantize_f8_reference(
     scale_inv: Optional[torch.Tensor] = None,
     axis: Optional[int] = 0,
     target_dtype: torch.dtype = torch.bfloat16,
+    scale_semantics: str = "multiplier",
 ) -> torch.Tensor:
     if not _FLOAT8_DTYPES:
         raise RuntimeError("Current PyTorch build does not provide FP8 tensors")
@@ -362,7 +372,11 @@ def _dequantize_f8_reference(
         result = result * scale_tensor
     elif scale_inv is not None:
         scale_tensor = _expand_scale(scale_inv.to(result.dtype), result, axis_hint=axis)
-        if torch.max(torch.abs(scale_tensor)) <= 1:
+        if scale_semantics == "multiplier":
+            result = result * scale_tensor
+        elif scale_semantics == "inverse":
+            result = result / scale_tensor
+        elif torch.max(torch.abs(scale_tensor)) <= 1:
             result = result * scale_tensor
         else:
             result = result / scale_tensor
@@ -717,6 +731,7 @@ def dequantize_f8_e4m3(
     scale_inv: Optional[torch.Tensor] = None,
     axis: Optional[int] = 0,
     target_dtype: torch.dtype = torch.bfloat16,
+    scale_semantics: str = "multiplier",
 ) -> torch.Tensor:
     """Fully dequantize FP8 (E4M3) values to ``target_dtype``.
 
@@ -730,6 +745,11 @@ def dequantize_f8_e4m3(
 
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
+    scale_semantics = str(scale_semantics).strip().lower()
+    if scale_semantics not in {"multiplier", "inverse", "heuristic"}:
+        raise ValueError(
+            "FP8 scale semantics must be 'multiplier', 'inverse', or 'heuristic'"
+        )
     if tensor.dtype in _FLOAT8_DTYPES and _can_use_fast_path(
         tensor,
         scale if scale is not None else scale_inv,
@@ -749,11 +769,16 @@ def dequantize_f8_e4m3(
                 scale_inv=scale_inv,
                 axis=axis,
                 target_dtype=target_dtype,
+                scale_semantics=scale_semantics,
             )
 
         ops = _load_floatx_cpu_ops()
         if ops is not None:
-            fast_scale, scale_mode = _fast_scale_arg(scale=scale, scale_inv=scale_inv)
+            fast_scale, scale_mode = _fast_scale_arg(
+                scale=scale,
+                scale_inv=scale_inv,
+                scale_semantics=scale_semantics,
+            )
             format_code = _FP8_FORMAT_CODES.get(tensor.dtype)
             if format_code is not None:
                 enable_large_threads = (
@@ -779,6 +804,7 @@ def dequantize_f8_e4m3(
         scale_inv=scale_inv,
         axis=axis,
         target_dtype=target_dtype,
+        scale_semantics=scale_semantics,
     )
 
 
@@ -789,6 +815,7 @@ def dequantize_fp8(
     scale_inv: Optional[torch.Tensor] = None,
     axis: Optional[int] = 0,
     target_dtype: torch.dtype = torch.bfloat16,
+    scale_semantics: str = "multiplier",
 ) -> torch.Tensor:
     return dequantize_f8_e4m3(
         tensor,
@@ -796,6 +823,7 @@ def dequantize_fp8(
         scale_inv=scale_inv,
         axis=axis,
         target_dtype=target_dtype,
+        scale_semantics=scale_semantics,
     )
 
 

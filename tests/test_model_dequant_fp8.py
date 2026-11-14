@@ -9,7 +9,11 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from gptqmodel.quantization.dtype import decode_e8m0_scale, dequantize_f4_e2m1
+from gptqmodel.quantization.dtype import (
+    decode_e8m0_scale,
+    dequantize_f4_e2m1,
+    dequantize_f8_e4m3,
+)
 from gptqmodel.utils.model_dequant import (
     convert_awq_file,
     convert_bitsandbytes_shard,
@@ -34,6 +38,121 @@ def _write_index(model_dir, shard_name: str, keys: list[str]) -> None:
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": weight_map}),
         encoding="utf-8",
+    )
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_fp8_weight_scale_inv_defaults_to_multiplier(tmp_path):
+    unscaled = torch.tensor(
+        [
+            [1.0, 2.0, -1.0, -2.0],
+            [4.0, 2.0, -4.0, -2.0],
+        ],
+        dtype=torch.float32,
+    ).to(torch.float8_e4m3fn)
+    scale_inv = torch.tensor(
+        [
+            [0.5, 0.5],
+            [1.5, 1.5],
+        ],
+        dtype=torch.float32,
+    )
+    expanded = scale_inv.repeat_interleave(2, dim=1)
+    oracle = unscaled.to(torch.float64) * expanded.to(torch.float64)
+    model_dir = tmp_path / "multiplier"
+    output_dir = tmp_path / "multiplier_out"
+    model_dir.mkdir()
+    path = model_dir / "model.safetensors"
+    save_file(
+        {
+            "linear.weight": unscaled,
+            "linear.weight_scale_inv": scale_inv,
+        },
+        str(path),
+    )
+    _write_index(
+        model_dir,
+        path.name,
+        ["linear.weight", "linear.weight_scale_inv"],
+    )
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["TestModel"],
+                "quantization_config": {
+                    "format": "float8_e4m3fn",
+                    "quant_method": "fp8",
+                    "weight_block_size": [1, 2],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    direct = dequantize_f8_e4m3(
+        unscaled,
+        scale_inv=scale_inv,
+        axis=None,
+        target_dtype=torch.float32,
+    )
+    dequantize_model(
+        model_dir,
+        output_dir,
+        target_dtype=torch.float32,
+        device="cpu",
+    )
+    with safe_open(output_dir / path.name, framework="pt", device="cpu") as reader:
+        converted = reader.get_tensor("linear.weight")
+
+    torch.testing.assert_close(direct, oracle.to(torch.float32), rtol=0, atol=0)
+    torch.testing.assert_close(converted, oracle.to(torch.float32), rtol=0, atol=0)
+
+    inverse_dir = tmp_path / "inverse"
+    inverse_output = tmp_path / "inverse_out"
+    inverse_dir.mkdir()
+    save_file(
+        {
+            "linear.weight": unscaled,
+            "linear.weight_scale_inv": scale_inv,
+        },
+        str(inverse_dir / path.name),
+    )
+    _write_index(
+        inverse_dir,
+        path.name,
+        ["linear.weight", "linear.weight_scale_inv"],
+    )
+    (inverse_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["TestModel"],
+                "quantization_config": {
+                    "format": "float8_e4m3fn",
+                    "quant_method": "fp8",
+                    "weight_block_size": [1, 2],
+                    "weight_scale_semantics": "inverse",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    dequantize_model(
+        inverse_dir,
+        inverse_output,
+        target_dtype=torch.float32,
+        device="cpu",
+    )
+    with safe_open(
+        inverse_output / path.name,
+        framework="pt",
+        device="cpu",
+    ) as reader:
+        inverse = reader.get_tensor("linear.weight")
+    torch.testing.assert_close(
+        inverse,
+        (unscaled.to(torch.float64) / expanded.to(torch.float64)).to(torch.float32),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -470,7 +589,7 @@ def test_dequantize_model_fp8_resolves_scale_inv_from_other_shard(tmp_path):
         weight_out = reader.get_tensor("linear.weight")
 
     expanded_scale_inv = scale_inv.repeat_interleave(2, dim=0).repeat_interleave(4, dim=1)
-    expected = weight.to(torch.bfloat16) / expanded_scale_inv.to(torch.bfloat16)
+    expected = weight.to(torch.bfloat16) * expanded_scale_inv.to(torch.bfloat16)
     torch.testing.assert_close(weight_out, expected)
 
     output_index = json.loads((output_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
@@ -531,7 +650,7 @@ def test_dequantize_model_fp8_allows_partial_edge_blocks(tmp_path):
     expanded_scale_inv = scale_inv.repeat_interleave(block_rows, dim=0)
     expanded_scale_inv = expanded_scale_inv.repeat_interleave(block_cols, dim=1)
     expanded_scale_inv = expanded_scale_inv[:rows, :cols].to(torch.bfloat16)
-    expected = weight.to(torch.bfloat16) / expanded_scale_inv
+    expected = weight.to(torch.bfloat16) * expanded_scale_inv
 
     torch.testing.assert_close(weight_out, expected)
 
@@ -578,7 +697,7 @@ def test_dequantize_model_fp8_crops_overpadded_block_scale_grid(tmp_path):
     expanded_scale_inv = scale_inv.repeat_interleave(block_rows, dim=0)
     expanded_scale_inv = expanded_scale_inv.repeat_interleave(block_cols, dim=1)
     expanded_scale_inv = expanded_scale_inv[:rows, :cols].to(torch.bfloat16)
-    expected = weight.to(torch.bfloat16) / expanded_scale_inv
+    expected = weight.to(torch.bfloat16) * expanded_scale_inv
 
     torch.testing.assert_close(weight_out, expected)
 
@@ -631,7 +750,7 @@ def test_dequantize_model_fp8_honors_ignored_layers(tmp_path):
         quant_out = reader.get_tensor("quant.weight")
         ignored_out = reader.get_tensor("ignored.weight")
 
-    expected_quant = quant_weight.to(torch.bfloat16) / quant_scale_inv.to(torch.bfloat16)
+        expected_quant = quant_weight.to(torch.bfloat16) * quant_scale_inv.to(torch.bfloat16)
     torch.testing.assert_close(quant_out, expected_quant)
     torch.testing.assert_close(ignored_out, ignored_weight)
 
