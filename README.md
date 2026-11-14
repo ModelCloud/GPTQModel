@@ -552,6 +552,12 @@ falls back to dequantize+matmul (GEMV keeps both dtypes). Set
 `GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
 matrix and known limitations.
 
+On Ada (SM 8.9) and Blackwell (SM 10.x), `TritonV2Linear` reuses the same fused
+GEMV / small-M GEMM dispatch and the packed-load kernel covers `M=2..64` with no
+K/N caps: decode and small-batch forward measured 2.4x-6.8x faster than the
+previous TritonV2 path. See the [GPTQ Triton decode and small-M dispatch](docs/triton-dispatch.md)
+flow for the gate, split-K and bitwise contracts.
+
 bitsandbytes 4-bit (NF4/FP4) inference on ROCm routes `M >= 16` through a fused
 Triton GEMM that dequantizes the packed codes inside the matmul, because the
 vendor HIP kernel switches to a much slower path at that row count. Measured on

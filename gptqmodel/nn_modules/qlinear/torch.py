@@ -22,7 +22,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.arch import cuda_arch as _arch_cuda_arch
 from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
 from ...utils.arch import gemm_fused_max_out_features as _arch_gemm_max_out_features
-from ...utils.arch import is_ada as _arch_is_ada
+from ...utils.arch import is_cuda_fused as _arch_is_cuda_fused
 from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -264,6 +264,9 @@ class TorchLinear(PackableQuantLinear):
         self._lookahead_enabled = False
         self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
         self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
+        # Set by ``post_init`` once g_idx is final; the gather path is the
+        # safe default if a caller never materializes the module.
+        self._gptq_gemm_uniform_group = False
         self._lookahead_next = None
         self._weight_metadata = _LinearWeightMetadata(self)
         if bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0"))):
@@ -320,6 +323,18 @@ class TorchLinear(PackableQuantLinear):
             self.g_idx,
             self.scales,
             layer_name=type(self).__name__,
+        )
+
+        # Cache whether the checkpoint's g_idx is the identity mapping
+        # ``arange // group_size``.  The fused small-M GEMM uses it to replace
+        # the per-row g_idx gather with one scale/zero row per K-tile.
+        expected_g_idx = (
+            torch.arange(self.in_features, device=self.g_idx.device, dtype=self.g_idx.dtype)
+            // self.group_size
+        )
+        self._gptq_gemm_uniform_group = bool(
+            torch.equal(self.g_idx, expected_g_idx)
+            and self.in_features % self.group_size == 0
         )
 
         # torch benefits the most from torch.compile, enable it by default
@@ -459,6 +474,7 @@ class TorchLinear(PackableQuantLinear):
             out = gptq_gemm(
                 x, self.qweight, self.scales, self.qzeros, self.g_idx,
                 out_dtype=out_dtype, bits=self.bits,
+                uniform_group=self._gptq_gemm_uniform_group,
             )
             out = self._apply_fused_bias(out, x, wide=out_dtype is not None).reshape(out_shape)
             if self.adapter:
@@ -572,11 +588,14 @@ class TorchLinear(PackableQuantLinear):
 
     def _can_use_rocm_gemm(self, x: torch.Tensor) -> bool:
         small_m_max, max_in_features = self._rocm_gemm_gate(x)
+        in_features_supported = (
+            max_in_features <= 0 or self.in_features <= max_in_features
+        )
         return (
             self._rocm_gemm_enabled
             and 2 <= x.shape[0] <= small_m_max
             and x.shape[1] == self.in_features
-            and self.in_features <= max_in_features
+            and in_features_supported
             and self._rocm_gemm_out_features_supported(x)
             and self._rocm_gemm_dtype_supported(x)
             and self._can_use_rocm_fused(x)
@@ -591,7 +610,7 @@ class TorchLinear(PackableQuantLinear):
         portable dequantize + matmul path.
         """
         return (
-            (IS_ROCM or _arch_is_ada(x.device))
+            (IS_ROCM or _arch_is_cuda_fused(x.device))
             and self._triton_dequant_enabled
             and self._can_use_triton_dequant()
             and self.bits in (2, 4, 8)
@@ -618,11 +637,14 @@ class TorchLinear(PackableQuantLinear):
         behaviour and silently use dequantize + matmul.
         """
         if not IS_ROCM:
-            if _arch_is_ada(x.device):
-                # The Ada entry lives in the same tables; the shared precondition
+            if _arch_is_cuda_fused(x.device):
+                # The Ada/Blackwell entries live in the same tables; the shared precondition
                 # list above already covers it.
                 return True
-            _log_fallback_once("rocm-not-rocm", "ROCm fused GPTQ kernel skipped: not a ROCm host.")
+            _log_fallback_once(
+                "cuda-not-fused",
+                "CUDA fused GPTQ kernel skipped: not an Ada/Blackwell CUDA host.",
+            )
             return False
         arch = _rocm_arch_name(x.device)
         if not arch:

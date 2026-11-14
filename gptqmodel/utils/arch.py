@@ -32,6 +32,7 @@ __all__ = [
     "gemm_fused_dtypes",
     "gemm_fused_max_out_features",
     "is_ada",
+    "is_cuda_fused",
     "is_gfx950",
     "is_rdna4",
     "is_rocm_fused_arch",
@@ -55,20 +56,20 @@ _CDNA4_GATE = (16, 5120)
 # so RDNA4 keeps the full measured range while reusing the conservative
 # ``small_m_max`` (M>16 was not uniformly a win).
 _RDNA4_GATE = (16, 17408)
-# Ada (RTX 4090, SM 8.9) shape gate for the fused small-M GEMM, measured on a
-# 4090 (torch 2.15.0+cu132, Triton 3.9.0) with the (16, 16, 256, 4, 2) tile,
-# 4-bit gs=128, FP16 and BF16, M in {2, 8, 16}.  Inside the rectangle
-# K <= 2048 and N <= 2048 the fused kernel is never a material loss and is a
-# clear win on L2-flushed inputs: 1.09x-1.65x hot for K <= 2048 and N <= 1536
-# (1.10x-1.82x on the wider sweep), neutral-to-1.11x hot at the K=2048/N=2048
-# corner, and 1.10x-1.41x flushed everywhere in the rectangle.  Outside it the
-# serial K-loop and the grid width lose.  A second measured win band (K <= 1536, N <= 4096, min
-# 1.014x) is *not* enabled because the enclosing rectangle (K <= 2048,
-# N <= 4096) regresses (0.869x at 2048x3072), so the gate stays rectangular and
-# conservative instead of claiming a shape-dependent band the dispatcher cannot
-# express.  ``cdna4``/``rdna4`` values are unchanged.
-_ADA_GATE = (16, 2048)
-_ADA_MAX_OUT_FEATURES = 2048
+# Ada (RTX 4090, SM 8.9) shape gate for the fused small-M GEMM.  The packed-load
+# rewrite (BLOCK_K=128, BLOCK_N=32/64) removed the serial K-loop and grid-width
+# losses that the old (16, 16, 256) tile hit above K/N=2048, so the gate now
+# covers every measured projection at M in 2..64: 2.4x-5.8x over the previous
+# "best today" path (fused inside the old rectangle, dequantize+matmul outside)
+# across 2048^2 .. 14336x4096.  There is no K or N cap.
+#
+# Blackwell (SM 10.x) shares the tile and gate.  It is enabled from the issue's
+# indicative sm_120 report (1.3x-5.9x) because this host has no Blackwell GPU to
+# re-measure; the entry is intentionally the same packed-load kernel, not a
+# separate implementation.
+_ADA_GATE = (64, 0)
+_BLACKWELL_GATE = (64, 0)
+_ADA_MAX_OUT_FEATURES = 0
 _DISABLED_GATE = (0, 0)
 
 # Activation dtypes the fused small-M GEMM is *measurably* faster in.  CDNA has
@@ -93,6 +94,7 @@ _RDNA4_GEMM_DTYPES = frozenset({"float16"})
 # dequantize+matmul, so BF16 is a measured win there rather than an inherited
 # claim.  Outside the gate the fused kernel is disabled for both dtypes.
 _ADA_GEMM_DTYPES = frozenset({"float16", "bfloat16"})
+_BLACKWELL_GEMM_DTYPES = frozenset({"float16", "bfloat16"})
 
 _FUSED_ARCH_PREFIXES = ("gfx950", "gfx120", "gfx125")
 
@@ -289,6 +291,8 @@ def gemm_fused_dtypes(device_or_arch=None) -> frozenset[str]:
         return _RDNA4_GEMM_DTYPES
     if family == "ada":
         return _ADA_GEMM_DTYPES
+    if family == "blackwell":
+        return _BLACKWELL_GEMM_DTYPES
     return frozenset()
 
 
@@ -307,6 +311,8 @@ def gate_limits(device_or_arch=None) -> tuple[int, int]:
         return _RDNA4_GATE
     if family == "ada":
         return _ADA_GATE
+    if family == "blackwell":
+        return _BLACKWELL_GATE
     return _DISABLED_GATE
 
 
@@ -369,6 +375,17 @@ def is_ada(device_or_arch=None) -> bool:
     if isinstance(device_or_arch, str):
         return normalize_arch(device_or_arch) in ("sm_89", "sm89")
     return cuda_capability(device_or_arch) == _ADA_CAPABILITY
+
+
+def is_cuda_fused(device_or_arch=None) -> bool:
+    """True for CUDA families that ship a measured fused GPTQ kernel entry.
+
+    ``ada`` (SM 8.9) and ``blackwell`` (SM 10.x+) both use the packed-load
+    small-M GEMM.  Hopper and older CUDA families keep the portable
+    dequantize+matmul path.
+    """
+
+    return tuning_family(device_or_arch) in ("ada", "blackwell")
 
 
 def tuning_family(device_or_arch=None) -> str:
