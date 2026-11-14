@@ -40,6 +40,7 @@ struct SmallMParams {
   int64_t ldx;
   const uint8_t* w;
   const uint4* escapes;
+  uint32_t num_escapes;
   uint32_t base_x4;
   int m;
   int nb;  // 16-row blocks
@@ -111,7 +112,8 @@ __global__ void __launch_bounds__(WARPS * 32) small_m_kernel(const SmallMParams 
   const int core_kc = kDeviceHasClusters ? kc : 1;
   const int core_rank = kDeviceHasClusters ? rank : 0;
   small_m_core<S, MT, WARPS, kStages, KP, Retain, kDeviceIsSM103, SingleCTA>(
-      smem + kRingBytes, smem, wp, cnt, p.base_x4, p.escapes, p.m, p.slice, p.xstride, core_kc, core_rank,
+      smem + kRingBytes, smem, wp, cnt, p.base_x4, p.escapes, p.num_escapes, p.m, p.slice, p.xstride, core_kc,
+      core_rank,
       [&](int r) { return x0 + r * p.ldx; },
       [&] {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
@@ -393,6 +395,7 @@ cudaError_t linear_small_m(const LinearArgs& a, const SmallMConfig& cfg) {
   p.ldx = a.ldx;
   p.w = a.weight;
   p.escapes = a.escapes;
+  p.num_escapes = a.num_escapes;
   p.base_x4 = exp_base_x4(a.exp_base);
   p.m = static_cast<int>(a.m);
   p.nb = static_cast<int>(a.n / 16);

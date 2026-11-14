@@ -247,7 +247,7 @@ def _extension_for_name(name: str) -> TorchOpsJitExtension:
     return _EXTENSION_SPECS_BY_NAME[_resolve_single_extension_name(name)].resolve()
 
 
-def _load_one(name: str, *, use_cache: bool) -> TorchOpsJitExtension:
+def _load_one(name: str, *, use_cache: bool, verbose: bool | None = None) -> TorchOpsJitExtension:
     extension_name = _resolve_single_extension_name(name)
     spec = _EXTENSION_SPECS_BY_NAME[extension_name]
     if not _spec_supported(spec):
@@ -263,7 +263,8 @@ def _load_one(name: str, *, use_cache: bool) -> TorchOpsJitExtension:
                 )
             extension.clear_cache()
 
-        if not extension.load():
+        loaded = extension.load() if verbose is None else extension.load(verbose=verbose)
+        if not loaded:
             raise RuntimeError(
                 extension.last_error_message()
                 or f"{extension.display_name}: failed to compile torch.ops JIT extension."
@@ -299,7 +300,7 @@ def namespace(name: str, *, use_cache: bool = True) -> object:
     return _load_one(name, use_cache=use_cache).namespace_object()
 
 
-def load(name: str = "all", *, use_cache: bool = True) -> dict[str, bool]:
+def load(name: str = "all", *, use_cache: bool = True, verbose: bool | None = None) -> dict[str, bool]:
     """Build one or more GPT-QModel torch.ops JIT extensions ahead of first use.
 
     Args:
@@ -311,6 +312,9 @@ def load(name: str = "all", *, use_cache: bool = True) -> dict[str, bool]:
             compiling. This only works before the selected extension has been
             loaded in the current Python process. Once a torch.ops library is
             registered, a fresh interpreter is required for a true rebuild.
+        verbose: Explicit build verbosity for this call. When omitted, the
+            extension's own verbose setting is used. Passing it avoids mutating
+            process-wide environment variables for the duration of a build.
 
     Returns:
         A mapping of concrete extension names to their build/load result.
@@ -335,7 +339,10 @@ def load(name: str = "all", *, use_cache: bool = True) -> dict[str, bool]:
 
     for extension_name in selected:
         try:
-            _load_one(extension_name, use_cache=use_cache)
+            if verbose is None:
+                _load_one(extension_name, use_cache=use_cache)
+            else:
+                _load_one(extension_name, use_cache=use_cache, verbose=verbose)
             results[extension_name] = True
         except RuntimeError as exc:
             results[extension_name] = False

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import base64
+import importlib.util
 import os
 import tempfile
 from contextlib import contextmanager
@@ -12,11 +13,10 @@ from io import BytesIO
 from .image import load_bytes_from_url
 
 
-try:
-    import audioread
-    AUDIOREAD_AVAILABLE = True
-except ImportError:
-    AUDIOREAD_AVAILABLE = False
+# Audio decoding goes through the bounded fetch helper, so audioread is no
+# longer imported directly. Probe the distribution instead of importing it, so
+# an installed-but-unused module does not shadow the availability check.
+AUDIOREAD_AVAILABLE = importlib.util.find_spec("audioread") is not None
 
 try:
     import av

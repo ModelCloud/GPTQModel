@@ -198,6 +198,7 @@ ScaleSpec1D make_scale_spec_1d(
 
   TORCH_CHECK(scale.ndimension() == 1, "1D dequantization only supports scalar or 1D scale tensors");
   spec.length = scale.numel();
+  TORCH_CHECK(spec.length > 0, "scale tensor must not be empty");
   if (spec.length == result_len) {
     spec.layout = ScaleLayout1D::kVector;
     return spec;
@@ -232,6 +233,7 @@ ScaleSpec2D make_scale_spec_2d(
 
   if (scale.ndimension() == 1) {
     const int64_t count = scale.size(0);
+    TORCH_CHECK(count > 0, "scale tensor must not be empty");
     const int64_t resolved_axis = axis_is_none ? 0 : axis;
     if (resolved_axis == 0) {
       TORCH_CHECK(rows % count == 0, "row scale tensor shape incompatible with output");
@@ -251,6 +253,7 @@ ScaleSpec2D make_scale_spec_2d(
   TORCH_CHECK(scale.ndimension() == 2, "2D dequantization only supports scale tensors up to rank 2");
   spec.scale_rows = scale.size(0);
   spec.scale_cols = scale.size(1);
+  TORCH_CHECK(spec.scale_rows > 0 && spec.scale_cols > 0, "scale tensor must not be empty");
   if (spec.scale_rows == rows && spec.scale_cols == cols) {
     spec.layout = ScaleLayout2D::kFull;
     spec.cols = cols;

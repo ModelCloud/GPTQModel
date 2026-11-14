@@ -134,7 +134,7 @@ __global__ void __launch_bounds__(WARPS * 32, moe_small_threads_per_sm(MT) / (WA
   auto* scales = reinterpret_cast<float*>(region + p.table_bytes + kBm * 16);
   const int n0 = group * RW * 16;
   small_m_core<S, MT, WARPS, kStages, KP>(
-      region, smem, wp, cnt, codec.base_x4, codec.escapes, m, p.slice, p.xstride, kc, rank,
+      region, smem, wp, cnt, codec.base_x4, codec.escapes, codec.num_escapes, m, p.slice, p.xstride, kc, rank,
       [&](int r) { return xrows[r]; },
       [&] {
         // The table lives past the region x staging overwrites, and the

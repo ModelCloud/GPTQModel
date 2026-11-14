@@ -25,6 +25,7 @@ from ...utils.exllamav2 import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._g_idx import validate_g_idx_bounds
 from ._runtime_cache import tensor_cache_key
 
 
@@ -139,6 +140,17 @@ class ExllamaV2Linear(GPTQQuantLinear):
         self._release_q_handle()
         # ext_make_q_matrix only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
+        # ExLlamaV2's make_sequential() indexes a host histogram with g_idx
+        # directly (no negative wrap), so reject out-of-range values before the
+        # native handle is built at load time rather than corrupting the heap.
+        g_idx = getattr(self, "g_idx", None)
+        if g_idx is not None and g_idx.numel() > 0 and not bool((g_idx == 0).all().item()):
+            validate_g_idx_bounds(
+                g_idx,
+                self.scales,
+                layer_name=f"ExLlamaV2 `{self.name}`",
+                allow_negative_wrap=False,
+            )
         self.q_tensors = None
         self._ensure_q_handle()
 

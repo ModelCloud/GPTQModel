@@ -271,7 +271,8 @@ nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, c
   const DeviceInfo* dev = nullptr;
   if (nf12_status_t s = current_device(&dev); s != NF12_OK) return s;
   return from_codec(nf12::detail::decode(static_cast<const uint8_t*>(w->packed), static_cast<const uint4*>(w->escapes),
-                                         w->exp_base, w->n, w->k, static_cast<__nv_bfloat16*>(out_bf16), ldo, stream));
+                                         w->num_escapes, w->exp_base, w->n, w->k,
+                                         static_cast<__nv_bfloat16*>(out_bf16), ldo, stream));
 }
 
 nf12_status_t nf12_decode_fp32(const nf12_weight_t* w, void* out_fp32, int64_t ldo, cudaStream_t stream) {
@@ -279,8 +280,8 @@ nf12_status_t nf12_decode_fp32(const nf12_weight_t* w, void* out_fp32, int64_t l
   const DeviceInfo* dev = nullptr;
   if (nf12_status_t s = current_device(&dev); s != NF12_OK) return s;
   return from_codec(nf12::detail::decode_fp32(static_cast<const uint8_t*>(w->packed),
-                                              static_cast<const uint4*>(w->escapes), w->exp_base, w->n, w->k,
-                                              static_cast<float*>(out_fp32), ldo, stream));
+                                              static_cast<const uint4*>(w->escapes), w->num_escapes, w->exp_base,
+                                              w->n, w->k, static_cast<float*>(out_fp32), ldo, stream));
 }
 
 nf12_status_t nf12_sub_fp32(const nf12_weight_t* w, const void* wq_fp32, void* out_fp32, int64_t ldo,
@@ -292,9 +293,9 @@ nf12_status_t nf12_sub_fp32(const nf12_weight_t* w, const void* wq_fp32, void* o
   const DeviceInfo* dev = nullptr;
   if (nf12_status_t s = current_device(&dev); s != NF12_OK) return s;
   return from_codec(nf12::detail::sub_fp32(static_cast<const uint8_t*>(w->packed),
-                                           static_cast<const uint4*>(w->escapes), w->exp_base, w->n, w->k,
-                                           static_cast<const float*>(wq_fp32), static_cast<float*>(out_fp32),
-                                           ldo, stream));
+                                           static_cast<const uint4*>(w->escapes), w->num_escapes, w->exp_base,
+                                           w->n, w->k, static_cast<const float*>(wq_fp32),
+                                           static_cast<float*>(out_fp32), ldo, stream));
 }
 
 size_t nf12_linear_workspace_bytes(int64_t m, int64_t n, int64_t k, int device) {

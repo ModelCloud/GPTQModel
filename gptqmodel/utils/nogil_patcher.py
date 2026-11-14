@@ -16,6 +16,7 @@ from .safe import ThreadSafe
 
 
 _PATCHED_ATTR = "_gptqmodel_locked_save_file"
+_MISSING = object()
 
 TRITON_MIN_VERSION_STR = "3.5.0"
 # Alternate distribution names used by Windows and XPU builds.
@@ -40,7 +41,7 @@ __all__ = ["TritonPatch", "patch_safetensors_save_file", "patch_triton_autotuner
 
 
 class TritonPatch:
-    _apply_lock = threading.Lock()
+    _apply_lock = threading.RLock()
     _applied = False
 
     @classmethod
@@ -111,6 +112,45 @@ def patch_triton_autotuner() -> None:
 
     module.CacheFuture = CacheFuture
 
+    def thread_local_state(instance):
+        """Return the per-instance, per-thread scratch state.
+
+        ``nargs`` and ``best_config`` used to be plain attributes on the shared
+        Autotuner. Two threads running the same kernel then overwrote each
+        other's argument mapping, so a cold-key benchmark could prune and hook
+        against another thread's tensors. Keep those values thread-local while
+        leaving the shared ``cache`` (guarded by ``_cache_lock``) process-wide.
+        """
+
+        tls = instance.__dict__.get("_gptqmodel_tls")
+        if tls is not None:
+            return tls
+        with TritonPatch._apply_lock:
+            tls = instance.__dict__.get("_gptqmodel_tls")
+            if tls is None:
+                tls = threading.local()
+                instance.__dict__["_gptqmodel_tls"] = tls
+        return tls
+
+    def get_thread_local_attr(instance, name):
+        value = getattr(thread_local_state(instance), name, _MISSING)
+        if value is _MISSING:
+            # Instances created before the patch may already carry the old
+            # plain attribute; keep it readable until this thread sets its own.
+            return instance.__dict__.get(name)
+        return value
+
+    if not getattr(autotuner_cls, "_gptqmodel_thread_local_attrs", False):
+        autotuner_cls.nargs = property(
+            lambda self: get_thread_local_attr(self, "nargs"),
+            lambda self, value: setattr(thread_local_state(self), "nargs", value),
+        )
+        autotuner_cls.best_config = property(
+            lambda self: get_thread_local_attr(self, "best_config"),
+            lambda self, value: setattr(thread_local_state(self), "best_config", value),
+        )
+        autotuner_cls._gptqmodel_thread_local_attrs = True
+
     original_init = autotuner_cls.__init__
     rlock_type = type(threading.RLock())
 
@@ -135,6 +175,7 @@ def patch_triton_autotuner() -> None:
             self.cache = self._cache
             self._cache_lock = threading.RLock()
             self._cache_futures = {}
+            thread_local_state(self)
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -255,41 +296,42 @@ def patch_triton_autotuner() -> None:
         ensure_threadsafe_cache(self)
         nargs = dict(zip(self.arg_names, args))
         self.nargs = nargs
-        used_cached_result = True
-        bench_time = None
-        key = None
-        if len(self.configs) > 1:
-            all_args = {**nargs, **kwargs}
-            named_args = {k: v for (k, v) in all_args.items() if k in self.arg_names}
-            key_values = [named_args[name] for name in self.keys if name in named_args]
-            for _, arg in named_args.items():
-                if hasattr(arg, "dtype"):
-                    key_values.append(str(arg.dtype))
-            key = tuple(key_values)
-            config, used_cached_result, bench_time = _get_config_for_key(self, key, args, kwargs)
-        else:
-            config = self.configs[0]
+        try:
+            used_cached_result = True
+            bench_time = None
+            key = None
+            if len(self.configs) > 1:
+                all_args = {**nargs, **kwargs}
+                named_args = {k: v for (k, v) in all_args.items() if k in self.arg_names}
+                key_values = [named_args[name] for name in self.keys if name in named_args]
+                for _, arg in named_args.items():
+                    if hasattr(arg, "dtype"):
+                        key_values.append(str(arg.dtype))
+                key = tuple(key_values)
+                config, used_cached_result, bench_time = _get_config_for_key(self, key, args, kwargs)
+            else:
+                config = self.configs[0]
 
-        self.cache = self._cache
-        self.best_config = config
-        if knobs.autotuning.print and key is not None and not used_cached_result:
-            bench_time_value = bench_time if bench_time is not None else (self.bench_time or 0.0)
-            print(
-                f"Triton autotuning for function {self.base_fn.__name__},\n"
-                f"with key as {key},\n"
-                f"finished after {bench_time_value:.2f}s,\n"
-                f"best config selected: {self.best_config};"
+            self.cache = self._cache
+            self.best_config = config
+            if knobs.autotuning.print and key is not None and not used_cached_result:
+                bench_time_value = bench_time if bench_time is not None else (self.bench_time or 0.0)
+                print(
+                    f"Triton autotuning for function {self.base_fn.__name__},\n"
+                    f"with key as {key},\n"
+                    f"finished after {bench_time_value:.2f}s,\n"
+                    f"best config selected: {self.best_config};"
+                )
+            full_nargs = {**nargs, **kwargs, **config.all_kwargs()}
+            if config.pre_hook is not None:
+                config.pre_hook(full_nargs)
+            return self.fn.run(
+                *args,
+                **kwargs,
+                **config.all_kwargs(),
             )
-        full_nargs = {**nargs, **kwargs, **config.all_kwargs()}
-        if config.pre_hook is not None:
-            config.pre_hook(full_nargs)
-        result = self.fn.run(
-            *args,
-            **kwargs,
-            **config.all_kwargs(),
-        )
-        self.nargs = None
-        return result
+        finally:
+            self.nargs = None
 
     autotuner_cls.__init__ = patched_init
     autotuner_cls.check_disk_cache = patched_check_disk_cache
