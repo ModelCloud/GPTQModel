@@ -71,6 +71,7 @@ FIXED_MODELS = (
     "afmoe",
     "ernie4_5_vl_moe",
     "jamba",
+    "lfm2_moe",
 )
 
 # Configs whose default layer mix does not exercise every branch of the tree.
@@ -95,9 +96,24 @@ def _mix_jamba_layers(cfg):
     cfg.num_experts = 2
 
 
+def _shrink_lfm2_moe(cfg):
+    """Build a decoder with both conv/attention and dense/MoE layers."""
+
+    cfg.hidden_size = 32
+    cfg.intermediate_size = 48
+    cfg.moe_intermediate_size = 16
+    cfg.num_hidden_layers = 4
+    cfg.num_dense_layers = 1
+    cfg.num_experts = 4
+    cfg.num_experts_per_tok = 2
+    cfg.vocab_size = 64
+    cfg.layer_types = ["conv", "conv", "full_attention", "full_attention"]
+
+
 CONFIG_OVERRIDES = {
     "granitemoehybrid": _mix_granitemoehybrid_layers,
     "jamba": _mix_jamba_layers,
+    "lfm2_moe": _shrink_lfm2_moe,
 }
 
 # Model types whose routed experts the *installed* Defuser still leaves fused as
