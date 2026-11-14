@@ -97,6 +97,7 @@ The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes 
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
+GPTQ v1/v2 zero-point conversions decode and repack on the checkpoint's device, so a CUDA shard never round-trips through a host loop; see the [qzeros device conversion](docs/gptq-qzero-device-conversion.md) contract.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
 
