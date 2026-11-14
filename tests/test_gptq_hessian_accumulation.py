@@ -115,3 +115,78 @@ def test_gptq_snapshot_hessian_embedding_matches_finalize():
     assert task._hessian_dirty
     assert task.nsamples == 6
     torch.testing.assert_close(task.finalize_hessian(), expected)
+
+
+def test_gptq_snapshot_hessian_survives_later_finalization():
+    """A same-device FP32 snapshot must not alias the live capture (#3862).
+
+    ``Tensor.to(device=..., dtype=float32)`` is a no-op that returns the same
+    storage when the device and dtype already match, and
+    ``materialize_global_hessian`` mutates ``self.H`` in place on the next
+    finalization. The durable capture-frontier contract needs a stable value.
+    """
+
+    task = GPTQ(
+        torch.nn.Linear(2, 2, bias=False),
+        QuantizeConfig(bits=4, group_size=-1, fallback=None),
+    )
+    task.add_batch(torch.tensor([[1.0, 0.0]]), None)
+    task.finalize_hessian(torch.device("cpu"))
+
+    snapshot = task.snapshot_hessian(torch.device("cpu"))
+    saved = snapshot.clone()
+
+    assert snapshot.data_ptr() != task.H.data_ptr()
+
+    task.add_batch(torch.tensor([[0.0, 2.0]]), None)
+    task.finalize_hessian(torch.device("cpu"))
+
+    torch.testing.assert_close(snapshot, saved, rtol=0.0, atol=0.0)
+    # The live capture did move on; only the snapshot is frozen.
+    assert not torch.equal(task.H, saved)
+
+
+def test_gptq_snapshot_hessian_embedding_survives_later_finalization():
+    """The embedding diagonal fast path aliased ``_H_diag`` in the same way."""
+
+    task = _embedding_task()
+    task.add_batch(torch.tensor([[0, 1, 1]]), None)
+    task.finalize_hessian(torch.device("cpu"))
+
+    snapshot = task.snapshot_hessian(torch.device("cpu"))
+    saved = snapshot.clone()
+
+    assert snapshot.data_ptr() != task._H_diag.data_ptr()
+
+    task.add_batch(torch.tensor([[2, 3]]), None)
+    task.finalize_hessian(torch.device("cpu"))
+
+    torch.testing.assert_close(snapshot, saved, rtol=0.0, atol=0.0)
+    assert not torch.equal(task._H_diag, saved)
+
+
+def test_gptq_snapshot_hessian_is_writable_without_touching_the_capture():
+    """A caller may keep or edit a snapshot; the capture must not see it."""
+
+    task = GPTQ(
+        torch.nn.Linear(2, 2, bias=False),
+        QuantizeConfig(bits=4, group_size=-1, fallback=None),
+    )
+    task.add_batch(torch.tensor([[1.0, 0.0]]), None)
+    task.finalize_hessian(torch.device("cpu"))
+    live = task.H.clone()
+
+    snapshot = task.snapshot_hessian(torch.device("cpu"))
+    snapshot.fill_(-1.0)
+
+    torch.testing.assert_close(task.H, live, rtol=0.0, atol=0.0)
+
+    embedding = _embedding_task()
+    embedding.add_batch(torch.tensor([[0, 1, 1]]), None)
+    embedding.finalize_hessian(torch.device("cpu"))
+    live_diag = embedding._H_diag.clone()
+
+    diag_snapshot = embedding.snapshot_hessian(torch.device("cpu"))
+    diag_snapshot.fill_(-1.0)
+
+    torch.testing.assert_close(embedding._H_diag, live_diag, rtol=0.0, atol=0.0)

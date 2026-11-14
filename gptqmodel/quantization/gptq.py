@@ -1396,7 +1396,13 @@ class GPTQ:
                     self._wait_hessian_ready(device)
                     source_diag = self._H_diag
                     result = source_diag.detach().to(device=device, dtype=torch.float32)
-                    if result.device != source_diag.device or result.dtype != source_diag.dtype:
+                    if result.data_ptr() == source_diag.data_ptr():
+                        # `.to()` is a no-op that returns the live diagonal
+                        # itself when the device and dtype already match. The
+                        # snapshot outlives the capture, so detach it from the
+                        # storage that later finalization mutates in place.
+                        result = result.clone()
+                    elif result.device != source_diag.device or result.dtype != source_diag.dtype:
                         event = self._cuda_event_for(device)
                         if event is not None:
                             event.record(torch.cuda.current_stream(device))
@@ -1447,7 +1453,12 @@ class GPTQ:
                 self._wait_hessian_ready(device)
                 source = self.H
                 result = source.detach().to(device=device, dtype=torch.float32)
-                if result.device != source.device:
+                if result.data_ptr() == source.data_ptr():
+                    # Same device and dtype: `.to()` returned the live Hessian,
+                    # which `materialize_global_hessian` mutates in place on the
+                    # next finalization. The snapshot must be independent.
+                    result = result.clone()
+                elif result.device != source.device:
                     event = self._cuda_event_for(device)
                     if event is not None:
                         event.record(torch.cuda.current_stream(device))
