@@ -108,6 +108,7 @@ for the selection and failure flows.
 GPTAQ and FOEM consume one native calibration entry per sample, including batched calibration; see the [native calibration batch split](docs/native-calibration-batch-split.md) flow.
 3-bit zero-point packing requires 32-aligned `out_features`, and every packer fails closed instead of truncating the tail; see the [3-bit zero-point packing width contract](docs/3bit-zero-point-packing.md).
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
+GPTQ v1/v2 zero-point conversions decode and repack on the checkpoint's device, so a CUDA shard never round-trips through a host loop; see the [qzeros device conversion](docs/gptq-qzero-device-conversion.md) contract.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
 Torch compilation is best-effort: a `torch.compile` failure at first use (for
