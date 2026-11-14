@@ -187,9 +187,9 @@ def test_exact_fp16_embedding_keeps_source_dtype(monkeypatch):
 def test_cuda_embedding_uses_only_packed_storage(monkeypatch):
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
 
-    import gptqmodel_nf12
+    from gptqmodel_nf12 import available
 
-    native = gptqmodel_nf12.available()
+    native = available()
     source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
     with torch.no_grad():
         source.weight.copy_(torch.randn_like(source.weight) * 0.02)
