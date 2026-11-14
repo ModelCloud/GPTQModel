@@ -686,11 +686,13 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-# `requirements.txt` pins `defuser>=0.0.30`. Older releases do not split the
+# `requirements.txt` pins `defuser>=0.0.31`. Older releases do not split the
 # fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
 # experts stay fused and are silently left unquantized; the only symptom is a
-# "0 layer matches" line in the module-coverage report.
-DEFUSER_MIN_VERSION = "0.0.30"
+# "0 layer matches" line in the module-coverage report. Defuser 0.0.31 also
+# fixes the GLM-4.x replacement MoE blocks, which crashed on the Transformers
+# 5.22 router tuple.
+DEFUSER_MIN_VERSION = "0.0.31"
 _defuser_version_warning_emitted = False
 
 
@@ -721,8 +723,8 @@ def _check_defuser_version() -> None:
         return
     log.error(
         "Loader: defuser %s is installed but >= %s is required. Fused 3-D expert "
-        "tensors (afmoe, flint, granitemoe_swa, ...) will not be split, so their "
-        "routed experts are left unquantized; upgrade defuser.",
+        "tensors (afmoe, flint, granitemoe_swa, ...) will not be split and the "
+        "GLM-4.x defused MoE blocks cannot run on Transformers 5.22; upgrade defuser.",
         outdated,
         DEFUSER_MIN_VERSION,
     )
@@ -758,10 +760,6 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     # Defuser has no matching registration and reports no structural change.
     if callable(after_conversion):
         after_conversion(model)
-
-    from ..utils.defuser_compat import apply_glm4_moe_router_compat
-
-    apply_glm4_moe_router_compat()
 
     return converted
 

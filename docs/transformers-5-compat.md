@@ -219,35 +219,33 @@ layer after Defuser's expert expansion. The old tree failed that assertion
 because 13 of 51 linears (every routed expert plus the attention output) had no
 match.
 
-## GLM-4.x MoE router tuple shim
+## GLM-4.x MoE router tuple
 
-Defuser 0.0.30 replaces the GLM-4.5/4.6/4.7 and GLM-4.7-Flash MoE block with a
-per-expert module. Its `forward` passes the router result straight into
+Defuser 0.0.30 replaced the GLM-4.5/4.6/4.7 and GLM-4.7-Flash MoE block with a
+per-expert module whose `forward` passed the router result straight into
 `route_tokens_to_experts`, which calls `.sigmoid()`. Transformers 5.22 routers
 return `(router_logits, topk_weights, topk_indices)`, so the first MoE layer
 raised `AttributeError: 'tuple' object has no attribute 'sigmoid'`.
 
+Defuser 0.0.31 owns the fix: `route_tokens_to_experts` unwraps the tuple to the
+raw logits and keeps its own grouped top-k selection, so the routing math is
+byte-identical to the tensor path. GPT-QModel now requires `defuser>=0.0.31` and
+no longer installs a local compatibility shim.
+
 ```mermaid
 flowchart TD
-    A["defuser.convert_model / replace_fused_blocks"] --> B["LinearGlm4MoeMoE or LinearGlm4MoeLiteMoE"]
-    B --> C["apply_glm4_moe_router_compat"]
-    C --> D["inspect forward source"]
-    D -->|"still passes raw router result"| E["wrap route_tokens_to_experts"]
-    D -->|"already unpacks the tuple"| F["leave Defuser alone"]
-    E --> G["tuple -> router_logits"]
-    G --> H["original route_tokens_to_experts"]
-    H --> I["grouped top-k routing unchanged"]
+    A["Transformers 5.22 router"] --> B["(router_logits, topk_weights, topk_indices)"]
+    B --> C["Defuser LinearGlm4MoeMoE / LinearGlm4MoeLiteMoE"]
+    C --> D["route_tokens_to_experts: unwrap [0]"]
+    D --> E["Defuser grouped top-k selection"]
+    E --> F["routed + shared experts"]
 ```
 
 | Area | Before | After |
 | --- | --- | --- |
-| router input | 5.22 tuple reaches `.sigmoid()` | `gptqmodel/utils/defuser_compat.py` unwraps `[0]` |
-| routing math | crashes before selection | delegates to Defuser's original method |
-| future Defuser fix | n/a | source gate skips the shim when `forward` unpacks the tuple |
-
-The authoritative fix belongs in Defuser. The GPT-QModel shim is installed from
-`_convert_model_with_defuser` and `hf_load.convert_fused_modules`, so both the
-quantize and reload paths get it.
+| router input | 5.22 tuple reaches `.sigmoid()` | Defuser 0.0.31 unwraps `[0]` |
+| routing math | crashes before selection | Defuser's grouped top-k unchanged |
+| GPT-QModel | local `defuser_compat` shim | `defuser>=0.0.31` floor, no shim |
 
 ## Text-only Mllama
 

@@ -93,7 +93,7 @@ def test_phi4_ci_deps_cover_required_packages():
 def test_tenstorrent_manifest_defuser_satisfies_the_project_requirement():
     """The pinned TT defuser must satisfy requirements.txt.
 
-    Below 0.0.30 the Granite MoE SWA routed experts stay packed, so
+    Older releases leave the Granite MoE SWA routed experts packed, so
     ``tests/module_tree/test_granite_swa_model_tree.py`` cannot expose the
     quantizable expert projections.
     """
@@ -119,5 +119,5 @@ def test_tenstorrent_manifest_defuser_satisfies_the_project_requirement():
 
     assert specifier.contains(pinned), (
         f"Tenstorrent manifest pins defuser=={pinned}, which does not satisfy "
-        f"{requirements[0]}; Granite MoE SWA routed experts stay packed below 0.0.30"
+        f"{requirements[0]}; Granite MoE SWA routed experts stay packed on older releases"
     )
