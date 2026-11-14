@@ -153,18 +153,32 @@ def test_engine_alias_conflicts_are_rejected(source, target):
         )
 
 
-def test_enforce_eager_conflict_and_rocm_normalization():
+def test_enforce_eager_conflict_is_rejected():
     with pytest.raises(ValueError, match="enforce_eager"):
         sglang_utils._normalize_sglang_engine_kwargs(
             {"enforce_eager": True, "disable_cuda_graph": False},
             trust_remote_code=False,
         )
+
+
+def test_rocm_device_aliases_to_cuda_only_on_a_hip_build(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
     assert (
         sglang_utils._normalize_sglang_engine_kwargs({"device": "rocm"}, False)[
             "device"
         ]
         == "cuda"
     )
+
+
+def test_rocm_device_is_rejected_on_a_cuda_only_build(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+
+    with pytest.raises(ValueError, match="ROCm PyTorch build"):
+        sglang_utils._normalize_sglang_engine_kwargs({"device": "rocm"}, False)
+
+    # An NVIDIA request still resolves normally.
+    assert sglang_utils._normalize_sglang_engine_kwargs({"device": "cuda"}, False)["device"] == "cuda"
 
 
 def test_loader_sglang_kwargs_pass_only_resolved_dtype():

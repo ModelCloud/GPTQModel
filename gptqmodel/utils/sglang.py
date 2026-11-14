@@ -127,6 +127,14 @@ def _normalize_sglang_engine_kwargs(kwargs: Mapping[str, Any], trust_remote_code
             normalized.setdefault("base_gpu_id", parsed_device.index)
         normalized["device"] = parsed_device.type
     elif device == "rocm":
+        # SGLang spells every accelerator "cuda"; on a HIP build that alias
+        # names the same AMD device. On an NVIDIA-only build it would silently
+        # launch the checkpoint on CUDA instead of the requested hardware.
+        if torch.version.hip is None:
+            raise ValueError(
+                "SGLang device `rocm` requires a ROCm PyTorch build; "
+                "this process runs an NVIDIA CUDA build."
+            )
         normalized["device"] = "cuda"
 
     for key in ("base_gpu_id", "context_length", "random_seed", "tp_size"):
