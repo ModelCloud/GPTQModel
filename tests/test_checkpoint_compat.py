@@ -38,6 +38,7 @@ def _tokenizer_source() -> str:
         if os.path.isfile(os.path.join(candidate, "tokenizer.json")):
             return candidate
     pytest.skip("no local Qwen2 tokenizer available for the tiny-model fixture")
+    raise RuntimeError("unreachable after pytest.skip")
 
 
 def _build_tiny_qwen2(target_dir: str, *, tied: bool) -> str:
