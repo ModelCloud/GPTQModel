@@ -155,31 +155,18 @@ __global__ void rowmajor_lookup_kernel(
     meta = *reinterpret_cast<const uint2*>(src + lane * 8);
     lows = *reinterpret_cast<const uint4*>(src + kRowMetaBytes + lane * 16);
   }
+  const bool valid = row >= 0 && row < n;
   const uint64_t meta_bits =
       static_cast<uint64_t>(meta.x) | (static_cast<uint64_t>(meta.y) << 32);
-  const bool valid = row >= 0 && row < n;
-  const nf12_rowmajor::Pair a =
-      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits),
-                          lows.x, escapes, num_escapes, base)
-            : nf12_rowmajor::Pair{0u, 0u};
-  const nf12_rowmajor::Pair b =
-      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 16),
-                          lows.y, escapes, num_escapes, base)
-            : nf12_rowmajor::Pair{0u, 0u};
-  const nf12_rowmajor::Pair c =
-      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 32),
-                          lows.z, escapes, num_escapes, base)
-            : nf12_rowmajor::Pair{0u, 0u};
-  const nf12_rowmajor::Pair d =
-      valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 48),
-                          lows.w, escapes, num_escapes, base)
-            : nf12_rowmajor::Pair{0u, 0u};
+  const nf12_rowmajor::Quad q = valid
+      ? nf12_rowmajor::decode_quad(meta_bits, lows, escapes, num_escapes, base)
+      : nf12_rowmajor::Quad{};
 
   uint4* dst = reinterpret_cast<uint4*>(
       reinterpret_cast<__hip_bfloat16*>(out) +
       id_pos * k_blocks * kSuperAtomCols + kb * kSuperAtomCols);
-  dst[2 * lane] = make_uint4(a.lo, b.lo, c.lo, d.lo);
-  dst[2 * lane + 1] = make_uint4(a.hi, b.hi, c.hi, d.hi);
+  dst[2 * lane] = make_uint4(q.a.lo, q.b.lo, q.c.lo, q.d.lo);
+  dst[2 * lane + 1] = make_uint4(q.a.hi, q.b.hi, q.c.hi, q.d.hi);
 }
 
 template <typename Id, int IdsPerCTA, int Threads>
@@ -206,6 +193,21 @@ hipError_t launch_lookup(const uint8_t* packed,
       ids, packed, escapes, num_escapes, exp_base_x4(exp_base),
       n, k_blocks, num_ids, reinterpret_cast<uint4*>(out));
   return hipGetLastError();
+}
+
+template <typename Id>
+hipError_t launch_lookup_any(const uint8_t* packed,
+                             const uint64_t* escapes,
+                             uint32_t num_escapes,
+                             uint32_t exp_base,
+                             int64_t n, int64_t k,
+                             const Id* ids, int64_t num_ids,
+                             void* out, hipStream_t stream) {
+  return num_ids < 8
+      ? launch_lookup<Id, 1, 128>(packed, escapes, num_escapes, exp_base,
+                                  n, k, ids, num_ids, out, stream)
+      : launch_lookup<Id, 8, 256>(packed, escapes, num_escapes, exp_base,
+                                  n, k, ids, num_ids, out, stream);
 }
 
 }  // namespace
@@ -281,22 +283,11 @@ extern "C" hipError_t nf12_rowmajor_lookup(
   }
   if (num_ids == 0) return hipSuccess;
   if (id_bytes == 4) {
-    if (num_ids < 8) {
-      return nf12_hip::launch_lookup<int32_t, 1, 128>(
-          packed, escapes, num_escapes, exp_base, n, k,
-          static_cast<const int32_t*>(ids), num_ids, out, stream);
-    }
-    return nf12_hip::launch_lookup<int32_t, 8, 256>(
+    return nf12_hip::launch_lookup_any(
         packed, escapes, num_escapes, exp_base, n, k,
         static_cast<const int32_t*>(ids), num_ids, out, stream);
   }
-  if (num_ids < 8) {
-    return nf12_hip::launch_lookup<int64_t, 1, 128>(
-        packed, escapes, num_escapes,
-        exp_base, n, k, static_cast<const int64_t*>(ids),
-        num_ids, out, stream);
-  }
-  return nf12_hip::launch_lookup<int64_t, 8, 256>(
+  return nf12_hip::launch_lookup_any(
       packed, escapes, num_escapes,
       exp_base, n, k, static_cast<const int64_t*>(ids),
       num_ids, out, stream);

@@ -201,6 +201,23 @@ class _OperatorCache:
 _OPERATORS = _OperatorCache()
 
 
+def _op(name: str):
+    """Return a cached dispatcher handle, building the extension on first use."""
+
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = getattr(_OPERATORS, name)
+    if op is None:
+        # The dispatcher handle is immutable, so publishing it from concurrent
+        # free-threaded callers is safe.
+        op = getattr(torch.ops.nf12_hip, name)
+        setattr(_OPERATORS, name, op)
+    return op
+
+
 def nf12_hip_supported(device: torch.device | None = None) -> bool:
     """Return whether this host is an RDNA4 device the HIP kernel targets."""
 
@@ -317,20 +334,7 @@ def linear(
 ) -> torch.Tensor:
     """Decode-then-GEMM on RDNA4 (SPEC.md 6.5)."""
 
-    global _EXTENSION_READY
-    if not _EXTENSION_READY:
-        if not _EXTENSION.load():
-            raise RuntimeError(
-                _EXTENSION.last_error_message() or "nf12_hip extension is unavailable"
-            )
-        _EXTENSION_READY = True
-    op = _OPERATORS.linear
-    if op is None:
-        # The dispatcher handle is immutable and safe to publish from concurrent
-        # free-threaded callers, as for the embedding operators below.
-        op = torch.ops.nf12_hip.linear
-        _OPERATORS.linear = op
-    return op(x, packed, escapes, int(exp_base), bias)
+    return _op("linear")(x, packed, escapes, int(exp_base), bias)
 
 
 def embedding(
@@ -346,19 +350,7 @@ def embedding(
     are decoded, and no dense weight is retained between calls.
     """
 
-    global _EXTENSION_READY
-    if not _EXTENSION_READY:
-        if not _EXTENSION.load():
-            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
-        _EXTENSION_READY = True
-    op = _OPERATORS.embedding
-    if op is None:
-        # Assigning the same registered OpOverload from concurrent threads is
-        # safe on the free-threaded interpreter; it is an immutable dispatcher
-        # handle, not mutable state.
-        op = torch.ops.nf12_hip.embedding
-        _OPERATORS.embedding = op
-    return op(ids, packed, escapes, int(exp_base))
+    return _op("embedding")(ids, packed, escapes, int(exp_base))
 
 
 def rowmajor_pack(
@@ -368,16 +360,7 @@ def rowmajor_pack(
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     """Convert canonical NF12 to the embedding-only row-major layout."""
 
-    global _EXTENSION_READY
-    if not _EXTENSION_READY:
-        if not _EXTENSION.load():
-            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
-        _EXTENSION_READY = True
-    op = _OPERATORS.rowmajor_pack
-    if op is None:
-        op = torch.ops.nf12_hip.rowmajor_pack
-        _OPERATORS.rowmajor_pack = op
-    row_packed, row_escapes, original, collisions = op(
+    row_packed, row_escapes, original, collisions = _op("rowmajor_pack")(
         packed, escapes, int(exp_base)
     )
     return row_packed, row_escapes, int(original), int(collisions)
@@ -391,16 +374,7 @@ def rowmajor_embedding(
 ) -> torch.Tensor:
     """Gather exact BF16 rows from the row-major embedding layout."""
 
-    global _EXTENSION_READY
-    if not _EXTENSION_READY:
-        if not _EXTENSION.load():
-            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
-        _EXTENSION_READY = True
-    op = _OPERATORS.rowmajor_embedding
-    if op is None:
-        op = torch.ops.nf12_hip.rowmajor_embedding
-        _OPERATORS.rowmajor_embedding = op
-    return op(ids, row_packed, row_escapes, int(exp_base))
+    return _op("rowmajor_embedding")(ids, row_packed, row_escapes, int(exp_base))
 
 
 __all__ = [

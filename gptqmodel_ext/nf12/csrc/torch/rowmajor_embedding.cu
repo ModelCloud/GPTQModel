@@ -35,13 +35,12 @@ __global__ void rowmajor_kernel(const Id* __restrict__ ids,
     low = __ldg(reinterpret_cast<const uint4*>(src + 32) + lane);
   }
   const uint64_t mm = static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-  const nf12_rowmajor::Pair a = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
-  const nf12_rowmajor::Pair b = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
-  const nf12_rowmajor::Pair c = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
-  const nf12_rowmajor::Pair d = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Quad q = valid
+      ? nf12_rowmajor::decode_quad(mm, low, escapes, num_escapes, base)
+      : nf12_rowmajor::Quad{};
   uint4* dst = reinterpret_cast<uint4*>(out + (i * k + kb * 64) / 4) + 2 * lane;
-  __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
-  __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
+  __stcg(dst, make_uint4(q.a.lo, q.b.lo, q.c.lo, q.d.lo));
+  __stcg(dst + 1, make_uint4(q.a.hi, q.b.hi, q.c.hi, q.d.hi));
 }
 
 // A one-token decode launch has only one ID. Keep one CTA resident and walk
@@ -69,26 +68,13 @@ __global__ void __launch_bounds__(160) rowmajor_one_kernel(
     }
     const uint64_t mm =
         static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-    const nf12_rowmajor::Pair a = valid
-                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm), low.x, escapes,
-                                num_escapes, base)
-                       : nf12_rowmajor::Pair{0, 0};
-    const nf12_rowmajor::Pair b = valid
-                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 16), low.y, escapes,
-                                num_escapes, base)
-                       : nf12_rowmajor::Pair{0, 0};
-    const nf12_rowmajor::Pair c = valid
-                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 32), low.z, escapes,
-                                num_escapes, base)
-                       : nf12_rowmajor::Pair{0, 0};
-    const nf12_rowmajor::Pair d = valid
-                       ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 48), low.w, escapes,
-                                num_escapes, base)
-                       : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Quad q = valid
+        ? nf12_rowmajor::decode_quad(mm, low, escapes, num_escapes, base)
+        : nf12_rowmajor::Quad{};
     uint4* dst =
         reinterpret_cast<uint4*>(out + (kb * 64) / 4) + 2 * lane;
-    __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
-    __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
+    __stcg(dst, make_uint4(q.a.lo, q.b.lo, q.c.lo, q.d.lo));
+    __stcg(dst + 1, make_uint4(q.a.hi, q.b.hi, q.c.hi, q.d.hi));
   }
 }
 
@@ -219,38 +205,23 @@ extern "C" int nf12_rowmajor_pack(const uint8_t* source,
 template <typename Id>
 void launch_kernel(const Id* ids, const uint8_t* packed, const uint64_t* escapes,
                    int64_t num_escapes, uint32_t base, int64_t n, int64_t k,
-                   int64_t m, uint64_t* out, int threads, int ids_per_cta,
-                   cudaStream_t stream) {
-#define LAUNCH(PACK) { \
-  const int groups_per_id = (threads / 4) / PACK; \
-  const dim3 grid(static_cast<unsigned>((m + PACK - 1) / PACK), \
-                  static_cast<unsigned>((k / 64 + groups_per_id - 1) / groups_per_id)); \
-  rowmajor_kernel<Id, PACK><<<grid, threads, 0, stream>>>( \
-      ids, packed, escapes, num_escapes, base, n, k, m, out); \
-  break; \
-}
-  switch (ids_per_cta) {
-    case 1: LAUNCH(1)
-    case 2: LAUNCH(2)
-    case 4: LAUNCH(4)
-    case 8: LAUNCH(8)
-    case 16: LAUNCH(16)
-  }
-#undef LAUNCH
+                   int64_t m, uint64_t* out, cudaStream_t stream) {
+  constexpr int kThreads = 256;
+  constexpr int kIdsPerCta = 8;
+  constexpr int kGroupsPerId = (kThreads / 4) / kIdsPerCta;
+  const dim3 grid(static_cast<unsigned>((m + kIdsPerCta - 1) / kIdsPerCta),
+                  static_cast<unsigned>((k / 64 + kGroupsPerId - 1) / kGroupsPerId));
+  rowmajor_kernel<Id, kIdsPerCta><<<grid, kThreads, 0, stream>>>(
+      ids, packed, escapes, num_escapes, base, n, k, m, out);
 }
 
 extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
                                     const uint64_t* escapes, int64_t num_escapes,
                                     int64_t n, int64_t k, uint32_t base,
                                     int64_t m, uint64_t* out, int id_bytes,
-                                    int threads, int ids_per_cta,
                                     cudaStream_t stream) {
   if (!ids || !packed || !out || n <= 0 || k <= 0 || k % 64 || base > 120 ||
-      m < 0 || (id_bytes != 4 && id_bytes != 8) ||
-      (threads != 64 && threads != 128 && threads != 256 && threads != 512) ||
-      (ids_per_cta != 1 && ids_per_cta != 2 && ids_per_cta != 4 &&
-       ids_per_cta != 8 && ids_per_cta != 16) ||
-      ids_per_cta > threads / 4)
+      m < 0 || (id_bytes != 4 && id_bytes != 8))
     return cudaErrorInvalidValue;
   if (m == 0) return cudaSuccess;
   if (m == 1 && k <= 2048) {
@@ -267,12 +238,10 @@ extern "C" int nf12_rowmajor_lookup(const void* ids, const uint8_t* packed,
   }
   if (id_bytes == 4) {
     launch_kernel<int32_t>(static_cast<const int32_t*>(ids), packed, escapes,
-                           num_escapes, base, n, k, m, out, threads, ids_per_cta,
-                           stream);
+                           num_escapes, base, n, k, m, out, stream);
   } else {
     launch_kernel<int64_t>(static_cast<const int64_t*>(ids), packed, escapes,
-                           num_escapes, base, n, k, m, out, threads, ids_per_cta,
-                           stream);
+                           num_escapes, base, n, k, m, out, stream);
   }
   return cudaGetLastError();
 }
