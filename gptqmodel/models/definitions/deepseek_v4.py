@@ -1825,9 +1825,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
                 device=batch_device
             )
         self._mtp_input_capture_metadata = metadata
+        super().begin_input_capture_example(example=example, batch_device=batch_device)
 
     def end_input_capture_example(self) -> None:
         self._mtp_input_capture_metadata = None
+        super().end_input_capture_example()
 
     def capture_first_layer_input_kwargs(
         self,

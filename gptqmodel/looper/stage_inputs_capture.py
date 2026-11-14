@@ -299,6 +299,20 @@ class StageInputsCapture:
                 batch_device=batch_device,
                 layer_input_kwargs=one_kwargs,
             )
+            # `transformers` 5 builds one mask (and, for Gemma3, one rotary tuple)
+            # per layer *type*. The hook above only fires for the first decoder
+            # layer, so capture the remaining declared types here; replay selects
+            # the entry that belongs to the layer it is running.
+            capture_layer_type_kwargs = getattr(
+                self.gptq_model, "capture_layer_type_replay_kwargs", None
+            )
+            if callable(capture_layer_type_kwargs):
+                one_kwargs = capture_layer_type_kwargs(
+                    args=args,
+                    kwargs=kwargs,
+                    batch_device=batch_device,
+                    layer_input_kwargs=one_kwargs,
+                )
             layer_input_kwargs.append(one_kwargs)
 
             # In normal repeating layer/sbuset early stop happens on the last module forward
