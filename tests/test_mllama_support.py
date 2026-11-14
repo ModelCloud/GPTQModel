@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 import torch
 from torch import nn
+from transformers import AutoModelForCausalLM, MllamaForCausalLM, MllamaTextConfig
 
-from gptqmodel.models.definitions.mllama import MLlamaQModel
+from gptqmodel.models.definitions.mllama import MLlamaQModel, MLlamaTextQModel
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 from gptqmodel.utils.structure import LazyTurtle
 
@@ -71,6 +72,17 @@ class _LanguageModel(nn.Module):
         self.layers = nn.ModuleList(layers or [_DecoderLayer(), _DecoderLayer()])
         self.norm = nn.LayerNorm(4)
         self.rotary_emb = _Rotary()
+        # `run_input_capture` forwards the live text config to the mask builder.
+        self.config = SimpleNamespace(
+            model_type="mllama_text_model",
+            _attn_implementation="eager",
+            hidden_size=4,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            head_dim=4,
+            layer_types=["full_attention", "full_attention"],
+            sliding_window=None,
+        )
 
 
 class _CurrentMllamaWrapper(nn.Module):
@@ -272,3 +284,39 @@ def test_mllama_run_input_capture_moves_input_ids_to_embedding_device():
     instance.run_input_capture(example, use_cache=False, data_device=torch.device("cpu"))
 
     assert embedding.last_input_device == torch.device("meta")
+
+
+def _tiny_mllama_text_config():
+    return MllamaTextConfig(
+        hidden_size=32,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=64,
+        max_position_embeddings=64,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+
+
+def test_mllama_text_config_resolves_to_causal_lm():
+    # Transformers 5.22 ships MllamaForCausalLM for MllamaTextConfig but does
+    # not map the config in AutoModelForCausalLM.
+    model = AutoModelForCausalLM.from_config(_tiny_mllama_text_config())
+    assert isinstance(model, MllamaForCausalLM)
+
+
+def test_mllama_text_layout_resolves_to_inner_decoder():
+    model = MLlamaTextQModel.loader.from_config(_tiny_mllama_text_config())
+
+    language_model = MLlamaTextQModel._resolve_language_model(model)
+
+    assert language_model is model.model
+    assert language_model.layers is not None
+    assert model.get_submodule(MLlamaTextQModel.pre_lm_head_norm_module) is language_model.norm
+
+    layers, layer_names = get_layers_with_prefixes(model, MLlamaTextQModel.extract_layers_node())
+    assert layer_names == ["model.layers.0", "model.layers.1"]
+    assert layers[0] is language_model.layers[0]

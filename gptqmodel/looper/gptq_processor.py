@@ -665,6 +665,43 @@ class GPTQProcessor(LoopProcessor):
                         sample_out.data if torch.is_tensor(sample_out) else sample_out,
                         batch_index=batch_idx,
                     )  # noqa: F821
+            elif (
+                torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() == 2
+                and keep_mask.ndim == 2
+                and inp_tensor.shape[0] != keep_mask.numel()
+            ):
+                # Natively routed experts are called on `[routed_rows, H]`
+                # rows: the router selected a subset of the batch, so the row
+                # count is unrelated to the keep mask. ``register_moe_root_capture_hook``
+                # zeroed the padded rows before routing, but the router still
+                # routed and counted them. Drop every all-zero row here so a
+                # padding-only expert never reaches GPTQ with a zero Hessian
+                # (which would let ``_neutralize_dead_columns`` zero its whole
+                # weight), and so `nsamples` counts only real calibration rows.
+                mask_tls = getattr(self, "_mask_tls", None)
+                padding_present = getattr(mask_tls, "mask_has_padding", None)
+                if padding_present is None:
+                    padding_present = not bool(keep_mask.all())
+                if padding_present:
+                    keep_rows = (inp_tensor != 0).any(dim=-1)
+                    kept_inp = inp_tensor[keep_rows].contiguous()
+                    if (
+                        torch.is_tensor(out)
+                        and out.dim() >= 2
+                        and out.shape[0] == inp_tensor.shape[0]
+                    ):
+                        kept_out = out[keep_rows.to(device=out.device)].contiguous()
+                    else:
+                        kept_out = out
+                    g.add_batch(
+                        kept_inp.data,
+                        kept_out.data if torch.is_tensor(kept_out) else kept_out,
+                        batch_index=batch_idx,
+                    )  # noqa: F821
+                else:
+                    g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
             else:
                 g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
             del inp, out

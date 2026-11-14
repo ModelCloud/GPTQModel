@@ -243,6 +243,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 x, self.qweight, self.group_size, self.scales, self.qzeros
             )
         elif x.device.type == "cpu":
+            self.torch_fused_op.out_dtype = (
+                torch.float32
+                if self.bias is not None and x.dtype == torch.float16
+                else None
+            )
             out = self.torch_fused_op(x)
         else:
             raise NotImplementedError
@@ -341,8 +346,13 @@ class TorchFusedAwqLinear(AWQuantLinear):
             and self.linear_mode is None
             and TORCH_HAS_FUSED_OPS
             # FP16 can overflow before a cancelling bias. BF16 has FP32's
-            # range, so it can use the fused op and add the bias once.
-            and (self.bias is None or x_flat.dtype == torch.bfloat16)
+            # range, so it can use the fused op and add the bias once. The CPU
+            # fused op returns an FP32 product for a biased FP16 layer, so it
+            # can add the bias before the single visible cast too.
+            and (
+                self.bias is None
+                or x_flat.dtype in (torch.bfloat16, torch.float16)
+            )
         ):
             capture_fused_train_state(self)
             self.transform(x_flat.dtype, x_flat.device.type)

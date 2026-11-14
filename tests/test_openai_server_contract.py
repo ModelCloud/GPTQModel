@@ -781,6 +781,75 @@ def test_concurrent_seeded_requests_each_keep_their_own_seed(model):
     assert sorted(stub.seen_seeds) == [11, 22]
 
 
+def test_rng_restore_stays_inside_the_generation_lock(model, monkeypatch):
+    """A delayed restore must not overwrite the next request's seed.
+
+    The restore used to run in a ``finally`` after ``with _generation_lock``
+    exited. A second request could then seed and start generating before the
+    first request restored the global RNG state, so its draw came from the
+    previous request's stream. The 0.1 s delay stands in for preemption.
+    """
+
+    import gptqmodel.utils.openai_server as server_module
+
+    real_restore = server_module._restore_rng_state
+
+    def delayed_restore(state):
+        time.sleep(0.1)
+        real_restore(state)
+
+    monkeypatch.setattr(server_module, "_restore_rng_state", delayed_restore)
+
+    class _DrawingSeed(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self.draws = []
+            self._guard = threading.Lock()
+
+        def generate(self, **kwargs):
+            # Stay inside the generation lock long enough for the previous
+            # request's (buggy, lock-free) restore to land mid-generation.
+            time.sleep(0.3)
+            seed = torch.initial_seed()
+            draw = torch.rand(1).item()
+            with self._guard:
+                self.draws.append((seed, draw))
+            return "alpha"
+
+    stub = _DrawingSeed(model.tokenizer)
+    server = OpenAiServer(model=stub)
+
+    def payload(seed):
+        return {
+            "model": "stub-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.7,
+            "seed": seed,
+        }
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            return await asyncio.gather(
+                client.post("/v1/chat/completions", json=payload(11)),
+                client.post("/v1/chat/completions", json=payload(22)),
+            )
+
+    responses = asyncio.run(scenario())
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(stub.draws) == 2
+    # A restore outside the lock overwrites the next request's seed, so this
+    # set becomes something like {11, 787} instead of the requested seeds.
+    assert sorted(seed for seed, _ in stub.draws) == [11, 22], stub.draws
+    expected = {}
+    for seed in (11, 22):
+        torch.manual_seed(seed)
+        expected[seed] = torch.rand(1).item()
+    for seed, draw in stub.draws:
+        assert draw == pytest.approx(expected[seed], rel=0, abs=0), (seed, draw)
+
+
 def test_multi_eos_token_ids_from_generation_config(tokenizer):
     gen_eos_list = [128001, 128008]
 

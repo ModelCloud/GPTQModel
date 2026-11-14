@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import difflib
 import hashlib
 import json
 import math
@@ -4091,7 +4092,50 @@ def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str
     return {key: value for key, value in payload.items() if key in target_field_names}
 
 
+_QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS = frozenset({"weight_only"})
+# Serialized payloads can carry derived keys that are not dataclass fields.
+# Accept them for the factory so `QuantizeConfig(**config.to_dict())` keeps
+# working; the field they derive from is authoritative when both are present.
+_QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS = frozenset({"backend"})
+
+
+def _validate_quantize_config_factory_kwargs(target_cls, payload: Dict[str, Any]) -> None:
+    known_fields = _known_quantize_config_field_names()
+    allowed_keys = (
+        known_fields
+        | _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS
+        | _QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS
+    )
+    unknown = sorted(key for key in payload if key not in allowed_keys)
+    if unknown:
+        details = []
+        for key in unknown:
+            matches = difflib.get_close_matches(key, sorted(allowed_keys), n=1)
+            details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+        raise TypeError(
+            "QuantizeConfig: unexpected quantization config keyword(s): "
+            + ", ".join(details)
+            + f". `{target_cls.__name__}` accepts fields from the quantization config classes."
+        )
+
+    # Include init=False fields: the concrete class owns and normalises them,
+    # so passing one back from `to_dict` is not a foreign-method setting.
+    target_field_names = {field.name for field in fields(target_cls)}
+    ignored = sorted(
+        key
+        for key in payload
+        if key not in target_field_names and key not in _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS
+    )
+    if ignored:
+        log.warn(
+            f"QuantizeConfig: `{target_cls.__name__}` does not accept {ignored}; "
+            "these settings belong to another quantization method and are ignored. "
+            "Use the matching concrete config class to set them."
+        )
+
+
 def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _validate_quantize_config_factory_kwargs(target_cls, payload)
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
     if target_cls is RTNConfig:
         normalized = _normalize_rtn_kwargs(normalized)
@@ -4133,10 +4177,13 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
 
     normalized = dict(kwargs)
     if FORMAT_FIELD_COMPAT_MARLIN in normalized:
-        raise ValueError(
-            "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
-            "or `format=\"gptq\"` for new GPTQ quantization."
-        )
+        # Third-party AutoGPTQ checkpoints write `is_marlin_format: false`.
+        # Only the legacy `true` value requested the removed runtime layout.
+        if _is_truthy_compat_flag(normalized.pop(FORMAT_FIELD_COMPAT_MARLIN)):
+            raise ValueError(
+                "QuantizeConfig: `is_marlin_format: true` is no longer supported. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
+                "or `format=\"gptq\"` for new GPTQ quantization."
+            )
     if METHOD_FIELD_CODE not in normalized and QUANT_METHOD_FIELD in normalized:
         normalized[METHOD_FIELD_CODE] = normalized[QUANT_METHOD_FIELD]
     normalized.pop(QUANT_METHOD_FIELD, None)
@@ -4144,7 +4191,34 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
     if FORMAT_FIELD_CODE not in normalized and FORMAT_FIELD_CHECKPOINT in normalized:
         normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
     normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
+
+    # Serialized payloads also use the legacy `version`/`fmt` names for the
+    # checkpoint format and `wbits` for the bit width.
+    for legacy_key in ("version", "fmt"):
+        if legacy_key in normalized:
+            legacy_value = normalized.pop(legacy_key)
+            if FORMAT_FIELD_CODE not in normalized:
+                normalized[FORMAT_FIELD_CODE] = legacy_value
+    if "wbits" in normalized:
+        wbits = normalized.pop("wbits")
+        if BITS_FIELD_CODE not in normalized:
+            normalized[BITS_FIELD_CODE] = wbits
+
+    if "zero_point" in normalized:
+        zero_point = normalized.pop("zero_point")
+        if not isinstance(zero_point, bool):
+            raise TypeError("QuantizeConfig: `zero_point` must be a bool")
+        if SYMMETRIC_FIELD_CODE not in normalized:
+            normalized[SYMMETRIC_FIELD_CODE] = not zero_point
     return normalized
+
+
+def _is_truthy_compat_flag(value: Any) -> bool:
+    """Interpret a legacy boolean field, tolerating JSON strings."""
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 @dataclass
@@ -4453,13 +4527,55 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.offload_to_disk_path = self._offload_temp_dir.name
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
-    def __post_init__(self):
+    def _normalize_serialization_fields(self) -> None:
+        """Normalize fields that ``to_dict`` serializes with enum/dataclass assumptions.
+
+        Concrete configs that override ``__post_init__`` without delegating to
+        this base implementation must call this helper explicitly. The
+        ``test_every_concrete_config_normalizes_serialized_fields`` regression
+        covers that contract.
+        """
+
         try:
             self.auto_dtype_cast = AutoDtypeCast(self.auto_dtype_cast)
         except ValueError as exc:
             raise ValueError(
                 "auto_dtype_cast must be 'auto_nf12' or 'off'"
             ) from exc
+
+        if isinstance(self.telemetry, dict):
+            self.telemetry = TelemetryConfig(**self.telemetry)
+        elif not isinstance(self.telemetry, TelemetryConfig):
+            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
+
+        self.mse = _normalize_mse(self.mse)
+        # `sym: null` is written by some third-party configs; it means "use the
+        # default" rather than an unknown tri-state. Normalize before the bool
+        # field validation runs.
+        if self.sym is None:
+            self.sym = True
+
+    def _validate_bool_fields(self) -> None:
+        for field_name in (
+            "sym",
+            "true_sequential",
+            "lm_head",
+            "compile",
+            "offload_to_disk",
+            "keep_processor_logs",
+            "auto_forward_data_parallel",
+            "wait_for_submodule_finalizers",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"{self.__class__.__name__}: `{field_name}` must be a bool, "
+                    f"got {type(value).__name__} ({value!r})."
+                )
+
+    def __post_init__(self):
+        self._normalize_serialization_fields()
+        self._validate_bool_fields()
         self.method = _normalize_quant_method(self.method)
         format_family = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -4537,7 +4653,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if self.desc_act is None:
             self.desc_act = self.default_desc_act()
         elif not isinstance(self.desc_act, bool):
-            self.desc_act = bool(self.desc_act)
+            raise TypeError(
+                f"{self.__class__.__name__}: `desc_act` must be a bool or None, "
+                f"got {type(self.desc_act).__name__} ({self.desc_act!r})."
+            )
 
         if self.activation is not None:
             activation = ActivationConfig.from_value(self.activation)
@@ -4565,12 +4684,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
-        if isinstance(self.telemetry, dict):
-            self.telemetry = TelemetryConfig(**self.telemetry)
-        elif not isinstance(self.telemetry, TelemetryConfig):
-            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
-
-        self.mse = _normalize_mse(self.mse)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -4734,9 +4847,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             key = key.lower()
 
             if key == FORMAT_FIELD_COMPAT_MARLIN:
-                raise ValueError(
-                    "QuantizeConfig: `is_marlin_format` is no longer supported. Replace it with an explicit `format` field."
-                )
+                # Accept the `false` value that AutoGPTQ and hugging-quants
+                # checkpoints persist; only the removed `true` layout is an
+                # error.
+                if _is_truthy_compat_flag(val):
+                    raise ValueError(
+                        "QuantizeConfig: `is_marlin_format: true` is no longer supported. Replace it with an explicit `format` field."
+                    )
+                continue
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 if _looks_like_fp8_fmt(val):
@@ -4843,6 +4961,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "mock_quantization": "mock_quantization",
             "act_group_aware": "act_group_aware",
             "true_sequential": "true_sequential",
+            "static_groups": "static_groups",
             "damp_percent": "damp_percent",
             "damp_auto_increment": "damp_auto_increment",
             "opt_rotation_epochs": "opt_rotation_epochs",
@@ -6435,6 +6554,12 @@ class EXL3Config(PreProcessorConfig):
 
     def __post_init__(self):
         self._normalize_preprocessor_state()
+        # EXL3 does not delegate to BaseQuantizeConfig.__post_init__, so it
+        # must run the serialization normalisation explicitly. Without it
+        # `to_dict()` sees raw strings/dicts for auto_dtype_cast, telemetry,
+        # and mse, and loaded checkpoints fail on re-save.
+        self._normalize_serialization_fields()
+        self._validate_bool_fields()
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)

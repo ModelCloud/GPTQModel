@@ -543,6 +543,64 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
     return expand_selector_device_family(selected)
 
 
+_ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})
+
+
+def _is_accelerate_device_map_string(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered in _ACCELERATE_DEVICE_MAP_STRINGS or lowered.startswith("balanced_low_")
+
+
+def _validate_device_and_device_map_agree(device, device_map) -> None:
+    """Reject a `device` request that contradicts an explicit `device_map`."""
+
+    requested_family = selector_device_family(normalize_device_device_map(device, None))
+    mapped_family = selector_device_family(normalize_device_device_map(None, device_map))
+    if requested_family != mapped_family:
+        requested_name = requested_family.value if requested_family is not None else None
+        mapped_name = mapped_family.value if mapped_family is not None else None
+        raise ValueError(
+            f"`device={device!r}` conflicts with `device_map={device_map!r}`: "
+            f"`device` selects {requested_name} but `device_map` selects {mapped_name}. "
+            "Pass one placement argument, or make them agree."
+        )
+
+
+def _normalize_requested_device_map(device, device_map):
+    """Apply Hugging Face string shorthand and check device/device_map agreement.
+
+    Hugging Face accepts `device_map="cpu"` and `device_map="cuda:0"` as
+    shorthand for `{"": value}`. GPT-QModel used to reject those strings and
+    then let an explicit `device_map` silently replace `device`.
+    """
+
+    if device_map is None:
+        return None
+    if isinstance(device_map, str):
+        if _is_accelerate_device_map_string(device_map):
+            normalized = device_map
+        else:
+            try:
+                torch.device(device_map)
+            except (RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    "If passing a string for `device_map`, choose 'auto', 'balanced', "
+                    "'balanced_low_0', 'sequential', or a concrete device such as 'cpu' "
+                    "or 'cuda:0'."
+                ) from exc
+            if device_map.strip().lower() in {"disk", "meta"}:
+                raise ValueError(
+                    "A full-model `device_map` cannot be an offload target; use a "
+                    "per-module map for 'disk' or 'meta' entries."
+                )
+            normalized = {"": device_map}
+    else:
+        normalized = dict(device_map)
+    if device is not None:
+        _validate_device_and_device_map_agree(device, normalized)
+    return normalized
+
+
 def _external_runtime_device_kwargs(
     device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
@@ -674,6 +732,17 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     _check_defuser_version()
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
+    # Defuser gates `convert_model()` on its own model registry. Model types
+    # that GPT-QModel supports through the generic Transformers experts
+    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+    # so run Defuser's generic replacement pass explicitly instead of leaving
+    # the fused 3-D expert parameters unquantized.
+    if not converted and getattr(cls, "defuser_generic_experts", False):
+        from defuser.modeling.update_module import update_module
+
+        update_module(model, cleanup_original=cleanup_original)
+        converted = True
+
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())
     if defuser_module_paths:
         for module_path in defuser_module_paths:
@@ -689,6 +758,10 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     # Defuser has no matching registration and reports no structural change.
     if callable(after_conversion):
         after_conversion(model)
+
+    from ..utils.defuser_compat import apply_glm4_moe_router_compat
+
+    apply_glm4_moe_router_compat()
 
     return converted
 
@@ -1732,7 +1805,7 @@ def ModelLoader(cls):
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map = device_map
+        requested_device_map = _normalize_requested_device_map(device, device_map)
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.

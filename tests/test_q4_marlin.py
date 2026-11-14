@@ -49,14 +49,6 @@ class TestQ4Marlin(ModelTest):
         ]
     )
     def test_generation(self, model_id):
-        if model_id == "/monster/data/model/gemma-1.1-2b-it-GPTQ":
-            with self.assertRaisesRegex(
-                ValueError,
-                r"is_marlin_format.*no longer supported"
-            ):
-                GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
-            return
-
         model_q = GPTQModel.load(model_id, device="cuda:0", backend=BACKEND.MARLIN)
         has_marlin = False
         for _, module in model_q.named_modules():

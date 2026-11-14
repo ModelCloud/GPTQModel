@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import random
+from collections.abc import Mapping
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 import torch
@@ -349,7 +350,10 @@ def prepare_calibration_dataset(
 
     processed_examples: List[Dict[str, torch.Tensor]] = []
     for idx, example in enumerate(raw_examples):
-        if isinstance(example, dict):
+        # Tokenizer outputs are `BatchEncoding`, a `UserDict` rather than a
+        # builtin dict. Accept every mapping so the AutoGPTQ-style
+        # `[tokenizer(text), ...]` calibration input reaches the input_ids path.
+        if isinstance(example, Mapping):
             if "messages" in example:
                 apply_fn, _ = _get_message_template()
                 if apply_fn is None:

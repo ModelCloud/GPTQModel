@@ -6,13 +6,25 @@
 from types import SimpleNamespace
 
 import torch
-from transformers import AutoModelForCausalLM, AutoModelForPreTraining
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForPreTraining,
+    MllamaForCausalLM,
+    MllamaTextConfig,
+)
 
 from ...utils.model import get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+
+
+# Transformers 5.22 ships `MllamaForCausalLM` for the text-only model but does
+# not register `MllamaTextConfig` with `AutoModelForCausalLM`, so
+# `AutoModelForCausalLM.from_config(MllamaTextConfig)` raises "Unrecognized
+# configuration class" and `mllama_text_model` checkpoints cannot load.
+AutoModelForCausalLM.register(MllamaTextConfig, MllamaForCausalLM, exist_ok=True)
 
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
@@ -82,6 +94,12 @@ class MLlamaQModel(BaseQModel):
             language_model = get_module(model, prefix)
             if language_model is not None:
                 return language_model
+
+        # Text-only `MllamaForCausalLM` exposes the decoder as `model.model`
+        # (an `MllamaTextModel`) instead of either multimodal layout above.
+        inner = getattr(model, "model", None)
+        if inner is not None and getattr(inner, "layers", None) is not None:
+            return inner
 
         raise AttributeError("Unable to resolve an Mllama language model layout.")
 
