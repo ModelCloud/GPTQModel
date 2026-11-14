@@ -129,7 +129,7 @@ struct WmmaRoute {
 template <WeightSource S, bool kRouted, int kMt, int kSplits, bool kDbl, bool kPad>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     wmma_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
-                const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n, int64_t k,
+                const uint4* __restrict__ escapes, uint32_t num_escapes, uint32_t base_x4, int64_t n, int64_t k,
                 int64_t m_rows, __hip_bfloat16* __restrict__ out,
                 const __hip_bfloat16* __restrict__ bias, float* __restrict__ partial,
                 WmmaRoute route_in) {
@@ -137,7 +137,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 #if !NF12_HAS_WMMA
   // gfx1250 has no wmma-128b-insts. The body still has to exist so the host
   // and device passes agree on the symbol; the dispatcher never selects it.
-  (void)x; (void)packed; (void)escapes; (void)base_x4; (void)n; (void)k; (void)m_rows;
+  (void)x; (void)packed; (void)escapes; (void)num_escapes; (void)base_x4; (void)n; (void)k; (void)m_rows;
   (void)out; (void)bias; (void)partial; (void)route_in;
   if (blockIdx.x == 0xffffffffu && threadIdx.x == 0xffffffffu) out[0] = __float2bfloat16(0.f);
 #else
@@ -156,6 +156,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // scanned count are free: they return before touching memory.
   int64_t m = m_rows;
   int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
+  uint32_t esc_count = num_escapes;
   WmmaRoute route = route_in;
   if constexpr (kRouted) {
     int64_t rem = int64_t(blockIdx.z) * gridDim.y + blockIdx.y;
@@ -182,7 +183,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     // so all three are resolved here rather than by the launcher.
     packed += int64_t(e) * route.weight_expert_vecs;
     base_x4 = exp_base_x4(route.exp_base[e]);
-    if (escapes != nullptr) escapes = escapes + route.escape_offsets[e];
+    if (escapes != nullptr) {
+      const int64_t esc_lo = route.escape_offsets[e];
+      const int64_t esc_hi = route.escape_offsets[e + 1];
+      escapes = escapes + esc_lo;
+      esc_count = esc_hi > esc_lo ? static_cast<uint32_t>(esc_hi - esc_lo) : 0u;
+    }
   }
   const int64_t m_local = min(int64_t(kMt * 16), m - m0);
   if (m_local <= 0) return;
@@ -272,7 +278,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Decode the planes into the row-major 16x64 shared tile.
   auto decode_into = [&](const uint4 (&planes)[SourceTraits<S>::kLoads], __hip_bfloat16* dst) {
     AtomRegs r;
-    source_planes_to_atoms<S>(planes, base_x4, escapes, r);
+    source_planes_to_atoms<S>(planes, base_x4, escapes, esc_count, r);
 
     RowTile xr;
     atoms_to_tile(r, xr);
@@ -617,7 +623,7 @@ static WmmaPlan wmma_plan(int64_t n, int64_t k, int64_t m) {
 // rather than a second implementation.
 template <WeightSource Src>
 static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
-                                   uint32_t exp_base, const void* x, void* out, int64_t n,
+                                   uint32_t exp_base, uint32_t num_escapes, const void* x, void* out, int64_t n,
                                    int64_t k, int64_t m, const void* bias, void* workspace,
                                    size_t workspace_bytes, hipStream_t stream) {
   if constexpr (Src == WeightSource::kNf12) {
@@ -660,7 +666,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
 #define NF12_LAUNCH(SRC, ROUTED, T, SPL, D, P)                                          \
   wmma_kernel<SRC, ROUTED, T, SPL, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(           \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),  \
-      escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),     \
+      escapes, num_escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out), \
       reinterpret_cast<const __hip_bfloat16*>(bias), partial, route)
 
   // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
@@ -806,7 +812,7 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
   // single tile keeps the VGPR budget low enough for several CTAs per CU.
   wmma_kernel<Src, true, 1, 1, false, false><<<grid, kThreadsPerBlock, 0, stream>>>(
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),
-      escapes, 0u, n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, nullptr, route);
+      escapes, 0u, 0u, n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, nullptr, route);
   return hipGetLastError();
 }
 
@@ -852,10 +858,10 @@ size_t nf12_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
 
 
 hipError_t nf12_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                                uint32_t num_escapes, const void* x, void* out, int64_t n, int64_t k, int64_t m,
                                 const void* bias, void* workspace, size_t workspace_bytes,
                                 hipStream_t stream) {
-  return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
+  return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, num_escapes, x, out, n, k, m, bias,
                                                workspace, workspace_bytes, stream);
 }
 
@@ -863,7 +869,7 @@ hipError_t nf12_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_
 hipError_t nf12_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out, int64_t n,
                                       int64_t k, int64_t m, const void* bias, void* workspace,
                                       size_t workspace_bytes, hipStream_t stream) {
-  return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias,
+  return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, 0u, x, out, n, k, m, bias,
                                                 workspace, workspace_bytes, stream);
 }
 

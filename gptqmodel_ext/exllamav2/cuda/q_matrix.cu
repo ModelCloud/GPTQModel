@@ -554,32 +554,57 @@ bool QMatrix::make_sequential(const uint32_t* cpu_g_idx)
     uint32_t* cpu_x_map = (uint32_t*) malloc(height * sizeof(uint32_t));
     uint32_t* cpu_x_map_inv = (uint32_t*) malloc(height * sizeof(uint32_t));
 
+    // Host-side remapping writes are only safe while every checkpoint index is
+    // inside the histogram and every target row is inside the matrix. Reject
+    // the tensor instead of corrupting the heap; the caller reports the error.
+    auto fail_cleanup = [&]() -> bool {
+        cudaFree(cuda_new_qweight);
+        free(cpu_g_idx_map);
+        free(cpu_x_map);
+        free(cpu_x_map_inv);
+        return false;
+    };
+
     // Group histogram
 
-    for (int i = 0; i < height; i++) cpu_g_idx_map[cpu_g_idx[i]]++;
+    for (int i = 0; i < height; i++)
+    {
+        if (cpu_g_idx[i] >= (uint32_t) groups) return fail_cleanup();
+        cpu_g_idx_map[cpu_g_idx[i]]++;
+    }
 
     // Group map
 
-    for (int i = 0, acc = 0; i < groups; i++)
+    // A uint32_t accumulator is required: a `short` truncates a group with
+    // >= 32768 rows and makes the prefix sum negative.
+    uint32_t acc = 0;
+    for (int i = 0; i < groups; i++)
     {
-        short tmp = cpu_g_idx_map[i];
+        uint32_t tmp = cpu_g_idx_map[i];
         cpu_g_idx_map[i] = acc;
         acc += tmp;
+        if (acc > (uint32_t) height) return fail_cleanup();
     }
+    if (acc != (uint32_t) height) return fail_cleanup();
 
     // X map (inverse)
 
     for (int row = 0; row < height; row++)
     {
         uint32_t target_group = cpu_g_idx[row];
-        uint32_t target_row = cpu_g_idx_map[target_group];
-        cpu_g_idx_map[target_group]++;
+        uint32_t target_row = cpu_g_idx_map[target_group]++;
+        if (target_row >= (uint32_t) height) return fail_cleanup();
         cpu_x_map_inv[row] = target_row;
     }
 
     // X map
 
-    for (int row = 0; row < height; row++) cpu_x_map[cpu_x_map_inv[row]] = row;
+    for (int row = 0; row < height; row++)
+    {
+        uint32_t target_row = cpu_x_map_inv[row];
+        if (target_row >= (uint32_t) height) return fail_cleanup();
+        cpu_x_map[target_row] = row;
+    }
 
     // Reduce to uint16_t
 

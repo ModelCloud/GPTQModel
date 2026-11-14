@@ -53,7 +53,7 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
 #pragma unroll
   for (int r = 0; r < KROT; r++) {
     const int rr = reverse ? (KROT - 1 - r) : r;
-    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE>(
+    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(
         x_grp, reg_idx[rr], reverse ? -reg_theta[rr] : reg_theta[rr]);
     __syncthreads();
   }
@@ -89,7 +89,7 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
 #pragma unroll
   for (int r = 0; r < KROT; r++) {
     const int rr = reverse ? (KROT - 1 - r) : r;
-    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE>(
+    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(
         x_grp, reg_idx[rr], reverse ? -reg_theta[rr] : reg_theta[rr]);
     __syncthreads();
   }
@@ -269,7 +269,7 @@ __global__ void rotate_pair_kernel(const scalar_t *__restrict__ x, const scalar_
 
 #pragma unroll
   for (int r = 0; r < KROT; r++) {
-    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE>(x_grp, reg_idx[r], reg_theta[r]);
+    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(x_grp, reg_idx[r], reg_theta[r]);
     __syncthreads();
   }
 
@@ -409,8 +409,8 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
 #pragma unroll
   for (int r = KROT - 1; r >= 0; r--) {
     const float tr = reg_theta[r];
-    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE>(x_grp, reg_idx[r], -tr);
-    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE>(g_grp, reg_idx[r], -tr);
+    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(x_grp, reg_idx[r], -tr);
+    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(g_grp, reg_idx[r], -tr);
     __syncthreads();
 
     const int i = reg_idx[r] & 0xFFFF;
@@ -1001,7 +1001,8 @@ int64_t rotation_autotune_cache_size() {
 }
 
 void validate_rotation_inputs(const at::Tensor &x, const at::Tensor &idx,
-                              const at::Tensor &theta, const at::Tensor &scales) {
+                              const at::Tensor &theta, const at::Tensor &scales,
+                              int64_t group_size) {
   // Rotation kernels use raw pointers and vectorized loads, so reject invalid
   // devices/layouts before dispatching a specialized launch variant.
   const bool has_scale = scales.defined() && scales.numel() > 0;
@@ -1023,6 +1024,20 @@ void validate_rotation_inputs(const at::Tensor &x, const at::Tensor &idx,
               "ParoQuant rotation theta must be a 2D floating-point tensor.");
   TORCH_CHECK(!has_scale || (scales.is_floating_point() && scales.dim() >= 1),
               "ParoQuant rotation scales must be floating-point.");
+  // The kernels index these tensors with the checkpoint's pair/theta layout.
+  // Check the geometry at the op entry so a direct caller cannot walk past
+  // them; pair *values* are validated once at load (and masked in the kernel).
+  const int64_t h = x.size(-1);
+  TORCH_CHECK(group_size > 0 && h % group_size == 0,
+              "ParoQuant rotation hidden size must be divisible by group_size.");
+  TORCH_CHECK(idx.size(1) == h,
+              "ParoQuant rotation indices must have one pair row per hidden column, got ",
+              idx.size(1), " for hidden size ", h);
+  TORCH_CHECK(theta.size(0) == idx.size(0) && theta.size(1) == h / 2,
+              "ParoQuant rotation theta must be [krot, hidden/2], got ", theta.sizes());
+  TORCH_CHECK(!has_scale || scales.numel() == h,
+              "ParoQuant rotation scales must have one value per hidden column, got ",
+              scales.numel());
 }
 
 } // namespace
@@ -1040,7 +1055,7 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
   int64_t krot = theta.size(0);
   TORCH_CHECK(krot == idx.size(0), "theta.size(0) must equal idx_ij.size(0)");
   at::Tensor scales = scales_opt.value_or(at::Tensor());
-  validate_rotation_inputs(x, idx, theta, scales);
+  validate_rotation_inputs(x, idx, theta, scales, group_size);
   const bool has_scale = scales.defined() && scales.numel() > 0;
   const LaunchConfig config = resolve_runtime_launch_config(
       x, idx, theta, scales, group_size, krot, static_cast<int>(requested_cta_m),
@@ -1074,8 +1089,8 @@ std::tuple<at::Tensor, at::Tensor> rotate_pair(at::Tensor x, at::Tensor x2, at::
   TORCH_CHECK(x.scalar_type() == x2.scalar_type(),
               "ParoQuant rotate_pair expects operands with equal dtypes.");
   const at::Tensor no_scales;
-  validate_rotation_inputs(x, idx, theta, no_scales);
-  validate_rotation_inputs(x2, idx, theta, no_scales);
+  validate_rotation_inputs(x, idx, theta, no_scales, group_size);
+  validate_rotation_inputs(x2, idx, theta, no_scales, group_size);
   const int64_t krot = theta.size(0);
   const LaunchConfig config = resolve_runtime_launch_config(
       x, idx, theta, no_scales, group_size, krot, static_cast<int>(requested_cta_m),
@@ -1095,8 +1110,8 @@ rotate_pair_grad(at::Tensor x, at::Tensor g, at::Tensor idx, at::Tensor theta,
   TORCH_CHECK(x.scalar_type() == g.scalar_type(),
               "ParoQuant rotate_pair_grad expects operands with equal dtypes.");
   const at::Tensor no_scales;
-  validate_rotation_inputs(x, idx, theta, no_scales);
-  validate_rotation_inputs(g, idx, theta, no_scales);
+  validate_rotation_inputs(x, idx, theta, no_scales, group_size);
+  validate_rotation_inputs(g, idx, theta, no_scales, group_size);
   const int64_t krot = theta.size(0);
   const LaunchConfig config = resolve_runtime_launch_config(
       x, idx, theta, no_scales, group_size, krot, static_cast<int>(requested_cta_m),

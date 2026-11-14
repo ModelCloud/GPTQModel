@@ -30,7 +30,7 @@ namespace {
 template <WeightSource S, int Warps, bool Cluster = false>
 __global__ void __launch_bounds__(Warps * 32) small_m_direct_kernel(
     const __nv_bfloat16* x, int64_t ldx, int m, const uint8_t* weights, const uint4* escapes,
-    uint32_t base, int kb, int chunk, const __nv_bfloat16* bias, __nv_bfloat16* y,
+    uint32_t base, uint32_t num_escapes, int kb, int chunk, const __nv_bfloat16* bias, __nv_bfloat16* y,
     int64_t ldy, bool weights_ready) {
   using T = WeightTraits<S, true>;
   const int lane = threadIdx.x & 31;
@@ -73,7 +73,7 @@ __global__ void __launch_bounds__(Warps * 32) small_m_direct_kernel(
       const int p = warp + (step + d) * Warps;
       if (p < count) {
         uint32_t a[4][4];
-        T::fragments(ring[d], base, escapes, a);
+        T::fragments(ring[d], base, escapes, num_escapes, a);
         if (p + 2 * Warps < count) {
 #pragma unroll
           for (int j = 0; j < T::kLoads; ++j)
@@ -156,7 +156,7 @@ __global__ void __launch_bounds__(Warps * 32) small_m_direct_kernel(
 }
 
 using Kernel = void (*)(const __nv_bfloat16*, int64_t, int, const uint8_t*, const uint4*,
-                        uint32_t, int, int, const __nv_bfloat16*, __nv_bfloat16*, int64_t, bool);
+                        uint32_t, uint32_t, int, int, const __nv_bfloat16*, __nv_bfloat16*, int64_t, bool);
 
 template <WeightSource S>
 Kernel select_kernel(const SmallMDirectConfig& config) {
@@ -218,7 +218,7 @@ cudaError_t linear_small_m_direct(const LinearArgs& a, const SmallMDirectConfig&
   const int chunk = (kb + config.kc - 1) / config.kc;
   const bool weights_ready = a.source == WeightSource::kNF12 && a.weights_ready;
   return cudaLaunchKernelEx(&launch, kernel, a.x, a.ldx, static_cast<int>(a.m), a.weight,
-                            a.escapes, exp_base_x4(a.exp_base), kb, chunk,
+                            a.escapes, exp_base_x4(a.exp_base), a.num_escapes, kb, chunk,
                             a.bias, a.y, a.ldy, weights_ready);
 }
 

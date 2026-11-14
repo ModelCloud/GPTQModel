@@ -40,15 +40,15 @@ extern "C" {
 // `out` is deliberately `void*`: the .hip translation unit owns the bf16 type
 // (__hip_bfloat16) and hipify would mangle any HIP bf16 spelling used here.
 hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                          int64_t n, int64_t k, void* out, int64_t ldo,
+                          uint32_t num_escapes, int64_t n, int64_t k, void* out, int64_t ldo,
                           hipStream_t stream);
 
 hipError_t nf12_decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                            int64_t n, int64_t k, void* out, int64_t ldo,
+                            uint32_t num_escapes, int64_t n, int64_t k, void* out, int64_t ldo,
                             hipStream_t stream);
 
 hipError_t nf12_sub_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                         int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
+                         uint32_t num_escapes, int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
                          hipStream_t stream);
 
 hipError_t nf12_embedding(const uint8_t* packed, const uint4* escapes,
@@ -77,7 +77,8 @@ hipError_t nf12_selftest(uint32_t* out, hipStream_t stream);
 // [m, n]. `out` may be `void*` for the same reason as decode's.
 int nf12_linear_fused_small_m_supported(int64_t m);
 hipError_t nf12_linear_fused(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                                uint32_t num_escapes, const void* x, void* out, int64_t n, int64_t k,
+                                int64_t m,
                                 const void* bias, hipStream_t stream);
 
 // Matrix-core path for the mid-M band (nf12_wmma.hip). Returns 0 when the
@@ -85,7 +86,8 @@ hipError_t nf12_linear_fused(const uint8_t* packed, const uint4* escapes, uint32
 int nf12_wmma_supported(int64_t m);
 size_t nf12_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m);
 hipError_t nf12_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                               const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                               uint32_t num_escapes, const void* x, void* out, int64_t n, int64_t k,
+                               int64_t m,
                                const void* bias, void* workspace, size_t workspace_bytes,
                                hipStream_t stream);
 
@@ -186,12 +188,13 @@ torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& es
   auto out = torch::empty({n, k}, packed.options().dtype(dtype));
 
   const auto* escapes_ptr = reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>());
+  const auto num_escapes = static_cast<uint32_t>(escapes.size(0));
   const hipError_t status = dtype == at::kFloat
       ? nf12_decode_fp32(packed.data_ptr<uint8_t>(), escapes_ptr,
-                         static_cast<uint32_t>(exp_base), n, k,
+                         static_cast<uint32_t>(exp_base), num_escapes, n, k,
                          static_cast<void*>(out.data_ptr()), k, current_stream())
       : nf12_decode(packed.data_ptr<uint8_t>(), escapes_ptr,
-                    static_cast<uint32_t>(exp_base), n, k,
+                    static_cast<uint32_t>(exp_base), num_escapes, n, k,
                     static_cast<void*>(out.data_ptr()), k, current_stream());
   TORCH_CHECK(status == hipSuccess, op, " failed: ", hipGetErrorString(status));
   return out;
@@ -222,7 +225,7 @@ torch::Tensor sub_fp32_dispatch(const torch::Tensor& packed, const torch::Tensor
   const hipError_t status = nf12_sub_fp32(
       packed.data_ptr<uint8_t>(),
       reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
-      static_cast<uint32_t>(exp_base), n, k,
+      static_cast<uint32_t>(exp_base), static_cast<uint32_t>(escapes.size(0)), n, k,
       static_cast<const void*>(wq.data_ptr()),
       static_cast<void*>(out.data_ptr()), k, current_stream());
   TORCH_CHECK(status == hipSuccess, op, " failed: ", hipGetErrorString(status));
@@ -464,7 +467,8 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     }
     const hipError_t status = nf12_linear_fused(
         packed.data_ptr<uint8_t>(), reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
-        static_cast<uint32_t>(exp_base), static_cast<const void*>(x2.data_ptr()),
+        static_cast<uint32_t>(exp_base), static_cast<uint32_t>(escapes.size(0)),
+        static_cast<const void*>(x2.data_ptr()),
         static_cast<void*>(out.data_ptr()), n, k, m,
         has_bias ? static_cast<const void*>(b.data_ptr()) : nullptr, current_stream());
     TORCH_CHECK(status == hipSuccess, "nf12_hip.linear (fused) failed: ",
@@ -514,7 +518,8 @@ torch::Tensor linear_dispatch(const torch::Tensor& x, const torch::Tensor& packe
     const hipError_t status = nf12_linear_wmma(
         packed.data_ptr<uint8_t>(),
         reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
-        static_cast<uint32_t>(exp_base), static_cast<const void*>(x2.data_ptr()),
+        static_cast<uint32_t>(exp_base), static_cast<uint32_t>(escapes.size(0)),
+        static_cast<const void*>(x2.data_ptr()),
         static_cast<void*>(out.data_ptr()), n, k, m, bias_ptr,
         workspace_bytes > 0 ? workspace.data_ptr() : nullptr, workspace_bytes,
         current_stream());

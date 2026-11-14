@@ -82,6 +82,10 @@ int exl3_gemm
     // Device properties
     int device;
     cudaGetDevice(&device);
+    // Per-device tables below are MAX_DEVICES entries. Reject an ordinal that
+    // would index past them instead of writing host memory out of bounds.
+    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
+                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     int num_sms = force_num_sms ? force_num_sms : DevCtx::instance().get_num_sms(device);
     int cc = DevCtx::instance().get_cc(device);
     int* locks = DevCtx::instance().get_locks(device);

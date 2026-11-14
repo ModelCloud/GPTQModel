@@ -70,11 +70,13 @@ __device__ __forceinline__ void decode_bulk(const Group& g, uint32_t base_x4, ui
 
 // All 32 lanes must participate in the warp-uniform escape branch.
 __device__ __forceinline__ void decode_group(const Group& g, uint32_t base_x4, const uint4* __restrict__ escapes,
-                                             uint32_t (&r)[4]) {
+                                             uint32_t num_escapes, uint32_t (&r)[4]) {
   decode_bulk(g, base_x4, r);
   const bool esc = g.meta == 0u;
   if (__any_sync(0xffffffffu, esc)) {
-    if (esc) {
+    // Checkpoint escape indices index the table; reject them rather than
+    // dereferencing an arbitrary offset (the embedding kernel does the same).
+    if (esc && g.lo0 < num_escapes) {
       const uint4 v = __ldg(escapes + g.lo0);
       r[0] = v.x;
       r[1] = v.y;
@@ -102,9 +104,10 @@ __device__ __forceinline__ uint4 load_global_u4(const uint4* p) {
 // Tail-safe decode without a full-warp participation requirement.
 template <bool Coherent = false>
 __device__ __forceinline__ void decode_group_any_lane(const Group& g, uint32_t base_x4,
-                                                      const uint4* __restrict__ escapes, uint32_t (&r)[4]) {
+                                                      const uint4* __restrict__ escapes, uint32_t num_escapes,
+                                                      uint32_t (&r)[4]) {
   decode_bulk(g, base_x4, r);
-  if (g.meta == 0u) {
+  if (g.meta == 0u && g.lo0 < num_escapes) {
     const uint4 v = load_global_u4<Coherent>(escapes + g.lo0);
     r[0] = v.x;
     r[1] = v.y;

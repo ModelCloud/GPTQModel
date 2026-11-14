@@ -190,7 +190,8 @@ cudaError_t linear_sliced(const LinearArgs& a, int64_t rows) {
     s.bias = a.bias != nullptr ? a.bias + n0 : nullptr;
     if (a.source == WeightSource::kNF12) {
       // Escape indices are absolute, so a row slice decodes with the whole table.
-      if (cudaError_t err = decode_bf16t(a.weight + n0 * a.k * 3 / 2, a.escapes, a.exp_base, s.n, a.k, buf, a.stream);
+      if (cudaError_t err = decode_bf16t(a.weight + n0 * a.k * 3 / 2, a.escapes, a.num_escapes, a.exp_base, s.n, a.k,
+                                         buf, a.stream);
           err != cudaSuccess)
         return err;
       s.weight = buf;

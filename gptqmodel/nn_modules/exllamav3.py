@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from ..exllamav3.trellis import validate_trellis_k
 from ..models._const import DEVICE, normalize_device
 
 
@@ -186,6 +187,14 @@ class ExllamaV3Linear(nn.Module):
         trellis = getattr(self, "trellis", None)
         if trellis is None or trellis.ndim != 3:
             raise ValueError(f"EXL3 module `{self.name}` has invalid trellis geometry")
+        try:
+            validate_trellis_k(
+                int(trellis.shape[-1]) // 16,
+                getattr(self, "mcg", None) is not None,
+                getattr(self, "mul1", None) is not None,
+            )
+        except ValueError as exc:
+            raise ValueError(f"EXL3 module `{self.name}`: {exc}") from exc
         inputs, outputs = int(trellis.shape[0]) * 16, int(trellis.shape[1]) * 16
         padded_outputs = ((self.out_features + 127) // 128) * 128
         if (inputs != self.in_features or outputs not in (self.out_features, padded_outputs)
