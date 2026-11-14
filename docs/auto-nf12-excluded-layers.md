@@ -46,8 +46,8 @@ excluded layer, and no `N` step existed for it. The packed module stayed in the
 model tree, so the writer serialized `nf12_packed`, `nf12_escapes`, and
 `nf12_exp_base` in place of `weight` while `quantize_config.json` still
 described the module as plain unquantized. The loader reported the NF12 keys as
-unused and left the `nn.Linear` weight uninitialised, which surfaced as NaN
-logits after reload.
+unused and left the `nn.Linear` weight uninitialised, so the reloaded logits
+were NaN in the issue report and arbitrary finite garbage in our rerun.
 
 The fix is the single state flag at `gptqmodel/looper/stage_layer.py:1100`. It
 is set only on the wrappers this replay creates, so the quantized-subset path
@@ -87,7 +87,7 @@ RTX 4090, `dynamic={"-:.*layers\\.1\\..*": {}}`, GPTQ 4-bit group 32:
 
 | State | Saved layer-1 keys | Reloaded logits rel-err |
 | --- | --- | --- |
-| Before fix | `mlp.up_proj.nf12_packed`, `.nf12_escapes`, `.nf12_exp_base` | `nan` (non-finite) |
+| Before fix | `mlp.up_proj.nf12_packed`, `.nf12_escapes`, `.nf12_exp_base` | `nan` in the issue; `1.034` in our rerun (uninitialised-weight garbage) |
 | Before fix, `auto_dtype_cast="off"` | `mlp.up_proj.weight` | `0.0384` |
 | After fix | `mlp.up_proj.weight` | `0.0384` |
 | After fix, AWQ 4-bit | `mlp.up_proj.weight` | `0.2215` |
@@ -114,4 +114,4 @@ layer-1 projections, so the corruption cannot reach a checkpoint again.
 
 - [Automatic NF12 source storage](auto-nf12-dtype-cast.md) describes the cast
   and restore decision flow this page special-cases.
-- Introduced by PR #4007.
+- Introduced by PR #4012 for issue #4007.
