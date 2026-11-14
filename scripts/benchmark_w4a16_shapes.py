@@ -202,21 +202,40 @@ def flush_buffer(device: str) -> torch.Tensor:
     return _FLUSH
 
 
-def _samples(fn, iters: int, warmup: int, flush) -> list[float]:
+def resolve_device_index(device: str) -> int:
+    """Return the CUDA ordinal that ``--device`` names.
+
+    ``--device`` is what the benchmark allocates and launches on. The current
+    CUDA device is whatever the process inherited, which is a different card
+    whenever the caller passes an explicit ordinal, so every CUDA API that
+    defaults to "current device" has to be told which device to use.
+    """
+
+    parsed = torch.device(device)
+    if parsed.type != "cuda":
+        raise ValueError(f"benchmark_w4a16_shapes requires a CUDA device, got `{device}`")
+    return parsed.index if parsed.index is not None else torch.cuda.current_device()
+
+
+def _samples(fn, iters: int, warmup: int, flush, device: str) -> list[float]:
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
     out = []
-    for _ in range(iters):
-        if flush is not None:
-            flush.sum()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn()
-        end.record()
-        end.synchronize()
-        out.append(start.elapsed_time(end))
+    # ``torch.cuda.Event`` records on the *current* device's current stream, so
+    # the measured device has to be current while the events are recorded.
+    # Otherwise a run on cuda:1 brackets cuda:0's idle stream and reports ~0.
+    with torch.cuda.device(device):
+        for _ in range(iters):
+            if flush is not None:
+                flush.sum()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            fn()
+            end.record()
+            end.synchronize()
+            out.append(start.elapsed_time(end))
     return sorted(out)
 
 
@@ -234,13 +253,13 @@ def _stats(samples: list[float]) -> tuple[float, float, float]:
     return samples[0], med, spread
 
 
-def time_hot(fn, iters: int, warmup: int) -> tuple[float, float, float]:
+def time_hot(fn, iters: int, warmup: int, device: str) -> tuple[float, float, float]:
     """Back-to-back calls. The weights can stay in L2; latency only."""
-    return _stats(_samples(fn, iters, warmup, None))
+    return _stats(_samples(fn, iters, warmup, None, device))
 
 
 def time_flushed(fn, iters: int, warmup: int, device: str) -> tuple[float, float, float]:
-    return _stats(_samples(fn, iters, warmup, flush_buffer(device)))
+    return _stats(_samples(fn, iters, warmup, flush_buffer(device), device))
 
 
 def gbps(shape: Shape, ms: float) -> float:
@@ -260,7 +279,7 @@ def warm_up_gpu(device: str, seconds: float = 1.0) -> None:
     deadline = time.perf_counter() + seconds
     while time.perf_counter() < deadline:
         a @ b
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
     del a, b
     torch.cuda.empty_cache()
 
@@ -269,7 +288,7 @@ def _measure(shape: Shape, m: int, args, device: str, dtype) -> dict:
     module = build_marlin(shape, device, dtype)
     x = torch.randn(m, shape.k, dtype=dtype, device=device)
     fn = functools.partial(marlin_call, module, x)
-    hot_min, hot_med, hot_spread = time_hot(fn, args.iters, args.warmup)
+    hot_min, hot_med, hot_spread = time_hot(fn, args.iters, args.warmup, device)
     cold_min, cold_med, cold_spread = time_flushed(fn, args.iters, args.warmup, device)
     del module
     torch.cuda.empty_cache()
@@ -455,7 +474,10 @@ def main() -> int:
         print("CUDA device required")
         return 1
 
-    device_index = torch.cuda.current_device()
+    try:
+        device_index = resolve_device_index(args.device)
+    except ValueError as exc:
+        parser.error(str(exc))
     device_name = torch.cuda.get_device_name(device_index)
     if args.device_profile:
         profile = _resolve_device_profile(device_index)

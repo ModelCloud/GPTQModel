@@ -4,6 +4,7 @@
 """Shape presets and bandwidth math for scripts/benchmark_w4a16_shapes.py."""
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,3 +190,120 @@ def test_disabled_profile_is_recorded_rather_than_omitted(bench):
     payload = bench.build_payload([], {"available": False, "reason": "disabled by --no-device-profile"}, "card")
     assert payload["device"]["reason"] == "disabled by --no-device-profile"
     assert payload["device"]["name"] == "card"
+
+
+def test_resolve_device_index_reads_the_explicit_ordinal(bench):
+    """--device cuda:1 names GPU 1 even when the process inherited GPU 0."""
+    assert bench.resolve_device_index("cuda:1") == 1
+    assert bench.resolve_device_index("cuda:0") == 0
+
+
+def test_resolve_device_index_falls_back_to_the_current_device(bench, monkeypatch):
+    """A bare `cuda` keeps the inherited ordinal."""
+    monkeypatch.setattr(bench, "torch", SimpleNamespace(
+        device=bench.torch.device,
+        cuda=SimpleNamespace(current_device=lambda: 3),
+    ))
+    assert bench.resolve_device_index("cuda") == 3
+
+
+def test_resolve_device_index_rejects_a_non_cuda_device(bench):
+    with pytest.raises(ValueError, match="requires a CUDA device"):
+        bench.resolve_device_index("cpu")
+
+
+def test_timing_brackets_the_requested_device(bench, monkeypatch):
+    """Events and the synchronize must target --device, not the current GPU.
+
+    ``torch.cuda.Event`` records on the current device's current stream. With
+    the process on GPU 0 and ``--device cuda:1`` the un-fixed code brackets
+    GPU 0's idle stream, so the reported latency is unrelated to the kernel.
+    """
+
+    seen = {"sync": [], "scopes": []}
+
+    class FakeEvent:
+        def __init__(self, enable_timing=False):
+            self._ms = 0.0
+
+        def record(self):
+            self._ms = 1.0
+
+        def synchronize(self):
+            pass
+
+        def elapsed_time(self, other):
+            return self._ms
+
+    class FakeDeviceScope:
+        def __init__(self, device):
+            seen["scopes"].append(device)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(bench, "torch", SimpleNamespace(
+        device=bench.torch.device,
+        cuda=SimpleNamespace(
+            synchronize=lambda device=None: seen["sync"].append(device),
+            Event=FakeEvent,
+            device=FakeDeviceScope,
+        ),
+    ))
+
+    samples = bench._samples(lambda: None, iters=3, warmup=0, flush=None, device="cuda:1")
+
+    assert len(samples) == 3
+    assert seen["sync"] == ["cuda:1"]
+    assert seen["scopes"] == ["cuda:1"]
+
+
+def test_main_profiles_and_names_the_requested_device(bench, monkeypatch, tmp_path):
+    """The JSON device identity must describe --device, not the current GPU."""
+
+    seen = {}
+
+    monkeypatch.setattr(bench, "torch", SimpleNamespace(
+        device=bench.torch.device,
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            # The process inherited GPU 0. `--device cuda:1` must win.
+            current_device=lambda: 0,
+            get_device_name=lambda index: f"card{index}",
+        ),
+    ))
+
+    def profile_for(index):
+        seen["profile_index"] = index
+        return {"available": True, **PROFILE}
+
+    monkeypatch.setattr(bench, "_resolve_device_profile", profile_for)
+    monkeypatch.setattr(bench, "run", lambda args: [])
+    monkeypatch.setattr(bench, "format_device_header",
+                        lambda profile, name: f"{name} header")
+
+    out = tmp_path / "result.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["benchmark_w4a16_shapes.py", "--device", "cuda:1", "--json", str(out)],
+    )
+
+    assert bench.main() == 0
+    assert seen["profile_index"] == 1
+    payload = json.loads(out.read_text())
+    assert payload["device"]["name"] == "card1"
+    assert payload["device"]["sms"] == PROFILE["sms"]
+
+
+def test_main_rejects_a_non_cuda_device(bench, monkeypatch):
+    monkeypatch.setattr(bench, "torch", SimpleNamespace(
+        device=bench.torch.device,
+        cuda=SimpleNamespace(is_available=lambda: True),
+    ))
+    monkeypatch.setattr(sys, "argv", ["benchmark_w4a16_shapes.py", "--device", "cpu"])
+
+    with pytest.raises(SystemExit):
+        bench.main()
