@@ -611,6 +611,15 @@ AMD ROCm support requires **ROCm >= 10.1** and a matching ROCm PyTorch build.
 Older ROCm releases are unsupported; GPT-QModel logs a warning at import/model
 load time and asks you to upgrade.
 
+PyTorch **>= 2.13.0** is required. Importing GPT-QModel on `torch <= 2.12.1`
+raises `UnsafeTorchVersionError` because that range is affected by
+[GHSA-rrmf-rvhw-rf47](https://github.com/pytorch/pytorch/security/advisories/GHSA-rrmf-rvhw-rf47)
+(CVE-2025-3000, memory corruption in `torch.jit.script`). The check runs before
+the CUDA allocator is initialized. See
+[PyTorch runtime safety gate](docs/torch-runtime-safety-gate.md) for the
+affected range, the bypass, and why the comparison uses the PEP 440 public
+version.
+
 ### Install from source 🛠️
 
 ```bash
