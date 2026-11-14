@@ -196,6 +196,12 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
             length = len(tokenizer(prompt)["input_ids"][0])
             if length < max_model_length - max_new_tokens:
                 prompt_length_ok = True
+            elif k == 0:
+                raise ValueError(
+                    f"MMLU-Pro prompt for subject {subject!r} is still longer than the "
+                    f"{max_model_length - max_new_tokens}-token budget with zero few-shot "
+                    "examples; shorten the question or raise max_model_length"
+                )
             k -= 1
         inference_batches.append(prompt)
 
