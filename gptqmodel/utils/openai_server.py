@@ -230,6 +230,23 @@ def _resolve_eos_token_ids(model, tokenizer) -> list[int]:
     return list(dict.fromkeys(ids))
 
 
+def _capture_rng_state():
+    """Capture the CPU RNG state plus the accelerator state when it exists.
+
+    ``torch.cuda.is_initialized()`` is used instead of ``is_available()`` so a
+    CPU-only request never creates a CUDA context just to read its state.
+    """
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    return torch.get_rng_state(), cuda_states
+
+
+def _restore_rng_state(state) -> None:
+    cpu_state, cuda_states = state
+    torch.set_rng_state(cpu_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
+
+
 def _coerce_generation_results(outputs) -> list:
     """Normalise whatever a runtime adapter returned into ``GenerationResult``s.
 
@@ -418,11 +435,6 @@ class OpenAiServer:
                 stop_strings = _stop_list(request.stop)
                 do_sample = request.temperature != 0.0
 
-                if request.seed is not None:
-                    torch.manual_seed(request.seed)
-                    if torch.cuda.is_available():
-                        torch.cuda.manual_seed_all(request.seed)
-
                 eos_ids = _resolve_eos_token_ids(self.model, self.tokenizer)
                 eos_arg = eos_ids if len(eos_ids) > 1 else (eos_ids[0] if eos_ids else None)
 
@@ -457,8 +469,24 @@ class OpenAiServer:
                         # External runtime adapters accept the OpenAI-style `stop` argument.
                         generate_kwargs["stop"] = stop_strings
 
-                with self._generation_lock, torch.inference_mode():
-                    outputs = self.model.generate(**generate_kwargs, **generate_inputs)
+                # Transformers `generate` has no seed argument, so the global RNG
+                # is seeded for this one call. Seeding outside the lock would let
+                # a concurrent request overwrite the seed before the model reads
+                # it, and leaving it applied would move every later caller onto
+                # this request's random stream. Capture, seed, generate and
+                # restore therefore all happen while `_generation_lock` is held.
+                seeded = request.seed is not None and getattr(self.model, "_runtime_generate", None) is None
+                rng_state = None
+                try:
+                    with self._generation_lock:
+                        if seeded:
+                            rng_state = _capture_rng_state()
+                            torch.manual_seed(request.seed)
+                        with torch.inference_mode():
+                            outputs = self.model.generate(**generate_kwargs, **generate_inputs)
+                finally:
+                    if rng_state is not None:
+                        _restore_rng_state(rng_state)
 
                 pad_token_id = self.tokenizer.pad_token_id
                 eos_token_id = eos_ids or self.tokenizer.eos_token_id
