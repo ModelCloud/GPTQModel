@@ -74,6 +74,22 @@ int64_t make_q_matrix(
     // decodes inside its launch, and the dense fallback allocates a transient
     // tensor per call in gemm_half_q_half().
 
+    // Act-order remapping reads g_idx on the host and writes a histogram
+    // indexed by its values. Validate the checkpoint tensor at the op entry so
+    // direct API callers cannot reach make_sequential() with an unchecked
+    // index. Already-shuffled matrices do not consume g_idx.
+    if (gptq_g_idx.defined() && !gptq_g_idx.device().is_meta() && !already_shuffled)
+    {
+        TORCH_CHECK(gptq_g_idx.is_cpu(), "gptq_g_idx must be a CPU tensor");
+        TORCH_CHECK(gptq_g_idx.numel() == height,
+                    "gptq_g_idx has ", gptq_g_idx.numel(), " entries but the weight has ", height, " rows");
+        TORCH_CHECK(groups > 0, "act-order weights need at least one scale group");
+        const int64_t g_min = gptq_g_idx.min().item<int64_t>();
+        const int64_t g_max = gptq_g_idx.max().item<int64_t>();
+        TORCH_CHECK(g_min >= 0 && g_max < groups,
+                    "gptq_g_idx must be in [0, ", groups - 1, "], got min=", g_min, " max=", g_max);
+    }
+
     QMatrix* m = new QMatrix(
         device,
         height,
@@ -90,6 +106,12 @@ int64_t make_q_matrix(
         (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
         already_shuffled
     );
+
+    if (m->failed)
+    {
+        delete m;
+        TORCH_CHECK(false, "ExLlamaV2 failed to build the act-order row mapping from g_idx");
+    }
 
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(m));
 }
