@@ -452,6 +452,15 @@ def prepare_calibration_dataset(
         raise ValueError(
             f"Unsupported tokenizer.padding_side `{padding_side}`. Expected `left` or `right`."
         )
+    # Padding and truncation are independent tokenizer settings. Trimming a
+    # row to the model's position budget must follow `truncation_side`
+    # (HF default: right), not the batch padding direction: left padding used
+    # to front-truncate every overlong row and drop its BOS/attention sink.
+    truncation_side = getattr(tokenizer, "truncation_side", "right") if tokenizer is not None else "right"
+    if truncation_side not in ("left", "right"):
+        raise ValueError(
+            f"Unsupported tokenizer.truncation_side `{truncation_side}`. Expected `left` or `right`."
+        )
 
     for example in calibration_dataset:
         input_ids = _convert_tensor_to_list(example["input_ids"])
@@ -468,7 +477,7 @@ def prepare_calibration_dataset(
                     trimmed = True
                     trimmed_row_count += 1
                     longest_trimmed_row = max(longest_trimmed_row, row_len)
-                    if padding_side == "left":
+                    if truncation_side == "left":
                         trimmed_input_ids.append(row_ids[-max_positions:])
                         trimmed_attention_mask.append(row_mask[-max_positions:])
                     else:
@@ -514,11 +523,12 @@ def prepare_calibration_dataset(
 
     if trimmed_row_count > 0:
         log.info(
-            "Quantize: trimmed %s calibration rows above %s=%s (longest original length=%s)",
+            "Quantize: trimmed %s calibration rows above %s=%s (longest original length=%s, truncation_side=%s)",
             trimmed_row_count,
             max_positions_source,
             max_positions,
             longest_trimmed_row,
+            truncation_side,
         )
 
     if calibration_dataset_concat_size:
