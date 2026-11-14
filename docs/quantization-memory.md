@@ -218,39 +218,44 @@ Dedup remains off for them, which is the fail-safe default.
 ## 5. Measured
 
 RTX 4090 (48 GiB), CUDA 13.0 / torch 2.16, transformers 5.22.2. Calibration is
-128 x 512 tokens, GPTQ and AWQ are 4-bit gs128, `offload_to_disk` default. The
-host was shared with other workers, so device memory and packed hashes are the
-reported metrics; wall times are listed but are not comparable run to run.
+128 x 512 tokens, GPTQ and AWQ are 4-bit gs128, `offload_to_disk` default.
+"Before" is `origin/main`; "after" is this change. The host was shared with other
+workers, and the same configuration varied by 30-50% in wall time between runs,
+so device memory and packed hashes are the reported metrics and no wall-time
+claim is made.
 
 | Run | Peak device alloc | Live at end of run | Allocator retries | Packed SHA-256 |
 | --- | --- | --- | --- | --- |
-| 8-layer GPTQ, before | 2141.5 MB | 1547.6 MB | 0 | `157265fa...` |
-| 8-layer GPTQ, after | **967.5 MB** | **267.6 MB** | 0 | `157265fa...` (identical) |
+| 8-layer GPTQ, before | 2397.5 MB | 1803.6 MB | 0 | `157265fa...` |
+| 8-layer GPTQ, after | **952.8 MB** (-60.3%) | **267.6 MB** | 0 | `157265fa...` (identical) |
 | 8-layer AWQ, before | 5389.2 MB | 1892.1 MB | 8 | `b709e98b...` |
-| 8-layer AWQ, after | **3853.2 MB** | **356.1 MB** | 8 | `b709e98b...` (identical) |
+| 8-layer AWQ, after | **3853.2 MB** (-28.5%) | **356.1 MB** | 7 | `b709e98b...` (identical) |
 | 5-layer 70B-dim GPTQ, before | 19221.0 MB | 4148.3 MB | 4 | `d7246844...` |
-| 5-layer 70B-dim GPTQ, after | **16149.0 MB** | **1076.3 MB** | 4 | `d7246844...` (identical) |
-
-Host RSS for the 8-layer AWQ run went from 9152 MB to 8436 MB with the capture
-sharing in section 3.
+| 5-layer 70B-dim GPTQ, after | **16149.0 MB** (-16.0%) | **1076.3 MB** | 4 | `d7246844...` (identical) |
 
 The deterministic per-layer regression is a weakref liveness check on the real
 `p2p_move_nested`: with cyclic GC disabled, a dropped batch's tensors are still
 alive 8/8 times before the fix (32 MiB still allocated on the source device) and
 0/8 after, with no `gc.collect()`.
 
+Host RSS did not move reproducibly: one 8-layer AWQ pair measured 9152 -> 8436 MB
+and another 8675 -> 8756 MB. The capture sharing removes duplicate host copies,
+but peak RSS is dominated by allocator retention, so it is not reported as a win.
+
 ### Hessian dedup
 
-Measured on a 2-layer EXAONE 4 decoder at 70B dimensions (h8192/i28672, 64 heads,
-8 KV heads), 128 x 512 calibration tokens, best of two runs per setting:
+The dedup win is structural and measurable as a count, not as a wall time on this
+host. On a 2-layer EXAONE 4 decoder at 70B dimensions (h8192/i28672, 64 heads,
+8 KV heads), 128 x 512 calibration tokens:
 
-| Setting | Wall time | Adopted followers | Leader groups | Packed SHA-256 |
-| --- | --- | --- | --- | --- |
-| `dedup_shared_inputs=True` | 25.86 s | 6/6 | 4 | `3803fa7b...` |
-| `dedup_shared_inputs=False` | 32.12 s | 0 | 0 | `3803fa7b...` (identical) |
+| Setting | Adopted followers | Leader groups | Packed SHA-256 |
+| --- | --- | --- | --- |
+| `dedup_shared_inputs=True` | 6/6 | 4 | `3803fa7b...` |
+| `dedup_shared_inputs=False` | 0 | 0 | `3803fa7b...` (identical) |
 
-Five captures per layer (q/k/v plus gate/up) collapse to two, which is about
-3.1 s per layer at those dimensions. The tags do not change the packed tensors.
+Five captures per layer (q/k/v plus gate/up) collapse to two. The wall time of
+that comparison moved in both directions across repeated runs (25.9/34.5 s vs
+32.1/38.1 s in one pair, 45.2 s vs 36.6 s in another), so it is not evidence.
 
 ## Related reading
 
