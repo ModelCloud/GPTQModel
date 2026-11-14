@@ -270,6 +270,21 @@ def decode(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.
     return torch.ops.nf12_hip.decode(packed, escapes, int(exp_base))
 
 
+def decode_fp32(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.Tensor:
+    """Decode NF12 bytes straight to FP32 on RDNA4, with no BF16 intermediate.
+
+    BF16 -> FP32 is an exact bit shift, so the result is bit-identical to
+    ``decode(...).float()``.
+    """
+
+    if not _EXTENSION.load():
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    native = getattr(torch.ops.nf12_hip, "decode_fp32", None)
+    if callable(native):
+        return native(packed, escapes, int(exp_base))
+    return torch.ops.nf12_hip.decode(packed, escapes, int(exp_base)).float()
+
+
 def linear(
     x: torch.Tensor,
     packed: torch.Tensor,
@@ -369,6 +384,7 @@ __all__ = [
     "SUPPORTED_ARCHS",
     "available",
     "decode",
+    "decode_fp32",
     "embedding",
     "encode",
     "last_error",

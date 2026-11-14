@@ -11,6 +11,7 @@ from ._library import library_path, load
 from .api import (
     NF12Weight,
     decode,
+    decode_fp32,
     embedding,
     embedding_repeat4,
     encode,
@@ -47,6 +48,7 @@ __all__ = [
     "NF12MoEWeight",
     "NF12Weight",
     "decode",
+    "decode_fp32",
     "embedding",
     "embedding_repeat4",
     "encode",

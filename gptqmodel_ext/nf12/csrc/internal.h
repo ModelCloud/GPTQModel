@@ -73,6 +73,10 @@ cudaError_t encode(const __nv_bfloat16* w, int64_t n, int64_t k, int64_t ldw, ui
                    cudaStream_t stream);
 cudaError_t decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, int64_t n, int64_t k,
                    __nv_bfloat16* out, int64_t ldo, cudaStream_t stream);
+// Same elements as `decode`, widened to FP32 during the store so no BF16
+// matrix is materialized.
+cudaError_t decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, int64_t n, int64_t k,
+                        float* out, int64_t ldo, cudaStream_t stream);
 cudaError_t pack_bf16t(const __nv_bfloat16* w, int64_t n, int64_t k, int64_t ldw, uint8_t* out,
                        cudaStream_t stream);
 // out holds n * k * 2 bytes in the bf16t layout (SPEC.md 4.4).

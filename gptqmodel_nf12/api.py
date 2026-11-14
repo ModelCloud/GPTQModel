@@ -77,6 +77,9 @@ class NF12Weight:
     def decode(self) -> torch.Tensor:
         return decode(self)
 
+    def decode_fp32(self) -> torch.Tensor:
+        return decode_fp32(self)
+
     def to(self, device: torch.device | str | int) -> NF12Weight:
         return NF12Weight(self.packed.to(device), self.escapes.to(device), self.exp_base)
 
@@ -119,6 +122,23 @@ def decode(weight: NF12Weight) -> torch.Tensor:
     _check_cuda(weight.packed, "weight")
     load()
     return torch.ops.nf12.decode(weight.packed, weight.escapes, weight.exp_base)
+
+
+def decode_fp32(weight: NF12Weight) -> torch.Tensor:
+    """Decodes straight to ``[N, K]`` FP32 without a BF16 intermediate.
+
+    BF16 -> FP32 is an exact bit shift, so every element is bit-identical to
+    ``decode(weight).float()``. FP32 consumers therefore read 1.5 B/element of
+    packed weight and write 4 B/element instead of materializing, then
+    re-reading, a 2 B/element BF16 matrix.
+    """
+    _check_cuda(weight.packed, "weight")
+    load()
+    native = getattr(torch.ops.nf12, "decode_fp32", None)
+    if callable(native):
+        return native(weight.packed, weight.escapes, weight.exp_base)
+    # An already-loaded older runtime may predate the fused widening store.
+    return torch.ops.nf12.decode(weight.packed, weight.escapes, weight.exp_base).float()
 
 
 def _check_input(x: torch.Tensor, k: int) -> None:

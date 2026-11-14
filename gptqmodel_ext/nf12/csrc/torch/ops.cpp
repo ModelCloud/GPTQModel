@@ -244,6 +244,15 @@ Tensor decode(const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
   return out;
 }
 
+Tensor decode_fp32(const Tensor& packed, const Tensor& escapes, int64_t exp_base) {
+  const int32_t device = packed.get_device_index();
+  const torch::stable::accelerator::DeviceGuard guard(device);
+  const nf12_weight_t w = weight_view(packed, escapes, exp_base, device);
+  Tensor out = torch::stable::new_empty(packed, {w.n, w.k}, ScalarType::Float);
+  check_status(nf12_decode_fp32(&w, out.data_ptr(), w.k, current_stream(device)), "decode_fp32");
+  return out;
+}
+
 Tensor linear(const Tensor& x, const Tensor& packed, const Tensor& escapes, int64_t exp_base,
               const std::optional<Tensor>& bias, bool static_weights) {
   const int32_t device = packed.get_device_index();
@@ -842,6 +851,7 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> encode_moe(const Tensor& w_in) {
 STABLE_TORCH_LIBRARY(nf12, m) {
   m.def("encode(Tensor w) -> (Tensor packed, Tensor escapes, int exp_base)");
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
+  m.def("decode_fp32(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None, "
         "*, bool static_weights=False) -> Tensor");
   m.def("linear_staged_b1(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None) -> Tensor");
@@ -873,6 +883,7 @@ STABLE_TORCH_LIBRARY(nf12, m) {
 STABLE_TORCH_LIBRARY_IMPL(nf12, CUDA, m) {
   m.impl("encode", TORCH_BOX(&encode));
   m.impl("decode", TORCH_BOX(&decode));
+  m.impl("decode_fp32", TORCH_BOX(&decode_fp32));
   m.impl("linear", TORCH_BOX(&linear));
   m.impl("linear_staged_b1", TORCH_BOX(&linear_staged_b1));
   m.impl("pack_bf16t", TORCH_BOX(&pack_bf16t));

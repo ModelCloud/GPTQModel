@@ -284,6 +284,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                     with torch.cuda.device(device):
                         w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
                         p = nf12.encode(w)
+                        nf12.decode_fp32(p)
                         x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
                         nf12.linear_fp32(x, p)
                         nf12.linear(x.bfloat16(), p)
@@ -305,6 +306,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
         ids = torch.tensor([0, 127], device="cuda")
         restored = nf12.decode(p)
+        restored_fp32 = nf12.decode_fp32(p)
         y_bf16 = nf12.linear(x.bfloat16(), p)
         y_fp32 = nf12.linear_fp32(x, p)
         gathered = nf12.embedding(ids, p)
@@ -318,6 +320,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         y_mma_fp32 = nf12.linear_bf16_fp32(x[:, :256].bfloat16(), short)
         torch.cuda.current_stream().synchronize()
         if not (torch.equal(restored, w)
+                and torch.equal(restored_fp32.view(torch.int32), restored.float().view(torch.int32))
                 and bool(torch.all(y_bf16 == 1))
                 and bool(torch.all(y_fp32 == 1))
                 and bool(torch.all(y_mma_fp32 == 0.5))
@@ -361,6 +364,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                         ids = ids_cpu.to("cuda")
                         nf12_hip.embedding(ids, p, e, base)
                         nf12_hip.rowmajor_embedding(ids, row_p, row_e, base)
+                        decode_golden = nf12_hip.decode(p, e, base)
+                        nf12_hip.decode_fp32(p, e, base)
                         x = linear_x.to("cuda")
                         nf12_hip.linear(x, p, e, base)
                         torch.cuda.current_stream().synchronize()
@@ -374,6 +379,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                             golden.to("cuda"),
                             x,
                             linear_golden.to("cuda"),
+                            decode_golden,
                         )
             if not hasattr(nf12_hip_embedding_thread, "device"):
                 nf12_hip_embedding_thread.device = nf12_hip_embedding_next_device[0] % 2
@@ -394,6 +400,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             golden,
             linear_x,
             linear_golden,
+            decode_golden,
         ) = (
             nf12_hip_embedding_state[device]
         )
@@ -402,12 +409,17 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             row_actual = nf12_hip.rowmajor_embedding(
                 ids, row_packed, row_escapes, base
             )
+            fused_fp32 = nf12_hip.decode_fp32(packed, escapes, base)
             linear_actual = nf12_hip.linear(linear_x, packed, escapes, base)
             nf12_hip_embedding_thread.stream.synchronize()
             if not (
                 torch.equal(actual.view(torch.int16), golden.view(torch.int16))
                 and torch.equal(
                     row_actual.view(torch.int16), golden.view(torch.int16)
+                )
+                and torch.equal(
+                    fused_fp32.view(torch.int32),
+                    decode_golden.float().view(torch.int32),
                 )
             ):
                 raise AssertionError(

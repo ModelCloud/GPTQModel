@@ -18,6 +18,7 @@
 // Warp accesses span 512 tiled bytes or 64 contiguous row-major bytes per row.
 // The C API validates 16-byte bases and strides divisible by 8.
 #include <cstdint>
+#include <type_traits>
 
 #include "codec/codec.h"
 #include "codec/tile.cuh"
@@ -49,10 +50,23 @@ int64_t grid_blocks(int64_t num_sa) {
   return (num_sa + per_block - 1) / per_block;
 }
 
-template <int kPerWarp, int kWarps = kWarpsPerBlock>
-__device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed, const uint4* __restrict__ escapes,
-                                            uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
-                                            __nv_bfloat16* __restrict__ out, int64_t ldo) {
+// Widening store: BF16 output keeps the canonical `store_row_tile`; FP32 output
+// decodes and widens in one pass, which removes the 2 B/element intermediate.
+template <typename OutT>
+__device__ __forceinline__ void store_decoded_tile(OutT* __restrict__ out, int64_t off, int64_t ld,
+                                                   const RowTile& x) {
+  if constexpr (std::is_same_v<OutT, float>) {
+    codec::store_row_tile_fp32(out, off, ld, x);
+  } else {
+    codec::store_row_tile(out, off, ld, x);
+  }
+}
+
+template <typename OutT, int kPerWarp, int kWarps = kWarpsPerBlock>
+__device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
+                                            const uint4* __restrict__ escapes, uint32_t base_x4,
+                                            int64_t num_sa, int64_t k_blocks,
+                                            OutT* __restrict__ out, int64_t ldo) {
   const int lane = threadIdx.x & 31;
   uint4 planes[kPerWarp][3];
 #pragma unroll
@@ -83,24 +97,24 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed, co
 #pragma unroll
       for (int p = 0; p < 2; ++p) codec::quad_transpose(x[h][p], lane);
     }
-    codec::store_row_tile(out, codec::row_tile_offset(codec::super_atom(sa, k_blocks), ldo, lane), ldo, x);
+    store_decoded_tile(out, codec::row_tile_offset(codec::super_atom(sa, k_blocks), ldo, lane), ldo, x);
   }
 }
 
-template <int kPerWarp, int kWarps = kWarpsPerBlock>
+template <typename OutT, int kPerWarp, int kWarps = kWarpsPerBlock>
 __global__ void __launch_bounds__(kWarps * 32)
     decode_kernel(const uint4* __restrict__ packed, const uint4* __restrict__ escapes, uint32_t base_x4,
-                  int64_t num_sa, int64_t k_blocks, __nv_bfloat16* __restrict__ out, int64_t ldo) {
-  decode_rows<kPerWarp, kWarps>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
+                  int64_t num_sa, int64_t k_blocks, OutT* __restrict__ out, int64_t ldo) {
+  decode_rows<OutT, kPerWarp, kWarps>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
 }
 
-template <int kPerWarp, int kWarps = kWarpsPerBlock>
+template <typename OutT, int kPerWarp, int kWarps = kWarpsPerBlock>
 cudaError_t launch_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                          int64_t num_sa, int64_t k_blocks, __nv_bfloat16* out, int64_t ldo,
+                          int64_t num_sa, int64_t k_blocks, OutT* out, int64_t ldo,
                           cudaStream_t stream) {
   const int64_t blocks = grid_blocks<kPerWarp, kWarps>(num_sa);
   if (blocks > codec::kMaxGridX) return cudaErrorInvalidValue;
-  decode_kernel<kPerWarp, kWarps><<<dim3(static_cast<unsigned>(blocks)), kWarps * 32, 0, stream>>>(
+  decode_kernel<OutT, kPerWarp, kWarps><<<dim3(static_cast<unsigned>(blocks)), kWarps * 32, 0, stream>>>(
       reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa, k_blocks, out, ldo);
   return cudaGetLastError();
 }
@@ -129,8 +143,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   const int e = static_cast<int>(blockIdx.y);
   if (expert_offsets != nullptr && !moe_expert_active(expert_offsets, e, max_assignments)) return;
   const uint4* esc = escapes != nullptr ? escapes + __ldg(escape_offsets + e) : nullptr;
-  decode_rows<kPerWarp>(packed + e * expert_vecs, esc, exp_base_x4(__ldg(exp_base + e)), num_sa, k_blocks,
-                        out + e * expert_stride, ldo);
+  decode_rows<__nv_bfloat16, kPerWarp>(packed + e * expert_vecs, esc,
+                                       exp_base_x4(__ldg(exp_base + e)), num_sa, k_blocks,
+                                       out + e * expert_stride, ldo);
 }
 
 // The bf16t super-atom stores atom j's decoded registers at plane j (SPEC.md
@@ -198,8 +213,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 }
 
-cudaError_t decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, int64_t n, int64_t k,
-                   __nv_bfloat16* out, int64_t ldo, cudaStream_t stream) {
+template <typename OutT>
+cudaError_t decode_impl(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, int64_t n, int64_t k,
+                        OutT* out, int64_t ldo, cudaStream_t stream) {
   if (exp_base > kMaxExpBase) return cudaErrorInvalidValue;
   const int64_t num_sa = (n / kSuperAtomRows) * (k / kSuperAtomCols);
   if (num_sa == 0) return cudaSuccess;
@@ -207,12 +223,22 @@ cudaError_t decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_bas
   if (cudaError_t err = cudaGetDevice(&device); err != cudaSuccess) return err;
   const int sm_arch = device_info(device).sm_arch;
   if (sm_arch == 103)
-    return launch_decode<1, 2>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
+    return launch_decode<OutT, 1, 2>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
   // Preserve the SM80 one-super-atom prefill route.
   if (sm_arch == 80 && n == 512 && k == 5120)
-    return launch_decode<1>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
-  return launch_decode<kDecodeSuperAtomsPerWarp>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols,
-                                                 out, ldo, stream);
+    return launch_decode<OutT, 1>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols, out, ldo, stream);
+  return launch_decode<OutT, kDecodeSuperAtomsPerWarp>(packed, escapes, exp_base, num_sa, k / kSuperAtomCols,
+                                                       out, ldo, stream);
+}
+
+cudaError_t decode(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, int64_t n, int64_t k,
+                   __nv_bfloat16* out, int64_t ldo, cudaStream_t stream) {
+  return decode_impl(packed, escapes, exp_base, n, k, out, ldo, stream);
+}
+
+cudaError_t decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base, int64_t n, int64_t k,
+                        float* out, int64_t ldo, cudaStream_t stream) {
+  return decode_impl(packed, escapes, exp_base, n, k, out, ldo, stream);
 }
 
 cudaError_t moe_decode(const uint8_t* packed, const uint4* escapes, const int64_t* escape_offsets,

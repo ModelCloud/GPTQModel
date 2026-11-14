@@ -78,6 +78,11 @@ def _register_fakes() -> None:
         n, row_bytes = packed.shape
         return packed.new_empty((n, row_bytes * 2 // 3), dtype=torch.bfloat16)
 
+    @torch.library.register_fake("nf12::decode_fp32")
+    def _decode_fp32(packed, escapes, exp_base):
+        n, row_bytes = packed.shape
+        return packed.new_empty((n, row_bytes * 2 // 3), dtype=torch.float32)
+
     @torch.library.register_fake("nf12::linear")
     def _linear(x, packed, escapes, exp_base, bias=None, *, static_weights=False):
         return x.new_empty((*x.shape[:-1], packed.shape[0]))

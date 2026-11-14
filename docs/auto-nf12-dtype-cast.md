@@ -289,3 +289,67 @@ The encoder now consumes the accelerator-resident BF16 source directly and
 installs the native result on that device. Warm encoding took 0.118522 seconds
 for all 112 modules, or 0.079967 seconds after excluding the first seven shape
 specializations. Median warm encoding was 0.478 ms per module.
+
+### Decode output width
+
+GPTQ needs the source weight twice: as the restored BF16 module weight, and as
+an FP32 operand for the Hessian solve, `w - wq` diagnostics and FP32 oracles.
+The FP32 copy used to be produced by decoding BF16 and then widening the dense
+matrix, which materializes and re-reads 2 B/element.
+
+`NF12Linear.dequantize_weight` now selects the store width from the requested
+dtype. `nf12::decode_fp32` and `nf12_hip::decode_fp32` decode each super-atom
+once and widen it in registers, so a BF16 matrix never exists on the FP32 path:
+
+```mermaid
+flowchart TD
+    A["NF12Linear.dequantize_weight(dtype)"] --> B{"dtype is float32?"}
+    B -- No --> C["nf12.decode / nf12_hip.decode"]
+    C --> D["store_row_tile writes BF16"]
+    D --> E["weight.to(dtype)"]
+    B -- Yes --> F["nf12.decode_fp32 / nf12_hip.decode_fp32"]
+    F --> G["store_row_tile_fp32 widens in registers"]
+    G --> H["FP32 matrix, no BF16 staging"]
+    E --> I["Dense export"]
+    H --> I
+    F -. "native op missing in an older loaded runtime" .-> J["decode then float fallback"]
+    J --> I
+```
+
+The widening is an exponent-preserving bit shift, so the result is
+bit-identical to decoding BF16 and casting. Signed zero, subnormals,
+infinities and NaN payloads all match, which
+`test_native_decode_fp32_is_bit_identical_to_decode_then_widen` and
+`test_hip_decode_fp32_is_bit_identical_to_decode_then_widen` pin against
+adversarial bit patterns.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| FP32 weight materialization | `nf12.decode` then `Tensor.float` | `nf12.decode_fp32` |
+| ROCm equivalent | `nf12_hip.decode` then `Tensor.float` | `nf12_hip.decode_fp32` |
+| Bytes moved per element | 1.5 read + 2 write + 2 read + 4 write = 9.5 | 1.5 read + 4 write = 5.5 |
+| BF16 matrix on the FP32 path | required | never materialized |
+
+Measured on an RTX 4090 with resident inputs, median of seven trials:
+
+| Shape `(N, K)` | Decode then widen | `decode_fp32` | Speedup |
+| --- | ---: | ---: | ---: |
+| `2048×2048` | 15.23 µs | 12.45 µs | 1.22× |
+| `512×2048` | 10.59 µs | 6.49 µs | 1.63× |
+| `8192×2048` | 175.31 µs | 109.21 µs | 1.61× |
+| `2048×8192` | 175.50 µs | 109.75 µs | 1.60× |
+
+Across the 112 Llama 3.2 1B projections the FP32 conversion falls from
+9.08 ms to 5.77 ms, a 1.57× improvement and 3.30 ms saved. On an R9700 the
+same shapes measured 1.37× to 2.41×.
+
+This does not remove the BF16 module weight from the GPTQ path. `GPTQ.clone_module`
+reads the restored dense source, and that source is also what W4A replay and
+the saved checkpoint require, so decoding FP32 from NF12 instead of widening
+the resident BF16 copy would add a packed buffer beside both dense tensors
+rather than remove one. The fused store therefore targets FP32-only consumers:
+`dequantize_weight(dtype=torch.float32)`, FP32 oracles, and future FP32 paths.
+
+Not in scope: the embedding row-major layout still restores through its BF16
+lookup kernel and casts afterwards, so `AutoNF12Embedding.dequantize_weight`
+has no FP32 widening store yet.

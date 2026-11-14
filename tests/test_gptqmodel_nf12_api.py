@@ -46,6 +46,37 @@ def test_native_runtime_stays_testable_without_build_tools(monkeypatch):
     assert torch.equal(actual, torch.full((2, 16), 64, device=device, dtype=x.dtype))
 
 
+_FP32_DECODE_EDGE_BITS = (
+    0x0000, 0x8000, 0x0001, 0x8001, 0x007F, 0x807F, 0x7F7F, 0xFF7F,
+    0x7F80, 0xFF80, 0x7FC0, 0x7FFF, 0x7F81, 0x0002, 0x0080, 0x8080,
+)
+
+
+@pytest.mark.parametrize("shape", [(16, 64), (32, 128), (256, 512)])
+def test_native_decode_fp32_is_bit_identical_to_decode_then_widen(shape):
+    device = _cuda()
+    n, k = shape
+    generator = torch.Generator(device=device).manual_seed(9100 + n + k)
+    dense = (torch.randn(shape, generator=generator, device=device) * 0.02).bfloat16()
+    edge = torch.tensor(_FP32_DECODE_EDGE_BITS, dtype=torch.uint16).view(torch.int16)
+    dense.view(torch.int16)[0, : edge.numel()] = edge.to(device)
+    dense.view(torch.int16)[1, : edge.numel()] = edge.flip(0).to(device)
+    packed = nf12.encode(dense)
+
+    fused = nf12.decode_fp32(packed)
+    widened = nf12.decode(packed).float()
+
+    assert fused.dtype == torch.float32
+    assert tuple(fused.shape) == shape
+    # Widening is exact, so the two routes must agree bit for bit, including
+    # signed zero, subnormals, infinities and NaN payloads.
+    assert torch.equal(fused.view(torch.int32), widened.view(torch.int32))
+    assert bool(torch.signbit(fused[0, 1]))
+    assert bool(torch.isinf(fused[0, 8]))
+    assert bool(torch.isnan(fused[0, 10]))
+    assert set(vars(packed)) == {"packed", "escapes", "exp_base", "shape"}
+
+
 @pytest.mark.parametrize("shape", [
     (16, 64), (32, 5120), (128, 512), (128, 5120), (384, 5120), (512, 5120),
 ])

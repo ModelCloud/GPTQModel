@@ -119,6 +119,16 @@ quantization critical path. A forced `exp_base` still routes through the codec.
 escapes and the decode round-trip against the reference codec, so the native
 encoder is gated rather than assumed.
 
+## Decoding
+
+`nf12_hip.decode(packed, escapes, exp_base)` returns the exact BF16 matrix.
+`nf12_hip.decode_fp32` returns the same elements as FP32: the kernel widens
+each decoded register pair with a bit shift during the store, so the FP32
+route never materializes a BF16 matrix. Both share `decode_nf12_matrix` and
+`store_decoded_tile` in `nf12_decode.hip`, so they cannot drift apart. Measured
+on an R9700, the fused FP32 store is 1.37× to 2.41× faster than decoding BF16
+and widening the dense result.
+
 ## Embedding lookup
 
 `nf12_hip.embedding(ids, packed, escapes, exp_base)` gathers BF16 rows directly

@@ -43,6 +43,10 @@ hipError_t nf12_decode(const uint8_t* packed, const uint4* escapes, uint32_t exp
                           int64_t n, int64_t k, void* out, int64_t ldo,
                           hipStream_t stream);
 
+hipError_t nf12_decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                            int64_t n, int64_t k, void* out, int64_t ldo,
+                            hipStream_t stream);
+
 hipError_t nf12_embedding(const uint8_t* packed, const uint4* escapes,
                           uint32_t num_escapes, uint32_t exp_base,
                           int64_t n, int64_t k, const int32_t* ids32,
@@ -131,41 +135,55 @@ inline void check_arch(const torch::Tensor& t) {
 
 // ---------------------------------------------------------------------------
 // nf12_hip::decode(packed, escapes, exp_base) -> bf16 [N, K]
+// nf12_hip::decode_fp32(packed, escapes, exp_base) -> fp32 [N, K]
 // ---------------------------------------------------------------------------
-torch::Tensor decode_dispatch(const torch::Tensor& packed, const torch::Tensor& escapes,
-                              int64_t exp_base) {
+torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& escapes,
+                            int64_t exp_base, at::ScalarType dtype, const char* op) {
   check_arch(packed);
   TORCH_CHECK(packed.dim() == 2 && packed.scalar_type() == at::kByte,
-              "nf12_hip.decode: packed must be a 2-D uint8 tensor");
-  TORCH_CHECK(packed.is_contiguous(), "nf12_hip.decode: packed must be contiguous");
+              op, ": packed must be a 2-D uint8 tensor");
+  TORCH_CHECK(packed.is_contiguous(), op, ": packed must be contiguous");
   TORCH_CHECK(escapes.scalar_type() == at::kShort && escapes.dim() == 2 &&
                   escapes.size(1) == 8,
-              "nf12_hip.decode: escapes must be int16 [E, 8]");
-  TORCH_CHECK(escapes.is_contiguous(), "nf12_hip.decode: escapes must be contiguous");
+              op, ": escapes must be int16 [E, 8]");
+  TORCH_CHECK(escapes.is_contiguous(), op, ": escapes must be contiguous");
   TORCH_CHECK(packed.device() == escapes.device(),
-              "nf12_hip.decode: packed and escapes must share a device");
+              op, ": packed and escapes must share a device");
   TORCH_CHECK(exp_base >= 0 && exp_base <= kMaxExpBase,
-              "nf12_hip.decode: exp_base must be in [0, 120], got ", exp_base);
+              op, ": exp_base must be in [0, 120], got ", exp_base);
 
   const int64_t n = packed.size(0);
   const int64_t row_bytes = packed.size(1);
   TORCH_CHECK(n > 0 && n % 16 == 0,
-              "nf12_hip.decode: N must be a positive multiple of 16");
+              op, ": N must be a positive multiple of 16");
   TORCH_CHECK(row_bytes % 96 == 0,
-              "nf12_hip.decode: packed row must be a multiple of 96 bytes");
+              op, ": packed row must be a multiple of 96 bytes");
   const int64_t k = row_bytes * 2 / 3;
-  TORCH_CHECK(k % 64 == 0, "nf12_hip.decode: K must be a multiple of 64");
+  TORCH_CHECK(k % 64 == 0, op, ": K must be a multiple of 64");
 
   auto guard = device_guard(packed);
-  auto out = torch::empty({n, k}, packed.options().dtype(at::kBFloat16));
+  auto out = torch::empty({n, k}, packed.options().dtype(dtype));
 
-  const hipError_t status = nf12_decode(
-      packed.data_ptr<uint8_t>(),
-      reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
-      static_cast<uint32_t>(exp_base), n, k,
-      static_cast<void*>(out.data_ptr()), k, current_stream());
-  TORCH_CHECK(status == hipSuccess, "nf12_hip.decode failed: ", hipGetErrorString(status));
+  const auto* escapes_ptr = reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>());
+  const hipError_t status = dtype == at::kFloat
+      ? nf12_decode_fp32(packed.data_ptr<uint8_t>(), escapes_ptr,
+                         static_cast<uint32_t>(exp_base), n, k,
+                         static_cast<void*>(out.data_ptr()), k, current_stream())
+      : nf12_decode(packed.data_ptr<uint8_t>(), escapes_ptr,
+                    static_cast<uint32_t>(exp_base), n, k,
+                    static_cast<void*>(out.data_ptr()), k, current_stream());
+  TORCH_CHECK(status == hipSuccess, op, " failed: ", hipGetErrorString(status));
   return out;
+}
+
+torch::Tensor decode_dispatch(const torch::Tensor& packed, const torch::Tensor& escapes,
+                              int64_t exp_base) {
+  return decode_common(packed, escapes, exp_base, at::kBFloat16, "nf12_hip.decode");
+}
+
+torch::Tensor decode_fp32_dispatch(const torch::Tensor& packed, const torch::Tensor& escapes,
+                                   int64_t exp_base) {
+  return decode_common(packed, escapes, exp_base, at::kFloat, "nf12_hip.decode_fp32");
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +594,7 @@ std::string arch_info() {
 
 TORCH_LIBRARY(nf12_hip, m) {
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
+  m.def("decode_fp32(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("embedding(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("rowmajor_pack(Tensor packed, Tensor escapes, int exp_base) -> "
         "(Tensor row_packed, Tensor row_escapes, int original_escapes, int collisions)");
@@ -590,6 +609,7 @@ TORCH_LIBRARY(nf12_hip, m) {
 
 TORCH_LIBRARY_IMPL(nf12_hip, CUDA, m) {
   m.impl("decode", &decode_dispatch);
+  m.impl("decode_fp32", &decode_fp32_dispatch);
   m.impl("embedding", &embedding_dispatch);
   m.impl("rowmajor_pack", &rowmajor_pack_dispatch);
   m.impl("rowmajor_embedding", &rowmajor_embedding_dispatch);

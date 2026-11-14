@@ -63,6 +63,14 @@ def decode(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.
     return gptqmodel_nf12.decode(gptqmodel_nf12.NF12Weight(packed, escapes, exp_base))
 
 
+def decode_fp32(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> torch.Tensor:
+    """Decode straight to FP32; bit-identical to ``decode(...).float()``."""
+
+    if not load():
+        raise RuntimeError(_ERROR or "NF12 native extension is unavailable")
+    return gptqmodel_nf12.decode_fp32(gptqmodel_nf12.NF12Weight(packed, escapes, exp_base))
+
+
 def linear(x: torch.Tensor, packed: torch.Tensor, escapes: torch.Tensor,
            exp_base: int, bias: torch.Tensor | None = None) -> torch.Tensor:
     if not load():
@@ -70,4 +78,5 @@ def linear(x: torch.Tensor, packed: torch.Tensor, escapes: torch.Tensor,
     return gptqmodel_nf12.linear(x, gptqmodel_nf12.NF12Weight(packed, escapes, exp_base), bias)
 
 
-__all__ = ["available", "build_directory", "decode", "encode", "last_error", "linear", "load"]
+__all__ = ["available", "build_directory", "decode", "decode_fp32", "encode", "last_error", "linear",
+           "load"]

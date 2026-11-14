@@ -44,6 +44,11 @@ chooses one 8-bit biased exponent base `B` (0..120); a value is stored in a
 escape table. `decode(encode(W))` is bit-identical to `W` for every BF16
 input, including `-0`, subnormals, Inf, and NaN payloads.
 
+`nf12_decode` writes BF16. `nf12_decode_fp32` writes the same elements as
+FP32, widening each register pair with a bit shift during the store, so a
+BF16 matrix is never materialized for FP32 consumers. The two outputs agree
+bit for bit, and the fused store moves 5.5 bytes per element instead of 9.5.
+
 The tiled memory layout packs 16x64 super-atoms so a decoded group is exactly
 the `A` fragment of `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`.
 Constraints are `N % 16 == 0` and `K % 64 == 0`.
