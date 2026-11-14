@@ -288,6 +288,26 @@ def _dequantize_int8_weight(
     return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
 
 
+def _int8_vectorwise_quant_fp32(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, None]:
+    """LLM.int8() row quantizer that keeps the row scale in FP32.
+
+    ``bitsandbytes.functional.int8_vectorwise_quant`` accepts FP16 only, so a
+    BF16/FP32 activation had to be narrowed first and any magnitude above
+    65504 became inf. Compute the row absmax and codes in FP32 instead. The
+    returned statistics match the native op (the row absmax, not the divided
+    scale), so the shared dequant epilogue stays valid.
+    """
+
+    x_fp32 = x.to(torch.float32)
+    row_absmax = x_fp32.abs().amax(dim=1)
+    scale = row_absmax / 127.0
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    return codes, row_absmax, None
+
+
 def _cpu_packed_max_rows(
     *,
     in_features: int,
@@ -815,15 +835,14 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 self._buffers[_packed_state_key_to_buffer_name(key)] = tensor.contiguous()
             self._refresh_quant_state(force=True)
         else:
-            weight = weight.to(torch.float16).contiguous()
+            # Keep the INT8 weight scale in FP32: narrowing the source to FP16
+            # first overflows any weight magnitude above 65504.
+            weight = weight.to(torch.float32).contiguous()
             if _mlx_quantization_available() and weight.numel() >= _MLX_INT8_MIN_ELEMENTS:
-                qweight, scales = _quantize_int8_weight_mlx_to_torch(weight)
+                qweight, scales = _quantize_int8_weight_mlx_to_torch(weight.to(torch.float16))
                 outlier_cols = None
             else:
-                qweight, scales, outlier_cols = bnb.functional.int8_vectorwise_quant(
-                    weight,
-                    threshold=0.0,
-                )
+                qweight, scales, outlier_cols = _int8_vectorwise_quant_fp32(weight)
             if outlier_cols is not None and outlier_cols.numel() > 0:
                 raise NotImplementedError(
                     "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
@@ -955,17 +974,30 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         ):
             return self._cpu_int8_tiled_forward(x, bias)
 
-        x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
-            x.to(torch.float16),
-            threshold=0.0,
-        )
+        if x.dtype == torch.float16:
+            x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
+                x,
+                threshold=0.0,
+            )
+        else:
+            x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x)
         if outlier_cols is not None and outlier_cols.numel() > 0:
             raise NotImplementedError(
                 "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
             )
 
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
-        out = bnb.functional.int8_mm_dequant(mm_out, x_stats, self.weight_scb, bias=bias)
+        # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
+        # overflows) the partial sum before a cancelling bias is added. Keep
+        # the row/column scales and the bias in FP32 and round once.
+        out = (
+            mm_out.to(torch.float32)
+            * x_stats.to(torch.float32).reshape(-1, 1)
+            * self.weight_scb.to(torch.float32).reshape(1, -1)
+            / (127.0 * 127.0)
+        )
+        if bias is not None:
+            out = out + bias.to(torch.float32)
         return out.to(input_dtype)
 
 

@@ -235,6 +235,13 @@ class AwqExllamaV2Linear(AWQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
 
         x = x.reshape(-1, x.shape[-1]).contiguous()
+        # The native kernel writes the activation dtype, so a pre-bias sum
+        # outside that range becomes inf before a cancelling bias is added.
+        # The extension's FP32 path keeps the reduction and the bias wide and
+        # only rounds the visible output.
+        wide_bias = self.bias is not None
+        if wide_bias and x.dtype != torch.float32:
+            x = x.to(torch.float32)
 
         out = torch.empty(
             (x.shape[0], self.out_features),
@@ -254,11 +261,10 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
                 exllamav2_free_q_matrix(handle, awq=True)
 
-        if input_dtype != torch.float16:
+        if wide_bias:
+            out = out + self.bias.to(device=out.device, dtype=torch.float32)
+        if out.dtype != input_dtype:
             out = out.to(dtype=input_dtype)
-
-        if self.bias is not None:
-            out.add_(self.bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

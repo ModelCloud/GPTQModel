@@ -122,7 +122,10 @@ class QQQLinear(GroupedQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    # The native Marlin-derived W4A8 kernel is FP16-only. BF16 checkpoints use
+    # the portable ``QQQTorchLinear`` (BACKEND.QQQ_TORCH), which computes in
+    # FP32 and is what AUTO selects for BF16.
+    SUPPORTS_DTYPES = [torch.float16]
 
     #: Whether the native Marlin kernel's device restrictions apply: SM80 or
     #: newer on NVIDIA, and no ROCm. The portable FP32 kernel clears this.
@@ -531,12 +534,16 @@ class QQQLinear(GroupedQuantLinear):
             return self.empty_linear_output(A)
 
         A_dtype = A.dtype
-        # qqq is float16 kernel only
-        if A.dtype != torch.float16:
-            A = A.to(dtype=torch.float16)
+        # qqq is float16 kernel only. Do not narrow BF16/FP32 here: an
+        # activation above 65504 would become inf before dynamic_quant.
+        if A_dtype != torch.float16:
+            raise NotImplementedError(
+                f"{type(self).__name__} is an FP16 kernel; use BACKEND.QQQ_TORCH "
+                f"for {A_dtype} activations."
+            )
 
         out_shape = A.shape[:-1] + (self.out_features,)
-        A = A.reshape(-1, A.shape[-1]) # .to(dtype=torch.float16)
+        A = A.reshape(-1, A.shape[-1])
         quant_A, s1 = self.dynamic_quant(A)
         D = torch.empty(A.shape[0], self.out_features, dtype=A.dtype, device=A.device)
         mul(
@@ -555,7 +562,9 @@ class QQQLinear(GroupedQuantLinear):
         D = D.reshape(out_shape)
 
         if self.bias is not None:
-            D.add_(self.bias)
+            # The kernel output is FP16; add the stored bias in FP32 so the
+            # visible cast is the only rounding after the reduction.
+            D = (D.float() + self.bias.float()).to(dtype=A_dtype)
 
         if self.adapter:
             D = self.adapter.apply(x=A, out=D)

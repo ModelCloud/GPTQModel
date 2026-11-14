@@ -29,7 +29,9 @@ SHAPES = [
 
 
 def _pack_columns(values, bits):
-    order = (0, 2, 4, 6, 1, 3, 5, 7) if bits == 4 else (0, 2, 1, 3)
+    # Only the 4-bit AWQ layout is interleaved; 8-bit words are a contiguous
+    # little-endian stream (see awq_marlin_repack.cu and #3974).
+    order = (0, 2, 4, 6, 1, 3, 5, 7) if bits == 4 else (0, 1, 2, 3)
     packed = torch.zeros((values.shape[0], values.shape[1] // len(order)), dtype=torch.int32)
     for lane, source in enumerate(order):
         packed |= values[:, source::len(order)] << (lane * bits)
@@ -59,8 +61,8 @@ def test_marlin_narrow_fp32_oracle(dtype, shape, cancellation):
     dense = (codes.double() - zeros.repeat_interleave(k // groups, 0).double())
     dense *= scales.repeat_interleave(k // groups, 0).double()
     raw = source.double() @ dense
-    # Marlin's existing bias epilogue rounds the product before adding bias.
-    expected = (raw.to(dtype).double() + .25).to(dtype)
+    # The epilogue adds the bias in FP32 before the single output cast.
+    expected = (raw + .25).to(dtype)
     layer = AwqMarlinLinear(bits=bits, group_size=group, sym=False, desc_act=False,
                            in_features=k, out_features=n, bias=True, dtype=dtype,
                            register_buffers=True).cuda().eval()
@@ -77,7 +79,10 @@ def test_marlin_narrow_fp32_oracle(dtype, shape, cancellation):
         for _ in range(3):
             actual = layer(x)
             assert actual.dtype == dtype and actual.isfinite().all()
-            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+            # The kernel accumulates in FP32 and rounds once; an FP64 oracle
+            # can differ by one output ulp at rounding boundaries.
+            tol = 2e-3 if dtype == torch.float16 else 8e-3
+            torch.testing.assert_close(actual.cpu(), expected, rtol=tol, atol=tol)
     stream.synchronize()
     assert not any(t.data_ptr() not in before and t.is_floating_point() and t.numel() >= k * n
                    for t in state_tensors(layer))

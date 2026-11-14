@@ -133,6 +133,9 @@ documents fused low-precision bias addition and FP32 checkpoint bias handling.
 The [low-precision bias epilogues](docs/low-precision-bias-epilogue.md)
 reference keeps FP4, VPTQ, FP8, GGUF, and NF12 bias widths and their
 failure paths in one place.
+The [FP16 inference overflow and bias epilogues](docs/inference-fp16-overflow-epilogues.md)
+page covers BF16-through-FP16 activation quantization and every kernel that now
+adds the stored bias before the final cast.
 The [AllSpark W8A16 bias epilogue](docs/allspark-bias-epilogue.md)
 documents how the CUDA and RDNA4 kernels add a checkpoint bias to the
 FP32 accumulator before output rounding.

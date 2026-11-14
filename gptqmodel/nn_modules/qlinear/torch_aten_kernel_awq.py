@@ -23,6 +23,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
+from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import (
     TorchAtenLinear,
     _cpu_int4pack_scale_dtype,
@@ -260,6 +261,9 @@ class TorchAtenAwqLinear(AWQuantLinear):
             and _has_local_int4pack_cpu_ops()
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
+            # The fused kernel writes the activation dtype before the bias add.
+            # Keep biased layers on the FP32-reduce dense path.
+            and self.bias is None
         ):
             capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)
@@ -276,10 +280,10 @@ class TorchAtenAwqLinear(AWQuantLinear):
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             weight = self.awq_weight_dequantize(device=x.device, dtype=x.dtype)
-            out = torch.matmul(x, weight).reshape(out_shape)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x, weight, self.bias).reshape(out_shape)
+            else:
+                out = torch.matmul(x, weight).reshape(out_shape)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

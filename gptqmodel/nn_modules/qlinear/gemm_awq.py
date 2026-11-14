@@ -24,6 +24,7 @@ from ...utils.awq import (
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.rocm import IS_ROCM
+from ._numerics import matmul_fp32_reduce
 
 
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
@@ -85,19 +86,36 @@ class AwqGemmFn(torch.autograd.Function):
         # Native GEMM consumes [rows, features]; restore leading dimensions later.
         x_2d = x.reshape(rows, x.shape[-1])
         if FULL_DEQUANT_MATMUL_THRESHOLD:
-            out = awq_dequantize_weights(qweight, scales, qzeros, 0, 0, 0, False)
-            out = torch.matmul(x_2d, out.to(dtype=x.dtype))
+            weight = awq_dequantize_weights(qweight, scales, qzeros, 0, 0, 0, False)
+            weight = weight.to(dtype=x.dtype)
+            if bias is not None:
+                out = matmul_fp32_reduce(x_2d, weight, bias)
+            else:
+                out = torch.matmul(x_2d, weight)
         else:
-            out = _awq_cuda_gemm_forward(
-                x_2d,
-                qweight,
-                scales,
-                qzeros,
-                8,
-                fp32_accum=fp32_accum,
-            )
+            if bias is not None:
+                # The split-K partials are already FP32. Ask for an FP32
+                # result and add the stored bias there, so a finite sum that
+                # overflows the activation dtype is not rounded before the
+                # bias cancels it.
+                out = _awq_cuda_gemm_forward_fp32_reduce(
+                    x_2d,
+                    qweight,
+                    scales,
+                    qzeros,
+                    8,
+                )
+                out = out + bias.float()
+            else:
+                out = _awq_cuda_gemm_forward(
+                    x_2d,
+                    qweight,
+                    scales,
+                    qzeros,
+                    8,
+                    fp32_accum=fp32_accum,
+                )
 
-        out = out + bias if bias is not None else out
         out = out.reshape(out_shape)
         return out
 
