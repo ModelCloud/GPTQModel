@@ -26,8 +26,8 @@ from ...utils.paroquant import (
     build_identity_rotation_buffers,
     is_identity_rotation,
 )
-from ._runtime_cache import tensor_cache_key
 from ._numerics import linear_wide_bias
+from ._runtime_cache import tensor_cache_key
 from .gemm_awq import (
     FP32_ACCUM,
     _awq_cuda_gemm_forward,
