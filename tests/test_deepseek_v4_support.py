@@ -218,6 +218,66 @@ def test_deepseek_v4_pre_quantize_keeps_packed_target_layer_lazy(monkeypatch) ->
     assert first.weight.device.type == "meta"
 
 
+@pytest.mark.parametrize(
+    ("method", "format_value"),
+    [
+        (SimpleNamespace(value="gptq"), None),
+        (SimpleNamespace(value="awq"), None),
+        (SimpleNamespace(value="rtn"), None),
+    ],
+)
+def test_deepseek_v4_pre_quantize_materializes_non_packed_target_layer(
+    monkeypatch, method, format_value
+) -> None:
+    """GPTQ/AWQ/RTN subsets prepare only their own projections.
+
+    Without eager materialization the layer still holds META projections when
+    the first subset rehomes it, which crashed with
+    ``Tensor on device meta is not on the expected device``.
+    """
+
+    first = nn.Linear(2, 2, device="meta")
+    harness = object.__new__(DeepSeekV4QModel)
+    nn.Module.__init__(harness)
+    harness.model = SimpleNamespace(
+        model=SimpleNamespace(layers=nn.ModuleList([first]))
+    )
+    harness.quantize_config = SimpleNamespace(
+        method=method, format=format_value, device=torch.device("cpu")
+    )
+    materialized = nn.Linear(2, 2)
+    calls = []
+    monkeypatch.setattr(
+        harness,
+        "shell_module_materialize",
+        lambda **kwargs: calls.append(kwargs["target_submodule"]) or materialized,
+    )
+
+    assert harness.pre_quantize(first) is materialized
+    assert calls == [first]
+
+
+def test_deepseek_v4_pre_quantize_keeps_exl3_target_layer_lazy(monkeypatch) -> None:
+    first = nn.Linear(2, 2, device="meta")
+    harness = object.__new__(DeepSeekV4QModel)
+    nn.Module.__init__(harness)
+    harness.model = SimpleNamespace(
+        model=SimpleNamespace(layers=nn.ModuleList([first]))
+    )
+    harness.quantize_config = SimpleNamespace(
+        method=SimpleNamespace(value="exl3"), format=None
+    )
+    monkeypatch.setattr(
+        harness,
+        "shell_module_materialize",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("packed parent layer was eagerly materialized")
+        ),
+    )
+
+    assert harness.pre_quantize(first) is first
+
+
 def test_auto_decoder_materializes_unquantized_linear_subclass_with_its_forward(
     monkeypatch,
 ) -> None:

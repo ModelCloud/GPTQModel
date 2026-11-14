@@ -15,6 +15,7 @@ from torch.nn import functional as F
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.kimi_k3 import KimiK3QModel, KimiLinearQModel
+from gptqmodel.models.definitions.kimi_linear import KimiLinearNativeQModel
 from gptqmodel.quantization.dtype import dequantize_f4_e2m1
 
 
@@ -48,7 +49,10 @@ def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
 
 
 @pytest.mark.parametrize("model_type,definition", [
-    ("kimi_k3", KimiK3QModel), ("kimi_linear", KimiLinearQModel),
+    # A bare `kimi_linear` config has no AttnRes fields, so it selects the
+    # native Transformers tree. AttnRes dispatch is covered in
+    # tests/module_tree/test_kimi_linear_native_tree.py.
+    ("kimi_k3", KimiK3QModel), ("kimi_linear", KimiLinearNativeQModel),
 ])
 def test_registry_selects_kimi_backbone(monkeypatch, model_type, definition):
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *a, **kw: True)

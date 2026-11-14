@@ -625,7 +625,11 @@ __global__ void __launch_bounds__(128) gemmv2_forward_4bit_cuda_m128n64k32(int s
 
   // preload s.f. and zeros
   int k_bound = make_divisible(IC / 32, split_k_iters); // (IC / 32 + split_k_iters - 1) / split_k_iters;
-  if ((k_bound - 1) * 32 + blockIdx_z >= IC) k_bound -= 1;
+  // k_bound counts 32-wide k-tiles owned by this split; k_0_0 below is a tile
+  // index, so the bound must be compared against the tile count IC / 32 (not
+  // the column count IC). The old comparison never fired for IC = 896 and
+  // split_k_iters = 8, so splits 4..7 read tiles 28..31 past the row end.
+  if ((k_bound - 1) * split_k_iters + blockIdx_z >= IC / 32) k_bound -= 1;
   
   // TODO (Haotian): load scales and zero points to smem
 

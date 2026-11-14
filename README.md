@@ -97,6 +97,7 @@ Disk-backed replay outputs use [bounded staging and shard verification on every 
 Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
 Quantized kernels receive packed rows and launch in the operand's device; see the [kernel input contiguity and launch contracts](docs/kernel-input-contiguity.md) for activation packing, 64-bit offsets, empty batches, and per-token compiles.
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
+Transformers 5.22 model-family fixes for module trees, Defuser router shims, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
@@ -107,6 +108,7 @@ AWQ scaling groups are validated against the decoder layer's forward data flow, 
 LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 AWQ dequantization dispatches on the saved checkpoint layout and per-module `dynamic` widths; see the [AWQ dequantization layouts](docs/awq-dequant-layouts.md) flow.
+AWQ split-K prefill covers every K tile and the decode-batch bound trims on the tile count; see the [AWQ split-K kernel boundaries](docs/awq-kernel-splitk.md) contract.
 Legacy 5.4.x `meta.gptaq` booleans, untied `lm_head` quantization, and the metadata plain Transformers or vLLM need are described in the [checkpoint compatibility](docs/checkpoint-compat.md) contract.
 Third-party Marlin `g_idx`, `is_marlin_format: false`, dense export, and mixed-bit dequantization are described in the [checkpoint interop](docs/checkpoint-interop.md) contract.
 FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
@@ -930,6 +932,9 @@ For nested offload tensor names, see [Offload index resolution](docs/offload-ind
 #### Other Quantization Formats 📦
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12Config`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
+
+For the factory validation contract, EXL3 field normalisation, and the
+checkpoint metadata round trip, see [quantization config serialization](docs/config-serialization.md).
 
 `GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12` are weight-only and should be quantized with `calibration=None`.
 
