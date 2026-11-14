@@ -86,6 +86,7 @@ def _materialized_media(source):
         try:
             os.unlink(temporary)
         except OSError:
+            # Best-effort cleanup: ignore unlink failures to avoid masking primary errors.
             pass
 
 
