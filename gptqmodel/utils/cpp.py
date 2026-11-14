@@ -1038,6 +1038,23 @@ def _jit_cxx_standard() -> str:
         return "c++17"
 
 
+_STABLE_ABI_STD_FINGERPRINT = "-std=stable-abi"
+
+
+def _stable_abi_fingerprint_flags(flags: Sequence[str]) -> list[str]:
+    """Fold the torch-version-dependent C++ standard out of a cache key.
+
+    Installed headers ask for c++17 before torch 2.14 and c++20 after, but the
+    standard is a compile-time choice: it does not change the stable runtime
+    ABI. Folding it keeps one stable-ABI artifact valid across torch releases.
+    """
+
+    return [
+        _STABLE_ABI_STD_FINGERPRINT if flag.startswith("-std=c++") else flag
+        for flag in flags
+    ]
+
+
 def default_jit_cflags(
     *,
     opt_level: str | None = "O3",
@@ -1139,6 +1156,7 @@ class TorchOpsJitExtension:
         force_rebuild_env: Optional[str] = None,
         verbose_env: Optional[str] = None,
         requires_cuda: bool = False,
+        with_cuda: bool | None = None,
         merge_visible_cuda_arch_override: bool = True,
         binary_names: Optional[Sequence[str]] = None,
         python_abi_dependent: bool | None = None,
@@ -1159,6 +1177,10 @@ class TorchOpsJitExtension:
         self.force_rebuild_env = force_rebuild_env
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
+        # `None` keeps torch's own inference (any `.cu` source enables CUDA).
+        # A host-only `.cpp` that includes CUDA headers must set this so torch
+        # adds the CUDA include paths and links the CUDA runtime libraries.
+        self.with_cuda = with_cuda
         self.merge_visible_cuda_arch_override = bool(merge_visible_cuda_arch_override)
         self.binary_names = tuple(binary_names or (name,))
         self.python_abi_dependent = python_abi_dependent
@@ -1490,6 +1512,8 @@ class TorchOpsJitExtension:
         if torch_stable_abi:
             major, minor = self.torch_stable_abi_target
             payload.append(f"torch_abi=stable-{major}.{minor}")
+            extra_cflags = _stable_abi_fingerprint_flags(extra_cflags)
+            extra_cuda_cflags = _stable_abi_fingerprint_flags(extra_cuda_cflags)
         else:
             torch_version = torch.__version__ if self.requires_cuda else _torch_cpu_cache_version()
             payload.append(f"torch={torch_version}")
@@ -1885,6 +1909,8 @@ class TorchOpsJitExtension:
                         "is_python_module": False,
                         "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
                     }
+                    if self.with_cuda is not None:
+                        kwargs["with_cuda"] = self.with_cuda
                     extra_cflags = self._resolved_extra_cflags()
                     if extra_cflags:
                         kwargs["extra_cflags"] = extra_cflags
