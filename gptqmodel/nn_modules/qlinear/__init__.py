@@ -1489,7 +1489,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         # small buffers
         self.register_buffer("scales", _scales_for_storage(scales, name=f"{self.name}.scales"))
         if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
+            self.register_buffer("bias", linear.bias.detach().to("cpu"))
         elif not hasattr(self, "bias"):
             self.bias = None
 
@@ -1724,7 +1724,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         self.register_buffer("scales", _scales_for_storage(scales_g, name=f"{self.name}.scales").to(device="cpu"))
         if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to(device="cpu", dtype=t.float16))
+            self.register_buffer("bias", linear.bias.detach().to(device="cpu"))
         else:
             self.bias = None
 
@@ -1886,7 +1886,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             if hasattr(linear, "bias") and linear.bias is not None:
                 # TODO why clone?
                 # self.bias = linear.bias.clone().to(dtype=t.float16)
-                self.register_buffer("bias", linear.bias.to(dtype=t.float16))
+                self.register_buffer("bias", linear.bias.detach())
             elif not hasattr(self, "bias"):
                 self.bias = None
 

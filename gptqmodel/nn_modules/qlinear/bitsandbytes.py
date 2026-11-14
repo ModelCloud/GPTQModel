@@ -118,7 +118,12 @@ def _clear_availability_state() -> None:
     process ends.
     """
 
+    global _VALIDATED_BITSANDBYTES
+
     sys.modules[__name__].__dict__.pop("BITSANDBYTES_AVAILABLE", None)
+    # The validated module is cached on the forward path; drop it with the
+    # version probe so a later install/upgrade is re-validated.
+    _VALIDATED_BITSANDBYTES = None
     _probe_cache_clear()
     cls = globals().get("BitsAndBytesLinear")
     if cls is not None:
@@ -157,7 +162,18 @@ def __dir__():
     return sorted(set(globals()) | {"BITSANDBYTES_AVAILABLE"})
 
 
+_VALIDATED_BITSANDBYTES = None
+
+
 def import_bitsandbytes():
+    """Import bitsandbytes and validate its version once per process."""
+
+    global _VALIDATED_BITSANDBYTES
+
+    cached = _VALIDATED_BITSANDBYTES
+    if cached is not None:
+        return cached
+
     import bitsandbytes as bnb
 
     # ``getattr`` + ``try`` keep a build with a missing or unparsable
@@ -169,6 +185,8 @@ def import_bitsandbytes():
         raise ImportError(BITSANDBYTES_INSTALL_HINT) from exc
     if parsed_version < version.parse(MINIMUM_BITSANDBYTES_VERSION):
         raise ImportError(BITSANDBYTES_INSTALL_HINT)
+
+    _VALIDATED_BITSANDBYTES = bnb
     return bnb
 
 
@@ -594,14 +612,16 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self._ensure_unpacked()
 
         bnb = import_bitsandbytes()
+        # One attribute lookup per tensor instead of four, and no string
+        # formatting: ``torch.Size`` and ``torch.device`` compare by value.
         signature = tuple(
-            (
-                name,
-                tuple(getattr(self, name).shape),
-                str(getattr(self, name).device),
-                getattr(self, name).dtype,
+            (tensor.shape, tensor.device, tensor.dtype)
+            for tensor in (
+                self.weight,
+                self.weight_absmax,
+                self.weight_quant_map,
+                self.weight_quant_state,
             )
-            for name in ("weight", "weight_absmax", "weight_quant_map", "weight_quant_state")
         )
         if not force and self.quant_state is not None and signature == self._quant_state_signature:
             return self.quant_state

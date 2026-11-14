@@ -118,6 +118,12 @@ class GemmLaunch(NamedTuple):
     # the cdna4/rdna4 entries and their ``(small_m_max, max_in_features)``
     # contract byte-for-byte unchanged.
     max_out_features: int = 0
+    # Ada/Blackwell retile the launch by M: (16, 32) for M <= 16, (32, 64) for
+    # M <= 32 and (64, 64) for M <= 64.  CDNA4/RDNA4 keep one fixed tile.
+    m_banded: bool = False
+    # Deterministic split-K is only auto-selected for the retiled CUDA entries;
+    # the ROCm entries keep their previously measured single-pass launch.
+    auto_split: bool = False
 
 
 # Launch table keyed by ``arch_class()``. ``cdna4`` is the gfx950 configuration
@@ -137,13 +143,23 @@ _LAUNCH_CONFIGS: dict[str, GemmLaunch] = {
         block_m=32, block_n=32, block_k=256, num_warps=4, num_stages=2,
         small_m_max=16, max_in_features=17408,
     ),
-    # Ada (RTX 4090, SM 8.9): measured on one 4090.  The (16, 16) tile is a
-    # uniform win for K <= 2048 and N <= 2048 in FP16 and BF16; the output cap
-    # is what keeps the fused path off the wide-N regressions.  See the module
-    # docstring table.
+    # Ada (RTX 4090, SM 8.9): the packed-load rewrite loads every int32 word
+    # once and unpacks it in registers, so the serial-K and narrow-grid losses
+    # of the old (16, 16, 256) tile are gone.  BLOCK_K=128, 4 warps, 2 stages,
+    # with BLOCK_N=32 (64 when M > 16) and BLOCK_M in {16, 32, 64}.  See the
+    # module docstring table.
     "ada": GemmLaunch(
-        block_m=16, block_n=16, block_k=256, num_warps=4, num_stages=2,
-        small_m_max=16, max_in_features=2048, max_out_features=2048,
+        block_m=16, block_n=32, block_k=128, num_warps=4, num_stages=2,
+        small_m_max=64, max_in_features=0, max_out_features=0,
+        m_banded=True, auto_split=True,
+    ),
+    # Blackwell (SM 10.x+): same packed-load tile as Ada.  This host has no
+    # Blackwell GPU to re-measure, so the entry is enabled from the issue's
+    # indicative sm_120 report and shares the Ada kernel exactly.
+    "blackwell": GemmLaunch(
+        block_m=16, block_n=32, block_k=128, num_warps=4, num_stages=2,
+        small_m_max=64, max_in_features=0, max_out_features=0,
+        m_banded=True, auto_split=True,
     ),
 }
 
@@ -211,6 +227,41 @@ def gate_max_out_features(arch=None) -> int:
     return _arch.gemm_fused_max_out_features(arch)
 
 
+# M-banded launch for the CUDA packed-load entries.  ``(max_m, block_m,
+# block_n)``: the whole batch fits one M tile, so every weight word is decoded
+# exactly once per output tile.
+_M_BANDS: tuple[tuple[int, int, int], ...] = ((16, 16, 32), (32, 32, 64), (64, 64, 64))
+
+
+def tile_for_m(cfg: GemmLaunch, m: int) -> tuple[int, int]:
+    """Return ``(block_m, block_n)`` for this batch size and launch entry."""
+
+    if not cfg.m_banded:
+        return cfg.block_m, cfg.block_n
+    for max_m, block_m, block_n in _M_BANDS:
+        if m <= max_m:
+            return block_m, block_n
+    return _M_BANDS[-1][1], _M_BANDS[-1][2]
+
+
+def split_k_for(m: int, in_features: int) -> int:
+    """Pick a deterministic split-K factor for the CUDA packed-load kernel.
+
+    Largest ``S`` in ``{2, 4, 8}`` with ``K % (128 * S) == 0`` and
+    ``K / S >= 512``; capped at 4 when ``M > 32`` so the fp32 partial buffer
+    stays small.
+    """
+
+    chosen = 1
+    for candidate in (8, 4, 2):
+        if in_features % (128 * candidate) == 0 and in_features // candidate >= 512:
+            chosen = candidate
+            break
+    if m > 32:
+        chosen = min(chosen, 4)
+    return chosen
+
+
 @triton.jit
 def _gptq_gemm_small_m_kernel(
     x_ptr, qweight_ptr, scales_ptr, qzeros_ptr, g_idx_ptr, out_ptr,
@@ -219,9 +270,17 @@ def _gptq_gemm_small_m_kernel(
     num_groups: tl.constexpr,
     block_m: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
     bits: tl.constexpr,
+    uniform_group: tl.constexpr,
+    split_k: tl.constexpr,
 ):
     pack_factor: tl.constexpr = 32 // bits
     maxq: tl.constexpr = (1 << bits) - 1
+    group_size: tl.constexpr = in_features // num_groups
+    k_per_split: tl.constexpr = in_features // split_k
+    num_chunks: tl.constexpr = (k_per_split + block_k - 1) // block_k
+
+    split = tl.program_id(2)
+    k_begin = split * k_per_split
 
     rows_m = tl.program_id(0) * block_m + tl.arange(0, block_m)
     cols = tl.program_id(1) * block_n + tl.arange(0, block_n)
@@ -230,31 +289,66 @@ def _gptq_gemm_small_m_kernel(
 
     accumulator = tl.zeros((block_m, block_n), tl.float32)
     k_offsets = tl.arange(0, block_k)
+    packed_k = tl.arange(0, block_k // pack_factor)
+    lanes = tl.arange(0, pack_factor)
+    shifts = lanes * bits
+    packed_cols = tl.arange(0, block_n // pack_factor)
 
-    for chunk in range(tl.cdiv(in_features, block_k)):
-        rows = chunk * block_k + k_offsets
+    for chunk in range(num_chunks):
+        k_start = k_begin + chunk * block_k
+        rows = k_start + k_offsets
         row_mask = rows < in_features
-        groups = tl.load(g_idx_ptr + rows, row_mask, other=0)
-        groups = tl.where(groups < 0, groups + num_groups, groups)
-        group_mask = row_mask & (groups >= 0) & (groups < num_groups)
-        weight_mask = group_mask[:, None] & n_mask[None, :]
 
-        weight_words = tl.load(
-            qweight_ptr + (rows[:, None] // pack_factor) * out_features + cols[None, :],
-            weight_mask, other=0,
+        # One load per int32 word: [BLOCK_K / pack_factor, BLOCK_N].  The
+        # per-lane codes are then extracted in registers and reshaped back to
+        # [BLOCK_K, BLOCK_N]; the old kernel re-fetched every word once per
+        # lane.
+        packed_rows = k_start // pack_factor + packed_k
+        packed_mask = (packed_rows < in_features // pack_factor)[:, None] & n_mask[None, :]
+        words = tl.load(
+            qweight_ptr + packed_rows[:, None] * out_features + cols[None, :],
+            packed_mask, other=0,
         )
-        zero_words = tl.load(
-            qzeros_ptr + groups[:, None] * (out_features // pack_factor) + cols[None, :] // pack_factor,
-            weight_mask, other=0,
-        )
-        scales = tl.load(
-            scales_ptr + groups[:, None] * out_features + cols[None, :],
-            weight_mask, other=0,
-        ).to(tl.float32)
+        codes = (words[:, None, :] >> shifts[None, :, None]) & maxq
+        codes = tl.reshape(codes, (block_k, block_n))
 
-        codes = (weight_words >> ((rows[:, None] % pack_factor) * bits)) & maxq
-        zeros = (zero_words >> ((cols[None, :] % pack_factor) * bits)) & maxq
-        weights = ((codes - zeros).to(tl.float32) * scales).to(x_ptr.dtype.element_ty)
+        if uniform_group:
+            # g_idx is the identity mapping and the K-tile lies inside one
+            # quantization group: one scale/zero row covers the whole tile.
+            group = k_start // group_size
+            scale_row = tl.load(
+                scales_ptr + group * out_features + cols, n_mask, other=0,
+            ).to(tl.float32)
+            zero_cols = tl.program_id(1) * block_n // pack_factor + packed_cols
+            zero_mask = zero_cols < (out_features // pack_factor)
+            zero_words = tl.load(
+                qzeros_ptr + group * (out_features // pack_factor) + zero_cols,
+                zero_mask, other=0,
+            )
+            zeros = (zero_words[:, None] >> shifts[None, :]) & maxq
+            zeros = tl.reshape(zeros, (block_n,))
+            weights = (
+                (codes - zeros[None, :]).to(tl.float32) * scale_row[None, :]
+            ).to(x_ptr.dtype.element_ty)
+        else:
+            # Act-order (or a group narrower than BLOCK_K): keep the per-row
+            # g_idx gather.
+            groups = tl.load(g_idx_ptr + rows, row_mask, other=0)
+            groups = tl.where(groups < 0, groups + num_groups, groups)
+            group_mask = row_mask & (groups >= 0) & (groups < num_groups)
+            weight_mask = group_mask[:, None] & n_mask[None, :]
+            scales = tl.load(
+                scales_ptr + groups[:, None] * out_features + cols[None, :],
+                weight_mask, other=0,
+            ).to(tl.float32)
+            zero_words = tl.load(
+                qzeros_ptr
+                + groups[:, None] * (out_features // pack_factor)
+                + cols[None, :] // pack_factor,
+                weight_mask, other=0,
+            )
+            zeros = (zero_words >> ((cols[None, :] % pack_factor) * bits)) & maxq
+            weights = ((codes - zeros).to(tl.float32) * scales).to(x_ptr.dtype.element_ty)
 
         activations = tl.load(
             x_ptr + rows_m[:, None] * in_features + rows[None, :],
@@ -262,28 +356,78 @@ def _gptq_gemm_small_m_kernel(
         )
         accumulator = tl.dot(activations, weights, accumulator)
 
-    tl.store(
-        out_ptr + rows_m[:, None] * out_features + cols[None, :],
-        accumulator.to(out_ptr.dtype.element_ty),
-        m_mask[:, None] & n_mask[None, :],
-    )
+    if split_k > 1:
+        # Deterministic split-K: each program owns one K slice and writes an
+        # fp32 partial.  The caller reduces ``partials.sum(0)``; no atomics.
+        tl.store(
+            out_ptr
+            + split * m * out_features
+            + rows_m[:, None] * out_features
+            + cols[None, :],
+            accumulator,
+            m_mask[:, None] & n_mask[None, :],
+        )
+    else:
+        tl.store(
+            out_ptr + rows_m[:, None] * out_features + cols[None, :],
+            accumulator.to(out_ptr.dtype.element_ty),
+            m_mask[:, None] & n_mask[None, :],
+        )
 
 
 def gptq_gemm(x: torch.Tensor, qweight: torch.Tensor, scales: torch.Tensor,
               qzeros: torch.Tensor, g_idx: torch.Tensor,
-              out_dtype: torch.dtype = None, bits: int = 4) -> torch.Tensor:
+              out_dtype: torch.dtype = None, bits: int = 4, *,
+              uniform_group: bool = False,
+              split_k: int = None) -> torch.Tensor:
+    """Fused GPTQ small-M GEMM.
+
+    ``uniform_group`` says the checkpoint's ``g_idx`` is the identity mapping;
+    the kernel then loads one scale/zero row per K-tile instead of gathering
+    per row.  ``split_k=None`` selects the deterministic split factor from
+    :func:`split_k_for`; pass ``1`` to force the single-pass path (which is
+    bitwise identical to the pre-rewrite kernel).
+    """
+
     cfg = launch_config(x.device)
     m, in_features = x.shape
     out_features = qweight.shape[1]
-    output = torch.empty(
-        (m, out_features), device=x.device, dtype=x.dtype if out_dtype is None else out_dtype,
+    block_m, block_n = tile_for_m(cfg, m)
+    output_dtype = x.dtype if out_dtype is None else out_dtype
+
+    if split_k is None:
+        split_k = split_k_for(m, in_features) if cfg.auto_split else 1
+    if split_k < 1:
+        raise ValueError(f"split_k must be >= 1, got {split_k}")
+
+    group_size = in_features // scales.shape[0]
+    uniform_group = bool(uniform_group) and group_size >= cfg.block_k
+
+    if split_k > 1:
+        if in_features % (cfg.block_k * split_k) != 0:
+            raise ValueError(
+                f"split_k={split_k} does not divide in_features={in_features} "
+                f"into {cfg.block_k}-element K tiles"
+            )
+        output = torch.empty(
+            (split_k, m, out_features), device=x.device, dtype=torch.float32,
+        )
+    else:
+        output = torch.empty((m, out_features), device=x.device, dtype=output_dtype)
+
+    grid = (
+        triton.cdiv(m, block_m),
+        triton.cdiv(out_features, block_n),
+        split_k,
     )
-    grid = (triton.cdiv(m, cfg.block_m), triton.cdiv(out_features, cfg.block_n))
     with torch.cuda.device(x.device):
         _gptq_gemm_small_m_kernel[grid](
             x, qweight, scales, qzeros, g_idx, output,
             m, in_features, out_features, scales.shape[0],
-            cfg.block_m, cfg.block_n, cfg.block_k, bits,
+            block_m, block_n, cfg.block_k, bits,
+            uniform_group, split_k,
             num_warps=cfg.num_warps, num_stages=cfg.num_stages,
         )
+    if split_k > 1:
+        return output.sum(0).to(output_dtype)
     return output

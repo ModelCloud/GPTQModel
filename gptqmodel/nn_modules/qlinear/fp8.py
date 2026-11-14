@@ -465,7 +465,12 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         block_rows, block_cols = self.weight_block_size
         expanded = scale_inv.repeat_interleave(block_rows, dim=0)
         expanded = expanded.repeat_interleave(block_cols, dim=1)
-        return expanded
+        rows, cols = self.weight.shape
+        if expanded.shape[0] < rows:
+            expanded = torch.cat([expanded, expanded[-1:].expand(rows - expanded.shape[0], -1)], dim=0)
+        if expanded.shape[1] < cols:
+            expanded = torch.cat([expanded, expanded[:, -1:].expand(-1, cols - expanded.shape[1])], dim=1)
+        return expanded[:rows, :cols]
 
     def dequantize_weight(
         self,
@@ -514,9 +519,33 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
     def _dequantize_native(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
-        weight = weight.to(torch.float32)
-        scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=torch.float32)
-        return (weight / scale_inv).to(target_dtype).transpose(0, 1).contiguous()
+        # FP8 -> FP32 is exact, so divide the fp32 dequant buffer in place
+        # instead of materialising a full N x K fp32 scale with
+        # `repeat_interleave`. The per-element division order is unchanged and
+        # the result is bitwise identical to `weight / expanded_scale`.
+        deq = weight.to(torch.float32)
+        scale_inv = self.weight_scale_inv
+        if scale_inv.device != target_device or scale_inv.dtype != torch.float32:
+            scale_inv = scale_inv.to(device=target_device, dtype=torch.float32)
+
+        if self.weight_scale_method == "tensor":
+            deq.div_(scale_inv)
+        elif self.weight_scale_method == "row":
+            deq.div_(scale_inv.view(-1, 1))
+        else:
+            if self.weight_block_size is None:
+                raise ValueError("TorchFP8Linear block scaling requires `weight_block_size`.")
+            block_rows, block_cols = self.weight_block_size
+            rows, cols = deq.shape
+            if rows % block_rows == 0 and cols % block_cols == 0:
+                deq.view(rows // block_rows, block_rows, cols // block_cols, block_cols).div_(
+                    scale_inv[:, None, :, None]
+                )
+            else:
+                # Non-divisible block shapes keep the padded/cropped expansion
+                # as a fallback; the common path above never allocates it.
+                deq.div_(self._expanded_scale_inv(target_device=target_device, target_dtype=torch.float32))
+        return deq.to(target_dtype).transpose(0, 1).contiguous()
 
     def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         # ``dequantize_fp8`` treats ``scale_inv`` heuristically (it multiplies

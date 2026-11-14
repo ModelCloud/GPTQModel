@@ -159,6 +159,8 @@ def open_mesh(
     device_count: int = 1,
     fabric: str = "DISABLED",
     owner: str = "gptqmodel",
+    trace_region_size: int = 0,
+    device_id: int = 0,
 ) -> TTNNMesh:
     """Open (or reuse) the process-wide mesh for the native TTNN backend.
 
@@ -167,6 +169,10 @@ def open_mesh(
     tensor-parallel GPTQ kernel shards ``out_features`` across.  Only one
     backend may own the chips at a time, so a PJRT-owned runtime is rejected
     rather than left to fail inside TT-Metal.
+
+    ``trace_region_size`` reserves device memory for captured traces (a traced
+    decode step needs one).  ``device_id`` picks the chip for a single-device
+    open, which is how one process per card is run.
     """
 
     global _MESH
@@ -208,11 +214,14 @@ def open_mesh(
         mesh_shape: tuple[int, ...] = ()
         device = None
         try:
+            extra = {"trace_region_size": int(trace_region_size)} if trace_region_size else {}
             if device_count == 1:
-                device = ttnn.open_device(device_id=0)
+                device = ttnn.open_device(device_id=int(device_id), **extra)
             else:
+                if device_id:
+                    raise ValueError("device_id selects a single chip; it cannot offset a mesh")
                 mesh_shape = (1, device_count)
-                device = ttnn.open_mesh_device(ttnn.MeshShape(*mesh_shape))
+                device = ttnn.open_mesh_device(ttnn.MeshShape(*mesh_shape), **extra)
         except Exception as exc:
             if applied_fabric != "DISABLED":
                 try:

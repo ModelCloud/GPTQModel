@@ -21,12 +21,16 @@ from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
     gate_max_out_features,
     gptq_gemm,
     launch_config,
+    split_k_for,
+    tile_for_m,
 )
 from gptqmodel.utils import arch
+from tests.kernels._gptq_gemm_pre_rewrite import pre_rewrite_gptq_gemm
 
 
 TOL = 2e-3
-ADA_GATE = (16, 2048)
+ADA_GATE = (64, 0)
+BLACKWELL_GATE = (64, 0)
 
 
 @pytest.fixture(autouse=True)
@@ -54,19 +58,25 @@ requires_ada = pytest.mark.skipif(not _is_ada_host(), reason="Ada (SM 8.9) CUDA 
 def test_ada_launch_entry_is_measured_tile():
     cfg = launch_config("sm_89")
     assert cfg == launch_config((8, 9))
-    assert (cfg.block_m, cfg.block_n, cfg.block_k) == (16, 16, 256)
+    assert (cfg.block_m, cfg.block_n, cfg.block_k) == (16, 32, 128)
     assert (cfg.num_warps, cfg.num_stages) == (4, 2)
-    assert cfg.small_m_max == 16
-    assert cfg.max_in_features == 2048
-    assert cfg.max_out_features == 2048
+    assert cfg.small_m_max == 64
+    assert cfg.max_in_features == 0
+    assert cfg.max_out_features == 0
+    assert cfg.m_banded is True
+    assert cfg.auto_split is True
     assert cfg == _LAUNCH_CONFIGS["ada"]
+    assert launch_config("sm_100") == _LAUNCH_CONFIGS["blackwell"]
+    assert launch_config("sm_120") == _LAUNCH_CONFIGS["blackwell"]
 
 
 @pytest.mark.parametrize(
     ("arch_id", "expected"),
     [
-        ("sm_89", GemmLaunch(16, 16, 256, 4, 2, 16, 2048, 2048)),
-        ((8, 9), GemmLaunch(16, 16, 256, 4, 2, 16, 2048, 2048)),
+        ("sm_89", GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ((8, 9), GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ("sm_100", GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
+        ("sm_120", GemmLaunch(16, 32, 128, 4, 2, 64, 0, 0, True, True)),
         ("gfx950", GemmLaunch(16, 16, 256, 4, 2, 16, 5120, 0)),
         ("gfx1201", GemmLaunch(32, 32, 256, 4, 2, 16, 17408, 0)),
         ("gfx942", _DEFAULT_LAUNCH),
@@ -83,8 +93,15 @@ def test_gemm_launch_routes_every_family(arch_id, expected):
 def test_ada_gate_and_dtypes():
     assert gate_limits("sm_89") == ADA_GATE
     assert gate_limits((8, 9)) == ADA_GATE
-    assert gate_max_out_features("sm_89") == 2048
+    assert gate_max_out_features("sm_89") == 0
     assert set(arch.gemm_fused_dtypes("sm_89")) == {"float16", "bfloat16"}
+    assert arch.is_cuda_fused("sm_89") is True
+    assert gate_limits("sm_100") == BLACKWELL_GATE
+    assert gate_limits("sm_120") == BLACKWELL_GATE
+    assert gate_max_out_features("sm_100") == 0
+    assert set(arch.gemm_fused_dtypes("sm_100")) == {"float16", "bfloat16"}
+    assert arch.is_cuda_fused("sm_100") is True
+    assert arch.is_cuda_fused("sm_120") is True
     # Unchanged for the AMD families (the output cap stays disabled).
     assert gate_limits("gfx950") == (16, 5120)
     assert gate_max_out_features("gfx950") == 0
@@ -99,8 +116,13 @@ def test_ada_gate_and_dtypes():
     host_family = arch.tuning_family(None)
     # Registered non-Ada hosts (e.g. an RDNA4 GPU running the ROCm suite) still
     # resolve their own gate; only truly unregistered families stay disabled.
-    _KNOWN_HOST_GATES = {"ada": ADA_GATE, "cdna4": (16, 5120), "rdna4": (16, 17408)}
-    assert gate_max_out_features(None) == (2048 if host_family == "ada" else 0)
+    _KNOWN_HOST_GATES = {
+        "ada": ADA_GATE,
+        "blackwell": BLACKWELL_GATE,
+        "cdna4": (16, 5120),
+        "rdna4": (16, 17408),
+    }
+    assert gate_max_out_features(None) == 0
     assert arch.gate_limits(None) == _KNOWN_HOST_GATES.get(host_family, (0, 0))
     # The kernel-module helpers keep ``None`` = "unknown caller" -> disabled,
     # and only ``gemm_fused_max_out_features`` follows the shared device default.
@@ -133,11 +155,12 @@ def _fake_cuda_ada(monkeypatch, capability=(8, 9)):
 @pytest.mark.parametrize(
     ("capability", "expect_fused", "expect_gate", "expect_out_cap", "expect_dtypes"),
     [
-        ((8, 9), True, ADA_GATE, 2048, {"float16", "bfloat16"}),
+        ((8, 9), True, ADA_GATE, 0, {"float16", "bfloat16"}),
         ((8, 0), False, (0, 0), 0, set()),
         ((8, 6), False, (0, 0), 0, set()),
         ((9, 0), False, (0, 0), 0, set()),
-        ((10, 0), False, (0, 0), 0, set()),
+        ((10, 0), True, BLACKWELL_GATE, 0, {"float16", "bfloat16"}),
+        ((12, 0), True, BLACKWELL_GATE, 0, {"float16", "bfloat16"}),
     ],
 )
 def test_module_dispatch_follows_capability(
@@ -165,22 +188,26 @@ def test_module_dispatch_follows_capability(
         ) is True
 
 
-def test_ada_out_features_cap_excludes_wide_losses(monkeypatch):
+def test_ada_has_no_output_width_cap(monkeypatch):
     device = _fake_cuda_ada(monkeypatch)
     narrow = _cpu_module(out_features=2048)
     wide = _cpu_module(out_features=4096)
-    x_narrow = type("X", (), {"device": device})()
-    assert narrow._rocm_gemm_out_features_supported(x_narrow) is True
-    assert wide._rocm_gemm_out_features_supported(x_narrow) is False
+    x_stub = type("X", (), {"device": device})()
+    assert narrow._rocm_gemm_out_features_supported(x_stub) is True
+    assert wide._rocm_gemm_out_features_supported(x_stub) is True
 
 
-def test_ada_in_features_cap_excludes_serial_k_regressions(monkeypatch):
+def test_ada_has_no_in_features_cap(monkeypatch):
     device = _fake_cuda_ada(monkeypatch)
     x_stub = type("X", (), {"device": device})()
     at_cap = _cpu_module(in_features=2048, out_features=1024)
     over = _cpu_module(in_features=2560, out_features=1024)
-    assert at_cap._rocm_gemm_gate(x_stub)[1] == 2048
-    assert over._rocm_gemm_gate(x_stub)[1] == 2048
+    assert at_cap._rocm_gemm_gate(x_stub)[1] == 0
+    assert over._rocm_gemm_gate(x_stub)[1] == 0
+    for module in (at_cap, over):
+        # The shape gate accepts both widths; the real dtype/device gates are
+        # exercised by the kernel-oracle cases.
+        assert module._rocm_gemm_gate(x_stub)[0] == 64
 
 
 # --------------------------------------------------------------------------- #
@@ -310,8 +337,8 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
         )
 
 
-# In-gate shapes (fused) plus out-of-gate shapes (must fall back and still be
-# correct through the split path).
+# Shapes covering the widened gate: small and 7B-style projections, K/N tails,
+# 2/4/8-bit, gs 128/256 and act-order.
 _SHAPES = [
     ((896, 128), 128, False, False, 4),
     ((896, 1280), 128, False, False, 4),
@@ -329,7 +356,7 @@ _SHAPES = [
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", _SHAPES)
-@pytest.mark.parametrize("m", [2, 8, 16])
+@pytest.mark.parametrize("m", [2, 16, 32, 64])
 def test_ada_gptq_gemm_matches_independent_torch_oracle(
     dtype, shape, group_size, desc_act, bias, bits, m,
 ):
@@ -346,17 +373,16 @@ def test_ada_gptq_gemm_gate_band():
 
     assert not module._can_use_rocm_gemm(x(1))
     assert module._can_use_rocm_gemv(x(1))
-    for m in (2, 4, 8, 16):
+    for m in (2, 4, 8, 16, 17, 32, 33, 64):
         assert module._can_use_rocm_gemm(x(m)), f"M={m} should use the fused GEMM"
-    for m in (17, 32, 64):
-        assert not module._can_use_rocm_gemm(x(m))
+    assert not module._can_use_rocm_gemm(x(65))
 
-    # Out-of-gate shapes must fall back: wide N and long K were measured as
-    # fused losses on Ada.
+    # The packed-load rewrite removed the old K/N caps: both wide-N and long-K
+    # projections are inside the gate now.
     wide = _make_module(2048, 4096, torch.float16)
-    assert not wide._can_use_rocm_gemm(x(8))
+    assert wide._can_use_rocm_gemm(x(8))
     long_k = _make_module(4096, 1024, torch.float16)
-    assert not long_k._can_use_rocm_gemm(
+    assert long_k._can_use_rocm_gemm(
         torch.randn(8, 4096, device="cuda", dtype=torch.float16)
     )
     # BF16 is a measured in-gate win, so both dtypes take the fused path.
@@ -371,17 +397,21 @@ def test_ada_gptq_gemm_gate_band():
 def test_ada_dtypes_are_the_measured_set():
     """Only dtypes actually measured on the 4090 may enable the fused GEMM.
 
-    Both were measured: FP16 1.09x-1.65x hot and 1.10x-1.41x flushed inside the
-    gate; BF16 1.11x-1.82x on the same shapes.  Nothing else is enabled, and
-    the shape gate is the conservative K<=2048/N<=2048 rectangle.
+    Both were measured on the 4090.  Blackwell ships the same kernel and is
+    enabled from the issue's indicative sm_120 report; this host has no
+    Blackwell GPU to re-measure it.
     """
 
     assert arch.gemm_fused_dtypes("sm_89") == frozenset({"float16", "bfloat16"})
     assert arch.gemm_fused_dtypes((8, 9)) == frozenset({"float16", "bfloat16"})
-    assert arch.gate_limits("sm_89") == (16, 2048)
-    assert arch.gemm_fused_max_out_features("sm_89") == 2048
+    assert arch.gate_limits("sm_89") == (64, 0)
+    assert arch.gemm_fused_max_out_features("sm_89") == 0
+    assert arch.gemm_fused_dtypes("sm_100") == frozenset({"float16", "bfloat16"})
+    assert arch.gemm_fused_dtypes("sm_120") == frozenset({"float16", "bfloat16"})
+    assert arch.gate_limits("sm_100") == (64, 0)
+    assert arch.gate_limits("sm_120") == (64, 0)
     # Unregistered CUDA families keep the fused path fully disabled.
-    for arch_id in ("sm_80", "sm_86", "sm_90", "sm_100"):
+    for arch_id in ("sm_80", "sm_86", "sm_90"):
         assert arch.gemm_fused_dtypes(arch_id) == frozenset()
         assert arch.gate_limits(arch_id) == (0, 0)
 
@@ -406,3 +436,137 @@ def test_ada_forward_retains_no_dense_weight_at_scale():
         assert _dense_weight_candidates(module) == [], "repeated forwards retained a dense weight"
         assert torch.equal(first, again)
         assert first.dtype == dtype
+
+
+# --------------------------------------------------------------------------- #
+# Bitwise / split-K contracts.
+# --------------------------------------------------------------------------- #
+
+def test_ada_tile_for_m_bands():
+    cfg = launch_config("sm_89")
+    assert tile_for_m(cfg, 1) == (16, 32)
+    assert tile_for_m(cfg, 16) == (16, 32)
+    assert tile_for_m(cfg, 17) == (32, 64)
+    assert tile_for_m(cfg, 32) == (32, 64)
+    assert tile_for_m(cfg, 33) == (64, 64)
+    assert tile_for_m(cfg, 64) == (64, 64)
+    # CDNA4/RDNA4 keep one fixed tile.
+    for arch_id in ("gfx950", "gfx1201"):
+        fixed = launch_config(arch_id)
+        assert tile_for_m(fixed, 2) == (fixed.block_m, fixed.block_n)
+        assert tile_for_m(fixed, 64) == (fixed.block_m, fixed.block_n)
+
+
+def test_ada_split_k_selection():
+    assert split_k_for(2, 4096) == 8
+    assert split_k_for(16, 14336) == 8
+    assert split_k_for(64, 4096) == 4
+    assert split_k_for(64, 14336) == 4
+    # K/S must stay >= 512 and the split must divide the K tiles.
+    assert split_k_for(2, 1024) == 2
+    assert split_k_for(2, 512) == 1
+    assert split_k_for(2, 4090) == 1
+
+
+@requires_ada
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("desc_act", [False, True])
+@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("m", [2, 64])
+def test_ada_split_off_is_bitwise_equal_to_pre_rewrite_kernel(
+    dtype, desc_act, bits, m,
+):
+    torch.manual_seed(3982)
+    module = _make_module(2048, 1024, dtype, group_size=128,
+                          desc_act=desc_act, bits=bits)
+    x = torch.randn(m, 2048, device="cuda", dtype=dtype)
+
+    with torch.inference_mode():
+        old_fp32 = pre_rewrite_gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=torch.float32, bits=bits,
+        )
+        new_fp32 = gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=torch.float32, bits=bits,
+            uniform_group=module._gptq_gemm_uniform_group, split_k=1,
+        )
+        old_visible = pre_rewrite_gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=None, bits=bits,
+        )
+        new_visible = gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=None, bits=bits,
+            uniform_group=module._gptq_gemm_uniform_group, split_k=1,
+        )
+
+    assert torch.equal(old_fp32, new_fp32), "split-off FP32 output is not bitwise equal"
+    assert torch.equal(old_visible, new_visible), "split-off visible output is not bitwise equal"
+    assert new_visible.dtype == dtype
+
+
+@requires_ada
+@pytest.mark.cuda
+def test_ada_auto_split_k_is_deterministic():
+    module = _make_module(4096, 1024, torch.float16, group_size=128)
+    x = torch.randn(16, 4096, device="cuda", dtype=torch.float16)
+    with torch.inference_mode():
+        first = gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=torch.float32, bits=4,
+            uniform_group=module._gptq_gemm_uniform_group,
+        )
+        second = gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=torch.float32, bits=4,
+            uniform_group=module._gptq_gemm_uniform_group,
+        )
+    assert torch.equal(first, second)
+
+
+@requires_ada
+@pytest.mark.cuda
+@pytest.mark.parametrize("desc_act", [False, True])
+@pytest.mark.parametrize("m", [16, 64])
+def test_ada_auto_split_k_is_no_worse_than_single_pass(desc_act, m):
+    """Split-K must stay inside the FP32 drift bound and not increase it."""
+    torch.manual_seed(3982)
+    module = _make_module(14336, 1024, torch.float16, group_size=128,
+                          desc_act=desc_act)
+    x = torch.randn(m, 14336, device="cuda", dtype=torch.float16)
+    reference = _oracle_fp64(x, module)
+
+    with torch.inference_mode():
+        single = gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=torch.float32, bits=4,
+            uniform_group=module._gptq_gemm_uniform_group, split_k=1,
+        )
+        split = gptq_gemm(
+            x,
+            module.qweight, module.scales,
+            module.qzeros, module.g_idx, out_dtype=torch.float32, bits=4,
+            uniform_group=module._gptq_gemm_uniform_group, split_k=None,
+        )
+
+    single_drift = (single.double() - reference).abs().max().item()
+    split_drift = (split.double() - reference).abs().max().item()
+    limit = 1e-3 + 1e-5 * reference.abs().max().item()
+    assert split_drift <= limit, f"split-K drift {split_drift:.3e} exceeds {limit:.3e}"
+    assert split_drift <= single_drift + 1e-6, (
+        f"split-K drift {split_drift:.3e} is worse than single-pass {single_drift:.3e}"
+    )
+    assert split_k_for(m, 14336) == (8 if m <= 32 else 4)
+
+
+@requires_ada
+@pytest.mark.cuda
+@pytest.mark.parametrize("m", [2, 64])
+@pytest.mark.parametrize(
+    "shape",
+    [(14336, 4096), (4096, 14336), (4096, 11008)],
+)
+def test_ada_large_projection_matches_independent_oracle(shape, m):
+    _assert_gemm_case(torch.float16, shape, 128, False, False, 4, m)

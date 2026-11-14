@@ -99,10 +99,16 @@ Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ run
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
 AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
+FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
 GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
+Checkpoint resaves, GGUF BF16 bytes, packed biases, explicit dtype strings, and
+FP8 block scales preserve their declared precision and bit patterns; see
+[checkpoint dtype boundary preservation](docs/dtype-boundary-preservation.md)
+for the selection and failure flows.
 GPTAQ and FOEM consume one native calibration entry per sample, including batched calibration; see the [native calibration batch split](docs/native-calibration-batch-split.md) flow.
 3-bit zero-point packing requires 32-aligned `out_features`, and every packer fails closed instead of truncating the tail; see the [3-bit zero-point packing width contract](docs/3bit-zero-point-packing.md).
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
+GPTQ v1/v2 zero-point conversions decode and repack on the checkpoint's device, so a CUDA shard never round-trips through a host loop; see the [qzeros device conversion](docs/gptq-qzero-device-conversion.md) contract.
 
 `TorchLinear` never retains dense/dequantized weights between inference calls.
 Torch compilation is best-effort: a `torch.compile` failure at first use (for
@@ -181,6 +187,7 @@ For checkpoint-backed module loading, see [lazy checkpoint materialization](docs
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
+For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `ResolvedModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.
@@ -548,6 +555,12 @@ FP16-only on RDNA4: BF16 measured 0.43x-1.42x of the split path there (median 0.
 falls back to dequantize+matmul (GEMV keeps both dtypes). Set
 `GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
 matrix and known limitations.
+
+On Ada (SM 8.9) and Blackwell (SM 10.x), `TritonV2Linear` reuses the same fused
+GEMV / small-M GEMM dispatch and the packed-load kernel covers `M=2..64` with no
+K/N caps: decode and small-batch forward measured 2.4x-6.8x faster than the
+previous TritonV2 path. See the [GPTQ Triton decode and small-M dispatch](docs/triton-dispatch.md)
+flow for the gate, split-K and bitwise contracts.
 
 bitsandbytes 4-bit (NF4/FP4) inference on ROCm routes `M >= 16` through a fused
 Triton GEMM that dequantizes the packed codes inside the matmul, because the

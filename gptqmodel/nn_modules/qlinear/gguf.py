@@ -1027,6 +1027,19 @@ _GGUF_RAW_NUMPY_DTYPES = {
 }
 
 
+def _decode_gguf_bf16(data: np.ndarray) -> np.ndarray:
+    """Reinterpret GGUF BF16 storage bytes as little-endian uint16 pairs."""
+
+    array = np.asarray(data)
+    if array.dtype == np.uint8:
+        if array.ndim == 0 or array.shape[-1] % 2:
+            raise ValueError("BF16 byte storage must have an even final dimension")
+        rows = np.ascontiguousarray(array).view(np.uint16)
+    else:
+        rows = np.asarray(array, dtype=np.uint16)
+    return np.left_shift(rows.astype(np.uint32), np.uint32(16)).view(np.float32)
+
+
 def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
 
@@ -1035,8 +1048,7 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     if resolved_qtype == "F16":
         return np.asarray(data, dtype=np.float16).astype(np.float32)
     if resolved_qtype == "BF16":
-        rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
-        return np.left_shift(rows, np.uint32(16)).view(np.float32)
+        return _decode_gguf_bf16(data)
     raw_dtype = _GGUF_RAW_NUMPY_DTYPES.get(resolved_qtype)
     if raw_dtype is not None:
         return np.asarray(data, dtype=raw_dtype).astype(np.float32)

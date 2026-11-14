@@ -459,6 +459,7 @@ def _gptq_gemm_row(module, in_features, out_features, m, args, device, dtype, l2
         return gemm_mod.gptq_gemm(
             x, module.qweight, module.scales, module.qzeros, module.g_idx,
             out_dtype=dtype, bits=args.bits,
+            uniform_group=module._gptq_gemm_uniform_group,
         )
 
     def split_fn():
@@ -476,12 +477,13 @@ def _gptq_gemm_row(module, in_features, out_features, m, args, device, dtype, l2
     magnitude = oracle.abs().max().item()
     fused_oracle_abs = (fused64 - oracle).abs().max().item()
     cfg = gemm_mod.launch_config(x.device)
+    block_m, block_n = gemm_mod.tile_for_m(cfg, m)
     return {
         "section": "gemm",
         "in_features": in_features,
         "out_features": out_features,
         "m": m,
-        "shipped_cfg": [cfg.block_m, cfg.block_n, cfg.block_k, cfg.num_warps, cfg.num_stages],
+        "shipped_cfg": [block_m, block_n, cfg.block_k, cfg.num_warps, cfg.num_stages],
         "gate": [cfg.small_m_max, cfg.max_in_features, cfg.max_out_features],
         "fused_hot_us": fused_hot,
         "fused_flushed_us": fused_flushed,

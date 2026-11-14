@@ -37,6 +37,21 @@ def _torch_device(idx):
         return "cpu"
     return f"cuda:{idx}"
 
+
+def _q_fast_signature(tensor):
+    """Cheap change detector for one tensor bound into a native q-matrix."""
+
+    if tensor is None:
+        return None
+    try:
+        # Inference tensors have no version counter; PyTorch raises instead of
+        # returning one. Only their storage identity is stable.
+        version = tensor._version
+    except RuntimeError:
+        version = None
+    return (version, tensor.data_ptr(), tensor.dtype, tensor.shape)
+
+
 class ExllamaV2Linear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -110,6 +125,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
         self.q_handle = None
         self.q_tensors = None
         self._q_handle_key = None
+        # (tensors, signatures) snapshot for the per-forward handle fast path.
+        self._q_fast = None
         self._native_shuffled = False
 
     @classmethod
@@ -161,6 +178,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
             exllamav2_free_q_matrix(self.q_handle)
             self.q_handle = None
         self._q_handle_key = None
+        self._q_fast = None
 
     def clear_weight_cache(self) -> None:
         """Release native pointers derived from the current packed buffers."""
@@ -201,6 +219,22 @@ class ExllamaV2Linear(GPTQQuantLinear):
             if self.q_handle is None:
                 raise RuntimeError("ExLlamaV2 fusion view lost its native descriptor")
             return self.q_handle
+        # Fast path: the native matrix only has to be rebuilt when a packed
+        # tensor is replaced or written in place. Comparing the live tensors
+        # against a stored identity + (version, data_ptr, dtype, shape)
+        # snapshot is much cheaper than rebuilding the dict, merging it, and
+        # hashing every tensor on every forward. In-place writes bump
+        # ``_version``; ``.data =`` swaps change ``data_ptr``; a replacement
+        # changes the object identity. Inference tensors have no version
+        # counter, which is why the identity/pointer fields stay in the key.
+        fast = getattr(self, "_q_fast", None)
+        if fast is not None and self.q_handle is not None:
+            tensors, signatures = fast
+            live = (self.qweight, self.qzeros, self.scales, self.g_idx)
+            if len(tensors) >= len(live) and all(t is l for t, l in zip(tensors, live)) and all(
+                _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
+            ):
+                return self.q_handle
         if self.scales.dtype != torch.float16:
             self.scales = self.scales.to(dtype=torch.float16)
         tensors = {
@@ -234,6 +268,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
             self._q_handle_key = tuple(
                 tensor_cache_key(tensor) for tensor in self.q_tensors.values()
             )
+        tensors = tuple(self.q_tensors.values())
+        self._q_fast = (tensors, tuple(_q_fast_signature(tensor) for tensor in tensors))
         return self.q_handle
 
     def list_buffers(self) -> List:

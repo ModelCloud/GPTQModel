@@ -224,9 +224,14 @@ class AwqGEMVLinear(AWQuantLinear):
             )
 
         if self.bias is not None:
-            # Preserve the FP16 kernel result and bias until after addition:
-            # rounding either operand to BF16 first can destroy cancellation.
-            out = out.float() + self.bias.float()
+            # A CUDA FP16 add already accumulates in FP32 and rounds once, so
+            # the single kernel is bitwise identical to widening both operands.
+            # Keep the wide path for BF16 and mixed dtypes: rounding either
+            # operand to BF16 before the add changes the result.
+            if input_dtype == torch.float16 and self.bias.dtype == torch.float16:
+                out = torch.add(out, self.bias)
+            else:
+                out = out.float() + self.bias.float()
         out = out.to(dtype=input_dtype)
 
         if self.adapter:
