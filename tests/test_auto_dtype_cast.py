@@ -233,7 +233,7 @@ def test_cuda_embedding_uses_only_packed_storage(monkeypatch):
 )
 def test_cuda_embedding_falls_back_when_native_nf12_is_unavailable(monkeypatch):
     import gptqmodel_nf12
-    import gptqmodel_nf12._library as nf12_library
+    from gptqmodel_nf12 import _library as nf12_library
 
     monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
     monkeypatch.setattr(nf12_library, "_native_available", lambda: False)
