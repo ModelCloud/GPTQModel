@@ -32,11 +32,45 @@ _REQUIRED_OPS = (
     "_fused_moe",
 )
 
+_ANY_OPS = _REQUIRED_OPS + ("embedding_repeat4", "decode_fp32", "linear_staged_b1",
+                            "pack_bf16t", "linear_bf16t", "moe_decode")
+
 
 def _registered() -> bool:
     """Return whether a complete ``torch.ops.nf12`` implementation is already live."""
     namespace = torch.ops.nf12
     return all(callable(getattr(namespace, name, None)) for name in _REQUIRED_OPS)
+
+
+def has_ops(*names: str) -> bool:
+    """Return whether every named operator is registered in ``torch.ops.nf12``."""
+    namespace = torch.ops.nf12
+    return all(callable(getattr(namespace, name, None)) for name in names)
+
+
+def _any_registered() -> bool:
+    """Return whether *any* NF12 operator is already registered."""
+    return any(callable(getattr(torch.ops.nf12, name, None)) for name in _ANY_OPS)
+
+
+def require(*names: str) -> None:
+    """Ensure the named operators are available, reusing a registered namespace.
+
+    An older standalone NF12 library, or GPTQModel's legacy runtime, may own
+    ``torch.ops.nf12`` with only a subset of the current operators. Loading a
+    second library would fail registration, so reuse whatever is registered and
+    only report the specific operators the caller needs.
+    """
+    if has_ops(*names):
+        _loaded.set()
+        return
+    load()
+    missing = [name for name in names if not callable(getattr(torch.ops.nf12, name, None))]
+    if missing:
+        raise RuntimeError(
+            "gptqmodel_nf12: native operator(s) unavailable in the loaded NF12 library: "
+            + ", ".join(missing)
+        )
 
 
 def _packaged() -> bool:
@@ -65,8 +99,25 @@ def available() -> bool:
     GPUs, or the build tools needed for a first-use JIT build are present.
     Callers that can keep packed storage without native kernels should check
     this before selecting a native-only path.
+
+    A namespace preloaded by an older standalone library satisfies this only
+    when it exposes the complete current operator set. Use :func:`available_ops`
+    to ask about a specific subset.
     """
     if torch.version.hip is not None:
+        return False
+    return _native_available()
+
+
+def available_ops(*names: str) -> bool:
+    """Return whether the named operators are registered or can be built here."""
+    if torch.version.hip is not None:
+        return False
+    if has_ops(*names):
+        return True
+    if _any_registered():
+        # A registered namespace owns the operator library; loading another one
+        # would fail, so the answer is exactly what is already present.
         return False
     return _native_available()
 
@@ -99,8 +150,9 @@ def load() -> None:
             return
         # GPTQModel's legacy runtime or an explicitly imported standalone NF12
         # may already own the torch namespace. A second TORCH_LIBRARY load
-        # would fail, so reuse a complete registered implementation.
-        if _registered():
+        # would fail registration, so reuse whatever implementation is already
+        # registered; callers name the operators they need through require().
+        if _registered() or _any_registered():
             _loaded.set()
             return
         # The Torch extension links the codec. Load it first so bare source
