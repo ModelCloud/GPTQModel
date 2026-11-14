@@ -11,7 +11,6 @@ import queue
 import sys
 import threading
 import time
-import traceback
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -531,8 +530,16 @@ class _DeviceWorker:
                 try:
                     self._run_warmup()
                 except BaseException as exc:
-                    self._abort_process(exc)
-                    return
+                    # Warmup runs on the worker thread before the task. Report
+                    # the failure through the pending future and keep the
+                    # worker alive so the caller can unwind normally; the
+                    # shared warmup state caches the error, so later tasks on
+                    # this worker fail with the same exception.
+                    self._on_task_finished(self.key)
+                    if not fut.cancelled():
+                        fut.set_exception(exc)
+                    if DEBUG_ON: log.debug(f"{self.name}: warmup exception: {exc!r}")
+                    continue
 
                 event = kwargs.pop("cuda_event", None)
                 override_inference = _pop_public_kwarg(
@@ -559,27 +566,12 @@ class _DeviceWorker:
                 if not fut.cancelled():
                     fut.set_exception(exc)
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
-                self._abort_process(exc)
             finally:
                 self._q.task_done()
         try:
             self._on_worker_exit(self.key, self)
         finally:
             if DEBUG_ON: log.debug(f"{self.name}: exited")
-
-    def _abort_process(self, exc: BaseException) -> None:
-        """Dump the stack trace and terminate the interpreter without cleanup."""
-        try:
-            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
-            sys.stderr.flush()
-        except Exception:
-            pass
-        try:
-            os._exit(1)
-        except Exception:
-            # Last resort if os._exit is unavailable for some reason.
-            os.system("kill -9 %d" % os.getpid())
-
 
 class _SyncWorker:
     """Fallback worker that executes tasks synchronously when threads are unsafe."""

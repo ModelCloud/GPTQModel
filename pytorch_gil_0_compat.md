@@ -352,6 +352,45 @@ threaded path because it cannot describe the lifecycle of existing allocations.
 | `gptqmodel.p2p.allocator_guard` (`_allocator_is_native`, `_raw_peer_copy_unsafe`, `_rocm_peer_link_unusable`, `_pytorch_owns_peer_enablement`, `_rocm_nested_peer_disabled`) | SAFE (concurrent), metadata only | raw-copy attempts, `enable_peer_access` and `_enable_one` | The probe now reads metadata on both CUDA and ROCm, including the explicit nested-copy policy. It compares all four guard verdicts across 8 threads x 4 iterations. It never issues a peer copy or pre-enables runtime peer access. On 2026-11-13, after removing settings-string authorization, the updated probe passed 3/3 independent processes on each of CUDA and ROCm with `PYTHON_GIL=0`. The mover fallback test separately passed 3/3 independent processes per backend, each with 8 workers and 32 bidirectional tasks on per-thread streams. Native raw copies are now withheld even with expandable segments disabled; the nested-copy opt-in cannot override this guard. |
 | `gptqmodel.utils.p2p` policy snapshot + status cache (`_policy_snapshot`, `_publish_status`, `_STATUS_CACHE`) | SAFE (concurrent) | `configure_p2p`, `enable_peer_access`, `_cached_status_for`, `clear_p2p_cache` | `_CONFIG_LOCK` is an `RLock` guarding the active policy, the monotonic `_POLICY_GENERATION`, and `_STATUS_CACHE`. A verdict is bound to the generation it measured under: the cache key starts with that generation, and a probe that finishes after a concurrent `configure_p2p` is returned to its own caller but not published. `configure_p2p` publishes the new policy and clears the cache in one critical section, so a late writer cannot reinsert an entry the clear removed. Regression: `tests/test_p2p.py::test_policy_change_during_a_probe_does_not_cache_a_stale_verdict` parks a probe inside the bandwidth measurement, installs a stricter `min_gbps` from another thread, and asserts the next call re-probes to `degraded` instead of reusing the stale `enabled` object. Passed 5/5 under `PYTHON_GIL=0` (`sys._is_gil_enabled() is False`) on 2026-11-14. |
 
+### 8. DeviceThreadPool task failures propagate through futures
+
+`_DeviceWorker._run` used to call `os._exit(1)` after setting a task
+exception on its future. That bypassed every `finally`, `atexit` handler,
+checkpoint signal restore, and caller `try/except`; whether the main thread
+observed the future first was a race. Warmup failures took the same path, and
+`_SyncWorker.submit` already only set the exception. Both paths now record the
+exception on the pending future and keep the worker alive. The shared
+`_WorkerWarmupState` caches a warmup failure, so later tasks on that worker
+report the same exception instead of hanging.
+
+`LoopProcessor.log_save_async` is fire-and-forget, so it now attaches a
+done-callback that logs a failed write instead of silently dropping it.
+
+Regression: `tests/test_threadx_error_propagation.py` runs a free-threaded
+subprocess that fails a normal task and a warmup, asserts both futures raise,
+asserts a later task still succeeds, and asserts an `atexit` marker was written.
+It fails on the pre-fix code because the subprocess exits 1 before the marker.
+
+### 9. Triton autotuner `nargs` is thread-local
+
+`Autotuner.run` and `CustomizedTritonAutoTuner.run` used to write the current
+call's argument mapping to `self.nargs` on the shared kernel object. A second
+thread running the same kernel overwrote it while the first thread was still
+inside `_bench`, `prune_configs`, `pre_hook`, `reset_to_zero`, or
+`restore_value`, so a cold-key benchmark could run against another thread's
+tensors. `best_config` was shared the same way.
+
+The process-wide Triton patch now installs a data-descriptor `nargs` and
+`best_config` backed by a per-instance `threading.local()`; the shared `cache`
+stays guarded by `_cache_lock`. The GPTQ GGUF autotuner passes `nargs`
+explicitly to `_bench`/`prune_configs`, keeps a thread-local `nargs` property,
+and guards its cache check-then-set with `_cache_lock`.
+
+Regression: `tests/test_triton_autotuner_concurrency.py` parks one thread in a
+fake `_bench`, starts a second thread on the same kernel, and asserts the first
+thread still observes its own `nargs`. Both tests fail on the pre-fix code and
+pass with `PYTHON_GIL=0` (`sys._is_gil_enabled() is False`).
+
 ## Adding a probe
 
 1. Add the callable to `build_probes()` in `scripts/gil0_api_probe.py`.

@@ -110,6 +110,7 @@ class _HessianAccumulatorState:
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
 _WORKSPACE_SLOTS: Dict[Tuple[Tuple[str, Optional[int]], torch.dtype], list["_WorkspaceSlot"]] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
+_WORKSPACE_GENERATION = 0
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 
 
@@ -237,6 +238,8 @@ def _lease_workspace(
     key = _workspace_cache_key(device)
     lock = _workspace_lock(key)
     slot_key = (key, dtype)
+    with _WORKSPACE_LOCKS_GUARD:
+        generation = _WORKSPACE_GENERATION
     with lock:
         # Test fixtures and callers historically clear ``_WORKSPACE_CACHE``;
         # treat that as clearing the event-gated pool too.
@@ -279,14 +282,37 @@ def _lease_workspace(
                 slot.ready_event.record(stream)
             else:
                 slot.ready_event = None
-            slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
-            slots.append(slot)
-            # Keep a small bounded pool (the default CUDA worker pool is four
-            # workers/GPU) while allowing concurrent leases without a host
-            # synchronization.  Extra slots are safe to release.
-            if len(slots) > 8:
-                del slots[:-8]
-            _WORKSPACE_CACHE[key] = workspace
+            with _WORKSPACE_LOCKS_GUARD:
+                released_while_leased = _WORKSPACE_GENERATION != generation
+            if not released_while_leased:
+                slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
+                slots.append(slot)
+                # Keep a small bounded pool (the default CUDA worker pool is four
+                # workers/GPU) while allowing concurrent leases without a host
+                # synchronization.  Extra slots are safe to release.
+                if len(slots) > 8:
+                    del slots[:-8]
+                _WORKSPACE_CACHE[key] = workspace
+
+
+def release_workspace_cache() -> None:
+    """Drop every cached Hessian workspace slot.
+
+    The slots are process-wide tensors, so they survive ``quantize()`` returning
+    and the model being deleted, and ``torch.cuda.empty_cache()`` cannot
+    reclaim them. A lease that is still running observes the generation change
+    and drops its slot instead of repopulating the pool.
+    """
+
+    global _WORKSPACE_GENERATION
+    with _WORKSPACE_LOCKS_GUARD:
+        _WORKSPACE_GENERATION += 1
+        keys = list(_WORKSPACE_LOCKS)
+    for key in keys:
+        with _workspace_lock(key):
+            _WORKSPACE_CACHE.pop(key, None)
+            for slot_key in [slot_key for slot_key in _WORKSPACE_SLOTS if slot_key[0] == key]:
+                _WORKSPACE_SLOTS.pop(slot_key, None)
 
 
 def _device_supports_bfloat16(device: torch.device) -> bool:

@@ -797,9 +797,7 @@ def _exercise_thread_local_worker_warmup(*, per_worker: bool):
     }
 
 
-def test_shared_warmup_reproduces_thread_local_initialization_bug(monkeypatch):
-    monkeypatch.setattr(threadx_mod._DeviceWorker, "_abort_process", lambda self, exc: None)
-
+def test_shared_warmup_reproduces_thread_local_initialization_bug():
     with pytest.raises(RuntimeError, match="thread-local warmup missing"):
         _exercise_thread_local_worker_warmup(per_worker=False)
 

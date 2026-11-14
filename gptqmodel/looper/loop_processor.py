@@ -564,7 +564,17 @@ class LoopProcessor:
         """Schedules asynchronous log persistence on the serial CPU worker."""
 
         # Serialize writes on the CPU-bound worker to avoid interleaved JSON output.
-        DEVICE_THREAD_POOL.submit_serial(CPU, self._async_log_writer, stat)
+        future = DEVICE_THREAD_POOL.submit_serial(CPU, self._async_log_writer, stat)
+        # This future is fire-and-forget, but a worker exception must not vanish:
+        # the pool now reports task errors through the future instead of
+        # terminating the interpreter.
+        future.add_done_callback(self._on_async_log_failure)
+
+    @staticmethod
+    def _on_async_log_failure(future):
+        error = future.exception()
+        if error is not None:
+            log.error("Async processor log write failed: %s", error)
 
     def log_new_row(self, stat):
         """Prints a formatted log row and queues it for async persistence."""
@@ -1238,6 +1248,11 @@ class LoopProcessor:
         """Releases shared processor resources after the full quantization loop."""
 
         self._close_device_smi_handles()
+        # The Hessian workspace pool is process-wide and outlives the model, so
+        # release it with the rest of the run's shared state.
+        from ..quantization.gptq import release_workspace_cache
+
+        release_workspace_cache()
         del self.inputs_cache
         del self._results
 

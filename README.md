@@ -1702,6 +1702,12 @@ rejects any later submission; see
 [device thread pool shutdown](docs/device-thread-pool-shutdown.md) for the
 accept/drain/reject flow and the race it closes.
 
+A worker task failure propagates through its future instead of terminating the
+interpreter; see
+[device thread pool error propagation](docs/thread-pool-error-contract.md) for
+the task and warmup failure paths, the thread-local Triton autotuner state, and
+the Hessian workspace release.
+
 Saved quantization configs preserve the complete P2P policy; see
 [P2P policy persistence](docs/multi_gpu_quantization.md#p2p-policy-persistence)
 for override precedence and validation.
