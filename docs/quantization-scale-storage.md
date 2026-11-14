@@ -42,6 +42,39 @@ Thus multiplying by that factor after code selection preserves a packable
 scale in the original weight domain. `Quantizer.find_params` accepts this
 per-row bound through `scale_min` for RTN, including RTN's optional MSE search.
 
+## Asymmetric SmoothMSE zero points
+
+An affine code range only represents zero points in `[0, maxq]`. The MSE search
+therefore fits a range that contains zero; otherwise the derived zero point is
+outside the code range for any group whose values do not cross zero.
+
+```mermaid
+flowchart TD
+    A["mse_optimal_quant(block, sym=False)"] --> B["min_val = row min, max_val = row max"]
+    B --> C["min_val = min(min_val, 0), max_val = max(max_val, 0)"]
+    C --> D["Ternary search over shrink factors"]
+    D --> E["zero = round(-min_val * shrink / scale)"]
+    E --> F{"0 <= zero <= maxq?"}
+    F -- Yes --> G["Representable grid"]
+    F -- No --> H["Out-of-range zero point: packer stores a different grid"]
+    G --> I["pack_block writes codes and zero points"]
+    style H fill:#fee,stroke:#c00
+```
+
+Including zero keeps `-min_val / (max_val - min_val)` inside `[0, 1]`, so
+`zero` is always representable for any shrink factor and every group keeps full
+coverage. The pre-pack dequantization and the packed grid then agree.
+
+| Mechanism | Previous behavior | New behavior |
+| --- | --- | --- |
+| Asymmetric range fit | Raw row minimum and maximum | Range expanded to include zero |
+| Zero point for a positive-only group | Negative (for example `-5`) | `0` |
+| Zero point for a negative-only group | Above `maxq` (for example `20`) | `maxq` |
+| Packed weights vs the scored grid | Shifted by more than one step (about 1.57 for a `[0.5, 2.0]` group) | Agree within checkpoint scale rounding |
+
+The symmetric branch is unchanged: its zero point is the fixed midpoint
+`(maxq + 1) / 2`.
+
 ```mermaid
 flowchart TD
     F["GPTQ._fallback_quantize"] --> M{"SmoothMSE?"}
