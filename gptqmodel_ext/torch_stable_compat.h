@@ -322,6 +322,39 @@ inline Tensor arange(int64_t end, const TensorOptions& options = TensorOptions()
 inline Tensor empty(
     IntHeaderOnlyArrayRef size,
     const TensorOptions& options = TensorOptions()) {
+  // Fast path: the direct AOTI shim avoids the boxed `aten::empty` dispatcher,
+  // which costs roughly twice a native allocation. Every kernel materialises
+  // sentinel and output buffers on each call, so this is on the hot path.
+  const std::optional<ScalarType> dtype = options.dtype();
+  const std::optional<Layout> layout = options.layout();
+  const bool strided = !layout.has_value() || *layout == Layout::Strided;
+  const int64_t ndim = static_cast<int64_t>(size.size());
+  if (dtype.has_value() && strided && ndim <= 8 &&
+      !options.pinned_memory().value_or(false)) {
+    std::array<int64_t, 8> sizes{};
+    std::array<int64_t, 8> strides{};
+    int64_t stride = 1;
+    for (int64_t dim = ndim - 1; dim >= 0; --dim) {
+      sizes[static_cast<size_t>(dim)] = size[dim];
+      strides[static_cast<size_t>(dim)] = stride;
+      stride *= size[dim];
+    }
+    const Device device = options.device().value_or(kCPU);
+    int32_t device_index = device.index();
+    if (device.type() != DeviceType::CPU && device_index < 0) {
+      device_index = torch::stable::accelerator::getCurrentDeviceIndex();
+    }
+    AtenTensorHandle handle = nullptr;
+    STABLE_TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided(
+        ndim,
+        sizes.data(),
+        strides.data(),
+        static_cast<int32_t>(*dtype),
+        static_cast<int32_t>(device.type()),
+        device_index,
+        &handle));
+    return Tensor(handle);
+  }
   return torch::stable::empty(
       size,
       options.dtype(),
