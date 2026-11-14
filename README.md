@@ -1243,6 +1243,10 @@ GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded thro
 PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter separate for quantized inference, or merge it into the original full-precision model and then quantize the merged model. See [docs/peft.md](docs/peft.md) for tested training, loading, and merge examples.
 
 Per-module `rank_pattern` overrides match canonical, case-sensitive module names and are applied in full-name, suffix, then regex order; see [adapter rank-pattern matching](docs/adapter-rank-pattern-matching.md) for the matching flow and the legacy lowercase fallback.
+Saved adapters resolve `lora_alpha`, `use_rslora`, `rank_pattern`, and
+`alpha_pattern` per module; EoRA exports mirror dynamic ranks into alphas and
+normalize calibration covariance once. See [LoRA and EoRA scaling
+semantics](docs/lora-eora-scaling.md) for the load, export, and covariance flows.
 Adapter weights are cached per source path for the life of the process; see [adapter weight cache](docs/adapter-weight-cache.md) for how a load that uses only a subset of an adapter's target modules leaves the cached tensors intact for the next load.
 
 ### How to Add Support for a New Model 🛠️
