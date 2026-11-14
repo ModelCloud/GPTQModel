@@ -12,7 +12,7 @@ layer still computes what the unquantized layer computed:
 Both are decided from declared data flow (`module_tree`, `ModulePlan`) and from
 the calibration keep mask, never from module names.
 
-Introduced by PR #4027 (issue #4017).
+Introduced by PR #4035 (issue #4017).
 
 ## 1. Fold-source selection and consumer scaling
 
