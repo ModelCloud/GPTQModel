@@ -1568,11 +1568,16 @@ def ModelWriter(cls):
             if self.quantize_config.dynamic:
                 rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
 
+            # EoRA's residual targets a unit-scale correction. PEFT resolves
+            # alpha per module, so mirroring dynamic ranks keeps every module's
+            # `alpha / rank` ratio at one.
+            alpha_pattern = dict(rank_pattern)
             lora_cfg = LoraConfig(base_model_name_or_path=model_save_dir,
                                   r=self.quantize_config.adapter.rank,
                                   lora_alpha=self.quantize_config.adapter.rank,
                                   target_modules=list(target_modules),
-                                  rank_pattern=rank_pattern)
+                                  rank_pattern=rank_pattern,
+                                  alpha_pattern=alpha_pattern)
             lora_cfg.save_pretrained(save_dir=save_dir)
 
             log.info(f"Adapter: Saving EoRA weights to -> `{save_dir}`")

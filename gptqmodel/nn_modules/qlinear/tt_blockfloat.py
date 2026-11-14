@@ -67,33 +67,58 @@ def packed_code_bytes(numel: int, bits: int) -> int:
     )
 
 
-def _buffer_shape(out_features: int, in_features: int, bits: int, block: int):
+#: Axes a block of 16 shared-exponent values may run along. ``"in"`` stores
+#: ``W [out, in]`` blocked along ``in_features`` (the historical layout, and the
+#: one the CUDA/HIP kernels read). ``"out"`` stores ``W^T [in, out]`` blocked
+#: along ``out_features``: the operand ``ttnn.linear(x, W^T)`` consumes, so a
+#: Tenstorrent upload is exact with no host-side re-quantization.
+BLOCK_AXES = ("in", "out")
+
+
+def stored_shape(out_features: int, in_features: int, block_axis: str = "in"):
+    """``[rows, cols]`` of the matrix whose codes are stored (blocks along cols)."""
+
+    if block_axis not in BLOCK_AXES:
+        raise ValueError(f"block_axis must be one of {BLOCK_AXES}, got {block_axis!r}")
+    return (out_features, in_features) if block_axis == "in" else (in_features, out_features)
+
+
+def _buffer_shape(
+    out_features: int, in_features: int, bits: int, block: int, block_axis: str = "in"
+):
     """Shapes the three storage buffers must have for this geometry."""
 
-    if in_features % block:
+    rows, cols = stored_shape(out_features, in_features, block_axis)
+    if cols % block:
+        axis = "in_features" if block_axis == "in" else "out_features"
         raise ValueError(
-            f"in_features={in_features} must be a multiple of the block size {block}"
+            f"{axis}={cols} must be a multiple of the block size {block}"
         )
     return (
         torch.Size([packed_code_bytes(out_features * in_features, bits)]),
-        torch.Size([out_features, in_features // block]),
+        torch.Size([rows, cols // block]),
     )
 
 
 class _BlockfloatStorage(nn.Module):
     """Codes plus exponents, with a dense view computed only when needed."""
 
-    def _init_storage(self, out_features: int, in_features: int, bits: int, block: int):
+    def _init_storage(
+        self, out_features: int, in_features: int, bits: int, block: int, block_axis: str = "in"
+    ):
         codes_shape, exponents_shape = _buffer_shape(
-            out_features, in_features, bits, block
+            out_features, in_features, bits, block, block_axis
         )
+        self.block_axis = block_axis
         # Sized up front, not lazily: a plain ``load_state_dict`` rejects a
         # size-0 buffer, and sizing from the geometry is what makes the
         # checkpoint loadable without any bespoke reader.
         self.register_buffer("codes", torch.zeros(codes_shape, dtype=torch.uint8))
         self.register_buffer(
             "code_shape",
-            torch.tensor([out_features, in_features], dtype=torch.int64),
+            # The stored matrix's shape: ``[out, in]`` for ``block_axis="in"``,
+            # ``[in, out]`` for ``"out"``.
+            torch.tensor(list(stored_shape(out_features, in_features, block_axis)), dtype=torch.int64),
         )
         self.register_buffer(
             "exponents", torch.zeros(exponents_shape, dtype=torch.int8)
@@ -112,6 +137,7 @@ class _BlockfloatStorage(nn.Module):
 
         return (
             tensor.is_cuda
+            and getattr(self, "block_axis", "in") == "in"
             and self.block == BLOCKFLOAT_BLOCK
             and tt_blockfloat_hip.available(tensor.device)
             and tt_blockfloat_hip.supports_bits(self.bits)
@@ -128,6 +154,9 @@ class _BlockfloatStorage(nn.Module):
 
         if tensor.device.type != "cuda" or self.codes.device != tensor.device:
             return False
+        # The CUDA kernels index exponents as one per 16 inputs of a row.
+        if getattr(self, "block_axis", "in") != "in":
+            return False
         if self.block != BLOCKFLOAT_BLOCK:
             return False
         if self.bits not in (4, 8):
@@ -138,7 +167,11 @@ class _BlockfloatStorage(nn.Module):
         return tt_blockfloat_cuda.ready(tensor.device)
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-        """Rebuild the exact grid weights as ``[out_features, in_features]``."""
+        """Rebuild the exact grid weights as ``[out_features, in_features]``.
+
+        For ``block_axis="out"`` the stored ``W^T`` is decoded and transposed, so
+        callers always see the logical orientation.
+        """
 
         from ...utils import tt_blockfloat_hip
         from ...utils.tt_blockfloat_quant import _unpack_codes, recompose_blockfloat
@@ -154,6 +187,8 @@ class _BlockfloatStorage(nn.Module):
         weight = recompose_blockfloat(
             codes, self.exponents, bits=self.bits, block=self.block
         )
+        if getattr(self, "block_axis", "in") == "out":
+            weight = weight.T.contiguous()
         return weight.to(dtype)
 
     def set_quantized_state(self, codes: torch.Tensor, exponents: torch.Tensor) -> None:
@@ -163,7 +198,8 @@ class _BlockfloatStorage(nn.Module):
 
         codes = codes.to(torch.int64)
         expected_codes, expected_exponents = _buffer_shape(
-            self.out_features, self.in_features, self.bits, self.block
+            self.out_features, self.in_features, self.bits, self.block,
+            getattr(self, "block_axis", "in"),
         )
         if tuple(exponents.shape) != tuple(expected_exponents):
             raise ValueError(
@@ -174,7 +210,7 @@ class _BlockfloatStorage(nn.Module):
         if tuple(packed.shape) != tuple(expected_codes):
             raise ValueError(
                 f"{self.name}: code shape {tuple(codes.shape)} does not match "
-                f"({self.out_features}, {self.in_features})"
+                f"{stored_shape(self.out_features, self.in_features, getattr(self, 'block_axis', 'in'))}"
             )
         self.codes = packed
         self.exponents = exponents.to(torch.int8).contiguous()
@@ -185,7 +221,8 @@ class _BlockfloatStorage(nn.Module):
         """Install codes that are already packed at the storage density."""
 
         expected_codes, expected_exponents = _buffer_shape(
-            self.out_features, self.in_features, self.bits, self.block
+            self.out_features, self.in_features, self.bits, self.block,
+            getattr(self, "block_axis", "in"),
         )
         packed_codes = packed_codes.to(torch.uint8).contiguous()
         if tuple(packed_codes.shape) != tuple(expected_codes):
@@ -285,6 +322,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         dtype: Optional[torch.dtype] = None,
         block: int = BLOCKFLOAT_BLOCK,
         pack_dtype: torch.dtype = torch.uint8,
+        block_axis: str = "in",
         **kwargs,
     ):
         if block != BLOCKFLOAT_BLOCK:
@@ -306,7 +344,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         )
         self.block = block
         self.pack_dtype = pack_dtype
-        self._init_storage(out_features, in_features, bits, block)
+        self._init_storage(out_features, in_features, bits, block, block_axis)
         if bias:
             # Bias is not quantized, so keep the precision of the model it came
             # from. Narrowing to float16 here would overflow large finite
@@ -323,7 +361,11 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         from ...utils.tt_blockfloat_quant import quantize_blockfloat
 
         weight = linear.weight.detach().to(torch.float32)
-        if self.hip_dispatch(weight):
+        if self.block_axis == "out":
+            self.load_codes_from(
+                quantize_blockfloat(weight.T.contiguous(), self.bits, block=self.block)[0].T
+            )
+        elif self.hip_dispatch(weight):
             # Quantise on the GPU: the exponent search and packing stay on the
             # device instead of round-tripping a dense fp32 copy through torch.
             codes, exponents = tt_blockfloat_hip.quantize(weight, self.bits)
@@ -339,13 +381,14 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
         return self
 
     def load_codes_from(self, grid_weight: torch.Tensor) -> None:
-        """Store an already-on-grid weight as packed codes plus exponents."""
+        """Store an already-on-grid ``[out, in]`` weight as packed codes plus exponents."""
 
         from ...utils.tt_blockfloat_quant import decompose_blockfloat
 
-        codes, exponents = decompose_blockfloat(
-            grid_weight.detach().to(torch.float32), bits=self.bits, block=self.block
-        )
+        weight = grid_weight.detach().to(torch.float32)
+        if self.block_axis == "out":
+            weight = weight.T.contiguous()
+        codes, exponents = decompose_blockfloat(weight, bits=self.bits, block=self.block)
         self.set_quantized_state(codes, exponents)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -404,6 +447,7 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         block: int = BLOCKFLOAT_BLOCK,
         name: str = None,
         dtype: Optional[torch.dtype] = None,
+        block_axis: str = "in",
     ):
         super().__init__()
         self.name = name or type(self).__name__
@@ -429,7 +473,7 @@ class TTBlockfloatEmbedding(_BlockfloatStorage, nn.Module):
         self.bits = bits
         self.block = block
         self.pack_dtype = torch.uint8
-        self._init_storage(num_embeddings, embedding_dim, bits, block)
+        self._init_storage(num_embeddings, embedding_dim, bits, block, block_axis)
 
     @property
     def output_dtype(self) -> torch.dtype:
@@ -567,6 +611,7 @@ def swap_blockfloat_modules(
     embed_bits: int = 8,
     block: int = BLOCKFLOAT_BLOCK,
     quantized_prefixes: Optional[list] = None,
+    block_axis: str = "in",
 ) -> dict:
     """Replace quantized modules on an already-built model with block-float ones.
 
@@ -598,6 +643,7 @@ def swap_blockfloat_modules(
                 # Follow the precision the model was built at, so the table does
                 # not upcast the rest of the forward to float32.
                 dtype=module.weight.dtype,
+                block_axis=block_axis,
             )
         elif isinstance(module, nn.Linear):
             replacement = TTBlockfloatLinear(
@@ -612,6 +658,7 @@ def swap_blockfloat_modules(
                 # is dense state and must not be narrowed on the way in.
                 dtype=module.weight.dtype,
                 block=block,
+                block_axis=block_axis,
             )
         else:
             continue
@@ -638,9 +685,11 @@ def swap_blockfloat_modules(
 
 __all__ = [
     "BLOCKFLOAT_BLOCK",
+    "BLOCK_AXES",
     "TTBlockfloatEmbedding",
     "TTBlockfloatLinear",
     "TTBlockfloatTiedHead",
     "packed_code_bytes",
+    "stored_shape",
     "swap_blockfloat_modules",
 ]

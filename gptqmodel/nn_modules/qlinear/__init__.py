@@ -1833,6 +1833,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             packed = (zeros_view << shifts).sum(dim=-1, dtype=t.int64) & mask_tensor
             qzeros_dev = packed.to(dtype=self.pack_dtype)
         elif bits == 3 and not self.planar:
+            if zeros_int.shape[1] % word_bits != 0:
+                raise ValueError(
+                    "3-bit packing requires out_features to be divisible by 32, "
+                    f"got out_features={zeros_int.shape[1]}"
+                )
             groups = zeros_int.shape[1] // word_bits
             qzeros_chunks: List[t.Tensor] = []
             for g in range(groups):
@@ -1987,7 +1992,12 @@ class PackableQuantLinear(GPTQQuantLinear):
                         for j in range(min(self.pack_factor, zeros.shape[1] - col * self.pack_factor)):
                             qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
-                if self.pack_dtype_bits == 32 and zeros.shape[1] % 32 == 0:
+                if zeros.shape[1] % 32 != 0:
+                    raise ValueError(
+                        "3-bit packing requires out_features to be divisible by 32, "
+                        f"got out_features={zeros.shape[1]}"
+                    )
+                if self.pack_dtype_bits == 32:
                     qzeros = _pack_code_cols_3(zeros)
                 else:
                     qzeros = t.zeros(

@@ -19,6 +19,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
@@ -1530,6 +1531,7 @@ def convert_awq_file(
     target_dtype: torch.dtype,
     device: str,
     *,
+    config: Optional[dict] = None,
     ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
@@ -1567,10 +1569,18 @@ def convert_awq_file(
         qweight = buf["qweight"]
         qzeros = buf["qzeros"]
         scales = buf["scales"]
-        bits = 4
+        bits = int((config or {}).get("bits", 4))
 
-        unpacked_weight = unpack_cols(qweight, bits).to(torch.float32)
-        unpacked_zeros = unpack_cols(qzeros, bits).to(torch.float32)
+        # AWQ packs along the output axis with the 4-bit `[0, 2, 4, 6, 1, 3,
+        # 5, 7]` interleave; wider widths are a contiguous little-endian
+        # stream. `unpack_awq` decodes the words and `reverse_awq_order`
+        # restores the natural column order (it is a no-op for bits != 4).
+        unpacked_weight, unpacked_zeros = unpack_awq(qweight, qzeros, bits)
+        unpacked_weight, unpacked_zeros = reverse_awq_order(
+            unpacked_weight, unpacked_zeros, bits
+        )
+        unpacked_weight = unpacked_weight.to(torch.float32)
+        unpacked_zeros = unpacked_zeros.to(torch.float32)
 
         num_groups = scales.shape[0]
         group_size = unpacked_weight.shape[0] // num_groups
@@ -1902,6 +1912,7 @@ def dequantize_model(
                     path,
                     target_dtype,
                     open_device,
+                    config=quant_cfg,
                     ignored_layers=ignored_layers,
                 )
             elif fmt == "gptq":

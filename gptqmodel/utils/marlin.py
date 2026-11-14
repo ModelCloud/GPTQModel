@@ -1120,16 +1120,17 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     # and pack it back.
     q_zp = unpack_cols(q_zp_packed, num_bits, size_k, size_n)
 
-    # Undo interleaving (use argsort(..) to get inverse perm)
+    # Undo the AWQ packer's interleave. Only the 4-bit layout is interleaved
+    # (`AWQ_ORDER`); `pack_awq` writes every other width as a contiguous
+    # little-endian stream, so 8-bit codes are already in natural order.
+    # Undoing a permutation that was never applied would swap columns 1 and 2
+    # inside every 32-bit word.
     if num_bits == 4:
         undo_interleave = _argsort([0, 2, 4, 6, 1, 3, 5, 7])
-    elif num_bits == 8:
-        undo_interleave = _argsort([0, 2, 1, 3])
-    else:
+        q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
+        q_zp = q_zp.reshape((-1, size_n)).contiguous()
+    elif num_bits != 8:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
-
-    q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
-    q_zp = q_zp.reshape((-1, size_n)).contiguous()
 
     marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
     return marlin_zp
