@@ -37,6 +37,34 @@ instead of sending a different prompt to the runtime. Non-binary mask values
 are rejected rather than coerced with `bool()`, and a mask supplied with a text
 prompt is rejected because there are no token positions to apply it to.
 
+## Returned tensor alignment
+
+The vLLM adapter sends the *unpadded* rows, because a vLLM token prompt is a
+bare ID sequence. Its returned tensor must still look like a Hugging Face
+`generate` result, because callers slice it at their own input width:
+
+```python
+completion = output[:, input_ids.shape[1]:]
+```
+
+Each returned row is therefore `original_input_ids_row + generated_token_ids`.
+The caller's own padding is kept in the prefix, so the slice above starts
+exactly at that row's completion for left-padded, right-padded, and unpadded
+batches alike. A text prompt has no caller-side width, so it keeps vLLM's
+prompt echo as the prefix.
+
+| Input | vLLM receives | Returned row |
+| --- | --- | --- |
+| `[0, 0, 11, 12]`, mask `[0, 0, 1, 1]` | `[11, 12]` | `[0, 0, 11, 12] + completion` |
+| `[21, 22, 0, 0]`, mask `[1, 1, 0, 0]` | `[21, 22]` | `[21, 22, 0, 0] + completion` |
+| `[21, 22]` (no padding) | `[21, 22]` | `[21, 22] + completion` |
+| text prompt | the text | prompt echo `+ completion` |
+
+Reconstructing the row from vLLM's unpadded prompt echo instead moved the
+completion left by the stripped width, so a caller lost the beginning of the
+completion — or read prompt IDs — whenever a batch had unequal effective
+lengths.
+
 ## Previous behavior
 
 | Input | vLLM adapter before | Both adapters now |
@@ -60,3 +88,7 @@ matches it.
 | `::test_non_binary_mask_is_rejected` / `::test_float_mask_is_rejected` | Only boolean/0-1 values are accepted |
 | `::test_mask_removing_every_token_is_rejected` | An all-zero row raises |
 | `::test_mask_with_text_prompt_is_rejected` | Text prompts reject a mask |
+| `tests/test_vllm_generate_alignment.py::test_left_padded_batch_keeps_the_completion_at_the_input_width` | The completion slice is exact for a left-padded batch |
+| `::test_right_padded_batch_keeps_the_completion_at_the_input_width` | Same for right padding |
+| `::test_multiple_return_sequences_share_the_restored_prefix` | Every `n > 1` row keeps the width |
+| `::test_text_prompts_keep_the_prompt_echo` | Text prompts are unchanged |

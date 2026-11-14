@@ -271,6 +271,23 @@ def _normalize_vllm_inputs(prompts: Any, input_ids: Any, attention_mask: Any):
     return None, _apply_attention_mask(token_batch, attention_mask)
 
 
+def _original_token_rows(prompts: Any, input_ids: Any):
+    """Return the caller's own token rows, or ``None`` for a text prompt.
+
+    vLLM is given the *unpadded* rows (see ``_normalize_vllm_inputs``), but a
+    Hugging Face caller slices the returned tensor at the width of the original
+    ``input_ids``. The original rows are what restore that width.
+    """
+
+    if prompts is not None or input_ids is None:
+        return None
+    if isinstance(input_ids, str):
+        return None
+    if isinstance(input_ids, (list, tuple)) and input_ids and all(isinstance(item, str) for item in input_ids):
+        return None
+    return _coerce_token_batch(input_ids)
+
+
 def _build_sampling_params(value: Any, kwargs: Mapping[str, Any]):
     if value is None:
         hf_keys = (
@@ -327,6 +344,9 @@ def vllm_generate(model, **kwargs):
     prompts = kwargs.pop("prompts", None)
     input_ids = kwargs.pop("input_ids", None)
     attention_mask = kwargs.pop("attention_mask", None)
+    # Captured before normalization strips the padding this adapter does not
+    # forward, so the returned tensor keeps each row's original prefix width.
+    original_rows = _original_token_rows(prompts, input_ids)
     text_prompts, token_batch = _normalize_vllm_inputs(prompts, input_ids, attention_mask)
 
     sampling_params = _build_sampling_params(kwargs.pop("sampling_params", None), kwargs)
@@ -347,10 +367,17 @@ def vllm_generate(model, **kwargs):
     )
 
     outputs = []
-    for result in req_results:
+    for index, result in enumerate(req_results):
         prompt_token_ids = list(result.prompt_token_ids)
+        # Restore the caller's padded prompt as the prefix so
+        # ``output[:, input_ids.shape[1]:]`` starts at this row's completion.
+        # A text prompt has no caller-side width, so it keeps the echo.
+        if original_rows is not None and index < len(original_rows):
+            prefix = list(original_rows[index])
+        else:
+            prefix = prompt_token_ids
         for output in result.outputs:
-            outputs.append(prompt_token_ids + list(output.token_ids))
+            outputs.append(prefix + list(output.token_ids))
     if not outputs:
         return torch.empty((0, 0), dtype=torch.long)
 
