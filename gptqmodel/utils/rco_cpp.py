@@ -33,3 +33,9 @@ _RCO_DP_EXTENSION = TorchOpsJitExtension(
     python_abi_dependent=False,
     torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
+
+
+def rco_dp_extension() -> TorchOpsJitExtension:
+    """Return the stable-ABI RCO DP loader; the build happens on ``load()``."""
+
+    return _RCO_DP_EXTENSION

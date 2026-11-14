@@ -154,7 +154,7 @@ def test_swordfish_uses_stable_abi():
 
 
 def test_rco_dp_uses_stable_abi():
-    _assert_stable(rco_cpp._RCO_DP_EXTENSION)
+    _assert_stable(rco_cpp.rco_dp_extension())
 
 
 def test_int4_qzero_group_scaled_cpu_uses_stable_abi():
