@@ -36,7 +36,7 @@ def _save_tokenizer(directory):
     ).save_pretrained(directory)
 
 
-def test_loaded_quantized_resave_preserves_bf16_norm_bits(tmp_path):
+def test_loaded_quantized_resave_preserves_bf16_non_quantized_bits(tmp_path):
     source_dir = tmp_path / "source"
     quantized_dir = tmp_path / "quantized"
     resaved_dir = tmp_path / "resaved"
@@ -51,18 +51,35 @@ def test_loaded_quantized_resave_preserves_bf16_norm_bits(tmp_path):
         num_key_value_heads=4,
         max_position_embeddings=64,
         dtype=torch.bfloat16,
+        attention_bias=True,
+        mlp_bias=True,
     )
     source = LlamaForCausalLM(config).to(dtype=torch.bfloat16)
+    # A finite BF16 value above the FP16 range plus a subnormal-sized value.
+    # The re-save rebuild used to register quantized-module biases as FP16, so
+    # these became [inf, 2.98e-07, -inf] after the round trip.
+    extreme_bias = torch.tensor([99840.0, 3e-7, -70144.0], dtype=torch.bfloat16)
     with torch.no_grad():
         source.model.norm.weight.fill_(70144.0)
         source.model.layers[0].input_layernorm.weight.fill_(9.98e-7)
+        for name, parameter in source.named_parameters():
+            if name.endswith("bias"):
+                flat = parameter.view(-1)
+                count = min(flat.numel(), extreme_bias.numel())
+                flat[:count].copy_(extreme_bias[:count].to(flat.dtype))
     source.save_pretrained(source_dir)
     _save_tokenizer(source_dir)
 
     expected = {
         "norm": _bf16_bits(source.model.norm.weight),
         "input_layernorm": _bf16_bits(source.model.layers[0].input_layernorm.weight),
+        "bias": {
+            name: _bf16_bits(parameter)
+            for name, parameter in source.named_parameters()
+            if name.endswith("bias")
+        },
     }
+    assert len(expected["bias"]) == 7
 
     qcfg = QuantizeConfig(
         bits=4,
@@ -116,3 +133,13 @@ def test_loaded_quantized_resave_preserves_bf16_norm_bits(tmp_path):
         _bf16_bits(resaved.model.model.layers[0].input_layernorm.weight),
         expected["input_layernorm"],
     )
+    resaved_biases = {
+        name: buffer
+        for name, buffer in resaved.model.named_buffers()
+        if name.endswith("bias")
+    }
+    assert set(resaved_biases) == set(expected["bias"])
+    for name, expected_bits in expected["bias"].items():
+        buffer = resaved_biases[name]
+        assert buffer.dtype is torch.bfloat16, name
+        assert torch.equal(_bf16_bits(buffer), expected_bits), name

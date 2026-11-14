@@ -265,6 +265,7 @@ class BaseQuantLinear(nn.Module):
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
                  dtype: Optional[t.dtype] = None,
+                 bias_dtype: Optional[t.dtype] = None,
                  validate_kwargs: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__()
@@ -275,6 +276,11 @@ class BaseQuantLinear(nn.Module):
         self.out_features = out_features
         self.bits = bits
         self.backend = backend
+        # Quantized checkpoints keep their non-quantized biases at the model
+        # dtype. ``dtype`` is the activation dtype used for kernel validation
+        # and may be unsupported for a storage-only rebuild (FP32), so a
+        # caller that only rebuilds storage passes the buffer width separately.
+        self.bias_dtype = bias_dtype if bias_dtype is not None else t.float16
         # we need to clone the adapter since passed in adapter may be shared
         # adapter tensors are lodaed inside adapter so they must be unique per module
         self.adapter =  copy.deepcopy(adapter)
@@ -313,7 +319,7 @@ class BaseQuantLinear(nn.Module):
         # The root base only owns fields shared across all quantization methods.
         if register_buffers and bias:
             bias_shape = self.out_features if register_buffers_out_features is None else register_buffers_out_features
-            self.register_buffer("bias", t.zeros(bias_shape, dtype=t.float16))
+            self.register_buffer("bias", t.zeros(bias_shape, dtype=self.bias_dtype))
 
         # load adapter if any
         if adapter is not None:
@@ -1130,6 +1136,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 bias=bias,
                 register_buffers_in_features=register_buffers_in_features,
                 register_buffers_out_features=register_buffers_out_features,
+                bias_dtype=self.bias_dtype,
             )
 
     @classmethod
@@ -1155,10 +1162,26 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         # Planar-only widths pack whole 32-code blocks, so the packed
         # dimensions must be 32-aligned regardless of the class-level
         # SUPPORTS_*_FEATURES_DIVISIBLE_BY declarations.
-        if bits in PLANAR_BITS:
+        #
+        # 3-bit has no continuous word layout either: the continuous
+        # 10-1-10-1-10 packer and the planar gptq_p split planes both consume
+        # 32-code blocks. Reject a misaligned 3-bit contract here so kernel
+        # selection or module skipping happens before calibration; otherwise
+        # the packers raise only after the full quantization pass (and the
+        # qweight path can index past the last row).
+        if bits in PLANAR_BITS or bits == 3:
             for dim_name, dim in (("in_features", in_features), ("out_features", out_features)):
                 if dim is not None and dim % 32 != 0:
-                    err = f"{cls}: planar {bits}-bit requires `{dim_name}` divisible by 32: actual {dim_name} = `{dim}`."
+                    if bits in PLANAR_BITS:
+                        err = (
+                            f"{cls}: planar {bits}-bit requires `{dim_name}` divisible by 32: "
+                            f"actual {dim_name} = `{dim}`."
+                        )
+                    else:
+                        err = (
+                            f"{cls}: 3-bit packing requires `{dim_name}` divisible by 32: "
+                            f"actual {dim_name} = `{dim}`."
+                        )
                     return False, NotImplementedError(err)
         return True, None
 
@@ -1168,6 +1191,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         bias: bool,
         register_buffers_in_features: int = None,
         register_buffers_out_features: int = None,
+        bias_dtype: Optional[t.dtype] = None,
     ) -> None:
         in_features = self.in_features if register_buffers_in_features is None else register_buffers_in_features
         out_features = self.out_features if register_buffers_out_features is None else register_buffers_out_features
@@ -1198,7 +1222,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             t.tensor([i // self.group_size for i in range(in_features)], dtype=t.int32),
         )
         if bias:
-            self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
+            self.register_buffer("bias", t.zeros(out_features, dtype=bias_dtype or t.float16))
         else:
             self.bias = None
 
@@ -2080,7 +2104,7 @@ class AWQuantLinear(PackedGroupedQuantLinear):
             )
 
             if bias:
-                self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
+                self.register_buffer("bias", t.zeros(out_features, dtype=self.bias_dtype))
             else:
                 self.bias = None
 

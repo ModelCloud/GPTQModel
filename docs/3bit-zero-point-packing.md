@@ -9,6 +9,12 @@ Both now fail closed with `ValueError`, matching `pack_block` and the CPU
 extension, so `hf_pack_layer(pack_impl="auto")` cannot write a truncated
 checkpoint.
 
+The same 32-code block rule applies to `in_features`: the continuous
+10-1-10-1-10 qweight packer and the planar `gptq_p` split planes both consume
+32-code blocks. `_validate` now rejects either misaligned dimension before
+calibration, so kernel selection or module skipping happens before the full
+quantization pass instead of crashing in `pack_original`.
+
 This page describes the width contract. It was introduced with PR #3995
 (issue #3978).
 
@@ -37,6 +43,21 @@ The four packers now agree on the accepted width: `pack_gpu`, `pack_block`,
 `pack_original`, and the `pack_block_cpu` extension all require
 `out_features % 32 == 0` for 3-bit packing.
 
+## Validate before calibration
+
+```mermaid
+flowchart TD
+    A["TorchLinear.validate(bits=3, in_features, out_features)"] --> B["GPTQQuantLinear._validate"]
+    B --> C{"bits == 3 and (in_features % 32 or out_features % 32)"}
+    C -- "yes" --> D["NotImplementedError: 3-bit packing requires ... divisible by 32"]
+    C -- "no" --> E["kernel selection / module quantization continues"]
+    D --> F["FAIL-CLOSED before calibration"]
+    X["Old path: validate returned True"] --> Y["full quantization pass"]
+    Y --> Z["pack_original IndexError or packer ValueError"]
+    classDef failure fill:#f8d7da,stroke:#b42318,color:#111;
+    class F,Z failure;
+```
+
 ## Before / after
 
 | Packer | Before | After |
@@ -46,6 +67,7 @@ The four packers now agree on the accepted width: `pack_gpu`, `pack_block`,
 | `pack_block` | Already raised `ValueError` for `out_features % 32 != 0` (`__init__.py:1502-1505` on main) | Unchanged |
 | `pack_block_cpu` | Already required `out_features % word_bits == 0` (`pack_block_cpu.cpp:48-51` on main) | Unchanged |
 | `hf_pack_layer(pack_impl="auto")` | GPU path returned a truncated `qzeros`; the later dequant failed with `shape '[k, 48]' is invalid` or a truncated checkpoint was written | GPU `ValueError` falls through to `pack_original`, which raises `ValueError`; no checkpoint is emitted |
+| `TorchLinear.validate(bits=3, in=64, out=48)` | Returned `True` (`qlinear/__init__.py:1157` rejected only planar 5/6/7), so the failure surfaced after the full quantization pass | Returns `NotImplementedError` for a misaligned `in_features` or `out_features` (`qlinear/__init__.py:1172`) |
 
 ## Failure contract
 

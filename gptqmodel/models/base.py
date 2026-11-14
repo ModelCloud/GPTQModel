@@ -3677,6 +3677,14 @@ class BaseQModel(nn.Module):
                         scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
                         axis=None,
                         target_dtype=torch.float32,
+                        # Resolve the checkpoint convention once so this decoder
+                        # and ``_build_fp8_forward_module`` agree. A direct
+                        # ``weight_scale`` is already normalized to a multiplier.
+                        scale_semantics=(
+                            self._decoder_fp8_scale_semantics()
+                            if isinstance(scale_inv, torch.Tensor)
+                            else "multiplier"
+                        ),
                     )
                 elif decoder_kind == "fp4":
                     decoded_weight = dequantize_f4_e2m1(
@@ -3719,6 +3727,39 @@ class BaseQModel(nn.Module):
         if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
             return int(block_size[0]), int(block_size[1])
         return None
+
+    def _decoder_fp8_scale_semantics(self) -> str:
+        """Resolve how a checkpoint's ``weight_scale_inv`` is applied, once.
+
+        HF/DeepSeek/Qwen FP8 checkpoints store ``amax / 448`` under the
+        historical ``weight_scale_inv`` name and *multiply* it. A checkpoint
+        that stores a true inverse scale declares
+        ``quantization_config.weight_scale_semantics = "inverse"``.
+
+        Both the native forward wrapper and the dense quant-source decoder read
+        this single resolved value so they can never disagree about the same
+        checkpoint tensor.
+        """
+
+        cached = self.__dict__.get("_resolved_fp8_scale_semantics")
+        if cached is not None:
+            return cached
+
+        config = self._decoder_source_config()
+        quant_config = getattr(config, "quantization_config", None)
+        if isinstance(quant_config, dict):
+            declared = quant_config.get("weight_scale_semantics")
+        else:
+            declared = getattr(quant_config, "weight_scale_semantics", None)
+
+        semantics = "multiplier" if declared is None else str(declared).strip().lower()
+        if semantics not in {"multiplier", "inverse"}:
+            raise ValueError(
+                "FP8 `weight_scale_semantics` must be 'multiplier' or 'inverse', "
+                f"got {declared!r}."
+            )
+        self.__dict__["_resolved_fp8_scale_semantics"] = semantics
+        return semantics
 
     def _decoder_declared_floatx_format(self) -> str:
         """Read flat and compressed-tensors group format labels."""
@@ -4025,7 +4066,9 @@ class BaseQModel(nn.Module):
             scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
             result_shape=tuple(weight.shape),
         )
-        if not isinstance(scale_inv, torch.Tensor):
+        if isinstance(scale_inv, torch.Tensor):
+            scale_semantics = self._decoder_fp8_scale_semantics()
+        else:
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
             direct_scale = checkpoint_tensors.get("weight_scale")
@@ -4044,6 +4087,9 @@ class BaseQModel(nn.Module):
                 torch.reciprocal(scale),
                 torch.full_like(scale, 1.0 / tiny),
             )
+            # The synthesized tensor is an inverse scale regardless of any
+            # checkpoint-declared semantics, so the wrapper must divide.
+            scale_semantics = "inverse"
 
         format_name = str(weight.dtype).split(".")[-1]
         try:
@@ -4065,6 +4111,7 @@ class BaseQModel(nn.Module):
                 format=format_name,
                 weight_scale_method=weight_scale_method,
                 weight_block_size=weight_block_size,
+                weight_scale_semantics=scale_semantics,
                 register_buffers=False,
             ).to(device=device)
         except Exception:
