@@ -1052,7 +1052,7 @@ def convert_fp8_shard(
     *,
     block_shape: Optional[Tuple[int, int]],
     model_type: Optional[str] = None,
-    scale_semantics: str = "heuristic",
+    scale_semantics: str = "multiplier",
     tensor_lookup: Optional[_ShardTensorLookup] = None,
     ignored_layers: Iterable[str] = (),
     source_config: Optional[dict] = None,
@@ -1222,6 +1222,7 @@ def convert_fp8_shard(
                 scale_inv=scale_inv_arg,
                 axis=None,
                 target_dtype=target_dtype,
+                scale_semantics=scale_semantics,
             )
             tensors[key] = finalize_for_save(deq, target_dtype)
         elif key.endswith("_scale_inv"):
@@ -1817,7 +1818,9 @@ def dequantize_model(
 
     ignored_layers = resolve_ignored_layers(config)
     block_shape = resolve_block_size(config) if fmt in {"fp8", "nvfp8"} else None
-    fp8_scale_semantics = str(quant_cfg.get("weight_scale_semantics") or "heuristic").strip().lower()
+    fp8_scale_semantics = str(
+        quant_cfg.get("weight_scale_semantics") or "multiplier"
+    ).strip().lower()
 
     if block_shape is not None:
         LOG.debug("Configured FP8 block size %s found in quantization_config", block_shape)
