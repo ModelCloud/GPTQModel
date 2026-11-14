@@ -156,6 +156,18 @@ def _probe_gain_offset(module: nn.Module, name: str) -> float:
     return matches[0]
 
 
+def resolve_gain_offset(module: nn.Module, name: Optional[str] = None) -> float:
+    """Return the additive gain offset applied by ``module``.
+
+    ``0.0`` means the module multiplies by ``weight``; ``1.0`` means it
+    multiplies by ``1 + weight`` (Gemma/Qwen3.5/Qwen3-Next style). The value is
+    measured from the module's own forward pass rather than inferred from its
+    class name, so new model definitions with the same semantics are handled
+    without extending a registry. ``name`` is only used in error messages.
+    """
+    return _probe_gain_offset(module, name or type(module).__name__)
+
+
 def resolve_norm_params(
     model: nn.Module,
     module_names: Sequence[str],
@@ -421,6 +433,7 @@ def tune_norm_params(
 __all__ = [
     "NormParam",
     "norm_type_of",
+    "resolve_gain_offset",
     "resolve_norm_params",
     "tune_norm_params",
     "validate_tuning_model",
