@@ -1945,6 +1945,14 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.VPTQ_TORCH
             elif self.quantize_config.method == METHOD.NF12:
                 preferred_backend = BACKEND.NF12
+            elif self.quantize_config.method == METHOD.MACAQ:
+                from ..utils.macaq_triton import TRITON_AVAILABLE
+
+                preferred_backend = (
+                    BACKEND.MACAQ_TRITON
+                    if torch.cuda.is_available() and TRITON_AVAILABLE and not IS_ROCM
+                    else BACKEND.MACAQ_TORCH
+                )
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -6049,11 +6057,12 @@ class BaseQModel(nn.Module):
             METHOD.EXL3,
             METHOD.PARO,
             METHOD.VPTQ,
+            METHOD.MACAQ,
             METHOD.NF12,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/NF12"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/MACAQ/NF12"
             )
             return None
 

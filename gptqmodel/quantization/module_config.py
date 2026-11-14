@@ -259,6 +259,18 @@ def module_constructor_config(
         }
     if quant_type == "qqq":
         kind = "qqq"
+    if quant_type == "macaq":
+        kind = "macaq"
+        options = {
+            key: getattr(module, key)
+            for key in (
+                "block_size",
+                "had_block",
+                "activation_precision",
+                "pre_mode",
+                "pre_alpha",
+            )
+        }
 
     return ModuleConstructorConfig(
         bits=getattr(module, "bits", config.runtime_bits),
