@@ -133,3 +133,130 @@ def test_quantize_model_out_axis_embedding_and_layers():
             bits = 8 if name.endswith("o_proj") else 4
             assert bq.is_on_blockfloat_grid(module.weight, bits, block_axis="out"), name
     assert bq.is_on_blockfloat_grid(model.model.embed_tokens.weight, 8, block_axis="out")
+
+
+# --- checkpoint / module format -------------------------------------------------
+
+
+def _tiny_llama():
+    transformers = pytest.importorskip("transformers")
+    cfg = transformers.LlamaConfig(
+        vocab_size=256, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, tie_word_embeddings=True,
+    )
+    torch.manual_seed(0)
+    return transformers.LlamaForCausalLM(cfg).eval()
+
+
+class _Tok:
+    def __call__(self, text, return_tensors=None, **_):
+        ids = torch.tensor([[ord(c) % 256 for c in text]])
+        return type("E", (), {"input_ids": ids})()
+
+    def save_pretrained(self, *_args, **_kwargs):
+        return None
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_linear_module_out_axis_stores_transpose(bits):
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+    from gptqmodel.utils.backend import BACKEND
+
+    torch.manual_seed(1)
+    lin = torch.nn.Linear(48, 32, bias=True)
+    mod = TTBlockfloatLinear(bits=bits, in_features=48, out_features=32, bias=True,
+                             backend=BACKEND.TT_BLOCKFLOAT, dtype=torch.float32, block_axis="out")
+    mod.pack(lin)
+    assert [int(v) for v in mod.code_shape] == [48, 32]
+    assert tuple(mod.exponents.shape) == (48, 2)
+    w = mod.dequantize()
+    assert w.shape == (32, 48)
+    assert bq.is_on_blockfloat_grid(w, bits, block_axis="out")
+    expect = bq.quantize_blockfloat(lin.weight.detach().T.contiguous(), bits)[0].T
+    assert torch.equal(w, expect)
+    x = torch.randn(3, 48)
+    torch.testing.assert_close(mod(x), torch.nn.functional.linear(x, expect, lin.bias.detach()))
+
+
+def test_out_axis_needs_out_features_multiple_of_block():
+    from gptqmodel.nn_modules.qlinear.tt_blockfloat import TTBlockfloatLinear
+    from gptqmodel.utils.backend import BACKEND
+
+    with pytest.raises(ValueError, match="out_features"):
+        TTBlockfloatLinear(bits=4, in_features=32, out_features=24, bias=False,
+                           backend=BACKEND.TT_BLOCKFLOAT, block_axis="out")
+
+
+def test_out_axis_checkpoint_round_trip(tmp_path):
+    import json
+
+    model = _tiny_llama()
+    bq.quantize_model_blockfloat(
+        model, _Tok(), bits={"*": 4, "o_proj": 8}, nsamples=2,
+        text=["the quick brown fox jumps over the lazy dog " * 20] * 4,
+        embed_bits=8, block_axis="out", act_order=True,
+    )
+    ids = torch.tensor([[1, 5, 9, 33, 77, 120]])
+    with torch.no_grad():
+        before = model(ids).logits
+    info = bq.save_blockfloat_model(model, str(tmp_path), bits={"*": 4, "o_proj": 8},
+                                    embed_bits=8, block_axis="out")
+    qcfg = json.load(open(tmp_path / "config.json"))["quantization_config"]
+    assert qcfg["block_axis"] == "out"
+    assert info["layers"] == 2 * 7 + 1
+    state = bq.load_hf_state_dict(str(tmp_path))
+    assert [int(v) for v in state["model.layers.0.mlp.down_proj.code_shape"]] == [128, 64]
+    assert [int(v) for v in state["model.embed_tokens.code_shape"]] == [64, 256]
+
+    reloaded, restored, _ = bq.build_blockfloat_model(str(tmp_path), dtype=torch.float32)
+    assert len(restored) == 15
+    assert reloaded.model.layers[0].mlp.down_proj.block_axis == "out"
+    with torch.no_grad():
+        after = reloaded(ids).logits
+    assert torch.equal(before, after)
+
+    # Re-saving the loaded model keeps the axis and the bytes.
+    again = tmp_path / "again"
+    bq.save_blockfloat_model(reloaded, str(again))
+    assert json.load(open(again / "config.json"))["quantization_config"]["block_axis"] == "out"
+    state2 = bq.load_hf_state_dict(str(again))
+    for k, v in state.items():
+        assert torch.equal(v, state2[k]), k
+
+
+def test_in_axis_checkpoint_config_unchanged(tmp_path):
+    import json
+
+    model = _tiny_llama()
+    bq.quantize_model_blockfloat(model, _Tok(), bits=4, nsamples=2,
+                                 text=["hello world " * 50] * 4, embed_bits=8)
+    bq.save_blockfloat_model(model, str(tmp_path), bits=4, embed_bits=8)
+    assert "block_axis" not in json.load(open(tmp_path / "config.json"))["quantization_config"]
+
+
+def test_out_axis_checkpoint_rejects_swapped_code_shape(tmp_path):
+    from safetensors.torch import load_file, save_file
+
+    model = _tiny_llama()
+    bq.quantize_model_blockfloat(model, _Tok(), bits=4, nsamples=2,
+                                 text=["hello world " * 50] * 4, embed_bits=8,
+                                 block_axis="out")
+    bq.save_blockfloat_model(model, str(tmp_path), bits=4, embed_bits=8, block_axis="out")
+    shard = next(p for p in tmp_path.glob("*.safetensors"))
+    tensors = load_file(str(shard))
+    key = next(k for k in tensors if k.endswith("down_proj.code_shape"))
+    tensors[key] = tensors[key].flip(0)
+    save_file(tensors, str(shard), metadata={"format": "pt"})
+    with pytest.raises(ValueError, match="code_shape"):
+        bq.build_blockfloat_model(str(tmp_path), dtype=torch.float32)
+
+
+def test_writer_rejects_axis_contradicting_packed_modules(tmp_path):
+    model = _tiny_llama()
+    bq.quantize_model_blockfloat(model, _Tok(), bits=4, nsamples=2,
+                                 text=["hello world " * 50] * 4, embed_bits=8,
+                                 block_axis="out")
+    bq.save_blockfloat_model(model, str(tmp_path / "a"), bits=4, embed_bits=8, block_axis="out")
+    reloaded, _, _ = bq.build_blockfloat_model(str(tmp_path / "a"), dtype=torch.float32)
+    with pytest.raises(ValueError, match="contradicts"):
+        bq.save_blockfloat_model(reloaded, str(tmp_path / "b"), block_axis="in")
