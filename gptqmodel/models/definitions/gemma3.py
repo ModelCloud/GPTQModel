@@ -136,16 +136,16 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                "q_proj:0:q",
-                "k_proj:0:k",
-                "v_proj:0:v",
+                "q_proj:0:q:in=x",
+                "k_proj:0:k:in=x",
+                "v_proj:0:v:in=x",
                 "q_norm:!",
                 "k_norm:!",
                 "o_proj:1:o",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
-            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         }
     ]

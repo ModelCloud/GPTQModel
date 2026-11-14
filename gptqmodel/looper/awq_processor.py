@@ -8,6 +8,7 @@ import inspect
 import math
 import threading
 import time
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -302,6 +303,14 @@ class AWQProcessor(LoopProcessor):
         self._scale_feature_by_module: Dict[str, str] = {}
         self._feature_task_names: Set[str] = set()
         self._awq_feature_kwargs: Dict[str, Dict[str, Any]] = {}
+        # Sibling projections (q/k/v, gate/up) are hooked separately but receive the
+        # *same* source activation object in the same batch. Cache one host copy per
+        # source tensor so the D2H transfer, the host allocation and the later
+        # `torch.cat` are paid once per unique input instead of once per module.
+        # Entries are keyed by (batch, id(source), source._version) and validated by
+        # a weakref so a recycled id can never alias a different tensor.
+        self._capture_host_cache: Dict[Tuple[Any, int, int], Tuple[Any, torch.Tensor]] = {}
+        self._capture_host_batch: Any = None
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -609,15 +618,7 @@ class AWQProcessor(LoopProcessor):
                 reserved_batch_index = True
 
         try:
-            feature = self._apply_active_keep_mask_to_feature(feature)
-            # Preserve a leading sample axis for flattened [seq, hidden] captures so later
-            # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
-            if feature.dim() <= 2:
-                feature = feature.unsqueeze(0)
-            if feature.device.type != "cpu":
-                feature = feature.detach().cpu()
-            else:
-                feature = feature.detach()
+            feature = self._materialize_host_feature(feature)
         except Exception:
             if reserved_batch_index:
                 with self.lock:
@@ -639,6 +640,62 @@ class AWQProcessor(LoopProcessor):
             inputs_list = entry.setdefault("inputs", [])
             inputs_list.append(feature)
             entry.setdefault("batch_indices", []).append(batch_index)
+
+    def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, int, int]]:
+        """Identity of one captured source tensor, or ``None`` when it cannot be shared.
+
+        Masked captures build a fresh masked tensor per sibling, so they never
+        share. Tensors without a version counter (inference tensors) are excluded
+        too: their id could be recycled while an entry is still cached, and a
+        stale hit would hand a sibling the wrong activations.
+        """
+
+        if getattr(getattr(self, "_mask_tls", None), "value", None) is not None:
+            return None
+        if not torch.is_tensor(feature):
+            return None
+        try:
+            version = int(feature._version)
+        except Exception:
+            return None
+        return (self.current_batch_index(), id(feature), version)
+
+    def _materialize_host_feature(self, feature: torch.Tensor) -> torch.Tensor:
+        """Return the host copy of one captured input, reusing a sibling's copy.
+
+        ``q_proj``/``k_proj``/``v_proj`` and ``gate_proj``/``up_proj`` are hooked
+        separately but read the same activation object, so the D2H transfer and the
+        host allocation are identical for every sibling. Copy once per unique
+        source tensor instead of once per module.
+        """
+
+        batch_index = self.current_batch_index()
+        if self._capture_host_batch != batch_index:
+            # A capture cache only ever describes one calibration batch.
+            with self.lock:
+                self._capture_host_cache.clear()
+                self._capture_host_batch = batch_index
+
+        key = self._capture_share_key(feature)
+        if key is not None:
+            cached = self._capture_host_cache.get(key)
+            if cached is not None and cached[0]() is feature:
+                return cached[1]
+
+        host = self._apply_active_keep_mask_to_feature(feature)
+        # Preserve a leading sample axis for flattened [seq, hidden] captures so later
+        # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
+        if host.dim() <= 2:
+            host = host.unsqueeze(0)
+        if host.device.type != "cpu":
+            host = host.detach().cpu()
+        else:
+            host = host.detach()
+
+        if key is not None:
+            with self.lock:
+                self._capture_host_cache[key] = (weakref.ref(feature), host)
+        return host
 
     def _apply_active_keep_mask_to_feature(self, feature: torch.Tensor) -> torch.Tensor:
         """Remove padded rows from an activation captured by the current worker.
@@ -1189,6 +1246,10 @@ class AWQProcessor(LoopProcessor):
                     feature_names.append(root)
 
         self._feature_task_names = set(feature_names)
+        # Sibling modules can share one host tensor per batch, so their cached
+        # input lists are the same objects in the same order. Concatenate that
+        # identical list once and hand every sibling the same result.
+        cat_cache: Dict[Tuple[int, ...], torch.Tensor] = {}
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
@@ -1255,7 +1316,12 @@ class AWQProcessor(LoopProcessor):
                     f"for {name!r}."
                 )
             elif self._can_concat_batch_tensors(tensors):
-                features[name] = torch.cat(tensors, dim=0)
+                cat_key = tuple(id(tensor) for tensor in tensors)
+                cat_tensor = cat_cache.get(cat_key)
+                if cat_tensor is None:
+                    cat_tensor = torch.cat(tensors, dim=0)
+                    cat_cache[cat_key] = cat_tensor
+                features[name] = cat_tensor
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices(batch_indices)
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [None]
@@ -1333,6 +1399,9 @@ class AWQProcessor(LoopProcessor):
         self._feature_stats = {}
         self._scale_feature_by_module = {}
         self._awq_feature_kwargs = {}
+        with self.lock:
+            self._capture_host_cache.clear()
+            self._capture_host_batch = None
 
         if hasattr(self._scale_context, "layer_index"):
             delattr(self._scale_context, "layer_index")
@@ -1613,7 +1682,12 @@ class AWQProcessor(LoopProcessor):
             )
 
         sanitized_module_config = filtered_module_config
-        feature_name_by_id = {id(tensor): name for name, tensor in input_feat.items()}
+        # Siblings such as q/k/v can share one host tensor object, so several names
+        # may map to the same id. Keep the first (declaration order) for the
+        # telemetry column instead of letting dict order pick one arbitrarily.
+        feature_name_by_id: Dict[int, str] = {}
+        for name, tensor in input_feat.items():
+            feature_name_by_id.setdefault(id(tensor), name)
         for cfg in sanitized_module_config:
             feature_name = cfg.pop("_input_feature_name", None)
             if feature_name not in input_feat:
@@ -1876,19 +1950,12 @@ class AWQProcessor(LoopProcessor):
             prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
             prepared_forward = (prepared_x, prepared_kwargs)
 
-            # Build the FP reference output one replay batch at a time and move each
-            # chunk back to CPU immediately so scale search does not keep the full
-            # activation tensor resident on GPU.
-            with ctx(torch.inference_mode()):
-                fp16_output = [
-                    output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
-                    for output in self._iter_prepared_forward_outputs(
-                        prepared_x,
-                        module2inspect,
-                        prepared_kwargs,
-                        batch_size=replay_batch_size,
-                    )
-                ]
+            fp16_output = self._build_chunked_reference_outputs(
+                prepared_x,
+                module2inspect,
+                prepared_kwargs,
+                replay_batch_size,
+            )
         else:
             # Legacy path: run the full forward eagerly on the module device and keep
             # the dense activation tensor for the later reconstruction-loss pass.
@@ -2298,6 +2365,35 @@ class AWQProcessor(LoopProcessor):
         if dst_view.dtype.is_floating_point:
             limits = torch.finfo(dst_view.dtype)
             dst_view.clamp_(limits.min, limits.max)
+
+
+    def _build_chunked_reference_outputs(
+        self,
+        prepared_x: torch.Tensor,
+        module2inspect: torch.nn.Module,
+        prepared_kwargs: Dict,
+        replay_batch_size: Optional[int],
+    ) -> List[torch.Tensor]:
+        """Build the FP reference outputs for chunked scale search.
+
+        The chunks stay on the replay device. ``_compute_best_scale`` moves every
+        one of them back to the module device for the whole 20-ratio grid, so a
+        host round-trip here would only add a blocking D2H + H2D plus a duplicate
+        host copy per scaling group without lowering peak device memory.
+        ``_iter_prepared_forward_outputs`` still streams the replay, so the
+        reference is materialized once rather than per grid step.
+        """
+
+        with ctx(torch.inference_mode()):
+            return [
+                output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach()
+                for output in self._iter_prepared_forward_outputs(
+                    prepared_x,
+                    module2inspect,
+                    prepared_kwargs,
+                    batch_size=replay_batch_size,
+                )
+            ]
 
 
     def _compute_best_scale(

@@ -28,16 +28,16 @@ def _gemma4_module_tree():
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 "q_norm:!",
-                "q_proj:0",
+                "q_proj:0:in=x",
                 "k_norm:!",
-                "k_proj:0",
+                "k_proj:0:in=x",
                 "v_norm:!",
-                "v_proj:0",
+                "v_proj:0:in=x",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
             "per_layer_input_gate": ("per_layer_input_gate:0",),
             "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),
@@ -186,6 +186,11 @@ class Gemma4TextQModel(LlamaQModel):
     """Quantization definition for text-only Gemma 4 checkpoints."""
     fusable = FusableConfig("gemma4_text").merge(LlamaFusableConfig(), profiles=("gate_up",))
 
+    # q/k/v share the post-norm hidden state and gate/up share the MLP input.
+    # Verified against a real (tiny, CPU) forward in
+    # tests/module_tree/test_shared_input_cpu_forward.py.
+    shared_input_verified_model_types = frozenset({"gemma4_text"})
+
 
     # Gemma 4 mixes optional KV projections and per-layer residual adapters across variants.
     layer_modules_strict = False
@@ -244,16 +249,16 @@ class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 "q_norm:!",
-                "q_proj:0",
+                "q_proj:0:in=x",
                 "k_norm:!",
-                "k_proj:0",
+                "k_proj:0:in=x",
                 "v_norm:!",
-                "v_proj:0",
+                "v_proj:0:in=x",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
             "per_layer_input_gate": ("per_layer_input_gate:0",),
             "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),

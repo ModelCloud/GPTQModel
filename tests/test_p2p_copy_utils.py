@@ -11,6 +11,9 @@ copies on both ROCm and CUDA. These tests cover the replacement, the module
 and nested-input moves that use it, and the one-time degraded warning.
 """
 
+import gc
+import weakref
+
 import pytest
 import torch
 
@@ -280,6 +283,96 @@ def test_p2p_move_nested_skips_large_leaves():
 
     values = [torch.randn(1024, 512, device="cuda:0") for _ in range(5)]
     assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
+
+
+def _alive_without_gc(make_call, iterations: int = 8, shape=(1024, 1024)) -> int:
+    """Count inputs still alive after the call result is dropped, with the GC off.
+
+    ``move_nested_to_device`` runs ``p2p_move_nested`` for every batch of every
+    forward. If the helpers form a reference cycle that holds the traversed
+    tensor list, each batch's activations stay alive until a generational
+    collection happens to run. Cyclic GC is disabled here so the count is
+    deterministic instead of timing dependent.
+    """
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        alive = 0
+        for _ in range(iterations):
+            value = torch.randn(*shape, device="cuda:0")
+            ref = weakref.ref(value)
+            moved = make_call(value)
+            assert moved is not P2P_NOT_APPLICABLE
+            del moved, value
+            alive += int(ref() is not None)
+        return alive
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.collect()
+
+
+def test_p2p_move_nested_does_not_pin_inputs_until_gc():
+    """Nested moves must not leave a closure cycle holding the traversed tensors.
+
+    Regression for the quantization-pipeline leak: the nested ``_walk``/``_rebuild``
+    closures kept every replay batch's hidden state alive on the source device.
+    The traversed tensors have to die as soon as the caller drops the result, with
+    no ``gc.collect()`` and with cyclic GC disabled.
+    """
+
+    # ROCm disables the nested peer path entirely, so the traversal never runs there.
+    _require_nested_p2p()
+    device = torch.device("cuda:0")
+    torch.cuda.empty_cache()
+    baseline = torch.cuda.memory_allocated(device)
+
+    # Same-device input: the walk still runs, and the value is returned as-is.
+    assert _alive_without_gc(lambda value: p2p_move_nested({"h": value}, device)) == 0
+    # Nothing may remain allocated for the dropped batches ("flat across layers").
+    assert torch.cuda.memory_allocated(device) == baseline
+
+
+def test_p2p_move_nested_does_not_pin_peer_copies_until_gc():
+    """The peer-copy fast path must release both sides without a cyclic GC."""
+
+    _require_nested_p2p()
+    _require_p2p(0, 1)
+
+    # ``min_bytes`` needs several leaves, so every call moves a small batch.
+    def _move_batch(value):
+        batch = [value] + [value.clone() for _ in range(4)]
+        return p2p_move_nested(batch, torch.device("cuda:1"))
+
+    assert _alive_without_gc(_move_batch, shape=(256, 256)) == 0
+
+    values = _small_leaves()
+    moved = p2p_move_nested(values, torch.device("cuda:1"))
+    assert moved is not P2P_NOT_APPLICABLE
+    for observed, expected in zip(moved, values):
+        assert observed.device == torch.device("cuda:1")
+        torch.testing.assert_close(observed.cpu(), expected.cpu())
+
+
+def test_p2p_nested_helpers_are_module_level():
+    """Guard against re-nesting the traversal helpers into closure cycles."""
+
+    walk = p2p_mod._p2p_walk_tensors
+    rebuild = p2p_mod._p2p_rebuild
+    assert walk.__qualname__ == "_p2p_walk_tensors"
+    assert rebuild.__qualname__ == "_p2p_rebuild"
+    assert walk.__closure__ is None
+    assert rebuild.__closure__ is None
+
+    collected = []
+    walk({"a": [torch.zeros(2, device="cuda:0")], "b": (torch.ones(2, device="cuda:0"),)}, collected)
+    assert [tensor.tolist() for tensor in collected] == [[0.0, 0.0], [1.0, 1.0]]
+
+    replacements = {id(collected[0]): torch.full((2,), 7.0, device="cuda:0")}
+    rebuilt = rebuild({"a": [collected[0]], "b": (collected[1],)}, replacements)
+    assert rebuilt["a"][0].tolist() == [7.0, 7.0]
+    assert rebuilt["b"][0] is collected[1]
 
 
 def test_move_nested_to_device_cpu_fallback():

@@ -2006,6 +2006,45 @@ _P2P_NOT_APPLICABLE = object()
 P2P_NOT_APPLICABLE = _P2P_NOT_APPLICABLE
 
 
+def _p2p_walk_tensors(item: Any, out: list[torch.Tensor]) -> None:
+    """Append every tensor leaf of ``item`` to ``out`` in depth-first order.
+
+    Deliberately a module-level function with no closure. ``move_nested_to_device``
+    runs this for every batch of every forward, so a nested helper would put the
+    collected tensors inside a reference cycle (function -> closure cell ->
+    function) and pin that batch's activations until the cyclic GC happened to
+    run. The traversal is iterative so a deeply nested structure cannot exhaust
+    the interpreter stack either.
+    """
+
+    stack = [item]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, torch.Tensor):
+            out.append(node)
+        elif isinstance(node, dict):
+            stack.extend(reversed(list(node.values())))
+        elif isinstance(node, (list, tuple)):
+            stack.extend(reversed(node))
+
+
+def _p2p_rebuild(item: Any, replacements: dict[int, torch.Tensor]) -> Any:
+    """Return ``item`` with every tensor id present in ``replacements`` swapped out.
+
+    Module-level for the same reason as ``_p2p_walk_tensors``: a nested recursive
+    helper closes over ``replacements`` (and, before the split, over the full
+    ``tensors`` list) and forms a cycle that keeps the moved activations alive.
+    """
+
+    if isinstance(item, torch.Tensor):
+        return replacements.get(id(item), item)
+    if isinstance(item, dict):
+        return {key: _p2p_rebuild(child, replacements) for key, child in item.items()}
+    if isinstance(item, (list, tuple)):
+        return type(item)(_p2p_rebuild(child, replacements) for child in item)
+    return item
+
+
 def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 * 1024) -> Any:
     """Move a nested tensor structure to ``device`` using runtime peer copies.
 
@@ -2030,17 +2069,7 @@ def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 *
 
     tensors: list[torch.Tensor] = []
 
-    def _walk(item: Any) -> None:
-        if isinstance(item, torch.Tensor):
-            tensors.append(item)
-        elif isinstance(item, dict):
-            for child in item.values():
-                _walk(child)
-        elif isinstance(item, (list, tuple)):
-            for child in item:
-                _walk(child)
-
-    _walk(value)
+    _p2p_walk_tensors(value, tensors)
     if not tensors:
         return _P2P_NOT_APPLICABLE
 
@@ -2085,16 +2114,7 @@ def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 *
 
     replacements = {id(tensor): moved for tensor, moved in zip(pending, staged)}
 
-    def _rebuild(item: Any) -> Any:
-        if isinstance(item, torch.Tensor):
-            return replacements.get(id(item), item)
-        if isinstance(item, dict):
-            return {key: _rebuild(child) for key, child in item.items()}
-        if isinstance(item, (list, tuple)):
-            return type(item)(_rebuild(child) for child in item)
-        return item
-
-    return _rebuild(value)
+    return _p2p_rebuild(value, replacements)
 
 
 def enable_for_devices(devices: Sequence | None = None, *, strict: bool = False) -> PeerStatus:
