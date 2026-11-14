@@ -128,6 +128,10 @@ device/dtype moves invalidate this metadata automatically.
 The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
 explains how rotation buffer changes, state loads, and module moves refresh its
 identity shortcut.
+QuaRot/SpinQuant Hadamard rotation resolves its backend per call from the
+tensor's device, so a rotated checkpoint runs on CPU and a CPU-only host can
+apply the exact Hadamard; see the
+[rotation Hadamard device dispatch](docs/rotation-device-dispatch.md) flow.
 The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
 page explains how a token lookup reads only its packed rows, why small tables
 and large token counts still use whole-table decode, and what that means for
@@ -189,6 +193,7 @@ For checkpoint-backed module loading, see [lazy checkpoint materialization](docs
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
+For how each decoder layer is replayed with the attention mask and rotary embeddings of its own `config.layer_types` entry, see [calibration layer replay](docs/calibration-replay.md).
 For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
@@ -228,7 +233,9 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 lossless NF12 storage for eligible BF16 source matrices during calibration
 forwards and restores the exact source dtype before quantization. See
 [automatic NF12 source storage](docs/auto-nf12-dtype-cast.md) for the decision
-flow, FP16 eligibility rule, and native floatx precedence.
+flow, FP16 eligibility rule, and native floatx precedence, and
+[excluded-layer replay and AUTO_NF12](docs/auto-nf12-excluded-layers.md) for the
+`dynamic` exclusion contract and the writer's fail-closed check.
 
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 

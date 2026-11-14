@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import inspect
 import json
 import os
 import threading
@@ -476,6 +477,18 @@ def _thaw_module_tree(value):
 def _module_tree_for_class(cls):
     active = _ACTIVE_MODULE_TREE.get()
     return active[1] if active is not None and active[0] is cls else cls.module_tree
+
+
+# Replay metadata key: the per-layer-type `attention_mask` / `position_embeddings`
+# captured from the first decoder layer's forward. `capture_first_layer_input_kwargs`
+# stores it in the cached batch kwargs and `prepare_layer_replay_kwargs` consumes it,
+# selecting the entry for the layer being replayed and dropping the key again.
+_LAYER_TYPE_REPLAY_KWARGS_KEY = "_gptqmodel_layer_type_replay_kwargs"
+
+# `transformers` names the windowed attention layer type this string; every other
+# declared type (`full_attention`, `hybrid`, ...) uses the plain causal mask.
+_LAYER_TYPE_SLIDING = "sliding_attention"
+
 
 class BaseQModel(nn.Module):
     # Class-method APIs remain available to model definitions.  Calls through
@@ -3301,12 +3314,23 @@ class BaseQModel(nn.Module):
         example: Dict[str, Any],
         batch_device: torch.device,
     ) -> None:
-        """Expose original model inputs while the first-layer hook executes."""
+        """Expose original model inputs while the first-layer hook executes.
 
-        del example, batch_device
+        The first-layer hook only sees the mask and rotary embeddings that the
+        outer decoder block selected for *that* layer. Rebuilding the kwargs of
+        the other declared layer types needs the unexpanded inputs (the 2-D
+        padding mask and the position ids), so keep a reference for the duration
+        of one example and release it in `end_input_capture_example`.
+        """
+
+        del batch_device
+        self._layer_type_replay_source = example
 
     def end_input_capture_example(self) -> None:
         """Release any model-specific original-input capture state."""
+
+        self._layer_type_replay_source = None
+        self._layer_type_replay_rotary = None
 
     def capture_first_layer_input_kwargs(
         self,
@@ -3318,6 +3342,271 @@ class BaseQModel(nn.Module):
         """Allow model definitions to persist extra first-layer replay metadata during calibration capture."""
 
         return layer_input_kwargs
+
+    @staticmethod
+    def _layer_type_param_name(module: nn.Module) -> Optional[str]:
+        """Name of the rotary-embedding argument that selects a layer type."""
+
+        try:
+            parameters = inspect.signature(module.forward).parameters
+        except (TypeError, ValueError):
+            return None
+        for name in ("layer_type", "attention_type"):
+            if name in parameters:
+                return name
+        return None
+
+    def _resolve_layer_type_replay_rotary(self) -> Optional[nn.Module]:
+        """Rotary module that builds a different `position_embeddings` per layer type."""
+
+        state = object.__getattribute__(self, "__dict__")
+        cached = state.get("_layer_type_replay_rotary")
+        if cached is not None:
+            return cached
+
+        model = self._replay_root_model()
+        if model is None:
+            return None
+
+        declared = getattr(self, "rotary_embedding", None)
+        if declared:
+            module, _ = get_module_by_name_prefix(model, [declared])
+            if module is not None and self._layer_type_param_name(module) is not None:
+                self._layer_type_replay_rotary = module
+                return module
+
+        for name, module in model.named_modules():
+            if "rotary" not in name.lower() and "rotary" not in type(module).__name__.lower():
+                continue
+            if self._layer_type_param_name(module) is not None:
+                self._layer_type_replay_rotary = module
+                return module
+        return None
+
+    def _replay_root_model(self) -> Optional[nn.Module]:
+        """The loaded model, or None for a definition instance built without `nn.Module.__init__`.
+
+        `BaseQModel.__getattr__` resolves missing attributes through `self.model`,
+        so probing attributes on a bare instance recurses. Read the module table
+        directly instead.
+        """
+
+        modules = object.__getattribute__(self, "__dict__").get("_modules") or {}
+        model = modules.get("model")
+        return model if isinstance(model, nn.Module) else None
+
+    def _layer_type_replay_config(self):
+        """Config that declares `layer_types` (the text tower for multimodal wrappers)."""
+
+        model = self._replay_root_model()
+        if model is None:
+            return None
+        config = getattr(model, "config", None)
+        if config is None:
+            return None
+        text_config = getattr(config, "text_config", config)
+        return text_config if text_config is not None else config
+
+    def _declared_layer_types(self) -> Optional[tuple]:
+        """Distinct-typed `config.layer_types`, or None when one type covers the stack."""
+
+        text_config = self._layer_type_replay_config()
+        layer_types = getattr(text_config, "layer_types", None)
+        if not isinstance(layer_types, (list, tuple)) or not layer_types:
+            return None
+        if len(set(layer_types)) < 2:
+            return None
+        return tuple(layer_types)
+
+    @staticmethod
+    def _layer_type_or_mask(layer_type: str, text_config):
+        """Mask overlay `Gemma3TextModel.forward` applies for bidirectional attention."""
+
+        if layer_type != _LAYER_TYPE_SLIDING:
+            return lambda *args, **kwargs: torch.tensor(True, dtype=torch.bool)
+        try:
+            from transformers.masking_utils import sliding_window_bidirectional_overlay
+        except ImportError:  # pragma: no cover - older transformers
+            return None
+        window = getattr(text_config, "sliding_window", None)
+        if window is None:
+            return None
+        return sliding_window_bidirectional_overlay(window)
+
+    def _build_layer_type_attention_mask(
+        self,
+        text_config,
+        layer_type: str,
+        hidden_states: torch.Tensor,
+        raw_attention_mask: Optional[torch.Tensor],
+        position_ids: torch.Tensor,
+    ):
+        """Rebuild the mask `transformers` would hand to a layer of `layer_type`."""
+
+        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
+        mask_kwargs = {
+            "config": text_config,
+            "inputs_embeds": hidden_states,
+            "attention_mask": raw_attention_mask,
+            "past_key_values": None,
+            "position_ids": position_ids,
+        }
+        if getattr(text_config, "use_bidirectional_attention", False):
+            or_mask_function = self._layer_type_or_mask(layer_type, text_config)
+            if or_mask_function is None:
+                return None
+            mask_kwargs["or_mask_function"] = or_mask_function
+        builder = (
+            create_sliding_window_causal_mask
+            if layer_type == _LAYER_TYPE_SLIDING
+            else create_causal_mask
+        )
+        return builder(**mask_kwargs)
+
+    def _build_layer_type_position_embeddings(
+        self,
+        rotary: nn.Module,
+        layer_type: str,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        target_device: torch.device,
+    ):
+        """Rebuild the per-layer-type rotary tuple with the model's own rotary module."""
+
+        rotary_device = get_device(rotary)
+        probe = torch.empty(1, device=rotary_device, dtype=hidden_states.dtype)
+        result = rotary(probe, move_to(position_ids, device=rotary_device), layer_type)
+        if isinstance(result, (tuple, list)):
+            return type(result)(move_to(value, device=target_device) for value in result)
+        return move_to(result, device=target_device)
+
+    def capture_layer_type_replay_kwargs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+        layer_input_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist the replay kwargs of every declared layer type, not only layer 0's.
+
+        Called by the capture stage right after `capture_first_layer_input_kwargs`;
+        a no-op (the key is simply absent) when the model declares one layer type.
+        """
+
+        layer_type_kwargs = self._build_layer_type_replay_kwargs(
+            args=args,
+            kwargs=kwargs,
+            batch_device=batch_device,
+        )
+        if layer_type_kwargs is not None:
+            layer_input_kwargs[_LAYER_TYPE_REPLAY_KWARGS_KEY] = layer_type_kwargs
+        return layer_input_kwargs
+
+    def _build_layer_type_replay_kwargs(
+        self,
+        *,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+    ) -> Optional[Dict[str, Any]]:
+        """Rebuild the mask and rotary tuple of every declared layer type.
+
+        `transformers` 5 builds one mask per layer *type*
+        (`causal_mask_mapping[config.layer_types[i]]`) and Gemma3/OLMo3 also pass a
+        different `position_embeddings` per type. The capture hook fires on the
+        first decoder layer only, so a single captured mask would be replayed to
+        layers whose type expects a different one. Rebuild the missing types from
+        the same inputs the model used, and let replay select by layer index.
+        """
+
+        layer_types = self._declared_layer_types()
+        if layer_types is None:
+            return None
+        source = object.__getattribute__(self, "__dict__").get("_layer_type_replay_source")
+        if not isinstance(source, dict):
+            return None
+
+        hidden_states = kwargs.get("hidden_states")
+        if hidden_states is None and args:
+            hidden_states = args[0]
+        if not torch.is_tensor(hidden_states) or hidden_states.dim() != 3:
+            return None
+
+        text_config = self._layer_type_replay_config()
+        num_layers = getattr(text_config, "num_hidden_layers", None)
+        if isinstance(num_layers, int) and num_layers != len(layer_types):
+            # A per-layer list is the only shape this reconstruction can index.
+            return None
+
+        raw_attention_mask = source.get("attention_mask")
+        if raw_attention_mask is not None:
+            if not torch.is_tensor(raw_attention_mask) or raw_attention_mask.dim() != 2:
+                return None
+            if raw_attention_mask.shape[-1] != hidden_states.shape[1]:
+                return None
+            raw_attention_mask = move_to(raw_attention_mask, device=hidden_states.device)
+
+        position_ids = kwargs.get("position_ids")
+        if not torch.is_tensor(position_ids):
+            position_ids = torch.arange(
+                hidden_states.shape[1], device=hidden_states.device, dtype=torch.long
+            ).unsqueeze(0)
+        position_ids = move_to(position_ids, device=hidden_states.device)
+        if position_ids.shape[-1] != hidden_states.shape[1]:
+            return None
+
+        base_type = layer_types[0]
+        captured_position_embeddings = kwargs.get("position_embeddings")
+        rotary = (
+            self._resolve_layer_type_replay_rotary()
+            if captured_position_embeddings is not None
+            else None
+        )
+
+        by_type: Dict[str, Dict[str, Any]] = {}
+        for layer_type in sorted(set(layer_types) - {base_type}):
+            entry: Dict[str, Any] = {}
+            entry["attention_mask"] = self._build_layer_type_attention_mask(
+                text_config=text_config,
+                layer_type=layer_type,
+                hidden_states=hidden_states,
+                raw_attention_mask=raw_attention_mask,
+                position_ids=position_ids,
+            )
+            if rotary is not None:
+                entry["position_embeddings"] = self._build_layer_type_position_embeddings(
+                    rotary=rotary,
+                    layer_type=layer_type,
+                    hidden_states=hidden_states,
+                    position_ids=position_ids,
+                    target_device=batch_device,
+                )
+            by_type[layer_type] = entry
+
+        return {
+            "base_type": base_type,
+            "layer_types": layer_types,
+            "by_type": by_type,
+        }
+
+    @staticmethod
+    def _resolve_layer_replay_type(layer: nn.Module, layer_types: Sequence[str]) -> Optional[str]:
+        """Layer type declared by the decoder layer being replayed."""
+
+        attention = getattr(layer, "self_attn", None)
+        declared = getattr(attention, "layer_type", None)
+        if not isinstance(declared, str):
+            declared = getattr(layer, "layer_type", None)
+        if isinstance(declared, str):
+            return declared
+
+        index = getattr(attention, "layer_idx", None)
+        if not isinstance(index, int):
+            index = getattr(layer, "layer_idx", None)
+        if isinstance(index, int) and 0 <= index < len(layer_types):
+            return layer_types[index]
+        return None
 
     def quantization_layer_output_required(
         self,
@@ -3367,7 +3656,60 @@ class BaseQModel(nn.Module):
     ) -> Dict[str, Any]:
         """Allow model definitions to refresh layer-specific kwargs before cached layer replay."""
 
+        layer_type_kwargs = additional_inputs.pop(_LAYER_TYPE_REPLAY_KWARGS_KEY, None)
+        if layer_type_kwargs:
+            self._apply_layer_type_replay_kwargs(
+                layer=layer,
+                layer_type_kwargs=layer_type_kwargs,
+                additional_inputs=additional_inputs,
+                target_device=target_device,
+            )
         return additional_inputs
+
+    def _apply_layer_type_replay_kwargs(
+        self,
+        *,
+        layer: nn.Module,
+        layer_type_kwargs: Dict[str, Any],
+        additional_inputs: Dict[str, Any],
+        target_device: torch.device,
+    ) -> None:
+        """Swap in the mask/rotary captured for the layer type being replayed."""
+
+        layer_types = layer_type_kwargs.get("layer_types") or ()
+        by_type = layer_type_kwargs.get("by_type") or {}
+        if not by_type:
+            return
+        layer_type = self._resolve_layer_replay_type(layer, layer_types)
+        if layer_type is None or layer_type == layer_type_kwargs.get("base_type"):
+            return
+        entry = by_type.get(layer_type)
+        if not entry:
+            return
+
+        # Only replace kwargs the caller is already replaying: a model that is
+        # handed no mask (for example a wrapper that keeps the layer-0 mask out
+        # of replay) must not start receiving one here.
+        if "attention_mask" in entry and additional_inputs.get("attention_mask") is not None:
+            layer_type_mask = entry["attention_mask"]
+            additional_inputs["attention_mask"] = (
+                None
+                if layer_type_mask is None
+                else move_to(layer_type_mask, device=target_device)
+            )
+        position_embeddings = entry.get("position_embeddings")
+        if position_embeddings is not None and additional_inputs.get("position_embeddings") is not None:
+            additional_inputs["position_embeddings"] = self._move_position_embeddings(
+                position_embeddings, target_device
+            )
+
+    @staticmethod
+    def _move_position_embeddings(position_embeddings, target_device: torch.device):
+        if isinstance(position_embeddings, (tuple, list)):
+            return type(position_embeddings)(
+                move_to(value, device=target_device) for value in position_embeddings
+            )
+        return move_to(position_embeddings, device=target_device)
 
     def prepare_layer_replay_keep_mask(
         self,

@@ -113,6 +113,25 @@ def test_kv_block_pool_reserve_release():
 
 
 @pytest.mark.parametrize(
+    "max_context, kv_tokens, expect",
+    [
+        (100, 356, (8, 9)),        # short generate: pool grown to the 8-wide table + scratch
+        (4096, 8192, (64, 129)),   # already large enough
+        (65, 64, (8, 9)),          # 2 blocks of context still rounds the row to 8
+        (16384 + 128, 32 * 16512, (264, 8257)),
+    ],
+)
+def test_kv_pool_geometry_satisfies_device_ops(max_context, kv_tokens, expect):
+    from gptqmodel.utils.tt_llama import kv_pool_geometry
+
+    per_user, blocks = kv_pool_geometry(max_context, kv_tokens, 64)
+    assert (per_user, blocks) == expect
+    assert per_user % 8 == 0                 # chunked SDPA: 32-byte page-table rows
+    assert per_user <= blocks                # paged_update_cache: table width <= pool
+    assert per_user * 64 >= max_context and (blocks - 1) * 64 >= kv_tokens
+
+
+@pytest.mark.parametrize(
     "overrides, match",
     [
         ({"tie_word_embeddings": False}, "tied"),
