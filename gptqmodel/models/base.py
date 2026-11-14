@@ -413,6 +413,11 @@ NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
 MOE_FLAG = ":moe"
 NORM_FLAG = ":norm"
+# Marks a normalization that consumes the block output (a "sandwich" post-norm).
+# It still owns checkpoint weights and may be trained, but it never feeds the
+# next quantized projection, so AWQ must not fold the consumer's input scale
+# into it.
+POST_NORM_FLAG = ":postnorm"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -485,6 +490,7 @@ class BaseQModel(nn.Module):
         "is_moe_module",
         "get_moe_module_name",
         "get_norm_modules",
+        "get_post_norm_modules",
         "build_layer_modules",
         "simple_layer_modules",
         "shared_input_plan",
@@ -1130,8 +1136,14 @@ class BaseQModel(nn.Module):
         return found_names
 
     @classmethod
-    def _collect_norm_modules_from_tree(cls, tree_node, parent_path: str = "") -> List[str]:
-        """Collect layer-relative paths of modules tagged with the `:norm` flag."""
+    def _collect_norm_modules_from_tree(
+        cls,
+        tree_node,
+        parent_path: str = "",
+        flag: str = NORM_FLAG,
+    ) -> List[str]:
+        """Collect layer-relative paths of modules tagged with ``flag``."""
+        flag_name = flag.lstrip(":")
         found = []
         if isinstance(tree_node, dict):
             for key, value in tree_node.items():
@@ -1139,18 +1151,18 @@ class BaseQModel(nn.Module):
                     continue
                 module_name, flags = cls._parse_module_flags(key)
                 path = f"{parent_path}.{module_name}" if parent_path else module_name
-                if NORM_FLAG.lstrip(":") in flags:
+                if flag_name in flags:
                     found.append(path)
-                found.extend(cls._collect_norm_modules_from_tree(value, path))
+                found.extend(cls._collect_norm_modules_from_tree(value, path, flag))
         elif isinstance(tree_node, (tuple, list)):
             for item in tree_node:
                 if isinstance(item, dict):
-                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path))
+                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path, flag))
                     continue
                 if not isinstance(item, str):
                     continue
                 module_name, flags = cls._parse_module_flags(item)
-                if NORM_FLAG.lstrip(":") not in flags:
+                if flag_name not in flags:
                     continue
                 # Same leaf rule as the layer walker: a child named like its parent is the parent.
                 if parent_path == module_name or parent_path.endswith(f".{module_name}"):
@@ -1158,6 +1170,22 @@ class BaseQModel(nn.Module):
                 else:
                     found.append(f"{parent_path}.{module_name}" if parent_path else module_name)
         return found
+
+    @classmethod
+    def _collect_flagged_layer_modules(cls, flag: str) -> List[str]:
+        """Collect the deduplicated layer-relative paths tagged with ``flag``."""
+        names = []
+        for tree in cls._iter_module_tree_variants():
+            found_hash = False
+            for item in tree:
+                if item == "#":
+                    found_hash = True
+                elif found_hash and isinstance(item, dict):
+                    for name in cls._collect_norm_modules_from_tree(item, flag=flag):
+                        if name not in names:
+                            names.append(name)
+                    break
+        return names
 
     @classmethod
     def get_norm_modules(cls) -> List[str]:
@@ -1168,18 +1196,17 @@ class BaseQModel(nn.Module):
 
         Example (Qwen3): ["input_layernorm", "self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm"]
         """
-        names = []
-        for tree in cls._iter_module_tree_variants():
-            found_hash = False
-            for item in tree:
-                if item == "#":
-                    found_hash = True
-                elif found_hash and isinstance(item, dict):
-                    for name in cls._collect_norm_modules_from_tree(item):
-                        if name not in names:
-                            names.append(name)
-                    break
-        return names
+        return cls._collect_flagged_layer_modules(NORM_FLAG)
+
+    @classmethod
+    def get_post_norm_modules(cls) -> List[str]:
+        """Layer-relative paths of sandwich post-norms declared via `:postnorm`.
+
+        These norms consume a block's output (after the residual add), so their
+        output never feeds the next quantized projection. AWQ must not fold a
+        consumer's input scale into them.
+        """
+        return cls._collect_flagged_layer_modules(POST_NORM_FLAG)
 
     @classmethod
     def has_norm_flag(cls, module_spec: str) -> bool:
@@ -4369,6 +4396,13 @@ class BaseQModel(nn.Module):
                     module_name = module_name.replace(flag, "")
             return module_name
 
+        # A sandwich post-norm (for example LFM3's `post_operator_norm`) is
+        # applied to the block output, after the residual add. It can appear in
+        # the tree immediately before the next consumer and share that
+        # consumer's width, so position and width cannot identify a fold
+        # source. The definition marks it explicitly instead.
+        post_norm_modules = set(self.get_post_norm_modules())
+
         def _select_feature_name(names):
             """Return the first quantized child that has captured activations."""
             for raw in names:
@@ -4395,8 +4429,10 @@ class BaseQModel(nn.Module):
                 last_module_root = candidate_name.split(".", 1)[0]
             return True
 
-        def _is_gain_norm(candidate_module, input_width: int | None) -> bool:
+        def _is_gain_norm(candidate_module, candidate_name: str, input_width: int | None) -> bool:
             """Whether ``candidate_module`` can absorb the consumer's input scale."""
+            if candidate_name in post_norm_modules:
+                return False
             if norm_type_of(candidate_module) is None:
                 return False
             weight = getattr(candidate_module, "weight", None)
@@ -4414,9 +4450,13 @@ class BaseQModel(nn.Module):
             branches (for example the router) or to a preceding residual.
             ``last_module`` remains the fallback when no norm matches.
             """
-            for _, candidate_module in reversed(pending_nonquant):
-                if _is_gain_norm(candidate_module, input_width):
+            for candidate_name, candidate_module in reversed(pending_nonquant):
+                if _is_gain_norm(candidate_module, candidate_name, input_width):
                     return candidate_module
+            if last_module_name in post_norm_modules:
+                # Folding into a post-norm corrupts the block output. With no
+                # data-flow source in this run, skip the scale instead.
+                return None
             return last_module
 
         def _module_kwargs_for_feature(feature_name: str | None):

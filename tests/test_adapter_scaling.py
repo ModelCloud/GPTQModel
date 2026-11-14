@@ -5,6 +5,7 @@
 
 import importlib.util
 import json
+import re
 
 import pytest
 import torch
@@ -31,6 +32,27 @@ def _write_adapter(directory, *, config, weights):
         encoding="utf-8",
     )
     save_file(weights, str(directory / "adapter_model.safetensors"))
+
+
+def _peft_pattern_key(pattern_keys, name):
+    """PEFT 0.21.2 `get_pattern_key`: `re.match(r"(.*\\.)?(key)$", name)`."""
+
+    for key in pattern_keys:
+        if re.match(rf"(.*\.)?({key})$", name):
+            return key
+    return name
+
+
+def _peft_scale(*, name, rank_pattern, alpha_pattern, base_rank, base_alpha):
+    rank = rank_pattern.get(
+        _peft_pattern_key(rank_pattern.keys(), name),
+        base_rank,
+    )
+    alpha = alpha_pattern.get(
+        _peft_pattern_key(alpha_pattern.keys(), name),
+        base_alpha,
+    )
+    return rank, alpha / rank
 
 
 @pytest.mark.parametrize("use_rslora", [False, True])
@@ -204,3 +226,122 @@ def test_eora_export_alpha_pattern_matches_peft_module_scale(tmp_path):
         / peft_config.rank_pattern["model.layers.1.*"]
         == 1.0
     )
+
+
+@pytest.mark.parametrize(
+    "pattern,names,matched_name",
+    [
+        (
+            "1.self_attn.q_proj",
+            [
+                "model.layers.1.self_attn.q_proj",
+                "model.layers.10.self_attn.q_proj",
+                "model.layers.11.self_attn.q_proj",
+            ],
+            "model.layers.1.self_attn.q_proj",
+        ),
+        (
+            "model.layers.1",
+            [
+                "model.layers.1.self_attn.q_proj",
+                "model.layers.10.self_attn.q_proj",
+                "model.layers.11.self_attn.q_proj",
+            ],
+            None,
+        ),
+        (
+            "up_proj",
+            [
+                "model.layers.0.mlp.gate_up_proj",
+                "model.layers.0.mlp.up_proj",
+                "model.layers.0.mlp.down_proj",
+            ],
+            "model.layers.0.mlp.up_proj",
+        ),
+    ],
+)
+def test_alpha_pattern_matches_peft_dot_boundary(tmp_path, pattern, names, matched_name):
+    """A pattern may only select a module whose name ends at a dot boundary."""
+
+    base_rank = 8
+    base_alpha = 8
+    pattern_alpha = 64
+    alpha_pattern = {pattern: pattern_alpha}
+    _write_adapter(
+        tmp_path,
+        config={
+            "r": base_rank,
+            "lora_alpha": base_alpha,
+            "target_modules": ["q_proj", "up_proj"],
+            "alpha_pattern": alpha_pattern,
+        },
+        weights={
+            f"base_model.model.{name}.{suffix}": tensor
+            for name in names
+            for suffix, tensor in (
+                ("lora_A.weight", torch.ones(base_rank, 4) * 0.1),
+                ("lora_B.weight", torch.ones(3, base_rank) * 0.2),
+            )
+        },
+    )
+
+    for name in names:
+        AdapterCache.reset()
+        adapter = Lora(rank=base_rank, path=str(tmp_path))
+        adapter.post_init(name, CPU)
+
+        peft_rank, peft_scale = _peft_scale(
+            name=name,
+            rank_pattern={},
+            alpha_pattern=alpha_pattern,
+            base_rank=base_rank,
+            base_alpha=base_alpha,
+        )
+        assert adapter.rank == peft_rank
+        assert abs(adapter.lora_scale - peft_scale) <= 1e-7, (pattern, name)
+
+    # Encode the expected selection, not only parity with the oracle.
+    selected = [
+        name
+        for name in names
+        if _peft_pattern_key(alpha_pattern.keys(), name) == pattern
+    ]
+    if matched_name is None:
+        assert selected == []
+    else:
+        assert selected == [matched_name]
+
+
+def test_float_alpha_pattern_loads_with_peft_scale(tmp_path):
+    """`adapter_config.json` has no integer type; PEFT accepts `4.0`."""
+
+    module_key = "model.layers.0.self_attn.q_projection"
+    base_rank = 8
+    base_alpha = 8
+    float_alpha = 4.0
+    _write_adapter(
+        tmp_path,
+        config={
+            "r": base_rank,
+            "lora_alpha": base_alpha,
+            "target_modules": ["q_projection"],
+            "alpha_pattern": {module_key: float_alpha},
+        },
+        weights={
+            f"base_model.model.{module_key}.lora_A.weight": torch.ones(base_rank, 4) * 0.1,
+            f"base_model.model.{module_key}.lora_B.weight": torch.ones(3, base_rank) * 0.2,
+        },
+    )
+
+    adapter = Lora(rank=base_rank, path=str(tmp_path))
+    adapter.post_init(module_key, CPU)
+
+    _, peft_scale = _peft_scale(
+        name=module_key,
+        rank_pattern={},
+        alpha_pattern={module_key: float_alpha},
+        base_rank=base_rank,
+        base_alpha=base_alpha,
+    )
+    assert adapter.lora_scale == pytest.approx(float_alpha / base_rank)
+    assert abs(adapter.lora_scale - peft_scale) <= 1e-7

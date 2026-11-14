@@ -155,6 +155,24 @@ class TestExtensionConfig(unittest.TestCase):
         )
         assert adapter.rank == 8
 
+    def test_rank_pattern_requires_a_dot_boundary(self):
+        """`1.self_attn.q_proj` names layer 1, not the tail of layer 11."""
+
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"1.self_attn.q_proj": 16}),
+            "model.layers.11.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
+        # `model.layers.1` is a prefix of layer 10/11, not a module suffix.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"model.layers.1": 16}),
+            "model.layers.10.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
     def test_rank_pattern_matches_canonical_mixed_case_module_name(self):
         """PEFT rank patterns name module segments in their canonical case."""
 
@@ -178,12 +196,21 @@ class TestExtensionConfig(unittest.TestCase):
         """Lowercasing rewrote `\\S`/`\\D`/`\\W` into their opposite classes."""
 
         name = "model.layers.0.self_attn.q_proj"
-        for pattern in (r"\S+\.q_proj$", r"\D+\.q_proj$", r"\W+q_proj$"):
+        for pattern in (r"\S+\.q_proj$", r"\D+\.q_proj$"):
             adapter = Lora(rank=8)
             assert adapter.dynamic_rank_override(
                 LoraConfig(r=8, rank_pattern={pattern: 16}), name
             ), pattern
             assert adapter.rank == 16, pattern
+
+        # PEFT anchors the optional prefix at a dot boundary, so `\W+` cannot
+        # consume that dot: the prefix group already ends with it. Matching
+        # here would be the broader `re.search` behaviour this rule replaces.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\W+q_proj$": 16}), name
+        )
+        assert adapter.rank == 8
 
         # The folded classes must not match a name that only the original
         # spelling selects: `\d` needs a digit immediately before `.q_proj`.

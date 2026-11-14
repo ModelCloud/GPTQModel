@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import inspect
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -34,6 +33,10 @@ from gptqmodel.utils.model import move_to
 log = logging.getLogger(__name__)
 
 
+class UnresolvableGainOffset(RuntimeError):
+    """The norm's gain parameterization could not be measured on the live module."""
+
+
 try:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
 except Exception:  # pragma: no cover - older transformers builds do not expose Gemma 4 yet
@@ -59,53 +62,22 @@ allowed_act_fns = [
 ]
 
 
-def _source_gain_offset(ln: nn.Module) -> Optional[float]:
-    """Infer a ``1 + weight`` gain from the module's forward source.
-
-    Only used when the live gain probe cannot run (for example a norm whose
-    forward needs extra inputs). Returns ``None`` when the source is
-    unavailable or does not show an additive offset.
-    """
-    try:
-        source = inspect.getsource(type(ln).forward)
-    except (OSError, TypeError):
-        return None
-    compact = "".join(source.split())
-    if any(
-        pattern in compact
-        for pattern in (
-            "1.0+self.weight",
-            "1+self.weight",
-            "self.weight+1.0",
-            "self.weight+1",
-        )
-    ):
-        return 1.0
-    return None
-
-
 def _norm_gain_offset(ln: nn.Module) -> float:
     """Resolve whether ``ln`` applies ``weight`` or ``1 + weight``.
 
     The semantics are measured from the live module, not selected from a class
     list, so Gemma 3, Qwen3.5, Qwen3-Next and future offset-gain norms are
-    folded correctly. A forward-source check keeps unusual modules working when
-    the probe cannot execute.
+    folded correctly. When the probe cannot decide, the scale is not folded:
+    source text cannot distinguish a foldable post-gain from a norm that scales
+    before normalizing, and guessing produced silently corrupted layers.
     """
     try:
         return resolve_gain_offset(ln)
-    except Exception as exc:  # noqa: BLE001 - fall back to source semantics
-        offset = _source_gain_offset(ln)
-        if offset is not None:
-            return offset
-        log.warning(
-            "AWQ: could not resolve the gain parameterization of %s (%s): %s; "
-            "assuming a plain `weight` gain",
-            type(ln).__name__,
-            id(ln),
-            exc,
-        )
-        return 0.0
+    except Exception as exc:  # noqa: BLE001 - report the module, not the raw error
+        raise UnresolvableGainOffset(
+            f"AWQ: could not resolve the gain parameterization of "
+            f"{type(ln).__name__} ({id(ln)}): {exc}"
+        ) from exc
 
 
 @torch.inference_mode()
@@ -150,30 +122,42 @@ def apply_scale(module, scales_list, input_feat_dict=None):
             move_to(layer, device=target_device)
         scales = scales.to(target_device)
 
-        if (
-            isinstance(prev_op, nn.Linear)
-            and isinstance(layers, list)
-            and isinstance(layers[0], nn.Linear)
-        ):
-            scale_fc_fcs(prev_op, layers, scales)
+        try:
+            if (
+                isinstance(prev_op, nn.Linear)
+                and isinstance(layers, list)
+                and isinstance(layers[0], nn.Linear)
+            ):
+                scale_fc_fcs(prev_op, layers, scales)
 
-        elif isinstance(prev_op, nn.Linear):
-            assert len(layers) == 1
-            scale_fc_fc(prev_op, layers[0], scales)
+            elif isinstance(prev_op, nn.Linear):
+                assert len(layers) == 1
+                scale_fc_fc(prev_op, layers[0], scales)
 
-        elif (
-            any(isinstance(prev_op, t) for t in allowed_norms)
-            or "rmsnorm" in str(prev_op.__class__).lower()
-        ):
-            scale_ln_fcs(prev_op, layers, scales)
+            elif (
+                any(isinstance(prev_op, t) for t in allowed_norms)
+                or "rmsnorm" in str(prev_op.__class__).lower()
+            ):
+                scale_ln_fcs(prev_op, layers, scales)
 
-        elif any(isinstance(prev_op, t) for t in allowed_act_fns):
-            new_module = ScaledActivation(prev_op, scales)
-            set_op_by_name(module, prev_op_name, new_module)
-            scale_gelu_fc(prev_op, layers[0], scales)
+            elif any(isinstance(prev_op, t) for t in allowed_act_fns):
+                new_module = ScaledActivation(prev_op, scales)
+                set_op_by_name(module, prev_op_name, new_module)
+                scale_gelu_fc(prev_op, layers[0], scales)
 
-        else:
-            raise NotImplementedError(f"prev_op {type(prev_op)} not supported yet!")
+            else:
+                raise NotImplementedError(f"prev_op {type(prev_op)} not supported yet!")
+        except UnresolvableGainOffset as exc:
+            log.warning(
+                "AWQ: skipping scale group %s -> %s: %s",
+                prev_op_name,
+                layer_names,
+                exc,
+            )
+            move_to(prev_op, device=original_prev_device)
+            for layer, original_device in zip(layers, original_layer_devices):
+                move_to(layer, device=original_device)
+            continue
 
         # apply the scaling to input feat if given; prepare it for clipping
         if input_feat_dict is not None:
