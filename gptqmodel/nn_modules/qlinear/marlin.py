@@ -470,7 +470,22 @@ class MarlinLinear(GPTQQuantLinear):
                 marlin_pad_dim(self.bias, self.out_features, padded_n)
             )
 
+        # The checkpoint's GPTQ words are now Marlin-tile-permuted and the
+        # original zero points are gone. Mark the module so a state-dict save
+        # fails closed instead of writing this runtime layout as a checkpoint.
+        self._marlin_repacked = True
+
         super().post_init()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_marlin_repacked", False):
+            raise RuntimeError(
+                "Marlin rewrites `qweight` into its runtime tile layout and replaces "
+                "`qzeros`/`g_idx`; the original checkpoint tensors cannot be "
+                "reconstructed. Use `GPTQModel.save()`/`save_quantized()` for a "
+                "loadable checkpoint, or reload the original checkpoint."
+            )
+        super()._save_to_state_dict(destination, prefix, keep_vars)
 
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process

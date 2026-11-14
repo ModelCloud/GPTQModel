@@ -1971,6 +1971,18 @@ def ModelLoader(cls):
 
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
+        # Remember the layout the tensors actually have on disk.  A re-save
+        # after mutating `quantize_config.format` must convert qzeros instead
+        # of copying the old words under a new label.
+        qcfg._checkpoint_format_on_disk = format_code
+        qcfg._checkpoint_layout_snapshot = {
+            "format": format_code,
+            "bits": qcfg.bits,
+            "group_size": qcfg.group_size,
+            "sym": qcfg.sym,
+            "desc_act": qcfg.desc_act,
+            "pack_dtype": qcfg.pack_dtype,
+        }
         backend = normalize_backend(backend, quant_method=export_quant_method)
         backend = backend_for_activation(qcfg.activation_mode, backend)
         backend = _auto_select_mlx_backend(
@@ -2292,6 +2304,7 @@ def ModelLoader(cls):
                 )
 
                 simple_layer_modules = cls.simple_layer_modules(config, qcfg)
+            external_inclusions = qcfg.external_module_inclusions()
             for name in list(modules.keys()):
                 if input_embed_quantized and name == input_embed_name:
                     continue
@@ -2323,10 +2336,15 @@ def ModelLoader(cls):
                         for leaf in declared
                     )
                 )
+                inclusion_match = (
+                    external_inclusions is None
+                    or relative is None
+                    or any(relative.endswith(entry) for entry in external_inclusions)
+                )
                 if layer_prefix is None or any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")
                         for ignore_module in ignore_modules
-                ) or not relative_match:
+                ) or not relative_match or not inclusion_match:
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         log.info(f"The layer {name} is not quantized.")
@@ -2814,6 +2832,14 @@ def ModelLoader(cls):
                     tokenizer.save_pretrained(temp_dir)
 
                     model, _ = load(temp_dir)
+
+        # Record the layout the tensors had on disk so a later
+        # `model.save_pretrained()` can emit checkpoint-layout qzeros instead of
+        # the kernel's converted runtime words.
+        if hasattr(model, "modules"):
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = format_code
 
         instance = cls(
             model,
