@@ -82,4 +82,4 @@ flowchart LR
   per projection stage.
 - Unknown result shapes pass through to the generic formatter unchanged.
 
-Introduced by PR #3932 for issue #3932.
+Introduced by PR #3955 for issue #3932.
