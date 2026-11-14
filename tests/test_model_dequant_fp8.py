@@ -827,3 +827,131 @@ def test_dequantize_model_fp8_does_not_treat_other_models_as_deepseek_v4(tmp_pat
         assert set(reader.keys()) == {weight_key, scale_key}
         assert reader.get_tensor(weight_key).dtype is torch.int8
         assert reader.get_tensor(scale_key).dtype is torch.bfloat16
+
+
+def _pack_awq_reference(codes: torch.Tensor, bits: int) -> torch.Tensor:
+    """Independent AWQ packer: 4-bit interleaves, wider widths stay contiguous."""
+    pack_factor = 32 // bits
+    rows, cols = codes.shape
+    assert cols % pack_factor == 0
+    order = [0, 2, 4, 6, 1, 3, 5, 7] if bits == 4 else list(range(pack_factor))
+    grouped = codes.to(torch.int64).reshape(rows, cols // pack_factor, pack_factor)
+    packed = torch.zeros((rows, cols // pack_factor), dtype=torch.int64)
+    mask = (1 << bits) - 1
+    for lane in range(pack_factor):
+        packed |= (grouped[..., order[lane]] & mask) << (lane * bits)
+    return packed.to(torch.int32)
+
+
+def _awq_dense_reference(
+    codes: torch.Tensor,
+    zero_points: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    """Dense ``[out_features, in_features]`` weight built from the source codes."""
+    group_indices = torch.arange(codes.shape[0]) // group_size
+    dense = (codes - zero_points.index_select(0, group_indices)).to(torch.float32)
+    dense = dense * scales.index_select(0, group_indices).to(torch.float32)
+    return dense.t().contiguous()
+
+
+def _write_awq_shard(
+    model_dir,
+    *,
+    bits: int,
+    group_size: int,
+    in_features: int,
+    out_features: int,
+) -> torch.Tensor:
+    torch.manual_seed(3974)
+    groups = in_features // group_size
+    maxq = (1 << bits) - 1
+    codes = torch.randint(0, maxq + 1, (in_features, out_features), dtype=torch.int32)
+    zero_points = torch.randint(0, maxq + 1, (groups, out_features), dtype=torch.int32)
+    scales = (torch.rand(groups, out_features) * 0.01 + 0.001).to(torch.float16)
+
+    save_file(
+        {
+            "model.layers.0.qweight": _pack_awq_reference(codes, bits),
+            "model.layers.0.qzeros": _pack_awq_reference(zero_points, bits),
+            "model.layers.0.scales": scales,
+        },
+        str(model_dir / "model.safetensors"),
+    )
+    return _awq_dense_reference(codes, zero_points, scales, group_size)
+
+
+def test_convert_awq_file_4bit_restores_natural_column_order(tmp_path):
+    dense = _write_awq_shard(
+        tmp_path,
+        bits=4,
+        group_size=32,
+        in_features=64,
+        out_features=16,
+    )
+
+    tensors = convert_awq_file(tmp_path / "model.safetensors", torch.float32, "cpu")
+
+    torch.testing.assert_close(
+        tensors["model.layers.0.weight"],
+        dense,
+        rtol=0,
+        atol=1e-6,
+    )
+
+
+def test_convert_awq_file_reads_8bit_from_config(tmp_path):
+    dense = _write_awq_shard(
+        tmp_path,
+        bits=8,
+        group_size=32,
+        in_features=64,
+        out_features=16,
+    )
+
+    tensors = convert_awq_file(
+        tmp_path / "model.safetensors",
+        torch.float32,
+        "cpu",
+        config={"bits": 8, "group_size": 32},
+    )
+
+    torch.testing.assert_close(
+        tensors["model.layers.0.weight"],
+        dense,
+        rtol=0,
+        atol=1e-6,
+    )
+
+
+def test_dequantize_model_awq_8bit_uses_config_bits(tmp_path):
+    model_dir = tmp_path / "awq_8bit"
+    output_dir = tmp_path / "awq_8bit_out"
+    model_dir.mkdir()
+    dense = _write_awq_shard(
+        model_dir,
+        bits=8,
+        group_size=32,
+        in_features=64,
+        out_features=16,
+    )
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["TestModel"],
+                "quantization_config": {
+                    "bits": 8,
+                    "group_size": 32,
+                    "quant_method": "awq",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.float32)
+
+    with safe_open(output_dir / "model.safetensors", framework="pt", device="cpu") as reader:
+        weight = reader.get_tensor("model.layers.0.weight")
+    torch.testing.assert_close(weight, dense, rtol=0, atol=1e-6)
