@@ -190,4 +190,5 @@ Measured with an independent FP64 oracle (`out_features=64`,
 | `tests/test_checkpoint_compat.py::test_untied_lm_head_quantizes_and_reloads` | untied head quantizes, saves, reloads, forwards |
 | `tests/test_checkpoint_compat.py::test_tied_lm_head_is_rejected_with_the_explicit_error` | tied head raises `NotImplementedError` |
 
-Introduced for [issue #4013](https://github.com/ModelCloud/GPTQModel/issues/4013).
+Introduced in [PR #4034](https://github.com/ModelCloud/GPTQModel/pull/4034) for
+[issue #4013](https://github.com/ModelCloud/GPTQModel/issues/4013).
