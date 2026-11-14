@@ -64,6 +64,7 @@ from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
+    get_config_selection_kwargs,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
@@ -1073,7 +1074,16 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
 
 
 def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
-    return get_hf_gguf_load_kwargs(model_init_kwargs)
+    """Tokenizer options that must match the config/weight selection.
+
+    A nested checkpoint keeps its tokenizer beside the config, so forwarding
+    only ``gguf_file`` would load the repository-root tokenizer (or fail when
+    the root has none) while the weights came from the requested subfolder.
+    """
+
+    kwargs = get_config_selection_kwargs(model_init_kwargs)
+    kwargs.update(get_hf_gguf_load_kwargs(model_init_kwargs))
+    return kwargs
 
 
 def _resolve_local_gguf_checkpoint_path(model_local_path: str, hf_gguf_load_kwargs: Dict[str, str]) -> Optional[str]:
@@ -1900,6 +1910,22 @@ def ModelLoader(cls):
             model_local_path,
             model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
+            # The tokenizer must come from the same directory and revision as
+            # the config and weights. A nested checkpoint keeps all of them in
+            # the requested subfolder, so resolving only the weights there would
+            # load the root tokenizer (or fail on a repo that has none).
+            **_get_tokenizer_load_kwargs(
+                {
+                    "cache_dir": cache_dir,
+                    "force_download": force_download,
+                    "resume_download": resume_download,
+                    "proxies": proxies,
+                    "local_files_only": local_files_only,
+                    "use_auth_token": use_auth_token,
+                    "revision": revision,
+                    "subfolder": subfolder,
+                }
+            ),
             **hf_gguf_load_kwargs,
         )
 
