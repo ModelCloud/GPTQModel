@@ -95,6 +95,7 @@ GPTQ Hessian capture and repeated finalization are described in the [Hessian acc
 Every supported quantization path ends with one [run summary](docs/quantize-run-summary.md) emitted after finalization.
 Disk-backed replay outputs use [bounded staging and shard verification on every read](docs/looper-checkpoint-redesign.md#disk-backed-layer-output-staging-and-reads).
 Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
+Quantized kernels receive packed rows and launch in the operand's device; see the [kernel input contiguity and launch contracts](docs/kernel-input-contiguity.md) for activation packing, 64-bit offsets, empty batches, and per-token compiles.
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
 Transformers 5.22 model-family fixes for module trees, Defuser router shims, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
@@ -118,6 +119,11 @@ Checkpoint resaves, GGUF BF16 bytes, packed biases, explicit dtype strings, and
 FP8 block scales preserve their declared precision and bit patterns; see
 [checkpoint dtype boundary preservation](docs/dtype-boundary-preservation.md)
 for the selection and failure flows.
+Quantized saves leave packed payloads (`weight` codes owned by a module with
+`QUANT_TYPE`) to the disk-offload restore instead of aliasing them from the
+dense source checkpoint, and a capture-only AUTO_NF12 forward keeps the dense
+module in the tree; see the
+[packed payload save ownership](docs/fp8-save-offload.md) flow.
 GPTAQ and FOEM consume one native calibration entry per sample, including batched calibration; see the [native calibration batch split](docs/native-calibration-batch-split.md) flow.
 3-bit zero-point packing requires 32-aligned `out_features`, and every packer fails closed instead of truncating the tail; see the [3-bit zero-point packing width contract](docs/3bit-zero-point-packing.md).
 Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
@@ -204,10 +210,13 @@ For how checkpoint index tensors (`g_idx`, NF12 escapes, ParoQuant pairs, VPTQ
 outliers, EXL3 `K`) are validated before any native kernel indexes memory, see
 [checkpoint index validation](docs/checkpoint-index-validation.md).
 For checkpoint-backed module loading, see [lazy checkpoint materialization](docs/lazy-checkpoint-materialization.md).
+For how Transformers 5.22 class-keyed conversion maps, legacy mixer patch guards, the Nemotron-H tree root, and non-persistent Mamba buffers are handled, see [Transformers 5.22 model compatibility](docs/transformers-5-compat.md).
 For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
 For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
 For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
 For how each decoder layer is replayed with the attention mask and rotary embeddings of its own `config.layer_types` entry, see [calibration layer replay](docs/calibration-replay.md).
+For the outer-loop work multimodal models apply outside a decoder layer—DeepStack residuals, Gemma-3 image-block masks, padded batches, and the Qwen2.5-Omni lazy checkpoint aliases—see [multimodal calibration replay](docs/multimodal-calibration.md).
+For the base-type mask, the `super()` contract for definition replay overrides, and AWQ's typed rotary call, see [layer-type replay masks](docs/layer-type-replay-masks.md).
 For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
@@ -217,6 +226,8 @@ For how QQQ and GPTQ capture convolution inputs—including `padding="same"` and
 See [quantization scale storage](docs/quantization-scale-storage.md) for near-dead group handling and checkpoint precision requirements.
 
 Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts. Expert cardinality follows the same rule: a `#` placeholder expands only when the definition declares `dynamic_expert_index` and the owning config node resolves it, so **[expert cardinality resolution](docs/model-tree-resolution.md#expert-cardinality-resolution)** covers that step and why a surviving placeholder is a silent miss.
+
+Subset digits order the quantization blocks: a projection that consumes another projection's output must live in a later subset. See **[module tree subset ordering](docs/module-tree-ordering.md)** for the producer-before-consumer contract and the rule that every called `nn.Linear` is either quantized or explicitly excluded.
 
 Use the **[module-plan guide](docs/module-plan-guide.md)** for `model.module_plan()`, terminal/JSON inspection, model-definition tags, and the required new-model tests. The **[DeepSeek V4.1 Flash inventory](docs/deepseek-v41-module-inventory.md)** shows its verified checkpoint structure and remaining integration requirements.
 

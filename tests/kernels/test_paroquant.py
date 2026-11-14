@@ -530,6 +530,62 @@ def test_linear_wide_bias_promotes_mismatched_cuda_dtypes(dtype):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
+@pytest.mark.cuda
+def test_paroquant_cuda_forward_packs_a_strided_activation():
+    """A strided decode-step slice must reach the fused rotation packed."""
+    from gptqmodel.utils.paroquant import _load_rotation_extension
+
+    if not _load_rotation_extension():
+        pytest.skip("fused ParoQuant rotation extension unavailable")
+
+    bits = 4
+    in_features = 128
+    out_features = 64
+    group_size = 128
+    qweight, qzeros, scales, bias = _make_packed_buffers(
+        bits, in_features, out_features, group_size
+    )
+    module = ParoLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+        krot=1,
+    )
+    module.qweight.copy_(qweight)
+    module.qzeros.copy_(qzeros)
+    module.scales.copy_(scales)
+    module.bias.copy_(bias)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=1,
+        dtype=torch.float16,
+    )
+    theta.fill_(0.2)
+    channel_scales.mul_(0.75)
+    module.pairs.copy_(pairs)
+    module.theta.copy_(theta)
+    module.channel_scales.copy_(channel_scales)
+    module.post_init()
+    module = module.cuda().eval()
+
+    base = torch.randn(4, 7, in_features, device="cuda", dtype=torch.float16)
+    strided = base[:, -1:, :]
+    assert not strided.is_contiguous()
+
+    actual = module(strided)
+    expected = module(strided.contiguous())
+
+    assert actual.shape == (4, 1, out_features)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_paroquant_forward_matches_explicit_rotated_reference(monkeypatch):
     """Guard the dense reference contract for non-identity ParoQuant rotations."""
     bits = 4

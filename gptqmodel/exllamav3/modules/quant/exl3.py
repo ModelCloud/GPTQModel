@@ -132,7 +132,11 @@ class LinearEXL3:
             torch_mode = params.get("reconstruct", bsz > 32)
 
         out_shape = x.shape[:-1] + (self.out_features,)
-        x = x.view(-1, self.in_features)
+        # The native hadamard/hgemm/bc kernels treat the operand as densely
+        # packed rows and take `data_ptr()` directly. `view` succeeds on some
+        # strided inputs (column slices, `hidden_states[:, -1:, :]`), which
+        # then produced silently wrong rows, so pack before the kernels.
+        x = x.reshape(-1, self.in_features).contiguous()
         y = torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
 
         if torch_mode:
