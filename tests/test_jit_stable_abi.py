@@ -25,6 +25,7 @@ from gptqmodel.utils import (
     hadamard,
     machete,
     marlin,
+    nf12_hip,
     paroquant,
     qqq,
     rco_cpp,
@@ -34,10 +35,12 @@ from gptqmodel.utils import (
 )
 
 
-def _assert_stable(loader) -> None:
+def _assert_stable(loader, sources=None, include_paths=None) -> None:
     assert loader.torch_stable_abi_target == cpp._TORCH_STABLE_ABI_TARGET
-    sources = loader._resolve_sequence(loader.sources)
-    include_paths = loader._resolved_extra_include_paths()
+    if sources is None:
+        sources = loader._resolve_sequence(loader.sources)
+    if include_paths is None:
+        include_paths = loader._resolved_extra_include_paths()
     python_dependent, stable, non_stable_headers = loader._source_abi_details(
         sources, include_paths
     )
@@ -116,6 +119,18 @@ def test_allspark_hip_uses_stable_abi():
     _assert_stable(allspark_hip._EXTENSION)
 
 
+def test_nf12_hip_uses_stable_abi():
+    # The loader stages its sources into the build cache, so point the check at
+    # the shipped binding instead of triggering that staging. The include path
+    # only has to resolve the compat header for this read-only scan.
+    root = Path(__file__).resolve().parents[1] / "gptqmodel_ext" / "nf12_hip"
+    _assert_stable(
+        nf12_hip._EXTENSION,
+        sources=[str(root / "nf12_torch.cpp")],
+        include_paths=[cpp.torch_stable_compat_include_path()],
+    )
+
+
 def test_tt_blockfloat_cuda_uses_stable_abi():
     _assert_stable(tt_blockfloat_cuda._EXTENSION)
 
@@ -145,7 +160,6 @@ def test_every_jit_loader_declares_the_stable_abi():
 
     root = Path(__file__).resolve().parents[1] / "gptqmodel"
     rocm_only = {
-        "gptqmodel/utils/nf12_hip.py",
         "gptqmodel/utils/tt_blockfloat_hip.py",
     }
     missing = []

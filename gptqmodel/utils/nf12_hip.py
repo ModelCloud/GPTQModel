@@ -27,12 +27,19 @@ from pathlib import Path
 
 import torch
 
-from .cpp import TorchOpsJitExtension, default_jit_cuda_cflags, default_torch_ops_build_root
+from .cpp import (
+    _TORCH_STABLE_ABI_TARGET,
+    TorchOpsJitExtension,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+    torch_stable_compat_include_path,
+)
 from .env import env_flag
 
 
 _OPS_NAME = "gptqmodel_nf12_hip_ops"
 _NAMESPACE = "nf12_hip"
+_COMPAT_HEADER = "torch_stable_compat.h"
 
 # RDNA4 (gfx12xx). gfx1250 shares the wave32 ISA subset used here.
 SUPPORTED_ARCHS = ("gfx1200", "gfx1201", "gfx1250")
@@ -87,6 +94,11 @@ def _sources() -> list[str]:
         if not source.exists():
             raise FileNotFoundError(f"NF12 HIP source is missing: {source}")
         (stage / name).write_bytes(source.read_bytes())
+    # The compat header is staged too: pointing an include path at
+    # ``gptqmodel_ext`` makes torch's hipify walk that tree and rewrite CUDA
+    # headers in place, which mutates the shipped sources.
+    compat = Path(torch_stable_compat_include_path()) / _COMPAT_HEADER
+    (stage / _COMPAT_HEADER).write_bytes(compat.read_bytes())
     # Derived from _SOURCE_FILES so a new kernel cannot be staged but silently
     # left out of the build. Headers are staged above but are not sources.
     return [str(stage / name) for name in _SOURCE_FILES if name.endswith((".cpp", ".hip"))]
@@ -143,6 +155,12 @@ def _ldflags() -> list[str]:
     return [f"-L{rocm_root / 'lib'}"] if rocm_root is not None else []
 
 
+def _include_paths() -> list[str]:
+    # The staged sources live under the build cache, so the compat header is
+    # found through an include path rather than a relative include.
+    return [str(_staging_root())]
+
+
 _EXTENSION = TorchOpsJitExtension(
     name=_OPS_NAME,
     namespace=_NAMESPACE,
@@ -152,11 +170,13 @@ _EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("nf12_hip"),
     display_name="NF12 codec (HIP/RDNA4)",
     extra_cuda_cflags=_cuda_cflags,
+    extra_include_paths=_include_paths,
     extra_ldflags=_ldflags,
     force_rebuild_env="GPTQMODEL_NF12_HIP_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 _SELFTESTED = False
