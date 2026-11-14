@@ -72,6 +72,7 @@ from ..utils.hf import (
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
     prepare_remote_model_init_compat,
+    resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
     set_hf_config_dtype,
     suspend_hf_weight_init,
@@ -1754,6 +1755,11 @@ def ModelLoader(cls):
         use_auth_token = kwargs_without_internal.pop("use_auth_token", None)
         revision = kwargs_without_internal.pop("revision", None)
         subfolder = kwargs_without_internal.pop("subfolder", "")
+        # Resolve the requested repo subfolder once. The quantize config, the
+        # checkpoint shards, and a relative adapter manifest must all be read
+        # from the same directory, and that directory must stay inside the
+        # checkpoint the caller named.
+        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, subfolder)
         commit_hash = kwargs_without_internal.pop("_commit_hash", None)
         attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
 
@@ -1825,7 +1831,7 @@ def ModelLoader(cls):
                     "checkpoint metadata cannot authorize remote adapter downloads."
                 )
             if qcfg.adapter is not None and qcfg.adapter.path not in (None, ""):
-                qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, model_local_path)
+                qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, checkpoint_dir)
         else:
             qcfg.adapter = normalize_adapter(adapter)
             configure_explicit_remote_adapter(

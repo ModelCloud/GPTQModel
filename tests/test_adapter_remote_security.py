@@ -387,6 +387,28 @@ def test_checkpoint_adapter_provenance_survives_direct_config_loading(tmp_path, 
     assert reloaded.adapter.path == qcfg.adapter.path
 
 
+@pytest.mark.parametrize("filename", ["quantize_config.json", "config.json"])
+def test_checkpoint_adapter_provenance_follows_the_repo_subfolder(tmp_path, monkeypatch, filename):
+    root = tmp_path / "repo"
+    nested = root / "nested"
+    _write_adapter_files(nested / "adapter")
+    payload = {"bits": 4, "adapter": {"name": "lora", "rank": 2, "path": "adapter"}}
+    (nested / filename).write_text(json.dumps(
+        {"quantization_config": payload} if filename == "config.json" else payload
+    ))
+    monkeypatch.chdir(tmp_path)
+
+    # The repository root carries no quantize config, so this only resolves
+    # when the subfolder selects the directory that owns the manifest.
+    qcfg = QuantizeConfig.from_pretrained(root, subfolder="nested")
+
+    assert qcfg.adapter._gptqmodel_checkpoint_source == (str(nested), "adapter")
+    qcfg.adapter.post_init(weight_key="layer", device=torch.device("cpu"))
+    assert qcfg.adapter.path == str(nested / "adapter")
+    # Serialization keeps the manifest-relative path, not the resolved one.
+    assert qcfg.adapter.to_dict()["path"] == "adapter"
+
+
 def test_checkpoint_adapter_files_reject_external_symlinks(tmp_path, monkeypatch):
     checkpoint = tmp_path / "checkpoint"
     adapter_dir = checkpoint / "adapter"

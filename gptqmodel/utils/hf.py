@@ -5,6 +5,7 @@
 
 import inspect
 import json
+import ntpath
 import os
 import shutil
 import sys
@@ -317,6 +318,49 @@ def get_hf_gguf_load_kwargs(kwargs: dict[str, Any]) -> dict[str, str]:
     if gguf_file is None:
         return {}
     return {"gguf_file": gguf_file}
+
+
+def resolve_checkpoint_subfolder(base: Any, subfolder: Optional[str]) -> str:
+    """Resolve a repo-relative ``subfolder`` under a local checkpoint root.
+
+    A ``subfolder`` names a directory *inside* the checkpoint or Hub repository,
+    so it may only narrow the base path. Absolute paths, Windows drive letters,
+    backslash separators, and ``.``/``..`` segments are rejected instead of
+    being normalized away, because silently escaping the checkpoint would make
+    the quantize config, the weights, and the adapter manifest resolve against
+    different roots.
+    """
+
+    base_path = os.fspath(base)
+    if subfolder is None:
+        return base_path
+    text = str(subfolder)
+    if text in ("", "."):
+        return base_path
+    if "\\" in text or os.path.isabs(text) or ntpath.isabs(text) or ntpath.splitdrive(text)[0]:
+        raise ValueError(
+            f"`subfolder` must be a relative path inside the checkpoint, got `{text}`."
+        )
+    parts = [part for part in text.split("/") if part]
+    if not parts:
+        return base_path
+    if any(part in (".", "..") for part in parts):
+        raise ValueError(
+            f"`subfolder` must not contain `.` or `..` segments, got `{text}`."
+        )
+
+    joined = os.path.join(base_path, *parts)
+    if os.path.isdir(base_path) and os.path.exists(joined):
+        base_real = os.path.realpath(base_path)
+        try:
+            inside = os.path.commonpath([base_real, os.path.realpath(joined)]) == base_real
+        except ValueError:
+            inside = False
+        if not inside:
+            raise ValueError(
+                f"`subfolder` must stay inside the checkpoint directory, got `{text}`."
+            )
+    return joined
 
 
 def _normalize_repo_file_paths(file_names) -> list[str]:
