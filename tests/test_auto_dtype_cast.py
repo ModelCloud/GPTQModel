@@ -231,6 +231,43 @@ def test_cuda_embedding_uses_only_packed_storage(monkeypatch):
     not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
     reason="requires NVIDIA SM80 or newer",
 )
+def test_cuda_row_major_embedding_dequantizes_to_cpu(monkeypatch):
+    """An explicit CPU target must decode on the packed GPU, not on the host (#3885)."""
+    import gptqmodel_nf12
+
+    if not gptqmodel_nf12.available():
+        pytest.skip("native row-major NF12 kernels are unavailable on this host")
+
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    source = nn.Embedding(32, 128, dtype=torch.bfloat16, device="cuda:0")
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+        source.weight[3, 5] = -0.0
+        source.weight[9, 64] = 2.0**-20
+
+    spec = auto_dtype_cast.eligible_source_module(source, "cuda:0")
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    assert packed.row_major
+
+    host = packed.dequantize_weight(device="cpu", dtype=torch.bfloat16)
+    assert host.device.type == "cpu"
+    assert host.dtype is torch.bfloat16
+    assert _bits_equal(host, source.weight.cpu())
+
+    fp32 = packed.dequantize_weight(device="cpu", dtype=torch.float32)
+    assert fp32.device.type == "cpu" and fp32.dtype is torch.float32
+    torch.testing.assert_close(fp32, source.weight.float().cpu())
+
+    # The packed device path is unchanged and needs no move.
+    on_device = packed.dequantize_weight(device="cuda:0", dtype=torch.bfloat16)
+    assert on_device.device.type == "cuda"
+    assert _bits_equal(on_device, source.weight)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None or torch.cuda.get_device_capability(0)[0] < 8,
+    reason="requires NVIDIA SM80 or newer",
+)
 def test_cuda_embedding_falls_back_when_native_nf12_is_unavailable(monkeypatch):
     import gptqmodel_nf12
     from gptqmodel_nf12 import _library as nf12_library
