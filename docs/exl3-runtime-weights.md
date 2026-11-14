@@ -6,7 +6,7 @@ that produces the next layer's calibration inputs, and is replaced by the
 packed module at finalization. This page describes that lifecycle, the layer
 wide refresh that keeps it correct across subsets, and the 128-channel geometry
 contract for the generic `EXL3Processor`. The refresh was introduced with
-[PR #4006](https://github.com/ModelCloud/GPTQModel/pull/4006).
+[PR #4026](https://github.com/ModelCloud/GPTQModel/pull/4026).
 
 ## Why the layer inventory is refreshed, not only the subset
 
