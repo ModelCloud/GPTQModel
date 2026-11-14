@@ -149,7 +149,7 @@ skipped `beta` for its first column, which made results depend on `blocksize`.
 ```mermaid
 flowchart TD
     A["block i1 .. i2"] --> B["for i in block:<br/>quantize, update, correct column i+1"]
-    B --> C{"i2 < columns?"}
+    B --> C{"i2 less than columns?"}
     C -- yes --> D["correct column i2<br/>before the next block"]
     C -- no --> E["last block, done"]
     D --> F["next block sees corrected first column"]
