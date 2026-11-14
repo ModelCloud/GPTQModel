@@ -25,6 +25,7 @@ from .api import (
     prepare_fp32_gate,
     rowmajor_embedding,
     rowmajor_pack,
+    sub_fp32,
 )
 from .moe import (
     NF12MoEWeight,
@@ -72,4 +73,5 @@ __all__ = [
     "prepare_fp32_gate",
     "rowmajor_embedding",
     "rowmajor_pack",
+    "sub_fp32",
 ]

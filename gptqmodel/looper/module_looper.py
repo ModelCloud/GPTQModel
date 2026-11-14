@@ -2139,6 +2139,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 skipped_modules.append(name)
             else:
                 source_module = subset[name].module
+                # EoRA runs after quantization: its forward must consume the
+                # quantized module in the model tree, not a freshly packed
+                # copy of the restored dense source.
+                if isinstance(processor, EoraProcessor):
+                    subset[name].state["auto_dtype_cast_forward_disabled"] = True
+                    continue
                 packed_module = self.gptq_model._maybe_auto_dtype_cast_forward_module(
                     source_module,
                     device=get_device(source_module),

@@ -12,6 +12,7 @@ from torch import nn
 
 import gptqmodel.models.base as base_module
 import gptqmodel.quantization.nf12 as nf12_quantization
+from gptqmodel.looper import gptq_processor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
@@ -314,6 +315,150 @@ def test_quant_source_releases_packed_storage_for_every_source_kind(monkeypatch,
     assert model.source is restored
     assert _bits_equal(restored.weight, expected)
     assert all(not tensor.numel() for tensor in packed.buffers())
+
+
+def test_quant_source_keeps_packed_source_when_eora_needs_the_diff(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    source = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+
+    class Wrapper(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = source
+
+    model = Wrapper()
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = model
+    harness.quantize_config = QuantizeConfig(offload_to_disk=False)
+    harness._turtle_lock = threading.RLock()
+    harness.turtle_model = None
+    harness.auto_dtype_cast_events = []
+    harness._needs_w_wq_diff = True
+    named = NamedModule(model.proj, name="proj", full_name="proj", layer_index=0)
+
+    packed = harness._maybe_auto_dtype_cast_forward_module(
+        model.proj, device=torch.device("cpu"), named_module=named
+    )
+    harness.shell_module_materialize(
+        target_submodule=packed,
+        device=torch.device("cpu"),
+        role="quant_source",
+        named_module=named,
+    )
+
+    assert named.state["auto_dtype_cast_packed_source"] is packed
+    assert any(tensor.numel() for tensor in packed.buffers())
+
+
+def test_w_wq_diff_falls_back_and_releases_packed_source(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    source = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+    assert spec is not None
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cpu")
+
+    named = NamedModule(restored, name="proj", full_name="proj", layer_index=0)
+    named.state["auto_dtype_cast_packed_source"] = packed
+    wq = torch.randn_like(restored.weight, dtype=torch.float32)
+    processor = gptq_processor.GPTQProcessor.__new__(gptq_processor.GPTQProcessor)
+    processor.calculate_w_wq_diff = True
+
+    diff = processor._w_wq_diff(named, wq)
+
+    expected = restored.weight.detach().to(torch.float32) - wq
+    assert torch.equal(diff, expected)
+    assert "auto_dtype_cast_packed_source" not in named.state
+    assert all(not tensor.numel() for tensor in packed.buffers())
+
+
+def test_w_wq_diff_prefers_the_fused_native_path(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    source = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        source.weight.copy_(torch.randn_like(source.weight) * 0.02)
+    spec = auto_dtype_cast.eligible_source_module(source, "cpu")
+    assert spec is not None
+    packed = auto_dtype_cast.cast_source_module(source, spec)
+    restored = auto_dtype_cast.restore_source_module(packed, spec, device="cpu")
+    named = NamedModule(restored, name="proj", full_name="proj", layer_index=0)
+    named.state["auto_dtype_cast_packed_source"] = packed
+    wq = torch.randn_like(restored.weight, dtype=torch.float32)
+    sentinel = torch.zeros_like(wq)
+    seen = []
+
+    def fake_fused(candidate, candidate_wq):
+        seen.append((candidate, candidate_wq))
+        return sentinel
+
+    monkeypatch.setattr(auto_dtype_cast, "fused_w_minus_wq", fake_fused)
+    processor = gptq_processor.GPTQProcessor.__new__(gptq_processor.GPTQProcessor)
+    processor.calculate_w_wq_diff = True
+
+    diff = processor._w_wq_diff(named, wq)
+
+    assert diff is sentinel
+    assert seen == [(packed, wq)]
+    assert "auto_dtype_cast_packed_source" not in named.state
+    assert all(not tensor.numel() for tensor in packed.buffers())
+
+
+def test_eora_forward_does_not_repack_the_restored_source(monkeypatch):
+    monkeypatch.setattr(auto_dtype_cast, "nf12_supported_device", lambda _device: True)
+    monkeypatch.setattr(nf12_quantization, "_native_encode_runtime", lambda *_args: (None, None))
+
+    linear = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.quantize_config = QuantizeConfig(offload_to_disk=False)
+    named = NamedModule(linear, name="proj", full_name="proj", layer_index=0)
+    named.state["auto_dtype_cast_forward_disabled"] = True
+
+    result = harness._maybe_auto_dtype_cast_forward_module(
+        linear, device=torch.device("cpu"), named_module=named
+    )
+
+    assert result is linear
+    assert "auto_dtype_cast_source_spec" not in named.state
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not auto_dtype_cast.nf12_supported_device("cuda:0"),
+    reason="requires a native NF12 accelerator",
+)
+def test_fused_w_minus_wq_matches_the_dense_difference():
+    linear = nn.Linear(64, 16, bias=False, device="cuda:0", dtype=torch.bfloat16)
+    with torch.no_grad():
+        linear.weight.copy_(torch.randn_like(linear.weight) * 0.02)
+    spec = auto_dtype_cast.eligible_source_module(linear, "cuda:0")
+    assert spec is not None
+    packed = auto_dtype_cast.cast_source_module(linear, spec)
+    wq = torch.randn((16, 64), device="cuda:0", dtype=torch.float32)
+
+    fused = auto_dtype_cast.fused_w_minus_wq(packed, wq)
+
+    assert fused is not None
+    assert fused.dtype is torch.float32
+    expected = packed.dequantize_weight(device="cuda:0", dtype=torch.float32) - wq
+    assert torch.equal(fused.view(torch.int32), expected.view(torch.int32))
+
+
+def test_fused_w_minus_wq_declines_when_the_source_is_not_packed():
+    linear = nn.Linear(64, 16, bias=False, dtype=torch.bfloat16)
+    wq = torch.randn((16, 64), dtype=torch.float32)
+
+    assert auto_dtype_cast.fused_w_minus_wq(linear, wq) is None
 
 
 @pytest.mark.skipif(

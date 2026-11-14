@@ -285,6 +285,18 @@ def decode_fp32(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int) -> t
     return torch.ops.nf12_hip.decode(packed, escapes, int(exp_base)).float()
 
 
+def sub_fp32(packed: torch.Tensor, escapes: torch.Tensor, exp_base: int,
+             wq: torch.Tensor) -> torch.Tensor:
+    """``decode_fp32(...) - wq`` in one pass on RDNA4."""
+
+    if not _EXTENSION.load():
+        raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+    native = getattr(torch.ops.nf12_hip, "sub_fp32", None)
+    if callable(native):
+        return native(packed, escapes, int(exp_base), wq.contiguous())
+    return decode_fp32(packed, escapes, int(exp_base)) - wq
+
+
 def linear(
     x: torch.Tensor,
     packed: torch.Tensor,
@@ -393,4 +405,5 @@ __all__ = [
     "prewarm_nf12_hip_extension",
     "rowmajor_embedding",
     "rowmajor_pack",
+    "sub_fp32",
 ]

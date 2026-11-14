@@ -47,6 +47,10 @@ hipError_t nf12_decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_
                             int64_t n, int64_t k, void* out, int64_t ldo,
                             hipStream_t stream);
 
+hipError_t nf12_sub_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                         int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
+                         hipStream_t stream);
+
 hipError_t nf12_embedding(const uint8_t* packed, const uint4* escapes,
                           uint32_t num_escapes, uint32_t exp_base,
                           int64_t n, int64_t k, const int32_t* ids32,
@@ -136,9 +140,11 @@ inline void check_arch(const torch::Tensor& t) {
 // ---------------------------------------------------------------------------
 // nf12_hip::decode(packed, escapes, exp_base) -> bf16 [N, K]
 // nf12_hip::decode_fp32(packed, escapes, exp_base) -> fp32 [N, K]
+// nf12_hip::sub_fp32(packed, escapes, exp_base, wq) -> fp32 [N, K]
 // ---------------------------------------------------------------------------
-torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& escapes,
-                            int64_t exp_base, at::ScalarType dtype, const char* op) {
+std::pair<int64_t, int64_t> decode_geometry(const torch::Tensor& packed,
+                                            const torch::Tensor& escapes,
+                                            int64_t exp_base, const char* op) {
   check_arch(packed);
   TORCH_CHECK(packed.dim() == 2 && packed.scalar_type() == at::kByte,
               op, ": packed must be a 2-D uint8 tensor");
@@ -160,6 +166,12 @@ torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& es
               op, ": packed row must be a multiple of 96 bytes");
   const int64_t k = row_bytes * 2 / 3;
   TORCH_CHECK(k % 64 == 0, op, ": K must be a multiple of 64");
+  return {n, k};
+}
+
+torch::Tensor decode_common(const torch::Tensor& packed, const torch::Tensor& escapes,
+                            int64_t exp_base, at::ScalarType dtype, const char* op) {
+  const auto [n, k] = decode_geometry(packed, escapes, exp_base, op);
 
   auto guard = device_guard(packed);
   auto out = torch::empty({n, k}, packed.options().dtype(dtype));
@@ -184,6 +196,28 @@ torch::Tensor decode_dispatch(const torch::Tensor& packed, const torch::Tensor& 
 torch::Tensor decode_fp32_dispatch(const torch::Tensor& packed, const torch::Tensor& escapes,
                                    int64_t exp_base) {
   return decode_common(packed, escapes, exp_base, at::kFloat, "nf12_hip.decode_fp32");
+}
+
+torch::Tensor sub_fp32_dispatch(const torch::Tensor& packed, const torch::Tensor& escapes,
+                                int64_t exp_base, const torch::Tensor& wq) {
+  const char* op = "nf12_hip.sub_fp32";
+  const auto [n, k] = decode_geometry(packed, escapes, exp_base, op);
+  TORCH_CHECK(wq.scalar_type() == at::kFloat && wq.dim() == 2 && wq.size(0) == n &&
+                  wq.size(1) == k,
+              op, ": wq must be a float32 [N, K] matrix");
+  TORCH_CHECK(wq.device() == packed.device(), op, ": wq must share the packed device");
+  TORCH_CHECK(wq.is_contiguous(), op, ": wq must be contiguous");
+
+  auto guard = device_guard(packed);
+  auto out = torch::empty({n, k}, packed.options().dtype(at::kFloat));
+  const hipError_t status = nf12_sub_fp32(
+      packed.data_ptr<uint8_t>(),
+      reinterpret_cast<const uint4*>(escapes.data_ptr<int16_t>()),
+      static_cast<uint32_t>(exp_base), n, k,
+      static_cast<const void*>(wq.data_ptr()),
+      static_cast<void*>(out.data_ptr()), k, current_stream());
+  TORCH_CHECK(status == hipSuccess, op, " failed: ", hipGetErrorString(status));
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +629,7 @@ std::string arch_info() {
 TORCH_LIBRARY(nf12_hip, m) {
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("decode_fp32(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
+  m.def("sub_fp32(Tensor packed, Tensor escapes, int exp_base, Tensor wq) -> Tensor");
   m.def("embedding(Tensor ids, Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("rowmajor_pack(Tensor packed, Tensor escapes, int exp_base) -> "
         "(Tensor row_packed, Tensor row_escapes, int original_escapes, int collisions)");
@@ -610,6 +645,7 @@ TORCH_LIBRARY(nf12_hip, m) {
 TORCH_LIBRARY_IMPL(nf12_hip, CUDA, m) {
   m.impl("decode", &decode_dispatch);
   m.impl("decode_fp32", &decode_fp32_dispatch);
+  m.impl("sub_fp32", &sub_fp32_dispatch);
   m.impl("embedding", &embedding_dispatch);
   m.impl("rowmajor_pack", &rowmajor_pack_dispatch);
   m.impl("rowmajor_embedding", &rowmajor_embedding_dispatch);

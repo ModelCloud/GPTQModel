@@ -253,6 +253,20 @@ Tensor decode_fp32(const Tensor& packed, const Tensor& escapes, int64_t exp_base
   return out;
 }
 
+Tensor sub_fp32(const Tensor& packed, const Tensor& escapes, int64_t exp_base, const Tensor& wq) {
+  const int32_t device = packed.get_device_index();
+  const torch::stable::accelerator::DeviceGuard guard(device);
+  const nf12_weight_t w = weight_view(packed, escapes, exp_base, device);
+  check_cuda_tensor(wq, "wq", device);
+  STD_TORCH_CHECK(wq.scalar_type() == ScalarType::Float && wq.dim() == 2 && wq.size(0) == w.n &&
+                      wq.size(1) == w.k,
+                  "nf12.sub_fp32: wq must be a float32 [N, K] matrix");
+  const Tensor wq_c = wq.is_contiguous() ? wq : torch::stable::contiguous(wq);
+  Tensor out = torch::stable::new_empty(wq_c, {w.n, w.k}, ScalarType::Float);
+  check_status(nf12_sub_fp32(&w, wq_c.data_ptr(), out.data_ptr(), w.k, current_stream(device)), "sub_fp32");
+  return out;
+}
+
 Tensor linear(const Tensor& x, const Tensor& packed, const Tensor& escapes, int64_t exp_base,
               const std::optional<Tensor>& bias, bool static_weights) {
   const int32_t device = packed.get_device_index();
@@ -852,6 +866,7 @@ STABLE_TORCH_LIBRARY(nf12, m) {
   m.def("encode(Tensor w) -> (Tensor packed, Tensor escapes, int exp_base)");
   m.def("decode(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
   m.def("decode_fp32(Tensor packed, Tensor escapes, int exp_base) -> Tensor");
+  m.def("sub_fp32(Tensor packed, Tensor escapes, int exp_base, Tensor wq) -> Tensor");
   m.def("linear(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None, "
         "*, bool static_weights=False) -> Tensor");
   m.def("linear_staged_b1(Tensor x, Tensor packed, Tensor escapes, int exp_base, Tensor? bias=None) -> Tensor");
@@ -884,6 +899,7 @@ STABLE_TORCH_LIBRARY_IMPL(nf12, CUDA, m) {
   m.impl("encode", TORCH_BOX(&encode));
   m.impl("decode", TORCH_BOX(&decode));
   m.impl("decode_fp32", TORCH_BOX(&decode_fp32));
+  m.impl("sub_fp32", TORCH_BOX(&sub_fp32));
   m.impl("linear", TORCH_BOX(&linear));
   m.impl("linear_staged_b1", TORCH_BOX(&linear_staged_b1));
   m.impl("pack_bf16t", TORCH_BOX(&pack_bf16t));

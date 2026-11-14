@@ -2251,6 +2251,18 @@ class BaseQModel(nn.Module):
             "calibration": calibration_config,
             "calculate_w_wq_diff": ProcessorStep.EORA in run_plan.processors,
         }
+        # EoRA consumes state stored on the NamedModule, so the layer inventory
+        # must keep that wrapper instead of unwrapping it to the live module.
+        self._has_eora = bool(args["calculate_w_wq_diff"])
+        # GPTQ's EoRA path needs ``w - wq`` in FP32. Keep the packed NF12 source
+        # alive until the processor consumes it so the difference fuses the
+        # widening decode with the subtraction instead of materializing an FP32
+        # source copy. Other quantizers compute their diff in the source dtype,
+        # so they keep the existing release-on-restore behavior.
+        self._needs_w_wq_diff = (
+            self._has_eora
+            and ProcessorStep.GPTQ in run_plan.processors
+        )
 
         processors = []
         for step in run_plan.processors:
@@ -3355,6 +3367,21 @@ class BaseQModel(nn.Module):
         native_plan = getattr(qcfg, "_native_floatx_forward_plan", None)
         if isinstance(native_plan, dict) and native_plan.get("mode") == "native":
             return module
+        # EoRA captures statistics after quantization; its forward must consume
+        # the quantized layer instead of a freshly packed dense source.
+        if named_module is not None and named_module.state.get("auto_dtype_cast_forward_disabled"):
+            return module
+        # A post-quantization forward (EoRA adapter capture) must consume the
+        # quantized layer that already lives in the model tree. Re-packing the
+        # restored dense source here would replace that layer for the forward.
+        full_name = getattr(named_module, "full_name", None)
+        if full_name:
+            try:
+                live = self.model.get_submodule(full_name)
+            except AttributeError:
+                live = None
+            if getattr(live, "QUANT_TYPE", None) is not None:
+                return module
         from ..utils.auto_dtype_cast import cast_source_module, eligible_source_module
 
         spec = eligible_source_module(module, device)
@@ -4427,7 +4454,12 @@ class BaseQModel(nn.Module):
                 if source_spec is not None:
                     from ..utils.auto_dtype_cast import release_packed_source_storage
 
-                    release_packed_source_storage(target_submodule)
+                    if getattr(self, "_needs_w_wq_diff", False):
+                        # EoRA builds ``w - wq`` from this packed source; the
+                        # processor releases it once the FP32 diff exists.
+                        named_module.state["auto_dtype_cast_packed_source"] = target_submodule
+                    else:
+                        release_packed_source_storage(target_submodule)
                 named_module.state.pop("auto_dtype_cast_source_spec", None)
                 if get_device(module) != device:
                     safe_module_to(module, device)

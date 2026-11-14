@@ -101,6 +101,37 @@ __device__ __forceinline__ void store_row_tile_fp32(float* __restrict__ out, int
   }
 }
 
+// out = widen(x) - wq, at the same element offsets as `store_row_tile`.
+// `wq` is a dense FP32 matrix with the same layout as the decoded output.
+__device__ __forceinline__ void store_row_tile_sub_fp32(float* __restrict__ out, const float* __restrict__ wq,
+                                                        int64_t off, int64_t ld, const RowTile& x) {
+  const int64_t row8 = ld;
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+      const uint4 v = x[h][q];
+      const uint32_t words[4] = {v.x, v.y, v.z, v.w};
+      const float4* src = reinterpret_cast<const float4*>(wq + off + 8 * h * row8 + 32 * q);
+      const float4 a = src[0];
+      const float4 b = src[1];
+      float4 lo;
+      float4 hi;
+      lo.x = __uint_as_float((words[0] & 0x0000ffffu) << 16) - a.x;
+      lo.y = __uint_as_float(words[0] & 0xffff0000u) - a.y;
+      lo.z = __uint_as_float((words[1] & 0x0000ffffu) << 16) - a.z;
+      lo.w = __uint_as_float(words[1] & 0xffff0000u) - a.w;
+      hi.x = __uint_as_float((words[2] & 0x0000ffffu) << 16) - b.x;
+      hi.y = __uint_as_float(words[2] & 0xffff0000u) - b.y;
+      hi.z = __uint_as_float((words[3] & 0x0000ffffu) << 16) - b.z;
+      hi.w = __uint_as_float(words[3] & 0xffff0000u) - b.w;
+      float4* dst = reinterpret_cast<float4*>(out + off + 8 * h * row8 + 32 * q);
+      __stcs(dst, lo);
+      __stcs(dst + 1, hi);
+    }
+  }
+}
+
 // Swap lane bits 0-1 with the vector-component index using four shuffles.
 // This transpose is its own inverse.
 __device__ __forceinline__ void quad_transpose(uint4& v, int lane) {

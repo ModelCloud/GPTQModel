@@ -284,7 +284,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                     with torch.cuda.device(device):
                         w = torch.full((128, 512), 0.015625, dtype=torch.bfloat16, device="cuda")
                         p = nf12.encode(w)
-                        nf12.decode_fp32(p)
+                        decoded = nf12.decode_fp32(p)
+                        nf12.sub_fp32(p, torch.zeros_like(decoded))
                         x = torch.full((1, 512), 0.125, dtype=torch.float32, device="cuda")
                         nf12.linear_fp32(x, p)
                         nf12.linear(x.bfloat16(), p)
@@ -307,6 +308,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         ids = torch.tensor([0, 127], device="cuda")
         restored = nf12.decode(p)
         restored_fp32 = nf12.decode_fp32(p)
+        wq_zero = torch.zeros_like(restored_fp32)
+        restored_sub = nf12.sub_fp32(p, wq_zero)
         y_bf16 = nf12.linear(x.bfloat16(), p)
         y_fp32 = nf12.linear_fp32(x, p)
         gathered = nf12.embedding(ids, p)
@@ -321,6 +324,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         torch.cuda.current_stream().synchronize()
         if not (torch.equal(restored, w)
                 and torch.equal(restored_fp32.view(torch.int32), restored.float().view(torch.int32))
+                and torch.equal(restored_sub.view(torch.int32), restored_fp32.view(torch.int32))
                 and bool(torch.all(y_bf16 == 1))
                 and bool(torch.all(y_fp32 == 1))
                 and bool(torch.all(y_mma_fp32 == 0.5))
@@ -365,7 +369,10 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                         nf12_hip.embedding(ids, p, e, base)
                         nf12_hip.rowmajor_embedding(ids, row_p, row_e, base)
                         decode_golden = nf12_hip.decode(p, e, base)
-                        nf12_hip.decode_fp32(p, e, base)
+                        decode_golden_fp32 = nf12_hip.decode_fp32(p, e, base)
+                        nf12_hip.sub_fp32(
+                            p, e, base, torch.zeros_like(decode_golden_fp32)
+                        )
                         x = linear_x.to("cuda")
                         nf12_hip.linear(x, p, e, base)
                         torch.cuda.current_stream().synchronize()
@@ -410,6 +417,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                 ids, row_packed, row_escapes, base
             )
             fused_fp32 = nf12_hip.decode_fp32(packed, escapes, base)
+            wq_zero = torch.zeros_like(fused_fp32)
+            fused_sub = nf12_hip.sub_fp32(packed, escapes, base, wq_zero)
             linear_actual = nf12_hip.linear(linear_x, packed, escapes, base)
             nf12_hip_embedding_thread.stream.synchronize()
             if not (
@@ -420,6 +429,10 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                 and torch.equal(
                     fused_fp32.view(torch.int32),
                     decode_golden.float().view(torch.int32),
+                )
+                and torch.equal(
+                    fused_sub.view(torch.int32),
+                    fused_fp32.view(torch.int32),
                 )
             ):
                 raise AssertionError(

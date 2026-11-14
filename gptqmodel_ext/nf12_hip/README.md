@@ -129,6 +129,12 @@ route never materializes a BF16 matrix. Both share `decode_nf12_matrix` and
 on an R9700, the fused FP32 store is 1.37× to 2.41× faster than decoding BF16
 and widening the dense result.
 
+`nf12_hip.sub_fp32(packed, escapes, exp_base, wq)` extends that store with a
+subtraction: `out = widen(decode(W)) - wq` for a contiguous FP32 `wq`. It
+shares `decode_nf12_matrix` and `store_row_tile_sub_fp32`, so the EoRA
+`w - wq` path never materializes the FP32 source and matches
+`decode_fp32 - wq` bit for bit.
+
 ## Embedding lookup
 
 `nf12_hip.embedding(ids, packed, escapes, exp_base)` gathers BF16 rows directly

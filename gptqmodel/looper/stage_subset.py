@@ -929,7 +929,12 @@ def _run_single_subset_pass(
                 # module alive after AUTO_NF12 replaces it for this forward.
                 # Refresh its reference before the quantizer restores a dense
                 # source for the selected module.
-                if named_module.state.get("auto_dtype_cast_source_spec") is not None:
+                # EoRA consumes per-module state through this wrapper, so keep
+                # it in the inventory when an adapter is generated.
+                if (
+                    named_module.state.get("auto_dtype_cast_source_spec") is not None
+                    and not getattr(looper.gptq_model, "_has_eora", False)
+                ):
                     full[named_module.name] = named_module.module
 
     # Determine MoE block name for hook selection
@@ -1426,7 +1431,10 @@ def _run_single_subset_pass(
                 named_module=named_module,
                 fallback_device=cur_layer_device,
             )
-            if named_module.state.pop("auto_dtype_cast_was_applied", False):
+            auto_dtype_cast_was_applied = named_module.state.pop(
+                "auto_dtype_cast_was_applied", False
+            )
+            if auto_dtype_cast_was_applied and not getattr(looper.gptq_model, "_has_eora", False):
                 full[name] = named_module.module
         else:
             target_device = get_device(named_module.module)

@@ -80,6 +80,11 @@ nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, c
  * matrix is materialized. out_fp32 must be 32-byte aligned. */
 nf12_status_t nf12_decode_fp32(const nf12_weight_t* w, void* out_fp32, int64_t ldo, cudaStream_t stream);
 
+/* out_fp32 = decode_fp32(W) - wq_fp32, fused so the FP32 source copy is never
+ * materialized. wq_fp32 and out_fp32 are row-major [n, k] and must not alias. */
+nf12_status_t nf12_sub_fp32(const nf12_weight_t* w, const void* wq_fp32, void* out_fp32, int64_t ldo,
+                            cudaStream_t stream);
+
 /* y = x @ W.T + bias, with BF16 input/output and FP32 accumulation.
  * x is [m, k], y is [m, n], and ldx/ldy are row strides in elements. bias may be NULL.
  * Workspace must hold nf12_linear_workspace_bytes(...) bytes, which may be zero.

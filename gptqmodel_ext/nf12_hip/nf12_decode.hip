@@ -53,12 +53,16 @@ __device__ __forceinline__ void store_decoded_tile(OutT* __restrict__ out, int64
   }
 }
 
+// `sub` is null for a plain decode. When set it points at a dense FP32 matrix
+// and the decoded tile is written as `widen(x) - sub`, fusing the subtraction
+// with the widening store.
 template <WeightSource S, typename OutT, int kPerWarp>
 __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
                                             const uint4* __restrict__ escapes,
                                             uint32_t base_x4, int64_t num_sa,
                                             int64_t k_blocks,
-                                            OutT* __restrict__ out, int64_t ldo) {
+                                            OutT* __restrict__ out, int64_t ldo,
+                                            const float* __restrict__ sub = nullptr) {
   const int lane = threadIdx.x % kWarpSize;
   uint4 planes[kPerWarp][SourceTraits<S>::kLoads];
 #pragma unroll
@@ -82,7 +86,12 @@ __device__ __forceinline__ void decode_rows(const uint4* __restrict__ packed,
 #pragma unroll
       for (int p = 0; p < 2; ++p) quad_transpose(x[h][p], lane);
     }
-    store_decoded_tile(out, row_tile_offset(super_atom(sa, k_blocks), ldo, lane), ldo, x);
+    const int64_t off = row_tile_offset(super_atom(sa, k_blocks), ldo, lane);
+    if (sub != nullptr) {
+      store_row_tile_sub_fp32(reinterpret_cast<float*>(out), sub, off, ldo, x);
+    } else {
+      store_decoded_tile(out, off, ldo, x);
+    }
   }
 }
 
@@ -90,8 +99,8 @@ template <WeightSource S, typename OutT, int kPerWarp>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     decode_kernel(const uint4* __restrict__ packed, const uint4* __restrict__ escapes,
                   uint32_t base_x4, int64_t num_sa, int64_t k_blocks,
-                  OutT* __restrict__ out, int64_t ldo) {
-  decode_rows<S, OutT, kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo);
+                  OutT* __restrict__ out, int64_t ldo, const float* __restrict__ sub) {
+  decode_rows<S, OutT, kPerWarp>(packed, escapes, base_x4, num_sa, k_blocks, out, ldo, sub);
 }
 
 
@@ -378,7 +387,8 @@ namespace {
 
 template <typename OutT>
 hipError_t decode_nf12_matrix(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                              int64_t n, int64_t k, OutT* out, int64_t ldo, hipStream_t stream) {
+                              int64_t n, int64_t k, OutT* out, int64_t ldo, hipStream_t stream,
+                              const float* sub = nullptr) {
   if (exp_base > uint32_t(kMaxExpBase)) return hipErrorInvalidValue;
   // SPEC.md 4 geometry; n / 16 and k / 64 below would otherwise truncate and
   // decode a smaller matrix than the caller asked for.
@@ -392,7 +402,7 @@ hipError_t decode_nf12_matrix(const uint8_t* packed, const uint4* escapes, uint3
   decode_kernel<WeightSource::kNf12, OutT, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
           reinterpret_cast<const uint4*>(packed), escapes, exp_base_x4(exp_base), num_sa,
-          k / kSuperAtomCols, out, ldo);
+          k / kSuperAtomCols, out, ldo, sub);
   return hipGetLastError();
 }
 
@@ -416,6 +426,15 @@ hipError_t nf12_decode_fp32(const uint8_t* packed, const uint4* escapes, uint32_
                             stream);
 }
 
+// out = widen(decode) - wq, fused so no FP32 source copy is materialized.
+hipError_t nf12_sub_fp32(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
+                         int64_t n, int64_t k, const void* wq, void* out, int64_t ldo,
+                         hipStream_t stream) {
+  if (wq == nullptr || out == nullptr || wq == out) return hipErrorInvalidValue;
+  return decode_nf12_matrix(packed, escapes, exp_base, n, k, reinterpret_cast<float*>(out), ldo,
+                            stream, static_cast<const float*>(wq));
+}
+
 // Uncompressed bf16t twin (SPEC.md 4.4). Same walk, no escape table and no
 // exp_base: the super-atom is already the decoded register image.
 hipError_t nf12_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* out,
@@ -431,7 +450,7 @@ hipError_t nf12_unpack_bf16t(const uint8_t* packed, int64_t n, int64_t k, void* 
   decode_kernel<WeightSource::kBf16t, __hip_bfloat16, kDecodeSuperAtomsPerWarp>
       <<<static_cast<unsigned>(blocks), kThreadsPerBlock, 0, stream>>>(
           reinterpret_cast<const uint4*>(packed), nullptr, 0u, num_sa, k / kSuperAtomCols,
-          out_bf16, ldo);
+          out_bf16, ldo, nullptr);
   return hipGetLastError();
 }
 

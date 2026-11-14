@@ -282,6 +282,49 @@ def release_packed_source_storage(packed: nn.Module) -> None:
         clear_weight_cache()
 
 
+def fused_w_minus_wq(packed: nn.Module, wq: torch.Tensor) -> torch.Tensor | None:
+    """Return ``decode_fp32(packed) - wq`` without materializing the source.
+
+    EoRA needs ``w - wq`` in FP32. Decoding the packed source and subtracting in
+    the same widening store means the module never holds an FP32 copy of the
+    source: only ``wq`` plus the result. Returns ``None`` when the fused native
+    path is unavailable so callers can fall back to the dense expression.
+    """
+
+    if not isinstance(packed, NF12Linear):
+        return None
+    if wq.dtype != torch.float32 or wq.ndim != 2 or not wq.is_cuda:
+        return None
+    packed_weight = getattr(packed, "nf12_packed", None)
+    escapes = getattr(packed, "nf12_escapes", None)
+    if not torch.is_tensor(packed_weight) or not torch.is_tensor(escapes):
+        return None
+    if packed_weight.numel() == 0:
+        return None
+    if packed_weight.device != wq.device:
+        return None
+    if tuple(wq.shape) != (packed.out_features, packed.in_features):
+        return None
+    try:
+        exp_base = packed._exp_base()
+    except Exception:  # noqa: BLE001 - unreadable metadata falls back to dense
+        return None
+    try:
+        if torch.version.hip is not None:
+            from . import nf12_hip
+
+            if not nf12_hip.available(wq.device):
+                return None
+            return nf12_hip.sub_fp32(packed_weight, escapes, exp_base, wq)
+        from . import nf12
+
+        if not nf12.available():
+            return None
+        return nf12.sub_fp32(packed_weight, escapes, exp_base, wq)
+    except Exception:  # noqa: BLE001 - optional accelerator; caller falls back
+        return None
+
+
 def restore_source_module(
     packed: nn.Module,
     spec: SourceModuleSpec,
@@ -328,6 +371,7 @@ __all__ = [
     "cast_source_module",
     "eligible_source_module",
     "fp16_is_bf16_exact",
+    "fused_w_minus_wq",
     "nf12_supported_device",
     "release_packed_source_storage",
     "restore_source_module",

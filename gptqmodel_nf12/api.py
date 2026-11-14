@@ -141,6 +141,25 @@ def decode_fp32(weight: NF12Weight) -> torch.Tensor:
     return torch.ops.nf12.decode(weight.packed, weight.escapes, weight.exp_base).float()
 
 
+def sub_fp32(weight: NF12Weight, wq: torch.Tensor) -> torch.Tensor:
+    """``decode_fp32(weight) - wq`` in one pass.
+
+    EoRA consumes the FP32 difference between the source weight and the
+    reconstructed quantized weight. Fusing the widening decode with the
+    subtraction means the source is never materialized as an FP32 matrix, so a
+    module holds one FP32 copy (``wq``) plus the result instead of two dense
+    FP32 matrices plus the result.
+    """
+    _check_cuda(weight.packed, "weight")
+    if wq.dtype != torch.float32 or wq.dim() != 2 or tuple(wq.shape) != weight.shape:
+        raise ValueError(f"nf12: wq must be a float32 {weight.shape} matrix, got {wq.dtype} {tuple(wq.shape)}")
+    load()
+    native = getattr(torch.ops.nf12, "sub_fp32", None)
+    if callable(native):
+        return native(weight.packed, weight.escapes, weight.exp_base, wq)
+    return decode_fp32(weight) - wq
+
+
 def _check_input(x: torch.Tensor, k: int) -> None:
     _check_cuda(x, "x")
     if x.dtype != torch.bfloat16:

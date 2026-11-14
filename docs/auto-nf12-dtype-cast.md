@@ -353,3 +353,62 @@ rather than remove one. The fused store therefore targets FP32-only consumers:
 Not in scope: the embedding row-major layout still restores through its BF16
 lookup kernel and casts afterwards, so `AutoNF12Embedding.dequantize_weight`
 has no FP32 widening store yet.
+
+### Fused EoRA `w - wq` diff
+
+EoRA consumes the FP32 difference between the source weight and GPTQ's
+reconstructed weight. Before this change the diff was built as
+`module.weight.data.float() - wq`, which materializes a second full FP32 source
+matrix next to `wq` and the result. `nf12::sub_fp32` /
+`nf12_hip.sub_fp32` decode each super-atom and subtract `wq` in the same
+widening store, so the FP32 source is never written:
+
+```mermaid
+flowchart TD
+    A["GPTQProcessor.process"] --> B{"AUTO_NF12 kept the packed source?"}
+    B -- No --> C["module.weight.float() - wq"]
+    B -- Yes --> D["fused_w_minus_wq(packed, wq)"]
+    D --> E{"native sub_fp32 available?"}
+    E -- No --> C
+    E -- Yes --> F["nf12.sub_fp32 / nf12_hip.sub_fp32"]
+    F --> G["widen(decode) - wq in one store"]
+    G --> H["EoRA w_wq_diff"]
+    C --> H
+    H --> I["release packed source"]
+```
+
+The packed source is stashed only when GPTQ and EoRA both run. The EoRA stage
+does not re-pack the restored dense source: it forwards the quantized layer
+already in the model tree, and the packed bytes are released immediately after
+the diff is built.
+
+| Mechanism | Dense diff | Fused diff |
+| --- | --- | --- |
+| Source read | 2 B/element | 1.5 B/element (packed) |
+| FP32 source copy | 4 B/element | none |
+| `wq` read | 4 B/element | 4 B/element |
+| Result write | 4 B/element | 4 B/element |
+| Peak for the diff step | 8 B/element | 4 B/element |
+
+Measured on an RTX 4090 with resident inputs, median of 30 trials:
+
+| Shape `(N, K)` | Dense diff | Fused diff | Speedup | Peak saved |
+| --- | ---: | ---: | ---: | ---: |
+| `512×2048` | 15.97 µs | 18.24 µs | 0.88× | 4 MiB |
+| `2048×2048` | 25.86 µs | 27.65 µs | 0.94× | 16 MiB |
+| `8192×2048` | 325.58 µs | 184.22 µs | 1.77× | 64 MiB |
+| `2048×8192` | 324.66 µs | 184.22 µs | 1.76× | 64 MiB |
+| `128256×2048` | 5,027.84 µs | 2,712.77 µs | 1.85× | 1,002 MiB |
+
+Across the 112 Llama 3.2 1B projections plus the vocabulary projection the diff
+falls from 21.98 ms to 13.02 ms (1.69×), and 4,714 MiB of FP32 source traffic is
+never materialized. Small matrices are slightly slower because the decode
+store is compute-bound while the dense expression is a pure elementwise copy;
+the large projections dominate the aggregate.
+
+End-to-end GPTQ + EoRA on Llama 3.2 1B with the same calibration set produced
+482/482 bit-identical model tensors and 224/224 bit-identical adapter tensors
+between AUTO_NF12 and OFF. The end-to-end peak was 4,129.6 MiB versus
+4,042.4 MiB because the packed source must stay resident through GPTQ's
+Hessian/inverse workspace; the 4 B/element saving applies to the diff step, not
+to that workspace-dominated peak.
