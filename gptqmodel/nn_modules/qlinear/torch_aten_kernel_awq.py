@@ -261,9 +261,9 @@ class TorchAtenAwqLinear(AWQuantLinear):
             and _has_local_int4pack_cpu_ops()
             and x.device.type == "cpu"
             and self._fused_input_dtype(x)
-            # The fused kernel writes the activation dtype before the bias add.
-            # Keep biased layers on the FP32-reduce dense path.
-            and self.bias is None
+            # FP16 can overflow before a cancelling bias. BF16 has FP32's
+            # range, so it can use the fused kernel and add the bias once.
+            and (self.bias is None or x.dtype == torch.bfloat16)
         ):
             capture_fused_train_state(self)
             self.transform(x.device.type, dtype=x.dtype)
@@ -277,7 +277,10 @@ class TorchAtenAwqLinear(AWQuantLinear):
                     f"{self.__class__.__name__} was transformed for {self._cpu_transform_dtype} "
                     f"but received {x.dtype} activations. Keep one activation dtype per layer."
                 )
-            out = self._fused_op_forward(x).reshape(out_shape)
+            out = self._fused_op_forward(x)
+            if self.bias is not None:
+                out = (out.float() + self.bias.to(out.device, torch.float32)).to(x.dtype)
+            out = out.reshape(out_shape)
         else:
             weight = self.awq_weight_dequantize(device=x.device, dtype=x.dtype)
             if self.bias is not None:

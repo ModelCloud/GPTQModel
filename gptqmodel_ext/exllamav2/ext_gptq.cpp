@@ -127,7 +127,9 @@ void gemm_half_q_half(
 
     TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16 || a.scalar_type() == at::kFloat,
                 "ExLlamaV2 requires FP16, BF16 or FP32 activations");
-    TORCH_CHECK(c.scalar_type() == a.scalar_type(), "output dtype must match input");
+    const bool wide_output = a.scalar_type() == at::kHalf && c.scalar_type() == at::kFloat;
+    TORCH_CHECK(c.scalar_type() == a.scalar_type() || wide_output,
+                "output dtype must match input, or be FP32 for FP16 input");
     TORCH_CHECK_SHAPES(a, 0, c, 0, 1);
     TORCH_CHECK(qm->height == a.size(1), "a and b have incompatible shapes");
     TORCH_CHECK(qm->width == c.size(1), "b and c have incompatible shapes");
@@ -136,7 +138,7 @@ void gemm_half_q_half(
     if (a.scalar_type() != at::kHalf || (a.size(0) > MAX_Q_GEMM_ROWS && !force_cuda)) {
         auto weights = torch::empty({qm->height, qm->width}, a.options().dtype(at::kHalf));
         qm->reconstruct(reinterpret_cast<half*>(weights.data_ptr()));
-        if (a.scalar_type() == at::kHalf) {
+        if (a.scalar_type() == at::kHalf && !wide_output) {
             gemm_half_half_cuda(
                 at::cuda::getCurrentCUDABlasHandle(),
                 (const half*) a.data_ptr(),
@@ -157,7 +159,8 @@ void gemm_half_q_half(
         at::cuda::getCurrentCUDABlasHandle(),
         (const half*) a.data_ptr(),
         qm,
-        (half*) c.data_ptr(),
+        wide_output ? nullptr : (half*) c.data_ptr(),
+        wide_output ? c.data_ptr<float>() : nullptr,
         c.size(0),
         c.size(1),
         a.size(1),
