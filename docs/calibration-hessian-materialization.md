@@ -57,6 +57,36 @@ The restore step is exact because the stored value is a mean:
 Both then add the pending partials and divide by the new total, so the result is
 the mean over all samples, not just the newest batch.
 
+## Target device
+
+`target_device` names where the caller wants the Hessian. The cached result is a
+read-only view of the statistics, so a request for a different device returns a
+moved copy instead of relocating the cache.
+
+```mermaid
+flowchart TD
+    A["materialize_hessian(target_device)"] --> B{"pending samples == 0?"}
+    B -- No --> M["Merge path: build on target_device"]
+    B -- Yes --> C{"cached H on target_device?"}
+    C -- Yes --> D["Return the cached tensor"]
+    C -- No --> E["safe_move_to(cached H, target_device)"]
+    E --> F["Return the copy; the cache stays where it was"]
+    style D fill:#dfd,stroke:#060
+    style F fill:#dfd,stroke:#060
+```
+
+| Situation | Result |
+| --- | --- |
+| Repeat call, same device | The cached tensor itself |
+| Repeat call, different device | A copy on the requested device; the cache is unchanged |
+| Repeat call, different dtype | A cast copy on the requested device |
+| New batches pending | Merge path, built directly on `target_device` |
+
+Moving the cache instead of copying would make a read path mutate the capture,
+which is the failure mode the repeat-materialization fix removed. A caller that
+inspects on CPU and then quantizes on GPU therefore receives GPU data without
+disturbing the statistics.
+
 ## Previous behavior
 
 | Mechanism | Previous behavior | New behavior |
@@ -86,8 +116,11 @@ reachable only after the first call had already consumed the partials.
 | `tests/test_vptq.py::test_vptq_materialize_hessian_is_idempotent_and_accumulates_later_batches` | Repeat call is identical; a later batch merges; `nsamples` is the total |
 | `tests/test_qqq.py::TestQQQHessian::test_repeat_materialization_is_idempotent` | Repeat call returns the same `2/N * X^T X` |
 | `tests/test_qqq.py::TestQQQHessian::test_batch_after_materialization_accumulates` | Merged Hessian equals the closed-form reference over both batches |
+| `tests/test_vptq.py::test_vptq_repeat_materialization_honours_a_changed_target_device` | A CPU-inspected capture returns GPU data on request and keeps its cache |
+| `tests/test_qqq.py::TestQQQHessian::test_repeat_materialization_honours_a_changed_target_device` | Same contract for QQQ |
 
 Measured on an R9700 (gfx1201, torch 2.16.0.dev+rocm10.1):
-`tests/test_qqq.py -k TestQQQHessian` reports 6 passed after the fix and 2
-failed before it. On CPU with torch 2.16.0.dev+cu130, `tests/test_vptq.py`
-reports 296 passed.
+`tests/test_qqq.py -k TestQQQHessian` reports 7 passed, and the two lifecycle
+tests fail when the merge change is reverted. On an RTX 4090 with torch
+2.16.0.dev+cu130, `tests/test_vptq.py` reports 297 passed, and the
+changed-target-device test fails when the cached-result change is reverted.
