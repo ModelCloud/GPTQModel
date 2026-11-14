@@ -164,3 +164,39 @@ class TestQQQHessian(unittest.TestCase):
         H = qqq.materialize_hessian()
         self.assertEqual(H.shape, (16, 16))
         self.assertTrue(torch.allclose(H, torch.zeros_like(H)))
+
+    def test_repeat_materialization_is_idempotent(self):
+        """A second materialization must not erase the capture (#3869)."""
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, dtype=torch.float32)
+        qqq = QQQ(layer)
+        x = torch.randn(4, 8, 16, dtype=torch.float32)
+        qqq.add_batch(x, None)
+
+        first = qqq.materialize_hessian()
+        samples = qqq.nsamples
+        second = qqq.materialize_hessian()
+
+        torch.testing.assert_close(second, first, rtol=0.0, atol=0.0)
+        self.assertEqual(qqq.nsamples, samples)
+        torch.testing.assert_close(first, self._reference_hessian(x), rtol=1e-4, atol=1e-5)
+
+    def test_batch_after_materialization_accumulates(self):
+        """Batches added after a materialization extend the earlier statistics."""
+        torch.manual_seed(42)
+        layer = torch.nn.Linear(16, 8, dtype=torch.float32)
+        qqq = QQQ(layer)
+        first = torch.randn(4, 8, 16, dtype=torch.float32)
+        second = torch.randn(2, 8, 16, dtype=torch.float32)
+
+        qqq.add_batch(first, None)
+        qqq.materialize_hessian()
+        qqq.add_batch(second, None)
+        merged = qqq.materialize_hessian()
+
+        torch.testing.assert_close(merged, self._reference_hessian(first, second), rtol=1e-4, atol=1e-5)
+        self.assertEqual(qqq.nsamples, 6 * 8)
+
+        # A further call with no new batches returns the merged statistics.
+        torch.testing.assert_close(qqq.materialize_hessian(), merged, rtol=0.0, atol=0.0)
+        self.assertEqual(qqq.nsamples, 6 * 8)

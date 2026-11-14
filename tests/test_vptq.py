@@ -1810,6 +1810,45 @@ def test_vptq_quantizer_accumulates_calibration_hessian(shape):
         quantizer.add_batch(torch.randn(5))
 
 
+def test_vptq_materialize_hessian_is_idempotent_and_accumulates_later_batches():
+    """Repeated materialization must not erase the capture (#3869).
+
+    `materialize_hessian` used to pop the per-device partials and clear the
+    sample counts, so a second call returned zeros with `nsamples == 0` and a
+    batch added after a materialization replaced the earlier statistics.
+    """
+
+    qcfg = VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    quantizer = build_quantizer(torch.zeros(8, 6), qcfg)
+
+    generator = torch.Generator().manual_seed(11)
+    # `add_batch` expects `[..., columns]`; H is the mean of `x^T x`.
+    first = torch.randn(4, 6, generator=generator, dtype=torch.float64)
+    second = torch.randn(3, 6, generator=generator, dtype=torch.float64)
+
+    quantizer.add_batch(first)
+    first_hessian = quantizer.materialize_hessian()
+    first_samples = quantizer.nsamples
+    expected_first = (first.t() @ first) / first.shape[0]
+    torch.testing.assert_close(first_hessian, expected_first, rtol=1e-12, atol=1e-12)
+    assert first_samples == first.shape[0]
+
+    repeated = quantizer.materialize_hessian()
+    torch.testing.assert_close(repeated, first_hessian, rtol=0.0, atol=0.0)
+    assert quantizer.nsamples == first_samples
+
+    quantizer.add_batch(second)
+    merged = quantizer.materialize_hessian()
+    tokens = torch.cat([first, second], dim=0)
+    expected_merged = (tokens.t() @ tokens) / tokens.shape[0]
+    torch.testing.assert_close(merged, expected_merged, rtol=1e-12, atol=1e-12)
+    assert quantizer.nsamples == tokens.shape[0]
+
+    # A third call with no new batches still returns the merged statistics.
+    torch.testing.assert_close(quantizer.materialize_hessian(), merged, rtol=0.0, atol=0.0)
+    assert quantizer.nsamples == tokens.shape[0]
+
+
 def test_vptq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
     """The per-device partial merge must not issue a raw cross-device copy.
 
