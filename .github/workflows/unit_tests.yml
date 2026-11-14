@@ -75,7 +75,10 @@ env:
   GPTQ_BYPASS_SAFETY_CHECKS: '1'
   PYTHON_VERSION: 3.14t
   UV_PYTHON: 3.14t
-  # PYTHON_GIL: 0 // test libs don't support yet
+  # The default matrix does not force PYTHON_GIL=0: some test-only libraries
+  # still need the GIL. The dedicated `free-threaded` job below sets it and
+  # asserts sys._is_gil_enabled() is False after importing the model stack, so
+  # a 3.14t run cannot silently serialize itself.
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
   MODEL_TEST_GPU_COUNT: '1'
@@ -233,6 +236,38 @@ jobs:
       check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
       matrix_json: ${{ needs.list-test-files.outputs.model-matrix || '[]' }}
       model_test_mode: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
+
+  # A 3.14t job without PYTHON_GIL=0 can re-enable the GIL while importing
+  # triton._C.libtriton and then run fully serialized while every GIL=0-only
+  # test skips. This lane forces the free-threaded interpreter, proves the GIL
+  # is still disabled after the model stack is imported, and runs bounded
+  # concurrency tests: CPU thread-pool/lock/shutdown paths, stream handoff, and
+  # two-GPU P2P plus native-kernel ownership checks.
+  free-threaded:
+    needs:
+      - check-vm
+    if: always() && !cancelled()
+    uses: ./.github/workflows/unit_tests_reusable.yml
+    secrets: inherit
+    with:
+      repo: ${{ github.event.inputs.repo || github.repository }}
+      ref: ${{ github.event.inputs.ref || github.ref }}
+      pr_number: ${{ fromJSON(github.event.inputs.pr_number || '0') }}
+      check_vm_ip: ${{ needs.check-vm.outputs.ip }}
+      check_vm_max_parallel: ${{ needs.check-vm.outputs['max-parallel'] }}
+      check_vm_cuda_version: ${{ needs.check-vm.outputs.cuda_version }}
+      free_threaded: true
+      matrix_json: |
+        [
+          {"test_script": "test_threadx_cpu_locks", "test_group": "cpu", "alloc_gpu_count": "0", "require_single_gpu": "false", "include_model_test_mode": "false"},
+          {"test_script": "test_threadx_shutdown", "test_group": "cpu", "alloc_gpu_count": "0", "require_single_gpu": "false", "include_model_test_mode": "false"},
+          {"test_script": "test_looper_concurrency", "test_group": "cpu", "alloc_gpu_count": "0", "require_single_gpu": "false", "include_model_test_mode": "false"},
+          {"test_script": "test_checkpoint_store", "test_group": "cpu", "alloc_gpu_count": "0", "require_single_gpu": "false", "include_model_test_mode": "false"},
+          {"test_script": "test_stream", "test_group": "torch", "alloc_gpu_count": "1", "require_single_gpu": "true", "include_model_test_mode": "false"},
+          {"test_script": "test_thread_pool_exit", "test_group": "torch", "alloc_gpu_count": "1", "require_single_gpu": "true", "include_model_test_mode": "false"},
+          {"test_script": "test_p2p", "test_group": "torch", "alloc_gpu_count": "2", "require_single_gpu": "false", "include_model_test_mode": "false"},
+          {"test_script": "test_p2p_copy_utils", "test_group": "torch", "alloc_gpu_count": "2", "require_single_gpu": "false", "include_model_test_mode": "false"}
+        ]
 
   check-torch:
     runs-on: [ self-hosted, xeon5 ]

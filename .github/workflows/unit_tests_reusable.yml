@@ -43,6 +43,11 @@ on:
         required: false
         default: "fast"
         type: string
+      free_threaded:
+        description: "Force PYTHON_GIL=0 and require a free-threaded interpreter"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -190,6 +195,19 @@ jobs:
           echo "::group::pip list"
           uv pip list
           echo "::endgroup::"
+
+      - name: Force the free-threaded interpreter
+        if: ${{ inputs.free_threaded }}
+        run: |
+          # A 3.14t build can re-enable the GIL while importing an extension
+          # that has not declared free-threading support. Set this for every
+          # later step, then prove the model stack keeps it disabled.
+          echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
+
+      - name: Assert the GIL stays disabled after importing the model stack
+        if: ${{ inputs.free_threaded }}
+        run: |
+          python .github/scripts/ci_assert_free_threaded.py
 
       - name: Find suitable GPU
         if: ${{ !cancelled() && env.SKIP_GPU_ALLOCATION != 'true' }}
