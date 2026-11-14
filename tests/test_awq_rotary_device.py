@@ -83,6 +83,19 @@ class _TypedSelfAttention(nn.Module):
         return x
 
 
+class _TypedDecoderLayer(nn.Module):
+    """Decoder layer passed as `module2inspect` for a later AWQ group."""
+
+    def __init__(self, parameter_name: str = "layer_type", value: str = "full_attention") -> None:
+        super().__init__()
+        self.self_attn = _TypedSelfAttention(parameter_name, value)
+
+    def forward(self, x, position_embeddings=None, position_ids=None):
+        assert position_embeddings is not None
+        assert position_ids is not None
+        return x
+
+
 def _make_processor(rotary: nn.Module, *, preserve_explicit_position_embeddings: bool = False) -> AWQProcessor:
     qcfg = QuantizeConfig(
         quant_method=METHOD.AWQ,
@@ -238,3 +251,17 @@ def test_module_forward_passes_attention_type_to_typed_rotary():
 
     assert output.device == torch.device("meta")
     assert processor._rotary_cache["meta"].calls == ["full_attention"]
+
+
+def test_module_forward_reads_layer_type_from_nested_self_attn():
+    """A later AWQ group can pass the decoder layer, not the attention block."""
+
+    rotary = _LayerTypeTrackingRotary()
+    processor = _make_processor(rotary)
+    layer = _TypedDecoderLayer("layer_type", "sliding_attention")
+    hidden_states = torch.empty(1, 3, 4, device="meta")
+
+    output = processor._module_forward(hidden_states, layer, {})
+
+    assert output.device == torch.device("meta")
+    assert processor._rotary_cache["meta"].calls == ["sliding_attention"]
