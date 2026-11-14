@@ -1099,6 +1099,7 @@ class LazyTurtle:
         recurse: bool = True,
         tie_weights: bool = True,
         show_progress: bool = True,
+        skip_module_types: tuple[type, ...] = (),
     ) -> torch.nn.Module:
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
@@ -1134,6 +1135,7 @@ class LazyTurtle:
                 non_blocking=non_blocking,
                 modules_by_name=modules_by_name,
                 show_progress=show_progress,
+                skip_module_types=skip_module_types,
             )
         if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
@@ -3179,11 +3181,18 @@ class LazyTurtle:
         non_blocking: bool,
         modules_by_name: Optional[Dict[str, nn.Module]] = None,
         show_progress: bool = True,
+        skip_module_types: tuple[type, ...] = (),
     ) -> int:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
+        # `skip_module_types` names module classes that own a packed
+        # quantization payload rather than a dense checkpoint tensor (for
+        # example a `weight` buffer holding FP8 codes). Materializing those
+        # leaves by checkpoint name would replace the packed payload with the
+        # source tensor, so they are left exactly as their owner holds them.
+        skipped_module_paths = _skipped_submodule_paths(target_submodule, skip_module_types)
         if modules_by_name is None:
             # Fall back to a full model scan when the caller has not supplied a
             # targeted ancestor+descendant map.
@@ -3193,6 +3202,8 @@ class LazyTurtle:
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         concat_entries: list[tuple[str, str, list[str], int | _LazyCheckpointAssembly]] = []
         for rel_name in t_params:
+            if _is_skipped_tensor_path(rel_name, skipped_module_paths):
+                continue
             concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
             if concat_source is not None:
                 full_names, concat_dim = concat_source
@@ -3221,6 +3232,8 @@ class LazyTurtle:
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
         for rel_name, target_buffer in list(t_bufs.items()):
+            if _is_skipped_tensor_path(rel_name, skipped_module_paths):
+                continue
             concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
             if concat_source is not None:
                 full_names, concat_dim = concat_source
@@ -3979,6 +3992,7 @@ def alias_from_turtle_for_submodule(
     non_blocking: bool = False,
     module_path: Optional[str] = None,
     tie_weights: bool = True,
+    skip_module_types: tuple[type, ...] = (),
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     # A model may intentionally defer tie_weights() until both a capture branch
@@ -3996,6 +4010,7 @@ def alias_from_turtle_for_submodule(
         non_blocking=non_blocking,
         module_path=module_path,
         tie_weights=tie_weights,
+        **({"skip_module_types": skip_module_types} if skip_module_types else {}),
     )
 
 
@@ -4021,6 +4036,34 @@ def alias_direct_meta_from_turtle_for_submodule(
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:
     return bool(getattr(t, "is_meta", False)) or (hasattr(t, "device") and t.device.type == "meta")
+
+
+def _skipped_submodule_paths(
+    submodule: nn.Module,
+    skip_module_types: tuple[type, ...],
+) -> tuple[str, ...]:
+    """Return the relative paths of submodules whose tensors must not be aliased."""
+
+    if not skip_module_types:
+        return ()
+    return tuple(
+        name
+        for name, candidate in submodule.named_modules()
+        if isinstance(candidate, skip_module_types)
+    )
+
+
+def _is_skipped_tensor_path(rel_name: str, skipped_module_paths: tuple[str, ...]) -> bool:
+    """Return whether a relative tensor name is owned by a skipped submodule."""
+
+    if not skipped_module_paths:
+        return False
+    owner_path, _, _ = rel_name.rpartition(".")
+    return any(
+        owner_path == skipped or owner_path.startswith(f"{skipped}.")
+        for skipped in skipped_module_paths
+    )
+
 
 def alias_all_from_turtle_if_meta(
     shell_model: nn.Module,
