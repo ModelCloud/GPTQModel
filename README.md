@@ -226,7 +226,9 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 lossless NF12 storage for eligible BF16 source matrices during calibration
 forwards and restores the exact source dtype before quantization. See
 [automatic NF12 source storage](docs/auto-nf12-dtype-cast.md) for the decision
-flow, FP16 eligibility rule, and native floatx precedence.
+flow, FP16 eligibility rule, and native floatx precedence, and
+[excluded-layer replay and AUTO_NF12](docs/auto-nf12-excluded-layers.md) for the
+`dynamic` exclusion contract and the writer's fail-closed check.
 
 † GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
@@ -312,7 +314,7 @@ or native TTNN (`BACKEND.GPTQ_TTNN`, opt-in), with optional multi-card
 execution. `BACKEND.GPTQ_TT_BF8` explicitly converts GPTQ weights to `bf8_b`
 for hardware-native unpacking. See the [Tenstorrent execution guide](docs/tenstorrent.md)
 for runtime pins, numerical results, and backend constraints, and the
-[validated hardware inventory](hw/tenstorrent.md) for Blackhole measurements.
+[validated hardware inventory](hw/tenstorrent.md) for Blackhole measurements. Out-axis block-float Llama checkpoints are served fully on device with a paged KV cache and chunked prefill; see [Tenstorrent Llama serving](docs/tt-llama-paged-serving.md).
 Install the runtime from [`requirements/tenstorrent-py312.txt`](requirements/tenstorrent-py312.txt);
 the PJRT plugin is not on the default PyPI index.
 
