@@ -18,6 +18,10 @@ quantization pass instead of crashing in `pack_original`.
 This page describes the width contract. It was introduced with PR #3995
 (issue #3978).
 
+The earlier `_validate` rejection for a misaligned `in_features`/`out_features`
+was added in [PR #4025](https://github.com/ModelCloud/GPTQModel/pull/4025)
+(issue #4003).
+
 ## New flow
 
 ```mermaid

@@ -114,6 +114,6 @@ Measured on the issue's repro (FP8 E4M3 weight, one row scale):
 The remaining `0.1%` is the quant source's BF16 output rounding; the FP32
 forward matches the FP64 oracle to `1e-6`.
 
-Introduced with the fix for issue #4003. See
-[checkpoint dtype boundary preservation](dtype-boundary-preservation.md) for
-the surrounding dtype rules.
+Introduced in [PR #4025](https://github.com/ModelCloud/GPTQModel/pull/4025)
+(issue #4003). See [checkpoint dtype boundary preservation](dtype-boundary-preservation.md)
+for the surrounding dtype rules.
