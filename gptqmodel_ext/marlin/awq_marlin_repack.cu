@@ -1,4 +1,7 @@
-#include "../torch_stable_compat.h"
+#include <ATen/DeviceGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <torch/types.h>
 
 #include "marlin.cuh"
 
@@ -209,12 +212,12 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
   // Verify device and strides
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
-  TORCH_CHECK(b_q_weight.scalar_type() == at::kInt, "b_q_weight type is not kInt");
+  TORCH_CHECK(b_q_weight.dtype() == at::kInt, "b_q_weight type is not kInt");
 
   // Alloc buffers
   const c10::cuda::OptionalCUDAGuard device_guard(at::device_of(b_q_weight));
   auto options = torch::TensorOptions()
-                     .dtype(b_q_weight.scalar_type())
+                     .dtype(b_q_weight.dtype())
                      .device(b_q_weight.device());
   torch::Tensor out = torch::empty(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
@@ -248,13 +251,13 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
 }
 
 torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
-                                     int64_t size_k, int64_t size_n,
+                                     c10::SymInt size_k, c10::SymInt size_n,
                                      int64_t num_bits) {
   int const pack_factor = 32 / num_bits;
   auto options = torch::TensorOptions()
-                     .dtype(b_q_weight.scalar_type())
+                     .dtype(b_q_weight.dtype())
                      .device(b_q_weight.device());
-  return torch::empty(
+  return torch::empty_symint(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
       options);
 }

@@ -16,7 +16,6 @@ import torch
 
 from ..utils.logger import setup_logger
 from .cpp import (
-    _TORCH_STABLE_ABI_TARGET,
     TorchOpsJitExtension,
     cuda_include_paths_with_fallback,
     default_jit_cflags,
@@ -262,7 +261,6 @@ _MARLIN_FP16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
-    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 
@@ -286,7 +284,6 @@ _MARLIN_BF16_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
-    torch_stable_abi_target=_TORCH_STABLE_ABI_TARGET,
 )
 
 
