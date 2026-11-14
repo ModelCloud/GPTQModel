@@ -1535,10 +1535,15 @@ torch::Tensor gemm_forward_cuda_fp32_reduce(
     torch::Tensor _kernel,
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
-    int split_k_iters)
+    int split_k_iters,
+    bool fp32_output)
 {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
-    at::ScalarType output_dtype = _in_feats.scalar_type();
+    // The split-K partials are always float32.  Asking for a float32 result
+    // keeps the reduction wide for a caller that has its own float32 epilogue
+    // (a bias added before the single visible cast), instead of rounding the
+    // sum to the activation dtype here.
+    at::ScalarType output_dtype = fp32_output ? at::kFloat : _in_feats.scalar_type();
     torch::Tensor in_feats = _in_feats;
     torch::Tensor scaling_factors = _scaling_factors;
     torch::Tensor kernel = _kernel;
