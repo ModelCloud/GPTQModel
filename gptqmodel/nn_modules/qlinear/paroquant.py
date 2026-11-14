@@ -39,6 +39,14 @@ from .torch_awq import AwqTorchLinear
 
 log = setup_logger()
 
+# INT4 AWQ stores eight codes per int32, so `pack_awq` rejects a packed
+# dimension that is not a multiple of eight. ParoQuant reuses that packer for
+# every path (CPU ATen, dense fallback, AWQ CUDA, Triton), so the alignment is
+# a property of the format rather than of one kernel. Declaring it here keeps
+# backend selection, the constructor, and the packer on one source of truth
+# instead of accepting a width that can only fail later at packing.
+PAROQUANT_OUT_FEATURES_ALIGN = 8
+
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PAROQUANT_AWQ_SPLIT_K = 4
 _PAROQUANT_CACHE_RUNTIME_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_RUNTIME_DTYPE", default=False)
@@ -101,7 +109,12 @@ class ParoLinear(AwqTorchLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    # The inherited INT4 AWQ packer writes eight codes per int32, so an output
+    # width that is not a multiple of eight cannot be packed at all. Advertising
+    # 1 here let backend selection accept such a layer and fail later inside
+    # `pack_awq`; every ParoQuant inference path consumes the same packed
+    # layout, so the constraint is a declaration, not a per-kernel detail.
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [PAROQUANT_OUT_FEATURES_ALIGN]
 
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
@@ -136,6 +149,16 @@ class ParoLinear(AwqTorchLinear):
         self.krot = int(krot)
         if self.krot <= 0:
             raise ValueError(f"ParoLinear: `krot` must be positive, got {krot}.")
+        # Backend selection already rejects this through
+        # `SUPPORTS_OUT_FEATURES_DIVISIBLE_BY`, but a directly constructed layer
+        # must fail here with the real reason instead of inside `pack_awq`.
+        if int(out_features) % PAROQUANT_OUT_FEATURES_ALIGN:
+            raise ValueError(
+                f"ParoLinear: `out_features` must be a multiple of "
+                f"{PAROQUANT_OUT_FEATURES_ALIGN}, got {out_features}. INT4 AWQ packs "
+                "eight codes per int32, and ParoQuant reuses that layout for every "
+                "inference path, so a narrower output cannot be packed."
+            )
         self.fp32_accum = bool(fp32_accum)
         self.cache_runtime_dtype = bool(cache_runtime_dtype)
         self.auto_cache_bf16_runtime_dtype = bool(auto_cache_bf16_runtime_dtype)
@@ -364,9 +387,10 @@ class ParoLinear(AwqTorchLinear):
         The kernel's own validator (``validate_awq_gemm_args``) requires an
         output width that is a multiple of its 64-column CTA tile, a group size
         that is a multiple of 32, and an output width divisible by that group
-        size. ParoQuant advertises ``group_size=16`` and unconstrained output
-        widths because the CPU, ATen and dense paths support them, so the native
-        path has to be skipped for those configurations instead of raising from
+        size. ParoQuant advertises ``group_size=16`` and output widths that the
+        shared INT4 packer accepts (multiples of eight) even though they miss
+        this tile, because the CPU, ATen and dense paths support them; the
+        native path is skipped for those configurations instead of raising from
         inside the kernel.
 
         The group size is derived from the packed tensors the kernel actually
