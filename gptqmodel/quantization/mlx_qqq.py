@@ -129,9 +129,6 @@ def _qqq_quantize_weight_mlx(
         raise ValueError("inverse_hessian must be float32")
 
     original = weight.astype(mx.float32)
-    # QQQ's post-quantization int8 row scale is based on the original weight.
-    maximum = mx.max(mx.abs(original), axis=1)
-    scale_extra = mx.where(maximum == 0, 1, maximum)[:, None] / 127
     fixed_scale, fixed_zero = (
         _qqq_fixed_params(original) if group_size == -1 else (None, None)
     )
@@ -176,6 +173,12 @@ def _qqq_quantize_weight_mlx(
             )
             mx.eval(remaining)
     quantized_out = mx.concatenate(quantized, axis=1)
+    # The exported INT8 channel scale must describe the quantized weight, not
+    # the original one: error propagation can push max|Q| above max|W|, and a
+    # scale fitted to W saturates the packed codes instead of reproducing the
+    # in-memory Q. This matches the Torch path in `quantization/qqq.py`.
+    maximum = mx.max(mx.abs(quantized_out), axis=1)
+    scale_extra = mx.where(maximum == 0, 1, maximum)[:, None] / 127
     scales_out = (
         fixed_scale if group_size == -1 else mx.concatenate(scales, axis=1)
     )

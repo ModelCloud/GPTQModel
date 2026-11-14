@@ -126,6 +126,10 @@ device/dtype moves invalidate this metadata automatically.
 The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
 explains how rotation buffer changes, state loads, and module moves refresh its
 identity shortcut.
+QuaRot/SpinQuant Hadamard rotation resolves its backend per call from the
+tensor's device, so a rotated checkpoint runs on CPU and a CPU-only host can
+apply the exact Hadamard; see the
+[rotation Hadamard device dispatch](docs/rotation-device-dispatch.md) flow.
 The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
 page explains how a token lookup reads only its packed rows, why small tables
 and large token counts still use whole-table decode, and what that means for
