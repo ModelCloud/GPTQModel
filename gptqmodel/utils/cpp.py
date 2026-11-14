@@ -1533,6 +1533,45 @@ class TorchOpsJitExtension:
         namespace = getattr(torch.ops, self.namespace, None)
         return namespace is not None and all(hasattr(namespace, op_name) for op_name in self.required_ops)
 
+    def loadable_without_build(self) -> bool:
+        """Whether a load can succeed without compiling a new binary.
+
+        Mirrors the pre-build stages of :meth:`load`: registered operators and an
+        existing cached binary are authoritative, and a configured prebuilt
+        library disables the source build, so it must exist. Callers use this as
+        a capability probe before selecting a native-only path.
+        """
+
+        configured_prebuilt = self._configured_prebuilt_library()
+        if configured_prebuilt is not None:
+            return configured_prebuilt.is_file()
+        if self._ops_available():
+            return True
+        return any(path.is_file() for path in self._candidate_binary_paths(self.build_root()))
+
+    def configured_prebuilt_library(self) -> Optional[Path]:
+        """Return the explicitly configured prebuilt library, if any."""
+
+        return self._configured_prebuilt_library()
+
+    def cuda_source_build_available(self) -> bool:
+        """Whether torch's CUDA JIT can compile this extension on this host.
+
+        torch's extension loader raises when ``CUDA_HOME`` is unset and needs
+        ``nvcc`` under it plus ``ninja``. A CUDA runtime wheel installed without
+        a toolkit provides neither, so a first-use build is guaranteed to fail;
+        callers use this to keep the portable fallback instead of running
+        native-only assertions.
+        """
+
+        if not self.requires_cuda or not torch.cuda.is_available():
+            return False
+        if not CUDA_HOME:
+            return False
+        if not (Path(CUDA_HOME) / "bin" / "nvcc").is_file():
+            return False
+        return shutil.which("ninja") is not None
+
     def _refresh_runtime_cache(self) -> bool:
         namespace = getattr(torch.ops, self.namespace, None)
         if namespace is None:
