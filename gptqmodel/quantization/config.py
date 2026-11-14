@@ -25,6 +25,7 @@ import torch
 from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
+from ..utils.hf import resolve_checkpoint_subfolder
 from ..utils.logger import setup_logger
 from ..utils.p2p import P2PConfig
 from ..utils.vptq import vptq_index_bits
@@ -4752,11 +4753,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
         format = kwargs.pop("format", None)
+        subfolder = kwargs.pop("subfolder", None)
+        # The quantize config may live in a repo subfolder while the caller
+        # passes the repository root, so resolve it the same way the config,
+        # the weights, and the adapter manifest are resolved.
+        checkpoint_dir = resolve_checkpoint_subfolder(save_dir, subfolder)
 
         transformers_config = False
         resolved_config_file = None
         for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
-            resolved_config_file = join(save_dir, quantize_config_filename)
+            resolved_config_file = join(checkpoint_dir, quantize_config_filename)
             if os.path.exists(resolved_config_file):
                 if quantize_config_filename == "config.json":
                     transformers_config = True
@@ -4774,7 +4780,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             config = cls.from_quant_config(args_from_json, format)
             if config.adapter is not None and config.adapter.path not in (None, ""):
                 config.adapter._gptqmodel_checkpoint_source = (
-                    os.path.abspath(save_dir), config.adapter.path,
+                    os.path.abspath(checkpoint_dir), config.adapter.path,
                 )
             return config
 

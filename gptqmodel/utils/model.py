@@ -66,7 +66,7 @@ from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
 from .ctx import ctx
 from .device import get_device
-from .hf import get_hf_config_dtype
+from .hf import get_hf_config_dtype, resolve_checkpoint_subfolder
 from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
@@ -1712,6 +1712,12 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
     true_model_basename = None
 
     if os.path.isdir(model_id_or_path):
+        # A downloaded snapshot is a local directory, so the Hub branch below
+        # never sees `subfolder`. Apply it here or a nested checkpoint would be
+        # searched at the repository root.
+        model_id_or_path = resolve_checkpoint_subfolder(
+            model_id_or_path, cached_file_kwargs.get("subfolder")
+        )
         for ext in extensions:
             for possible_model_basename in possible_model_basenames:
                 shard_index_name = possible_model_basename + ext + ".index.json"
