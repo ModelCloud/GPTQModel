@@ -35,12 +35,13 @@ __global__ void rowmajor_kernel(const Id* __restrict__ ids,
     low = __ldg(reinterpret_cast<const uint4*>(src + 32) + lane);
   }
   const uint64_t mm = static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-  const nf12_rowmajor::Quad q = valid
-      ? nf12_rowmajor::decode_quad(mm, low, escapes, num_escapes, base)
-      : nf12_rowmajor::Quad{};
+  const nf12_rowmajor::Pair a = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair b = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair c = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair d = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
   uint4* dst = reinterpret_cast<uint4*>(out + (i * k + kb * 64) / 4) + 2 * lane;
-  __stcg(dst, make_uint4(q.a.lo, q.b.lo, q.c.lo, q.d.lo));
-  __stcg(dst + 1, make_uint4(q.a.hi, q.b.hi, q.c.hi, q.d.hi));
+  __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
+  __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
 }
 
 // A one-token decode launch has only one ID. Keep one CTA resident and walk
@@ -68,13 +69,14 @@ __global__ void __launch_bounds__(160) rowmajor_one_kernel(
     }
     const uint64_t mm =
         static_cast<uint64_t>(mm2.x) | (static_cast<uint64_t>(mm2.y) << 32);
-    const nf12_rowmajor::Quad q = valid
-        ? nf12_rowmajor::decode_quad(mm, low, escapes, num_escapes, base)
-        : nf12_rowmajor::Quad{};
+    const nf12_rowmajor::Pair a = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm), low.x, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Pair b = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 16), low.y, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Pair c = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 32), low.z, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+    const nf12_rowmajor::Pair d = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(mm >> 48), low.w, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
     uint4* dst =
         reinterpret_cast<uint4*>(out + (kb * 64) / 4) + 2 * lane;
-    __stcg(dst, make_uint4(q.a.lo, q.b.lo, q.c.lo, q.d.lo));
-    __stcg(dst + 1, make_uint4(q.a.hi, q.b.hi, q.c.hi, q.d.hi));
+    __stcg(dst, make_uint4(a.lo, b.lo, c.lo, d.lo));
+    __stcg(dst + 1, make_uint4(a.hi, b.hi, c.hi, d.hi));
   }
 }
 

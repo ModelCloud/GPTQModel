@@ -13,18 +13,11 @@ struct Pair {
   uint32_t hi;
 };
 
-struct Quad {
-  Pair a;
-  Pair b;
-  Pair c;
-  Pair d;
-};
-
 __device__ __forceinline__ Pair decode_pair(
     uint16_t meta, uint32_t lows, const uint64_t* __restrict__ escapes,
     int64_t num_escapes, uint32_t base) {
   if (meta == 0u) {
-    if (lows < static_cast<uint64_t>(num_escapes) && escapes != nullptr) {
+    if (lows < static_cast<uint64_t>(num_escapes)) {
       const uint64_t value = __ldg(escapes + lows);
       return Pair{static_cast<uint32_t>(value),
                   static_cast<uint32_t>(value >> 32)};
@@ -42,15 +35,6 @@ __device__ __forceinline__ Pair decode_pair(
   const uint32_t hi = ((h2 << 8) | ((lows >> 16) & 0xffu)) |
                       (((h3 << 8) | ((lows >> 24) & 0xffu)) << 16);
   return Pair{lo, hi};
-}
-
-__device__ __forceinline__ Quad decode_quad(
-    uint64_t meta, uint4 lows, const uint64_t* __restrict__ escapes,
-    int64_t num_escapes, uint32_t base) {
-  return Quad{decode_pair(static_cast<uint16_t>(meta), lows.x, escapes, num_escapes, base),
-              decode_pair(static_cast<uint16_t>(meta >> 16), lows.y, escapes, num_escapes, base),
-              decode_pair(static_cast<uint16_t>(meta >> 32), lows.z, escapes, num_escapes, base),
-              decode_pair(static_cast<uint16_t>(meta >> 48), lows.w, escapes, num_escapes, base)};
 }
 
 __device__ __forceinline__ int collision_count(uint32_t meta) {

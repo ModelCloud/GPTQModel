@@ -93,7 +93,7 @@ def eligible_source_module(module: nn.Module, device: torch.device | str) -> Sou
 
 
 def _rowmajor_ops(device: torch.device):
-    """Resolve the CUDA or HIP row-major (pack, lookup) pair, if available."""
+    """Resolve the row-major pack callable and native lookup namespace."""
 
     if device.type != "cuda":
         return None
@@ -102,14 +102,14 @@ def _rowmajor_ops(device: torch.device):
 
         if not hasattr(nf12_hip, "rowmajor_pack"):
             return None
-        return nf12_hip.rowmajor_pack, nf12_hip.rowmajor_embedding
+        return nf12_hip.rowmajor_pack, "nf12_hip"
     if torch.cuda.get_device_capability(device)[0] < 8:
         return None
     import gptqmodel_nf12 as nf12
 
     return (
         lambda packed, escapes, base: nf12.rowmajor_pack(nf12.NF12Weight(packed, escapes, base)),
-        nf12.rowmajor_embedding,
+        "nf12",
     )
 
 
@@ -134,7 +134,9 @@ class AutoNF12Embedding(nn.Module):
             self.selected_half_collisions = int(collisions)
             self.register_buffer("nf12_row_packed", row_packed)
             self.register_buffer("nf12_row_escapes", row_escapes)
-            self._rowmajor_embedding_op = ops[1]
+            # Packing has loaded the extension, so bind the native dispatcher
+            # directly and keep the Python wrapper off the forward hot path.
+            self._rowmajor_embedding_op = getattr(getattr(torch.ops, ops[1]), "rowmajor_embedding")
         else:
             self._rowmajor_embedding_op = None
             self.register_buffer("nf12_packed", packed)

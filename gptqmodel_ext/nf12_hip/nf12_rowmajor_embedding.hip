@@ -12,6 +12,7 @@
 #include "nf12_format_hip.cuh"
 
 #define NF12_ROWMAJOR_SHFL_UP(value, offset) __shfl_up(value, offset)
+#define NF12_ROWMAJOR_SHFL_DOWN(value, offset) __shfl_down(value, offset)
 #include "rowmajor_pack.cuh"
 
 #include <cstdint>
@@ -55,15 +56,16 @@ __global__ void rowmajor_lookup_kernel(
   const bool valid = row >= 0 && row < n;
   const uint64_t meta_bits =
       static_cast<uint64_t>(meta.x) | (static_cast<uint64_t>(meta.y) << 32);
-  const nf12_rowmajor::Quad q = valid
-      ? nf12_rowmajor::decode_quad(meta_bits, lows, escapes, num_escapes, base)
-      : nf12_rowmajor::Quad{};
+  const nf12_rowmajor::Pair a = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits), lows.x, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair b = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 16), lows.y, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair c = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 32), lows.z, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
+  const nf12_rowmajor::Pair d = valid ? nf12_rowmajor::decode_pair(static_cast<uint16_t>(meta_bits >> 48), lows.w, escapes, num_escapes, base) : nf12_rowmajor::Pair{0, 0};
 
   uint4* dst = reinterpret_cast<uint4*>(
       reinterpret_cast<__hip_bfloat16*>(out) +
       id_pos * k_blocks * kSuperAtomCols + kb * kSuperAtomCols);
-  dst[2 * lane] = make_uint4(q.a.lo, q.b.lo, q.c.lo, q.d.lo);
-  dst[2 * lane + 1] = make_uint4(q.a.hi, q.b.hi, q.c.hi, q.d.hi);
+  dst[2 * lane] = make_uint4(a.lo, b.lo, c.lo, d.lo);
+  dst[2 * lane + 1] = make_uint4(a.hi, b.hi, c.hi, d.hi);
 }
 
 template <typename Id, int IdsPerCTA, int Threads>

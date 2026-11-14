@@ -335,7 +335,16 @@ def linear(
 ) -> torch.Tensor:
     """Decode-then-GEMM on RDNA4 (SPEC.md 6.5)."""
 
-    return _op("linear")(x, packed, escapes, int(exp_base), bias)
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = _OPERATORS.linear
+    if op is None:
+        op = torch.ops.nf12_hip.linear
+        _OPERATORS.linear = op
+    return op(x, packed, escapes, int(exp_base), bias)
 
 
 def embedding(
@@ -351,7 +360,16 @@ def embedding(
     are decoded, and no dense weight is retained between calls.
     """
 
-    return _op("embedding")(ids, packed, escapes, int(exp_base))
+    global _EXTENSION_READY
+    if not _EXTENSION_READY:
+        if not _EXTENSION.load():
+            raise RuntimeError(_EXTENSION.last_error_message() or "nf12_hip extension is unavailable")
+        _EXTENSION_READY = True
+    op = _OPERATORS.embedding
+    if op is None:
+        op = torch.ops.nf12_hip.embedding
+        _OPERATORS.embedding = op
+    return op(ids, packed, escapes, int(exp_base))
 
 
 def rowmajor_pack(

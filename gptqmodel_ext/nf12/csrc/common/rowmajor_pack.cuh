@@ -11,6 +11,11 @@
   __shfl_up_sync(0xffffffffu, value, offset)
 #endif
 
+#ifndef NF12_ROWMAJOR_SHFL_DOWN
+#define NF12_ROWMAJOR_SHFL_DOWN(value, offset) \
+  __shfl_down_sync(0xffffffffu, value, offset)
+#endif
+
 namespace nf12_rowmajor {
 
 constexpr int kRowBlockBytes = 96;
@@ -24,13 +29,16 @@ __global__ void count_collisions(const uint8_t* __restrict__ source,
   const uint32_t meta =
       reinterpret_cast<const uint32_t*>(source + tile * 1536)[tid];
   const int count = collision_count(meta);
-  __shared__ int partial[kPackThreads];
-  partial[tid] = count;
+  int warp_sum = count;
+#pragma unroll
+  for (int offset = 16; offset > 0; offset /= 2) {
+    warp_sum += NF12_ROWMAJOR_SHFL_DOWN(warp_sum, offset);
+  }
+  __shared__ int warp_totals[4];
+  if ((tid & 31) == 0) warp_totals[tid >> 5] = warp_sum;
   __syncthreads();
   if (tid == 0) {
-    int total = 0;
-    for (int i = 0; i < kPackThreads; ++i) total += partial[i];
-    counts[tile] = total;
+    counts[tile] = warp_totals[0] + warp_totals[1] + warp_totals[2] + warp_totals[3];
   }
 }
 
