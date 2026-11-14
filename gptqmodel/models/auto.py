@@ -58,6 +58,7 @@ from ..utils import BACKEND, PROFILE  # noqa: E402
 from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
 from ..utils.env import env_flag  # noqa: E402
 from ..utils.hf import (  # noqa: E402
+    get_config_selection_kwargs,
     get_hf_gguf_load_kwargs,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
@@ -605,7 +606,17 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
 
 
 def _get_config_load_kwargs(kwargs: dict) -> dict:
-    return get_hf_gguf_load_kwargs(kwargs)
+    """Config-selection kwargs for model-type detection.
+
+    Detection must read the same config file the loader will read. Forwarding
+    only ``gguf_file`` made a nested checkpoint (``subfolder=...``) or a pinned
+    ``revision`` resolve against the repository root/default revision here, so
+    dispatch raised "Unrecognized model" even though the loader could load it.
+    """
+
+    config_kwargs = get_config_selection_kwargs(kwargs)
+    config_kwargs.update(get_hf_gguf_load_kwargs(kwargs))
+    return config_kwargs
 
 
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):

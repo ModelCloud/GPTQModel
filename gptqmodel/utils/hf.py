@@ -81,7 +81,9 @@ __all__ = [
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
+    "get_config_selection_kwargs",
     "get_hf_gguf_load_kwargs",
+    "normalize_checkpoint_subfolder",
     "normalize_model_id_or_path_for_hf_gguf",
     "ensure_qwen_drive_registered",
     "resolve_trust_remote_code",
@@ -320,36 +322,84 @@ def get_hf_gguf_load_kwargs(kwargs: dict[str, Any]) -> dict[str, str]:
     return {"gguf_file": gguf_file}
 
 
-def resolve_checkpoint_subfolder(base: Any, subfolder: Optional[str]) -> str:
-    """Resolve a repo-relative ``subfolder`` under a local checkpoint root.
+# Options that decide *which* config file a load reads. Model-type detection and
+# the checkpoint loader must agree on all of them: otherwise dispatch can
+# inspect the repository root or the default revision while the loader targets a
+# nested directory or another revision.
+CONFIG_SELECTION_KWARGS = (
+    "subfolder",
+    "revision",
+    "cache_dir",
+    "local_files_only",
+    "use_auth_token",
+    "force_download",
+    "resume_download",
+    "proxies",
+    "_commit_hash",
+)
+
+
+def get_config_selection_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return the config-selection options the caller actually supplied.
+
+    ``None`` is skipped so an unset option keeps the ``AutoConfig`` default
+    instead of being forced to ``None``; explicit ``False``/``""`` values are
+    preserved because they are meaningful (``subfolder=""`` means the root).
+    ``subfolder`` is validated here so every public entry point rejects an
+    escaping path before it reaches the filesystem or the Hub.
+    """
+
+    selected = {name: kwargs[name] for name in CONFIG_SELECTION_KWARGS if kwargs.get(name) is not None}
+    if "subfolder" in selected:
+        selected["subfolder"] = normalize_checkpoint_subfolder(selected["subfolder"])
+    return selected
+
+
+def normalize_checkpoint_subfolder(subfolder: Optional[str]) -> str:
+    """Validate a repo-relative ``subfolder`` and return its canonical spelling.
 
     A ``subfolder`` names a directory *inside* the checkpoint or Hub repository,
     so it may only narrow the base path. Absolute paths, Windows drive letters,
     backslash separators, and ``.``/``..`` segments are rejected instead of
     being normalized away, because silently escaping the checkpoint would make
-    the quantize config, the weights, and the adapter manifest resolve against
-    different roots.
+    the quantize config, the weights, the tokenizer, and the adapter manifest
+    resolve against different roots.
+
+    Returns ``""`` when the checkpoint root itself is requested.
     """
 
-    base_path = os.fspath(base)
     if subfolder is None:
-        return base_path
+        return ""
     text = str(subfolder)
     if text in ("", "."):
-        return base_path
+        return ""
     if "\\" in text or os.path.isabs(text) or ntpath.isabs(text) or ntpath.splitdrive(text)[0]:
         raise ValueError(
             f"`subfolder` must be a relative path inside the checkpoint, got `{text}`."
         )
     parts = [part for part in text.split("/") if part]
     if not parts:
-        return base_path
+        return ""
     if any(part in (".", "..") for part in parts):
         raise ValueError(
             f"`subfolder` must not contain `.` or `..` segments, got `{text}`."
         )
+    return "/".join(parts)
 
-    joined = os.path.join(base_path, *parts)
+
+def resolve_checkpoint_subfolder(base: Any, subfolder: Optional[str]) -> str:
+    """Resolve a repo-relative ``subfolder`` under a local checkpoint root.
+
+    See :func:`normalize_checkpoint_subfolder` for the accepted syntax. A
+    resolved path that leaves the checkpoint through a symlink is rejected.
+    """
+
+    base_path = os.fspath(base)
+    canonical = normalize_checkpoint_subfolder(subfolder)
+    if not canonical:
+        return base_path
+
+    joined = os.path.join(base_path, *canonical.split("/"))
     if os.path.isdir(base_path) and os.path.exists(joined):
         base_real = os.path.realpath(base_path)
         try:
@@ -358,7 +408,7 @@ def resolve_checkpoint_subfolder(base: Any, subfolder: Optional[str]) -> str:
             inside = False
         if not inside:
             raise ValueError(
-                f"`subfolder` must stay inside the checkpoint directory, got `{text}`."
+                f"`subfolder` must stay inside the checkpoint directory, got `{canonical}`."
             )
     return joined
 
