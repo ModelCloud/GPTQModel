@@ -75,7 +75,7 @@ from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
-from ..utils.logger import QuantizationRegionTimer, setup_logger
+from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.model import (
     MODALITY,
     _module_has_meta_tensors,
@@ -118,6 +118,7 @@ from .writer import ModelWriter
 if TYPE_CHECKING:
     from ..looper.checkpoint_store import CheckpointConfig
     from .fusion import FusionPlanner
+
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
@@ -125,6 +126,29 @@ if TYPE_CHECKING:
         HFDatasetType = HFIterableDatasetType = object
 
     from ..looper.named_module import NamedModule
+
+
+def _peak_vram_gib(quantize_config: object = None) -> Optional[float]:
+    """Peak allocated VRAM for a run that quantized on the GPU.
+
+    Reported only when the run targeted CUDA: a CPU quantization on a machine
+    that happens to have a card still allocates a little while loading, and
+    quoting that as the run's peak would be misleading.
+    """
+
+    if not torch.cuda.is_available():
+        return None
+    if quantize_config is not None:
+        try:
+            device = normalize_device(getattr(quantize_config, "device", None))
+        except Exception:
+            device = None
+        if getattr(device, "type", None) != "cuda":
+            return None
+    try:
+        return torch.cuda.max_memory_allocated() / (1024 ** 3)
+    except Exception:  # pragma: no cover - driver/host edge cases
+        return None
 
 
 class _QuantizedCheckpointSource:
@@ -1575,6 +1599,10 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        run_started = time.perf_counter()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
@@ -1941,6 +1969,14 @@ class BaseQModel(nn.Module):
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
             timer.flush()
+
+        log.info(
+            format_quantize_summary(
+                result,
+                elapsed_s=time.perf_counter() - run_started,
+                peak_vram_gib=_peak_vram_gib(self.quantize_config),
+            )
+        )
 
         _setup_rotation_online_had(
             self.model,

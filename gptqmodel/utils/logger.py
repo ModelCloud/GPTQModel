@@ -224,6 +224,44 @@ def render_table(
     return _render_grid_table(header_text, row_text, widths)
 
 
+def format_duration(seconds: float) -> str:
+    """Human-readable duration: 42s, 3m41s, 1h02m."""
+
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, rest = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m{rest:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def format_quantize_summary(
+        result: Optional[Dict[str, Sequence[Any]]],
+        *,
+        elapsed_s: float,
+        peak_vram_gib: Optional[float] = None,
+) -> str:
+    """One line describing what a finished quantization run did.
+
+    A long run ends with a flush of the region timer, which says how time was
+    spent but not what was produced or how much of the card it used. This is the
+    line a user pastes into a bug report.
+    """
+
+    result = result or {}
+    layers = len(result)
+    modules = sum(len(entries or ()) for entries in result.values())
+    parts = [
+        f"Quantize summary: {layers} layer(s), {modules} module(s), "
+        f"{format_duration(elapsed_s)}"
+    ]
+    if peak_vram_gib is not None:
+        parts.append(f"peak VRAM {peak_vram_gib:.2f} GiB")
+    return ", ".join(parts)
+
+
 class QuantizationRegionTimer:
     """Aggregate and display timing statistics for key quantization stages."""
 
