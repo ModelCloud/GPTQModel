@@ -412,6 +412,69 @@ The before column refers to `e310049849b109c9da64d2c542a7ea99594f55a0`.
 and invalid metadata. Its fixture restores the incoming process-wide policy.
 The persistence fix was introduced in [#3850](https://github.com/ModelCloud/GPTQModel/pull/3850).
 
+### Policy generations and cached verdicts
+
+`enable_peer_access` caches its classification so repeated calls are free. That
+cache has to be bound to the policy that produced it: `configure_p2p` can run
+from another thread, and a verdict measured under a loose `min_gbps` must not
+answer a query under a stricter one.
+
+Every replacement of the active policy bumps a monotonic generation. The
+generation is the first element of the cache key, and a probe publishes its
+result only while the generation it started under is still current.
+
+```mermaid
+flowchart TD
+    A["enable_peer_access(devices)"] --> B["_policy_snapshot()<br/>generation, policy under _CONFIG_LOCK"]
+    B --> C["mode, probe, min_gbps, min_ratio<br/>all read from that one snapshot"]
+    C --> D["cache_key = (generation, mode, probe, indices)"]
+    D --> E{"Cached entry for this generation?"}
+    E -->|Yes| F["Return cached verdict"]
+    E -->|No| G["Enable and validate every directed pair<br/>(long; no lock held)"]
+    G --> H["_publish_status(cache_key, generation)"]
+    H --> I{"_POLICY_GENERATION == generation?"}
+    I -->|Yes| J["Publish and return"]
+    I -->|No| K["Return to this caller, drop from cache"]
+    classDef stale fill:#fee,stroke:#b00,color:#900
+    class K stale
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A (probe)
+    participant L as _CONFIG_LOCK
+    participant B as Thread B (reconfigure)
+    A->>L: snapshot generation 1, min_gbps=5
+    A->>A: measure 10 GB/s (lock released)
+    B->>L: configure_p2p(min_gbps=20)
+    L->>L: generation=2, clear _STATUS_CACHE
+    A->>L: _publish_status(key with generation 1)
+    L-->>A: refused, generation is now 2
+    B->>L: snapshot generation 2, min_gbps=20
+    B->>B: no cache entry, re-probe 10 GB/s
+    B-->>B: degraded (10 < 20)
+```
+
+| Mechanism at `origin/main` | Location | Consequence |
+| --- | --- | --- |
+| Cache cleared after the lock is released | `gptqmodel/utils/p2p.py:318-340` | A probe already in flight reinserts its verdict after the clear |
+| Cache key without policy identity | `gptqmodel/utils/p2p.py:1193-1201` | A verdict measured under the old gates answers queries under the new ones |
+| Gates read after the cache lookup | `gptqmodel/utils/p2p.py:1230-1231` | The key and the classification can describe two different policies |
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `configure_p2p` with no concurrent probe | Cache cleared, next call re-probes | Unchanged |
+| `configure_p2p` while another thread is validating | Stale verdict cached; stricter gate bypassed | Verdict dropped; next call re-probes under the new policy |
+| Repeat call under an unchanged policy | Cache hit | Cache hit (same generation) |
+| `_cached_status_for` after a policy change | Could reuse a superset verdict from the old policy | Ignores entries whose generation is not current |
+
+`tests/test_p2p.py` covers the deterministic interleaving
+(`test_policy_change_during_a_probe_does_not_cache_a_stale_verdict`), the
+non-concurrent invalidation, and that the cache key starts with the generation.
+The interleaving test passes 5/5 under `PYTHON_GIL=0` with
+`sys._is_gil_enabled() is False`. The generation contract was introduced in
+[#3947](https://github.com/ModelCloud/GPTQModel/issues/3947).
+
 ### Bandwidth diagnostics (`p2p=P2PConfig(probe=True)`)
 
 Probing moves real payload across every directed pair and synchronizes each

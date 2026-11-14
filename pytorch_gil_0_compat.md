@@ -350,6 +350,7 @@ threaded path because it cannot describe the lifecycle of existing allocations.
 | API | Result | Where we use it | Notes / workaround |
 |---|---|---|---|
 | `gptqmodel.p2p.allocator_guard` (`_allocator_is_native`, `_raw_peer_copy_unsafe`, `_rocm_peer_link_unusable`, `_pytorch_owns_peer_enablement`, `_rocm_nested_peer_disabled`) | SAFE (concurrent), metadata only | raw-copy attempts, `enable_peer_access` and `_enable_one` | The probe now reads metadata on both CUDA and ROCm, including the explicit nested-copy policy. It compares all four guard verdicts across 8 threads x 4 iterations. It never issues a peer copy or pre-enables runtime peer access. On 2026-11-13, after removing settings-string authorization, the updated probe passed 3/3 independent processes on each of CUDA and ROCm with `PYTHON_GIL=0`. The mover fallback test separately passed 3/3 independent processes per backend, each with 8 workers and 32 bidirectional tasks on per-thread streams. Native raw copies are now withheld even with expandable segments disabled; the nested-copy opt-in cannot override this guard. |
+| `gptqmodel.utils.p2p` policy snapshot + status cache (`_policy_snapshot`, `_publish_status`, `_STATUS_CACHE`) | SAFE (concurrent) | `configure_p2p`, `enable_peer_access`, `_cached_status_for`, `clear_p2p_cache` | `_CONFIG_LOCK` is an `RLock` guarding the active policy, the monotonic `_POLICY_GENERATION`, and `_STATUS_CACHE`. A verdict is bound to the generation it measured under: the cache key starts with that generation, and a probe that finishes after a concurrent `configure_p2p` is returned to its own caller but not published. `configure_p2p` publishes the new policy and clears the cache in one critical section, so a late writer cannot reinsert an entry the clear removed. Regression: `tests/test_p2p.py::test_policy_change_during_a_probe_does_not_cache_a_stale_verdict` parks a probe inside the bandwidth measurement, installs a stricter `min_gbps` from another thread, and asserts the next call re-probes to `degraded` instead of reusing the stale `enabled` object. Passed 5/5 under `PYTHON_GIL=0` (`sys._is_gil_enabled() is False`) on 2026-11-14. |
 
 ## Adding a probe
 
@@ -362,8 +363,10 @@ threaded path because it cannot describe the lifecycle of existing allocations.
 ## Where P2P is used
 
 `gptqmodel.utils.p2p.enable_peer_access` / `enable_for_devices` probe and
-enable every ordered pair of the GPUs a run actually uses, cache the result,
-and log one actionable warning when a pair cannot be enabled (with the
+enable every ordered pair of the GPUs a run actually uses, cache the result
+under the policy generation that produced it (a `configure_p2p` from another
+thread invalidates every verdict it did not measure), and log one actionable
+warning when a pair cannot be enabled (with the
 motherboard/BIOS/hardware compatibility wording). `peer_copy_batch` then backs
 module replication and per-layer moves, calibration input staging, Hessian
 partial reduction, and shared-Hessian adoption. Control it with
