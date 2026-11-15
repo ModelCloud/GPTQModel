@@ -5,11 +5,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import pcre
 
 from .config import FORMAT, METHOD, GGUFBits, GGUFConfig, QuantizeConfig, SmoothMAD
+from .norm_tuning import norm_type_of
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,74 @@ class ExecutionPlan:
     stages: tuple[Stage, ...]
 
 
+class ProtocolActionError(RuntimeError):
+    """A rule-scoped protocol action could not be resolved or applied."""
+
+
+@dataclass(frozen=True)
+class ActionContext:
+    """Everything one registered action needs to operate on a live model."""
+
+    model: Any
+    rule: Rule
+    stage: str
+    matched: tuple[tuple[str, Any], ...]
+    calibration: Optional[Callable[[], None]]
+
+
+ActionHandler = Callable[[ActionContext, Mapping[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class CompiledAction:
+    """An ``OperationSpec`` resolved against the action registry."""
+
+    method: str
+    handler: ActionHandler
+    args: dict[str, Any]
+
+
+# Keyed by ``OperationSpec.method``. Compilation resolves every action through
+# this registry; execution resolves the same keys again in ``apply_plan_actions``.
+ACTION_REGISTRY: dict[str, ActionHandler] = {}
+
+
+def register_action(method: str, handler: ActionHandler) -> None:
+    """Register one rule-scoped action handler under ``method``."""
+
+    key = str(method).strip().lower()
+    if not key:
+        raise ValueError("Protocol action method must not be empty.")
+    ACTION_REGISTRY[key] = handler
+
+
+def known_action_methods() -> tuple[str, ...]:
+    """Registered action methods, sorted for stable error messages."""
+
+    return tuple(sorted(ACTION_REGISTRY))
+
+
+def compile_rule_actions(actions: tuple[OperationSpec, ...]) -> tuple[CompiledAction, ...]:
+    """Resolve rule ``actions`` against the registry.
+
+    Unknown methods fail closed with the list of known methods. Compilation does
+    not touch a model; ``apply_plan_actions`` executes the resolved handlers.
+    """
+
+    return tuple(_compile_action(action) for action in actions)
+
+
+def _compile_action(action: OperationSpec) -> CompiledAction:
+    method = str(action.method).strip().lower()
+    handler = ACTION_REGISTRY.get(method)
+    if handler is None:
+        known = ", ".join(f"`{name}`" for name in known_action_methods()) or "none"
+        raise NotImplementedError(
+            f"Unsupported protocol action `{action.method}`. Known actions: {known}."
+        )
+    return CompiledAction(method=method, handler=handler, args=dict(action.args))
+
+
 def skip() -> dict[str, str]:
     return {"method": "skip"}
 
@@ -127,11 +196,18 @@ def compile_plan_to_quantize_config(plan: ExecutionPlan):
     if len(stage.rules) != 1:
         raise NotImplementedError("Initial protocol implementation supports exactly one rule for config compilation.")
 
-    rule = stage.rules[0]
+    # A directly constructed ``ExecutionPlan`` (as in the documented Python DSL)
+    # can still carry a string ``match`` or dict targets; normalize the rule so
+    # compilation and action resolution see the same typed shape as
+    # ``compile_protocol`` produces.
+    rule = _normalize_rule(stage.rules[0])
     if rule.aliases:
         raise NotImplementedError("Initial protocol implementation does not support aliases during config compilation.")
     if rule.actions:
-        raise NotImplementedError("Initial protocol implementation does not support actions during config compilation.")
+        # Actions execute as a separate stage (``apply_plan_actions``); the
+        # compiler only resolves their methods so an unknown action still fails
+        # loudly here, before any model or calibration work starts.
+        compile_rule_actions(rule.actions)
     if rule.stop:
         raise NotImplementedError("Initial protocol implementation does not support stop during config compilation.")
     if rule.input is not None or rule.output is not None or rule.kv_cache is not None:
@@ -148,6 +224,318 @@ def compile_protocol_to_quantize_config(source: Any):
 
 def compile_protocol_yaml_to_quantize_config(text: str):
     return compile_plan_to_quantize_config(compile_protocol_yaml_text(text))
+
+
+def apply_plan_actions(
+    model: Any,
+    plan: Any,
+    *,
+    calibration: Optional[Callable[[], None]] = None,
+) -> None:
+    """Run rule-scoped protocol ``actions`` against ``model``.
+
+    This is the separate action stage the protocol documents: config
+    compilation stays pure, and this function resolves each rule's matches on
+    the live model before running the registered handlers in stage/rule order.
+
+    ``calibration`` must be a zero-argument callable that runs one or more
+    forward passes through ``model`` (the model root). Actions that need
+    activation statistics, such as ``smoothquant``, raise
+    :class:`ProtocolActionError` when it is omitted.
+    """
+
+    resolved = _normalize_plan(plan)
+    named_modules = tuple(model.named_modules())
+    for stage in resolved.stages:
+        for rule in stage.rules:
+            if not rule.actions:
+                continue
+            compiled = compile_rule_actions(rule.actions)
+            matched = tuple((name, module) for name, module in named_modules if name and rule.matches(name))
+            if not matched:
+                raise ProtocolActionError(
+                    f"Protocol action rule {_rule_label(rule)} in stage `{stage.name}` matched no modules."
+                )
+            context = ActionContext(
+                model=model,
+                rule=rule,
+                stage=stage.name,
+                matched=matched,
+                calibration=calibration,
+            )
+            for action in compiled:
+                action.handler(context, action.args)
+
+
+def _normalize_plan(plan: Any) -> ExecutionPlan:
+    if isinstance(plan, ExecutionPlan):
+        return ExecutionPlan(
+            version=plan.version,
+            stages=tuple(_normalize_stage(stage) for stage in plan.stages),
+        )
+    return compile_protocol(plan)
+
+
+def _rule_label(rule: Rule) -> str:
+    selectors = []
+    for selector in rule.match:
+        selectors.append(f"{'' if selector.include else '-:'}{selector.pattern}")
+    return "[" + ", ".join(selectors) + "]"
+
+
+def _apply_smoothquant_action(context: ActionContext, args: Mapping[str, Any]) -> None:
+    import torch
+
+    from .awq.quantize.scale import is_foldable_source, scale_ln_fcs
+
+    unknown = set(args) - {"alpha"}
+    if unknown:
+        raise ProtocolActionError(
+            f"smoothquant does not accept argument(s) {sorted(unknown)}; only `alpha` is supported."
+        )
+    try:
+        alpha = float(args.get("alpha", 0.5))
+    except (TypeError, ValueError) as exc:
+        raise ProtocolActionError(
+            f"smoothquant `alpha` must be a float, got {args.get('alpha')!r}."
+        ) from exc
+    if not 0.0 <= alpha <= 1.0:
+        raise ProtocolActionError(f"smoothquant `alpha` must be in [0, 1], got {alpha}.")
+
+    if context.calibration is None:
+        raise ProtocolActionError(
+            f"smoothquant rule {_rule_label(context.rule)} requires calibration activations; "
+            "call apply_plan_actions(model, plan, calibration=callable)."
+        )
+
+    matched_modules = dict(context.matched)
+    for name, module in context.matched:
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(context.rule)} matched `{name}` "
+                f"({type(module).__name__}), which has no 2-D weight to scale."
+            )
+
+    modules = dict(context.model.named_modules())
+    state = _capture_smoothquant_statistics(context.model, context.calibration)
+    groups = _resolve_smoothquant_groups(state, matched_modules, context.rule)
+
+    scales_by_group = {}
+    for norm_name, consumer_names in groups.items():
+        norm = modules[norm_name]
+        if not is_foldable_source(norm):
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(context.rule)} resolved `{norm_name}` "
+                f"({type(norm).__name__}) as the preceding norm, but it has no foldable gain."
+            )
+        consumers = _validate_smoothquant_consumers(
+            state, modules, consumer_names, norm_name=norm_name, rule=context.rule
+        )
+        scales_by_group[norm_name] = (
+            norm,
+            [module for _, module in consumers],
+            _smoothquant_scales(state, consumers, alpha=alpha, rule=context.rule, norm_name=norm_name),
+        )
+        norm_width = int(norm.weight.numel())
+        scales_width = int(scales_by_group[norm_name][2].numel())
+        if norm_width != scales_width:
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(context.rule)} computed {scales_width} channel scales "
+                f"for `{norm_name}` with {norm_width} gain values."
+            )
+
+    with torch.no_grad():
+        for norm_name, (norm, consumers, scales) in scales_by_group.items():
+            # ``scale_ln_fcs`` divides the norm gain/bias by the scale and
+            # multiplies every consumer's input columns by it, so the block
+            # output is preserved for every consumer of that norm output.
+            scale_ln_fcs(norm, consumers, scales)
+
+
+def _capture_smoothquant_statistics(model: Any, calibration: Callable[[], None]) -> dict[str, Any]:
+    """Capture first-pass data flow plus per-channel activation maxima.
+
+    Only pointer metadata is retained for data-flow resolution; the per-channel
+    maxima are small ``[in_features]`` tensors. No activation tensor is kept
+    after calibration, so this does not create a dense activation cache.
+    """
+
+    import torch
+
+    modules = dict(model.named_modules())
+    weighted = {
+        name: module
+        for name, module in modules.items()
+        if name and isinstance(getattr(module, "weight", None), torch.Tensor)
+    }
+    norms = {
+        name: module
+        for name, module in weighted.items()
+        if norm_type_of(module) is not None and module.weight.ndim == 1
+    }
+
+    state = {
+        "first_pass": 0,
+        "seen_forward": False,
+        "input_ptrs": {name: set() for name in weighted},
+        "output_ptrs": {name: set() for name in norms},
+        "x_max": dict.fromkeys(weighted),
+    }
+    handles = []
+
+    def _root_pre_hook(module, args):
+        if state["seen_forward"]:
+            state["first_pass"] += 1
+        state["seen_forward"] = True
+
+    def _input_hook(name):
+        def hook(module, args, kwargs):
+            activation = args[0] if args else kwargs.get("input")
+            if not isinstance(activation, torch.Tensor) or not activation.is_floating_point():
+                return None
+            if activation.ndim == 0:
+                return None
+            if state["first_pass"] == 0:
+                state["input_ptrs"][name].add(activation.data_ptr())
+            flat = activation.detach().reshape(-1, activation.shape[-1]).to(torch.float32)
+            current = flat.abs().amax(dim=0)
+            previous = state["x_max"][name]
+            state["x_max"][name] = current if previous is None else torch.maximum(previous, current)
+            return None
+
+        return hook
+
+    def _output_hook(name):
+        def hook(module, args, output):
+            if state["first_pass"] == 0 and isinstance(output, torch.Tensor) and output.is_floating_point():
+                state["output_ptrs"][name].add(output.data_ptr())
+            return None
+
+        return hook
+
+    handles.append(model.register_forward_pre_hook(_root_pre_hook))
+    for name, module in weighted.items():
+        handles.append(module.register_forward_pre_hook(_input_hook(name), with_kwargs=True))
+    for name, module in norms.items():
+        handles.append(module.register_forward_hook(_output_hook(name)))
+    try:
+        calibration()
+    finally:
+        for handle in handles:
+            handle.remove()
+    return state
+
+
+def _resolve_smoothquant_groups(
+    state: dict[str, Any],
+    matched_modules: dict[str, Any],
+    rule: Rule,
+) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for name in matched_modules:
+        ptrs = state["input_ptrs"][name]
+        if len(ptrs) != 1:
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(rule)} matched `{name}` but its input did not "
+                f"resolve to exactly one tensor in the first calibration pass ({len(ptrs)} distinct inputs)."
+            )
+        ptr = next(iter(ptrs))
+        predecessors = [norm_name for norm_name, output_ptrs in state["output_ptrs"].items() if ptr in output_ptrs]
+        if len(predecessors) != 1:
+            if not predecessors:
+                detail = "no norm output feeds it"
+            else:
+                detail = f"multiple norm outputs feed it: {sorted(predecessors)}"
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(rule)} matched `{name}` but {detail}; "
+                "v1 folds only the canonical norm -> linear pair."
+            )
+        groups.setdefault(predecessors[0], []).append(name)
+
+    for norm_name, consumers in groups.items():
+        norm_ptrs = state["output_ptrs"][norm_name]
+        for name, input_ptrs in state["input_ptrs"].items():
+            if name in consumers:
+                continue
+            if input_ptrs & norm_ptrs:
+                consumers.append(name)
+    return groups
+
+
+def _validate_smoothquant_consumers(
+    state: dict[str, Any],
+    modules: dict[str, Any],
+    consumer_names: list[str],
+    *,
+    norm_name: str,
+    rule: Rule,
+) -> list[tuple[str, Any]]:
+    import torch
+
+    consumers = []
+    seen_weights = set()
+    for name in consumer_names:
+        module = modules[name]
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(rule)} resolved `{norm_name}` as the preceding norm "
+                f"for `{name}`, but `{name}` ({type(module).__name__}) has no 2-D weight; "
+                "v1 cannot fold that consumer."
+            )
+        if len(state["input_ptrs"][name]) != 1:
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(rule)} found `{name}` consuming `{norm_name}` "
+                "with more than one distinct input in the first calibration pass; "
+                "the fold would not be well-defined."
+            )
+        ptr = weight.data_ptr()
+        if ptr in seen_weights:
+            continue
+        seen_weights.add(ptr)
+        consumers.append((name, module))
+    return consumers
+
+
+def _smoothquant_scales(
+    state: dict[str, Any],
+    consumers: list[tuple[str, Any]],
+    *,
+    alpha: float,
+    rule: Rule,
+    norm_name: str,
+) -> Any:
+    import torch
+
+    x_max = None
+    w_max = None
+    for name, module in consumers:
+        activation_max = state["x_max"].get(name)
+        if activation_max is None:
+            continue
+        if int(module.weight.shape[1]) != int(activation_max.numel()):
+            raise ProtocolActionError(
+                f"smoothquant rule {_rule_label(rule)} found `{name}` with "
+                f"{module.weight.shape[1]} input columns but {activation_max.numel()} activation channels."
+            )
+        x_max = activation_max if x_max is None else torch.maximum(x_max, activation_max)
+        weight_max = module.weight.detach().abs().amax(dim=0).to(torch.float32)
+        w_max = weight_max if w_max is None else torch.maximum(w_max, weight_max)
+    if x_max is None or w_max is None:
+        raise ProtocolActionError(
+            f"smoothquant rule {_rule_label(rule)} collected no calibration activations for `{norm_name}`."
+        )
+    if x_max.numel() != w_max.numel():
+        raise ProtocolActionError(
+            f"smoothquant rule {_rule_label(rule)} found mismatched channel counts under `{norm_name}`: "
+            f"activation {x_max.numel()}, weight {w_max.numel()}."
+        )
+    eps = torch.finfo(torch.float32).eps
+    return (x_max.clamp_min(eps).pow(alpha) / w_max.clamp_min(eps).pow(1.0 - alpha)).clamp_min(eps)
+
+
+register_action("smoothquant", _apply_smoothquant_action)
 
 
 def _normalize_root(source: Any) -> dict[str, Any]:

@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from functools import lru_cache
 from typing import Optional
 
@@ -50,6 +51,21 @@ except Exception:  # pragma: no cover
 
 MXFP4_BLOCK = 32
 _E2M1_MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+
+
+def _launch_device(device: torch.device):
+    """Bind a Triton launch to the device that owns the operands.
+
+    Triton launches into the *current* CUDA/HIP context, but a checkpoint
+    sharded over several devices hands each layer operands on that layer's
+    device. Without this guard a layer on `cuda:1` raises
+    ``ValueError: Pointer argument cannot be accessed from Triton`` while
+    `cuda:0` is current. GGUF Triton and the W4A kernels use the same guard.
+    """
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        return torch.cuda.device(device)
+    return nullcontext()
 
 
 def _cuda_ordinals(device) -> tuple[int, ...]:
@@ -122,7 +138,9 @@ if TRITON_AVAILABLE:
                             BLOCK_G: tl.constexpr):
         """One program = ``BLOCK_G`` scale groups (of 32) of one row."""
 
-        row = tl.program_id(0)
+        # rows * K can exceed 2^31 for one large prefill batch; a 32-bit row
+        # offset wraps and reads the wrong row (CUDA) or faults (HIP).
+        row = tl.program_id(0).to(tl.int64)
         g0 = tl.program_id(1) * BLOCK_G
         gid = g0 + tl.arange(0, BLOCK_G)
         half = tl.arange(0, 16)
@@ -157,7 +175,7 @@ if TRITON_AVAILABLE:
                                 BLOCK_G: tl.constexpr):
         """Fused ``(x * pre_scale) @ blkdiag(BH)`` then MXFP4 RTN."""
 
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         g0 = tl.program_id(1) * BLOCK_G
         gid = g0 + tl.arange(0, BLOCK_G)
         cols = tl.arange(0, 32)
@@ -237,7 +255,7 @@ if TRITON_AVAILABLE:
     def _dequant_w4_to_bf16_kernel(pk_ptr, sc_ptr, out_ptr, K, BLOCK_G: tl.constexpr):
         """Packed MXFP4 row -> bf16.  ``value = magnitude * 2 ** (e8m0 - 127)``."""
 
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         gid = tl.program_id(1) * BLOCK_G + tl.arange(0, BLOCK_G)
         half = tl.arange(0, 16)
         Kg = K // 32
@@ -273,11 +291,12 @@ def quantize_mxfp4(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     e8m0 = torch.empty(rows, groups, dtype=torch.uint8, device=x.device)
     block_groups = min(triton.next_power_of_2(groups), 16)
     grid = (rows, triton.cdiv(groups, block_groups))
-    _quant_mxfp4_kernel[grid](
-        x, packed, e8m0, k,
-        x.stride(0), packed.stride(0), e8m0.stride(0),
-        BLOCK_G=block_groups,
-    )
+    with _launch_device(x.device):
+        _quant_mxfp4_kernel[grid](
+            x, packed, e8m0, k,
+            x.stride(0), packed.stride(0), e8m0.stride(0),
+            BLOCK_G=block_groups,
+        )
     return packed, e8m0
 
 
@@ -305,11 +324,12 @@ def rot_scale_quantize_mxfp4(
     ).contiguous()
     block_groups = min(triton.next_power_of_2(groups), 16)
     grid = (rows, triton.cdiv(groups, block_groups))
-    _rot_scale_quant_kernel[grid](
-        x, scale, bh.contiguous(), packed, e8m0, k,
-        x.stride(0), packed.stride(0), e8m0.stride(0),
-        BLOCK_G=block_groups,
-    )
+    with _launch_device(x.device):
+        _rot_scale_quant_kernel[grid](
+            x, scale, bh.contiguous(), packed, e8m0, k,
+            x.stride(0), packed.stride(0), e8m0.stride(0),
+            BLOCK_G=block_groups,
+        )
     return packed, e8m0
 
 
@@ -340,14 +360,22 @@ def dequant_w4_to_bf16(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tens
         raise ValueError("MACaQ: MXFP4 requires 32-wide groups.")
     scale_bytes = scales.view(torch.uint8)[:rows, : k // MXFP4_BLOCK].contiguous()
     out = torch.empty(rows, k, dtype=torch.bfloat16, device=packed.device)
-    _dequant_w4_to_bf16_kernel[(rows, triton.cdiv(k // MXFP4_BLOCK, 16))](
-        packed.contiguous(), scale_bytes, out, k, BLOCK_G=16
-    )
+    with _launch_device(packed.device):
+        _dequant_w4_to_bf16_kernel[(rows, triton.cdiv(k // MXFP4_BLOCK, 16))](
+            packed.contiguous(), scale_bytes, out, k, BLOCK_G=16
+        )
     return out
 
 
 def _pick_tiles(rows: int, k: int) -> tuple[int, int, int, int, int]:
-    """Measured NVIDIA/RDNA4 launch tiles; K must divide MXFP4 groups."""
+    """Measured NVIDIA/RDNA4 launch tiles.
+
+    ``BLOCK_K`` never drops below 64. On sm_120 ``tl.dot_scaled`` lowers to
+    the native ``mma.sync`` MXFP4 instruction, which requires a K tile of at
+    least 64; a 32-wide tile fails to compile and the module silently falls
+    back to Torch. The GEMM masks its K tail, so the tile does not need to
+    divide K.
+    """
 
     if IS_ROCM:
         # gfx1201 lowers scaled dot through BF16 WMMA. Its 128-wide K tile
@@ -361,7 +389,7 @@ def _pick_tiles(rows: int, k: int) -> tuple[int, int, int, int, int]:
         block_m, block_n, k_candidates, warps = 16, 64, (512, 256, 128, 64), 4
     else:
         block_m, block_n, k_candidates, warps = 64, 128, (256, 128, 64), 8
-    block_k = next((candidate for candidate in k_candidates if k % candidate == 0), 32)
+    block_k = k_candidates[0]
     return block_m, block_n, block_k, warps, 3
 
 
@@ -406,24 +434,28 @@ def mxfp4_w4a4_linear(
     block_k = block_k if block_k is not None else default_k
     num_warps = num_warps if num_warps is not None else default_warps
     num_stages = num_stages if num_stages is not None else default_stages
-    # `tl.dot_scaled` tiles must not straddle the K boundary; pick the largest
-    # power-of-two tile (up to the caller's request) that divides K.
-    while block_k > 32 and (block_k > k or k % block_k):
+    # sm_120's native MXFP4 `tl.dot_scaled` needs a K tile of at least 64.
+    # Prefer a tile that divides K, but the kernel's `kb_mask`/`ks_mask` tails
+    # make a non-divisor correct, so never shrink below 64.
+    block_k = max(int(block_k), 64)
+    while block_k > 64 and (block_k > k or k % block_k):
         block_k //= 2
+    block_k = max(block_k, 64)
     out = torch.empty(rows, n, device=x.device, dtype=x.dtype)
     grid = (triton.cdiv(rows, block_m), triton.cdiv(n, block_n))
     # Triton 3.9's pointer canonicalizer does not accept the E8M0 dtype
     # directly; the bytes are the same and `dot_scaled` consumes them as E8M0.
     w_scales_bytes = w_scales.view(torch.uint8)
     bias_tensor = bias.contiguous() if bias is not None else w_scales_bytes
-    _dense_w4a4_kernel[grid](
-        a_packed, w_packed, a_scales, w_scales_bytes, out, bias_tensor, rows, n, k,
-        a_packed.stride(0), w_packed.stride(0), a_scales.stride(0), w_scales_bytes.stride(0),
-        out.stride(0),
-        OUT_SCALE=out_scale, HAS_BIAS=bias is not None,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        num_warps=num_warps, num_stages=num_stages,
-    )
+    with _launch_device(x.device):
+        _dense_w4a4_kernel[grid](
+            a_packed, w_packed, a_scales, w_scales_bytes, out, bias_tensor, rows, n, k,
+            a_packed.stride(0), w_packed.stride(0), a_scales.stride(0), w_scales_bytes.stride(0),
+            out.stride(0),
+            OUT_SCALE=out_scale, HAS_BIAS=bias is not None,
+            BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
+            num_warps=num_warps, num_stages=num_stages,
+        )
     return out.reshape(*lead, n)
 
 
