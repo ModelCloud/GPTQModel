@@ -63,11 +63,21 @@ FAMILY_MODEL_TYPES = [
     "falcon_mamba",
     "gemma4_text",
     "hrm_text",
+    # Issue #4121 items 7-10: trees that folded across a nonlinearity or a
+    # residual. `olmo_hybrid` alternates pre-norm linear-attention layers with
+    # post-norm full-attention layers, so one static tree cannot describe both.
+    "olmo_hybrid",
+    "gemma4",
+    "gemma4_unified",
+    "nemotron_h",
     # Remote-code families from issue #4093 items 1-2. Their definitions live in
     # the checkpoint's own code, so the tiny config is derived from the local
     # checkpoint config.json instead of `AutoConfig.for_model`.
     "instella",
     "k2_horizon",
+    # Issue #4121 item 7: PanGu's top-query layer reads `custom_query` instead
+    # of `ln_1`'s output, and its MLP has a GELU between `c_fc` and `c_proj`.
+    "gpt_pangu",
     # MoE families.
     "cohere2_moe",
     "gpt_oss",
@@ -109,7 +119,30 @@ _BASE_CONFIG = {
 REMOTE_CODE_MODEL_PATHS = {
     "instella": "/monster/data/model/Instella-3B-Instruct",
     "k2_horizon": "/monster/data/model/K2-Horizon-0.9B",
+    "gpt_pangu": "/monster/data/model/pangu_alpha_2_6B",
 }
+
+# Remote-code configs whose decoder fields are not named like `_BASE_CONFIG`'s.
+# PanGu spells the layer/head counts `num_layers` / `num_heads`.
+REMOTE_CODE_MODEL_OVERRIDES = {
+    "gpt_pangu": {
+        "vocab_size": 128,
+        "hidden_size": 64,
+        "intermediate_size": 256,
+        "num_layers": 2,
+        "num_heads": 4,
+        "max_position_embeddings": 64,
+        "layer_norm_epsilon": 1e-5,
+        "activation_function": "gelu",
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "pad_token_id": 0,
+    },
+}
+
+# Composite (text + vision) configs keep the decoder under `text_config`; the
+# generic builder would only shrink the unused top-level fields.
+COMPOSITE_TEXT_CONFIG_FAMILIES = {"gemma4", "gemma4_unified"}
 
 
 def _field_names(config):
@@ -121,6 +154,8 @@ def _field_names(config):
 def _tiny_config(model_type):
     if model_type in REMOTE_CODE_MODEL_PATHS:
         return _tiny_remote_config(model_type)
+    if model_type in COMPOSITE_TEXT_CONFIG_FAMILIES:
+        return _tiny_composite_config(model_type)
     base = AutoConfig.for_model(model_type)
     fields = _field_names(base)
     kwargs = dict(_BASE_CONFIG)
@@ -193,6 +228,8 @@ def _tiny_remote_config(model_type):
     for key, value in _BASE_CONFIG.items():
         if hasattr(config, key):
             setattr(config, key, value)
+    for key, value in REMOTE_CODE_MODEL_OVERRIDES.get(model_type, {}).items():
+        setattr(config, key, value)
     # K2's attention width is `num_attention_heads * head_dim`, which is wider
     # than `hidden_size` (2048 vs 1536 on the 0.9B checkpoint). Mirror that so
     # `o_proj` does not accidentally match the norm width and merge with it.
@@ -214,12 +251,51 @@ def _tiny_remote_config(model_type):
     return config
 
 
+def _tiny_composite_config(model_type):
+    """Tiny decoder for a composite (text + vision) checkpoint config.
+
+    The decoder lives under ``text_config``. The per-layer token embeddings
+    (``vocab_size_per_layer_input`` x ``hidden_size_per_layer_input``) dominate
+    the parameter count, so they are shrunk with the decoder; otherwise a
+    2-layer decoder would still allocate >100M parameters.
+    """
+
+    config = AutoConfig.for_model(model_type)
+    text = config.text_config
+    for key, value in _BASE_CONFIG.items():
+        if hasattr(text, key):
+            setattr(text, key, value)
+    text.vocab_size = _BASE_CONFIG["vocab_size"]
+    for key, value in (
+        ("vocab_size_per_layer_input", _BASE_CONFIG["vocab_size"]),
+        ("hidden_size_per_layer_input", _BASE_CONFIG["hidden_size"]),
+        ("head_dim", 8),
+    ):
+        setattr(text, key, value)
+    text._attn_implementation = "eager"
+    # The invariant compares logits before/after a fold; a bf16 tiny model
+    # would report the dtype's own rounding instead of fold error.
+    for dtype_attr in ("dtype", "torch_dtype"):
+        if hasattr(text, dtype_attr):
+            setattr(text, dtype_attr, torch.float32)
+    return config
+
+
 def _in_features(module):
     weight = getattr(module, "weight", None)
     if weight is None or weight.ndim != 2:
         return None
     # transformers Conv1D stores [in, out].
     return weight.shape[0] if type(module).__name__ == "Conv1D" else weight.shape[1]
+
+
+def _vocab_size(config) -> int:
+    """Vocabulary size of the decoder, which composite configs keep in `text_config`."""
+
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and hasattr(text_config, "vocab_size"):
+        return int(text_config.vocab_size)
+    return int(config.vocab_size)
 
 
 def _out_features(module):
@@ -377,7 +453,7 @@ def test_issue_4039_families_are_covered():
 def test_scaling_groups_preserve_decoder_layer_output(family):
     hf_model, qmodel, layers, tree = _tiny_model(family)
     plan = ModulePlan.from_tree(tree)
-    ids = torch.randint(0, hf_model.config.vocab_size, (1, 8))
+    ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
     worst = 0.0
     saw_group = False
     for layer in layers:
@@ -449,6 +525,15 @@ def test_routed_and_shared_experts_share_one_group(family):
         ("muse_glimmer", ["self_attn.gate_proj"]),
         ("hrm_text", ["self_attn.gate_proj"]),
         ("gemma4_text", ["self_attn.v_proj"]),
+        # Issue #4121 items 7-10: the composite/unified Gemma 4 trees did not
+        # copy the text tree's declarations, and PanGu/NemotronH folded across a
+        # nonlinearity. `olmo_hybrid` is absent on purpose: its
+        # `post_attention_layernorm` is a valid source on linear-attention
+        # layers, so only the per-layer fold invariant can pin it.
+        ("gemma4", ["self_attn.v_proj", "post_feedforward_layernorm", "post_per_layer_input_norm"]),
+        ("gemma4_unified", ["self_attn.v_proj", "post_feedforward_layernorm"]),
+        ("gpt_pangu", ["mlp.c_fc"]),
+        ("nemotron_h", ["mixer.up_proj"]),
         ("falcon", ["mlp.dense_h_to_4h"]),
         ("falcon_h1", ["mamba.in_proj"]),
     ],

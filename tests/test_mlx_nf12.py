@@ -284,3 +284,36 @@ def test_nf12_mlx_wide_output_shares_activation_loads(monkeypatch):
         np.testing.assert_allclose(
             np.array(actual.astype(mx.float32)), expected, rtol=3e-2, atol=2e-3,
         )
+
+
+@requires_metal
+def test_nf12_mlx_embedding_matches_the_table():
+    """Packed rows gather bit-exactly; out-of-range IDs give +0.0 rows."""
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
+
+    torch.manual_seed(5)
+    source = _source(in_features=256, out_features=48)
+    table = MlxNF12Embedding(
+        num_embeddings=source.out_features,
+        embedding_dim=source.in_features,
+        num_escapes=source.nf12_escapes.shape[0],
+    )
+    table.packed = mx.array(source.nf12_packed.numpy())
+    table.escapes = mx.array(source.nf12_escapes.numpy())
+    table.exp_base = mx.array(source.nf12_exp_base.numpy())
+    table.freeze()
+
+    weight = source.dequantize_weight(dtype=torch.bfloat16).float().numpy()
+    zero = np.zeros(source.in_features, dtype=np.float32)
+    for ids in ([0, 5, 17, 47], [3], list(range(48)), [-1, 48, 2], [47, 0, 47]):
+        actual = table(mx.array(np.array(ids, dtype=np.int32)))
+        mx.eval(actual)
+        expected = np.stack([
+            weight[index] if 0 <= index < source.out_features else zero for index in ids
+        ])
+        np.testing.assert_array_equal(np.array(actual.astype(mx.float32)), expected)
+
+    # Arbitrary leading dimensions are preserved.
+    grid = table(mx.array(np.arange(6, dtype=np.int32).reshape(2, 3)))
+    mx.eval(grid)
+    assert grid.shape == (2, 3, source.in_features)

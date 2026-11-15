@@ -44,7 +44,9 @@ def _gemma4_module_tree():
             # input gate reads the post-residual hidden state, not this norm.
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!:postnorm",),
             "per_layer_input_gate": ("per_layer_input_gate:0",),
-            "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),
+            # Applied to `per_layer_projection`'s output before that block's
+            # residual add, so it is a post-norm too.
+            "post_per_layer_input_norm": ("post_per_layer_input_norm:!:postnorm",),
             "per_layer_projection": ("per_layer_projection:1",),
         },
     ]
@@ -260,15 +262,24 @@ class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
                 "k_norm:!",
                 "k_proj:0:in=x",
                 "v_norm:!",
-                "v_proj:0:in=x",
+                # MHA configs pass v through a scale-free `v_norm`, so v_proj's
+                # output is not o_proj's input. Same declaration as the text
+                # tree in `_gemma4_module_tree`.
+                "v_proj:0:in=x:nosrc",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
-            "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
+            # Both norms sit on a residual branch: `post_feedforward_layernorm`
+            # is added to the residual before the per-layer input block, and
+            # `post_per_layer_input_norm(per_layer_projection(...))` is added to
+            # that block's residual. The per-layer input gate reads the
+            # post-residual hidden state, and its output passes through GELU and
+            # a multiply, so neither norm may absorb a consumer's input scale.
+            "post_feedforward_layernorm": ("post_feedforward_layernorm:!:postnorm",),
             "per_layer_input_gate": ("per_layer_input_gate:0",),
-            "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),
+            "post_per_layer_input_norm": ("post_per_layer_input_norm:!:postnorm",),
             "per_layer_projection": ("per_layer_projection:1",),
         },
     ]

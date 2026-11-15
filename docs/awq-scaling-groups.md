@@ -28,7 +28,8 @@ This page documents the contracts consumed by
    `HyperConnection` has no plain gain to divide; the group is dropped and the
    layer stays quantized plainly.
 
-Introduced by the fixes for issues #4005, #4017, #4039, and #4093 (items 1-6).
+Introduced by the fixes for issues #4005, #4017, #4039, #4093 (items 1-6) and
+#4121 (items 6-10).
 
 ## Flow
 
@@ -155,10 +156,52 @@ and two of them quantized to garbage without raising:
 | `k2_horizon` | `q_proj`, `k_proj`, `v_proj`, `gate_proj`, `o_proj` as separate dict nodes | one flat `""` tuple `q_proj:0`, `k_proj:0`, `v_proj:0`, `gate_proj:0:nosrc`, `o_proj:1` | one group per attention input instead of chained single-module groups (PPL 1100 -> sane) |
 | `telechat2` | `{"dense": ("dense",)}` only | `("query:0", "key_value:0", "dense:1")` | `query`/`key_value` are quantized instead of silently staying fp16 |
 
-`instella` and `k2_horizon` are in `FAMILY_MODEL_TYPES` in
-`tests/test_awq_scaling_groups.py`, so the output-preservation invariant covers
-them: folding a random scale into each group must leave the decoder layer's
-logits unchanged to `1e-5` relative.
+Issue #4121 added four more definitions whose tree did not match the forward
+graph. All of them are now in `FAMILY_MODEL_TYPES`:
+
+| Definition | Before | After | Effect (per-group fold error) |
+| --- | --- | --- | --- |
+| `gpt_pangu` | `mlp: ("c_fc:0", "c_proj:1")`; the last block's `ln_1` group contained `attn.q_proj` | `c_fc:0:nosrc`; `awq_get_modules_for_scaling` drops the top-query block's `q_proj` | GELU fold 4.5e-2 -> dropped; `ln_1 -> q_proj` 3.4e-3 -> `q_proj` excluded, remaining k/v group 1.2e-8 |
+| `olmo_hybrid` | one static tree; `post_attention_layernorm` was a gain source on every layer | `awq_post_norm_modules(layer)` adds it on the full-attention layer only | 3.6e-1 -> group dropped on attention layers; linear-attention fold stays exact (1.6e-8) |
+| `gemma4`, `gemma4_unified` | composite/unified trees kept `v_proj:0` and `post_feedforward_layernorm:!` | copied `v_proj:0:in=x:nosrc` and `:postnorm` from the text tree; `post_per_layer_input_norm` is `:postnorm` too | `v_proj -> o_proj` 1.9e-1 -> dropped; `post_feedforward_layernorm -> per_layer_input_gate` 2.4e-1 -> dropped; `post_per_layer_input_norm -> per_layer_projection` 2.2e-1 -> dropped |
+| `nemotron_h` | `mixer.up_proj` fed `down_proj` | `up_proj:3:nosrc` | `relu(x)^2` fold 2.2e-2 -> dropped |
+
+Every family listed in `FAMILY_MODEL_TYPES` is covered by the
+output-preservation invariant: folding a random scale into each group must
+leave the decoder layer's logits unchanged to `1e-5` relative.
+
+## Trees that alternate layer shapes
+
+`ModulePlan` is built from one `module_tree` per model, but OLMo Hybrid's
+decoder layers do not share a shape. `OlmoHybridAttentionDecoderLayer`
+post-norms the attention output and *adds it to the residual*:
+
+```
+residual = h
+h = post_attention_layernorm(self_attn(h))
+h = residual + h
+```
+
+`OlmoHybridLinearAttentionDecoderLayer` feeds the same-named norm straight into
+the MLP, where a fold is exact. A static `:postnorm` flag would therefore drop
+a valid group on half the layers, and no flag would fold across a residual on
+the other half.
+
+```mermaid
+flowchart TD
+    A["awq_get_modules_for_scaling"] --> B["awq_post_norm_modules(layer)"]
+    B --> C["set(get_post_norm_modules())"]
+    C --> D{"layer has self_attn?"}
+    D -- "yes, full attention" --> E["add post_attention_layernorm"]
+    D -- "no, linear attention" --> F["static set only"]
+    E --> G["_is_gain_norm returns False<br/>group dropped, consumer quantized plainly"]
+    F --> H["fold into post_attention_layernorm"]
+    style G fill:#fff3cd,stroke:#997404,stroke-width:2px
+    style H fill:#d1e7dd,stroke:#0f5132,stroke-width:2px
+```
+
+`get_post_norm_modules` stays a classmethod for the definitions that declare one
+static set; `awq_post_norm_modules` is the per-layer extension point.
 
 ## Coverage: declared specs versus undeclared leaves
 
@@ -221,6 +264,52 @@ flowchart TD
 `exaone` also declares `rotary_embedding = "transformer.rotary"`, so its
 model-level rotary is found directly. Nanbeige/DeciLM keep the rotary on the
 attention module and take the `module.rotary_emb` path.
+
+### Multimodal rotary resolution
+
+A multimodal wrapper nests the decoder one level deeper than a text model.
+Qwen2-VL, Qwen2.5-VL, Gemma 3 and Mistral 3 keep the decoder rotary on
+`model.language_model.rotary_emb`, and their definitions do not declare
+`rotary_embedding`. `AWQProcessor._get_root_rotary` looked only at
+`model.rotary_emb`, returned `None`, and the replay then dropped the captured
+`position_embeddings`; the attention unpacked `None`:
+
+```
+AWQ Qwen2-VL-2B-Instruct -> TypeError: cannot unpack non-iterable NoneType object
+```
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._get_root_rotary"] --> B{"gptq_model.rotary_embedding declared?"}
+    B -- "yes" --> C["get_module_by_name_prefix"]
+    B -- "no" --> D{"model.rotary_emb or model.rotary?"}
+    D -- "yes" --> E["return it"]
+    D -- "no" --> F["_scan_root_rotary over named_modules"]
+    F --> G{"segment in vision/audio tower?"}
+    G -- "yes" --> H["skip: model.visual.rotary_pos_emb"]
+    G -- "no" --> I{"numbered segment? per-layer rotary"}
+    I -- "yes" --> J["skip: handled by module-local fallback"]
+    I -- "no" --> K{"looks like a rotary embedding?"}
+    K -- "yes" --> L["shallowest match wins"]
+    K -- "no" --> M["not a candidate"]
+    style H fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style J fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style L fill:#d1e7dd,stroke:#0f5132,stroke-width:2px
+```
+
+Two exclusions keep the scan from picking the wrong module:
+
+- **Vision/audio towers.** `model.visual.rotary_pos_emb` is a rotary embedding
+  too, and by name it is the shallowest match on Qwen2-VL. Its frequency width
+  is the vision head width, so rebuilding the decoder's cos/sin from it would
+  silently produce a wrong-length tensor.
+- **Per-layer rotaries.** A rotary under a numbered container
+  (`layers.0.self_attn.rotary_emb` on Nanbeige/DeciLM) belongs to one layer and
+  is usually an old-style `(x, seq_len)` module. Those families are handled by
+  the module-local fallback in `_prepare_module_forward`, and `_get_root_rotary`
+  keeps returning `None` for them so the other replay paths behave as before.
+
+The resolved module is cached on the processor, so the scan runs once.
 
 ### Module-owned replay inputs
 
@@ -306,6 +395,13 @@ Issue #4093 item coverage:
 | `tests/test_pangu_alpha_replay.py` | last layer replays `ln_f` + `custom_query`; GPTQ beats RTN on the top-query `q_proj` |
 | `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99 |
 | `tests/test_layer_module_coverage.py` | undeclared quantizable leaves are recorded and warned about |
+
+Issue #4121 item coverage:
+
+| Test | Invariant |
+| --- | --- |
+| `tests/test_awq_scaling_groups.py` (`gpt_pangu`, `olmo_hybrid`, `gemma4`, `gemma4_unified`, `nemotron_h`) | fold preserves the decoder layer's logits to `1e-5` relative |
+| `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
 
 ## Not in scope
 
