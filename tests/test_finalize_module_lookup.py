@@ -104,7 +104,7 @@ def test_finalize_looks_up_only_the_module_being_packed(
     model = SimpleNamespace(model=tree, qlinear_kernel=kernel, lm_head="lm_head")
     processor.gptq_model = model
     if processor_cls is qqq_processor.QQQProcessor:
-        processor._quant_linear_kernel = lambda: (kernel, BACKEND.QQQ_TORCH)
+        processor._quant_linear_kernel = lambda dtype=None: (kernel, BACKEND.QQQ_TORCH)
 
     def check_pack_inputs(**kwargs: object) -> None:
         replacement = tree.get_submodule(name)

@@ -101,10 +101,11 @@ Transformers 5.22 model-family fixes for module trees, Defuser GLM-4.x router tu
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
-AWQ scale folding resolves offset gains from the norm's live forward and picks the norm that actually feeds the quantized block; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
+AWQ scale folding resolves offset gains from the norm's live forward, picks the norm that actually feeds the quantized block, and gauges the scale to `max(s) <= 1` so a BF16 `1 + weight` fold stays neutral; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
 AWQ selects fold sources from declared data flow and skips sandwich post-norms and unresolvable gains; see the [AWQ normalization selection](docs/awq-norm-selection.md) flow.
 MoE AWQ folds also scale the router and `shared_expert_gate`, and calibration padding is kept out of expert Hessians; see the [MoE AWQ scale folding and calibration row ownership](docs/moe-awq-calibration.md) flow.
 Padding-only MoE experts stay on the RTN fallback, sibling AWQ captures share one host copy under `inference_mode`, and FP16 CPU fused kernels keep their bias epilogue; see the [MoE padding ownership and calibration capture lifetimes](docs/moe-padding-and-awq-dedup.md) flow.
+GPTAQ and FOEM disable the native-input delta for routed experts (their token subset changes after attention is quantized) and fall back to RTN when an expert receives no rows; GGUF `q*_k_s`/`q*_k_m`/`q*_k_l` names warn that they store a uniform K-quant, and Hessian staging never narrows a bf16 input to float16; see the [quantizer MoE, GGUF alias, and Hessian staging flows](docs/quantizer-moe.md).
 Every AWQ module packs bounded token rows across all variable-length calibration captures and fallback coverage is checked per layer; see the [AWQ calibration aggregation](docs/awq-calibration-aggregation.md) flow.
 AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
 LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
@@ -114,6 +115,7 @@ AWQ split-K prefill covers every K tile and the decode-batch bound trims on the 
 Legacy 5.4.x `meta.gptaq` booleans, untied `lm_head` quantization, and the metadata plain Transformers or vLLM need are described in the [checkpoint compatibility](docs/checkpoint-compat.md) contract.
 Third-party module filters, format-changing re-saves, `save_pretrained()` layout safety, Marlin `g_idx`, `is_marlin_format: false`, dense export, and mixed-bit dequantization are described in the [checkpoint interop](docs/checkpoint-interop.md) contract.
 GPTQ `-:` exclusion declarations for plain HF/Optimum loads, endpoint requantize under AUTO_NF12, post-quant EoRA, fail-closed rotation validation, and FP32 staged GSQ losses are described in the [quantization feature contracts](docs/quantization-features.md) flow.
+Transformers/Optimum GPTQ loading, legacy checkpoint key layouts, AWQ group-size retuning, and the saved-config `auto_map` contract are described in the [HF interoperability](docs/hf-interop.md) flow.
 FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
 The native FP8 forward wrapper and the W4A16 quant source resolve one
 `weight_scale_semantics` per checkpoint, so a DeepSeek multiplier and a native
@@ -224,12 +226,13 @@ For how each decoder layer is replayed with the attention mask and rotary embedd
 For the outer-loop work multimodal models apply outside a decoder layer—DeepStack residuals, Gemma-3 image-block masks, padded batches, and the Qwen2.5-Omni lazy checkpoint aliases—see [multimodal calibration replay](docs/multimodal-calibration.md).
 For the base-type mask, the `super()` contract for definition replay overrides, and AWQ's typed rotary call, see [layer-type replay masks](docs/layer-type-replay-masks.md).
 For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
-For the CPU int4pack group-size gate, CPU-offload kernel selection, `max_memory` layer placement, and the `torch.compile` paths that must stay lowerable, see [CPU and offload dispatch](docs/kernel-dispatch-cpu.md).
+For the CPU int4pack group-size gate, CPU-offload kernel selection, `max_memory` layer placement, the `torch.compile` paths that must stay lowerable, HIP JIT source staging, and the bitsandbytes/GGUF autograd gate, see [CPU and offload dispatch](docs/kernel-dispatch-cpu.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `ResolvedModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.
 For how VPTQ and QQQ fold per-device calibration partials into a reusable Hessian, see [calibration Hessian materialization](docs/calibration-hessian-materialization.md).
 For how QQQ and GPTQ capture convolution inputs—including `padding="same"` and non-zero `padding_mode`—see [convolution capture padding](docs/conv-capture-padding.md).
+QQQ selects its in-memory kernel from the model dtype's `SUPPORTS_DTYPES` declaration and defaults to GPTQ's Hessian damping; see the [QQQ kernel selection](docs/qqq-kernel-selection.md) and [QQQ default damping](docs/qqq-default-damp.md) contracts.
 See [quantization scale storage](docs/quantization-scale-storage.md) for near-dead group handling and checkpoint precision requirements.
 
 Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts. Expert cardinality follows the same rule: a `#` placeholder expands only when the definition declares `dynamic_expert_index` and the owning config node resolves it, so **[expert cardinality resolution](docs/model-tree-resolution.md#expert-cardinality-resolution)** covers that step and why a surviving placeholder is a silent miss.
@@ -601,7 +604,9 @@ its `.amdgcn` contains `v_wmma_f32_16x16x16_f16`. The fused small-M GEMM is
 FP16-only on RDNA4: BF16 measured 0.43x-1.42x of the split path there (median 0.85x), so BF16
 falls back to dequantize+matmul (GEMV keeps both dtypes). Set
 `GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
-matrix and known limitations.
+matrix and known limitations, and [`docs/rocm-default-environment.md`](docs/rocm-default-environment.md)
+for the ROCm defaults GPT-QModel installs (`expandable_segments` is not enabled;
+`ROCBLAS_USE_HIPBLASLT=0` makes quantization reproducible across processes).
 
 On Ada (SM 8.9) and Blackwell (SM 10.x), `TritonV2Linear` reuses the same fused
 GEMV / small-M GEMM dispatch and the packed-load kernel covers `M=2..64` with no
@@ -659,6 +664,9 @@ per weight group. MLX currently performs the Cholesky factorization on its CPU
 stream. AWQ uses MLX-LM's native scale and clip search. The output uses MLX-LM's
 quantized model format and can be loaded with `mlx_lm.load`.
 Pass an MLX token array as `calibration_data` to use your own calibration set.
+To drive a GPTQ/AWQ checkpoint through the MLX runtime with the standard
+`generate()` API, or to export one with `GPTQModel.export(..., format="mlx")`,
+see the [MLX runtime and export flow](docs/mlx-runtime.md).
 
 
 ## Install 💾

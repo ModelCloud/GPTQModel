@@ -59,6 +59,68 @@ cannot be probed or both hypotheses fit, `_norm_gain_offset` raises
 `UnresolvableGainOffset`; `apply_scale` logs and skips that group without
 mutating weights or captured features. Source text is never parsed.
 
+## Offset-gain scale gauge
+
+AWQ's per-channel scale has a uniform gauge: dividing every channel by the same
+constant `c` and multiplying every consumer's input columns by `c` leaves the
+block output unchanged. For symmetric per-group quantisation the gauge is exact
+because scaling all columns of a group by `1/c` scales that group's absmax by
+`1/c`, so the packed codes are unchanged and only the group scale moves.
+
+That gauge is what makes an offset-gain fold safe. The fold stores
+`(1 + w) / s - 1`; as `s` grows, the stored value approaches `-1` and
+`1 + w'` loses its significand to cancellation. Gemma-3
+`pre_feedforward_layernorm` channels with `x_mean == 0` push the MLP-group
+scale to `s ≈ 1e3`, where `1 + w'` is no longer representable in bf16. The
+fold then stops being neutral even though the arithmetic was done in float32.
+
+`scale_ln_fcs` therefore renormalises an offset-gain scale by its peak
+(`max(s) <= 1`) before folding. Plain-gain norms store `w / s`, which keeps its
+relative precision at any `s`, so they keep their scale unchanged. The function
+returns the effective scale and `apply_scale` uses it for the captured input
+features and the non-quantized consumers, so the fold, the quantization input,
+and the router/gate share one scale.
+
+```mermaid
+flowchart TD
+    A["apply_scale group<br/>prev_op, layers, s"] --> B{"is_foldable_source?"}
+    B -- "no" --> B1["skip group<br/>log warning"]
+    B -- "yes" --> C["scale_ln_fcs(prev_op, layers, s)"]
+    C --> D{"_norm_gain_offset(prev_op)"}
+    D -- "raises" --> D1["UnresolvableGainOffset<br/>skip group"]
+    D -- "0.0 plain gain" --> E["w.div_(s)<br/>return s"]
+    D -- "1.0 offset gain" --> F{"max(s) > 1?"}
+    F -- "yes" --> G["s = s / max(s)<br/>max(s) = 1"]
+    F -- "no" --> H["keep s"]
+    G --> I["fold (1 + w) / s - 1 in float32<br/>cast once to serving dtype"]
+    H --> I
+    I --> J["return effective s"]
+    E --> J
+    J --> K["apply_scale divides captured features<br/>and consumer input columns by effective s"]
+    style B1 fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style D1 fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+```
+
+Before this change `apply_scale` ignored the returned scale (the function
+returned nothing) and divided the captured features by the original `s`, so
+renormalising inside the fold alone would have desynchronised the quantization
+input from the folded weights.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Offset-gain fold scale | `s` used as-is, `gptqmodel/quantization/awq/quantize/scale.py:316-320` | `s / max(s)` when `max(s) > 1` |
+| Effective scale ownership | `scale_ln_fcs` returned `None`; `apply_scale` reused the input `s` | `scale_ln_fcs` returns the effective `s`; `apply_scale` uses it for features and consumers |
+| Plain-gain fold | `w / s` | unchanged |
+
+Measured on the shipped code (`bf16`, relative L2 of the block output before and
+after folding a neutral scale):
+
+| Case | Before | After |
+| --- | --- | --- |
+| `Gemma3RMSNorm`, `max(s) ≈ 148` | 0.111 | 0.0036 |
+| `Gemma3RMSNorm`, `max(s) ≈ 1485` | 0.993 | 0.0036 |
+| `LlamaRMSNorm`, `max(s) ≈ 1499` | 0.0041 | 0.0041 |
+
 ## Before and after
 
 | Mechanism | Before | After |
@@ -83,6 +145,15 @@ mutating weights or captured features. Source text is never parsed.
 | LFM3 conv/FFN `prev_op` | `post_operator_norm` / `post_ffn_norm` | `operator_norm` / `ffn_norm` |
 | LFM3 layer-output relative L2 | 0.569 (fixture) / 0.688 (real model, issue #4002) | 1.57e-07 |
 | `MuseSparkTextInputScaledRMSNorm` fold relative L2 | 0.113 (fp32) | scale skipped; output unchanged |
+| Gemma-3-1B AWQ4 wikitext-2 PPL, `max(s) ≈ 1.4e3` | 848.5 | 67.8 |
+| Gemma-3-1B RTN4 / base PPL (same harness) | 72.6 / 59.6 | 72.6 / 59.6 |
+
+The PPL row uses 128 C4 calibration documents, 80 × 512 wikitext-2 test tokens,
+bf16, `sym=False`, `FORMAT.GEMM`. Before the gauge, AWQ was 12.5× worse than
+RTN; after it, AWQ is slightly better than RTN and within 14% of the
+unquantized model, matching the relative result reported in issue #4074.
+
+The offset-gain scale gauge was introduced by the fix for issue #4074.
 
 The tests are in `tests/test_awq_scale_folding.py`; the pre-fold
 `norm -> linear` output and the closed-form folded weights are the two

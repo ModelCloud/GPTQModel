@@ -129,6 +129,41 @@ def __getattr__(name: str):
 
 log = setup_logger()
 
+
+def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
+    """Return the key converter the quantized loader should apply.
+
+    A definition may declare an explicit ``checkpoint_key_for_load`` /
+    ``checkpoint_key_for_save``. Every other family falls back to its
+    Transformers checkpoint conversion map, inferred from the live model, so a
+    legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
+    and ``visual.*``) is remapped to the runtime names. The map is idempotent
+    for checkpoints already written with runtime keys: their names do not match
+    the checkpoint-side patterns and pass through unchanged.
+    """
+
+    explicit = getattr(
+        cls,
+        "checkpoint_key_for_load" if to_runtime else "checkpoint_key_for_save",
+        None,
+    )
+    if callable(explicit):
+        return explicit
+
+    try:
+        mapping = cls.resolve_hf_conversion_map_reversed(target_model=model)
+    except Exception:
+        log.debug("Loader: could not infer an HF checkpoint conversion map", exc_info=True)
+        return None
+    if mapping is None:
+        return None
+
+    def convert(name: str) -> str:
+        return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    return convert
+
+
 _GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
 
 
@@ -705,6 +740,40 @@ def _normalize_requested_device_map(device, device_map):
     if device is not None:
         _validate_device_and_device_map_agree(device, normalized)
     return normalized
+
+
+def _indexed_device_request(device) -> Optional[str]:
+    """Return an indexed ``device`` request as a placement string, if any."""
+
+    if isinstance(device, str) and ":" in device:
+        return device
+    if isinstance(device, torch.device) and device.index is not None:
+        return str(device)
+    return None
+
+
+def _normalize_explicit_placement(device, device_map, max_memory):
+    """Resolve ``device``/``device_map``/``max_memory`` into placement inputs.
+
+    An indexed ``device`` such as ``"cuda:0"`` is shorthand for a full-model
+    map, but only when the caller did not also supply a memory budget. With
+    ``max_memory`` the indexed device selects the accelerator family for the
+    budgeted layer-wise map; converting it to ``{"": device}`` first would
+    silently drop the cap.
+    """
+
+    requested_device_map = _normalize_requested_device_map(device, device_map)
+    explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+    if max_memory is not None and explicit_device_map is not None:
+        raise ValueError(
+            "Pass either an explicit `device_map` dict or `max_memory`, not both."
+        )
+    if requested_device_map is None and max_memory is None:
+        explicit_device = _indexed_device_request(device)
+        if explicit_device is not None:
+            explicit_device_map = {"": explicit_device}
+            requested_device_map = explicit_device_map
+    return requested_device_map, explicit_device_map
 
 
 def _external_runtime_device_kwargs(
@@ -1910,12 +1979,9 @@ def ModelLoader(cls):
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map = _normalize_requested_device_map(device, device_map)
-        explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
-        if max_memory is not None and explicit_device_map is not None:
-            raise ValueError(
-                "Pass either an explicit `device_map` dict or `max_memory`, not both."
-            )
+        requested_device_map, explicit_device_map = _normalize_explicit_placement(
+            device, device_map, max_memory
+        )
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
@@ -1927,17 +1993,6 @@ def ModelLoader(cls):
             str(key).strip().lower() == "cpu" for key in max_memory
         ):
             cpu_offload = True
-
-        if requested_device_map is None:
-            explicit_device = None
-            if isinstance(device, str) and ":" in device:
-                explicit_device = device
-            elif isinstance(device, torch.device) and device.index is not None:
-                explicit_device = str(device)
-
-            if explicit_device is not None:
-                explicit_device_map = {"": explicit_device}
-                requested_device_map = explicit_device_map
 
         # Keep string inputs compatible while allowing canonical method-prefixed names.
         backend = normalize_backend(backend)
@@ -2526,7 +2581,7 @@ def ModelLoader(cls):
             model,
             model_save_name,
             format_code,
-            key_converter=getattr(cls, "checkpoint_key_for_save", None),
+            key_converter=_checkpoint_key_converter(cls, model, to_runtime=False),
         )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
@@ -2815,7 +2870,7 @@ def ModelLoader(cls):
                 device_map=device_map,
                 offload_state_dict=True,
                 offload_buffers=True,
-                key_converter=getattr(cls, "checkpoint_key_for_load", None),
+                key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
             )
 
             load_checkpoint_in_model = False
@@ -2923,7 +2978,7 @@ def ModelLoader(cls):
                 device_map=device_map,
                 # offload_state_dict=True,
                 # offload_buffers=True,
-                key_converter=getattr(cls, "checkpoint_key_for_load", None),
+                key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
             )
 
             if format_code == FORMAT.GPTQ_V2:

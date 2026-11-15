@@ -896,6 +896,9 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 triton_backend is not None
                 and self.weight.device.type == "cuda"
                 and not self._cpu_packing_active
+                # The raw Triton launch has no backward; fall back to the
+                # vendor kernel when autograd must flow through the input.
+                and not (torch.is_grad_enabled() and x.requires_grad)
                 and triton_backend.should_use(
                     self.weight.device,
                     compute_dtype,

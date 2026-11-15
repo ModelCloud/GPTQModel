@@ -136,11 +136,11 @@ class TorchAtenAwqLinear(AWQuantLinear):
         super().post_init()
         self.optimize()
 
-    def optimize(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
 
-        super().optimize()
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         if x.dtype not in (torch.float16, torch.bfloat16):

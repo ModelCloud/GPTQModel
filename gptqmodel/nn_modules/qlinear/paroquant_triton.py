@@ -218,7 +218,10 @@ class ParoQuantTritonLinear(ParoLinear):
             # Do not autotune or launch Triton plans for a zero-row matrix.
             return self.empty_linear_output(x)
         adapter_input = x.reshape(-1, x.shape[-1])
-        x_flat = x.reshape(-1, x.shape[-1])
+        # ``generate()`` decode feeds ``hidden_states[:, -1:, :]``, which is a
+        # strided view. The fused rotation op rejects non-contiguous inputs
+        # (#4072), so pack the flat activation before rotating it.
+        x_flat = x.reshape(-1, x.shape[-1]).contiguous()
         rotated = self._rotate_inputs(x_flat)
 
         plan = self._select_plan(self._classify_forward_kind(x, x_flat), rotated)

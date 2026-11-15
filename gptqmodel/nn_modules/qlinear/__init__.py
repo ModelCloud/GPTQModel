@@ -633,6 +633,20 @@ class BaseQuantLinear(nn.Module):
             #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
+    def supports_dtype(cls, dtype: Optional[t.dtype]) -> bool:
+        """Whether this kernel serves ``dtype`` activations.
+
+        ``None`` means the caller did not constrain the dtype. This is the
+        same ``SUPPORTS_DTYPES`` declaration the loader validates, shared so a
+        quantization path cannot build an in-memory module with a kernel the
+        reload path would reject for the model dtype.
+        """
+        if dtype is None:
+            return True
+        supported = cls.SUPPORTS_DTYPES
+        return supported is None or dtype in supported
+
+    @classmethod
     def _validate_shared(
         cls,
         *,
@@ -641,6 +655,7 @@ class BaseQuantLinear(nn.Module):
         device:Optional[DEVICE | t.device]=None,
         trainable:Optional[bool]=None,
         adapter:Optional[Adapter]=None,
+        check_platform: bool = True,
     ) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
@@ -652,11 +667,15 @@ class BaseQuantLinear(nn.Module):
             err = f"{cls} does not support `pack_dtype`: {pack_dtype}"
             return False, NotImplementedError(err)
 
-        if dtype is not None and dtype not in cls.SUPPORTS_DTYPES:
+        if not cls.supports_dtype(dtype):
             err = f"{cls} only supports `{cls.SUPPORTS_DTYPES}` dtype: actual dtype = `{dtype}`"
             return False, NotImplementedError(err)
 
-        if PLATFORM.ALL not in cls.SUPPORTS_PLATFORM and sys.platform not in cls.SUPPORTS_PLATFORM:
+        # Host-side conversions (for example the pure-numpy MLX repack) can
+        # validate a packed layout without owning the runtime's platform gate.
+        if (check_platform
+                and PLATFORM.ALL not in cls.SUPPORTS_PLATFORM
+                and sys.platform not in cls.SUPPORTS_PLATFORM):
             err = f"{cls} does not support platform: {sys.platform}"
             return False, NotImplementedError(err)
 
@@ -749,13 +768,15 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None,
+                  check_platform: bool = True) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate_shared(
             pack_dtype=pack_dtype,
             dtype=dtype,
             device=device,
             trainable=trainable,
             adapter=adapter,
+            check_platform=check_platform,
         )
         if not ok:
             return ok, err
@@ -928,7 +949,8 @@ class GroupedQuantLinear(BaseQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None,
+                  check_platform: bool = True) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,
@@ -942,6 +964,7 @@ class GroupedQuantLinear(BaseQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            check_platform=check_platform,
         )
         if not ok:
             return ok, err
@@ -1148,7 +1171,8 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None,
+                  check_platform: bool = True) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,
@@ -1162,6 +1186,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            check_platform=check_platform,
         )
         if not ok:
             return ok, err

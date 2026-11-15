@@ -88,6 +88,7 @@ def pack_scales_and_zeros(scales, zeros):
     )
 
 
+@torch.compiler.disable
 def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     """Run int4pack with FP32 operands without expanding stored weights.
 
@@ -95,6 +96,12 @@ def _cpu_int4pack_mm(x, qweight, group_size, scales_and_zeros, out_dtype=None):
     accumulate in FP32. ``out_dtype`` lets a biased layer keep that product
     until the bias has been added, so the epilogue rounds once instead of
     overflowing or rounding the pre-bias sum.
+
+    Inductor fuses the operand casts into a Pointwise node and then cannot
+    lower ``aten::_weight_int4pack_mm_for_cpu`` on it (#4068). Disabling
+    tracing here keeps the op and its casts eager inside an otherwise
+    compiled model, which is a deliberate graph break rather than a silent
+    fallback to a different kernel.
     """
     compute_dtype = (
         torch.float32
@@ -222,11 +229,11 @@ class TorchFusedLinear(PackableQuantLinear):
         super().post_init()
         self.optimize()
 
-    def optimize(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
 
-        super().optimize()
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def clear_weight_cache(self) -> None:
         """Drop derived state that depends on the loaded packed buffers.

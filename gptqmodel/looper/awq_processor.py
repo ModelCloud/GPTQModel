@@ -6,6 +6,7 @@
 import copy
 import inspect
 import math
+import re
 import threading
 import time
 import weakref
@@ -318,6 +319,7 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs.setdefault("attention_mask", None)
         # Preserve fallback preference so AWQ can optionally fall back when no calibration data or activations are available.
         self.fallback = qcfg.fallback
+        self._ensure_group_size_divisibility()
 
     def _get_root_rotary(self) -> Optional[nn.Module]:
         """Returns the model rotary module used to refresh position embeddings."""
@@ -506,6 +508,97 @@ class AWQProcessor(LoopProcessor):
         """Resolve the resolved group size of one layer child."""
         return self._module_group_size(
             self._full_module_name(layer_module, module)
+        )
+
+    def _largest_supported_group_divisor(
+        self,
+        module_name: Optional[str],
+        in_features: int,
+        configured_group_size: int,
+    ) -> int:
+        """Pick the largest supported group size that divides ``in_features``.
+
+        Returns ``-1`` (per-channel) when no supported group size divides the
+        input axis. ``BaseQuantLinear`` normalizes ``-1`` to ``in_features``,
+        so every AWQ stage sees one full-width group.
+        """
+
+        try:
+            kernel = self._resolve_qlinear_kernel(module_name)
+        except Exception:
+            kernel = self.qlinear_kernel
+        supported = {
+            int(size)
+            for size in getattr(kernel, "SUPPORTS_GROUP_SIZE", ()) or ()
+            if isinstance(size, int) and size > 0
+        }
+        for size in sorted(supported, reverse=True):
+            if size <= configured_group_size and in_features % size == 0:
+                return size
+        return -1
+
+    def _ensure_group_size_divisibility(self) -> None:
+        """Retune AWQ modules whose ``in_features`` is not a group multiple.
+
+        AWQ's weight-mean, clip search, pseudo-quantization and packing all
+        reshape the input axis into fixed-size groups, so a module whose
+        ``in_features`` is not a multiple of the configured ``group_size``
+        cannot be quantized as-is. The failure previously surfaced only after
+        the whole calibration pass. Resolve a supported divisor up front and
+        record it as a per-module ``dynamic`` override so staging, packing,
+        saving and reload all resolve the same value.
+        """
+
+        if self.model is None:
+            return
+        try:
+            modules = find_modules(self.model)
+        except Exception:
+            return
+
+        lm_head_name = getattr(self.gptq_model, "lm_head", None)
+        lm_head_quantized = bool(getattr(self.qcfg, "lm_head", False))
+        adjusted: List[Tuple[str, int, int, Dict[str, Any]]] = []
+        for name, module in modules.items():
+            if not isinstance(module, nn.Linear):
+                continue
+            if name == lm_head_name and not lm_head_quantized:
+                continue
+            resolved_cfg = self.qcfg.resolve_module_config(name)
+            if resolved_cfg.excluded:
+                continue
+            in_features = int(getattr(module, "in_features", 0) or 0)
+            if in_features <= 0:
+                continue
+            configured = self._module_group_size(name, resolved_cfg=resolved_cfg)
+            if configured <= 0 or in_features % configured == 0:
+                continue
+            chosen = self._largest_supported_group_divisor(name, in_features, configured)
+            adjusted.append((name, configured, chosen, resolved_cfg.overrides))
+
+        if not adjusted:
+            return
+
+        overrides = {}
+        for name, _, chosen, resolved_overrides in adjusted:
+            payload = dict(resolved_overrides)
+            payload["group_size"] = chosen
+            overrides[f"+:^{re.escape(name)}$"] = payload
+        dynamic = dict(self.qcfg.dynamic or {})
+        merged = dict(overrides)
+        for pattern, value in dynamic.items():
+            merged.setdefault(pattern, value)
+        self.qcfg.dynamic = merged
+
+        examples = ", ".join(
+            f"{name}: {configured}->{chosen}" for name, configured, chosen, _ in adjusted[:4]
+        )
+        suffix = "" if len(adjusted) <= 4 else f", ... ({len(adjusted)} modules)"
+        log.warning(
+            "AWQ: in_features is not divisible by group_size for %s%s; using a "
+            "supported per-module group size so calibration can proceed.",
+            examples,
+            suffix,
         )
 
     def _format_for(

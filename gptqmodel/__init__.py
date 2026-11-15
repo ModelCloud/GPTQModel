@@ -28,6 +28,17 @@ from ._alloc_conf import apply_default_alloc_conf  # noqa: E402
 
 _installed_alloc_conf = apply_default_alloc_conf()
 
+# Still before any other submodule import: rocBLAS forwards its GEMMs to
+# hipBLASLt on ROCm 10.1/gfx1201, and hipBLASLt picks a different kernel per
+# process for the same shape. That makes two identical quantization runs in
+# separate processes save different checkpoints. ``ROCBLAS_USE_HIPBLASLT=0``
+# keeps the GEMMs in rocBLAS and is deterministic; the user's explicit value,
+# if any, wins. rocBLAS reads it on first use, so it has to be set before the
+# first BLAS call.
+from ._rocm_env import apply_default_rocm_blas_env  # noqa: E402
+
+_installed_rocm_blas_env = apply_default_rocm_blas_env()
+
 # Still before any other Torch use: HIP reports no last-level cache, so on
 # RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
 # Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
@@ -56,6 +67,12 @@ if _installed_alloc_conf is not None:
     log.info(
         "ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.",
         _installed_alloc_conf,
+    )
+
+if _installed_rocm_blas_env is not None:
+    log.info(
+        "ENV: Auto setting ROCBLAS_USE_HIPBLASLT='%s' for reproducible quantization.",
+        _installed_rocm_blas_env,
     )
 
 # Fail loudly (once) on ROCm releases older than the supported floor.
@@ -109,37 +126,6 @@ def _patch_transformers_gptq_device_map_compat():
 
         _process_model_before_weight_loading_with_device_map._gptqmodel_device_map_compat = True
         GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
-
-
-def _patch_transformers_paroquant_quantizer_compat():
-    """Teach transformers to treat ParoQuant checkpoints as GPTQ-backed configs.
-
-    Upstream transformers currently rejects `quant_method="paroquant"` before
-    the GPT-QModel loader path gets a chance to handle the checkpoint. ParoQuant
-    artifacts reuse GPT-QModel/Optimum loading semantics, so register the method
-    alongside GPTQ only when upstream has not provided native support yet.
-    """
-    try:
-        from transformers.quantizers import auto as hf_quant_auto
-        from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
-        from transformers.utils.quantization_config import GPTQConfig
-    except ImportError:
-        log.warning(
-            "ParoQuant quantizer compat is inactive: transformers quantizer API changed",
-            exc_info=True,
-        )
-        return
-    except Exception:
-        log.warning("ParoQuant quantizer compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        if getattr(hf_quant_auto, "_gptqmodel_paroquant_quantizer_compat", False):
-            return
-
-        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault("paroquant", GPTQConfig)
-        hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("paroquant", GptqHfQuantizer)
-        hf_quant_auto._gptqmodel_paroquant_quantizer_compat = True
 
 
 def _patch_openvino_gptqmodel_compat():
@@ -223,6 +209,67 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         if hasattr(hf_integrations, "lazy_load_kernel"):
             hf_integrations.lazy_load_kernel = _lazy_load_kernel_with_local_causal_conv1d
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
+
+
+def _patch_optimum_gptqmodel_load_bridge():
+    """Route Optimum's GPTQ loading through GPTQModel's native bridge.
+
+    Transformers delegates pre-quantized GPTQ loading to Optimum, which
+    replaces every ``nn.Linear`` with one kernel chosen from the *global*
+    quantization config. GPTQModel checkpoints can carry per-module ``dynamic``
+    settings and structural rewrites (expanded MoE experts, fused blocks), so
+    Optimum's homogeneous replacement silently drops every per-expert tensor.
+    Wrapping ``GPTQQuantizer.convert_model`` / ``post_init_model`` lets
+    ``hf_gptqmodel_prepare_model_for_load`` rebuild the checkpoint's real module
+    manifest first; checkpoints Optimum owns keep Optimum's own path because the
+    bridge returns ``None`` for them.
+    """
+
+    try:
+        from functools import wraps
+
+        from optimum.gptq import GPTQQuantizer
+    except ImportError:
+        # Optimum is an optional dependency of Transformers' GPTQ loader.
+        return
+    except Exception:
+        log.warning("Optimum GPTQ load-bridge compat probe failed", exc_info=True)
+        return
+
+    with _MONKEY_PATCH_LOCK:
+        original_convert_model = GPTQQuantizer.convert_model
+        if getattr(original_convert_model, "_gptqmodel_load_bridge", False):
+            return
+        original_post_init_model = GPTQQuantizer.post_init_model
+
+        @wraps(original_convert_model)
+        def _convert_model_with_gptqmodel_bridge(self, model, **kwargs):
+            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+
+            context = hf_gptqmodel_prepare_model_for_load(
+                model,
+                checkpoint_files=kwargs.get("checkpoint_files"),
+                device_map=kwargs.get("device_map"),
+                dtype=kwargs.get("dtype"),
+            )
+            if context is None:
+                return original_convert_model(self, model, **kwargs)
+            model._gptqmodel_hf_load_context = context
+            return model
+
+        @wraps(original_post_init_model)
+        def _post_init_model_with_gptqmodel_bridge(self, model):
+            context = getattr(model, "_gptqmodel_hf_load_context", None)
+            if context is None:
+                return original_post_init_model(self, model)
+            from .utils.hf_load import hf_gptqmodel_post_init_for_load
+
+            return hf_gptqmodel_post_init_for_load(model, context)
+
+        _convert_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        _post_init_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        GPTQQuantizer.convert_model = _convert_model_with_gptqmodel_bridge
+        GPTQQuantizer.post_init_model = _post_init_model_with_gptqmodel_bridge
 
 
 from .utils import has_gil_disabled
@@ -371,7 +418,6 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
-_patch_transformers_paroquant_quantizer_compat()
 _patch_openvino_gptqmodel_compat()
 _patch_transformers_causal_conv1d_hub_kernel_compat()
 
@@ -449,3 +495,9 @@ if ensure_modelscope_available():
         raise ModuleNotFoundError(
             "env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`."
         ) from exc
+
+
+# Installed last: `optimum.gptq` imports `gptqmodel` (BACKEND, QuantizeConfig)
+# while it loads, so the bridge can only be wrapped once this package has
+# finished defining its public names.
+_patch_optimum_gptqmodel_load_bridge()

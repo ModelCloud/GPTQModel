@@ -107,9 +107,18 @@ class NativeProcessor(LoopProcessor):
         raise NotImplementedError("NativeProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule):
-        """Allocates the per-module cache used by the forward hook."""
+        """Allocates the per-module cache used by the forward hook.
 
-        self.native_inp_caches[module.name] = []
+        Routed experts are marked by the module plan before this runs. Their
+        native inputs cannot be paired with the quantized-path inputs (the
+        router sends a different token subset), so GPTAQ/FOEM fall back to
+        ``dXXT = 0`` for them and the capture is skipped to save memory. The
+        empty list keeps ``module.state`` shape-compatible for the consumers.
+        """
+
+        self.native_inp_caches[module.name] = (
+            None if module.state.get("is_routed_expert", False) else []
+        )
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports that native input capture currently runs for every eligible module."""
@@ -122,6 +131,10 @@ class NativeProcessor(LoopProcessor):
 
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Copies the module input to the configured GPTAQ staging device."""
+
+            if self.native_inp_caches.get(name) is None:
+                # Routed expert: native and quantized routing differ.
+                return
 
             # gptq is mutable.
             inp = inp[0].detach()
@@ -165,7 +178,7 @@ class NativeProcessor(LoopProcessor):
     ):
         """Moves the captured input list into module state for downstream use."""
 
-        module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name)
+        module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name) or []
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Clears cached native inputs after module finalization."""

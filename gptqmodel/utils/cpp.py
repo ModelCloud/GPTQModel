@@ -1149,6 +1149,7 @@ class TorchOpsJitExtension:
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
         prebuilt_library_env: Optional[str] = None,
+        stage_hip_sources: bool = False,
     ) -> None:
         self.name = name
         self.namespace = namespace
@@ -1169,6 +1170,10 @@ class TorchOpsJitExtension:
         self.python_abi_dependent = python_abi_dependent
         self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
         self.prebuilt_library_env = prebuilt_library_env
+        # torch's HIP loader hipifies out-of-tree sources next to the
+        # originals, which mutates (or fails on) a read-only install. Staging
+        # copies the source root into the writable build cache first.
+        self.stage_hip_sources = bool(stage_hip_sources)
         self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
         self._load_result = False
@@ -1207,6 +1212,73 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return _dedupe_path_strings(include_paths)
         return cuda_include_paths_with_fallback(include_paths)
+
+    def _staging_root(self) -> Path:
+        """Writable directory that receives a copy of the HIP kernel sources."""
+
+        return self.base_build_root() / "_src"
+
+    def _stage_hip_sources(
+        self,
+        sources: Sequence[str],
+        include_paths: Sequence[str],
+    ) -> tuple[list[str], list[str]]:
+        """Copy the source tree into the build cache before hipification.
+
+        torch's ROCm loader writes ``<name>_hip.{hip,cpp}`` next to each source
+        it hipifies. Passing checkout paths directly therefore mutates the
+        shipped ``gptqmodel_ext`` tree (the generated names are gitignored, so
+        it goes unnoticed) and fails when site-packages is read-only. The
+        staged tree keeps every generated file under the writable cache and
+        preserves the relative layout so local ``#include`` directives and the
+        caller's include paths keep resolving.
+        """
+
+        resolved_sources = [str(source) for source in sources]
+        resolved_includes = [str(path) for path in include_paths]
+        if not self.stage_hip_sources or not IS_ROCM or not resolved_sources:
+            return resolved_sources, resolved_includes
+
+        source_paths = [Path(source).expanduser().resolve(strict=False) for source in resolved_sources]
+        source_root = Path(os.path.commonpath([str(path.parent) for path in source_paths]))
+        staging_root = self._staging_root()
+        if staging_root == source_root or staging_root.is_relative_to(source_root):
+            raise RuntimeError(
+                f"{self.display_name}: the JIT build root `{staging_root}` is inside the "
+                f"source tree `{source_root}`; choose a build root outside the checkout."
+            )
+        staging_root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+
+        def staged(path: Path) -> Path:
+            try:
+                relative = path.relative_to(source_root)
+            except ValueError:
+                return path
+            return staging_root / relative
+
+        staged_sources = [str(staged(path)) for path in source_paths]
+        staged_includes: list[str] = []
+        for include in resolved_includes:
+            path = Path(include).expanduser()
+            if path.exists():
+                resolved = path.resolve(strict=False)
+                try:
+                    resolved.relative_to(source_root)
+                except ValueError:
+                    staged_includes.append(include)
+                else:
+                    staged_includes.append(str(staged(resolved)))
+            else:
+                staged_includes.append(include)
+        return staged_sources, _dedupe_path_strings(staged_includes)
+
+    def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
+        """Resolve sources and includes, staging HIP sources when requested."""
+
+        sources = self._resolve_sequence(self.sources)
+        include_paths = self._resolved_extra_include_paths()
+        return self._stage_hip_sources(sources, include_paths)
 
     def _with_stable_abi_target(self, flags: Sequence[str]) -> list[str]:
         resolved = list(flags)
@@ -1470,10 +1542,9 @@ class TorchOpsJitExtension:
         """Hash the effective op surface and source metadata to avoid stale cache reuse."""
 
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
-        sources = self._resolve_sequence(self.sources)
+        sources, include_paths = self._resolved_sources_and_include_paths()
         extra_cflags = self._resolved_extra_cflags()
         extra_cuda_cflags = self._resolved_extra_cuda_cflags()
-        include_paths = self._resolved_extra_include_paths()
         python_abi_dependent, torch_stable_abi = self._resolved_abi_flags(sources, include_paths)
         if python_abi_dependent:
             payload.append(f"python_abi={_python_abi_tag()}")
@@ -1907,8 +1978,7 @@ class TorchOpsJitExtension:
                 started = time.perf_counter()
                 build_invocation_succeeded = False
                 try:
-                    resolved_sources = self._resolve_sequence(self.sources)
-                    extra_include_paths = self._resolved_extra_include_paths()
+                    resolved_sources, extra_include_paths = self._resolved_sources_and_include_paths()
                     kwargs = {
                         "name": self.name,
                         "sources": resolved_sources,

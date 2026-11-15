@@ -25,6 +25,7 @@ from gptqmodel._alloc_conf import (
     DEFAULT_ALLOC_CONF,
     alloc_conf_configured,
     apply_default_alloc_conf,
+    default_alloc_conf,
 )
 
 
@@ -39,17 +40,22 @@ def test_default_is_installed_when_unset(clean_alloc_env):
     assert not alloc_conf_configured()
 
     installed = apply_default_alloc_conf()
+    expected = default_alloc_conf()
 
-    assert installed == DEFAULT_ALLOC_CONF
+    assert installed == expected
     for name in ALLOC_CONF_ENV_VARS:
-        assert os.environ[name] == DEFAULT_ALLOC_CONF
+        assert os.environ[name] == expected
     # `expandable_segments` is the part that actually prevents the
-    # fragmentation cliff; keep the assertion narrow and meaningful.
-    assert "expandable_segments:True" in DEFAULT_ALLOC_CONF
+    # fragmentation cliff on CUDA; ROCm omits it because the VMM path
+    # corrupts results across ``empty_cache()``.
+    if expected == DEFAULT_ALLOC_CONF:
+        assert "expandable_segments:True" in DEFAULT_ALLOC_CONF
+    else:
+        assert "expandable_segments" not in expected
 
 
 def test_second_call_is_a_no_op(clean_alloc_env):
-    assert apply_default_alloc_conf() == DEFAULT_ALLOC_CONF
+    assert apply_default_alloc_conf() == default_alloc_conf()
     assert apply_default_alloc_conf() is None
 
 
@@ -88,7 +94,7 @@ def test_importing_gptqmodel_installs_the_default():
     assert out.returncode == 0, out.stderr[-4000:]
     payload = json.loads(out.stdout.strip().splitlines()[-1])
     for name in ALLOC_CONF_ENV_VARS:
-        assert payload[name] == DEFAULT_ALLOC_CONF
+        assert payload[name] == default_alloc_conf()
 
 
 def test_runtime_hook_applies_the_default_on_the_native_backend(clean_alloc_env, monkeypatch):
@@ -103,8 +109,8 @@ def test_runtime_hook_applies_the_default_on_the_native_backend(clean_alloc_env,
         torch.cuda.memory, "_set_allocator_settings", lambda value: calls.append(value)
     )
 
-    assert apply_default_alloc_conf() == DEFAULT_ALLOC_CONF
-    assert calls == [DEFAULT_ALLOC_CONF]
+    assert apply_default_alloc_conf() == default_alloc_conf()
+    assert calls == [default_alloc_conf()]
 
 
 def test_runtime_hook_leaves_a_non_native_backend_alone(clean_alloc_env, monkeypatch):
@@ -121,7 +127,7 @@ def test_runtime_hook_leaves_a_non_native_backend_alone(clean_alloc_env, monkeyp
         torch.cuda.memory, "_set_allocator_settings", lambda value: calls.append(value)
     )
 
-    assert apply_default_alloc_conf() == DEFAULT_ALLOC_CONF
+    assert apply_default_alloc_conf() == default_alloc_conf()
     assert calls == []
 
 
@@ -131,6 +137,8 @@ def test_expandable_segments_are_active_on_cuda():
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
+    if torch.version.hip is not None:
+        pytest.skip("ROCm deliberately does not enable expandable_segments")
 
     script = textwrap.dedent(
         """

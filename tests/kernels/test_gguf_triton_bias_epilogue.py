@@ -122,6 +122,26 @@ def test_fixed_launch_writes_fp32_before_bias(monkeypatch):
 
 @requires_gpu
 @pytest.mark.cuda
+def test_grad_input_uses_the_differentiable_torch_path(monkeypatch):
+    """The fused Triton matmul has no backward; a grad input must fall back."""
+
+    _, module = _packed_pair("q4_k", 256)
+
+    def fail_triton(*_args, **_kwargs):
+        raise AssertionError("fused Triton path used for a grad-requiring input")
+
+    monkeypatch.setattr(module, "_forward_triton", fail_triton)
+    torch.manual_seed(23)
+    x = torch.randn(16, 256, device="cuda", dtype=torch.float16, requires_grad=True)
+    out = module(x)
+
+    assert out.requires_grad and out.grad_fn is not None
+    out.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@requires_gpu
+@pytest.mark.cuda
 @pytest.mark.parametrize("shape", [(0, 256), (2, 0, 256)])
 def test_empty_input_does_not_launch_triton(shape):
     _, module = _packed_pair("q4_k", 256)

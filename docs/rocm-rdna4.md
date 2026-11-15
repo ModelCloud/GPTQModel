@@ -62,9 +62,20 @@ table instead of a single module-level constant set.
 
 The ROCm SDK ships Tensile libraries for `gfx1200`, `gfx1201`, and `gfx1250`
 (check `hipblaslt/library/`). The claim that "RDNA4 has no hipBLASLt library" is
-incorrect; the libraries exist but are not tuned for RDNA4. Cold hipBLASLt
-library loading dominates a cold quantize on CDNA, so quantization still selects
-rocBLAS by default. hipBLASLt is available only as an explicit experiment:
+incorrect; the libraries exist but are not tuned for RDNA4.
+
+They are also not reproducible across processes on this stack: rocBLAS forwards
+its GEMMs to hipBLASLt, and hipBLASLt selects a different kernel per process for
+the same shape (`MT64x64x16` vs `MT256x128x8`, or a split-K variant). Two
+identical GPTQ runs then save different checkpoints — measured on Qwen2.5-0.5B,
+334/795 tensors differed, starting at layer 0's `cholesky_inverse`. GPT-QModel
+therefore exports `ROCBLAS_USE_HIPBLASLT=0` at import unless the caller already
+set it, so rocBLAS runs its own deterministic kernels and "quantization selects
+rocBLAS by default" is now literally true. An explicit
+`ROCBLAS_USE_HIPBLASLT=1` opts back into hipBLASLt.
+
+Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
+hipBLASLt remains available as an explicit experiment:
 
 ```bash
 GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
@@ -73,6 +84,17 @@ GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
 `gptqmodel.utils.rocm.quantize_tuning(device)` returns
 `{"blas_backend", "amp", "prewarm_ops"}`; `amp` stays disabled on ROCm
 (including RDNA4) until autotune overhead is measured on RDNA4.
+
+### Default process environment
+
+ROCm also gets an allocator default without `expandable_segments`: on this
+stack, `expandable_segments:True` combined with `torch.cuda.empty_cache()`
+corrupts ordinary Torch results (measured 0–294912 bad rows across runs of the
+issue's 2097152×16 matmul repro) and GPT-QModel empties the cache throughout
+quantization. CUDA keeps `expandable_segments:True`. Both defaults defer to a
+caller-provided value. See
+[ROCm default process environment](rocm-default-environment.md) for the flow,
+the precedence rules and the before/after numbers.
 
 ### ParoQuant Triton
 
@@ -536,7 +558,9 @@ parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
   are `nullptr` and the loader already raises a clear `TORCH_CHECK`). Loading
   EXL3 on ROCm uses `EXL3_TORCH`; AUTO now does the same instead of selecting
   `EXL3_EXLLAMA_V3`.
-- **hipBLASLt:** libraries are shipped but not tuned for RDNA4.
+- **hipBLASLt:** libraries are shipped but not tuned for RDNA4; rocBLAS
+  forwarding to hipBLASLt is disabled by default (`ROCBLAS_USE_HIPBLASLT=0`)
+  because it picks a different kernel per process.
 - **Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4:** no ROCm support and
   deliberately not ported; see *Deliberately unsupported backends* for the
   per-backend reason. AUTO filters all of them out and an explicit selection
