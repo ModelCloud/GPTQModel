@@ -107,21 +107,59 @@ needs:
   mask supplies the model's own per-query relation (causal, padding, sliding
   window); a `[B, S]` mask supplies the kept set and the replay adds causal
   order among kept rows.
-- The packed mask is additive and block-diagonal: a retained row may only
-  attend to retained rows of the same document at or before its own position.
-  Document A can no longer attend to document B through the concatenated
-  sequence, which was the semantic defect behind #4095.
+- The kept set of a `[B, S, S]` grid comes from the **diagonal**, not from
+  `any(dim=-1)`. A real token always attends to itself, while a padding query
+  row of a real Hugging Face mask still sees the real keys (only padding
+  *keys* are masked). `any(dim=-1)` therefore counted padding rows as real
+  tokens, the `!= row_count` check failed, and every real padded `batch_size>1`
+  capture fell back to one causal sequence.
+- The packed mask is block-diagonal: a retained row may only attend to retained
+  rows of the same document at or before its own position. Document A can no
+  longer attend to document B through the concatenated sequence, which was the
+  semantic defect behind #4095.
 - `position_ids` keep each row's original offset (taken from the cached
   `position_ids` when available), so rotary embeddings are evaluated at the
   real positions instead of a synthetic `0..retained-1` range.
-- The mask keeps the captured form: a 3-D/4-D captured mask produces the
-  additive block-diagonal mask, while a 2-D captured mask (FlashAttention)
-  produces a 2-D packed keep mask and leaves causal masking to the attention
-  implementation. When the capture stored no mask at all (`batch_size=1`), the
-  additive block-diagonal fallback is used; it is the explicit form of the
-  causal path the module already took.
 - Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
   the quadratic mask is built once per unique capture list per layer.
+
+### Mask form and polarity
+
+`AWQProcessor._captured_mask_form` classifies the captured grid, and the replay
+rebuilds it in the same form. This is not cosmetic: the form decides how the
+attention implementation consumes the tensor.
+
+| Form | Captured example | Replay | Why |
+| --- | --- | --- | --- |
+| `additive` | `[B, 1, S, S]` float with `finfo.min` | float block grid, `min` for masked cells | Hugging Face eager attention sums the mask into the logits |
+| `bool_keep` | `[B, 1, S, S]` bool, `True` = attended (SDPA) | bool block grid, `True` = attended | SDPA takes a keep mask |
+| `bool_masked` | `[B, 1, S, S]` bool, `True` = masked (TeleChat2 `triu(1)`) | bool block grid, `True` = masked | the consumer calls `masked_fill`, which rejects a float mask |
+| planar | `[B, S]` keep mask | `[1, retained]` keep mask | FlashAttention takes a rank-2 keep mask; cross-document separation is not expressible |
+
+A bool mask's polarity is read from its diagonal: `True` on the diagonal means
+the keep convention, an all-`False` diagonal means `masked_fill`. An additive
+mask's polarity is read from whether it contains negative values. When the
+capture stored no mask at all (`batch_size=1` on a model that builds its own
+causal mask), the additive block-diagonal fallback is used; it is the explicit
+form of the causal path the module already took.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._token_row_replay_kwargs"] --> B["AWQProcessor._captured_mask_form"]
+    B --> C{"captured form"}
+    C -- additive --> D["float block grid, finfo.min masked"]
+    C -- bool_keep --> E["bool block grid, True attended"]
+    C -- bool_masked --> F["bool block grid, True masked"]
+    C -- planar --> G["1, retained keep mask"]
+    C -- none --> D
+    B --> H["AWQProcessor._token_row_source_structure"]
+    H --> I["keep from the grid diagonal"]
+    I --> J["documents and original positions"]
+    J --> D
+    J --> E
+    J --> F
+    style G fill:#ffe9b3,stroke:#b38600
+```
 
 ```mermaid
 sequenceDiagram
@@ -132,7 +170,7 @@ sequenceDiagram
     Hook->>Pack: kept rows per document
     Pack->>Kw: provenance source batch and row
     Kw->>Kw: source structure maps row to document and position
-    Kw->>Attn: attention_mask and position_ids for packed rows
+    Kw->>Attn: mask in the captured form and position_ids for packed rows
     Note over Attn: same-document causal only
 ```
 
@@ -159,10 +197,12 @@ to the memory bound.
 | Dense module, ragged captures | latest (shortest) capture | bounded rows from every capture |
 | Dense module, equal-length captures | batch concat | bounded token rows from every capture |
 | `batch_size>1`, batched capture | replay ran with `attention_mask=None`; `Qwen2Attention.forward` raised `TypeError` and the synthetic sequence attended across documents | replay carries a per-document block mask and original positions |
+| Captured `masked_fill` bool grid (TeleChat2) | converted to an additive float mask; `masked_fill` raised `RuntimeError: only supports boolean masks` | rebuilt as a bool grid with `True` = masked |
+| Real padded `batch_size>1` bool grid | keep came from `any(dim=-1)`, so padding rows counted and the structure was never recovered | keep comes from the diagonal; the document grid and positions are recovered |
 | Cached mask does not match the captured rows | mask dropped, cross-document attention | each capture batch replayed as one contiguous document |
 | No cached mask entries at all | `attention_mask=None` | kwargs left unchanged |
 | Captured masks are all `None` (`batch_size=1`) | `attention_mask=None`, synthetic positions | additive block-diagonal fallback with original positions |
-| 2-D captured mask (FlashAttention) | mask dropped | 2-D packed keep mask and original positions; causal masking stays inside the attention implementation, so cross-document separation is not expressible |
+| Planar `[B, S]` captured mask (FlashAttention) | mask dropped | planar packed keep mask and original positions; causal masking stays inside the attention implementation |
 | One starved member in a group | hidden by sibling sum | group falls back to RTN |
 | Empty capture for a module | group falls back | group falls back |
 | Token-row budget below batch count | n/a for dense | one row from evenly spaced batches |

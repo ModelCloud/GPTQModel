@@ -86,6 +86,9 @@ compatible deployment engine.
 - **Recover accuracy.** Use GSQ refinement, EoRA low-rank compensation, rotation,
   smoothing, and norm tuning for supported recipes. LoRA training and adapter
   loading support further task adaptation.
+- **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
+  a quantized block, including multimodal wrappers and hybrid layer shapes; see
+  the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.
@@ -255,6 +258,7 @@ and [quantization recipes](docs/quantization-guide.md) for the available control
 | Evaluate quality and performance | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Benchmark methodology](docs/benchmark-methodology.md) |
 | Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](docs/openai-server-exposure.md) |
 | Add a model or inspect its plan | [Module-plan guide](docs/module-plan-guide.md) · [Developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide) |
+| Load legacy remote-code models on Transformers 5 | [Transformers 5 compatibility](docs/transformers-5-compat.md#k-native-loads-run-the-pre-load-hook-one-legacy-generate-adapter-issue-4121-items-2-3) |
 | Diagnose runtime issues | [Troubleshooting](https://github.com/ModelCloud/GPTQModel/wiki/Troubleshooting-and-FAQ) · [Concurrency](docs/concurrency.md) |
 
 Kernel contracts, implementation flows, and focused technical notes are in the

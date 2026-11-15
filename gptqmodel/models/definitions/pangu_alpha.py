@@ -25,9 +25,41 @@ class PanguAlphaQModel(BaseQModel):
             "ln_1": ("ln_1:!",),
             "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "c_proj:1"),
             "ln_2": ("ln_2:!",),
-            "mlp": ("c_fc:0", "c_proj:1"),
+            # `GPTPanguMLP.forward` is `c_proj(act(c_fc(x)))` with GELU, which is
+            # not positively homogeneous: folding a scale into `c_fc` changes the
+            # MLP output (4.5e-2 on a tiny model).
+            "mlp": ("c_fc:0:nosrc", "c_proj:1"),
         }
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        """Drop the top-query layer's `q_proj` from the `ln_1` scaling group.
+
+        ``GPTPanguModel.forward`` passes ``custom_query = wqe(position_ids)`` to
+        the last block, so that block's ``q_proj`` does not read ``ln_1``'s
+        output. Scaling it with the ``ln_1`` group changes the attention output
+        (q is multiplied by the scale while its input is not divided).
+        """
+
+        nodes = super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+        transformer = getattr(self.model, "transformer", None)
+        blocks = getattr(transformer, "h", None)
+        if not blocks or blocks[-1] is not module:
+            return nodes
+        q_proj = getattr(getattr(module, "attn", None), "q_proj", None)
+        if q_proj is None:
+            return nodes
+
+        filtered = []
+        for node in nodes:
+            layers = node.get("layers") or []
+            if q_proj not in layers:
+                filtered.append(node)
+                continue
+            remaining = [consumer for consumer in layers if consumer is not q_proj]
+            if remaining:
+                filtered.append({**node, "layers": remaining})
+        return filtered
 
     def prepare_layer_replay_kwargs(
         self,

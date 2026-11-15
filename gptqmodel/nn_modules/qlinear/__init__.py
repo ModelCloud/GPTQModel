@@ -30,6 +30,7 @@ from ...utils.planar_packing import (
 )
 from ...utils.safe import THREADPOOLCTL
 from ..compiled_state import compiled_module_getstate
+from ._fused_train_state import QZEROS_FORMAT_BUFFER
 from ._runtime_cache import tensor_cache_key
 
 
@@ -1074,6 +1075,133 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         # pack_factor is only meaningful for packed low-bit code storage.
         self.pack_factor = self.pack_dtype_bits // self.bits
 
+        # Persistent layout marker. A state dict's ``_metadata`` is not a
+        # tensor, so safetensors and plain dict copies drop it; this buffer
+        # keeps the v1/v2 (or runtime-layout) code inside the payload.
+        # The initial value must be a valid checkpoint code: an export shell is
+        # built and then filled by accelerate, which round-trips the module's
+        # own ``state_dict()`` before any save hook runs. ``0`` is reserved for
+        # "kernel-private runtime layout", so a placeholder ``0`` would make
+        # that internal load look like a corrupt payload.
+        self.register_buffer(
+            QZEROS_FORMAT_BUFFER,
+            t.ones((), dtype=t.int64),
+            persistent=True,
+        )
+
+    def _emitted_layout_code(self) -> int:
+        """Value written to the ``qzeros_format`` buffer for this state dict.
+
+        ``0`` marks a kernel-private runtime layout that has no inverse. The
+        code lets a reload fail loudly even when the caller saved the tensors
+        without going through a writer that refuses. AWQ has no v1/v2
+        convention, so its checkpoint words are always ``2`` (logical).
+        """
+
+        if self._is_runtime_layout():
+            return 0
+        return 2
+
+    def _is_runtime_layout(self) -> bool:
+        """Whether the packed buffers hold a kernel-private runtime layout.
+
+        Marlin, Machete, Swordfish, BitBLAS and ExLlamaV2 rewrite `qweight`
+        (and often `qzeros`/`g_idx`) in place into a layout that has no inverse.
+        Such a module can serve inference and read-only `state_dict()` callers,
+        but it is not a checkpoint.
+        """
+
+        return any(
+            bool(getattr(self, flag, False))
+            for flag in ("_marlin_repacked", "_native_shuffled", "_awq_repacked")
+        )
+
+    def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
+        """Emit the checkpoint-layout tensors captured before a CPU transform.
+
+        The CPU int4pack kernels (GPTQ and AWQ alike) replace `qweight` and
+        `qzeros` in place with int4pack words and float affine offsets. Those
+        runtime operands are not a checkpoint: the integer v1/v2 conversion
+        turns float offsets into `inf`/`65536`, and the int4pack `qweight` has a
+        different shape. The snapshot taken by `capture_fused_train_state`
+        still holds the checkpoint tensors, so serialization emits those
+        instead of the transformed buffers.
+
+        A modified runtime layout has no inverse snapshot; exporting it must
+        fail closed rather than write garbage.
+        """
+
+        snapshot = getattr(self, "_fused_train_state", None)
+        if not snapshot:
+            return
+        if not getattr(self, "_fused_train_state_exportable", True):
+            raise RuntimeError(
+                f"{self.__class__.__name__} holds a modified CPU int4pack runtime state "
+                "that cannot be converted back to the checkpoint layout. Load "
+                "checkpoint-layout weights before saving."
+            )
+        for name, buffer_name in snapshot.items():
+            tensor = self._buffers.get(buffer_name)
+            if isinstance(tensor, t.Tensor):
+                destination[prefix + name] = tensor if keep_vars else tensor.detach()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
+        self._write_state_dict_layout_marker(destination, prefix, keep_vars)
+
+    def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
+        """Emit the layout code as a tensor so every transport keeps it.
+
+        A per-module ``_metadata`` entry is free but is not a tensor: a
+        safetensors round trip (Trainer/accelerate) or a plain
+        ``{k: v for k, v in sd.items()}`` copy drops it, and the receiving
+        module then reads v2 words as v1. The buffer is a registered persistent
+        buffer, which is what lets ``load_state_dict`` consume it instead of
+        reporting an unexpected key.
+        """
+
+        marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
+        if not isinstance(marker, t.Tensor):
+            return
+        value = marker if keep_vars else marker.detach()
+        destination[prefix + QZEROS_FORMAT_BUFFER] = value.clone().fill_(
+            self._emitted_layout_code()
+        )
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        state_dict = args[0] if args else kwargs.get("state_dict")
+        prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+        missing_keys = args[4] if len(args) > 4 else kwargs.get("missing_keys")
+
+        if state_dict is not None:
+            marker = state_dict.get(prefix + QZEROS_FORMAT_BUFFER)
+            if isinstance(marker, t.Tensor) and marker.numel() == 1:
+                if int(marker.reshape(-1)[0].item()) == 0 and not self._is_runtime_layout():
+                    # The payload records that it came from a kernel-private
+                    # runtime layout while this module holds checkpoint tensors.
+                    # Copying it would silently produce a wrong model, so fail
+                    # loudly however the tensors got here.
+                    #
+                    # A module that is itself in a runtime layout keeps its own
+                    # round trip: ExLlamaV2 records the shuffle in metadata and
+                    # rebinds the words, and that path is how a caller moves a
+                    # finalized layer between matching modules.
+                    raise RuntimeError(
+                        f"{self.__class__.__name__} received a state dict that records a "
+                        "kernel-private runtime layout (qzeros_format=0). That payload is not "
+                        "a checkpoint and cannot be loaded. Reload the original checkpoint, "
+                        "or use `GPTQModel.save()`/`save_quantized()` to write a loadable one."
+                    )
+
+        super()._load_from_state_dict(*args, **kwargs)
+
+        # A plain HF checkpoint has no layout marker. It is optional metadata,
+        # so a missing marker must not fail a strict load.
+        if missing_keys is not None:
+            marker_key = prefix + QZEROS_FORMAT_BUFFER
+            missing_keys[:] = [key for key in missing_keys if key != marker_key]
+
 
 def _scales_for_storage(scales: t.Tensor, *, name: str) -> t.Tensor:
     """Reject scales that become nonfinite or zero in the GPTQ FP16 layout.
@@ -1295,9 +1423,21 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         else:
             self.bias = None
 
+    def _runtime_qzeros_format(self) -> int:
+        """Return the live qzero word layout, defaulting to the v1 convention.
+
+        ``__init__`` records ``_qzeros_format = 1``, but a module built through
+        ``__new__`` (packing probes, tests, conversion shells) never runs it.
+        ``state_dict()`` reaches the emitted-layout helpers on those modules, so
+        every read defaults to the constructor value instead of raising
+        ``AttributeError`` from inside serialization.
+        """
+
+        return getattr(self, "_qzeros_format", 1)
+
     def qzero_format(self, format: int = None) -> int:
         if format is None:
-            return self._qzeros_format
+            return self._runtime_qzeros_format()
 
         if format not in [1, 2]:
             raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
@@ -1314,63 +1454,68 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         unchanged, so their layout is ``_qzeros_format``.
         """
 
-        checkpoint_format = getattr(self, "_checkpoint_format_on_disk", None)
+        checkpoint_format = self._checkpoint_qzeros_format()
         if checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
             return 1
         if checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
             return 2
-        return int(self._qzeros_format)
+        return int(self._runtime_qzeros_format())
 
-    def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
-        """Emit the checkpoint-layout tensors captured before a CPU transform.
+    def _checkpoint_qzeros_format(self):
+        """The qzero convention this module writes to a checkpoint.
 
-        ``TorchAtenLinear``/``TorchFusedLinear`` replace ``qweight`` and
-        ``qzeros`` in place with int4pack words and float affine offsets. Those
-        runtime operands are not a checkpoint: the integer v1/v2 conversion in
-        :meth:`_write_checkpoint_layout_qzeros` turns the float offsets into
-        ``inf``/``65536``. The snapshot taken by
-        :func:`capture_fused_train_state` still holds the checkpoint tensors, so
-        serialization emits those instead of the transformed buffers.
-
-        A modified runtime layout has no inverse snapshot; exporting it must
-        fail closed rather than write garbage.
+        The loader records the layout of the file it read in
+        ``_checkpoint_format_on_disk``. A module that was never loaded from disk
+        (a freshly quantized layer, or an export shell) has no such record, so
+        the format it was constructed for is the convention it writes. Both
+        ``checkpoint_layout_qzeros`` and the emitted layout code read this one
+        helper, so the words and their label cannot disagree.
         """
 
-        snapshot = getattr(self, "_fused_train_state", None)
-        if not snapshot:
-            return
-        if not getattr(self, "_fused_train_state_exportable", True):
-            raise RuntimeError(
-                f"{self.__class__.__name__} holds a modified CPU int4pack runtime state "
-                "that cannot be converted back to the checkpoint layout. Load "
-                "checkpoint-layout weights before saving."
-            )
-        for name, buffer_name in snapshot.items():
-            tensor = self._buffers.get(buffer_name)
-            if isinstance(tensor, t.Tensor):
-                destination[prefix + name] = tensor if keep_vars else tensor.detach()
+        recorded = getattr(self, "_checkpoint_format_on_disk", None)
+        if recorded is not None:
+            return recorded
+        return getattr(self, "format", None)
+
+    def _emitted_layout_code(self) -> int:
+        """Value written to the ``qzeros_format`` buffer for this state dict.
+
+        GPTQ additionally distinguishes the v1 and v2 checkpoint conventions.
+        """
+
+        if self._is_runtime_layout():
+            # A kernel-private layout that has no inverse is not a checkpoint.
+            # The code lets a reload fail loudly even when the caller saved the
+            # tensors without going through a refusing writer.
+            return 0
+        return self._emitted_qzeros_format()
 
     def _write_state_dict_layout_metadata(self, destination, prefix: str) -> None:
-        """Record the emitted qzeros layout in the state-dict metadata.
+        """Record the emitted qzeros layout in the state dict.
 
         A state dict can be copied between models loaded from different on-disk
         formats (v1 ``gptq`` vs ``gptq_v2``). The receiving module cannot infer
         the source layout from its own ``_checkpoint_format_on_disk``, so the
-        words must describe themselves. ``nn.Module.state_dict`` stores a
-        per-module metadata dict and ``load_state_dict`` forwards it to
-        ``_load_from_state_dict``; using it adds no tensor keys, so loading a
-        plain HF checkpoint with ``strict=True`` is unaffected.
+        words must describe themselves.
+
+        This is the human-readable mirror of the ``qzeros_format`` buffer,
+        which is the authoritative carrier because it survives safetensors and
+        plain dict copies (see ``_write_state_dict_layout_marker``). Keeping the
+        metadata entry lets a state dict written by an earlier release still be
+        read correctly.
         """
 
+        code = self._emitted_layout_code()
         metadata = getattr(destination, "_metadata", None)
         qzeros = destination.get(prefix + "qzeros")
         if metadata is None or not isinstance(qzeros, t.Tensor) or qzeros.numel() == 0:
             return
-        metadata.setdefault(prefix[:-1], {})["qzeros_format"] = self._emitted_qzeros_format()
+        metadata.setdefault(prefix[:-1], {})["qzeros_format"] = code
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
+        # ``PackedGroupedQuantLinear`` already emitted the fused-train snapshot,
+        # which replaces the transformed CPU int4pack operands.
         super()._save_to_state_dict(destination, prefix, keep_vars)
-        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
         self._write_checkpoint_layout_qzeros(destination, prefix)
         self._write_state_dict_layout_metadata(destination, prefix)
 
@@ -1390,10 +1535,10 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         if qzeros is None or qzeros.numel() == 0:
             return None
 
-        checkpoint_format = getattr(self, "_checkpoint_format_on_disk", None)
+        checkpoint_format = self._checkpoint_qzeros_format()
         if checkpoint_format is None:
             return None
-        runtime_format = self._qzeros_format
+        runtime_format = self._runtime_qzeros_format()
         planar = bool(getattr(self, "planar", False))
         if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
             from ...utils.model_dequant import _revert_gptq_v1_qzeros_correction
@@ -1424,6 +1569,24 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         if converted is not None:
             destination[prefix + "qzeros"] = converted
 
+    def _incoming_layout_code(self, state_dict, prefix: str, local_metadata) -> int | None:
+        """Layout code carried by the incoming state dict, if any.
+
+        The ``qzeros_format`` buffer is authoritative because it survives
+        safetensors and plain dict copies; the per-module metadata entry is the
+        fallback for state dicts produced by earlier releases.
+        """
+
+        if state_dict is not None:
+            marker = state_dict.get(prefix + QZEROS_FORMAT_BUFFER)
+            if isinstance(marker, t.Tensor) and marker.numel() == 1:
+                return int(marker.reshape(-1)[0].item())
+        if isinstance(local_metadata, dict):
+            recorded = local_metadata.get("qzeros_format")
+            if isinstance(recorded, int) and recorded in (0, 1, 2):
+                return recorded
+        return None
+
     def _incoming_qzeros_format(self, local_metadata) -> int | None:
         """Layout of the incoming qzeros words, or ``None`` when unknown.
 
@@ -1436,7 +1599,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         if isinstance(local_metadata, dict):
             recorded = local_metadata.get("qzeros_format")
-            if recorded in (1, 2):
+            if isinstance(recorded, int) and recorded in (1, 2):
                 return int(recorded)
 
         on_disk_format = getattr(self, "_checkpoint_format_on_disk", None)
@@ -1489,15 +1652,22 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             self._qzeros_format = 1
 
     def _load_from_state_dict(self, *args, **kwargs):
-        super()._load_from_state_dict(*args, **kwargs)
         state_dict = args[0] if args else kwargs.get("state_dict")
         prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
         local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+
+        layout_code = self._incoming_layout_code(state_dict, prefix, local_metadata)
+        # ``PackedGroupedQuantLinear`` rejects a runtime-layout payload and
+        # tolerates a missing layout marker before the copy.
+        super()._load_from_state_dict(*args, **kwargs)
+
         # A partial load (for example a PEFT adapter) carries no qzeros. Leave
         # the runtime layout alone: relabelling the live v2 words as v1 would
         # make the next save emit them under the wrong checkpoint label.
         if state_dict is not None and (prefix + "qzeros") in state_dict:
-            incoming_format = self._incoming_qzeros_format(local_metadata)
+            incoming_format = layout_code
+            if incoming_format not in (1, 2):
+                incoming_format = self._incoming_qzeros_format(local_metadata)
             if incoming_format is not None:
                 self._restore_qzeros_format(incoming_format)
         # Derived packed layouts depend on both the loaded words and the

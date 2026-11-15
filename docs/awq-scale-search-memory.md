@@ -108,11 +108,38 @@ so the two entry points cannot drift.
 | `AWQConfig(..., fallback={"strategy": "rtn"})` | `1.0%` | `0.5%` |
 | `EXL3Config(..., fallback={"strategy": "rtn"})` | `1.0%` | `0.5%` |
 | Explicit `fallback={"threshold": "2.0%"}` | `2.0%` | `2.0%` |
+| `normalize_fallback({"threshold": "3%"}, Fallback(smooth=SmoothMAD(k=2)))` | `smooth=None` | `SmoothMAD(k=2)` |
+| `normalize_fallback({"smooth": "mad"}, Fallback(smooth=SmoothPercentile()))` | `smooth=None` | `SmoothMAD()` |
+| `dynamic` per-module `fallback` in a real quantize | overwritten by the processor fallback | the override wins |
 
 A doubled threshold is silent: the fallback decision in
 `AWQProcessor._should_fallback_group` and `GPTQ` compares observed calibration
 tokens against this percentage. Doubling it moves modules from GPTQ to RTN
 without changing the checkpoint layout or reporting an error.
+
+### Resolution order
+
+Three layers feed one module's `Fallback`. The per-module override is the
+narrowest and must win; the processor-level argument is the run's default and
+sits under it; the config value is the base.
+
+```mermaid
+flowchart TD
+    A["config fallback<br/>qcfg.fallback"] --> B["normalize_fallback(processor fallback, config)"]
+    B --> C{"dynamic override for this module?"}
+    C -- yes --> D["normalize_fallback(override, processor-under-config)"]
+    C -- no --> E["processor-under-config"]
+    D --> F["task fallback used by the quantizer"]
+    E --> F
+```
+
+`GPTQProcessor` applies this in `clone_gptq_config_for_module`. Before #4121 it
+applied the override and then overwrote it with
+`normalize_fallback(fallback, qcfg_clone.fallback)`; because the looper always
+passes `quantize_config.fallback`, every per-module override was discarded in a
+real run. `MacaqProcessor`, `QQQProcessor` and `VPTQProcessor` had the same
+line, and additionally never applied the override at all. All four now merge
+the processor fallback *under* the override.
 
 ### Contract
 
@@ -122,6 +149,11 @@ without changing the checkpoint layout or reporting an error.
   wins.
 * An invalid strategy raises from `_normalize_fallback` instead of being
   silently treated as RTN.
+* Every field is merged, including `smooth`. A dict that omits `smooth`
+  inherits the default's smoother; a dict that names one (directly or through a
+  `smooth_*`/`clip_method` alias) replaces it.
+* Precedence is `dynamic` override > processor fallback > config fallback, for
+  GPTQ, MACaQ, QQQ and VPTQ.
 
 ## Validation
 
@@ -132,6 +164,12 @@ Regression tests:
   `test_scale_search_replay_batch_size_keeps_the_2d_row_size`,
   `test_scale_search_replay_batch_size_handles_empty_and_1d_inputs`.
 * `tests/test_fallback.py` — `test_dict_fallback_keeps_the_dataclass_threshold_default`.
+* `tests/test_fallback.py` —
+  `test_normalize_fallback_merges_every_field_including_smooth` and
+  `test_dynamic_fallback_override_survives_a_real_quantize` (a real CPU
+  quantize of a one-layer Llama).
+* `tests/test_dynamic.py` — `test_dynamic_overrides_apply_per_module` now
+  passes the processor-level `fallback` the looper always supplies.
 
 Measured on an RTX 4090 (48 GiB) with 128 x 2048 C4 windows, AWQ 4-bit group
 size 128, and the 3-D batch capture pinned through

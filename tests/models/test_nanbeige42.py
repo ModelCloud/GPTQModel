@@ -10,6 +10,7 @@ class TestNanbeige42(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Nanbeige4.2-3B" # Nanbeige/Nanbeige4.2-3B
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 8
+    ASSERT_INFERENCE = True
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,

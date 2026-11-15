@@ -86,7 +86,7 @@ from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config
+from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.model import (
@@ -781,6 +781,16 @@ class BaseQModel(nn.Module):
                 restored_rotary_buffers,
                 type(self.model).__name__,
             )
+        # transformers 5 always hands `generate()`'s cache to the remote
+        # `prepare_inputs_for_generation`, even before the first prefill, and
+        # replaced the tuple/attribute cache interface those implementations
+        # were written against. Install the shared legacy adapter here so every
+        # load path (native eval, quantization, quantized reload) gets it.
+        if install_legacy_generation_compat(self.model):
+            log.debug(
+                "Model: installed legacy generate() adapter for `%s`.",
+                type(self.model).__name__,
+            )
         hooks = getattr(self, "moe_lifecycle_hooks", None)
         if hooks is not None:
             hooks = copy.copy(hooks)
@@ -1281,6 +1291,20 @@ class BaseQModel(nn.Module):
         consumer's input scale into them.
         """
         return cls._collect_flagged_layer_modules(POST_NORM_FLAG)
+
+    def awq_post_norm_modules(self, layer: nn.Module) -> Set[str]:
+        """Layer-relative post-norms for ``layer``.
+
+        `get_post_norm_modules` is static because most definitions declare one
+        `:postnorm` set for every layer. A hybrid model whose decoder layers
+        alternate between pre-norm and post-norm shapes cannot: OLMo Hybrid's
+        full-attention layer post-norms the attention output and adds it to the
+        residual, while its linear-attention layer feeds the same norm straight
+        into the MLP. Such a definition overrides this to add the norm only on
+        the shapes where it sits on the residual branch.
+        """
+
+        return set(self.get_post_norm_modules())
 
     @classmethod
     def has_norm_flag(cls, module_spec: str) -> bool:
@@ -4965,7 +4989,7 @@ class BaseQModel(nn.Module):
         # the tree immediately before the next consumer and share that
         # consumer's width, so position and width cannot identify a fold
         # source. The definition marks it explicitly instead.
-        post_norm_modules = set(self.get_post_norm_modules())
+        post_norm_modules = set(self.awq_post_norm_modules(module))
 
         def _select_feature_name(names):
             """Return the first quantized child that has captured activations."""

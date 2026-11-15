@@ -11,7 +11,7 @@ import shutil
 import sys
 import warnings
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any, Optional
 
 import torch
@@ -1049,6 +1049,10 @@ def _patch_transformers_remote_code_compat() -> None:
             # can compute usable KV length against the newer cache interface.
             def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
                 max_length = self.get_max_length(layer_idx=layer_idx)
+                if max_length is not None and max_length < 0:
+                    # transformers 5 reports `-1` for a dynamic (unbounded)
+                    # layer; transformers 4 reported no limit as `None`.
+                    max_length = None
                 previous_seq_length = self.get_seq_length(layer_idx)
                 if max_length is not None and previous_seq_length + new_seq_length > max_length:
                     return max_length - new_seq_length
@@ -1082,6 +1086,36 @@ def _patch_transformers_remote_code_compat() -> None:
                 return cache
 
             dynamic_cache_cls.from_legacy_cache = from_legacy_cache
+
+        if cache_base_cls is not None and not hasattr(cache_base_cls, "seen_tokens"):
+            # transformers 4 exposed the number of cached tokens as
+            # `cache.seen_tokens`; transformers 5 replaced it with
+            # `get_seq_length()`. Legacy remote `prepare_inputs_for_generation`
+            # implementations still read the attribute (MiniCPM-2B-dpo).
+            def seen_tokens(self) -> int:
+                return self.get_seq_length()
+
+            cache_base_cls.seen_tokens = property(seen_tokens)
+
+        if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "__getitem__"):
+            # Legacy remote decoders index the KV cache as the transformers-4
+            # tuple of `(key, value)` pairs, e.g.
+            # `past_key_values[0][0].shape[2]` (DeciLM/Baichuan2 remote
+            # `prepare_inputs_for_generation`).
+            def __getitem__(self, layer_idx):
+                layers = self.layers
+                if isinstance(layer_idx, slice):
+                    return tuple((layer.keys, layer.values) for layer in layers[layer_idx])
+                if layer_idx < 0:
+                    layer_idx += len(layers)
+                if layer_idx < 0 or layer_idx >= len(layers):
+                    raise IndexError(f"cache layer {layer_idx} is out of range")
+                layer = layers[layer_idx]
+                if not getattr(layer, "is_initialized", False):
+                    raise IndexError(f"cache layer {layer_idx} has not been written yet")
+                return layer.keys, layer.values
+
+            dynamic_cache_cls.__getitem__ = __getitem__
 
         if generation_utils is not None and not hasattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING"):
             # Older remote generation code registers custom cache builders through
@@ -1461,11 +1495,10 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
     # newer transformers only preserves the serialized `seq_length` field.
     config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
     config.attribute_map["max_length"] = "seq_length"
-    if not hasattr(config, "num_hidden_layers") and hasattr(config, "num_layers"):
-        # transformers 5's DynamicCache sizes itself from `num_hidden_layers`;
-        # ChatGLM serializes the same value as `num_layers`. The attribute map
-        # keeps it out of the serialized config while `generate()` can read it.
-        config.attribute_map["num_hidden_layers"] = "num_layers"
+    # transformers 5's DynamicCache sizes itself from `num_hidden_layers`;
+    # ChatGLM serializes the same value as `num_layers`. The shared alias below
+    # covers this and the other legacy layer-count field names.
+    _restore_legacy_layer_count_alias(config)
 
     # `attribute_map` resolves `config.max_length` for the remote model's
     # `__init__`, but transformers 5's `_prepare_generation_config` walks the
@@ -1664,8 +1697,34 @@ def _normalize_rope_parameters_config_compat(
 
 # Restore config fields renamed by transformers 5.x before older trust_remote_code
 # model files instantiate their architectures from the config object.
+_LEGACY_LAYER_COUNT_FIELDS = ("num_layers", "n_layer", "n_layers")
+
+
+def _restore_legacy_layer_count_alias(config: Any) -> bool:
+    """Alias a legacy layer-count field to `num_hidden_layers`.
+
+    transformers 5 sizes `DynamicCache` (and the heterogeneity helpers it
+    delegates to) from `config.num_hidden_layers`. Remote configs such as
+    `GPTPanguConfig` only declare `num_layers`/`n_layer`, so `generate()` fails
+    while building the cache. The alias lives in `attribute_map`, so the
+    serialized config keeps the checkpoint's own field name.
+    """
+
+    if hasattr(config, "num_hidden_layers"):
+        return False
+    for field in _LEGACY_LAYER_COUNT_FIELDS:
+        value = getattr(config, field, None)
+        if isinstance(value, int) and value > 0:
+            attribute_map = dict(getattr(config, "attribute_map", {}) or {})
+            attribute_map["num_hidden_layers"] = field
+            config.attribute_map = attribute_map
+            return True
+    return False
+
+
 def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
+    _restore_legacy_layer_count_alias(config)
     model_type = getattr(config, "model_type", None)
     model_type_lower = model_type.lower() if isinstance(model_type, str) else None
 
@@ -1857,6 +1916,113 @@ def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
     normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+_REMOTE_CODE_MODULE_PREFIX = "transformers_modules."
+
+
+def _cache_sequence_length(cache: Any) -> int:
+    get_seq_length = getattr(cache, "get_seq_length", None)
+    if not callable(get_seq_length):
+        return 0
+    try:
+        return int(get_seq_length())
+    except Exception:
+        return 0
+
+
+def install_legacy_generation_compat(model: Any) -> bool:
+    """Restore the transformers-4 KV-cache contract for remote-code decoders.
+
+    transformers 5 hands `generate()`'s cache to `prepare_inputs_for_generation`
+    on the very first step, while transformers 4 passed `None` until the first
+    forward had written it. Legacy remote implementations guard on
+    `past_key_values is not None` and then index the cache as a tuple of
+    `(key, value)` pairs (DeciLM, Baichuan2) or read `seen_tokens`
+    (MiniCPM-2B-dpo). They also expect `cache_position` to be a tensor
+    (EXAONE-3). Nanbeige4.2 calls `get_max_length()` before the cache holds any
+    layer, which raises `max() iterable argument is empty`; passing `None`
+    while the cache is empty keeps that call out of the prefill path.
+
+    This installs one adapter on the remote model class; the cache-side
+    contract itself lives on `transformers.Cache`/`DynamicCache` in
+    `_patch_transformers_remote_code_compat`. Returns True when a wrapper was
+    installed.
+    """
+
+    model_cls = type(model)
+    if not model_cls.__module__.startswith(_REMOTE_CODE_MODULE_PREFIX):
+        return False
+    if getattr(model_cls, "_gptqmodel_legacy_generation_compat", False):
+        return False
+
+    original = getattr(model_cls, "prepare_inputs_for_generation", None)
+    if not callable(original):
+        return False
+    if not getattr(original, "__module__", "").startswith(_REMOTE_CODE_MODULE_PREFIX):
+        # The class inherits transformers' own implementation, which already
+        # speaks the transformers-5 cache contract.
+        return False
+
+    try:
+        parameters = inspect.signature(original).parameters
+    except (TypeError, ValueError):
+        return False
+
+    # Legacy remote implementations put `past_key_values` right after
+    # `input_ids`; anything else is not the contract this adapter restores.
+    positional = [
+        parameter
+        for parameter in parameters.values()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) < 3 or positional[2].name != "past_key_values":
+        return False
+
+    accepts_cache_position = "cache_position" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+    @wraps(original)
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, *args, **kwargs):
+        if past_key_values is not None and _cache_sequence_length(past_key_values) == 0:
+            # No state has been written yet: hand the remote code the
+            # transformers-4 "no past" value instead of an empty Cache.
+            past_key_values = None
+
+        # transformers 5 tells the callee how many tokens this step adds and
+        # passes the full sequence as `input_ids`; the transformers-4 contract
+        # that the remote code implements slices `input_ids` itself and expects
+        # `cache_position` to cover only the new tokens.
+        modern_sequence_length = "next_sequence_length" in parameters
+        num_new_tokens = None if modern_sequence_length else kwargs.pop(
+            "next_sequence_length", None
+        )
+        if (
+            accepts_cache_position
+            and not modern_sequence_length
+            and kwargs.get("cache_position") is None
+        ):
+            past_length = (
+                0 if past_key_values is None else _cache_sequence_length(past_key_values)
+            )
+            if not isinstance(num_new_tokens, int) or num_new_tokens <= 0:
+                num_new_tokens = int(input_ids.shape[-1]) - past_length
+                if num_new_tokens <= 0:
+                    num_new_tokens = 1
+            kwargs["cache_position"] = torch.arange(
+                past_length,
+                past_length + num_new_tokens,
+                device=input_ids.device,
+            )
+
+        return original(self, input_ids, past_key_values, *args, **kwargs)
+
+    prepare_inputs_for_generation._gptqmodel_legacy_generation_compat = True
+    model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
+    model_cls._gptqmodel_legacy_generation_compat = True
+    return True
 
 
 def register_runtime_automodel_config(config, remote_module, config_attr: str, remote_model_name: str) -> None:

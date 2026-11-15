@@ -126,3 +126,57 @@ def build_tiny_remote_model(
     model.save_pretrained(target)
     build_wordlevel_tokenizer(int(getattr(config, "vocab_size", 128))).save_pretrained(target)
     return target
+
+
+def build_tiny_qwen2_vl(source: str | Path, target: str | Path) -> Path:
+    """Materialize a tiny native Qwen2-VL checkpoint (decoder + vision tower).
+
+    Used by the AWQ rotary tests: Qwen2-VL keeps the decoder rotary on
+    ``model.language_model.rotary_emb``, which is the layout those tests need.
+    The per-layer attention-type list and ``mrope_section`` are shrunk with the
+    decoder so the config passes its own validation.
+    """
+
+    import shutil
+
+    from transformers import AutoConfig, Qwen2VLForConditionalGeneration
+
+    source = Path(source)
+    target = Path(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    config = AutoConfig.from_pretrained(source)
+    text = config.text_config
+    text.hidden_size = 128
+    text.intermediate_size = 256
+    text.num_hidden_layers = 2
+    text.num_attention_heads = 4
+    text.num_key_value_heads = 4
+    text.head_dim = 32
+    text.vocab_size = 128
+    text.max_position_embeddings = 64
+    text.bos_token_id = 1
+    text.eos_token_id = 2
+    if hasattr(text, "layer_types"):
+        text.layer_types = ["full_attention"] * 2
+    # `mrope_section` must sum to `head_dim // 2`; the checkpoint's [16, 24, 24]
+    # describes its 128-wide head, not the tiny 32-wide one.
+    rope = dict(getattr(text, "rope_scaling", None) or {})
+    if rope:
+        rope["mrope_section"] = [8, 4, 4]
+        text.rope_scaling = rope
+    vision = config.vision_config
+    vision.depth = 1
+    vision.embed_dim = 32
+    vision.hidden_size = 32
+    vision.intermediate_size = 64
+    vision.num_heads = 4
+    config._attn_implementation = "eager"
+
+    Qwen2VLForConditionalGeneration(config).eval().save_pretrained(target)
+    build_wordlevel_tokenizer(128).save_pretrained(target)
+    for name in ("preprocessor_config.json", "chat_template.json"):
+        fixture = source / name
+        if fixture.is_file():
+            shutil.copy(fixture, target / name)
+    return target

@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear._fused_train_state import QZEROS_FORMAT_BUFFER
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.packing import hf_repack_layer
@@ -143,7 +144,13 @@ def _gptq_cases():
 
 
 def _awq_cases():
-    """AWQ kernel inventory: (id, build, device)."""
+    """AWQ kernel inventory: (id, build, device, activation dtype).
+
+    The CPU AWQ kernels rewrite ``qweight`` in place on the first eval forward,
+    so they are the kernels that expose whether ``AWQuantLinear`` emits the
+    captured checkpoint snapshot. ``TorchCpuAvx512AwqLinear`` only accepts
+    bfloat16 activations; the others take float16.
+    """
 
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 
@@ -169,10 +176,15 @@ def _awq_cases():
         return lambda: hf_repack_layer(_awq_source(), backend, post_init=False)
 
     return [
-        ("awq_torch", _awq_source, "cpu"),
-        ("awq_torch_aten", _repacked(BACKEND.AWQ_TORCH_ATEN), "cpu"),
-        ("awq_torch_fused", _repacked(BACKEND.AWQ_TORCH_FUSED), "cpu"),
-        ("awq_torch_cpu_avx512", _repacked(BACKEND.AWQ_TORCH_CPU_AVX512), "cpu"),
+        ("awq_torch", _awq_source, "cpu", torch.float16),
+        ("awq_torch_aten", _repacked(BACKEND.AWQ_TORCH_ATEN), "cpu", torch.float16),
+        ("awq_torch_fused", _repacked(BACKEND.AWQ_TORCH_FUSED), "cpu", torch.bfloat16),
+        (
+            "awq_torch_cpu_avx512",
+            _repacked(BACKEND.AWQ_TORCH_CPU_AVX512),
+            "cpu",
+            torch.bfloat16,
+        ),
     ]
 
 
@@ -258,12 +270,76 @@ def test_gptq_state_dict_round_trip_is_identity(case, on_disk):
 
 @pytest.mark.parametrize("case", _awq_cases(), ids=[case[0] for case in _awq_cases()])
 def test_awq_state_dict_round_trip_is_identity(case):
-    name, build, device = case
+    name, build, device, dtype = case
     _require(device)
 
-    module = build().to(device)
-    _assert_round_trip_identity(module, device, torch.float16, name)
-    _assert_state_dict_is_a_checkpoint(build, module, None, device, torch.float16, name)
+    # ``eval()`` is required: the CPU int4pack/AVX512 transform only runs
+    # outside training, and it is what overwrites the checkpoint tensors.
+    module = build().to(device).eval()
+    _assert_round_trip_identity(module, device, dtype, name)
+    _assert_state_dict_is_a_checkpoint(build, module, None, device, dtype, name)
+
+
+def _transformed_cpu_awq_cases():
+    """AWQ CPU kernels that rewrite ``qweight`` in place."""
+
+    return [
+        case
+        for case in _awq_cases()
+        if case[0] in {"awq_torch_aten", "awq_torch_fused", "awq_torch_cpu_avx512"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "case", _transformed_cpu_awq_cases(), ids=[case[0] for case in _transformed_cpu_awq_cases()]
+)
+def test_awq_cpu_kernels_emit_checkpoint_layout_after_transform(case):
+    """Issue #4125 item 2: the AWQ transform must not leak into ``state_dict()``.
+
+    ``AWQuantLinear`` had no ``_save_to_state_dict`` hook, so the CPU AWQ
+    kernels captured their checkpoint tensors but never emitted them: an eval
+    forward replaced ``qweight`` with the int4pack operand and a subsequent
+    ``save_pretrained()`` wrote that shape under the checkpoint key. Reloading
+    then failed with a shape mismatch.
+    """
+
+    name, build, device, dtype = case
+    _require(device)
+
+    module = build().to(device).eval()
+    checkpoint_shape = tuple(module.qweight.shape)
+    x = torch.randn(3, IN_FEATURES, dtype=dtype, device=device)
+    reference = _run(module, x)
+
+    # The first eval forward is what installs the runtime layout.
+    assert getattr(module, "_fused_train_state", None) is not None, (
+        f"{name}: the int4pack transform did not run, so this case cannot "
+        "observe the defect"
+    )
+    assert tuple(module.qweight.shape) != checkpoint_shape, (
+        f"{name}: qweight kept its checkpoint shape, so the transform is a no-op"
+    )
+
+    emitted = module.state_dict()
+    assert tuple(emitted["qweight"].shape) == checkpoint_shape, (
+        f"{name}: state_dict() emitted the runtime qweight "
+        f"{tuple(emitted['qweight'].shape)} instead of the checkpoint shape "
+        f"{checkpoint_shape}"
+    )
+    # The float affine offsets must never reach a checkpoint.
+    assert not emitted["qzeros"].is_floating_point(), (
+        f"{name}: state_dict() emitted float qzeros ({emitted['qzeros'].dtype}); "
+        "the v1/v2 word conversion only applies to integer words"
+    )
+    assert torch.isfinite(emitted["qzeros"].to(torch.float32)).all(), (
+        f"{name}: state_dict() qzeros contains non-finite values"
+    )
+
+    fresh = build().to(device).eval()
+    result = fresh.load_state_dict(emitted)
+    assert not result.missing_keys, f"{name}: reload missing {result.missing_keys}"
+    assert not result.unexpected_keys, f"{name}: reload unexpected {result.unexpected_keys}"
+    torch.testing.assert_close(_run(fresh, x), reference, atol=2e-3, rtol=2e-3)
 
 
 def _no_inverse_cases():
@@ -338,10 +414,229 @@ def test_no_inverse_kernel_state_dict_contract(case):
         pytest.skip(f"{name} runtime unavailable: {error}")
     assert isinstance(module, BaseQuantLinear)
 
-    # Read-only collection (the PEFT path) must succeed and round-trip.
-    _assert_round_trip_identity(module, "cuda", torch.float16, name)
+    # Read-only collection (the PEFT path) must succeed.
+    state = module.state_dict()
+    assert state["qweight"].shape == module.qweight.shape
+    # The payload marks itself as a runtime layout so any other transport can
+    # tell it apart from a checkpoint.
+    assert state[QZEROS_FORMAT_BUFFER].item() == 0
+
+    # A runtime-layout payload is rejected by a module that holds checkpoint
+    # tensors: copying it there would silently produce a wrong model. The guard
+    # runs before any shape check, so any checkpoint-layout packed kernel is a
+    # valid receiver for this assertion.
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+
+    checkpoint_layout = AwqTorchLinear(
+        bits=BITS,
+        group_size=GROUP_SIZE,
+        sym=False,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        pack_dtype=torch.int32,
+        backend=BACKEND.AWQ_TORCH,
+        bias=False,
+        register_buffers=True,
+    )
+    assert not checkpoint_layout._is_runtime_layout()
+    with pytest.raises(RuntimeError, match="kernel-private runtime layout"):
+        checkpoint_layout.load_state_dict(state)
 
     # A checkpoint write must refuse instead of publishing the runtime layout.
     with checkpoint_serialization():
         with pytest.raises(RuntimeError, match="cannot be reconstructed"):
             module.state_dict()
+
+
+def test_transformers_save_pretrained_enters_checkpoint_scope(tmp_path):
+    """Issue #4125 item 1: the HF writer must be on the refusing side.
+
+    PEFT calls ``state_dict()`` read-only, so the runtime-layout kernels refuse
+    only inside ``checkpoint_serialization()``. That made the guard useless for
+    ``PreTrainedModel.save_pretrained()``, which collects ``state_dict()``
+    itself and therefore wrote the private layout with no error.
+    """
+
+    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel
+
+    from gptqmodel.utils.checkpoint_state import is_checkpoint_serialization
+
+    assert getattr(
+        PreTrainedModel.save_pretrained, "_gptqmodel_runtime_layout_guard", False
+    ), "PreTrainedModel.save_pretrained is not wrapped by the runtime-layout guard"
+
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=IN_FEATURES,
+        intermediate_size=IN_FEATURES,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+    )
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(config).half()
+
+    seen = {}
+    original_state_dict = model.state_dict
+
+    def _recording_state_dict(*args, **kwargs):
+        seen["serializing"] = is_checkpoint_serialization()
+        return original_state_dict(*args, **kwargs)
+
+    model.state_dict = _recording_state_dict
+    model.save_pretrained(str(tmp_path / "probe"))
+    assert seen.get("serializing") is True, (
+        "save_pretrained did not enter checkpoint_serialization(), so a "
+        "runtime-layout kernel would write its private layout without raising"
+    )
+    # The scope must not leak past the call.
+    assert is_checkpoint_serialization() is False
+
+
+@pytest.mark.cuda
+def test_save_pretrained_refuses_runtime_layout_model(tmp_path):
+    """Issue #4125 item 1: ``model.save_pretrained()`` must raise, not write garbage.
+
+    Before this fix an ExLlamaV2/Marlin model saved cleanly and the reloaded
+    directory generated ``' flags flags flags ...'``; Marlin raised a shape
+    error only at load time. Both are now refused at save.
+    """
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for Marlin")
+    if not marlin_runtime_available(torch.float16):
+        pytest.skip(f"Marlin runtime unavailable: {marlin_runtime_error(torch.float16)}")
+
+    device = "cuda:0"
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=IN_FEATURES,
+        intermediate_size=IN_FEATURES,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+    )
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(config).half()
+
+    linear, scales, zeros, g_idx = _inputs(group_size=128)
+    source = TorchLinear(
+        bits=BITS,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        pack_dtype=torch.int32,
+        backend=BACKEND.GPTQ_TORCH,
+        bias=False,
+    )
+    source.pack_original(linear, scales, zeros, g_idx)
+    source._init_wf_unsqueeze_buffers()
+    source.qzero_format(format=2)
+    source._checkpoint_format_on_disk = FORMAT.GPTQ_V2
+    source = _materialize(source).to(device)
+
+    marlin = hf_repack_layer(source, BACKEND.MARLIN, device=device)
+    assert marlin._marlin_repacked
+    model.model.layers[0].self_attn.q_proj = marlin
+
+    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+        model.save_pretrained(str(tmp_path / "out"))
+
+    # The read-only collection PEFT performs must still work, and it must mark
+    # the payload so any other transport fails loudly on reload.
+    state = model.state_dict()
+    assert state["model.layers.0.self_attn.q_proj.qzeros_format"].item() == 0
+
+
+
+def _torch_transport(state):
+    """A ``torch.save``/``torch.load`` round trip (pickle keeps ``_metadata``)."""
+
+    import io
+
+    buffer = io.BytesIO()
+    torch.save(state, buffer)
+    buffer.seek(0)
+    return torch.load(buffer, weights_only=False)
+
+
+def _safetensors_transport(state, tmp_path):
+    """A safetensors round trip: tensors only, ``_metadata`` is dropped."""
+
+    from safetensors.torch import load_file, save_file
+
+    path = tmp_path / "payload.safetensors"
+    save_file(
+        {key: value.contiguous() for key, value in state.items()},
+        str(path),
+        metadata={"format": "pt"},
+    )
+    return load_file(str(path))
+
+
+def _dict_copy_transport(state):
+    """A plain ``{k: v for k, v in sd.items()}`` copy: ``_metadata`` is dropped."""
+
+    return {key: value.clone() for key, value in state.items()}
+
+
+@pytest.mark.parametrize(
+    ("transport", "keeps_metadata"),
+    [
+        ("torch", True),
+        ("safetensors", False),
+        ("dict", False),
+    ],
+)
+def test_v1_v2_copy_survives_every_state_dict_transport(tmp_path, transport, keeps_metadata):
+    """Issue #4125 item 3: the layout must travel inside the payload.
+
+    The v1/v2 copy used to rely on ``state_dict._metadata``, which safetensors
+    (Trainer/accelerate checkpoints) and plain dict copies drop. The receiving
+    module then read v2 words as v1 and every zero point moved one step: the
+    synthetic fixture drifted by a relative 0.25-0.65.
+    """
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+
+    target = _as_loaded_from(_gptq_source(TorchLinear, BACKEND.GPTQ_TORCH), FORMAT.GPTQ)
+    source = _as_loaded_from(_gptq_source(TorchLinear, BACKEND.GPTQ_TORCH), FORMAT.GPTQ_V2)
+
+    x = torch.randn(3, IN_FEATURES, dtype=torch.float16)
+    reference = _run(target, x)
+    # Identical weights, different on-disk labels: the copy must be a no-op.
+    torch.testing.assert_close(_run(source, x), reference, atol=0, rtol=0)
+
+    state = source.state_dict()
+    assert state._metadata[""]["qzeros_format"] == 2
+
+    if transport == "torch":
+        carried = _torch_transport(state)
+    elif transport == "safetensors":
+        carried = _safetensors_transport(state, tmp_path)
+    else:
+        carried = _dict_copy_transport(state)
+
+    assert hasattr(carried, "_metadata") is keeps_metadata
+    # The tensor marker is what makes the non-metadata transports work.
+    assert carried["qzeros_format"].item() == 2
+
+    result = target.load_state_dict(carried)
+    assert not result.missing_keys, f"{transport}: missing {result.missing_keys}"
+    assert not result.unexpected_keys, f"{transport}: unexpected {result.unexpected_keys}"
+    torch.testing.assert_close(
+        _run(target, x), reference, atol=0, rtol=0,
+        msg=lambda m: f"{transport}: v2 words copied into a v1-labelled module ({m})",
+    )

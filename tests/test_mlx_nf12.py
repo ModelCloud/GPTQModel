@@ -98,7 +98,7 @@ def test_nf12_mlx_decode_is_bit_exact(monkeypatch, escapes):
 
 
 @pytest.mark.parametrize("escapes", [False, True])
-@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16, 33])
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 12, 16, 33])
 @requires_metal
 def test_nf12_mlx_forward_matches_torch(monkeypatch, escapes, rows):
     source = _source(escapes=escapes)
@@ -197,7 +197,8 @@ def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, 
 
 @requires_metal
 def test_nf12_mlx_row_count_dispatch(monkeypatch):
-    """1 row uses the GEMV, 2..16 the fused tile, and 17+ one decode."""
+    """1..15 rows use the decode-plus-dot kernel, 16 the tile, 17+ one decode."""
+    from gptqmodel.nn_modules.qlinear import mlx_nf12
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
 
     source = _source(in_features=256, out_features=48)
@@ -206,21 +207,38 @@ def test_nf12_mlx_row_count_dispatch(monkeypatch):
     assert isinstance(proj, MlxNF12Linear)
 
     rng = np.random.default_rng(37)
-    single = mx.array(rng.normal(0, 0.2, (1, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
-    np.testing.assert_array_equal(
-        np.array(model(single).astype(mx.float32)),
-        np.array(proj._gemv16(single).astype(mx.float32)).reshape(1, -1),
-    )
-    for rows in (2, 8, 16):
+    for rows in (1, 2, 4, 8):
         x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
-        # The tile epilogue applies the bias (and the split-K reduce does too).
-        tiled = proj._prefill(mx.array(x), rows)
+        direct = proj._rows(mx.array(x), rows)
         actual = model(mx.array(x))
-        mx.eval(tiled, actual)
-        np.testing.assert_allclose(
-            np.array(actual.astype(mx.float32)), np.array(tiled.astype(mx.float32)),
-            rtol=0, atol=0,
+        mx.eval(direct, actual)
+        np.testing.assert_array_equal(
+            np.array(actual.astype(mx.float32)), np.array(direct.astype(mx.float32)),
         )
+
+    # The decode-plus-dot kernel owns everything below the full 16-row tile,
+    # whatever the output width: the tile's per-super-atom barriers only pay
+    # for themselves at exactly 16 rows.
+    for rows in (9, 12, 16):
+        x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
+        direct = proj._rows(mx.array(x), rows)
+        actual = model(mx.array(x))
+        mx.eval(direct, actual)
+        np.testing.assert_array_equal(
+            np.array(actual.astype(mx.float32)), np.array(direct.astype(mx.float32)),
+        )
+
+    # A 16-row tile on a wide output takes the fused matrix-unit path.
+    monkeypatch.setattr(mlx_nf12, "_TILE_MIN_OUT_FEATURES", 0)
+    rows = 16
+    x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
+    # The tile epilogue applies the bias (and the split-K reduce does too).
+    tiled = proj._prefill(mx.array(x), rows)
+    actual = model(mx.array(x))
+    mx.eval(tiled, actual)
+    np.testing.assert_array_equal(
+        np.array(actual.astype(mx.float32)), np.array(tiled.astype(mx.float32)),
+    )
 
     rows = 17
     x = mx.array(rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
@@ -231,3 +249,71 @@ def test_nf12_mlx_row_count_dispatch(monkeypatch):
         np.array(actual.astype(mx.float32)), np.array(split.astype(mx.float32)),
         rtol=0, atol=0,
     )
+
+
+@requires_metal
+def test_nf12_mlx_wide_output_shares_activation_loads(monkeypatch):
+    """A wide output decodes several column blocks from one activation load."""
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear, _row_blocks
+
+    # Narrow outputs keep one block so the grid still covers the GPU; wide
+    # outputs take four blocks for the short token counts and two for 5..12.
+    assert _row_blocks(1, 48) == 1
+    assert _row_blocks(1, 512) == 1
+    assert _row_blocks(1, 1024) == 2
+    assert _row_blocks(1, 2048) == 4
+    assert _row_blocks(4, 2048) == 4
+    assert _row_blocks(8, 2048) == 2
+    assert _row_blocks(12, 2048) == 2
+    assert _row_blocks(16, 2048) == 1
+    assert _row_blocks(1, 128256) == 4
+
+    source = _source(in_features=256, out_features=1024)
+    model, _ = _transfer(monkeypatch, source)
+    assert isinstance(model.proj, MlxNF12Linear)
+    weight = source.dequantize_weight(dtype=torch.bfloat16)
+    rng = np.random.default_rng(41)
+    for rows in (1, 4, 8, 12):
+        x = rng.normal(0, 0.2, (rows, source.in_features)).astype(np.float32)
+        expected = (
+            torch.from_numpy(x).to(torch.bfloat16).float() @ weight.float().T
+            + source.bias.float()
+        ).to(torch.bfloat16).float().numpy()
+        actual = model(mx.array(x))
+        mx.eval(actual)
+        np.testing.assert_allclose(
+            np.array(actual.astype(mx.float32)), expected, rtol=3e-2, atol=2e-3,
+        )
+
+
+@requires_metal
+def test_nf12_mlx_embedding_matches_the_table():
+    """Packed rows gather bit-exactly; out-of-range IDs give +0.0 rows."""
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Embedding
+
+    torch.manual_seed(5)
+    source = _source(in_features=256, out_features=48)
+    table = MlxNF12Embedding(
+        num_embeddings=source.out_features,
+        embedding_dim=source.in_features,
+        num_escapes=source.nf12_escapes.shape[0],
+    )
+    table.packed = mx.array(source.nf12_packed.numpy())
+    table.escapes = mx.array(source.nf12_escapes.numpy())
+    table.exp_base = mx.array(source.nf12_exp_base.numpy())
+    table.freeze()
+
+    weight = source.dequantize_weight(dtype=torch.bfloat16).float().numpy()
+    zero = np.zeros(source.in_features, dtype=np.float32)
+    for ids in ([0, 5, 17, 47], [3], list(range(48)), [-1, 48, 2], [47, 0, 47]):
+        actual = table(mx.array(np.array(ids, dtype=np.int32)))
+        mx.eval(actual)
+        expected = np.stack([
+            weight[index] if 0 <= index < source.out_features else zero for index in ids
+        ])
+        np.testing.assert_array_equal(np.array(actual.astype(mx.float32)), expected)
+
+    # Arbitrary leading dimensions are preserved.
+    grid = table(mx.array(np.arange(6, dtype=np.int32).reshape(2, 3)))
+    mx.eval(grid)
+    assert grid.shape == (2, 3, source.in_features)

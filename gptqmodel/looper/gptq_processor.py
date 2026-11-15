@@ -146,11 +146,18 @@ def clone_gptq_config_for_module(
 
     apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
 
+    # The processor-level fallback is the *default* for this run: a per-module
+    # `dynamic` override outranks it. Applying it after the override (as this
+    # function used to) silently discarded the override in every real run,
+    # because the looper always passes `quantize_config.fallback`.
+    base_fallback = normalize_fallback(fallback, qcfg.fallback)
+    qcfg_clone.fallback = base_fallback
+
     # Method-specific dynamic fields stay with GPTQ.
     if qcfg.dynamic is not None:
         fallback_override = resolved_cfg.get("fallback", None)
         if fallback_override is not None:
-            qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
+            qcfg_clone.fallback = normalize_fallback(fallback_override, base_fallback)
         hessian_override = resolved_cfg.get("hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
@@ -179,7 +186,6 @@ def clone_gptq_config_for_module(
 
         qcfg_clone.validate_gsq()
 
-    qcfg_clone.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
     return qcfg_clone
 
 class GPTQProcessor(LoopProcessor):

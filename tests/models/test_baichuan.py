@@ -23,6 +23,7 @@ class TestBaiChuan(ModelTest):
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
     OFFLOAD_TO_DISK = False  # Local checkpoint is a monolithic .bin, so LazyTurtle offload is unavailable.
+    ASSERT_INFERENCE = True
 
     def test_baichuan(self):
         # Baichuan's remote tokenizer imports sentencepiece eagerly, so skip before model load when absent.

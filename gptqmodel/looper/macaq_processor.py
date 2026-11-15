@@ -111,7 +111,12 @@ class MacaqProcessor(LoopProcessor):
         if overrides:
             qcfg_clone.__post_init__()
         task = Macaq(module=module, qcfg=qcfg_clone)
-        task.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
+        # A per-module `dynamic` fallback override outranks the processor-level
+        # fallback, so it is merged as the value rather than as the default.
+        task.fallback = normalize_fallback(
+            resolved_cfg.get("fallback", None),
+            normalize_fallback(fallback, self.qcfg.fallback),
+        )
         task.expected_nsamples = getattr(self, "total_calibration_tokens", None)
         self.tasks[module.name] = task
 

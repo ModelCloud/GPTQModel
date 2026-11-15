@@ -353,6 +353,101 @@ module constructor; a remote rotary module whose constructor arguments are not
 stored as attributes is left untouched (LazyTurtle keeps its own
 materialization-time restore for the quantize path).
 
+## K. Native loads run the pre-load hook; one legacy `generate()` adapter (issue #4121 items 2-3)
+
+`GPTQModel.load(..., quantize_config=None)` (native evaluation) is a distinct
+load branch in `models/loader.py`. It used to skip `before_model_load`, the hook
+where a definition adapts the checkpoint's own remote code before
+`from_pretrained` runs it. The hook ran for quantize and quantized reload only,
+so the mask-helper shims that `OuroQModel`/`Spark2_5QModel` install there were
+missing exactly when a native model called `generate()`
+(`TypeError: create_causal_mask() got an unexpected keyword argument
+'input_embeds'`).
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load(path, quantize_config=None)"] --> B{"native branch<br/>models/loader.py:1823"}
+    B --> C["_call_before_model_load(cls, load_quantized_model=False)"]
+    C --> D["cls.before_model_load(cls, ...)"]
+    D --> E["definition patches remote module<br/>create_causal_mask / config aliases"]
+    E --> F["_hf_loader_from_pretrained_with_dynamic_module_retry"]
+    F --> G["BaseQModel.__init__<br/>install_legacy_generation_compat"]
+    G --> H["generate() / forward()"]
+    B -.->|"before this change"| X["hook skipped:<br/>remote mask helper unchanged"]
+    X -.-> Y["TypeError: input_embeds"]
+    style X fill:#fdd,stroke:#c00
+    style Y fill:#fdd,stroke:#c00
+```
+
+The same three-way call site now goes through one helper
+(`gptqmodel/models/loader.py:886`), so a definition cannot be wired into one
+load path and forgotten in another:
+
+```mermaid
+flowchart LR
+    A["from_pretrained native<br/>loader.py:1823"] --> H["_call_before_model_load"]
+    B["from_pretrained quantize<br/>loader.py:1911"] --> H
+    C["from_quantized reload<br/>loader.py:2504"] --> H
+    H --> D["cls.before_model_load(cls, load_quantized_model=...)"]
+    D --> E["definitions guard their patches,<br/>so repeated loads are idempotent"]
+```
+
+Item 3 is the generate half. #4108 fixed transformers-5 `generate()` for ChatGLM
+only, by disabling the KV cache for that one family. The other legacy families
+fail at the same boundary from different call sites, because transformers 5
+hands `prepare_inputs_for_generation` a `DynamicCache` on the very first step,
+while transformers 4 passed `None`, and the old tuple/attribute interface is
+gone:
+
+| Family | Failure on `main` | transformers-4 expectation |
+| --- | --- | --- |
+| DeciLM, Baichuan2 | `TypeError: 'DynamicCache' object is not subscriptable` | `past_key_values[0][0].shape[2]` |
+| MiniCPM-2B-dpo | `AttributeError: 'DynamicCache' object has no attribute 'seen_tokens'` | `past_key_values.seen_tokens` |
+| EXAONE-3 | `AttributeError: 'NoneType' object has no attribute 'shape'` | `cache_position` is a tensor |
+| Nanbeige4.2 | `ValueError: max() iterable argument is empty` | `get_max_length()` is `None` before prefill |
+| PanGu-alpha | `AttributeError: 'GPTPanguConfig' object has no attribute 'num_hidden_layers'` | layer count alias |
+
+The fix is one adapter installed from `BaseQModel.__init__`
+(`gptqmodel/models/base.py:774`) plus cache-side surface in
+`_patch_transformers_remote_code_compat`. No family names appear in it:
+
+```mermaid
+flowchart TD
+    A["BaseQModel.__init__"] --> B["install_legacy_generation_compat(model)<br/>gptqmodel/utils/hf.py"]
+    B --> C{"class module starts with<br/>transformers_modules.?"}
+    C -- No --> Z["leave native transformers classes alone"]
+    C -- Yes --> D{"class defines its own<br/>prepare_inputs_for_generation?"}
+    D -- No --> Z
+    D -- Yes --> E["wrap prepare_inputs_for_generation"]
+    E --> F{"cache sequence length == 0?"}
+    F -- Yes --> G["pass past_key_values=None"]
+    F -- No --> H["pass the Cache<br/>tuple indexing + seen_tokens work"]
+    G --> I["synthesize cache_position<br/>from next_sequence_length"]
+    H --> I
+    I --> J["remote legacy prepare_inputs_for_generation"]
+    style Z fill:#eef,stroke:#446
+```
+
+Cache-side surface, installed once per process by
+`_patch_transformers_remote_code_compat` (`gptqmodel/utils/hf.py:858`):
+
+| Symbol | Added by | Why |
+| --- | --- | --- |
+| `DynamicCache.__getitem__` | `hf.py:1118` | `cache[0][0].shape[2]`; an unwritten layer raises `IndexError` |
+| `Cache.seen_tokens` | `hf.py:1098` | property over `get_seq_length()` |
+| `Cache.get_usable_length` | `hf.py:1061` | treats transformers 5's `-1` sentinel as "unbounded", not `max_length - new_seq_length` |
+
+The layer-count alias is generic too: any remote config that declares
+`num_layers`/`n_layer`/`n_layers` but not `num_hidden_layers` gets an
+`attribute_map` entry (`hf.py:1703`), so `DynamicCache` can size itself and the
+checkpoint keeps its own field name. ChatGLM's `num_layers` alias now uses the
+same helper instead of its own copy.
+
+Failure contract: a cache that has not been written yet is reported as "no
+past", never as an empty tuple that legacy code will index; a native
+transformers class is never wrapped; a definition's hook runs on every load
+path and must stay idempotent because quantize and reload can share a process.
+
 ## Measured behaviour
 
 Tiny random models, GPTQ 4-bit, `group_size=32`, `desc_act=False`, saved and
@@ -387,6 +482,9 @@ quality claims for full checkpoints.
 | `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
 | `tests/test_spark2_5_support.py` | AUTO_NF12 source-weight dtype/shape/device contract |
 | `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |
+| `tests/test_legacy_generation_compat.py` | native load runs `before_model_load`; empty cache becomes `None`; `cache[0][0]`/`seen_tokens`/`get_usable_length`; `num_layers`/`n_layer` -> `num_hidden_layers` |
+| `tests/models/test_ouro.py`, `tests/models/test_spark2_5.py` | native `generate()` after the pre-load hook installs the mask-helper shim |
+| `tests/models/test_deci.py`, `test_exaone.py`, `test_nanbeige42.py`, `test_minicpm.py`, `test_baichuan.py`, `test_pangu_alpha.py` | quantize+ARC path also asserts real generated text (`ASSERT_INFERENCE`) |
 
 ## E-I. Definition and calibration fixes (issue #4040)
 
