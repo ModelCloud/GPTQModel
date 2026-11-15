@@ -19,7 +19,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 from transformers.quantizers.auto import AutoQuantizationConfig
-from transformers.utils.quantization_config import GPTQConfig
 
 import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 import gptqmodel.utils.paroquant as paroquant_utils_module
@@ -2297,20 +2296,29 @@ def test_paroquant_run_stage_only_enables_active_gradients(monkeypatch):
     assert {name: param.requires_grad for name, param in model.named_parameters()} == original_flags
 
 
-def test_paroquant_registers_with_transformers_gptq_quantizer():
-    """Guard the HF quantization registry alias used by Evalution loaders."""
-    cfg = AutoQuantizationConfig.from_dict(
-        {
-            "quant_method": "paroquant",
-            "bits": 4,
-            "group_size": 128,
-            "sym": True,
-            "format": "paroquant",
-        }
-    )
+def test_paroquant_is_not_registered_as_a_transformers_gptq_alias():
+    """ParoQuant is loaded by GPT-QModel, not through transformers' GPTQ path.
 
-    assert isinstance(cfg, GPTQConfig)
-    assert getattr(cfg.quant_method, "value", cfg.quant_method) == "gptq"
+    Issue #4074 item 3: mapping `quant_method="paroquant"` to HF's `GPTQConfig`
+    renamed the method to `gptq`, so optimum kernel selection rejected the
+    checkpoint with a FORMAT/METHOD mismatch. With no alias, transformers fails
+    cleanly on the unknown method and `GPTQModel.load` still handles ParoQuant.
+    """
+    from transformers.quantizers import auto as hf_quant_auto
+
+    assert "paroquant" not in hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING
+    assert "paroquant" not in hf_quant_auto.AUTO_QUANTIZER_MAPPING
+
+    with pytest.raises(ValueError, match="Unknown quantization type, got paroquant"):
+        AutoQuantizationConfig.from_dict(
+            {
+                "quant_method": "paroquant",
+                "bits": 4,
+                "group_size": 128,
+                "sym": True,
+                "format": "paroquant",
+            }
+        )
 
 
 def test_paroquant_kernel_mapping_uses_paroquant_backend():

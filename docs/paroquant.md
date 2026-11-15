@@ -248,3 +248,23 @@ real alignment keeps every accepted width round-trippable.
 | `test_paroquant_output_width_declaration_matches_the_packer` | Declaration is `[8]`; `validate` rejects 9 and accepts 8, 16, 64 |
 | `test_paroquant_constructor_rejects_an_unpackable_output_width` | Direct construction of width 9 raises before packing; width 8 still constructs |
 | `test_paroquant_pack_and_forward_round_trips_at_the_packer_alignment` | Width 8 packs, forwards, and matches `_fp32_awq_oracle` exactly |
+
+## Transformers loading
+
+ParoQuant checkpoints are loaded with `GPTQModel.load`. They are not supported
+by `transformers.AutoModelForCausalLM.from_pretrained`, because ParoQuant has
+its own packed layout and kernel (`ParoLinear`), not a GPTQ layout.
+
+Before issue #4074, `gptqmodel/__init__.py` registered
+`quant_method="paroquant"` as an alias for transformers' `GPTQConfig` and
+`GptqHfQuantizer`. That path renamed the method to `gptq`, so optimum kernel
+selection then rejected the checkpoint with:
+
+```text
+ValueError: Unsupported format: `FORMAT.PAROQUANT` for quantization method `METHOD.GPTQ`
+```
+
+The alias was removed. `transformers` now fails cleanly with
+`Unknown quantization type, got paroquant`, which names the actual problem
+instead of a FORMAT/METHOD mismatch, and `GPTQModel.load` continues to load
+ParoQuant checkpoints with `ParoLinear`.

@@ -3838,7 +3838,16 @@ def _resolve_dynamic_group_size_error() -> str:
 
 
 def _default_damp_percent(method: METHOD) -> float:
-    return 0.005 if method == METHOD.QQQ else 0.05
+    # QQQ has no activation-group-aware calibration, so a single massive
+    # activation (Llama's BOS token) can dominate the Hessian. The previous
+    # QQQ-only default of 0.005 is half of upstream `HandH1998/QQQ`
+    # (`percdamp=0.01`) and ten times below GPTQ's 0.05. Measured on
+    # Llama-3.2-1B QQQ4, wikitext-2 PPL with BOS kept: 59.5 at 0.005 vs 34.4
+    # at 0.05 (= reference GPTQ without AGA). Qwen2.5 is nearly unchanged
+    # (20.99 -> 21.30), so this is the cheap correct default; the change is
+    # called out in the issue #4074 PR.
+    del method
+    return 0.05
 
 
 def _default_damp_auto_increment(method: METHOD) -> float:

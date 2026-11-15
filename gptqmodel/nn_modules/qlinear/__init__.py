@@ -633,6 +633,20 @@ class BaseQuantLinear(nn.Module):
             #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
+    def supports_dtype(cls, dtype: Optional[t.dtype]) -> bool:
+        """Whether this kernel serves ``dtype`` activations.
+
+        ``None`` means the caller did not constrain the dtype. This is the
+        same ``SUPPORTS_DTYPES`` declaration the loader validates, shared so a
+        quantization path cannot build an in-memory module with a kernel the
+        reload path would reject for the model dtype.
+        """
+        if dtype is None:
+            return True
+        supported = cls.SUPPORTS_DTYPES
+        return supported is None or dtype in supported
+
+    @classmethod
     def _validate_shared(
         cls,
         *,
@@ -652,7 +666,7 @@ class BaseQuantLinear(nn.Module):
             err = f"{cls} does not support `pack_dtype`: {pack_dtype}"
             return False, NotImplementedError(err)
 
-        if dtype is not None and dtype not in cls.SUPPORTS_DTYPES:
+        if not cls.supports_dtype(dtype):
             err = f"{cls} only supports `{cls.SUPPORTS_DTYPES}` dtype: actual dtype = `{dtype}`"
             return False, NotImplementedError(err)
 

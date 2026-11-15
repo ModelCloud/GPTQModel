@@ -238,7 +238,11 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
                 any(isinstance(prev_op, t) for t in allowed_norms)
                 or "rmsnorm" in str(prev_op.__class__).lower()
             ):
-                scale_ln_fcs(prev_op, layers, scales)
+                # `scale_ln_fcs` renormalises the per-channel scale for
+                # offset-gain norms (see its docstring). The captured input
+                # features and the non-quantized consumers must use the same
+                # effective scale as the folded weights, so take it back.
+                scales = scale_ln_fcs(prev_op, layers, scales)
 
             elif any(isinstance(prev_op, t) for t in allowed_act_fns):
                 new_module = ScaledActivation(prev_op, scales)
@@ -303,7 +307,7 @@ def apply_scale(module, scales_list, input_feat_dict=None, consumer_map=None):
 
 
 @torch.inference_mode()
-def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
+def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor) -> torch.Tensor:
     if not isinstance(fcs, list):
         fcs = [fcs]
 
@@ -315,6 +319,18 @@ def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
     # absorb the rounding of the intermediate `1 + weight` value.
     gain_offset = _norm_gain_offset(ln)
     if gain_offset != 0.0:
+        # A uniform factor on `s` is an exact gauge of per-group symmetric
+        # quantisation: dividing every channel by the same constant and
+        # multiplying the consumers by it leaves the block output unchanged.
+        # Offset-gain folds must use that gauge because `(1 + w) / s - 1`
+        # approaches `-1` as `s` grows, and `1 + w'` is no longer representable
+        # in bf16 (Gemma-3 MLP scales reach ~1e3, where the round trip loses
+        # ~26% and the "neutral" fold changes the model). Renormalising by the
+        # peak keeps `max(s) <= 1`; plain-gain norms store `w / s`, which stays
+        # representable and is left untouched.
+        peak = scales.max()
+        if peak > 1:
+            scales = scales / peak
         folded = ln.weight.detach().to(torch.float32, copy=True)
         folded.add_(gain_offset).div_(scales.to(torch.float32)).sub_(gain_offset)
         ln.weight.copy_(folded.to(ln.weight.dtype))
@@ -332,6 +348,8 @@ def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
     for fc in fcs:
         for p in fc.parameters():
             assert torch.isnan(p).sum() == 0
+
+    return scales
 
 
 @torch.inference_mode()
