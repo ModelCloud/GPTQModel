@@ -249,3 +249,38 @@ def test_nf12_mlx_row_count_dispatch(monkeypatch):
         np.array(actual.astype(mx.float32)), np.array(split.astype(mx.float32)),
         rtol=0, atol=0,
     )
+
+
+@requires_metal
+def test_nf12_mlx_wide_output_shares_activation_loads(monkeypatch):
+    """A wide output decodes several column blocks from one activation load."""
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear, _row_blocks
+
+    # Narrow outputs keep one block so the grid still covers the GPU; wide
+    # outputs take four blocks for the short token counts and two for 5..12.
+    assert _row_blocks(1, 48) == 1
+    assert _row_blocks(1, 512) == 1
+    assert _row_blocks(1, 1024) == 2
+    assert _row_blocks(1, 2048) == 4
+    assert _row_blocks(4, 2048) == 4
+    assert _row_blocks(8, 2048) == 2
+    assert _row_blocks(12, 2048) == 2
+    assert _row_blocks(16, 2048) == 1
+    assert _row_blocks(1, 128256) == 4
+
+    source = _source(in_features=256, out_features=1024)
+    model, _ = _transfer(monkeypatch, source)
+    assert isinstance(model.proj, MlxNF12Linear)
+    weight = source.dequantize_weight(dtype=torch.bfloat16)
+    rng = np.random.default_rng(41)
+    for rows in (1, 4, 8, 12):
+        x = rng.normal(0, 0.2, (rows, source.in_features)).astype(np.float32)
+        expected = (
+            torch.from_numpy(x).to(torch.bfloat16).float() @ weight.float().T
+            + source.bias.float()
+        ).to(torch.bfloat16).float().numpy()
+        actual = model(mx.array(x))
+        mx.eval(actual)
+        np.testing.assert_allclose(
+            np.array(actual.astype(mx.float32)), expected, rtol=3e-2, atol=2e-3,
+        )
