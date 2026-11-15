@@ -43,6 +43,49 @@ class _FixedTokenizer:
         return _Tokenized(torch.arange(40).unsqueeze(0) % _VOCAB)
 
 
+class _ContextLayer(torch.nn.Module):
+    """Tiny block whose RoPE comes in as a per-layer ``position_embeddings``."""
+
+    def __init__(self, hidden: int):
+        super().__init__()
+        self.proj = torch.nn.Linear(hidden, hidden, bias=False)
+
+    def forward(self, hidden_states, position_embeddings=None, **kwargs):
+        del kwargs
+        if position_embeddings is not None:
+            hidden_states = hidden_states + position_embeddings
+        return self.proj(hidden_states)
+
+
+class _ContextBackbone(torch.nn.Module):
+    def __init__(self, vocab: int = _VOCAB, hidden: int = 8, layers: int = 2):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab, hidden)
+        self.layers = torch.nn.ModuleList(
+            [_ContextLayer(hidden) for _ in range(layers)]
+        )
+
+    def forward(self, input_ids=None, **kwargs):
+        del kwargs
+        hidden = self.embed_tokens(input_ids)
+        for index, layer in enumerate(self.layers):
+            # Distinct per layer, so replaying layer 0's tuple is observable.
+            hidden = layer(
+                hidden,
+                position_embeddings=torch.full_like(hidden, float(index + 1)),
+            )
+        return hidden
+
+
+class _ContextModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = _ContextBackbone()
+
+    def forward(self, input_ids=None, **kwargs):
+        return self.model(input_ids=input_ids, **kwargs)
+
+
 def _build_model(layer_types):
     config = Gemma2Config(
         vocab_size=_VOCAB,
@@ -154,3 +197,66 @@ def test_sequential_replay_full_attention_context_unchanged():
     assert torch.equal(native[0], native[1])
     for mask in replayed[0] + replayed[1]:
         assert torch.equal(mask, native[0])
+
+
+def test_sequential_replay_uses_each_layer_position_embeddings():
+    model = _ContextModel().eval()
+    native = {}
+
+    def _record_native(index):
+        def hook(_module, _args, kwargs):
+            embeddings = kwargs.get("position_embeddings")
+            native[index] = None if embeddings is None else embeddings.detach().clone()
+
+        return hook
+
+    handles = [
+        layer.register_forward_pre_hook(_record_native(index), with_kwargs=True)
+        for index, layer in enumerate(model.model.layers)
+    ]
+    try:
+        with torch.no_grad():
+            model.model(torch.arange(_SEQLEN).unsqueeze(0) % _VOCAB)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    replayed = {0: [], 1: []}
+
+    def _record_replay(index):
+        def hook(_module, _args, kwargs):
+            embeddings = kwargs.get("position_embeddings")
+            replayed[index].append(
+                None if embeddings is None else embeddings.detach().clone()
+            )
+
+        return hook
+
+    handles = [
+        layer.register_forward_pre_hook(_record_replay(index), with_kwargs=True)
+        for index, layer in enumerate(model.model.layers)
+    ]
+    try:
+        report = quantize_model_blockfloat(
+            model,
+            _FixedTokenizer(),
+            bits=4,
+            damp=0.01,
+            nsamples=_WINDOWS,
+            text="tiny sequential block float calibration sample",
+            seqlen=_SEQLEN,
+            sequential=True,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert report
+    assert not torch.equal(native[0], native[1])
+    for index in (0, 1):
+        assert replayed[index], f"layer {index} never replayed"
+        for embeddings in replayed[index]:
+            assert embeddings is not None
+            assert torch.equal(embeddings, native[index]), (
+                f"layer {index} replayed with another layer's position_embeddings"
+            )
