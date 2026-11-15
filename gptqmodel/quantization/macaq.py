@@ -713,7 +713,7 @@ class Macaq:
         pre_scale: Optional[torch.Tensor] = None,
         bh: Optional[torch.Tensor] = None,
     ) -> float:
-        """H-weighted reconstruction error in the rotated/scaled frame."""
+        """H-weighted reconstruction error in the original weight frame."""
 
         # Compare in the original weight frame so the metric is the original
         # calibration Hessian. `dequantized` is stored in the (D1, Hadamard)

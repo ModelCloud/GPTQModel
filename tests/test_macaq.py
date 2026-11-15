@@ -273,6 +273,75 @@ def test_macaq_processor_keeps_resolved_pack_backend_and_dynamic_config():
         MacaqProcessor(tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.AUTO)
 
 
+@pytest.mark.parametrize("activation_precision", ["w4a4", "w4a16"])
+def test_macaq_processor_replays_through_packed_runtime(activation_precision):
+    from gptqmodel.looper.macaq_processor import MacaqProcessor
+    from gptqmodel.looper.named_module import NamedModule
+
+    torch.manual_seed(29)
+    wrapped = NamedModule(
+        torch.nn.Linear(64, 32, bias=True),
+        name="proj", full_name="model.proj", layer_index=0,
+    )
+    config = MacaqConfig(
+        activation_precision=activation_precision, n_flip_iters=4,
+        offload_to_disk=False,
+    )
+    processor = MacaqProcessor(
+        tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.MACAQ_TORCH,
+    )
+    processor.preprocess(wrapped)
+    processor.tasks[wrapped.name].add_batch(torch.randn(128, 64))
+    processor.process(wrapped)
+
+    x = torch.randn(12, 64) * 3
+    packed_output = wrapped.module._macaq_replay(x)
+    torch.testing.assert_close(wrapped.module(x), packed_output, rtol=0, atol=0)
+    dense_output = torch.nn.functional.linear(x, wrapped.module.weight, wrapped.module.bias)
+    assert not torch.equal(packed_output, dense_output)
+
+    processor.prepare_layer_post_quantize(
+        model=None, layer_module=wrapped.module, layer_index=0,
+        processed_modules={wrapped.name: wrapped}, is_lm_head_module=False,
+    )
+    assert "_macaq_replay" not in wrapped.module._modules
+    assert "forward" not in wrapped.module.__dict__
+    torch.testing.assert_close(wrapped.module(x), dense_output, rtol=0, atol=0)
+
+
+def test_macaq_processor_conv1d_replay_preserves_weight_layout():
+    from transformers import Conv1D
+
+    from gptqmodel.looper.macaq_processor import MacaqProcessor
+    from gptqmodel.looper.named_module import NamedModule
+
+    torch.manual_seed(31)
+    wrapped = NamedModule(
+        Conv1D(32, 64), name="proj", full_name="model.proj", layer_index=0,
+    )
+    original_shape = wrapped.weight.shape
+    processor = MacaqProcessor(
+        tokenizer=None,
+        qcfg=MacaqConfig(n_flip_iters=4, offload_to_disk=False),
+        calibration=None,
+        backend=BACKEND.MACAQ_TORCH,
+    )
+    processor.preprocess(wrapped)
+    processor.tasks[wrapped.name].add_batch(torch.randn(128, 64))
+    processor.process(wrapped)
+
+    assert wrapped.weight.shape == original_shape
+    x = torch.randn(7, 64)
+    torch.testing.assert_close(wrapped.module(x), wrapped.module._macaq_replay(x), rtol=0, atol=0)
+
+    processor.prepare_layer_post_quantize(
+        model=None, layer_module=wrapped.module, layer_index=0,
+        processed_modules={wrapped.name: wrapped}, is_lm_head_module=False,
+    )
+    expected = torch.nn.functional.linear(x, wrapped.weight.T, wrapped.bias)
+    torch.testing.assert_close(wrapped.module(x), expected, rtol=1e-6, atol=1e-6)
+
+
 def test_macaq_triton_dequant_accepts_padded_e8m0_grid():
     from gptqmodel.utils.macaq_triton import dequantize_mxfp4
 

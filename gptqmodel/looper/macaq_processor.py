@@ -6,18 +6,20 @@
 #
 # MACaQ calibration/quantization processor.
 #
-# The calibration lifecycle (Hessian capture, per-Linear replay, block-level
-# error propagation) follows the VPTQ processor.  The quantization math and
-# packed storage are the Huawei CSL MACaQ recipe, ported in
+# The calibration lifecycle uses GPT-QModel's layer looper. Packed W4A4
+# block replay, quantization math, and packed storage follow the Huawei CSL
+# MACaQ reference recipe, ported in
 # `gptqmodel/quantization/macaq.py` from
 # https://github.com/huawei-csl/MACaQ (Apache-2.0; arXiv:2611.10649).
 
 from __future__ import annotations
 
 import copy
+from types import MethodType
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
+import transformers
 from torch.nn import Module
 
 from ..looper.loop_processor import (
@@ -148,6 +150,69 @@ class MacaqProcessor(LoopProcessor):
         result.dequantized_weight = None
         return result
 
+    @staticmethod
+    def _packed_replay_forward(linear: Module, x: torch.Tensor) -> torch.Tensor:
+        return linear._macaq_replay(x)
+
+    def _install_packed_replay(self, module: NamedModule, task: Macaq, result) -> None:
+        """Replay with MXFP4 activations, as the upstream block loop does.
+
+        The looper keeps the original Linear until finalization. A temporary
+        packed child supplies its forward during subset and block replay, then
+        is removed before the layer is offloaded and packed permanently.
+        """
+
+        linear = module.module
+        if module.state.get("macaq_replay_active") or "_macaq_replay" in linear._modules:
+            raise RuntimeError(f"MACaQ replay is already installed for {module.full_name}.")
+
+        qlinear_cls, _ = self._linear_cls()
+        qcfg = task.qcfg
+        replay = qlinear_cls(
+            bits=4,
+            group_size=qcfg.group_size,
+            in_features=task.columns,
+            out_features=task.rows,
+            bias=linear.bias is not None,
+            pack_dtype=qcfg.pack_dtype,
+            block_size=qcfg.block_size,
+            had_block=qcfg.had_block,
+            activation_precision=qcfg.activation_precision,
+            pre_mode=qcfg.pre_mode,
+            pre_alpha=qcfg.pre_alpha,
+            dtype=module.module_dtype,
+        ).to(module.weight.device)
+        replay.load_quant_result(result, bias=linear.bias)
+
+        # Retain the original forward only for this calibration layer. In
+        # particular, W4A4 activation rounding must affect the next block's
+        # Hessian; a dense dequantized weight replay would be W4A16 instead.
+        module.state["macaq_original_forward"] = linear.__dict__.get("forward")
+        linear._macaq_replay = replay
+        linear.forward = MethodType(self._packed_replay_forward, linear)
+        module.state["macaq_replay_active"] = True
+
+    @staticmethod
+    def _remove_packed_replay(module: NamedModule) -> None:
+        if not module.state.pop("macaq_replay_active", False):
+            return
+        linear = module.module
+        original = module.state.pop("macaq_original_forward")
+        if original is None:
+            linear.__dict__.pop("forward", None)
+        else:
+            linear.forward = original
+        del linear._macaq_replay
+
+    def prepare_layer_post_quantize(
+        self, *, model: BaseQModel, layer_module: Module, layer_index: int,
+        processed_modules: Dict[str, NamedModule], is_lm_head_module: bool,
+    ) -> None:
+        del model, layer_module, layer_index, is_lm_head_module
+        for module in processed_modules.values():
+            if isinstance(module, NamedModule):
+                self._remove_packed_replay(module)
+
     def process(
         self,
         module: NamedModule,
@@ -171,11 +236,14 @@ class MacaqProcessor(LoopProcessor):
 
         effective_weight = self._effective_weight(result)
         replay_weight = effective_weight.to(dtype=module.weight.dtype, device=module.weight.device)
+        if isinstance(module.module, transformers.Conv1D):
+            replay_weight = replay_weight.T.contiguous()
         if self.calculate_w_wq_diff:
             w_wq_diff = module.weight.data.to(torch.float32) - replay_weight.to(torch.float32)
         else:
             w_wq_diff = None
 
+        self._install_packed_replay(module, task, result)
         result = self._result_to_cpu(result)
         loss_display = f"{avg_loss:.10f}" if isinstance(avg_loss, (int, float)) else "unknown"
 
@@ -216,6 +284,8 @@ class MacaqProcessor(LoopProcessor):
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         del kwargs
+
+        self._remove_packed_replay(module)
 
         if self.calculate_w_wq_diff:
             module.weight.data = module.state.pop("wq").to(CPU)

@@ -69,14 +69,18 @@ flowchart TD
     D -->|included| E["Macaq.add_batch<br/>capture Hessian"]
     E -->|empty or nonfinite Hessian| F3["ValueError"]
     E -->|usable Hessian| Q["Macaq.quantize<br/>macaq_quantize_weight"]
-    Q --> R["MacaqProcessor.process<br/>replay effective weight"]
-    R --> U["submodule_finalize<br/>create_quant_module and pack"]
+    Q --> R["MacaqProcessor.process<br/>_install_packed_replay"]
+    R -->|later block needs inputs| F["stage_layer._replay_layer_outputs<br/>packed W4A4 forward"]
+    R -->|last block needs no outputs| C["prepare_layer_post_quantize<br/>_remove_packed_replay"]
+    F --> C
+    R -->|replay already installed| F4["RuntimeError"]
+    C --> U["submodule_finalize<br/>create_quant_module and pack"]
     U --> V["BaseQModel.save<br/>safetensors"]
     V --> L["GPTQModel.load<br/>MacaqLinear.forward"]
     L -->|Triton supported| K["mxfp4_w4a4_linear or mxfp4_w4a16_linear"]
     L -->|Torch or Triton execution error| O["MacaqLinear._forward_torch"]
     classDef error fill:#fdd,stroke:#c00,color:#000;
-    class F1,F2,F3 error;
+    class F1,F2,F3,F4 error;
 ```
 
 | Mechanism | Before (`origin/main`) | With MACaQ |
@@ -84,10 +88,21 @@ flowchart TD
 | Method | absent at `config.py:161` | `config.py:6079` |
 | AUTO backend | GPTQ fallback at `base.py:1954` | `base.py:1944` |
 | Processor | no entry at `quantization_run_plan.py:36` | `quantization_run_plan.py:41` |
-| Payload | no MACaQ layout | `macaq_processor.py:217` |
+| Payload | no MACaQ layout | `macaq_processor.py:272,305` |
 
 The diagram and table describe the flow introduced in
 [PR #4066](https://github.com/ModelCloud/GPTQModel/pull/4066).
+
+The replay path was corrected after the first port: previously
+`MacaqProcessor.process` installed a dense reconstructed weight into the
+original `nn.Linear`, so downstream Hessians missed W4A4 activation rounding.
+The temporary packed child now supplies the same activation precision selected
+for inference and is removed before the layer is offloaded.
+
+| Replay step | Earlier PR #4066 implementation | Current implementation |
+|---|---|---|
+| Forward target | original `nn.Linear` with `replay_weight` (`macaq_processor.py:217` at `a8b7b14`) | `_packed_replay_forward` calls the temporary `MacaqLinear` (`macaq_processor.py:154`) |
+| End of layer | no temporary runtime module | `prepare_layer_post_quantize` removes the child before `post_quantize` (`macaq_processor.py:207`) |
 
 ## Relationship to GPTQ
 
@@ -106,6 +121,62 @@ Because the stored grid, the solve, and the runtime are different, the
 implementation is a standalone `Macaq` quantizer and `MacaqConfig` rather than a
 `GPTQ` subclass. It reuses the shared Hessian-capture and processor
 infrastructure.
+
+## Forward replay and quantization speed
+
+MACaQ's per-Linear optimizer needs only that Linear's weight and input Hessian.
+Full-model streaming still uses forward replay: upstream `streaming_quantize`
+captures Hessians from the current block, replaces its Linear layers, then
+re-forwards the now-quantized block to generate inputs for the next block.
+GPT-QModel uses `MacaqProcessor.lifecycle.forward.replay_after_process` and
+`stage_layer._replay_layer_outputs` for the same propagation. Its temporary
+packed module now makes W4A4 activation quantization part of that replay.
+
+The paper's quantization-time advantage comes from the local D1 and
+block-Hadamard transforms, screening three exponent candidates, and a
+row-parallel flip sweep that updates its Hessian gradient using one column per
+accepted move. It avoids GPTQ's inverse-Hessian factorization and sequential
+column compensation. The upstream implementation can compile repeated flip
+sweeps and reuses the same `X.T @ X` result for projections sharing an input.
+This GPT-QModel port currently executes eager flip sweeps and accumulates each
+projection's Hessian separately; these are performance gaps relative to the
+paper's implementation.
+
+The paper's **11x quantization-time** result compares MACaQ against MR-GPTQ
+and DuQuant++ at matched W4A4 quality on Llama-3-8B. It does not compare
+against plain GPTQ W4A16. The reported Qwen3.5 122B run uses 32 flips and
+512K calibration tokens; the Llama-3-8B comparison uses 128 flips and 200K
+tokens. See the [paper](https://arxiv.org/html/2611.10649v2) and
+[reference implementation](https://github.com/huawei-csl/MACaQ/blob/main/quantize/macaq_mxfp4.py).
+
+### Local quantization timing
+
+The repository includes `scripts/benchmark_macaq_quantization.py` to time
+the full calibration, replay, solve, and pack workflow. One exploratory run
+used the local Llama-3.2-1B-Instruct checkpoint, 64 calibration messages
+(28,672 tokens after padding), BF16 source weights, eager attention, 2048-token
+concat size, batch size 1, group size 32, and an RTX 4090 with Torch
+2.15.0+cu132. MACaQ used 128 flips and `pre_alpha=0.75`.
+
+| Method | Activation | Quantization wall time | Summed module times | Peak allocated / reserved |
+|---|---|---:|---:|---:|
+| GPTQ Triton | W4A16 | 28.39 s | 6.15 s | 2.07 / 46.85 GiB |
+| MACaQ Triton | W4A4 | 109.51 s | 160.23 s | 3.49 / 46.88 GiB |
+
+The module-time sum can exceed wall time because modules are processed in
+parallel. Reserved memory includes allocator cache and is not live tensor
+storage. This one run shows the current eager MACaQ port took 3.86 times as
+long as plain GPTQ in this setup; it is exploratory, compares different
+activation precisions, and does not reproduce the paper's matched-quality
+MR-GPTQ/DuQuant++ benchmark. The script alternates method order across rounds;
+use `--rounds 4` or more for a stronger local comparison.
+
+```bash
+python scripts/benchmark_macaq_quantization.py \
+  --model /monster/data/model/Llama-3.2-1B-Instruct \
+  --calibration /monster/data/model/dataset/nm-calibration/llm.parquet \
+  --rows 64 --order gptq,macaq
+```
 
 ## Usage
 
@@ -160,20 +231,20 @@ bit width, and symmetric format remain fixed.
 
 ## Validation (Llama-3.2-1B-Instruct)
 
-Calibration: 128 Wikitext-2 training chunks (about 115k tokens), 128 flip
-sweeps, 32-wide blocks, `pre_alpha=0.5`, Triton W4A4 runtime, and all 112
+Calibration: 128 Wikitext-2 training chunks (115,325 tokens), 128 flip
+sweeps, 32-wide blocks, `pre_alpha=0.75`, Triton W4A4 runtime, and all 112
 Linear projections packed. Perplexity on 16 contiguous Wikitext-2 test
 chunks of 512 tokens:
 
 | Model | Perplexity | Delta |
 |---|---:|---:|
 | BF16 | 20.50 | — |
-| MACaQ W4A16 (same weights) | 21.67 | +5.7% |
-| MACaQ W4A4 (Triton) | 24.28 | +18.4% |
+| MACaQ W4A16 (same weights) | 21.85 | +6.6% |
+| MACaQ W4A4 (Triton) | 24.22 | +18.2% |
 
 These numbers are a smoke/regression baseline, not a tuned recipe: the upstream
-paper uses substantially more calibration data (millions of tokens) and reports
-W4A4 perplexity much closer to BF16 on larger models. W4A16 isolates the weight
+paper's Llama-3-8B comparison uses 200K calibration tokens and reports W4A4
+perplexity much closer to BF16 on larger models. W4A16 isolates the weight
 error from the activation error and is the better choice when activation
 accuracy matters more than the W4A4 speedup.
 
