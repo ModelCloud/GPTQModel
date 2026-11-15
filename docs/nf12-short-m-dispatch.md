@@ -176,10 +176,10 @@ does:
 
 Both packed paths read the checkpoint bytes exactly once per output block. The
 earlier Metal kernels decoded each value from scattered 1-byte loads, which
-cost a memory transaction per byte; staging the super-atom and unrolling the
-eight slots of a group is what closed most of the gap. On this host the change
-measured 24.8 us vs 31.5 us at `2048x2048` M=1 and 66.7 us vs 124.0 us at
-`8192x2048` M=4.
+cost a memory transaction per byte; reading the super-atom with coalesced
+`uint32` loads and unrolling the eight slots of a group is what closed most of
+the gap. That change measured 24.8 us vs 31.5 us at `2048x2048` M=1 and
+66.7 us vs 124.0 us at `8192x2048` M=4 under the earlier harness.
 
 Against the previous Metal kernels, this decode-plus-dot rework is 1.3x at
 M=1, 2.2x at M=4 and 1.8x at M=8 on this host; the M=16 column changes only
