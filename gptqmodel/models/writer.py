@@ -23,6 +23,7 @@ from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
+from .._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
@@ -271,6 +272,17 @@ def hf_compat_warnings(
             f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
             "refuses it instead of random-initializing every linear layer. Load "
             "it with `GPTQModel.load` or vLLM."
+        )
+    method = getattr(quantize_config, "method", None)
+    method_name = getattr(method, "value", method)
+    if method_name in GPTQMODEL_ONLY_QUANT_METHODS:
+        warnings.append(
+            f"`quant_method: \"{method_name}\"` is a GPT-QModel-only layout that "
+            "`transformers` cannot read: `AutoModelForCausalLM.from_pretrained` "
+            "only warns `Unknown quantization type` and then random-initializes "
+            "every linear layer. Importing `gptqmodel` installs a refusing "
+            "quantizer, so plain HF raises instead. Load this checkpoint with "
+            "`GPTQModel.load` or vLLM."
         )
     if _has_per_expert_quantized_modules(model):
         warnings.append(

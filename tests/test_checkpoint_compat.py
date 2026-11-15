@@ -233,6 +233,46 @@ def test_hf_compat_warning_for_packed_gguf():
     assert GGUF_EXPORT_QUANT_METHOD in warnings[0]
 
 
+def test_hf_compat_warning_for_every_gptqmodel_only_method():
+    """A save must name every layout plain transformers cannot read."""
+    from types import SimpleNamespace
+
+    from gptqmodel._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
+    from gptqmodel.models.writer import hf_compat_warnings
+
+    for quant_method in GPTQMODEL_ONLY_QUANT_METHODS:
+        warnings = hf_compat_warnings(
+            SimpleNamespace(method=quant_method, lm_head=False, bits=4), FORMAT.GPTQ
+        )
+        assert len(warnings) == 1
+        assert quant_method in warnings[0]
+        assert "random-initializes" in warnings[0]
+
+    # Methods transformers implements keep their previous warning set.
+    assert hf_compat_warnings(
+        SimpleNamespace(method="gptq", lm_head=False, bits=4), FORMAT.GPTQ
+    ) == []
+
+
+def test_every_gptqmodel_only_method_registers_a_refusing_quantizer():
+    from transformers.quantizers import auto as hf_auto
+
+    from gptqmodel._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
+    from gptqmodel.utils.hf_quant_refusal import (
+        GPTQModelOnlyHfQuantizer,
+        GPTQModelOnlyQuantizationConfig,
+    )
+
+    for quant_method in GPTQMODEL_ONLY_QUANT_METHODS:
+        assert (
+            hf_auto.AUTO_QUANTIZER_MAPPING[quant_method] is GPTQModelOnlyHfQuantizer
+        )
+        assert (
+            hf_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[quant_method]
+            is GPTQModelOnlyQuantizationConfig
+        )
+
+
 def _reference_pack_8bit(codes: torch.Tensor) -> torch.Tensor:
     """Independent little-endian lane-order reference for 8-bit AWQ words."""
 

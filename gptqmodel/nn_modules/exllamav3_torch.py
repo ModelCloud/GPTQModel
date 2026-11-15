@@ -20,6 +20,7 @@ from ..utils.cpu_features import has_avx512_bf16
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
+from .compiled_state import compiled_module_getstate
 from .exllamav3 import _EXL3_BUFFER_NAMES, _torch_dtype
 
 
@@ -595,6 +596,11 @@ class ExllamaV3TorchLinear(nn.Module):
     def _invalidate_compiled(self) -> None:
         self._compiled_forward = None
         self.optimized = False
+
+    def __getstate__(self):
+        """Drop the compiled forward so `torch.save(model)` keeps working."""
+
+        return compiled_module_getstate(self)
 
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)
