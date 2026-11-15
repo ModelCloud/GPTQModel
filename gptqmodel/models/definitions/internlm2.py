@@ -17,7 +17,7 @@ class InternLM2QModel(BaseQModel):
         "#",
         {
             "attention_norm": ("attention_norm:!",),
-            "attention": ("wqkv:0", "wo:0"),
+            "attention": ("wqkv:0", "wo:1"),
             "ffn_norm": ("ffn_norm:!",),
             "feed_forward": ("w1:0", "w3:0", "w2:1"),
         }

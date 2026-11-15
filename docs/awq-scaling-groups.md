@@ -67,7 +67,7 @@ available for the next block instead of leaving `last_module` unset.
 
 The search-safety checks were introduced in [#4144](https://github.com/ModelCloud/GPTQModel/pull/4144).
 
-The existing group dictionaries and definition tags are unchanged. Search uses
+The existing group dictionaries and tag syntax are unchanged. Search uses
 the original captured activation `x` and candidate weights `Q(W * s) / s`.
 Non-quantized routers and shared gates therefore keep their original weights
 during search. Only final `apply_scale`, which changes the source to emit
@@ -142,6 +142,66 @@ Cohere/Cohere2 topologies. Inference kernels, persistent quantized weight storag
 architecture declaration syntax, and replay mask/position reconstruction are
 unchanged. A declarative graph/DSL and automatic cross-root replay are out of
 scope.
+
+## Architecture relationship qualification
+
+The source audit covered all 206 registered model types (182 definitions) at
+`388f82f01`, without downloading checkpoint weights. It recorded 14 unsafe
+model-type entries across 13 definition families. Those are counterexamples to
+the inference rule, not a claim that every released checkpoint reaches the
+same invalid fold. Matching channel widths and executing every **declared**
+target cannot prove producer identity or discover an undeclared consumer.
+
+The immediate repairs use existing declarations, not a graph compiler or DSL:
+
+| Definition | Incorrect relationship before | Existing-format repair |
+| --- | --- | --- |
+| `cohere_compass` | The input norm also feeds the parallel MLP; `o_proj` is not its producer. | Shared `:in=normalized` on Q/K/V and gate/up, `o_proj:nosrc`; incomplete cross-root replay is rejected. |
+| `granitemoe_swa` | Routed experts omitted the sibling shared MLP. | Shared input tags include `shared_mlp.input_linear`; incomplete cross-root replay is rejected. |
+| `hunyuan_v1_moe` | The weightless gate container hid the actual router weight. | Declare the non-quantized affine consumer `mlp.gate.wg`. |
+| `falcon_mamba` | Matching widths allowed a fold across SSM and nonlinear computation. | Mark mixer projections `:nosrc`; explicitly exclude convolution, time-step and state owners. |
+| `moss` | Parallel attention/MLP and GELU were treated as sequential linear paths. | Mark the shared norm, attention output and activated MLP source `:nosrc`. |
+| `internlm2` | The attention input and output projections shared stage zero. | Stage `wqkv:0`, `wo:1`. |
+| `minicpm` | Parallel Q/K/V were sequential; MLP input and output stages were combined. | Group Q/K/V at stage zero and gate/up together; keep output projections in the next stage. |
+| `gemma3n`, `gemma3n_text` | Folds omitted Laurel, crossed value normalization, or crossed AltUp/residual/activation boundaries. | Exclude the corresponding sources with `:nosrc`, declare AltUp/Laurel owners, and place per-layer output normalization after its projection. |
+| `axk2`, `glm_moe_dsa` | An indexer projection was mistaken for a low-rank query producer; GLM's input fold omitted an indexer consumer. | Conservatively disable internal attention source folds and declare nested norm/indexer owners. FFN folds remain eligible. |
+| `longcat_flash` | Indexed norms and dual residual sublayers were treated as one sequential path. | Declare indexed norm owners and nested router weights; disable the ambiguous attention/output sources. |
+| `inkling_mm_model` | The norm fed unhandled native 3-D shared experts as well as routed experts. | Disable that norm's fold and explicitly exclude shared-expert, scale, convolution and relative-logit owners. |
+| `qwen` | The inferred `w2` source crosses SiLU. | Mark `w2:nosrc`. |
+
+```mermaid
+flowchart TD
+    A["architecture module_tree<br/>parallel stages, :in, nested :!, :nosrc"] --> B["awq_get_modules_for_scaling"]
+    B --> C["_merge_shared_source_nodes"]
+    C --> D["_filter_awq_scaling_sources"]
+    D --> E{"selected source is :nosrc?"}
+    E -- "yes" --> P["drop smoothing group<br/>existing plain quantization path"]
+    E -- "no" --> F["AWQProcessor._quantize_layer<br/>conflict, boundary and execution checks"]
+    F --> G{"complete supported replay?"}
+    G -- "yes" --> H["search and fold once"]
+    G -- "no: _AWQScaleGroupError" --> I{"configured fallback enabled?"}
+    I -- "yes" --> P
+    I -- "no" --> X["raise; no unsafe fold"]
+    F -- "raw forward exception" --> Y["propagate; not a safe fallback"]
+    style P fill:#fff3cd,stroke:#997404
+    style X fill:#f8d7da,stroke:#842029
+    style Y fill:#f8d7da,stroke:#842029
+```
+
+Declaring a source `:nosrc` retains the pre-existing unconditional plain
+quantization path for that group; this is different from rejecting a generated
+group under `fallback=None`. The safety checks are not expanded to infer an
+arbitrary graph. Raw replay exceptions (for example a native Bloom forward
+missing its residual argument) remain errors, not configured fallback.
+
+`tests/module_tree/test_awq_relationships.py` uses real tiny CPU model modules,
+their `state_dict()` owners, nontrivial synthetic folds and full text outputs.
+It covers shared/no-shared Granite, nested Hunyuan routing, a Falcon Mamba width
+collision, AXK2/GLM indexers, LongCat residuals, dense/sparse Inkling text layers,
+MHA/GQA CohereCompass and Gemma3n's AltUp/Laurel decoder. The legacy remote-code
+families also have pinned-source audit probes; their CI declaration checks do
+not claim that remote implementations were loaded by the CPU job. The
+always-run registry contract covers every registered alias and method case.
 
 ## One group per norm
 

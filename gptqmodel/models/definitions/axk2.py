@@ -39,25 +39,28 @@ class AXK2QModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
+            "input_layernorm:!": ("norm:!:nosrc",),
             "self_attn": (
-                "q_a_proj:0:q",
-                "kv_a_proj_with_mqa:0:k:v",
-                "q_gate_proj:1:q:in=q_a",
-                "kv_b_proj:1:k:v:in=kv_a",
-                "o_proj:2",
+                "q_a_layernorm:!:nosrc",
+                "kv_a_layernorm:!:nosrc",
+                "q_a_proj:0:q:nosrc",
+                "kv_a_proj_with_mqa:0:k:v:nosrc",
+                "q_gate_proj:1:q:in=q_a:nosrc",
+                "kv_b_proj:1:k:v:in=kv_a:nosrc",
+                "o_proj:2:nosrc",
                 # The DSA indexer linears are intentionally kept in their
                 # checkpoint dtype (see `_keep_in_fp32_modules`), but they are
                 # still called `nn.Linear` modules. Declare them so the plan
                 # owns them explicitly instead of relying on implicit exclusion.
-                "indexer.wq_b:!",
-                "indexer.wk:!",
-                "indexer.weights_proj:!",
+                "indexer.wq_b:!:nosrc",
+                "indexer.wk:!:nosrc",
+                "indexer.weights_proj:!:nosrc",
+                "indexer.k_norm:!:nosrc",
             ),
             # `AXK2GatedRMSNorm.mlp` is a small low-rank gate that is
             # intentionally not quantized. Declare its leaves explicitly.
             "input_layernorm.mlp": ("fc1:!", "fc2:!"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "post_attention_layernorm:!": ("norm:!:nosrc",),
             "post_attention_layernorm.mlp": ("fc1:!", "fc2:!"),
             "mlp:moe": {
                 "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),

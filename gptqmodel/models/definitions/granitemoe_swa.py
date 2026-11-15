@@ -37,10 +37,10 @@ class GraniteMoeSWAQModel(BaseQModel):
             "block_sparse_moe:moe:?": {
                 "router": ("router:!",),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:in=normalized", "up_proj:0:in=normalized", "down_proj:1"),
                 },
             },
-            "shared_mlp": ("input_linear:0", "output_linear:1"),
+            "shared_mlp": ("input_linear:0:in=normalized", "output_linear:1"),
         },
     ]
 

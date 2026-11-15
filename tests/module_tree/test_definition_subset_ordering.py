@@ -77,10 +77,10 @@ def _subset_indices(blocks) -> dict[str, int]:
             "falcon_mamba",
             {"mixer.in_proj": 0, "mixer.x_proj": 1, "mixer.out_proj": 2},
         ),
-        # The lightning attention gate is consumed by `out_proj`.
+        # The gate and QKV read the same input; `out_proj` consumes the gated result.
         (
             "minimax",
-            {"self_attn.qkv_proj": 0, "self_attn.output_gate": 1, "self_attn.out_proj": 2},
+            {"self_attn.qkv_proj": 0, "self_attn.output_gate": 0, "self_attn.out_proj": 2},
         ),
     ],
 )

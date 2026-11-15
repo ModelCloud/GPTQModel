@@ -37,7 +37,7 @@ class HunYuanMoEV1QModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 # Router weights are tiny and are not useful weight-only targets.
-                "gate": ("gate:!",),
+                "gate": ("wg:!",),
                 # The original forward runs shared_mlp before routed experts.
                 "shared_mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts:0": {

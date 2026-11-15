@@ -9,6 +9,7 @@ on:
       - 'gptqmodel/models/**'
       - 'gptqmodel/nn_modules/qlinear/torch_awq.py'
       - 'tests/test_awq_*.py'
+      - 'tests/module_tree/**'
       - 'requirements.txt'
       - 'pyproject.toml'
   workflow_dispatch:
@@ -50,6 +51,9 @@ jobs:
                 tests/test_awq_mla_scaling.py tests/test_awq_weight_mean.py \
                 tests/test_awq_per_module_bits.py tests/test_awq_position_kwargs.py \
                 tests/test_awq_scale_search_memory.py \
+                tests/module_tree/test_awq_relationships.py \
+                tests/module_tree/test_registered_module_plans.py \
+                tests/module_tree/test_definition_subset_ordering.py \
                 -q -o addopts='' -o log_cli=false --timeout=300 \
                 -o junit_family=legacy --junitxml=awq-cpu-results.xml
               ;;

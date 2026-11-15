@@ -59,8 +59,8 @@ class CohereCompassQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
-            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "self_attn": ("q_proj:0:q:in=normalized", "k_proj:0:k:in=normalized", "v_proj:0:v:in=normalized", "o_proj:1:nosrc"),
+            "mlp": ("gate_proj:0:gate:in=normalized", "up_proj:0:up:in=normalized", "down_proj:1:down"),
         },
     ]
 

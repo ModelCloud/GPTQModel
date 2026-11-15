@@ -500,7 +500,6 @@ MOE_SHARED_FAMILIES = [
     "solar_open",
     "deepseek_v2",
     "deepseek_v4",
-    "axk2",
     "qwen2_moe",
 ]
 
