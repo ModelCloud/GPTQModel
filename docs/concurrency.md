@@ -4,18 +4,18 @@
 # Concurrency guards
 
 GPT-QModel runs quantization and inference from several threads, including on
-free-threaded CPython (`PYTHON_GIL=0`). Three process-global resources are
+free-threaded CPython (`PYTHON_GIL=0`). Four process-global resources are
 shared by those threads: the ROCm BLAS backend selection, the TF32 precision
-setting, and libtriton's JIT compiler. This page documents how the guards for
-those resources behave after issue #4094, and why they are reference-counted,
-serialized, or classified as compiler failures.
+setting, the CPU oneDNN BF16x3 matmul precision, and libtriton's JIT compiler.
+This page documents how the guards for those resources behave, and why they are
+reference-counted, serialized, or classified as compiler failures.
 
 The shapes are deliberate: a guard that saves and restores a process-global
 value per entry is wrong as soon as two callers overlap, and a compiler that is
 assumed to be thread-safe is wrong as soon as two threads miss the same kernel
 cache entry.
 
-## 1. BLAS and TF32 guards are reference-counted
+## 1. BLAS, TF32 and CPU BF16x3 guards are reference-counted
 
 `quant_blas_backend` (`gptqmodel/utils/rocm.py`) and
 `tf32_high_precision_guard` (`gptqmodel/utils/torch.py`) protect a
@@ -24,9 +24,16 @@ under a module-level `RLock`. The first entry captures the user's setting and
 applies the override; every later entry only increments the depth. Only the
 last exit restores the captured value.
 
+`cpu_bf16x3_scope` (`gptqmodel/utils/cpu_features.py`) is the same shape for
+`torch.backends.mkldnn.matmul.fp32_precision`. It is shared by every CPU caller
+that runs FP32 matmuls as BF16x3: GGUF CPU and bitsandbytes CPU go through
+`cpu_bf16x3_matmul()`, and the EXL3 torch kernel enters the scope directly after
+its own shape and environment gate. The lock is an `RLock` because the scope is
+re-entrant; a plain `Lock` would deadlock a nested entry.
+
 ```mermaid
 flowchart TD
-    A["quant_blas_backend or tf32_high_precision_guard"] --> B{"depth == 0"}
+    A["quant_blas_backend, tf32_high_precision_guard or cpu_bf16x3_scope"] --> B{"depth == 0"}
     B -- yes --> C["snapshot user setting"]
     C --> D["apply override"]
     D --> E["depth = 1"]
@@ -54,7 +61,22 @@ backend whose per-process kernel selection #4075/#4079 removed.
 | --- | --- | --- |
 | BLAS depth | none; per-entry save/restore (`utils/rocm.py:240-283` at `718256fd7`) | `_QUANT_BLAS_GUARD_LOCK`, `_QUANT_BLAS_GUARD_DEPTH`, `_QUANT_BLAS_GUARD_PREVIOUS` |
 | TF32 depth | none; per-entry save/restore (`utils/torch.py:1021` at `718256fd7`) | `_TF32_GUARD_LOCK`, `_TF32_GUARD_DEPTH`, `_TF32_GUARD_PREVIOUS` |
+| BF16x3 depth | none; per-entry save/restore in two copies (`utils/cpu_features.py:88` and `nn_modules/exllamav3_torch.py:74` at `fe302047d`) | `_CPU_BF16X3_LOCK` (`RLock`), `_CPU_BF16X3_DEPTH`, `_CPU_BF16X3_RESTORE` in `cpu_features.py`; the EXL3 copy is deleted |
 | Restore rule | every exit restores | only the exit that reaches depth 0 restores |
+
+The BF16x3 guard used to exist twice. `nn_modules/exllamav3_torch.py` kept its
+own `_cpu_bf16x3_matmul` copy of the save/restore pair next to the one in
+`utils/cpu_features.py`, so the EXL3 forward and the GGUF/bitsandbytes forward
+could restore each other's precision. There is now one implementation; the EXL3
+module keeps only its environment-variable and shape gates.
+
+The failure was the same shape as the BLAS one: caller A entered first and
+selected BF16x3, caller B entered while A held it (B's copy saw BF16x3 and
+skipped its own switch), then A exited and restored `none`, so B's remaining
+matmuls ran in IEEE FP32. Measured on a 2048-wide `ExllamaV3TorchLinear` CPU
+forward with the GGUF/bitsandbytes scope as A: chunk precisions
+`bf16, bf16, none, none` and 5/5 forwards differing from the all-BF16x3
+reference. After the change all four chunks stay `bf16` and 0/5 differ.
 
 The guards stay scoped where they are entered. #4092 narrows
 `quant_blas_backend` to the Hessian/linalg phase; the counting works for that
@@ -142,6 +164,7 @@ assertion escaped and aborted a forward that raced another thread's
 | --- | --- |
 | Platform refuses the BLAS switch | guard yields without counting; caller keeps its backend |
 | User already selected a non-hipBLASLt backend | guard yields without counting |
+| Caller already selected BF16x3, or oneDNN refuses the switch | `cpu_bf16x3_scope` yields without counting; nothing to restore |
 | Restore raises | swallowed; the quantization result is already computed |
 | Triton compile raises | lock is released; the next miss retries the compile |
 | Triton cache already populated | no lock, no compile |
@@ -168,8 +191,20 @@ Measured on 2026-11-15 with the ROCm 10.1 R9700 (`gfx1201`) venv and the CUDA
 | Dynamo dtype race, `PYTHON_GIL=0`, 40 iterations | 18 ok / 22 failed | 40 ok / 0 failed |
 | Dynamo dtype race, `PYTHON_GIL=1`, 40 iterations | 2 failed in the initial 40-run probe | 40 ok / 0 failed |
 | Natural 3-thread load+forward, TorchLinear | intermittent; deterministic race used for the regression | 3 ok / 0 failed |
+| BF16x3 guard order A-in/B-in/A-out, both former call sites | B sees `none` after A exits | B sees `bf16` after A exits |
+| BF16x3 chunks in a 2048-wide EXL3 CPU forward while the other call site exits | `bf16, bf16, none, none`; 5/5 forwards differ | `bf16, bf16, bf16, bf16`; 0/5 differ |
+| BF16x3 race, 30 trials, `PYTHON_GIL=0` | 11/30 forwards differ | 0/30 forwards differ |
+| BF16x3 race, 30 trials, `PYTHON_GIL=1` | 2/30 forwards differ | 0/30 forwards differ |
 
 The 268/504 count is this host's reproduction; the issue measured 177-210 of
 794 on its checkpoint layout. Both counts are the same defect: the second
 quantize's later layers ran on the backend selected by the first quantize's
 restore.
+
+The BF16x3 numbers use a CPU host with AVX512-BF16 and the
+`Llama-3.2-1B-Instruct-EXL3-W4-ALL` checkpoint: a 2048-wide
+`ExllamaV3TorchLinear` forward (`q_proj`) against a shorter EXL3 forward on
+another thread, 16-row activations, reference computed inside the scope. The
+issue measured 5/30 (`PYTHON_GIL=0`) and 1/30 (GIL on) on its own host; the hit
+rate depends on how much of the guarded window is matmul rather than weight
+decode, so the ordering probe above is the stable regression.

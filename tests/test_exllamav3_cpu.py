@@ -535,7 +535,7 @@ def test_exllamav3_torch_cpu_bf16x3_scope_restores_precision():
     if previous_precision is None:
         pytest.skip("torch does not expose oneDNN matmul precision")
 
-    with exllamav3_torch._cpu_bf16x3_matmul():
+    with exllamav3_torch.cpu_bf16x3_scope():
         assert _matmul_precision() == "bf16"
     assert _matmul_precision() == previous_precision
 
