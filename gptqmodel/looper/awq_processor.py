@@ -11,6 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
@@ -55,7 +56,15 @@ from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, find_modules, get_module_by_name_prefix, move_to, pack_module
+from ..utils.model import (
+    create_quant_module,
+    find_modules,
+    get_module_by_name_prefix,
+    move_to,
+    pack_module,
+    restore_moe_topk,
+    set_moe_topk,
+)
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
@@ -2536,6 +2545,49 @@ class AWQProcessor(LoopProcessor):
             )
         return targets + consumers
 
+    def _replay_moe_routing_override(self) -> Optional[int]:
+        """Resolve the MoE top-k override that produced the captured features.
+
+        Calibration forwards run through ``ForwardExecutor``, which applies
+        ``ModuleLooper.MoERoutingOverrideContext`` when the user configured
+        ``MoEConfig(routing=ExpertsRoutingOverride(...))``. AWQ then replays
+        ``module2inspect`` directly instead of going through the forward
+        executor. Without re-entering the same override the replay routes with
+        the model's native top-k, so experts that only ran because of the
+        override are missing from the reference output and the coverage guard
+        rejects the complete group (#4151).
+
+        The resolution mirrors ``ModuleLooper``: an override only applies to
+        models that declare ``dynamic_expert_index`` and a scalar expert count.
+        """
+
+        gptq_model = getattr(self, "gptq_model", None)
+        if gptq_model is None or not getattr(gptq_model, "dynamic_expert_index", None):
+            return None
+        get_num_experts = getattr(gptq_model, "get_num_experts", None)
+        model_config = getattr(getattr(gptq_model, "model", None), "config", None)
+        resolver = getattr(self.qcfg, "moe_routing_override", None)
+        if not callable(get_num_experts) or model_config is None or not callable(resolver):
+            return None
+        num_experts = get_num_experts(model_config)
+        if num_experts is None:
+            return None
+        return resolver(num_experts)
+
+    @contextmanager
+    def _moe_replay_routing(self, module: nn.Module):
+        """Run a replay with the same MoE routing that captured its features."""
+
+        override = self._replay_moe_routing_override()
+        if not override:
+            yield
+            return
+        state = set_moe_topk(module, override)
+        try:
+            yield
+        finally:
+            restore_moe_topk(state)
+
     @torch.inference_mode()
     def _search_best_scale(
             self,
@@ -2629,65 +2681,70 @@ class AWQProcessor(LoopProcessor):
         def record_target(target, _args):
             observed.add(id(target))
 
-        try:
-            for _name, target in replay_targets:
-                handles.append(target.register_forward_pre_hook(record_target))
-            if use_chunked_scale_search:
-                # Resolve the device placement and rotary scaffolding once. Both the FP
-                # reference and every candidate-scale replay reuse this prepared forward.
-                prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
-                prepared_forward = (prepared_x, prepared_kwargs)
+        # Both the reference and candidate replays must route like the capture
+        # did. Otherwise an all-expert override captures every expert but the
+        # replay executes native top-k only, and the coverage guard below
+        # rejects the otherwise complete group (#4151).
+        with self._moe_replay_routing(module):
+            try:
+                for _name, target in replay_targets:
+                    handles.append(target.register_forward_pre_hook(record_target))
+                if use_chunked_scale_search:
+                    # Resolve the device placement and rotary scaffolding once. Both the FP
+                    # reference and every candidate-scale replay reuse this prepared forward.
+                    prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
+                    prepared_forward = (prepared_x, prepared_kwargs)
 
-                fp16_output = self._build_chunked_reference_outputs(
-                    prepared_x,
-                    module2inspect,
-                    prepared_kwargs,
-                    replay_batch_size,
+                    fp16_output = self._build_chunked_reference_outputs(
+                        prepared_x,
+                        module2inspect,
+                        prepared_kwargs,
+                        replay_batch_size,
+                    )
+                else:
+                    # Legacy path: run the full forward eagerly on the module device and keep
+                    # the dense activation tensor for the later reconstruction-loss pass.
+                    inp = inp.to(next(module2inspect.parameters()).device)
+                    with ctx(torch.inference_mode()):
+                        fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
+                    fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+
+            finally:
+                for handle in handles:
+                    handle.remove()
+            unobserved = [name for name, target in replay_targets if id(target) not in observed]
+            if unobserved:
+                raise _AWQScaleGroupError(
+                    f"AWQ: reference replay did not execute targets {unobserved}; "
+                    "the scale objective would not score the complete group."
                 )
-            else:
-                # Legacy path: run the full forward eagerly on the module device and keep
-                # the dense activation tensor for the later reconstruction-loss pass.
-                inp = inp.to(next(module2inspect.parameters()).device)
-                with ctx(torch.inference_mode()):
-                    fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
-                fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
-        finally:
-            for handle in handles:
-                handle.remove()
-        unobserved = [name for name, target in replay_targets if id(target) not in observed]
-        if unobserved:
-            raise _AWQScaleGroupError(
-                f"AWQ: reference replay did not execute targets {unobserved}; "
-                "the scale objective would not score the complete group."
+            # [STEP 4]: Compute loss
+            best_scale_kwargs = {
+                "replay_batch_size": replay_batch_size,
+                "prepared_forward": prepared_forward,
+                "bits": [self._bits_for(module, layer) for layer in layers] if bits is None else bits,
+                "group_sizes": group_sizes,
+            }
+            if any(module_format != default_format for module_format in formats):
+                best_scale_kwargs["formats"] = formats
+
+            consumer_modules = None
+            if scale_consumers:
+                consumer_modules = [get_op_by_name(module, name) for name in scale_consumers]
+            if consumer_modules:
+                best_scale_kwargs["scale_consumers"] = consumer_modules
+
+            best_scales, loss = self._compute_best_scale(
+                inp,
+                w_mean,
+                x_mean,
+                module2inspect,
+                layers,
+                fp16_output,
+                module_kwargs,
+                **best_scale_kwargs,
             )
-
-        # [STEP 4]: Compute loss
-        best_scale_kwargs = {
-            "replay_batch_size": replay_batch_size,
-            "prepared_forward": prepared_forward,
-            "bits": [self._bits_for(module, layer) for layer in layers] if bits is None else bits,
-            "group_sizes": group_sizes,
-        }
-        if any(module_format != default_format for module_format in formats):
-            best_scale_kwargs["formats"] = formats
-
-        consumer_modules = None
-        if scale_consumers:
-            consumer_modules = [get_op_by_name(module, name) for name in scale_consumers]
-        if consumer_modules:
-            best_scale_kwargs["scale_consumers"] = consumer_modules
-
-        best_scales, loss = self._compute_best_scale(
-            inp,
-            w_mean,
-            x_mean,
-            module2inspect,
-            layers,
-            fp16_output,
-            module_kwargs,
-            **best_scale_kwargs,
-        )
 
         return (
             get_op_name(module, prev_op),
