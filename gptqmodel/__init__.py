@@ -157,6 +157,36 @@ def _patch_transformers_gptqmodel_gguf_quantizer_compat():
         )
 
 
+def _patch_transformers_refusing_quantizers():
+    """Make transformers refuse every GPT-QModel-only packed checkpoint format.
+
+    Without a registered quantizer, transformers 5.x only warns about the
+    unknown `quant_method` and returns a plain model with randomly initialized
+    packed weights. The names live in one table so parallel method fixes do not
+    race on this registration.
+    """
+    try:
+        from transformers.quantizers import auto as hf_quant_auto
+    except ImportError:
+        log.debug("GPT-QModel refusing quantizers inactive: transformers quantizer API changed", exc_info=True)
+        return
+
+    from ._quant_methods import REFUSED_HF_QUANT_METHODS
+    from .utils.hf_refusing_quantizer import (
+        GPTQModelRefusingHfQuantizer,
+        GPTQModelRefusingQuantizationConfig,
+    )
+
+    with _MONKEY_PATCH_LOCK:
+        for method in REFUSED_HF_QUANT_METHODS:
+            hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault(
+                method, GPTQModelRefusingQuantizationConfig
+            )
+            hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
+                method, GPTQModelRefusingHfQuantizer
+            )
+
+
 def _patch_openvino_gptqmodel_compat():
     """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
     try:
@@ -448,6 +478,7 @@ DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
+_patch_transformers_refusing_quantizers()
 _patch_openvino_gptqmodel_compat()
 _patch_transformers_causal_conv1d_hub_kernel_compat()
 
