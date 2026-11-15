@@ -65,6 +65,8 @@ available for the next block instead of leaving `last_module` unset.
 
 ## Scale-search safety
 
+The search-safety checks were introduced in [#4144](https://github.com/ModelCloud/GPTQModel/pull/4144).
+
 The existing group dictionaries and definition tags are unchanged. Search uses
 the original captured activation `x` and candidate weights `Q(W * s) / s`.
 Non-quantized routers and shared gates therefore keep their original weights
@@ -82,13 +84,15 @@ flowchart TD
     E -- "no" --> F{"configured fallback enabled?"}
     E -- "yes" --> G["reference forward<br/>temporary target observation hooks"]
     G --> H["finally remove observation hooks"]
-    H --> I{"every declared target executed?"}
+    H --> R{"reference replay succeeded?"}
+    R -- "no" --> Y["propagate evaluation exception"]
+    R -- "yes" --> I{"every declared target executed?"}
     I -- "no" --> F
     I -- "yes" --> J["_compute_best_scale<br/>20 candidates: Q(W * s) / s<br/>routers and shared gates unchanged"]
     J --> K["finally restore original weights"]
     K --> L{"candidate evaluation succeeded?"}
     L -- "yes" --> M["collect scale results<br/>apply_scale once per source<br/>apply_quant"]
-    L -- "no" --> Y["propagate evaluation exception"]
+    L -- "no" --> Y
     F -- "yes" --> N["warn with group and reason<br/>exclude group from folding and clipping<br/>apply_quant with empty scales"]
     F -- "no" --> X
     style X fill:#f8d7da,stroke:#842029,stroke-width:2px
