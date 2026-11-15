@@ -640,3 +640,33 @@ def test_v1_v2_copy_survives_every_state_dict_transport(tmp_path, transport, kee
         _run(target, x), reference, atol=0, rtol=0,
         msg=lambda m: f"{transport}: v2 words copied into a v1-labelled module ({m})",
     )
+
+
+def test_layout_marker_is_omitted_only_for_checkpoint_writes():
+    """Issue #4152: a checkpoint write must not persist ``qzeros_format``.
+
+    The marker is a *persistent* buffer, so ``nn.Module._save_to_state_dict``
+    emits it before the packed hook runs. HF ``save_pretrained()`` collects
+    tensors inside ``checkpoint_serialization()`` and used to publish one extra
+    ``*.qzeros_format`` tensor per quantized layer: a key neither the GPTQ/AWQ
+    format nor ``config.json`` describes. A reloaded checkpoint takes its
+    layout from ``checkpoint_format``, so the marker is redundant there, while
+    the read-only ``state_dict()`` transports from #4125 item 3 still need it.
+    """
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.utils.checkpoint_state import checkpoint_serialization
+
+    module = _as_loaded_from(_gptq_source(TorchLinear, BACKEND.GPTQ_TORCH), FORMAT.GPTQ)
+
+    read_only = module.state_dict()
+    assert QZEROS_FORMAT_BUFFER in read_only
+    assert int(read_only[QZEROS_FORMAT_BUFFER].item()) in (0, 1, 2)
+
+    with checkpoint_serialization():
+        checkpoint = module.state_dict()
+
+    assert QZEROS_FORMAT_BUFFER not in checkpoint
+    assert set(checkpoint) == set(read_only) - {QZEROS_FORMAT_BUFFER}
+    # The scope is re-entrant and must not leak into a later read-only collect.
+    assert QZEROS_FORMAT_BUFFER in module.state_dict()

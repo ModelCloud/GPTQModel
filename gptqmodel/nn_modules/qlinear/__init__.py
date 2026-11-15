@@ -19,6 +19,7 @@ from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.checkpoint_state import is_checkpoint_serialization
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import (
     PLANAR_BITS,
@@ -1151,7 +1152,7 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         self._write_state_dict_layout_marker(destination, prefix, keep_vars)
 
     def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
-        """Emit the layout code as a tensor so every transport keeps it.
+        """Emit the layout code as a tensor so in-process transports keep it.
 
         A per-module ``_metadata`` entry is free but is not a tensor: a
         safetensors round trip (Trainer/accelerate) or a plain
@@ -1159,7 +1160,24 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         module then reads v2 words as v1. The buffer is a registered persistent
         buffer, which is what lets ``load_state_dict`` consume it instead of
         reporting an unexpected key.
+
+        A checkpoint write is the one transport that must not carry the marker.
+        HF ``save_pretrained()`` runs inside ``checkpoint_serialization()``, so
+        without this guard the writer persisted an extra ``*.qzeros_format``
+        tensor per quantized layer: a key neither ``config.json`` nor the
+        GPTQ/AWQ format describes. A reloaded checkpoint takes its layout from
+        ``config.json``'s ``checkpoint_format``, so the marker is redundant
+        there. Read-only ``state_dict()`` callers stay outside that scope and
+        keep the marker, which is what #4125 item 3 requires for safetensors
+        and plain-dict copies within a live process.
         """
+
+        if is_checkpoint_serialization():
+            # ``nn.Module._save_to_state_dict`` already emitted this persistent
+            # buffer (with its placeholder value) before this hook runs, so the
+            # key must be removed, not merely left unwritten.
+            destination.pop(prefix + QZEROS_FORMAT_BUFFER, None)
+            return
 
         marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
         if not isinstance(marker, t.Tensor):

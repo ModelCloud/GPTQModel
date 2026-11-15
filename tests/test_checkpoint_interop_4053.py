@@ -32,7 +32,7 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.quantization import FORMAT, QuantizeConfig
+from gptqmodel.quantization import FORMAT, QuantizeConfig, RTNConfig
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format
 
@@ -269,6 +269,96 @@ def test_save_pretrained_emits_checkpoint_qzeros(tmp_path):
 
     reloaded = _load(str(target))
     assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
+
+
+def test_save_pretrained_key_set_matches_save(tmp_path):
+    """Issue #4152: the HF writer must not add ``*.qzeros_format`` keys.
+
+    ``GPTQModel.save()`` has always skipped the runtime layout marker, but HF
+    ``save_pretrained()`` collected the persistent buffer, so the two save
+    paths produced different checkpoints: one extra int64 tensor per quantized
+    linear. Published checkpoints then carried keys that ``config.json`` and
+    the GPTQ/AWQ format do not describe, which strict third-party loaders may
+    reject or warn on.
+    """
+
+    source = tmp_path / "source"
+    torch.manual_seed(1234)
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        tie_word_embeddings=False,
+    )
+    LlamaForCausalLM(config).to(torch.float16).eval().save_pretrained(str(source))
+    _save_tokenizer(str(source))
+
+    qcfg = RTNConfig(bits=BITS, group_size=128, offload_to_disk=False, device="cpu")
+    model = GPTQModel.load(
+        str(source), quantize_config=qcfg, backend=BACKEND.GPTQ_TORCH
+    )
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(source))
+    calibration = []
+    for text in ("the quick brown fox", "a tiny llama calibration sample"):
+        encoded = tokenizer(text, return_tensors="pt")
+        calibration.append(
+            {
+                "input_ids": encoded["input_ids"],
+                "attention_mask": encoded["attention_mask"],
+            }
+        )
+    model.quantize(
+        calibration,
+        batch_size=1,
+        backend=BACKEND.GPTQ_TORCH,
+        calibration_data_min_length=1,
+    )
+    reference = _logits(model.model)
+
+    save_dir = tmp_path / "save"
+    hf_dir = tmp_path / "hf"
+    model.save(str(save_dir))
+    model.model.save_pretrained(str(hf_dir))
+    # ``save_pretrained`` writes tensors and config only; the quantize config
+    # and tokenizer come from the save directory (as for any HF re-save).
+    shutil.copy(save_dir / "quantize_config.json", hf_dir / "quantize_config.json")
+    _save_tokenizer(str(hf_dir))
+
+    def _tensor_keys(directory):
+        keys = set()
+        for name in os.listdir(directory):
+            if name.endswith(".safetensors"):
+                keys.update(load_file(os.path.join(directory, name)))
+        return keys
+
+    save_keys = _tensor_keys(str(save_dir))
+    hf_keys = _tensor_keys(str(hf_dir))
+
+    marker_keys = [key for key in hf_keys if key.endswith(".qzeros_format")]
+    assert marker_keys == [], f"save_pretrained wrote layout markers: {marker_keys}"
+    assert hf_keys == save_keys, (
+        f"save_pretrained differs from save(): extra={sorted(hf_keys - save_keys)}, "
+        f"missing={sorted(save_keys - hf_keys)}"
+    )
+
+    # Both save paths write the same tensors, so their reloads must agree
+    # exactly. The in-memory comparison keeps a small fp16 tolerance: the
+    # freshly quantized module and its fp16 payload can round differently on
+    # some runtimes (measured 0.0 on CUDA and 4.4e-3 on the ROCm CPU runtime),
+    # while the two serialized checkpoints are identical either way.
+    reloaded_logits = {}
+    for directory, label in ((save_dir, "save"), (hf_dir, "save_pretrained")):
+        reloaded = _load(str(directory))
+        reloaded_logits[label] = _logits(reloaded.model)
+        assert _relative_error(reference, reloaded_logits[label]) < 5e-3, label
+    assert torch.equal(reloaded_logits["save"], reloaded_logits["save_pretrained"])
 
 
 @pytest.mark.parametrize(
