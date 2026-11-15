@@ -264,7 +264,10 @@ def test_quantization_is_reproducible_across_processes(tmp_path, method):
         for name, tensor in model.model.state_dict().items():
             if not torch.is_tensor(tensor) or tensor.device.type == "meta":
                 continue
-            payload = tensor.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes()
+            # reshape(-1) handles 0-dim scalars, which some checkpoint layouts
+            # now carry (view() rejects a 0-dim tensor of a different dtype).
+            flat = tensor.detach().to("cpu").contiguous().reshape(-1)
+            payload = flat.view(torch.uint8).numpy().tobytes()
             hashes[name] = hashlib.sha256(payload).hexdigest()
         with open(out_path, "w") as handle:
             json.dump(hashes, handle, sort_keys=True)

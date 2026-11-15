@@ -186,6 +186,11 @@ indices produced five distinct results. That is independent of the BLAS backend
 and predates #4105 (before: 12-14 differing). It needs a deterministic
 segment-sum and is tracked separately; the Hessian pin alone cannot fix it.
 
+On the merged tree (`origin/main` at `1997993fc`, which adds the `qzeros_format`
+scalar to the checkpoint) four fresh GPTQ runs and four fresh QQQ runs each
+produced 0 differing tensors: 0/963 and 0/627. The scalar is hashed too, so the
+comparison still covers the whole checkpoint.
+
 #4075 measured 332/794 differing without the pin and 0/794 with it.
 
 ## The opt-in gives up reproducibility
