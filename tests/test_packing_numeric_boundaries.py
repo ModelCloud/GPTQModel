@@ -272,6 +272,22 @@ def test_machete_rejects_offset_overflow_before_repacking(device, cls):
         assert torch.equal(module.state_dict()[name], value)
 
 
+@pytest.mark.parametrize("cls", [TorchLinear, MacheteLinear])
+def test_bare_gptq_module_state_dict_uses_the_v1_layout_default(cls):
+    """A module built without ``__init__`` still serializes (#4130).
+
+    Every GPTQ kernel reads the emitted qzero layout from ``state_dict()``, so
+    the default must come from the class contract rather than from ``__init__``
+    having run. Before the fix both kernels raised ``AttributeError`` here;
+    Machete only happened to be the first test to reach it.
+    """
+
+    module = _bare(cls)
+    module.register_buffer("qzeros", _words(torch.full((1, 64), 14), 4))
+    assert "qzeros" in module.state_dict()
+    assert module.qzero_format() == 1
+
+
 @pytest.mark.parametrize("cls", [AwqGEMVFastLinear, LLMAwqLinear])
 def test_awq_scaled_zero_overflow_rejected_before_state_changes(device, cls):
     linear, scales, zeros, _ = _inputs(torch.float16, 4, device, "affine_overflow")

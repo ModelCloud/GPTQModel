@@ -1423,9 +1423,21 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         else:
             self.bias = None
 
+    def _runtime_qzeros_format(self) -> int:
+        """Return the live qzero word layout, defaulting to the v1 convention.
+
+        ``__init__`` records ``_qzeros_format = 1``, but a module built through
+        ``__new__`` (packing probes, tests, conversion shells) never runs it.
+        ``state_dict()`` reaches the emitted-layout helpers on those modules, so
+        every read defaults to the constructor value instead of raising
+        ``AttributeError`` from inside serialization.
+        """
+
+        return getattr(self, "_qzeros_format", 1)
+
     def qzero_format(self, format: int = None) -> int:
         if format is None:
-            return self._qzeros_format
+            return self._runtime_qzeros_format()
 
         if format not in [1, 2]:
             raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
@@ -1447,7 +1459,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             return 1
         if checkpoint_format in (FORMAT.GPTQ_V2, "gptq_v2"):
             return 2
-        return int(self._qzeros_format)
+        return int(self._runtime_qzeros_format())
 
     def _checkpoint_qzeros_format(self):
         """The qzero convention this module writes to a checkpoint.
@@ -1526,7 +1538,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         checkpoint_format = self._checkpoint_qzeros_format()
         if checkpoint_format is None:
             return None
-        runtime_format = self._qzeros_format
+        runtime_format = self._runtime_qzeros_format()
         planar = bool(getattr(self, "planar", False))
         if runtime_format == 2 and checkpoint_format in (FORMAT.GPTQ, "gptq", "gemm"):
             from ...utils.model_dequant import _revert_gptq_v1_qzeros_correction
