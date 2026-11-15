@@ -81,6 +81,13 @@ def test_balance_pre_scale_matches_definition():
     assert torch.allclose(scale, expected, atol=1e-6)
 
 
+def test_macaq_default_balance_matches_reference_recipe():
+    config = MacaqConfig()
+    assert config.pre_mode == "balance"
+    assert config.pre_alpha == 0.75
+    assert config.had_block == config.block_size == 32
+
+
 # ---------------------------------------------------------------------------
 # MXFP4 round-to-nearest and packing
 # ---------------------------------------------------------------------------

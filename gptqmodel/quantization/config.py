@@ -6178,7 +6178,7 @@ class MacaqConfig(PreProcessorConfig):
     ridge: float = field(default=1.0)
     # D1 activation-aware diagonal pre-scale.
     pre_mode: str = field(default="balance")
-    pre_alpha: float = field(default=0.5)
+    pre_alpha: float = field(default=0.75)
     # Hessian-weighted per-(row, block) E8M0 exponent screen.
     exp_screen: bool = field(default=True)
     exp_offsets: Tuple[int, ...] = field(default=(1, 0, -1))

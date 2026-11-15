@@ -228,7 +228,7 @@ model = GPTQModel.load(
     quantize_config=MacaqConfig(
         n_flip_iters=256,
         had_block=32,
-        pre_alpha=0.5,
+        pre_alpha=0.75,
         activation_precision="w4a4",
     ),
     device="cuda:0",
@@ -262,7 +262,7 @@ bit width, and symmetric format remain fixed.
 | `fast_flip` | `True` | active-set sweep (bit-identical to the dense sweep) |
 | `ridge` | 1.0 | uniform ridge added to the flip Hessian diagonal |
 | `pre_mode` | `"balance"` | `"none"` or D1 activation-aware balancing |
-| `pre_alpha` | 0.5 | D1 exponent (0.5 symmetric, 1.0 weight-std only) |
+| `pre_alpha` | 0.75 | D1 exponent (0.5 symmetric, 1.0 weight-std only) |
 | `exp_screen` | `True` | enable the H-weighted exponent screen |
 | `exp_offsets` | `(1, 0, -1)` | exponent offsets to screen |
 | `activation_precision` | `"w4a4"` | `"w4a4"` or `"w4a16"` |
