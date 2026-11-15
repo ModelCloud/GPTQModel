@@ -5,7 +5,7 @@ GPT-QModel checkpoints are consumed by three different loaders: its own
 The three disagree about module structure, key spelling, and which modules are
 quantized. This page describes the contracts that keep them consistent.
 
-Introduced by PR #4073.
+Introduced by PR #4084.
 
 ## 1. The native loading bridge
 
