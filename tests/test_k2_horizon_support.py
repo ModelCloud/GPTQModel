@@ -97,6 +97,33 @@ def test_k2_horizon_dense_config_does_not_expand_expert_placeholders():
     } <= modules
 
 
+def test_k2_horizon_attention_projections_share_one_awq_group():
+    """Issue #4093 item 2: per-projection nodes chained single-module AWQ groups.
+
+    q/k/v/gate all read the same attention input, so they must form one group.
+    Declaring each as its own node made AWQ fold `input_layernorm` into
+    `q_proj` alone (0.27-0.36 fold error, PPL 1100 vs RTN 21.03).
+    """
+
+    config = SimpleNamespace(num_experts=0, mova_num_experts=0)
+    blocks = K2HorizonQModel.simple_layer_modules(config, _quantize_config())
+
+    qkv_gate = {
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.gate_proj",
+    }
+
+    assert qkv_gate in [set(block) for block in blocks], (
+        "q/k/v/gate must be one flat attention group"
+    )
+    assert ["self_attn.o_proj"] in blocks, "o_proj consumes the attention output"
+    # No projection may be split into its own single-module group.
+    for name in qkv_gate:
+        assert [name] not in blocks
+
+
 class _MLPRouter(torch.nn.Module):
     def __init__(self):
         super().__init__()

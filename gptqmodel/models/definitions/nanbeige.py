@@ -7,10 +7,11 @@ from functools import wraps
 
 import torch
 
+from ..looped_capture import LoopedLayerCaptureMixin
 from . import LlamaQModel
 
 
-class NanbeigeQModel(LlamaQModel):
+class NanbeigeQModel(LoopedLayerCaptureMixin, LlamaQModel):
     """Nanbeige's looped decoder reuses a Llama-shaped set of physical layers."""
     fusable = None  # No qualified executor for this definition.
 

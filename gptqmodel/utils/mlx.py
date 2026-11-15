@@ -9,7 +9,7 @@
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from pathlib import Path
 from typing import Union
 
@@ -140,8 +140,14 @@ def _mlx_holder_class(module):
     return AwqMlxQuantLinear
 
 
-def _packed_mlx_weights(model, config, lm_head_name):
-    """Transfer exact packed layers or decoded weight-only layers to MLX."""
+def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool = False):
+    """Transfer exact packed layers or decoded weight-only layers to MLX.
+
+    ``stock_compatible`` keeps only layers that map onto stock
+    ``mlx.nn.QuantizedLinear`` and returns ``None`` when a layer needs
+    GPT-QModel's custom MLX runtime. The export path uses it so the written
+    checkpoint loads with stock ``mlx_lm.load`` on any OS (#4091 item 10).
+    """
     quantized = [(name, module) for name, module in model.named_modules()
                  if isinstance(module, (TorchLinear, GPTQBitBLASMlxQuantLinear,
                                         AWQBitBLASMlxQuantLinear,
@@ -211,13 +217,29 @@ def _packed_mlx_weights(model, config, lm_head_name):
             elif mlx_linear in (AwqMlxQuantLinear, AWQMarlinMlxQuantLinear):
                 awq_group16.add(name)
         elif isinstance(module, (GPTQBitBLASMlxQuantLinear, TorchLinear)):
-            gptq_dtype.add(name)
+            if not stock_compatible:
+                gptq_dtype.add(name)
         elif (isinstance(module, (AwqTorchLinear, AWQBitBLASMlxQuantLinear,
                                   AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
               and not isinstance(module, ParoLinear)):
-            awq_dtype.add(name)
+            if not stock_compatible:
+                awq_dtype.add(name)
         elif isinstance(module, GGUFTorchLinear):
             gguf_dtype.add(name)
+
+    if stock_compatible:
+        custom_layers = (
+            set(group16) | set(paro) | set(qqq) | set(fp8_native)
+            | set(fp8_packed) | set(bitsandbytes_native) | set(exl3_native)
+            | set(gguf_dtype) | set(macaq_native) | set(nf12_native)
+        )
+        if custom_layers:
+            log.info(
+                "MLX: %d layer(s) need GPT-QModel's custom MLX runtime; using "
+                "the stock-compatible requantization path instead.",
+                len(custom_layers),
+            )
+            return None
 
     weights = {}
     tied_embeddings = config.get("tie_word_embeddings", False)
@@ -451,13 +473,26 @@ def _packed_mlx_weights(model, config, lm_head_name):
     return mlx_model, mlx_config
 
 
-def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseQModel], gptq_config: dict, lm_head_name: str):
+def convert_gptq_to_mlx_weights(
+    model_id_or_path: str,
+    model: Union[PreTrainedModel, BaseQModel],
+    gptq_config: dict,
+    lm_head_name: str,
+    *,
+    stock_compatible: bool = False,
+):
     if not MLX_AVAILABLE:
         raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
     # Keep conversion on CPU while restoring MLX's GPU default for inference.
     with mx.stream(mx.cpu):
-        return _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_name)
+        return _convert_gptq_to_mlx_weights(
+            model_id_or_path,
+            model,
+            gptq_config,
+            lm_head_name,
+            stock_compatible=stock_compatible,
+        )
 
 
 def _mlx_quant_predicate(dynamic, default_bits, default_group_size):
@@ -485,7 +520,9 @@ def _mlx_quant_predicate(dynamic, default_bits, default_group_size):
     return quant_predicate
 
 
-def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_name):
+def _convert_gptq_to_mlx_weights(
+    model_id_or_path, model, gptq_config, lm_head_name, *, stock_compatible: bool = False
+):
 
     quant_format = resolve_quant_format(gptq_config.get("format"), gptq_config.get("method", gptq_config.get("quant_method")))
     if quant_format not in (FORMAT.EXL3, FORMAT.NF12) and gptq_config["bits"] not in [1, 2, 3, 4, 5, 6, 7, 8]:
@@ -516,7 +553,9 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
     if isinstance(model, BaseQModel):
         model = model.model
 
-    packed = _packed_mlx_weights(model, config, lm_head_name)
+    packed = _packed_mlx_weights(
+        model, config, lm_head_name, stock_compatible=stock_compatible
+    )
     if packed is not None:
         log.info("MLX: transferred source weights without requantization")
         return packed
@@ -609,6 +648,67 @@ def _mlx_prompt_list(prompt):
     raise TypeError(f"MLX prompt must be a string, token list, or tensor: {type(prompt).__name__}")
 
 
+def _mlx_attention_mask_rows(attention_mask):
+    if attention_mask is None:
+        return None
+    if torch.is_tensor(attention_mask):
+        return attention_mask.detach().to("cpu").tolist()
+    if hasattr(attention_mask, "tolist"):
+        return attention_mask.tolist()
+    return attention_mask
+
+
+def _mlx_strip_padding(prompts, attention_mask, pad_token_id):
+    """Remove padded positions from token prompts before ``mlx_lm`` sees them.
+
+    ``mlx_lm.generate`` treats every id in a prompt as content, so a batched,
+    left-padded ``input_ids`` makes the pad tokens part of each prompt (#4091
+    item 8). ``attention_mask`` is exact; ``pad_token_id`` is a fallback that
+    trims leading and trailing pad ids.
+    """
+
+    rows = _mlx_attention_mask_rows(attention_mask)
+    if rows is not None:
+        if rows and not isinstance(rows[0], (list, tuple)):
+            rows = [rows]
+        if len(rows) != len(prompts):
+            raise ValueError(
+                f"MLX attention_mask has {len(rows)} rows but {len(prompts)} "
+                "prompts were given"
+            )
+        stripped = []
+        for item, mask_row in zip(prompts, rows):
+            if isinstance(item, str):
+                log.warn(
+                    "MLX generate: attention_mask cannot be applied to string "
+                    "prompts; tokenize them or pass input_ids"
+                )
+                return prompts
+            if len(mask_row) != len(item):
+                raise ValueError(
+                    "MLX attention_mask row length does not match the prompt "
+                    "token count"
+                )
+            stripped.append([token for token, keep in zip(item, mask_row) if keep])
+        return stripped
+
+    if pad_token_id is None:
+        return prompts
+    pad = int(pad_token_id)
+    stripped = []
+    for item in prompts:
+        if isinstance(item, str):
+            stripped.append(item)
+            continue
+        start, end = 0, len(item)
+        while start < end and item[start] == pad:
+            start += 1
+        while end > start and item[end - 1] == pad:
+            end -= 1
+        stripped.append(item[start:end])
+    return stripped
+
+
 def _mlx_stop_strings(stop):
     if stop is None:
         return []
@@ -630,16 +730,23 @@ def _mlx_strip_stop(text, stop_strings):
 
 
 def _mlx_tokenizer_with_eos(tokenizer, eos_token_ids):
-    """Return a tokenizer whose EOS set includes the caller's explicit ids."""
+    """Return a per-call tokenizer whose EOS set includes the caller's ids.
+
+    The runtime binds one tokenizer into ``functools.partial`` for every call,
+    so mutating it here would let an ``eos_token_id`` from one call truncate
+    all later calls (#4091 item 9). Return a shallow copy instead.
+    """
     ids = {int(token) for token in eos_token_ids}
     current = getattr(tokenizer, "eos_token_ids", None)
     if current is not None:
-        tokenizer.eos_token_ids = set(current) | ids
-        return tokenizer
+        scoped = copy(tokenizer)
+        scoped.eos_token_ids = set(current) | ids
+        return scoped
     if isinstance(tokenizer, TokenizerWrapper):
         # Older mlx_lm wrappers expose only the private EOS set.
-        tokenizer._eos_token_ids = set(tokenizer._eos_token_ids) | ids
-        return tokenizer
+        scoped = copy(tokenizer)
+        scoped._eos_token_ids = set(tokenizer._eos_token_ids) | ids
+        return scoped
     return TokenizerWrapper(tokenizer, eos_token_ids=ids)
 
 
@@ -660,6 +767,9 @@ def mlx_generate(model, tokenizer, **kwargs,):
     if prompt is None:
         raise ValueError("MLX requires prompts or input_ids to be provided")
     prompts = _mlx_prompt_list(prompt)
+    attention_mask = kwargs.pop("attention_mask", None)
+    pad_token_id = kwargs.pop("pad_token_id", None)
+    prompts = _mlx_strip_padding(prompts, attention_mask, pad_token_id)
 
     verbose = kwargs.pop("verbose", False)
     kwargs.pop("formatter", None)
@@ -735,6 +845,12 @@ def mlx_generate(model, tokenizer, **kwargs,):
 
     if "prompt_progress_callback" in kwargs:
         sampling_params["prompt_progress_callback"] = kwargs.pop("prompt_progress_callback", None)
+
+    if kwargs:
+        log.warn(
+            "MLX generate: ignoring unsupported arguments: "
+            + ", ".join(sorted(kwargs))
+        )
 
     results = [
         _mlx_strip_stop(
