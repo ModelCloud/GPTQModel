@@ -88,7 +88,7 @@ def test_nf12_mlx_decode_is_bit_exact(monkeypatch, escapes):
 
 
 @pytest.mark.parametrize("escapes", [False, True])
-@pytest.mark.parametrize("rows", [1, 4, 33])
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16, 33])
 def test_nf12_mlx_forward_matches_torch(monkeypatch, escapes, rows):
     source = _source(escapes=escapes)
     model, _ = _transfer(monkeypatch, source)
@@ -160,3 +160,53 @@ def test_nf12_mlx_converts_a_llama_layer_end_to_end(tmp_path):
     logits = mlx_model(mx.array(np.array([[1, 2, 3, 4]], dtype=np.int32)))
     mx.eval(logits)
     assert logits.shape == (1, 4, 128)
+
+
+@pytest.mark.parametrize("in_features,out_features", [(64, 16), (192, 48), (512, 128)])
+def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, out_features):
+    """The 2..16 token tile must equal the exact decode followed by a matmul."""
+    source = _source(in_features=in_features, out_features=out_features, escapes=True)
+    model, _ = _transfer(monkeypatch, source)
+    weight = source.dequantize_weight(dtype=torch.bfloat16).double().numpy()
+    bias = source.bias.double().numpy()
+    for rows in (2, 3, 4, 8, 15, 16):
+        x = np.random.default_rng(rows).normal(0, 0.2, (rows, in_features)).astype(np.float32)
+        expected = x.astype(np.float64) @ weight.T + bias
+        actual = model(mx.array(x))
+        mx.eval(actual)
+        assert actual.shape == (rows, out_features)
+        scale = np.abs(expected).max() + 1e-30
+        np.testing.assert_allclose(
+            np.array(actual.astype(mx.float32)), expected, rtol=0, atol=5e-3 * scale,
+        )
+
+
+def test_nf12_mlx_row_count_dispatch(monkeypatch):
+    """1 row fuses the dot, 2..16 fuse the tile, and 17+ decode once."""
+    from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
+
+    source = _source(in_features=256, out_features=48)
+    model, _ = _transfer(monkeypatch, source)
+    proj = model.proj
+    assert isinstance(proj, MlxNF12Linear)
+
+    rng = np.random.default_rng(37)
+    for rows in (2, 8, 16):
+        x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
+        tiled = proj._prefill(mx.array(x), rows) + proj.bias
+        actual = model(mx.array(x))
+        mx.eval(tiled, actual)
+        np.testing.assert_allclose(
+            np.array(actual.astype(mx.float32)), np.array(tiled.astype(mx.float32)),
+            rtol=0, atol=0,
+        )
+
+    rows = 17
+    x = mx.array(rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
+    split = (mx.matmul(x, proj._decode().T) + proj.bias).astype(x.dtype)
+    actual = model(x)
+    mx.eval(split, actual)
+    np.testing.assert_allclose(
+        np.array(actual.astype(mx.float32)), np.array(split.astype(mx.float32)),
+        rtol=0, atol=0,
+    )
