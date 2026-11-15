@@ -16,7 +16,7 @@ from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState, _AWQSca
 from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, ExpertsRoutingOverride, MoEConfig
 
 
 class _RoutedBlock(nn.Module):
@@ -45,6 +45,64 @@ class _Layer(nn.Module):
         return self.block(self.norm(x))
 
 
+class _TopKRouter(nn.Linear):
+    """Minimal MoE router exposing the fields ``set_moe_topk`` expects."""
+
+    def __init__(self, in_features, num_experts):
+        super().__init__(in_features, num_experts, bias=False)
+        self.num_experts = num_experts
+        self.top_k = 1
+
+
+class _Expert(nn.Module):
+    def __init__(self, width):
+        super().__init__()
+        self.gate = nn.Linear(width, width)
+        self.up = nn.Linear(width, width)
+        self.down = nn.Linear(width, width)
+
+    def forward(self, x):
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+class _SparseMoEBlock(nn.Module):
+    """Top-k routed experts; ``omit_expert`` simulates a target that never runs."""
+
+    def __init__(self, num_experts=2, width=4, omit_expert=None):
+        super().__init__()
+        self.router = _TopKRouter(width, num_experts)
+        self.experts = nn.ModuleList([_Expert(width) for _ in range(num_experts)])
+        self.omit_expert = omit_expert
+        with torch.no_grad():
+            # Equal logits keep the native top-1 choice deterministic: index 0.
+            self.router.weight.zero_()
+
+    def forward(self, x):
+        selected = self.router(x).topk(self.router.top_k, dim=-1).indices
+        output = torch.zeros_like(x)
+        for index, expert in enumerate(self.experts):
+            if index == self.omit_expert:
+                continue
+            rows = (selected == index).any(dim=-1)
+            if rows.any():
+                output[rows] = output[rows] + expert(x[rows])
+        return output
+
+
+class _MoELayer(nn.Module):
+    def __init__(self, num_experts=2, width=4, omit_expert=None):
+        super().__init__()
+        self.norm = nn.LayerNorm(width)
+        self.block = _SparseMoEBlock(num_experts=num_experts, width=width, omit_expert=omit_expert)
+
+    def forward(self, x):
+        return self.block(self.norm(x))
+
+
+def _selected_experts(block, x):
+    return set(block.router(x).topk(block.router.top_k, dim=-1).indices.flatten().tolist())
+
+
 def _processor(layer, chunked=True, fallback=None):
     processor = AWQProcessor(
         tokenizer=None,
@@ -57,6 +115,40 @@ def _processor(layer, chunked=True, fallback=None):
     )
     processor._quant_batch_size = 0
     return processor
+
+
+def _moe_processor(layer, routing_override="all", chunked=True):
+    layer.config = SimpleNamespace(num_experts=layer.block.router.num_experts)
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(
+            device="cpu",
+            group_size=4,
+            sym=True,
+            scale_search_chunked_activations=chunked,
+            moe=MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok=routing_override)),
+        ),
+        calibration=CalibrationConfig(),
+        gptq_model=SimpleNamespace(
+            rotary_embedding=None,
+            model=layer,
+            dynamic_expert_index="num_experts",
+            get_num_experts=lambda _config: layer.block.router.num_experts,
+        ),
+        model=layer,
+        calculate_w_wq_diff=False,
+    )
+    processor._quant_batch_size = 0
+    return processor
+
+
+def _moe_group(layer):
+    return {
+        "prev_op": layer.norm,
+        "layers": [expert.gate for expert in layer.block.experts],
+        "inp": torch.randn(4, layer.norm.normalized_shape[0]),
+        "module2inspect": layer.block,
+    }
 
 
 def _snapshot(layer):
@@ -237,6 +329,45 @@ def test_incomplete_objective_rejected_before_candidate_mutation(chunked, incomp
     _assert_pristine(layer, before)
     assert not layer.left._forward_pre_hooks
     assert not layer.right._forward_pre_hooks
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+@torch.inference_mode()
+def test_moe_routing_override_replays_every_captured_expert(chunked):
+    """#4151: the replay must route like the capture, not with native top-k."""
+
+    torch.manual_seed(0)
+    layer = _MoELayer(num_experts=2)
+    processor = _moe_processor(layer, routing_override="all", chunked=chunked)
+    group = _moe_group(layer)
+    # Native top-1 never selects expert 1, so an unmodified replay cannot
+    # execute it even though the all-expert capture recorded its features.
+    assert _selected_experts(layer.block, group["inp"]) == {0}
+
+    result = processor._search_best_scale(layer, **group)
+
+    assert result[1] == ("block.experts.0.gate", "block.experts.1.gate")
+    # The temporary override is restored after the search.
+    assert layer.block.router.top_k == 1
+    assert _selected_experts(layer.block, group["inp"]) == {0}
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+@torch.inference_mode()
+def test_moe_routing_override_still_rejects_genuinely_partial_group(chunked):
+    """The coverage guard must keep firing when a target cannot be scored."""
+
+    torch.manual_seed(0)
+    layer = _MoELayer(num_experts=2, omit_expert=1)
+    processor = _moe_processor(layer, routing_override="all", chunked=chunked)
+    group = _moe_group(layer)
+    before = _snapshot(layer)
+
+    with pytest.raises(_AWQScaleGroupError, match=r"block\.experts\.1\.gate"):
+        processor._search_best_scale(layer, **group)
+
+    assert layer.block.router.top_k == 1
+    _assert_pristine(layer, before)
 
 
 @pytest.mark.parametrize("chunked", [False, True])
