@@ -275,6 +275,27 @@ evaluations, not a guarantee for every supported model or method.
 Selected public references include Hugging Face, Intel, NVIDIA, and Alibaba Cloud.
 This is not an exhaustive customer list.
 
+## Contributors and sponsors 🤝
+
+### Contributions welcome 🛠️
+
+We welcome all contributors, including people working with human-guided AI
+agents. Code, model and hardware support, documentation, bug reports, reviews,
+and testing all help move GPT-QModel forward. See the
+[developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide)
+to get started.
+
+### Support ongoing development 💛
+
+Supporting a wide range of hardware and models requires continuous CI testing,
+accuracy validation, and compatibility work. That takes substantial compute and
+AI-agent tokens. Contributions of compute, model/API credits, or financial
+support of any size help sustain project maintenance and future development.
+
+Interested in sponsoring? [Message Qubitium on X](https://x.com/Qubitium).
+If you find GPT-QModel useful, sending even a couple of dollars through X is
+also appreciated. Ongoing sponsors will be credited on this README page.
+
 ## License 📜
 
 GPT-QModel is licensed under [Apache-2.0](LICENSE). The optional, JIT-loaded
@@ -312,7 +333,6 @@ details are available in the [citation reference](docs/citations.md).
 | GGUF / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
 | ExLlama V3 / EXL3 | turboderp and contributors | [Project](https://github.com/turboderp-org/exllamav3) |
 | NF12 / NyoomFloat12 | Liberman et al., Together AI | [Research and codec](https://github.com/dphnAI/nf12) |
-| NF12 inference kernels | AlpinDale | [Code](https://github.com/dphnAI/nf12) |
 | EoRA | Shih-Yang Liu et al., NVIDIA | [Paper](https://arxiv.org/abs/2410.21271) |
 | GSQ | Alireza Dadgarnia et al., IST-DASLab | [Paper](https://arxiv.org/abs/2604.18556) · [Code](https://github.com/IST-DASLab/GSQ) |
 | RCO | Michael Helcig and Dan Alistarh, IST-DASLab | [Paper](https://arxiv.org/abs/2605.00649) · [Code](https://github.com/IST-DASLab/RCO) |
