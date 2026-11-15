@@ -657,6 +657,11 @@ def run_layer_stage(
             pristine_group_module = None
             layer_name = get_layer_name(layer_names, layer_index)
 
+        layer_hook_skip_modules = hook_skip_modules
+        branch_planning_modules = looper.layer_modules_for_prefix(layer_name, planning=True)
+        if branch_planning_modules is not None:
+            layer_hook_skip_modules = _collect_hook_skip_modules(branch_planning_modules)
+
         pb.title(layer_title).subtitle("").draw()
         if durable_progress_logs:
             log.info(
@@ -738,7 +743,7 @@ def run_layer_stage(
             replace_module_with_hooked_legacy(
                 module,
                 quant_lm_head=looper.gptq_model.quantize_config.lm_head,
-                skip_module_paths=hook_skip_modules,
+                skip_module_paths=layer_hook_skip_modules,
             )
 
             layers[layer_index] = module

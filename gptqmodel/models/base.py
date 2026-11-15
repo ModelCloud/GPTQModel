@@ -3758,6 +3758,24 @@ class BaseQModel(nn.Module):
             )
         return additional_inputs
 
+    def awq_module_replay_inputs(
+        self,
+        module: nn.Module,
+        x: torch.Tensor,
+        module_kwargs: Dict[str, Any],
+    ):
+        """Allow a definition to supply scaffolding an AWQ block replay needs.
+
+        AWQ replays the common parent of a multi-module scaling group to score
+        the combined block. Some attention modules require arguments that the
+        per-linear activation capture never records (TeleChat2's
+        ``TelechatAttention.forward`` needs ``residual`` and ``attention_mask``),
+        so the definition may add them here. Returning ``x`` unchanged and the
+        same kwargs is the default for every other family.
+        """
+
+        return x, module_kwargs
+
     def _apply_layer_type_replay_kwargs(
         self,
         *,
@@ -6081,7 +6099,24 @@ class BaseQModel(nn.Module):
                 return getattr(model, item)
             raise exc
 
-    def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
+    @classmethod
+    def _auto_detect_module_tree(cls, model: PreTrainedModel, quant_method: METHOD):
+        """Build a module tree from a live model that has no registered definition.
+
+        A model can expose more than one decoder stack as concurrent siblings
+        (for example ``model.layers`` for text and ``vision_tower.layers`` for
+        vision).  The declaration format already represents that shape as one
+        complete tree variant per stack, so discovery walks the whole module
+        tree and returns every stack it can resolve, not just the first match.
+
+        Discovery is deliberately structural: a candidate must be a sequence of
+        modules whose first element owns ``Linear``/``Conv`` leaves and either
+        carries a known decoder-stack name or looks like a transformer block.
+        The returned tree uses the full dotted path for every branch, which
+        keeps layer names, ``dynamic`` patterns and per-module overrides
+        unambiguous across branches.
+        """
+
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
         if quant_method not in {
@@ -6101,15 +6136,9 @@ class BaseQModel(nn.Module):
             )
             return None
 
-        def _get(path):
-            base = model
-            for p in path.split("."):
-                base = getattr(base, p, None)
-                if base is None:
-                    return None
-            return base
-
-        candidates = [
+        # A stack keeps its historical priority when a model exposes more than
+        # one candidate path.  Paths outside this list follow discovery order.
+        legacy_candidates = [
             "model.layers",
             "language_model.layers",
             "model.decoder.layers",
@@ -6119,65 +6148,136 @@ class BaseQModel(nn.Module):
             "blocks",
             "model.blocks",
         ]
+        legacy_order = {path: index for index, path in enumerate(legacy_candidates)}
+        stack_names = frozenset({"layers", "h", "blocks", "block"})
+        transformer_hints = (
+            "attn",
+            "attention",
+            "self_attn",
+            "mlp",
+            "ffn",
+            "feed",
+            "dense",
+            "mixer",
+        )
+        leaf_types = [nn.Linear, nn.Conv1d, nn.Conv2d]
 
-        chosen = None
-        for c in candidates:
-            m = _get(c)
-            if isinstance(m, (nn.ModuleList, list, tuple)) and len(m) > 0 and isinstance(m[0], nn.Module):
-                chosen = c
-                log.warn(f"Module Tree AutoCompat: Matched candidate path '{c}', type={type(m).__name__}")
-                break
+        def _is_sequence(module) -> bool:
+            return (
+                isinstance(module, (nn.ModuleList, list, tuple))
+                and len(module) > 0
+                and isinstance(module[0], nn.Module)
+            )
 
-        if chosen is None:
-            log.warn("Module Tree AutoCompat: All candidate paths invalid, return None")
+        def _looks_like_transformer_layer(layer: nn.Module) -> bool:
+            for child_name, _ in layer.named_children():
+                lowered = child_name.lower()
+                if any(hint in lowered for hint in transformer_hints):
+                    return True
+            return False
+
+        def _linear_names(module: nn.Module):
+            return list(find_modules(module, layers=leaf_types).keys())
+
+        def _named_children(module):
+            if isinstance(module, nn.Module):
+                return module.named_children()
+            # Diagnostic callers may pass a lightweight stand-in object that
+            # exposes torch modules as attributes instead of subclassing
+            # nn.Module.  Keep that shape usable without changing real models.
+            return (
+                (name, value)
+                for name, value in vars(module).items()
+                if isinstance(value, nn.Module)
+            )
+
+        branches: List[tuple[str, nn.Module]] = []
+        seen_ids = set()
+
+        def _walk(module: nn.Module, path: str) -> None:
+            for name, child in _named_children(module):
+                child_path = f"{path}.{name}" if path else name
+                if _is_sequence(child):
+                    layer0 = child[0]
+                    known_stack = name in stack_names
+                    transformer_like = _looks_like_transformer_layer(layer0)
+                    if known_stack or transformer_like:
+                        if not _linear_names(layer0):
+                            log.warn(
+                                f"Module Tree AutoCompat: Skipping '{child_path}': "
+                                f"{type(layer0).__name__} has no Linear/Conv leaves."
+                            )
+                        elif id(child) not in seen_ids:
+                            seen_ids.add(id(child))
+                            branches.append((child_path, child))
+                            log.warn(
+                                f"Module Tree AutoCompat: Matched branch '{child_path}', "
+                                f"type={type(child).__name__}"
+                            )
+                        # A decoder stack owns its blocks.  Never descend into it
+                        # and mistake a nested ModuleList (for example experts)
+                        # for another concurrent decoder branch.
+                        continue
+                _walk(child, child_path)
+
+        _walk(model, "")
+
+        if not branches:
+            log.warn("Module Tree AutoCompat: No decoder layer container found, return None")
             return None
 
-        layer0 = _get(chosen)[0]
-        log.warn(f"Module Tree AutoCompat: Using layer0: {type(layer0).__name__}")
-
-        def _linear_names(module):
-            mods = find_modules(module, layers=[nn.Linear, nn.Conv1d, nn.Conv2d])
-            log.warn(f"Module Tree AutoCompat: _linear_names: found {len(mods)} Linear/Conv modules in {type(module).__name__}")
-            return list(mods.keys())
-
-        all_linear = _linear_names(layer0)
-        if len(all_linear)>0:
-            log.warn(f"Module Tree AutoCompat: found {len(all_linear)} Linear/Conv modules in {type(layer0).__name__}: {all_linear}")
-        else:
-            log.warn("Module Tree AutoCompat: No Linear/Conv names in layer0, return None")
-            return None
-
-        mapping = {}
-
-        def _find_parents(module, possible_names):
-            found = set()
-            for n, _ in module.named_children():
-                lowered_name = n.lower()
-                if any(k in lowered_name for k in possible_names):
-                    found.add(n)
-            return found
-
-        def _leaf_tokens(prefix):
-            return tuple(x.split(".")[-1] for x in all_linear if x.startswith(f"{prefix}."))
+        # Stable sort: historical candidates first in their declared order, then
+        # the remaining stacks in module-registration order.
+        branches.sort(key=lambda item: legacy_order.get(item[0], len(legacy_order)))
 
         possible_parent = ["attn", "attention", "self_attn", "mlp", "ffn", "feed", "dense"]
+        variants = []
+        for branch_path, container in branches:
+            layer0 = container[0]
+            all_linear = _linear_names(layer0)
+            if not all_linear:
+                raise ValueError(
+                    f"Module Tree AutoCompat cannot resolve branch '{branch_path}': "
+                    f"{type(layer0).__name__} exposes no Linear/Conv leaves. "
+                    "Register an explicit model definition or pass an explicit module tree."
+                )
 
-        found_parents = _find_parents(layer0, possible_parent)
+            mapping = {}
+            for name, _ in layer0.named_children():
+                lowered = name.lower()
+                if not any(hint in lowered for hint in possible_parent):
+                    continue
+                leaves = tuple(
+                    path.split(".")[-1]
+                    for path in all_linear
+                    if path.startswith(f"{name}.")
+                )
+                if leaves:
+                    mapping[name] = leaves
 
-        for p in found_parents:
-            t = _leaf_tokens(p)
-            if t:
-                mapping[p] = t
+            if not mapping:
+                # Preserve the historical fallback, but keep the full relative
+                # path so nested leaves remain addressable.
+                mapping[""] = tuple(all_linear)
+                log.warn(
+                    f"Module Tree AutoCompat: '{branch_path}' has no recognized "
+                    f"parent, using all Linear/Conv leaves: {mapping['']}"
+                )
 
-        if not mapping:
-            blocks = tuple(n.split(".")[-1] for n in all_linear)
-            mapping[""] = blocks
-            log.warn(f"Module Tree AutoCompat: Mapping empty, using all Linear as fallback: {blocks}")
+            variant = branch_path.split(".") + ["#", mapping]
+            variants.append(variant)
+            log.warn(f"Module Tree AutoCompat: Resolved branch '{branch_path}' -> {variant}")
 
-        parts = chosen.split(".")
-        tree = parts + ["#", mapping]
-        log.warn(f"Module Tree AutoCompat: Final module_tree: {tree}")
-        return tree
+        if len(variants) == 1:
+            tree = variants[0]
+            log.warn(f"Module Tree AutoCompat: Final module_tree: {tree}")
+            return tree
+
+        log.warn(
+            f"Module Tree AutoCompat: Final module_tree has {len(variants)} concurrent branches: "
+            f"{variants}"
+        )
+        return variants
 
 __all__ = ["BaseQModel"]
 

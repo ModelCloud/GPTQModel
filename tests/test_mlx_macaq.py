@@ -7,9 +7,17 @@ import numpy as np
 import pytest
 import torch
 
+from tests import accelerator_gates
+
 
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
+
+_METAL_SKIP_REASON = accelerator_gates.mlx_metal_skip_reason()
+requires_metal = pytest.mark.skipif(
+    _METAL_SKIP_REASON is not None,
+    reason=_METAL_SKIP_REASON or "MLX Metal backend is unavailable",
+)
 
 
 def _quantized_layer(in_features=256, out_features=64, activation_precision="w4a4"):
@@ -54,6 +62,7 @@ def _transfer(monkeypatch, source):
     return mlx_utils._packed_mlx_weights(holder, {}, "lm_head")
 
 
+@requires_metal
 def test_macaq_holder_validates_without_affine_group_limits():
     from gptqmodel.models._const import DEVICE
     from gptqmodel.nn_modules.qlinear.mlx import MacaqMlxQuantLinear
@@ -95,6 +104,7 @@ def test_macaq_checkpoint_bytes_are_native_mxfp4():
     )
 
 
+@requires_metal
 def test_macaq_mlx_transfer_matches_torch_w4a16(monkeypatch):
     from gptqmodel.nn_modules.qlinear.mlx_macaq import MlxMACaQLinear
 
@@ -116,6 +126,7 @@ def test_macaq_mlx_transfer_matches_torch_w4a16(monkeypatch):
     )
 
 
+@requires_metal
 def test_macaq_mlx_w4a4_matches_its_own_activation_quantization(monkeypatch):
     """The fused path must be the MXFP4 activation quant MACaQ specifies.
 
@@ -155,6 +166,7 @@ def test_macaq_mlx_w4a4_matches_its_own_activation_quantization(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@requires_metal
 def test_macaq_mlx_preserves_activation_dtype(monkeypatch, dtype):
     source, _ = _quantized_layer()
     model, _ = _transfer(monkeypatch, source)
@@ -166,6 +178,7 @@ def test_macaq_mlx_preserves_activation_dtype(monkeypatch, dtype):
     assert output.shape == (2, 4, source.out_features)
 
 
+@requires_metal
 def test_macaq_mlx_wide_block_uses_the_split_activation_path(monkeypatch):
     """The >16-row block must skip MLX's fused qqmm (5x slower there)."""
     from gptqmodel.nn_modules.qlinear.mlx_macaq import MlxMACaQLinear
@@ -190,6 +203,7 @@ def test_macaq_mlx_wide_block_uses_the_split_activation_path(monkeypatch):
     assert isinstance(model.proj, MlxMACaQLinear)
 
 
+@requires_metal
 def test_macaq_mlx_converts_a_llama_layer_end_to_end(tmp_path):
     """The full conversion must land the holder on a real model's paths."""
     import json
@@ -224,6 +238,7 @@ def test_macaq_mlx_converts_a_llama_layer_end_to_end(tmp_path):
 
 
 @pytest.mark.parametrize("had_block", [32, 64])
+@requires_metal
 def test_macaq_mlx_pre_rotate_folds_the_diagonal_scale(monkeypatch, had_block):
     """The fused pre-scale plus block Hadamard must equal the reference product."""
     from gptqmodel.quantization import macaq as macaq_core

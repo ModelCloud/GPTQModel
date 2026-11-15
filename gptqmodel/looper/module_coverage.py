@@ -48,12 +48,28 @@ class LayerModuleCoverageTracker:
         self._hit_layers: Dict[str, set[int]] = {}
         self._miss_layers: Dict[str, set[int]] = {}
         self._examples: Dict[str, str] = {}
+        # Quantizable leaves that exist in a layer but are not declared by the
+        # definition tree at all. They cannot be reported as a "missed spec"
+        # because there is no spec to match; that is exactly how TeleChat2's
+        # `query`/`key_value` stayed fp16 while coverage claimed every declared
+        # spec matched (issue #4093 item 3).
+        self._undeclared_layers: Dict[str, set[int]] = {}
+        self._undeclared_examples: Dict[str, str] = {}
 
     def record_hit(self, name: str, layer_index: Optional[int] = None) -> None:
         self._record(name, layer_index, hit=True)
 
     def record_miss(self, name: str, layer_index: Optional[int] = None) -> None:
         self._record(name, layer_index, hit=False)
+
+    def record_undeclared(self, name: str, layer_index: Optional[int] = None) -> None:
+        """Record a quantizable leaf that the definition tree never declares."""
+
+        key = normalize_layer_module_name(name)
+        layer = -1 if layer_index is None else int(layer_index)
+        with self._lock:
+            self._undeclared_layers.setdefault(key, set()).add(layer)
+            self._undeclared_examples.setdefault(key, name)
 
     def _record(self, name: str, layer_index: Optional[int], *, hit: bool) -> None:
         key = normalize_layer_module_name(name)
@@ -74,6 +90,18 @@ class LayerModuleCoverageTracker:
                     "miss_layers": len(self._miss_layers.get(key, ())),
                 }
                 for key in keys
+            }
+
+    def undeclared_snapshot(self) -> Dict[str, dict]:
+        """Return the quantizable leaves no definition spec declares."""
+
+        with self._lock:
+            return {
+                key: {
+                    "example": self._undeclared_examples[key],
+                    "layers": len(layers),
+                }
+                for key, layers in self._undeclared_layers.items()
             }
 
     def report(self, model_name: Optional[str] = None) -> None:
@@ -124,6 +152,20 @@ class LayerModuleCoverageTracker:
                 "some layers (expected for hybrid/optional modules); enable DEBUG "
                 "logging for details."
             )
+
+        undeclared = sorted(self.undeclared_snapshot().items())
+        if undeclared:
+            log.warn(
+                f"Quantization coverage{label}: {len(undeclared)} quantizable "
+                "module(s) are present in the layer but NOT declared by the "
+                "definition tree, so they stay in the source dtype. Declare them "
+                "in `module_tree` (quantized, or `:!`/`:?` if intentional)."
+            )
+            for key, stats in undeclared:
+                log.warn(
+                    f"  - `{stats['example']}` (spec `{key}`): "
+                    f"{stats['layers']} layer(s), undeclared"
+                )
 
 
 class LayerModuleCoverageMixin:

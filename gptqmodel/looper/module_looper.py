@@ -201,6 +201,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        # Concurrent module-tree branches can declare different quantizable
+        # leaves.  Cache each branch's leaf blocks so a layer is never asked to
+        # resolve a sibling branch's modules.
+        self._layer_modules_by_prefix: Dict[tuple[str, bool], Optional[List[List[str]]]] = {}
         self.layer_module_coverage = LayerModuleCoverageTracker()
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -1760,6 +1764,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 layer_names=layer_names,
             )
             if lazy_cache is not None:
+                # A looped/recurrent decoder captures several invocations per
+                # calibration sample. The replay stage bounds itself by
+                # `processor.num_batches` (normally the calibration batch
+                # count), which would truncate the capture back to loop 0.
+                captured_batches = getattr(lazy_cache, "captured_batch_count", None)
+                if captured_batches:
+                    for processor in getattr(self, "processors", ()) or ():
+                        processor.num_batches = int(captured_batches)
                 return lazy_cache
 
         capture_stage = StageInputsCapture(self, logger=log)
@@ -2118,6 +2130,77 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         return total_log
 
+    def layer_modules_for_prefix(self, prefix: Optional[str], *, planning: bool = False):
+        """Return the leaf blocks declared by the tree branch that owns ``prefix``.
+
+        A module tree may contain several complete variants for concurrent
+        decoder stacks (text, vision, audio, ...).  Their quantizable leaves can
+        differ, so the flat union returned by ``simple_layer_modules()`` must not
+        be applied to every layer.  Resolve the variant whose decoder prefix
+        contains the layer instead.  ``None`` means the layer is outside every
+        declared branch (for example an embedding endpoint or ``lm_head``) and
+        the caller keeps its existing global declaration.
+        """
+
+        if not prefix:
+            return None
+
+        cache_key = (prefix, planning)
+        if cache_key in self._layer_modules_by_prefix:
+            return self._layer_modules_by_prefix[cache_key]
+
+        tree = getattr(self.gptq_model, "effective_module_tree", None)
+        if tree is None:
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+
+        definition = type(self.gptq_model)
+        matches = []
+        for variant in definition._iter_module_tree_variants(tree):
+            for variant_prefix in definition._expand_module_tree_prefixes(variant):
+                if prefix == variant_prefix or prefix.startswith(f"{variant_prefix}."):
+                    matches.append((len(variant_prefix), variant_prefix, variant))
+
+        if not matches:
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+
+        longest = max(match[0] for match in matches)
+        best = [match for match in matches if match[0] == longest]
+        if len(best) > 1:
+            # Several variants declare the same decoder prefix (alternative
+            # layer types).  Keep the historical merged declaration instead of
+            # silently selecting one alternative.
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+        best_variant = best[0][2]
+
+        is_awq_quantize = any(
+            isinstance(proc, (AWQProcessor, ParoQuantProcessor))
+            for proc in self.processors
+        )
+        include_capture_only = any(
+            getattr(getattr(proc, "forward", None), "activation_capture", False)
+            for proc in self.processors
+        )
+        with definition._module_tree_context(best_variant):
+            if planning:
+                modules = definition.full_layer_modules(
+                    self.gptq_model.model.config,
+                    is_awq_quantize=is_awq_quantize,
+                    include_capture_only=include_capture_only,
+                )
+            else:
+                modules = definition.simple_layer_modules(
+                    self.gptq_model.model.config,
+                    self.gptq_model.quantize_config,
+                    is_awq_quantize=is_awq_quantize,
+                    include_capture_only=include_capture_only,
+                )
+
+        self._layer_modules_by_prefix[cache_key] = modules
+        return modules
+
     def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
         """Build the named-module subset a processor will quantize for one layer."""
 
@@ -2150,6 +2233,20 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # this mark because their native-pass inputs cannot be paired with the
         # quantized-path inputs by call order (see `GPTAQ`/`FOEM`).
         plan = _model_module_plan(self.gptq_model)
+        if plan is not None and not is_lm_head_module:
+            # A quantizable leaf that no spec declares is invisible to the
+            # declared-spec coverage report: every declared spec can match while
+            # the leaf silently stays in the source dtype. TeleChat2's
+            # `query`/`key_value` were exactly this (issue #4093 item 3).
+            for candidate_name, candidate in list(full.items()):
+                if isinstance(candidate, NamedModule):
+                    continue
+                if not isinstance(candidate, (nn.Linear, nn.Conv1d, nn.Conv2d)):
+                    continue
+                if plan.find(candidate_name) is None:
+                    self.layer_module_coverage.record_undeclared(
+                        candidate_name, layer_index
+                    )
         for name in subset:
             if name in (self.input_embeddings_name, self.output_embeddings_name):
                 layer_name = name

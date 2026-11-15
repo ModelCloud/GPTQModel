@@ -15,23 +15,21 @@ from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.model import create_quant_module
 
 
-def _shape_only_awq_gemm():
+class ShapeOnlyAwqGemm:
     """AwqGEMMLinear's packing contract without the CUDA-extension platform gate.
 
-    ``verify_supports_params`` requires every ``SUPPORTS_*`` declaration to be
-    restated on a subclass, so copy them instead of inheriting them silently.
+    Deliberately not a ``BaseQuantLinear`` subclass: the kernel registry
+    enumerates every subclass, and a second ``AWQ_GEMM``/``GEMM`` declaration
+    makes ``get_kernel_for_backend`` reject the real kernel as ambiguous when
+    another test file loads it in the same process.
     """
 
-    declarations = {
-        name: getattr(AwqGEMMLinear, name)
-        for name in dir(AwqGEMMLinear)
-        if name.startswith("SUPPORTS_")
-    }
-    declarations["validate_once"] = classmethod(lambda cls: (True, None))
-    return type("ShapeOnlyAwqGemm", (AwqGEMMLinear,), declarations)
+    SUPPORTS_GROUP_SIZE = AwqGEMMLinear.SUPPORTS_GROUP_SIZE
 
-
-ShapeOnlyAwqGemm = _shape_only_awq_gemm()
+    @staticmethod
+    def validate(**kwargs):
+        kwargs["check_platform"] = False
+        return AwqGEMMLinear._validate(**kwargs)
 
 
 def _stub(bits=4, dynamic=None):

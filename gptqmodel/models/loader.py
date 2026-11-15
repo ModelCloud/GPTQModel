@@ -16,7 +16,7 @@ import weakref
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
 import transformers
@@ -1576,6 +1576,64 @@ def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None)
     return BACKEND.EXL3_TORCH
 
 
+def _apply_requested_module_tree(
+    definition_cls,
+    model,
+    module_tree,
+    quantize_config,
+    *,
+    allow_auto: bool,
+) -> None:
+    """Attach an explicit or auto-detected module tree to a loaded model.
+
+    ``None`` keeps the existing fail-closed behavior.  A list/tuple is an
+    explicit declaration.  ``"auto"`` asks the definition's structural
+    discovery to build one complete variant per concurrent decoder stack; it is
+    only valid for an unquantized source because a quantized checkpoint no
+    longer exposes the dense ``Linear`` leaves discovery looks for.
+    """
+
+    if module_tree is None:
+        return
+
+    if isinstance(module_tree, str):
+        if module_tree != "auto":
+            raise ValueError(
+                f"module_tree={module_tree!r} is not supported; "
+                "pass a tree declaration (list/tuple) or 'auto'."
+            )
+        if quantize_config is None:
+            raise ValueError(
+                "module_tree='auto' requires a quantize_config so the quantization "
+                "method is known; omit module_tree when loading only for evaluation."
+            )
+        if not allow_auto:
+            raise ValueError(
+                "module_tree='auto' requires an unquantized source model loaded through "
+                "from_pretrained(); quantized checkpoints need an explicit module tree."
+            )
+        detected = definition_cls._auto_detect_module_tree(
+            model, getattr(quantize_config, "method", None)
+        )
+        if detected is None:
+            model_type = getattr(getattr(model, "config", None), "model_type", "<unknown>")
+            raise ValueError(
+                f"module_tree='auto' could not resolve any quantizable decoder branch for "
+                f"model_type {model_type!r}. Register an explicit model definition or pass "
+                "an explicit module tree declaration."
+            )
+        model.gptqmodel_effective_module_tree = copy.deepcopy(detected)
+        return
+
+    if not isinstance(module_tree, (list, tuple)):
+        raise TypeError(
+            "module_tree must be None, 'auto', or a list/tuple tree declaration; "
+            f"got {type(module_tree).__name__}."
+        )
+
+    model.gptqmodel_effective_module_tree = copy.deepcopy(module_tree)
+
+
 def ModelLoader(cls):
     @classmethod
     def from_pretrained(
@@ -1590,6 +1648,7 @@ def ModelLoader(cls):
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **model_init_kwargs,
     ):
         if p2p is not None and quantize_config is not None:
@@ -1723,6 +1782,7 @@ def ModelLoader(cls):
                         dtype=dtype,
                         trust_remote_code=trust_remote_code,
                         tokenizer_trust_remote_code=tokenizer_trust_remote_code,
+                        module_tree=module_tree,
                         **redirect_kwargs,
                     )
 
@@ -1749,6 +1809,9 @@ def ModelLoader(cls):
             )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
+            _apply_requested_module_tree(
+                cls, model, module_tree, quantize_config, allow_auto=False
+            )
 
             turtle_model = None
 
@@ -1918,6 +1981,10 @@ def ModelLoader(cls):
 
                 turtle_model = None
 
+        _apply_requested_module_tree(
+            cls, model, module_tree, quantize_config, allow_auto=True
+        )
+
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
         config_seq_len = find_config_seq_len(model_config, seq_len_keys)
@@ -1971,6 +2038,7 @@ def ModelLoader(cls):
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ):
 
@@ -2478,6 +2546,9 @@ def ModelLoader(cls):
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
             dynamic_cache_stats_before = dynamic_override_cache_stats(qcfg.dynamic) if qcfg.dynamic else None
+            _apply_requested_module_tree(
+                cls, model, module_tree, qcfg, allow_auto=False
+            )
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
