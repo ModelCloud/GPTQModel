@@ -266,6 +266,10 @@ class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE_MIN = 128
     GENERATE_EVAL_SIZE_MAX = 128
     APPLY_CHAT_TEMPLATE = False
+    # ARC accuracy alone never calls `generate()`, so a broken transformers-5
+    # KV-cache contract stays invisible (#4121 item 3). Families that rely on
+    # the remote `prepare_inputs_for_generation` opt in here.
+    ASSERT_INFERENCE = False
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
 
@@ -802,10 +806,14 @@ class ModelTest(unittest.TestCase):
         return flat
 
 
-    def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
+    def assertInference(self, model, tokenizer=None, keywords=None, prompt=None):
         # gptqmodel can auto init tokenizer internally
         if keywords is None:
             keywords = self.INFERENCE_RESULT_KEYWORDS
+        # Resolve from the instance so a family can override the prompt without
+        # inheriting the class-definition-time default.
+        if prompt is None:
+            prompt = self.INFERENCE_PROMPT
         if tokenizer is None:
             tokenizer = model.tokenizer
 
@@ -2086,6 +2094,10 @@ class ModelTest(unittest.TestCase):
                         "The Stage-2 evaluation fallback is disabled."
                     )
         self.check_results(task_results)
+        if self.ASSERT_INFERENCE and self.model is not None:
+            # Quantize+ARC passes even when `generate()` cannot run at all;
+            # assert real generated text before the model is released.
+            self.assertInference(self.model)
         self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)
 
     def check_results(self, task_results):

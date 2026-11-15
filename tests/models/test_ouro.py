@@ -11,6 +11,7 @@ class TestOuro(ModelTest):
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 32
+    ASSERT_INFERENCE = True
 
     # Full 1172-row ARC-Challenge scores for GPTQ 4-bit (g128), measured against
     # dense BF16 acc=0.5017064846416383 and acc_norm=0.5264505119453925. This is
@@ -26,3 +27,26 @@ class TestOuro(ModelTest):
 
     def test_ouro(self):
         self.quantize_and_evaluate()
+
+    def test_ouro_native_generate_runs_before_model_load_hook(self):
+        """Issue #4121 item 2: the native branch must call `before_model_load`.
+
+        Ouro's remote forward passes `input_embeds`/`cache_position` to the
+        transformers mask helper; only `OuroQModel.before_model_load` adapts
+        those names. Without the hook a native load raises
+        `TypeError: create_causal_mask() got an unexpected keyword argument
+        'input_embeds'`.
+        """
+
+        from gptqmodel import GPTQModel
+
+        model = GPTQModel.load(
+            self.NATIVE_MODEL_ID,
+            quantize_config=None,
+            trust_remote_code=True,
+            device="cuda:0",
+        )
+        try:
+            self.assertInference(model)
+        finally:
+            del model

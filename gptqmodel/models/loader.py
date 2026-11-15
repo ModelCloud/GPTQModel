@@ -883,6 +883,25 @@ def _should_print_module_tree() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 
+def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool) -> None:
+    """Run a definition's pre-load hook for every load path.
+
+    `before_model_load` is a plain method on the definition class, not an
+    instance method: no model instance exists yet, so the class is passed as
+    the receiver. Definitions that patch remote modules guard their work, so
+    running the hook for quantize and quantized reload in the same process is
+    idempotent. Native (non-quantized) loads need the same hook because the
+    mask-helper and config patches it installs are also required by
+    `generate()`/`forward()` on an unquantized model.
+    """
+
+    cls.before_model_load(
+        cls,
+        model_local_path=model_local_path,
+        load_quantized_model=load_quantized_model,
+    )
+
+
 def _maybe_print_module_tree(model) -> None:
     """Print the module tree only when explicitly requested for debugging."""
 
@@ -1801,6 +1820,11 @@ def ModelLoader(cls):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
+            _call_before_model_load(
+                cls,
+                model_local_path=model_local_path,
+                load_quantized_model=False,
+            )
             model = _hf_loader_from_pretrained_with_dynamic_module_retry(
                 cls.loader,
                 model_local_path,
@@ -1884,7 +1908,11 @@ def ModelLoader(cls):
             model_init_kwargs_without_internal["_fast_init"] = cls.require_fast_init
             #model_init_kwargs["low_cpu_mem_usage"] = True
 
-            cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=False)
+            _call_before_model_load(
+                cls,
+                model_local_path=model_local_path,
+                load_quantized_model=False,
+            )
             from ..utils.hf import build_shell_model
 
             # XIELUActivation will use some weights when activation init, so can't use init_empty_weights
@@ -2473,7 +2501,11 @@ def ModelLoader(cls):
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         gguf_tensor_key_mapping = None
         with suspend_hf_weight_init():
-            cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=True)
+            _call_before_model_load(
+                cls,
+                model_local_path=model_local_path,
+                load_quantized_model=True,
+            )
 
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)
