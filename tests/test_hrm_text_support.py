@@ -176,7 +176,7 @@ def test_hrm_text_calibration_captures_every_recurrent_invocation():
         layer_names=layer_names,
     )
 
-    per_layer = instance._hrm_per_layer
+    per_layer = instance._looped_per_layer
     assert [len(per_layer[id(layer)]["layer_inputs"]) for layer in layers] == [4, 4, 2, 2]
 
     # Each L-stack invocation receives a different recurrent state, so a single
@@ -217,7 +217,7 @@ def test_hrm_text_pre_quantize_serves_each_layers_own_invocations():
 
     for layer in layers:
         instance.pre_quantize(layer)
-        assert cache.layer_inputs is instance._hrm_per_layer[id(layer)]["layer_inputs"]
+        assert cache.layer_inputs is instance._looped_per_layer[id(layer)]["layer_inputs"]
         assert len(cache.attention_masks) == len(cache.layer_inputs)
 
 

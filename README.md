@@ -97,7 +97,7 @@ Disk-backed replay outputs use [bounded staging and shard verification on every 
 Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
 Quantized kernels receive packed rows and launch in the operand's device; see the [kernel input contiguity and launch contracts](docs/kernel-input-contiguity.md) for activation packing, 64-bit offsets, empty batches, and per-token compiles.
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
-Transformers 5.22 model-family fixes for module trees, Defuser GLM-4.x router tuples, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow.
+Transformers 5.22 model-family fixes for module trees, Defuser GLM-4.x router tuples, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow. The same page covers the remote-code load and generate contracts: [native rotary buffer restoration](docs/transformers-5-compat.md#j1-native-rotary-buffers-are-restored-after-every-load-item-10), legacy unscaled RoPE, ChatGLM `generate()`, `.bin` tied-key normalization, the AUTO_NF12 source-weight view, and the Klear import shim.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
@@ -108,15 +108,15 @@ MoE AWQ folds also scale the router and `shared_expert_gate`, and calibration pa
 Padding-only MoE experts stay on the RTN fallback, sibling AWQ captures share one host copy under `inference_mode`, and FP16 CPU fused kernels keep their bias epilogue; see the [MoE padding ownership and calibration capture lifetimes](docs/moe-padding-and-awq-dedup.md) flow.
 GPTAQ and FOEM disable the native-input delta for routed experts (their token subset changes after attention is quantized) and fall back to RTN when an expert receives no rows; GGUF `q*_k_s`/`q*_k_m`/`q*_k_l` names warn that they store a uniform K-quant, and Hessian staging never narrows a bf16 input to float16; see the [quantizer MoE, GGUF alias, and Hessian staging flows](docs/quantizer-moe.md).
 Every AWQ module packs bounded token rows across all variable-length calibration captures and fallback coverage is checked per layer; see the [AWQ calibration aggregation](docs/awq-calibration-aggregation.md) flow.
-AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
+AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; the same page documents the remote-code family trees (Instella, K2-Horizon, TeleChat2), undeclared-leaf coverage, stale position-kwargs replay, looped-decoder capture, and PanGu's top-query layer replay; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
 LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
 AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
 AWQ dequantization dispatches on the saved checkpoint layout and per-module `dynamic` widths; see the [AWQ dequantization layouts](docs/awq-dequant-layouts.md) flow.
 AWQ split-K prefill covers every K tile and the decode-batch bound trims on the tile count; see the [AWQ split-K kernel boundaries](docs/awq-kernel-splitk.md) contract.
 Legacy 5.4.x `meta.gptaq` booleans, untied `lm_head` quantization, and the metadata plain Transformers or vLLM need are described in the [checkpoint compatibility](docs/checkpoint-compat.md) contract.
-Third-party module filters, format-changing re-saves, `save_pretrained()` layout safety, `load_state_dict()` round-trips and partial loads, HF `quant_method` for AWQ exports and packed GGUF, `torch.save(model)` pickling, Marlin `g_idx`, `is_marlin_format: false`, dense export, and mixed-bit dequantization are described in the [checkpoint interop](docs/checkpoint-interop.md) contract.
+Third-party module filters, format-changing re-saves, `save_pretrained()` layout safety, `load_state_dict()` round-trips and partial loads, HF `quant_method` for AWQ exports, packed GGUF and every GPT-QModel-only layout, `torch.save(model)` pickling after `optimize()`, Marlin `g_idx`, `is_marlin_format: false`, dense export, and mixed-bit dequantization are described in the [checkpoint interop](docs/checkpoint-interop.md) contract.
 GPTQ `-:` exclusion declarations for plain HF/Optimum loads, endpoint requantize under AUTO_NF12, post-quant EoRA, fail-closed rotation validation, and FP32 staged GSQ losses are described in the [quantization feature contracts](docs/quantization-features.md) flow.
-Transformers/Optimum GPTQ loading, legacy checkpoint key layouts, AWQ group-size retuning, and the saved-config `auto_map` contract are described in the [HF interoperability](docs/hf-interop.md) flow.
+Transformers/Optimum GPTQ loading, legacy checkpoint key layouts, AWQ group-size retuning, the saved-config `auto_map` contract, and the refusing quantizer registered for every GPT-QModel-only `quant_method` are described in the [HF interoperability](docs/hf-interop.md) flow.
 FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
 The native FP8 forward wrapper and the W4A16 quant source resolve one
 `weight_scale_semantics` per checkpoint, so a DeepSeek multiplier and a native
@@ -409,6 +409,7 @@ not tuned, so rocBLAS remains the default there too.
 * 🚀 Multi-GPU data-parallel quantization with GIL-safe peer copies and device-aware scheduling.
 * ✨ CUDA (NVIDIA), ROCm (AMD), Tenstorrent (Torch/XLA and TTNN), NPU (Huawei Ascend), XPU (Intel), MPS/MLX (Apple silicon), and CPU support. See the platform matrix below for OS and kernel availability.
 * ✨ `Dynamic` per-module mixed quantization control: each layer/module can have a unique quantization config or be excluded from quantization. 
+* ✨ Staged quantization protocol with rule-scoped actions: `smoothquant` folds its inverse into the preceding norm, and unsupported actions fail loudly. See [protocol actions](docs/protocol-actions.md).
 * 🚀 Torch fused kernels for Intel XPU and CPU, plus native AVX512-BF16 GPTQ/AWQ CPU kernels.
 * 🚀 Free-threaded Python support for multi-GPU quantization, with explicit [PyTorch GIL=0 safety contracts](pytorch_gil_0_compat.md).
 * ✨ Asymmetric `Sym=False` support. 
@@ -671,7 +672,9 @@ quantized model format and can be loaded with `mlx_lm.load`.
 Pass an MLX token array as `calibration_data` to use your own calibration set.
 To drive a GPTQ/AWQ checkpoint through the MLX runtime with the standard
 `generate()` API, or to export one with `GPTQModel.export(..., format="mlx")`,
-see the [MLX runtime and export flow](docs/mlx-runtime.md). MACaQ MXFP4 and NF12
+see the [MLX runtime and export flow](docs/mlx-runtime.md), including batched
+attention-mask handling, per-call EOS scoping, and the stock-compatible
+`mlx_lm.load` export layout. MACaQ MXFP4 and NF12
 checkpoints load into dedicated Metal kernels as well: MACaQ's OCP MXFP4 words
 feed MLX's native MXFP4 matmul, and NF12's 12-bit BF16 stream is decoded by a
 fused Metal GEMV or a decode-plus-matmul prefill.
@@ -1844,9 +1847,15 @@ If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, a
 ```python
 from gptqmodel import TritonPatch
 
-# Mitigate Triton kernel-cache crashes under nogil/free-threading Python 3.13+, where the cache storage is not thread-safe.
+# Serialize Triton autotuner state and JIT compilation under nogil/free-threading Python 3.13+.
 TritonPatch.apply()
 ```
+
+`TritonPatch` also makes the first concurrent launch of a kernel safe: libtriton's
+compiler is not free-thread safe, so cold JIT compiles are single-flight and
+globally serialized. See [concurrency guards](docs/concurrency.md) for the
+reference-counted BLAS/TF32 guards, the compile lock, and the dynamo
+compiler-failure classification.
 
 ## License 📜
 

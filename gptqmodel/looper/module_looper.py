@@ -1764,6 +1764,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 layer_names=layer_names,
             )
             if lazy_cache is not None:
+                # A looped/recurrent decoder captures several invocations per
+                # calibration sample. The replay stage bounds itself by
+                # `processor.num_batches` (normally the calibration batch
+                # count), which would truncate the capture back to loop 0.
+                captured_batches = getattr(lazy_cache, "captured_batch_count", None)
+                if captured_batches:
+                    for processor in getattr(self, "processors", ()) or ():
+                        processor.num_batches = int(captured_batches)
                 return lazy_cache
 
         capture_stage = StageInputsCapture(self, logger=log)
@@ -2225,6 +2233,20 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # this mark because their native-pass inputs cannot be paired with the
         # quantized-path inputs by call order (see `GPTAQ`/`FOEM`).
         plan = _model_module_plan(self.gptq_model)
+        if plan is not None and not is_lm_head_module:
+            # A quantizable leaf that no spec declares is invisible to the
+            # declared-spec coverage report: every declared spec can match while
+            # the leaf silently stays in the source dtype. TeleChat2's
+            # `query`/`key_value` were exactly this (issue #4093 item 3).
+            for candidate_name, candidate in list(full.items()):
+                if isinstance(candidate, NamedModule):
+                    continue
+                if not isinstance(candidate, (nn.Linear, nn.Conv1d, nn.Conv2d)):
+                    continue
+                if plan.find(candidate_name) is None:
+                    self.layer_module_coverage.record_undeclared(
+                        candidate_name, layer_index
+                    )
         for name in subset:
             if name in (self.input_embeddings_name, self.output_embeddings_name):
                 layer_name = name

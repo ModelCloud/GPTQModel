@@ -510,43 +510,119 @@ class AWQProcessor(LoopProcessor):
             self._full_module_name(layer_module, module)
         )
 
+    def _resolve_module_kernel(self, module_name: Optional[str], resolved_cfg=None):
+        """Resolve the packing kernel for one module, falling back to the default."""
+
+        try:
+            return self._resolve_qlinear_kernel(module_name, resolved_cfg=resolved_cfg)
+        except Exception:
+            return self.qlinear_kernel
+
+    def _kernel_group_size_supported(
+        self,
+        kernel,
+        module_name: Optional[str],
+        in_features: int,
+        out_features: int,
+        group_size: int,
+        *,
+        dtype: Optional[torch.dtype] = None,
+        resolved_cfg=None,
+    ) -> bool:
+        """Ask the resolved kernel whether it can pack this shape at ``group_size``.
+
+        The kernel owns the packing contract. ``AwqGEMMLinear`` requires both
+        ``in_features`` and ``out_features`` to be multiples of the group size,
+        so checking only the input axis let ``gate_proj``/``up_proj`` with
+        ``out_features=448`` reach ``create_quant_module`` and raise there.
+        Re-running the kernel's own ``validate`` keeps this retune decision and
+        the packing gate in lockstep instead of duplicating a partial predicate.
+
+        ``dtype`` and ``device`` are left to ``create_quant_module`` when they
+        are not known yet: this runs from the processor constructor, before the
+        final per-module placement is resolved.
+        """
+
+        validate = getattr(kernel, "validate", None)
+        if not callable(validate):
+            return in_features % group_size == 0
+        try:
+            ok, _ = validate(
+                bits=self._module_bits(module_name, resolved_cfg=resolved_cfg),
+                group_size=group_size,
+                desc_act=self.qcfg.desc_act,
+                sym=self.qcfg.sym,
+                in_features=in_features,
+                out_features=out_features,
+                pack_dtype=self.qcfg.pack_dtype,
+                dtype=dtype,
+            )
+        except Exception:
+            return False
+        return bool(ok)
+
     def _largest_supported_group_divisor(
         self,
         module_name: Optional[str],
         in_features: int,
+        out_features: int,
         configured_group_size: int,
+        *,
+        dtype: Optional[torch.dtype] = None,
+        resolved_cfg=None,
     ) -> int:
-        """Pick the largest supported group size that divides ``in_features``.
+        """Pick the largest group size the kernel can pack this module with.
 
-        Returns ``-1`` (per-channel) when no supported group size divides the
-        input axis. ``BaseQuantLinear`` normalizes ``-1`` to ``in_features``,
-        so every AWQ stage sees one full-width group.
+        Returns ``-1`` (per-channel) when no positive supported group size
+        passes the kernel's own packing validation but per-channel does;
+        ``BaseQuantLinear`` normalizes ``-1`` to ``in_features``, so every AWQ
+        stage sees one full-width group. When even per-channel does not pack
+        the shape, the configured size is returned unchanged so the caller does
+        not record an override for a module the kernel cannot quantize (for
+        example a non-quantized MoE router).
         """
 
-        try:
-            kernel = self._resolve_qlinear_kernel(module_name)
-        except Exception:
-            kernel = self.qlinear_kernel
+        kernel = self._resolve_module_kernel(module_name, resolved_cfg=resolved_cfg)
         supported = {
             int(size)
             for size in getattr(kernel, "SUPPORTS_GROUP_SIZE", ()) or ()
             if isinstance(size, int) and size > 0
         }
         for size in sorted(supported, reverse=True):
-            if size <= configured_group_size and in_features % size == 0:
+            if size <= configured_group_size and self._kernel_group_size_supported(
+                kernel,
+                module_name,
+                in_features,
+                out_features,
+                size,
+                dtype=dtype,
+                resolved_cfg=resolved_cfg,
+            ):
                 return size
-        return -1
+        if self._kernel_group_size_supported(
+            kernel,
+            module_name,
+            in_features,
+            out_features,
+            -1,
+            dtype=dtype,
+            resolved_cfg=resolved_cfg,
+        ):
+            return -1
+        return configured_group_size
 
     def _ensure_group_size_divisibility(self) -> None:
-        """Retune AWQ modules whose ``in_features`` is not a group multiple.
+        """Retune AWQ modules whose shape the kernel cannot pack as configured.
 
         AWQ's weight-mean, clip search, pseudo-quantization and packing all
-        reshape the input axis into fixed-size groups, so a module whose
-        ``in_features`` is not a multiple of the configured ``group_size``
-        cannot be quantized as-is. The failure previously surfaced only after
-        the whole calibration pass. Resolve a supported divisor up front and
-        record it as a per-module ``dynamic`` override so staging, packing,
-        saving and reload all resolve the same value.
+        reshape the weight matrix into fixed-size groups, so a module whose
+        ``in_features`` *or* ``out_features`` is not a multiple of the
+        configured ``group_size`` cannot be quantized as-is. The failure
+        previously surfaced only after the whole calibration pass (or, for the
+        output axis, not until ``create_quant_module`` packing). Resolve a
+        supported group size up front and record it as a per-module ``dynamic``
+        override so staging, packing, saving and reload all resolve the same
+        value.
         """
 
         if self.model is None:
@@ -570,10 +646,35 @@ class AWQProcessor(LoopProcessor):
             in_features = int(getattr(module, "in_features", 0) or 0)
             if in_features <= 0:
                 continue
-            configured = self._module_group_size(name, resolved_cfg=resolved_cfg)
-            if configured <= 0 or in_features % configured == 0:
+            out_features = int(getattr(module, "out_features", 0) or 0)
+            if out_features <= 0:
                 continue
-            chosen = self._largest_supported_group_divisor(name, in_features, configured)
+            configured = self._module_group_size(name, resolved_cfg=resolved_cfg)
+            if configured <= 0:
+                continue
+            weight = getattr(module, "weight", None)
+            dtype = weight.dtype if isinstance(weight, torch.Tensor) else None
+            kernel = self._resolve_module_kernel(name, resolved_cfg=resolved_cfg)
+            if self._kernel_group_size_supported(
+                kernel,
+                name,
+                in_features,
+                out_features,
+                configured,
+                dtype=dtype,
+                resolved_cfg=resolved_cfg,
+            ):
+                continue
+            chosen = self._largest_supported_group_divisor(
+                name,
+                in_features,
+                out_features,
+                configured,
+                dtype=dtype,
+                resolved_cfg=resolved_cfg,
+            )
+            if chosen == configured:
+                continue
             adjusted.append((name, configured, chosen, resolved_cfg.overrides))
 
         if not adjusted:
@@ -595,8 +696,8 @@ class AWQProcessor(LoopProcessor):
         )
         suffix = "" if len(adjusted) <= 4 else f", ... ({len(adjusted)} modules)"
         log.warning(
-            "AWQ: in_features is not divisible by group_size for %s%s; using a "
-            "supported per-module group size so calibration can proceed.",
+            "AWQ: group_size is not supported by the packing kernel for %s%s; "
+            "using a supported per-module group size so calibration can proceed.",
             examples,
             suffix,
         )
@@ -2855,6 +2956,9 @@ class AWQProcessor(LoopProcessor):
         them once and replays the result for every ratio in the grid.
         """
 
+        replay_inputs = getattr(self.gptq_model, "awq_module_replay_inputs", None)
+        if callable(replay_inputs):
+            x, module_kwargs = replay_inputs(module, x, module_kwargs)
         module_kwargs = dict(module_kwargs)
 
         target_device = None
@@ -2907,13 +3011,45 @@ class AWQProcessor(LoopProcessor):
             getattr(self.gptq_model, "awq_preserve_explicit_position_embeddings", False)
             and "position_embeddings" in module_kwargs
         )
+        captured_position_ids = module_kwargs.get("position_ids")
+        stale_position_ids = (
+            supports_position_ids
+            and seq_len is not None
+            and (
+                not torch.is_tensor(captured_position_ids)
+                or captured_position_ids.shape[-1] != seq_len
+            )
+        )
+        stale_position_embeddings = (
+            supports_position_embeddings
+            and seq_len is not None
+            and "position_embeddings" in module_kwargs
+            and not self._position_embeddings_match(
+                module_kwargs["position_embeddings"], seq_len
+            )
+        )
+        if (
+            rotary is None
+            and supports_position_embeddings
+            and not preserve_position_embeddings
+            and (stale_position_embeddings or stale_position_ids)
+        ):
+            # Some families keep the rotary on the attention module
+            # (Nanbeige/DeciLM expose `self_attn.rotary_emb`) instead of on the
+            # model root. Use it to rebuild the position scaffolding rather
+            # than replaying another sample's sequence length.
+            rotary = getattr(module, "rotary_emb", None) or getattr(module, "rotary", None)
         if (
             seq_len is not None
             and rotary is not None
             and supports_position_embeddings
             and not preserve_position_embeddings
         ):
-            rotary = self._get_rotary_for_device(target_device or x.device)
+            # `_get_rotary_for_device` resolves the model-root rotary again, so
+            # only use it when that is where `rotary` came from. A module-local
+            # rotary has no root counterpart and must be used as-is.
+            if self._get_root_rotary() is not None:
+                rotary = self._get_rotary_for_device(target_device or x.device)
             rotary_device = self._get_rotary_device(rotary, target_device or x.device)
             pos_ids = module_kwargs.get("position_ids") if supports_position_ids else None
             if not supports_position_ids:
@@ -2936,16 +3072,54 @@ class AWQProcessor(LoopProcessor):
                 pos_for_rotary,
                 **self._rotary_layer_type_kwargs(rotary, module),
             )
-        elif supports_position_ids and seq_len is not None and "position_ids" not in module_kwargs:
+        elif supports_position_ids and seq_len is not None and stale_position_ids:
+            # Rebuild whenever the captured ids describe a different sample.
+            # The old code only filled a *missing* key, so kwargs captured from
+            # a different-length sample were replayed with this sample's
+            # activations and crashed in `apply_rotary_pos_emb` (EXAONE-3.0
+            # 522 vs 430; DeciLM/Nanbeige 48 vs 20).
             pos_values = torch.arange(seq_len, device=target_device or x.device, dtype=torch.long)
             if x.dim() >= 2:
                 pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
             module_kwargs["position_ids"] = pos_values
 
+        if (
+            stale_position_embeddings
+            and not preserve_position_embeddings
+            and not self._position_embeddings_match(
+                module_kwargs.get("position_embeddings"), seq_len
+            )
+        ):
+            # No rotary could rebuild them; drop the other sample's cos/sin so
+            # the module falls back to its own rotary instead of broadcasting
+            # a foreign sequence length into this replay.
+            module_kwargs.pop("position_embeddings", None)
+
         if target_device is not None and x.device != target_device:
             x = x.to(target_device)
 
         return x, module_kwargs
+
+    @staticmethod
+    def _position_embeddings_match(position_embeddings, seq_len: int) -> bool:
+        """Whether ``position_embeddings`` already has ``seq_len`` positions."""
+
+        if position_embeddings is None or seq_len is None:
+            return True
+        values = (
+            position_embeddings
+            if isinstance(position_embeddings, (tuple, list))
+            else (position_embeddings,)
+        )
+        lengths = {
+            int(value.shape[-2])
+            for value in values
+            if torch.is_tensor(value) and value.dim() >= 2
+        }
+        if len(lengths) != 1:
+            # Unknown layout: never drop a value we cannot inspect.
+            return True
+        return lengths.pop() == seq_len
 
     @staticmethod
     def _rotary_layer_type_kwargs(
