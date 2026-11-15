@@ -44,7 +44,7 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ
 
 import os.path  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Dict, List, Optional, Union  # noqa: E402
+from typing import Any, Dict, List, Optional, Union  # noqa: E402
 
 import torch  # noqa: E402
 from packaging.version import Version  # noqa: E402
@@ -775,6 +775,7 @@ class GPTQModel:
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ):
         if type(fuse) is not bool:
@@ -871,6 +872,7 @@ class GPTQModel:
                 allow_remote_adapter=allow_remote_adapter,
                 adapter_revision=adapter_revision,
                 adapter_sha256=adapter_sha256,
+                module_tree=module_tree,
                 **kwargs,
             )
         else:
@@ -885,6 +887,7 @@ class GPTQModel:
                 profile=profile,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
+                module_tree=module_tree,
                 **kwargs,
             )
 
@@ -904,6 +907,7 @@ class GPTQModel:
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **model_init_kwargs,
     ) -> BaseQModel:
         if p2p is not None and quantize_config is not None:
@@ -978,6 +982,7 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=tokenizer_trust_remote_code,
                 p2p=p2p,
+                module_tree=module_tree,
                 **model_init_kwargs,
             )
 
@@ -1006,6 +1011,7 @@ class GPTQModel:
             profile=profile,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
+            module_tree=module_tree,
             **model_init_kwargs,
         )
 
@@ -1022,6 +1028,7 @@ class GPTQModel:
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ) -> BaseQModel:
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
@@ -1060,6 +1067,7 @@ class GPTQModel:
             allow_remote_adapter=allow_remote_adapter,
             adapter_revision=adapter_revision,
             adapter_sha256=adapter_sha256,
+            module_tree=module_tree,
             **kwargs,
         )
 
