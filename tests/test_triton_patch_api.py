@@ -225,3 +225,101 @@ def test_package_init_uses_triton_patch_api():
 
     assert ("TritonPatch", "apply") in call_names
     assert ("patch_triton_autotuner", "") not in call_names
+
+
+def _fake_jit_function(kernel_cache):
+    class _FakeJITFunction:
+        def __init__(self):
+            self.device_caches = {0: (kernel_cache, None, None, None, None)}
+
+    return _FakeJITFunction()
+
+
+def test_single_flight_triton_compile_compiles_one_key_once():
+    kernel_cache = {}
+    jit_function = _fake_jit_function(kernel_cache)
+    calls = []
+    calls_lock = threading.Lock()
+    start = threading.Barrier(8)
+
+    def compile_fn():
+        with calls_lock:
+            calls.append(1)
+        time.sleep(0.05)
+        kernel = object()
+        kernel_cache[("same",)] = kernel
+        return kernel
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        start.wait(timeout=10)
+        kernel = nogil_patcher._single_flight_triton_compile(
+            jit_function, ("same",), 0, compile_fn
+        )
+        with results_lock:
+            results.append(kernel)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(calls) == 1
+    assert len(results) == 8
+    assert all(result is results[0] for result in results)
+
+
+def test_single_flight_triton_compile_serializes_distinct_keys():
+    kernel_cache = {}
+    jit_function = _fake_jit_function(kernel_cache)
+    active = 0
+    max_active = 0
+    state_lock = threading.Lock()
+
+    def compile_fn():
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with state_lock:
+            active -= 1
+        return object()
+
+    threads = [
+        threading.Thread(
+            target=nogil_patcher._single_flight_triton_compile,
+            args=(jit_function, (index,), 0, compile_fn),
+        )
+        for index in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    # libtriton's compiler is process-global, so unrelated kernels must not
+    # compile concurrently either.
+    assert max_active == 1
+
+
+def test_triton_jit_compile_patch_is_installed():
+    jit_module = pytest.importorskip("triton.runtime.jit")
+    nogil_patcher.patch_triton_jit_compile()
+
+    assert getattr(jit_module.JITFunction, "_gptqmodel_compile_serialized", False)
+
+
+def test_macaq_triton_kernels_use_the_patched_jit_function():
+    jit_module = pytest.importorskip("triton.runtime.jit")
+    macaq = pytest.importorskip("gptqmodel.utils.macaq_triton")
+    if not getattr(macaq, "TRITON_AVAILABLE", False):
+        pytest.skip("triton is not available")
+
+    # MACaQ launches through the same JITFunction.run path as AWQ, so the
+    # process-wide compile lock covers it without a second patch.
+    assert isinstance(macaq._dense_w4a4_kernel, jit_module.JITFunction)
+    assert getattr(jit_module.JITFunction, "_gptqmodel_compile_serialized", False)

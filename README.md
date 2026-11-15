@@ -1843,9 +1843,15 @@ If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, a
 ```python
 from gptqmodel import TritonPatch
 
-# Mitigate Triton kernel-cache crashes under nogil/free-threading Python 3.13+, where the cache storage is not thread-safe.
+# Serialize Triton autotuner state and JIT compilation under nogil/free-threading Python 3.13+.
 TritonPatch.apply()
 ```
+
+`TritonPatch` also makes the first concurrent launch of a kernel safe: libtriton's
+compiler is not free-thread safe, so cold JIT compiles are single-flight and
+globally serialized. See [concurrency guards](docs/concurrency.md) for the
+reference-counted BLAS/TF32 guards, the compile lock, and the dynamo
+compiler-failure classification.
 
 ## License 📜
 
