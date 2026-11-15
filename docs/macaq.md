@@ -47,9 +47,10 @@ block-Hadamard. The W4A4 Triton GEMM reads packed tiles directly. The Torch
 fallback and W4A16 path reconstruct a temporary dense weight for the current
 forward and release it afterward; no dense weight cache is retained.
 
-The W4A4 CUDA path also ports Huawei's fused activation transform, native
+The W4A4 Triton path also ports Huawei's fused activation transform, native
 `tl.dot_scaled` GEMM, decode-aware launch tiles, and fused bias/output cast.
-It keeps only packed weights and E8M0 scales between forwards.
+It uses separately measured launch tiles on the Radeon AI PRO R9700 (RDNA4
+`gfx1201`) and keeps only packed weights and E8M0 scales between forwards.
 
 ### MXFP4 values and MACaQ checkpoint format
 
@@ -57,27 +58,28 @@ It keeps only packed weights and E8M0 scales between forwards.
 defines E2M1 elements with one E8M0 scale per 32 values. Those numerical
 values and scales are generic; MACaQ does not define a new 4-bit number system.
 
-`FORMAT.MACAQ` names GPT-QModel's native **checkpoint contract** for the
+`FORMAT.MXFP4_MACAQ` names GPT-QModel's native **checkpoint contract** for the
 MACaQ-transformed Linear. In addition to the MXFP4 weight codes and scales,
 the checkpoint stores `pre_scale` and `BH`; its quantization config records
 `activation_precision` and the transform settings. The tensor names, nibble
 packing, and transform metadata are part of this implementation's layout.
-A generic MXFP4 checkpoint cannot be loaded as `FORMAT.MACAQ` without
+A generic MXFP4 checkpoint cannot be loaded as `FORMAT.MXFP4_MACAQ` without
 converting that layout and supplying the required transform state.
 
 ## Quantization and runtime flow
 
 The backend is resolved once during preflight. `MACAQ_TORCH` remains selected
-when explicitly requested, including on a CUDA host. Automatic selection uses
-the configured quantization device, and only a CUDA target on a non-ROCm host
-with Triton selects `MACAQ_TRITON`. The module's winning `dynamic` rule is
-captured before calibration and reused for packing.
+when explicitly requested. Automatic selection uses the configured
+quantization device: NVIDIA CUDA or a ROCm `gfx1201` target with Triton selects
+`MACAQ_TRITON`; other targets select `MACAQ_TORCH`. Explicit Triton selection
+checks the selected GPU, including its ordinal. The module's winning `dynamic`
+rule is captured before calibration and reused for packing.
 
 ```mermaid
 flowchart TD
     A["MacaqConfig.__post_init__"] -->|valid| B["BaseQModel.quantize<br/>resolve pack_backend"]
     A -->|invalid config or dynamic key| F1["ValueError"]
-    B -->|AUTO on NVIDIA CUDA with Triton| T["MACAQ_TRITON"]
+    B -->|AUTO on NVIDIA CUDA or ROCm gfx1201 with Triton| T["MACAQ_TRITON"]
     B -->|AUTO elsewhere or explicit Torch| P["MACAQ_TORCH"]
     B -->|explicit backend unsupported by target| F2["select_quant_linear error"]
     T --> C["QuantizationRunPlan.build"]
@@ -233,6 +235,29 @@ epilogue. The M=64 threshold is 32 in this port: a local M=64 tile A/B on
 the same GPU measured 47.60 µs for the skinny tile versus 41.10 µs for
 the larger tile.
 
+### RDNA4 inference kernel timing
+
+The same packed W4A4 path runs on the Radeon AI PRO R9700 (`gfx1201`) with
+ROCm 10.1 / HIP 7.16, PyTorch 2.16.0.dev20261025+rocm10.1, and Triton 3.9.
+The R9700 launch plan uses 16×64×128 tiles through M=16 and 32×64×128 above
+that. These tiles were measured on this GPU; other ROCm architectures retain
+the Torch path. With resident BF16 activations, packed MXFP4 weights, an
+identity 32×32 block transform, unit pre-scale, and BF16 bias, the timing
+includes activation packing and GEMM. `triton.testing.do_bench_cudagraph`
+used `rep=100`. The comparison uses the earlier NVIDIA-oriented launch tiles
+on the same R9700 and the same kernel implementation.
+
+| M × N × K | Earlier tiles | R9700 tiles | Kernel-call speedup |
+|---|---:|---:|---:|
+| 1 × 2048 × 2048 | 46.12 µs | 17.39 µs | 2.65× |
+| 1 × 8192 × 2048 | 77.88 µs | 32.15 µs | 2.42× |
+| 16 × 2048 × 2048 | 46.80 µs | 17.86 µs | 2.62× |
+| 64 × 8192 × 2048 | 104.39 µs | 83.93 µs | 1.24× |
+| 128 × 2048 × 2048 | 86.08 µs | 56.57 µs | 1.52× |
+| 256 × 8192 × 2048 | 344.40 µs | 306.47 µs | 1.12× |
+
+These are Linear kernel-call timings, not full-model generation latency.
+
 ```bash
 python scripts/benchmark_macaq_quantization.py \
   --model /monster/data/model/Llama-3.2-1B-Instruct \
@@ -268,7 +293,9 @@ quantized = GPTQModel.load("./llama-3.2-1b-macaq", backend=BACKEND.MACAQ_TRITON)
 `activation_precision="w4a16"` keeps full-precision activations and stores only the
 4-bit weights. The portable Torch path (`BACKEND.MACAQ_TORCH`) runs on CPU,
 ROCm, XPU, and MPS; `BACKEND.MACAQ_TRITON` uses the native `tl.dot_scaled`
-E2M1 GEMM on CUDA for W4A4.
+E2M1 GEMM on NVIDIA CUDA and ROCm `gfx1201` for W4A4. Other ROCm
+architectures use Torch until their numerical behavior and launch plan are
+validated.
 
 `dynamic` may exclude modules with `False` or override `had_block`, `do_flip`,
 `n_flip_iters`, `fast_flip`, `compile_flip`, `ridge`, `pre_mode`, `pre_alpha`, `exp_screen`,
@@ -322,6 +349,19 @@ fast run is a lifecycle smoke test; the full-model perplexity measurements
 above use all 112 packed projections. The full checkpoint also reloads with
 both Torch and Triton backends.
 
+The same fast e2e test passed on R9700 with `PYTHON_GIL=0` and the ROCm
+runtime above: ARC-Challenge accuracy was 0.3359 and normalized accuracy
+0.3281. Its reloaded projections used the native W4A4 packer and GEMM.
+The 43 MACaQ unit tests also passed on R9700, including FP16/BF16/FP32
+numerical comparisons, K tails, and repeated forwards. For a 7×128
+activation and 64×128 weight, all 448 visible outputs matched the
+independent Torch reference exactly at each of FP16, BF16, and FP32
+with output scale 1.0 or 0.5 (six cases). The 64×128 weight stays in
+4096 packed data bytes and 256 E8M0 bytes, with no dense weight cache.
+A separate two-R9700 free-threaded probe passed three processes with eight
+threads × four calls each after serial kernel prewarm. It does not qualify
+concurrent cold JIT compilation.
+
 ## Port scope
 
 This port covers the native GPT-QModel safetensors path and the dense kernels
@@ -332,7 +372,7 @@ that path needs:
 - the Triton activation quantizer, fused rotate+quantize kernel, native
   `tl.dot_scaled` W4A4 GEMM, and W4A16 dequant GEMM in
   `gptqmodel/utils/macaq_triton.py`
-- the portable Torch and CUDA module paths in
+- the portable Torch and CUDA/ROCm module paths in
   `gptqmodel/nn_modules/qlinear/macaq.py`
 
 The upstream repository's MoE-specific kernels, W4A8 FP8 path, cuDNN/CUTLASS

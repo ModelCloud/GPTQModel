@@ -1031,7 +1031,7 @@ class ModelTest(unittest.TestCase):
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
-        elif format_family in (FORMAT.PAROQUANT, FORMAT.VPTQ, FORMAT.MACAQ):
+        elif format_family in (FORMAT.PAROQUANT, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:

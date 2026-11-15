@@ -149,8 +149,8 @@ class FORMAT(str, Enum):
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
     PAROQUANT = "paroquant"
-    # MACaQ stores nibble-packed E2M1 MXFP4 weights with E8M0 block scales.
-    MACAQ = "macaq"
+    # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales.
+    MXFP4_MACAQ = "mxfp4_macaq"
 
 
 class AutoDtypeCast(str, Enum):
@@ -1034,7 +1034,7 @@ def resolve_quant_format(
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
     if method == METHOD.MACAQ:
-        return FORMAT.MACAQ
+        return FORMAT.MXFP4_MACAQ
     if method == METHOD.NF12:
         return FORMAT.NF12
 
@@ -2290,7 +2290,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.VPTQ,
     },
     METHOD.MACAQ: {
-        FORMAT.MACAQ,
+        FORMAT.MXFP4_MACAQ,
     },
     METHOD.NF12: {
         FORMAT.NF12,
@@ -2347,7 +2347,7 @@ VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.VPTQ,
 )
 MACAQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
-    FORMAT.MACAQ,
+    FORMAT.MXFP4_MACAQ,
 )
 NF12_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.NF12,
@@ -2372,7 +2372,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
-    FORMAT.MACAQ: METHOD.MACAQ,
+    FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
     FORMAT.NF12: METHOD.NF12,
     FORMAT.TT_BLOCKFLOAT: METHOD.TT_BLOCKFLOAT,
 }
@@ -4097,9 +4097,9 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
                 normalized[FORMAT_FIELD_CODE] = normalized_format
             except ValueError:
                 normalized_format = None
-        if normalized_format is not None and normalized_format != FORMAT.MACAQ:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.MACAQ}`")
-            normalized[FORMAT_FIELD_CODE] = FORMAT.MACAQ
+        if normalized_format is not None and normalized_format != FORMAT.MXFP4_MACAQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.MXFP4_MACAQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.MXFP4_MACAQ
     elif target_cls is VPTQConfig:
         expected_method = METHOD.VPTQ
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -6162,7 +6162,7 @@ class MacaqConfig(PreProcessorConfig):
 
     bits: int = field(default=4, metadata={"choices": [4]})
     method: METHOD = field(default=METHOD.MACAQ)
-    format: FORMAT = field(default=FORMAT.MACAQ)
+    format: FORMAT = field(default=FORMAT.MXFP4_MACAQ)
     # MXFP4 always uses 32 values per E8M0 scale.
     group_size: int = field(default=32)
     block_size: int = field(default=32)
@@ -7299,7 +7299,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig
-    if method == METHOD.MACAQ or format_value == FORMAT.MACAQ:
+    if method == METHOD.MACAQ or format_value == FORMAT.MXFP4_MACAQ:
         return MacaqConfig
     if method == METHOD.NF12 or format_value == FORMAT.NF12:
         return NF12Config

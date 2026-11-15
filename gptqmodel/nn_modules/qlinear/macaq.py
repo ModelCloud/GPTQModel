@@ -32,7 +32,6 @@ from ...utils.macaq_triton import (
     mxfp4_w4a16_linear,
     triton_mxfp4_available,
 )
-from ...utils.rocm import IS_ROCM
 from . import WeightOnlyQuantLinear
 
 
@@ -49,7 +48,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TORCH]
     SUPPORTS_METHODS = [METHOD.MACAQ]
-    SUPPORTS_FORMATS = {FORMAT.MACAQ: 100}
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 100}
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -267,7 +266,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
             and self.backend == BACKEND.MACAQ_TRITON
             and TRITON_AVAILABLE
             and x.is_cuda
-            and not IS_ROCM
+            and triton_mxfp4_available(x.device)
         )
 
     def forward(self, x: torch.Tensor):
@@ -296,11 +295,11 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
 
 class MacaqTritonLinear(MacaqLinear):
-    """CUDA Triton MXFP4 Linear (native ``tl.dot_scaled`` W4A4 GEMM)."""
+    """NVIDIA CUDA and RDNA4 gfx1201 Triton MXFP4 Linear."""
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TRITON]
     SUPPORTS_METHODS = [METHOD.MACAQ]
-    SUPPORTS_FORMATS = {FORMAT.MACAQ: 100}
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 100}
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -309,7 +308,7 @@ class MacaqTritonLinear(MacaqLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.uint8]
     SUPPORTS_ADAPTERS = [Lora]
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
@@ -317,17 +316,18 @@ class MacaqTritonLinear(MacaqLinear):
     def validate_once(cls):
         if not TRITON_AVAILABLE:
             return False, RuntimeError("MacaqTritonLinear requires Triton.")
-        if not torch.cuda.is_available() or IS_ROCM:
-            return False, RuntimeError("MacaqTritonLinear requires an available CUDA device.")
+        if not torch.cuda.is_available():
+            return False, RuntimeError("MacaqTritonLinear requires an accelerator device.")
         return True, None
 
     @classmethod
     def validate_device(cls, device):
-        if not triton_mxfp4_available():
+        super().validate_device(device)
+        if not triton_mxfp4_available(device):
             raise NotImplementedError(
-                "MacaqTritonLinear requires a CUDA device and Triton; use BACKEND.MACAQ_TORCH otherwise."
+                "MacaqTritonLinear requires NVIDIA CUDA or ROCm RDNA4 gfx1201 "
+                "with Triton; use BACKEND.MACAQ_TORCH otherwise."
             )
-        return super().validate_device(device)
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.MACAQ_TRITON)

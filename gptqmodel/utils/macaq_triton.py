@@ -21,12 +21,14 @@
 #
 # Port scope: the dense activation quantizer, fused rotate+quantize kernel,
 # dense W4A4 `tl.dot_scaled` GEMM, decode-aware tiles and fused output epilogue
-# from `vllm/triton_mxfp4_dense.py`, and W4A16 dequant GEMM. The upstream MoE
-# kernels, W4A8 FP8 path, and cuDNN/CUTLASS backend are not included.
+# from `vllm/triton_mxfp4_dense.py`, and W4A16 dequant GEMM. GPT-QModel adds
+# measured RDNA4 gfx1201 launch tiles. The upstream MoE kernels, W4A8 FP8
+# path, and cuDNN/CUTLASS backend are not included.
 
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -50,10 +52,49 @@ MXFP4_BLOCK = 32
 _E2M1_MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 
 
-def triton_mxfp4_available() -> bool:
-    """Whether the Triton MXFP4 kernels can run on the current host."""
+def _cuda_ordinals(device) -> tuple[int, ...]:
+    """Resolve an indexed runtime device or all devices named by a family."""
 
-    return TRITON_AVAILABLE and torch.cuda.is_available() and not IS_ROCM
+    if device is None:
+        return (torch.cuda.current_device(),)
+    value = getattr(device, "value", device)
+    if isinstance(value, int):
+        return (value,)
+    try:
+        target = torch.device("cuda" if value == "rocm" else value)
+    except (TypeError, ValueError, RuntimeError):
+        return ()
+    if target.type != "cuda":
+        return ()
+    return tuple(range(torch.cuda.device_count())) if target.index is None else (target.index,)
+
+
+@lru_cache(maxsize=None)
+def _rdna4_macaq_supported(ordinal: int) -> bool:
+    """The R9700 gfx1201 is the validated ROCm MXFP4 Triton target."""
+
+    arch = getattr(torch.cuda.get_device_properties(ordinal), "gcnArchName", "")
+    return arch.split(":", 1)[0] == "gfx1201"
+
+
+def triton_mxfp4_available(device=None) -> bool:
+    """Whether every selected accelerator supports the MACaQ Triton path."""
+
+    if not TRITON_AVAILABLE or not torch.cuda.is_available():
+        return False
+    if not IS_ROCM and getattr(device, "value", device) == "rocm":
+        return False
+    ordinals = _cuda_ordinals(device)
+    if not ordinals:
+        return False
+    try:
+        return all(
+            0 <= index < torch.cuda.device_count()
+            and (not IS_ROCM or _rdna4_macaq_supported(index))
+            for index in ordinals
+        )
+    except (RuntimeError, AssertionError):
+        return False
 
 
 def make_hadamard(block: int, device="cpu") -> torch.Tensor:
@@ -306,11 +347,17 @@ def dequant_w4_to_bf16(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tens
 
 
 def _pick_tiles(rows: int, k: int) -> tuple[int, int, int, int, int]:
-    """Huawei's decode-aware tiling; choose a K divisor for MXFP4 groups."""
+    """Measured NVIDIA/RDNA4 launch tiles; K must divide MXFP4 groups."""
 
-    # The upstream fast path uses <=64; the 4090 benchmark favors the larger
-    # tile at M=64, so keep the skinny decode tile through M=32 only.
-    if rows <= 32:
+    if IS_ROCM:
+        # gfx1201 lowers scaled dot through BF16 WMMA. Its 128-wide K tile
+        # avoids the register pressure of Huawei's CUDA 512-wide decode tile.
+        block_m, block_n, k_candidates, warps = (
+            16 if rows <= 16 else 32, 64, (128, 64), 4
+        )
+    elif rows <= 32:
+        # The upstream fast path uses <=64; the 4090 benchmark favors the
+        # larger tile at M=64, so keep its skinny tile through M=32 only.
         block_m, block_n, k_candidates, warps = 16, 64, (512, 256, 128, 64), 4
     else:
         block_m, block_n, k_candidates, warps = 64, 128, (256, 128, 64), 8
@@ -335,8 +382,8 @@ def mxfp4_w4a4_linear(
 ) -> torch.Tensor:
     """Packed MXFP4 weights x MXFP4 activations (native block-scaled GEMM)."""
 
-    if not TRITON_AVAILABLE:
-        raise RuntimeError("MACaQ: Triton is not available.")
+    if not triton_mxfp4_available(x.device):
+        raise RuntimeError("MACaQ: Triton MXFP4 requires NVIDIA CUDA or ROCm gfx1201.")
     lead = x.shape[:-1]
     k = x.shape[-1]
     x2 = x.reshape(-1, k).contiguous()

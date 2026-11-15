@@ -316,7 +316,7 @@ class MacaqProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
-                format=FORMAT.MACAQ,
+                format=FORMAT.MXFP4_MACAQ,
                 backend=backend,
                 register_buffers=False,
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
@@ -336,7 +336,7 @@ class MacaqProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         model.quantized = True
         model.quantize_config.method = METHOD.MACAQ
-        model.quantize_config.format = FORMAT.MACAQ
+        model.quantize_config.format = FORMAT.MXFP4_MACAQ
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:

@@ -45,7 +45,7 @@ class TestLlama3_2_MACaQ(ModelTest):
     OFFLOAD_TO_DISK = False
 
     METHOD = METHOD.MACAQ
-    FORMAT = FORMAT.MACAQ
+    FORMAT = FORMAT.MXFP4_MACAQ
     BITS = 4
     GROUP_SIZE = 32
     LOAD_BACKEND = BACKEND.MACAQ_TRITON
@@ -156,5 +156,5 @@ class TestLlama3_2_MACaQ(ModelTest):
 
     def test_llama3_2_macaq(self):
         if not triton_mxfp4_available():
-            pytest.skip("MACaQ Triton inference requires a CUDA device")
+            pytest.skip("MACaQ Triton inference requires NVIDIA CUDA or ROCm gfx1201")
         self.quantize_and_evaluate()

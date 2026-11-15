@@ -194,7 +194,7 @@ def resolve_module_constructor_config(
                 overrides.get("bits", base_width),
                 overrides.get(FORMAT_FIELD_CODE, base_format),
             )
-        elif format == FORMAT.MACAQ:
+        elif format == FORMAT.MXFP4_MACAQ:
             for key in ("had_block", "activation_precision", "pre_mode", "pre_alpha"):
                 if key in overrides:
                     options[key] = overrides[key]

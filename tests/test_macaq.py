@@ -272,7 +272,8 @@ def test_macaq_config_roundtrip():
     )
     payload = config.to_dict()
     assert payload["method"] == METHOD.MACAQ
-    assert payload["format"] == FORMAT.MACAQ
+    assert payload["format"] == FORMAT.MXFP4_MACAQ
+    assert FORMAT.MXFP4_MACAQ.value == "mxfp4_macaq"
     assert payload["n_flip_iters"] == 12
     assert payload["compile_flip"] is True
     assert payload["had_block"] == 64
@@ -332,7 +333,7 @@ def test_macaq_processor_keeps_resolved_pack_backend_and_dynamic_config():
 
     module_config = resolve_module_constructor_config(
         bits=4, group_size=32, desc_act=False, sym=True, pack_dtype=torch.int32,
-        format=FORMAT.MACAQ, init_kwargs=config.quant_linear_init_kwargs(),
+        format=FORMAT.MXFP4_MACAQ, init_kwargs=config.quant_linear_init_kwargs(),
         overrides=config.resolve_module_config(wrapped.full_name).overrides,
     )
     assert module_config.options_dict()["had_block"] == 64
@@ -428,7 +429,7 @@ def test_macaq_triton_dequant_accepts_padded_e8m0_grid():
 
 @pytest.mark.skipif(
     not triton_mxfp4_available(),
-    reason="MACaQ Triton kernels require CUDA and Triton",
+    reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_triton_w4a16_matches_torch_with_bias(dtype):
@@ -455,7 +456,7 @@ def test_triton_w4a16_matches_torch_with_bias(dtype):
 
 @pytest.mark.skipif(
     not triton_mxfp4_available(),
-    reason="MACaQ Triton kernels require CUDA and Triton",
+    reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_triton_activation_packs_exact_e2m1_bytes(dtype):
@@ -484,7 +485,7 @@ def test_triton_activation_packs_exact_e2m1_bytes(dtype):
 
 @pytest.mark.skipif(
     not triton_mxfp4_available(),
-    reason="MACaQ Triton kernels require CUDA and Triton",
+    reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("out_scale", [1.0, 0.5])
@@ -510,7 +511,7 @@ def test_triton_w4a4_accumulates_bias_before_output_rounding(dtype, out_scale):
 
 
 @pytest.mark.skipif(
-    not triton_mxfp4_available(), reason="MACaQ Triton kernels require CUDA and Triton"
+    not triton_mxfp4_available(), reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201"
 )
 @pytest.mark.parametrize("rows", [32, 64, 65])
 def test_triton_tile_boundary_matches_torch(rows):
@@ -544,7 +545,7 @@ def test_macaq_module_does_not_retain_dense_weight_between_forwards():
 
 
 @pytest.mark.skipif(
-    not triton_mxfp4_available(), reason="MACaQ Triton kernels require CUDA and Triton"
+    not triton_mxfp4_available(), reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201"
 )
 def test_macaq_triton_module_keeps_only_packed_weight_after_repeated_forwards():
     _, _, _, module = _quantized_module_pair()
@@ -610,7 +611,7 @@ def test_macaq_linear_torch_matches_reference():
 
 @pytest.mark.skipif(
     not triton_mxfp4_available(),
-    reason="MACaQ Triton kernels require CUDA and Triton",
+    reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
 )
 def test_triton_kernels_match_torch():
     layer, result, torch_module, triton_module = _quantized_module_pair()
@@ -655,7 +656,7 @@ def test_triton_kernels_match_torch():
 
 @pytest.mark.skipif(
     not triton_mxfp4_available(),
-    reason="MACaQ Triton kernels require CUDA and Triton",
+    reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
 )
 @pytest.mark.parametrize("k", [896, 1152, 2176])
 def test_triton_dense_kernel_masks_k_tail(k):

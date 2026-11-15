@@ -585,6 +585,52 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     awq_fp32_lock = threading.Lock()
     awq_fp32_state = {}
 
+    macaq_thread = threading.local()
+    macaq_next_device = [0]
+    macaq_lock = threading.Lock()
+    macaq_state = {}
+
+    def macaq_triton_w4a4() -> bool:
+        """Exercise prewarmed packed W4A4 inference on two worker devices."""
+        from gptqmodel.utils.macaq_triton import (
+            mxfp4_w4a4_linear,
+            quantize_mxfp4,
+            triton_mxfp4_available,
+        )
+
+        with macaq_lock:
+            if not hasattr(macaq_thread, "device"):
+                macaq_thread.device = macaq_next_device[0] % 2
+                macaq_next_device[0] += 1
+                macaq_thread.stream = torch.cuda.Stream(device=macaq_thread.device)
+            device = macaq_thread.device
+        torch.cuda.set_device(device)
+        if not triton_mxfp4_available(torch.device("cuda", device)):
+            raise AssertionError("selected GPU lacks the MACaQ Triton kernel")
+
+        with macaq_lock:
+            if device not in macaq_state:
+                generator = torch.Generator(device=device).manual_seed(20261115)
+                x = torch.randn(1, 128, generator=generator, device="cuda", dtype=torch.bfloat16)
+                weight = torch.randn(128, 128, generator=generator, device="cuda", dtype=torch.bfloat16)
+                packed, scales = quantize_mxfp4(weight)
+                pre_scale = torch.ones(128, device="cuda", dtype=torch.bfloat16)
+                bh = torch.eye(32, device="cuda", dtype=torch.bfloat16)
+                bias = torch.randn(128, generator=generator, device="cuda", dtype=torch.bfloat16)
+                kwargs = {"pre_scale": pre_scale, "bh": bh, "bias": bias}
+                # Compile both kernels serially before worker launches.
+                expected = mxfp4_w4a4_linear(x, packed, scales, **kwargs)
+                torch.cuda.current_stream().synchronize()
+                macaq_state[device] = (x, packed, scales, kwargs, expected)
+            x, packed, scales, kwargs, expected = macaq_state[device]
+
+        with torch.cuda.stream(macaq_thread.stream), torch.inference_mode():
+            output = mxfp4_w4a4_linear(x, packed, scales, **kwargs)
+        macaq_thread.stream.synchronize()
+        if not bool(torch.equal(output, expected)):
+            raise AssertionError("concurrent MACaQ W4A4 inference changed output")
+        return True
+
     def awq_fp32_dequantize() -> bool:
         """Exercise the shared AWQ FP32 dense fallback on two worker devices."""
         from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
@@ -779,6 +825,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
         "gptqmodel_nf12_hip.embedding": nf12_hip_embedding,
+        "MACaQ Triton W4A4": macaq_triton_w4a4,
         "gptqmodel_nf12.gate": nf12_gate,
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
@@ -878,6 +925,7 @@ def _requires_two_gpus(name: str) -> bool:
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
             or name in (
                 "gptqmodel_nf12_hip.embedding",
+                "MACaQ Triton W4A4",
                 "AWQ FP32 dequantize_gemm",
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",

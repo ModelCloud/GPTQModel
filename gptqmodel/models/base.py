@@ -1946,12 +1946,12 @@ class BaseQModel(nn.Module):
             elif self.quantize_config.method == METHOD.NF12:
                 preferred_backend = BACKEND.NF12
             elif self.quantize_config.method == METHOD.MACAQ:
-                from ..utils.macaq_triton import TRITON_AVAILABLE
+                from ..utils.macaq_triton import triton_mxfp4_available
 
                 preferred_backend = (
                     BACKEND.MACAQ_TRITON
-                    if quant_device_type == "cuda" and torch.cuda.is_available()
-                    and TRITON_AVAILABLE and not IS_ROCM
+                    if quant_device_type in ("cuda", "rocm")
+                    and triton_mxfp4_available(quant_device)
                     else BACKEND.MACAQ_TORCH
                 )
             elif self.quantize_config.method == METHOD.PARO:
