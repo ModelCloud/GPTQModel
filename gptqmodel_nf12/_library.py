@@ -122,8 +122,15 @@ def available_ops(*names: str) -> bool:
     return _native_available()
 
 
-def library_path(name: str = "libnf12.so") -> Path:
+# The library a bare ``library_path()`` resolves to; upstream spells the default
+# as None, so the name lives here where the build list can be checked against it.
+DEFAULT_LIBRARY = "libnf12.so"
+
+
+def library_path(name: str | None = None) -> Path:
     """Find a packaged native library, or build and cache it for visible GPUs."""
+    if name is None:
+        name = DEFAULT_LIBRARY
     for directory in gptqmodel_nf12.__path__:
         candidate = Path(directory) / name
         if candidate.is_file():

@@ -38,7 +38,7 @@ from .moe import (
     moe_silu_mul,
     pack_bf16t_moe,
 )
-from .nn import NF12Embedding, NF12Linear
+from .nn import NF12Embedding, NF12Linear, verify_weights
 
 
 __version__ = "1.1.0"
@@ -78,4 +78,5 @@ __all__ = [
     "rowmajor_pack",
     "require",
     "sub_fp32",
+    "verify_weights",
 ]

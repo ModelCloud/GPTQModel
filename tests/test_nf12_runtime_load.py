@@ -14,7 +14,10 @@ def test_shared_library_names_match_build_and_loader():
     from gptqmodel_nf12 import _jit, _library
 
     assert _jit._LIBRARIES == ("libnf12.so", "libnf12_torch.so")
-    assert _library.library_path.__defaults__ == ("libnf12.so",)
+    # Upstream spells the default as None and resolves it, so the resolved name
+    # is what has to match the library the build produces.
+    assert _library.library_path.__defaults__ == (None,)
+    assert _library.DEFAULT_LIBRARY == _jit._LIBRARIES[0]
     source = Path(__file__).resolve().parents[1] / "gptqmodel_ext/nf12/CMakeLists.txt"
     cmake = source.read_text(encoding="utf-8")
     assert "OUTPUT_NAME nf12)" in cmake
