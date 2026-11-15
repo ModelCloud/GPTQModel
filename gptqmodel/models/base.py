@@ -75,7 +75,13 @@ from ..quantization.rotation.rotation import (
     validate_rotation_dimensions,
 )
 from ..utils.attn_mask import normalize_seq_mask
-from ..utils.backend import BACKEND, awq_gemm_pack_backend, backend_for_activation, normalize_backend
+from ..utils.backend import (
+    BACKEND,
+    awq_gemm_pack_backend,
+    awq_gemv_pack_backend,
+    backend_for_activation,
+    normalize_backend,
+)
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
@@ -722,6 +728,7 @@ class BaseQModel(nn.Module):
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.qlinear_kernel = qlinear_kernel
+        self.quantize_backend: Optional[BACKEND] = None
         self.trust_remote_code = trust_remote_code
         self.model_local_path = model_local_path
         self.quantize_config = quantize_config
@@ -1948,7 +1955,10 @@ class BaseQModel(nn.Module):
                 elif format_code == FORMAT.BITBLAS:
                     preferred_backend = BACKEND.AWQ_BITBLAS
                 elif format_code == FORMAT.GEMV:
-                    preferred_backend = BACKEND.AWQ_GEMV
+                    # The native GEMV extension is CUDA-only. ROCm packs the
+                    # identical GEMV layout with the portable Triton kernel
+                    # instead of selecting a class its runtime cannot build.
+                    preferred_backend = awq_gemv_pack_backend(is_rocm=IS_ROCM)
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                     preferred_backend = BACKEND.AWQ_GEMV_FAST
                 else:
@@ -1989,6 +1999,11 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.BITSANDBYTES
             else:
                 preferred_backend = BACKEND.GPTQ_TORCH
+
+        # Record the effective pack backend so the weight-only finalize path can
+        # tell an AUTO request (which may fall back per module) from an explicit
+        # one (which must raise instead).
+        self.quantize_backend = preferred_backend
 
         if self.quantize_config.method == METHOD.EXL3:
             if preferred_backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3):

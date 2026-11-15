@@ -648,6 +648,18 @@ class BaseQuantLinear(nn.Module):
         return supported is None or dtype in supported
 
     @classmethod
+    def supports_gguf_qtype(cls, bits) -> bool:
+        """Whether this kernel can construct the concrete GGUF tensor layout.
+
+        ``bits`` is the resolved ``GGUFBits`` spec, not just its integer width:
+        width 4 covers Q4_0, Q4_K and IQ4_NL, which have different packed
+        layouts. Kernels that implement only a subset of the ggml layouts
+        override this so AUTO selection rejects them before construction.
+        """
+
+        return True
+
+    @classmethod
     def _validate_shared(
         cls,
         *,
@@ -707,11 +719,24 @@ class BaseQuantLinear(nn.Module):
                     # state on ROCm (Machete, W4A-NVFP4, native AWQ GEMV, ...).
                     # Say so, and point at the portable backend family instead of
                     # leaving a bare "unsupported device" string.
-                    e = (
-                        f"{e} ({cls.__name__} is CUDA-only and does not run on ROCm; "
-                        "select a portable `*Torch` or `*Triton` backend for this "
-                        "quantization method instead)"
-                    )
+                    if DEVICE.CUDA in cls.SUPPORTS_DEVICES:
+                        e = (
+                            f"{e} ({cls.__name__} is CUDA-only and does not run on ROCm; "
+                            "select a portable `*Torch` or `*Triton` backend for this "
+                            "quantization method instead)"
+                        )
+                    else:
+                        # CPU/XPU kernels (e.g. TorchFusedLinear) are not
+                        # CUDA-only; name their actual families so the message
+                        # does not send a ROCm user looking for a CUDA build.
+                        families = ", ".join(
+                            sorted(family.value for family in cls.SUPPORTS_DEVICES)
+                        )
+                        e = (
+                            f"{e} ({cls.__name__} only supports `{families}` and does not "
+                            "run on ROCm; select a backend that declares ROCm support "
+                            "for this quantization method instead)"
+                        )
                 return False, NotImplementedError(e)
 
         if trainable and not cls.SUPPORTS_TRAINING:

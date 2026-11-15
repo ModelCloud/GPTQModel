@@ -49,7 +49,7 @@ table instead of a single module-level constant set.
 | GPTQ Torch (fused GEMV / small-M GEMM / dequant) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 GEMV `block_n=16/num_warps=4`, GEMM `(32, 32)/num_warps=4`, gate `(16, 17408)`; `tl.dot` lowers to `v_wmma_f32_16x16x16_f16`; **fused small-M GEMM is FP16-only** (BF16 goes through dequantize + matmul), GEMV keeps both dtypes |
 | GPTQ Triton dequant (`triton_utils/dequant.py`) | ✅ (family table) | ✅ measured | ✅ (family table) | Per-arch launch table: RDNA4 `x_block=2048/num_warps=4/num_stages=1` (74.5 us geomean vs the CDNA tile's 81.7 us on gfx1201). Output is bit-identical to the CDNA tile; the tile only changes the launch shape |
 | AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured (per-device plan table) | ✅ (family table) | portable Triton; capability-based dispatch removed for ROCm. A HIP host reports a seven-field `device_identity` (the HIP arch is appended, `capability` is `None`), and the scheduler now has an exact-match RDNA4 rule set instead of always falling back to the generic tile. Measured 1.67x-10.01x faster than that generic policy at the 4090 rule shapes (`(M,N,K,G)` in the M<=128 band), FP16 only. See *AWQ GEMM scheduler on RDNA4* below |
-| AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `AWQ_GEMV_TRITON` (explicit) | ❌ native / ✅ `AWQ_GEMV_TRITON` measured | ❌ native / ✅ `AWQ_GEMV_TRITON` (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); `AwqGEMVLinear` keeps `SUPPORTS_DEVICES=[DEVICE.CUDA]` and loading it on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`. **`BACKEND.AWQ_GEMV_TRITON`** now runs the same packed `FORMAT.GEMV` layout portably: a Triton kernel (`quantization/awq/modules/triton/gemv.py`) with FP32 accumulation, weights staying packed, output dtype == input dtype. Its `SUPPORTS_FORMATS` priority is `0`, so AUTO never picks it; select it explicitly. Measured 6.6-30.7x faster than the split dequantize+matmul path it replaces, and at parity (0.81-1.38x) with the shipped `FORMAT.GEMM` Triton GEMM at M==1 (see the AWQ table below); it is a portability fix, not a decode speedup over `FORMAT.GEMM`. Single-token / decode only; `FORMAT.GEMM` stays the prefill path |
+| AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `AWQ_GEMV_TRITON` (AUTO quantize, explicit load) | ❌ native / ✅ `AWQ_GEMV_TRITON` measured | ❌ native / ✅ `AWQ_GEMV_TRITON` (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); `AwqGEMVLinear` keeps `SUPPORTS_DEVICES=[DEVICE.CUDA]` and loading it on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`. **`BACKEND.AWQ_GEMV_TRITON`** now runs the same packed `FORMAT.GEMV` layout portably: a Triton kernel (`quantization/awq/modules/triton/gemv.py`) with FP32 accumulation, weights staying packed, output dtype == input dtype. `FORMAT.GEMV` quantize with `backend=AUTO` resolves to it on ROCm (`awq_gemv_pack_backend`), while the generic AUTO load order keeps its `SUPPORTS_FORMATS` priority `0` and still refuses an AUTO load of the native layout, so reload a GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`. Measured 6.6-30.7x faster than the split dequantize+matmul path it replaces, and at parity (0.81-1.38x) with the shipped `FORMAT.GEMM` Triton GEMM at M==1 (see the AWQ table below); it is a portability fix, not a decode speedup over `FORMAT.GEMM`. Single-token / decode only; `FORMAT.GEMM` stays the prefill path |
 | QQQ | ✅ `QQQ_TORCH` only | ✅ | ✅ | `QQQLinear` (Marlin-derived W4A8) is CUDA-only and there is **no** Triton port (see *QQQ* below); AUTO selects `QQQTorchLinear` |
 | ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *ParoQuant Triton* below) |
 | GGUF | ✅ `GGUF_TRITON` (AUTO) or `GGUF_TORCH` | ✅ measured | ✅ (family table) | `GGUF_TRITON` now declares `DEVICE.ROCM` and validates there; on ROCm `_cuda_device_capability()` returns `None`, so only the generic launch configs run (no SM80/SM89 specialization). Measured 5.0-13.1x faster than `GGUF_TORCH` at decode **and** prefill, so AUTO (priority 45) selects it; `GGUF_TORCH` stays available via `BACKEND.GGUF_TORCH` |
@@ -57,6 +57,26 @@ table instead of a single module-level constant set.
 | VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | |
 | EXL3 | ✅ `EXL3_TORCH` only | ✅ | ✅ | tensor-core GEMM tables are `nullptr` on ROCm; AUTO selects `EXL3_TORCH` |
 | Marlin / Machete / Swordfish / BitBLAS / W4A-NVFP4 | ❌ | ❌ | ❌ | deliberately unsupported: NVIDIA-only kernels (Marlin `mma.sync`/`cp.async` with tile permutes, Hopper/Blackwell CUTLASS for Machete/Swordfish, BitBLAS TensorCore IR, SM12.1 FP4 tensor cores for W4A-NVFP4) with no HIP lowering. None lists `DEVICE.ROCM`, so the AUTO candidate list filters them out before validation; an explicit selection fails with an actionable error naming the portable backend. See *Deliberately unsupported backends* below |
+
+### AWQ GEMV AUTO resolution
+
+`FORMAT.GEMV` quantization used to hardcode `BACKEND.AWQ_GEMV`, the native
+CUDA-only kernel, so `backend=AUTO` aborted before calibration on ROCm. The
+quantize path now asks `awq_gemv_pack_backend(is_rocm=IS_ROCM)` for the pack
+kernel; the generic AUTO load order is unchanged.
+
+```mermaid
+flowchart TD
+    A["quantize(format=GEMV, backend=AUTO)"] --> B{"IS_ROCM?"}
+    B -- "yes" --> C["awq_gemv_pack_backend<br/>BACKEND.AWQ_GEMV_TRITON"]
+    B -- "no" --> D["awq_gemv_pack_backend<br/>BACKEND.AWQ_GEMV"]
+    C --> E["select_quant_linear<br/>AwqGEMVTritonLinear"]
+    D --> F["select_quant_linear<br/>AwqGEMVLinear"]
+    E --> G["quantize -> save -> reload<br/>with BACKEND.AWQ_GEMV_TRITON"]
+    F --> H["quantize -> save -> AUTO reload"]
+    G -. "AUTO load still refuses native GEMV" .-> I["AWQ_GEMV_ROCM_UNSUPPORTED"]
+    style I fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+```
 
 ### hipBLASLt is present but untuned
 
@@ -230,6 +250,8 @@ AWQ_GEMM_TRITON (or AUTO) on ROCm.`, the equivalent Machete/BitBLAS text, and
 for any other CUDA-only kernel
 `... is CUDA-only and does not run on ROCm; select a portable *Torch or
 *Triton backend for this quantization method instead`.
+Kernels that are not CUDA-only name their actual families instead, e.g.
+`TorchFusedLinear only supports `cpu, xpu` and does not run on ROCm`.
 
 ## Measured RDNA4 numbers (gfx1201, R9700)
 
@@ -601,8 +623,12 @@ parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
   fails with a message naming the portable backend.
 - **QQQ:** `QQQLinear` (W4A8, CUDA inline PTX) has no Triton port; AUTO uses
   `QQQTorchLinear`. See *QQQ has no Triton port*.
-- **AWQ GEMV:** the native `FORMAT.GEMV` extension is CUDA-only. On ROCm use
-  `BACKEND.AWQ_GEMV_TRITON` (explicit; decode-shaped M==1) or `FORMAT.GEMM`.
+- **AWQ GEMV:** the native `FORMAT.GEMV` extension is CUDA-only.
+  `FORMAT.GEMV` quantize with `backend=AUTO` now resolves to
+  `BACKEND.AWQ_GEMV_TRITON` on ROCm, but an AUTO *load* of the native layout is
+  still refused (its `SUPPORTS_FORMATS` priority stays `0`), so reload a GEMV
+  checkpoint with `BACKEND.AWQ_GEMV_TRITON`. Decode-shaped M==1; `FORMAT.GEMM`
+  remains the portable prefill layout.
 - **bitsandbytes:** the fused Triton 4-bit kernel is enabled by default only on
   ROCm families with a measured tile (`rdna4`). CUDA keeps the vendor kernels
   because they are faster there. INT8 bitsandbytes already runs at a usable
