@@ -28,7 +28,7 @@ This page documents the contracts consumed by
    `HyperConnection` has no plain gain to divide; the group is dropped and the
    layer stays quantized plainly.
 
-Introduced by the fixes for issues #4005, #4017, and #4039.
+Introduced by the fixes for issues #4005, #4017, #4039, and #4093 (items 1-6).
 
 ## Flow
 
@@ -143,6 +143,139 @@ the emitted block list (the compiler drops non-`!`/`?` flags from block names).
 | `olmoe` `q_norm`/`k_norm` | full-width norms picked as `prev_op` (0.29) | group index `0` keeps them inside the q/k/v block |
 | `laguna` `g_proj` | omitted consumer (0.006) | declared `:!` sibling; collected as a scale consumer |
 
+## Remote-code family trees
+
+The tree is the only declaration of which module feeds a scaling group. Three
+remote-code families shipped a tree that did not describe their forward graph,
+and two of them quantized to garbage without raising:
+
+| Definition | Before | After | Effect |
+| --- | --- | --- | --- |
+| `instella` | inherited `LlamaQModel.module_tree` (`input_layernorm` / `post_attention_layernorm`) | own tree with `pre_attention_layernorm` / `pre_feedforward_layernorm` | q/k/v get a norm source; `mlp.gate/up` no longer fold into `self_attn.o_proj` across the residual (wikitext-2 PPL 27997 -> 27.7 on the 3B checkpoint) |
+| `k2_horizon` | `q_proj`, `k_proj`, `v_proj`, `gate_proj`, `o_proj` as separate dict nodes | one flat `""` tuple `q_proj:0`, `k_proj:0`, `v_proj:0`, `gate_proj:0:nosrc`, `o_proj:1` | one group per attention input instead of chained single-module groups (PPL 1100 -> sane) |
+| `telechat2` | `{"dense": ("dense",)}` only | `("query:0", "key_value:0", "dense:1")` | `query`/`key_value` are quantized instead of silently staying fp16 |
+
+`instella` and `k2_horizon` are in `FAMILY_MODEL_TYPES` in
+`tests/test_awq_scaling_groups.py`, so the output-preservation invariant covers
+them: folding a random scale into each group must leave the decoder layer's
+logits unchanged to `1e-5` relative.
+
+## Coverage: declared specs versus undeclared leaves
+
+`LayerModuleCoverageTracker` used to count only *declared* specs. A quantizable
+`nn.Linear` that no spec named was invisible: every declared spec matched while
+the leaf stayed in the source dtype. TeleChat2's `query`/`key_value` were
+exactly this, and the report said "all 4 specs matched".
+
+```mermaid
+flowchart TD
+    A["ModuleLooper.create_named_modules"] --> B["plan = _model_module_plan(gptq_model)"]
+    B --> C{"candidate is nn.Linear / Conv1d / Conv2d in full?"}
+    C -- "no" --> D["ignore"]
+    C -- "yes" --> E{"plan.find(name) is None?"}
+    E -- "no" --> F["declared: hit/miss accounting"]
+    E -- "yes" --> G["record_undeclared(name, layer_index)"]
+    G --> H["report(): NOT declared by the definition tree"]
+    style G fill:#fff3cd,stroke:#997404,stroke-width:2px
+    style H fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+The LM head is excluded because it is quantized through its own path, not the
+layer tree. A leaf that is intentionally not quantized must still be declared
+with `:!` or `:?`; "no spec at all" is now reported.
+
+## AWQ replay scaffolding
+
+AWQ scores a multi-module scaling group by replaying its common parent. Two
+inputs to that replay are captured per linear, not per parent, so they can be
+stale or incomplete.
+
+### Position kwargs
+
+`AWQProcessor._prepare_module_forward` rebuilds position scaffolding whenever
+it does not match the sample being replayed. Before, `position_ids` was only
+added when the key was *absent*, so a 430-token capture was replayed with a
+522-token activation (EXAONE-3.0) or 48 vs 20 (tiny DeciLM/Nanbeige), crashing
+in `apply_rotary_pos_emb`.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._prepare_module_forward"] --> B{"definition overrides<br/>awq_module_replay_inputs?"}
+    B -- "yes" --> C["TeleChat2: promote x to 3-D,<br/>add residual and causal bool mask"]
+    B -- "no" --> D["module_kwargs = dict(module_kwargs)"]
+    C --> D
+    D --> E{"position_ids.shape[-1] == seq_len?"}
+    E -- "no" --> F["stale_position_ids = True"]
+    E -- "yes" --> G["keep captured position_ids"]
+    F --> H{"root rotary found?"}
+    G --> H
+    H -- "no" --> I["module.rotary_emb / module.rotary"]
+    H -- "yes" --> J["_get_rotary_for_device"]
+    I --> K{"rotary available?"}
+    J --> K
+    K -- "yes" --> L["rebuild position_ids and position_embeddings<br/>for seq_len"]
+    K -- "no" --> M["rebuild position_ids with arange;<br/>drop mismatched position_embeddings"]
+    style M fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+`exaone` also declares `rotary_embedding = "transformer.rotary"`, so its
+model-level rotary is found directly. Nanbeige/DeciLM keep the rotary on the
+attention module and take the `module.rotary_emb` path.
+
+### Module-owned replay inputs
+
+`BaseQModel.awq_module_replay_inputs` lets a definition add arguments the
+per-linear capture cannot record. TeleChat2's `TelechatAttention.forward`
+requires `(hidden_states, residual, attention_mask, ...)`; the default
+implementation returns `(x, module_kwargs)` unchanged, and TeleChat2 promotes
+the 2-D capture to 3-D, passes the block input as `residual` (an additive
+constant shared by reference and candidate), and builds a causal bool mask.
+
+## Looped decoder calibration
+
+HRM-Text, Ouro (`total_ut_steps=4`) and Nanbeige 4.2 (`num_loops=2`) run the
+same physical layers several times per forward. The default capture aborts at
+the first layer, so each processor's Hessian only saw loop 0. Ouro's steps 1-3
+have cosine -0.03..0.42 against the single captured input.
+
+```mermaid
+flowchart TD
+    A["ModuleLooper.cache_inputs"] --> B["lazy build_quantization_input_cache"]
+    B --> C{"definition uses<br/>LoopedLayerCaptureMixin?"}
+    C -- "no" --> D["StageInputsCapture:<br/>abort at the first layer"]
+    C -- "yes" --> E["_materialize_looped_capture_model"]
+    E --> F["one full forward per sample;<br/>pre-hook on every physical layer"]
+    F --> G["per-layer bucket: every loop invocation"]
+    G --> H["cache.captured_batch_count =<br/>max bucket length"]
+    H --> I["ModuleLooper sets processor.num_batches"]
+    I --> J["pre_quantize serves the<br/>current layer's invocations"]
+    style D fill:#f8d7da,stroke:#842029,stroke-width:2px
+```
+
+`_resolve_batch_total` caps the replay at `processor.num_batches`, so publishing
+`captured_batch_count` is what keeps loops 1..N-1 from being truncated.
+
+## Top-query layer replay
+
+`GPTPanguModel.forward` applies `ln_f` before the last decoder block and passes
+it `custom_query = wqe(position_ids)`, so that block's `q_proj` reads query
+embeddings rather than hidden states. `PanguAlphaQModel.prepare_layer_replay_kwargs`
+now mirrors that for the last block only; the measured last-layer `q_proj`
+relative error on query embeddings dropped from GPTQ 0.130 (worse than RTN
+0.101) to GPTQ 0.0558 (better than RTN 0.0933).
+
+```mermaid
+flowchart TD
+    A["BaseQModel.prepare_layer_replay_kwargs"] --> B{"blocks[-1] is layer?"}
+    B -- "no" --> C["replay kwargs unchanged"]
+    B -- "yes" --> D["layer_input[0] = ln_f(hidden_states)"]
+    D --> E{"position_ids tensor?"}
+    E -- "no" --> F["arange over seq_len"]
+    E -- "yes" --> G["use captured position_ids"]
+    F --> H["custom_query = wqe(position_ids)"]
+    G --> H
+```
+
 ## Failure and ambiguity contract
 
 | Situation | Before | After |
@@ -160,6 +293,19 @@ the emitted block list (the compiler drops non-`!`/`?` flags from block names).
 `apply_scale`, and requires the decoder-layer logits to change by less than
 `1e-5` relative (Llama measures ~1.5e-7). `tests/test_awq_empty_groups.py` pins
 both empty-group paths to `apply_quant(..., scales_list=[])`.
+
+Issue #4093 item coverage:
+
+| Test | Invariant |
+| --- | --- |
+| `tests/test_awq_scaling_groups.py` (`instella`, `k2_horizon`) | fold preserves the decoder-layer output |
+| `tests/test_instella_support.py` | the tree declares the real Instella norm names and resolves on the checkpoint's own layer |
+| `tests/test_k2_horizon_support.py` | q/k/v/gate form one flat group; `o_proj` is the separate consumer |
+| `tests/test_telechat2_coverage.py` | `query`/`key_value`/`dense` are quantized and no leaf is undeclared; replay supplies `residual` + mask |
+| `tests/test_awq_position_kwargs.py` | stale `position_ids` are rebuilt, mismatched `position_embeddings` dropped, module-local rotary rebuilds cos/sin |
+| `tests/test_pangu_alpha_replay.py` | last layer replays `ln_f` + `custom_query`; GPTQ beats RTN on the top-query `q_proj` |
+| `tests/test_looped_decoder_capture.py` | Ouro captures 4 invocations, Nanbeige 2, per-loop cosine < 0.99 |
+| `tests/test_layer_module_coverage.py` | undeclared quantizable leaves are recorded and warned about |
 
 ## Not in scope
 

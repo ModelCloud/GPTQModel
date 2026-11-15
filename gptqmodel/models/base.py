@@ -3726,6 +3726,24 @@ class BaseQModel(nn.Module):
             )
         return additional_inputs
 
+    def awq_module_replay_inputs(
+        self,
+        module: nn.Module,
+        x: torch.Tensor,
+        module_kwargs: Dict[str, Any],
+    ):
+        """Allow a definition to supply scaffolding an AWQ block replay needs.
+
+        AWQ replays the common parent of a multi-module scaling group to score
+        the combined block. Some attention modules require arguments that the
+        per-linear activation capture never records (TeleChat2's
+        ``TelechatAttention.forward`` needs ``residual`` and ``attention_mask``),
+        so the definition may add them here. Returning ``x`` unchanged and the
+        same kwargs is the default for every other family.
+        """
+
+        return x, module_kwargs
+
     def _apply_layer_type_replay_kwargs(
         self,
         *,
