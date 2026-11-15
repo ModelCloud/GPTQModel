@@ -406,7 +406,8 @@ _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
     "q4_k_s": 4.5,
     "q4_k_m": 4.5,
     "q5_k": 5.5,
-    "q5_k_s": 5.0,
+    # `q5_k_s` is stored as uniform Q5_K, whose blocks are 5.5 bpw.
+    "q5_k_s": 5.5,
     "q5_k_m": 5.5,
     "q6_k": 6.0,
     "q8_k": 9.125,
@@ -847,6 +848,29 @@ def _normalize_gguf_config(
             )
 
     return normalized_bits, normalized_format, bits_spec
+
+
+_GGUF_K_QUALITY_ALIASES = frozenset({"s", "m", "l"})
+
+
+def _warn_gguf_quality_alias(bits_spec: GGUFBits) -> None:
+    """Warn that `q*_k_s`/`q*_k_m`/`q*_k_l` store a uniform K-quant.
+
+    llama.cpp's `_s`/`_m`/`_l` names select a per-tensor mixture (for example
+    Q6_K for `attn_v`/`ffn_down` in the `use_more_bits` layers). GPT-QModel
+    packs every tensor with the base K type, so the alias name overstates the
+    saved checkpoint's quality.
+    """
+
+    if bits_spec.variant != "k" or bits_spec.quality not in _GGUF_K_QUALITY_ALIASES:
+        return
+    log.warn(
+        "GGUFConfig: `%s` aliases to uniform `Q%d_K`; the llama.cpp per-tensor "
+        "`_s`/`_m`/`_l` quality mixture is not implemented. The saved "
+        "checkpoint is lower quality than its name implies.",
+        bits_spec.to_string(),
+        bits_spec.bits,
+    )
 
 
 def _fractional_bits_error(
@@ -3817,7 +3841,16 @@ def _resolve_dynamic_group_size_error() -> str:
 
 
 def _default_damp_percent(method: METHOD) -> float:
-    return 0.005 if method == METHOD.QQQ else 0.05
+    # QQQ has no activation-group-aware calibration, so a single massive
+    # activation (Llama's BOS token) can dominate the Hessian. The previous
+    # QQQ-only default of 0.005 is half of upstream `HandH1998/QQQ`
+    # (`percdamp=0.01`) and ten times below GPTQ's 0.05. Measured on
+    # Llama-3.2-1B QQQ4, wikitext-2 PPL with BOS kept: 59.5 at 0.005 vs 34.4
+    # at 0.05 (= reference GPTQ without AGA). Qwen2.5 is nearly unchanged
+    # (20.99 -> 21.30), so this is the cheap correct default; the change is
+    # called out in the issue #4074 PR.
+    del method
+    return 0.05
 
 
 def _default_damp_auto_increment(method: METHOD) -> float:
@@ -6857,6 +6890,7 @@ class GGUFConfig(PreProcessorConfig):
             raw_bits = layer_dict.get("bits", self.bits)
             raw_format = layer_dict.get(FORMAT_FIELD_CODE, self.format)
             normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config(raw_bits, raw_format)
+            _warn_gguf_quality_alias(normalized_runtime_bits)
 
             layer_dict["bits"] = normalized_bits
 
@@ -6883,6 +6917,7 @@ class GGUFConfig(PreProcessorConfig):
         # avoid running that normalization twice.
         BaseQuantizeConfig.__post_init__(self)
         self._gguf_bits = _gguf_bits_from_components(self.bits, self.format)
+        _warn_gguf_quality_alias(self._gguf_bits)
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)

@@ -91,17 +91,18 @@ def test_scale_ln_fcs_resolves_gain_offset_from_semantics(name, norm_factory, of
     x = torch.randn(8, dim)
     with torch.no_grad():
         before = linear(norm(x))
-        scale_ln_fcs(norm, [linear], scales)
+        effective = scale_ln_fcs(norm, [linear], scales)
         after = linear(norm(x))
 
     assert _relative_error(after, before) < 1e-6, name
 
     # Closed-form oracle for the stored weights, independent of the fold code.
-    expected_norm = (weight_before + offset) / scales - offset
+    # Offset-gain norms return the gauge-normalised scale that was folded.
+    expected_norm = (weight_before + offset) / effective - offset
     torch.testing.assert_close(norm.weight.detach(), expected_norm, rtol=1e-6, atol=1e-7)
     torch.testing.assert_close(
         linear.weight.detach(),
-        linear_before * scales.view(1, -1),
+        linear_before * effective.view(1, -1),
         rtol=1e-6,
         atol=1e-7,
     )
@@ -114,7 +115,14 @@ def test_scale_ln_fcs_resolves_gain_offset_from_semantics(name, norm_factory, of
     # rounding only; the pre-fix wrong-semantics error is ~0.44.
     [(torch.float16, 2e-3), (torch.bfloat16, 1e-2)],
 )
-def test_scale_ln_fcs_offset_gain_folds_in_float32(dtype, tolerance):
+@pytest.mark.parametrize(
+    "scale_peak",
+    # Issue #4074 item 1: Gemma-3 MLP scales reach ~1e3. The original coverage
+    # only used [0.5, 1.5], where `1 + w'` is still representable in bf16 and
+    # the cancellation that shipped is invisible.
+    [1.5, 100.0, 1000.0],
+)
+def test_scale_ln_fcs_offset_gain_folds_in_float32(dtype, tolerance, scale_peak):
     torch.manual_seed(0)
     dim = 32
     norm = Gemma3RMSNorm(dim).to(dtype)
@@ -122,20 +130,111 @@ def test_scale_ln_fcs_offset_gain_folds_in_float32(dtype, tolerance):
         norm.weight.copy_((torch.randn(dim, dtype=torch.float32) * 0.1).to(dtype))
     linear = nn.Linear(dim, dim, bias=False).to(dtype)
 
-    scales = torch.rand(dim, dtype=torch.float32) + 0.5
+    scales = (torch.rand(dim, dtype=torch.float32) + 0.5) * scale_peak
     x = torch.randn(8, dim).to(dtype)
     weight_before = norm.weight.detach().clone()
     with torch.no_grad():
         before = linear(norm(x)).float()
-        scale_ln_fcs(norm, [linear], scales)
+        effective = scale_ln_fcs(norm, [linear], scales)
         after = linear(norm(x)).float()
 
     assert _relative_error(after, before) < tolerance
 
+    # A uniform factor on the per-channel scale is a free gauge for per-group
+    # symmetric quantisation, so an offset-gain fold must renormalise by its
+    # peak and keep `max(s) <= 1`. Otherwise `(1 + w) / s - 1` approaches -1
+    # and `1 + w'` is not representable in bf16 at Gemma-3 MLP scales.
+    expected_effective = scales / scales.max() if float(scales.max()) > 1.0 else scales
+    torch.testing.assert_close(effective, expected_effective, rtol=0.0, atol=0.0)
+    assert float(effective.max()) <= 1.0 + 1e-6
+
     # The intermediate `1 + w` and the division are performed in float32; only
     # the final stored gain is rounded back to the serving dtype.
-    expected = ((weight_before.float() + 1.0) / scales - 1.0).to(dtype)
+    expected = ((weight_before.float() + 1.0) / effective.float() - 1.0).to(dtype)
     torch.testing.assert_close(norm.weight.detach(), expected, rtol=0.0, atol=0.0)
+
+
+def test_apply_scale_uses_the_gauge_for_captured_features_and_weights():
+    """The fold and the captured input must share the same effective scale.
+
+    Issue #4074 item 1: if only the stored gain is renormalised, the captured
+    features are divided by the original scale while the weights were folded
+    with the gauge-normalised one, so the quantization input no longer matches
+    the block the scale search scored.
+    """
+
+    torch.manual_seed(0)
+    dim = 32
+
+    class _Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = Gemma3RMSNorm(dim).to(torch.bfloat16)
+            self.linear = nn.Linear(dim, dim, bias=False).to(torch.bfloat16)
+
+        def forward(self, hidden_states):
+            return self.linear(self.norm(hidden_states))
+
+    block = _Block()
+    with torch.no_grad():
+        block.norm.weight.copy_((torch.randn(dim) * 0.1).to(torch.bfloat16))
+
+    x = torch.randn(8, dim).to(torch.bfloat16)
+    scales = (torch.rand(dim, dtype=torch.float32) + 0.5) * 1000.0
+    effective = scales / scales.max()
+    features = {"linear": x.clone()}
+    linear_before = block.linear.weight.detach().clone()
+    with torch.no_grad():
+        before = block(x).float()
+        apply_scale(
+            block,
+            [("norm", ["linear"], scales, None)],
+            input_feat_dict=features,
+        )
+        after = block(x).float()
+
+    assert _relative_error(after, before) < 1e-2
+    torch.testing.assert_close(
+        block.linear.weight.detach().float(),
+        linear_before.float() * effective.view(1, -1),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    torch.testing.assert_close(
+        features["linear"].float(),
+        x.float() / effective.view(1, -1),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+
+@pytest.mark.parametrize(
+    "name,norm_factory,offset",
+    [case for case in _norm_cases() if case[2] == 1.0],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_offset_gain_fold_is_neutral_at_gemma3_mlp_scale(name, norm_factory, offset):
+    """Every offset-gain norm family must survive the Gemma-3 MLP scale.
+
+    Gemma-3 is the measured case; Gemma, Gemma 2, Qwen3-Next and Qwen3.5 share
+    the `1 + weight` fold and are covered by the same gauge.
+    """
+    torch.manual_seed(0)
+    dim = 32
+    norm = norm_factory(dim).to(torch.bfloat16)
+    with torch.no_grad():
+        norm.weight.copy_((torch.randn(dim, dtype=torch.float32) * 0.1).to(torch.bfloat16))
+    linear = nn.Linear(dim, dim, bias=False).to(torch.bfloat16)
+    scales = (torch.rand(dim, dtype=torch.float32) + 0.5) * 1000.0
+    x = torch.randn(8, dim).to(torch.bfloat16)
+
+    with torch.no_grad():
+        before = linear(norm(x)).float()
+        effective = scale_ln_fcs(norm, [linear], scales)
+        after = linear(norm(x)).float()
+
+    assert _relative_error(after, before) < 1e-2, name
+    assert float(effective.max()) <= 1.0 + 1e-6
 
 
 def _tiny_gemma2() -> Gemma2ForCausalLM:

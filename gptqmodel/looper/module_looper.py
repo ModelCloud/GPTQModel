@@ -2145,6 +2145,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if capture_only:
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
+        # The plan is layer-relative, so a concrete leaf is identified by its
+        # relative `name` (e.g. `mlp.experts.3.gate_proj`). Routed experts need
+        # this mark because their native-pass inputs cannot be paired with the
+        # quantized-path inputs by call order (see `GPTAQ`/`FOEM`).
+        plan = _model_module_plan(self.gptq_model)
         for name in subset:
             if name in (self.input_embeddings_name, self.output_embeddings_name):
                 layer_name = name
@@ -2168,6 +2173,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     named_module.state.setdefault("layer_module", layer_module)
             elif capture_only_flags.get(name, False):
                 subset[name].state["capture_only"] = True
+
+            if plan is not None and plan.is_expert(name):
+                subset[name].state["is_routed_expert"] = True
 
             if isinstance(processor, GPTQProcessor):
                 processor.preprocess(subset[name], fallback=fallback, region_timer=region_timer)

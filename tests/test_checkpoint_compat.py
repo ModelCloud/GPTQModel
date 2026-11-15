@@ -310,3 +310,94 @@ def test_tied_lm_head_is_rejected_with_the_explicit_error(tmp_path):
 
     with pytest.raises(NotImplementedError, match="tied weights"):
         model.quantize(CALIBRATION_TEXT, batch_size=2)
+
+
+def test_hf_compat_warning_for_defused_moe_checkpoint():
+    """A per-expert checkpoint must warn that plain HF loading drops the experts."""
+
+    from gptqmodel.models.writer import hf_compat_warnings
+
+    class _QuantLinear(torch.nn.Module):
+        QUANT_TYPE = "gptq"
+
+    class _ExpertMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = torch.nn.ModuleList()
+            for _ in range(2):
+                expert = torch.nn.Module()
+                expert.gate_proj = _QuantLinear()
+                expert.up_proj = _QuantLinear()
+                expert.down_proj = _QuantLinear()
+                self.experts.append(expert)
+
+    class _Layer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = _ExpertMlp()
+
+    class _MoE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.layers = torch.nn.ModuleList([_Layer()])
+
+    warnings = hf_compat_warnings(
+        QuantizeConfig(bits=4, group_size=32),
+        FORMAT.GPTQ,
+        model=_MoE(),
+    )
+
+    assert len(warnings) == 1
+    assert "experts.<n>" in warnings[0]
+    assert "MISSING" in warnings[0] and "random-initializes" in warnings[0]
+    # A dense model has no expert warning.
+    dense = torch.nn.Module()
+    dense.proj = _QuantLinear()
+    assert hf_compat_warnings(
+        QuantizeConfig(bits=4, group_size=32), FORMAT.GPTQ, model=dense
+    ) == []
+
+
+def test_saved_config_drops_auto_map_when_remote_code_is_not_copied(tmp_path):
+    """A native save must not keep an `auto_map` that points at missing `.py` files."""
+
+    import json
+
+    from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.models.writer import _save_model_configs_without_weights
+
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    config.auto_map = {"AutoConfig": "configuration_slimmoe.PhiMoEConfig"}
+    model = LlamaForCausalLM(config).eval()
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps({"auto_map": config.auto_map}), encoding="utf-8"
+    )
+
+    native_out = tmp_path / "native"
+    _save_model_configs_without_weights(
+        model, str(native_out), str(source), trust_remote_code=False
+    )
+    saved = json.loads((native_out / "config.json").read_text(encoding="utf-8"))
+    assert "auto_map" not in saved
+    # The exported config still loads natively, including with the model-card
+    # instruction that asks for remote code.
+    assert AutoConfig.from_pretrained(str(native_out), trust_remote_code=True).model_type == "llama"
+
+    remote_out = tmp_path / "remote"
+    _save_model_configs_without_weights(
+        model, str(remote_out), str(source), trust_remote_code=True
+    )
+    saved = json.loads((remote_out / "config.json").read_text(encoding="utf-8"))
+    assert saved["auto_map"] == config.auto_map

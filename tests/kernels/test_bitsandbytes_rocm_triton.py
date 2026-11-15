@@ -200,6 +200,39 @@ def test_module_dispatch_and_no_dense_cache():
     assert bt.should_use(module.weight.device, torch.float16, small.shape[0]) is False
 
 
+@requires_gpu
+@pytest.mark.cuda
+def test_triton_dispatch_falls_back_when_the_input_needs_grad(monkeypatch):
+    """The raw Triton launch has no backward; M>=16 must use the vendor kernel."""
+
+    module = _packed_module(512, 128, dtype=torch.float16, quant_type="nf4",
+                            blocksize=64, compress=False)
+    module = module.cuda().eval()
+    if bt._family(module.weight.device) not in bt.tuned_families():
+        pytest.skip(f"no tuned bitsandbytes tile for {bt._family(module.weight.device)}")
+
+    monkeypatch.setenv("GPTQMODEL_BNB_TRITON", "1")
+    triton_calls = []
+    triton_matmul = bt.matmul_4bit
+
+    def counted_matmul(*args, **kwargs):
+        triton_calls.append(True)
+        return triton_matmul(*args, **kwargs)
+
+    monkeypatch.setattr(bt, "matmul_4bit", counted_matmul)
+
+    rows = bt.gemm_launch(module.weight.device).min_m
+    torch.manual_seed(19)
+    x = torch.randn(rows, module.in_features, dtype=torch.float16, device="cuda")
+    x.requires_grad_(True)
+    out = module(x)
+
+    assert triton_calls == [], "Triton has no backward and must not service a grad input"
+    assert out.requires_grad and out.grad_fn is not None
+    out.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
 def _retained_tensors(obj, seen=None):
     """Include unregistered module/QuantState/container tensors, not just buffers."""
     seen = set() if seen is None else seen

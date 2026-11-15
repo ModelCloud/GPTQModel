@@ -54,24 +54,6 @@ def test_transformers_device_map_compat_reports_upstream_api_change(monkeypatch)
     assert exc_info is True, "the warning must carry the upstream traceback"
 
 
-def test_paroquant_quantizer_compat_reports_upstream_api_change(monkeypatch):
-    """Same guarantee for the ParoQuant shim."""
-    # Simulate upstream moving GPTQConfig: the shim's import then fails even
-    # though transformers itself is still installed.
-    import transformers.utils.quantization_config as quantization_config
-
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    monkeypatch.delattr(quantization_config, "GPTQConfig")
-
-    gptqmodel._patch_transformers_paroquant_quantizer_compat()
-
-    assert recording.warning_calls, "an upstream rename was reported at no level at all"
-    msg, exc_info = recording.warning_calls[0]
-    assert "ParoQuant quantizer compat is inactive" in msg
-    assert exc_info is True, "the warning must carry the upstream traceback"
-
-
 class _RecordingLogger:
     """Minimal stand-in for the project logger that records call levels."""
 

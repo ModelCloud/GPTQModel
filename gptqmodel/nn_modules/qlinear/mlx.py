@@ -63,6 +63,19 @@ class _MlxLinearContract:
         return True, None
 
     @classmethod
+    def _validate_source(cls, **kwargs):
+        """Validate a packed source layer for the host-side numpy repack.
+
+        ``pack_source`` only decodes and repacks checkpoint words in numpy, so
+        it runs on any OS. Apple Silicon and Metal are requirements of the MLX
+        runtime, enforced by :meth:`validate_once` when the loader instantiates
+        the kernel, not of the export/convert path. The repack emits float16
+        MLX scales regardless of the checkpoint's storage dtype, so callers
+        pass ``dtype=None`` and let ``pack_source`` perform the cast.
+        """
+        return cls._validate(check_platform=False, **kwargs)
+
+    @classmethod
     def _validate(cls, **kwargs):
         ok, err = super()._validate(**kwargs)
         if not ok:
@@ -84,7 +97,7 @@ class _MlxLinearContract:
     def source_compatible(cls, module):
         if not isinstance(module, cls.SOURCE_LINEAR):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits,
             group_size=module.requested_group_size,
             desc_act=module.desc_act,
@@ -92,7 +105,7 @@ class _MlxLinearContract:
             in_features=module.in_features,
             out_features=module.out_features,
             pack_dtype=module.pack_dtype,
-            dtype=module.scales.dtype,
+            dtype=None,
             device=DEVICE.MPS,
             adapter=module.adapter,
         )
@@ -324,7 +337,7 @@ class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
     def source_compatible(cls, module):
         if not isinstance(module, cls):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits,
             group_size=module.requested_group_size,
             desc_act=module.desc_act,
@@ -332,7 +345,7 @@ class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
             in_features=module.in_features,
             out_features=module.out_features,
             pack_dtype=module.pack_dtype,
-            dtype=module.scales.dtype,
+            dtype=None,
             device=DEVICE.MPS,
             adapter=module.adapter,
         )
@@ -514,7 +527,7 @@ class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
     def source_compatible(cls, module):
         if not isinstance(module, cls):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits,
             group_size=module.requested_group_size,
             desc_act=module.desc_act,
@@ -522,7 +535,7 @@ class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
             in_features=module.in_features,
             out_features=module.out_features,
             pack_dtype=module.pack_dtype,
-            dtype=module.scales.dtype,
+            dtype=None,
             device=DEVICE.MPS,
             adapter=module.adapter,
         )
@@ -760,7 +773,7 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
     def source_compatible(cls, module):
         if not isinstance(module, QQQTorchLinear):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits, group_size=-1 if module.group_size == module.in_features else module.group_size,
             desc_act=module.desc_act, sym=module.sym,
             in_features=module.in_features, out_features=module.out_features,
@@ -844,7 +857,7 @@ class GGUFMlxQuantLinear(_MlxLinearContract, GGUFTorchLinear):
 
         if not isinstance(module, GGUFTorchLinear) or module.gguf_tensor_qtype not in MLX_GGUF_QTYPES:
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=int(module.bits), group_size=-1, desc_act=False, sym=True,
             in_features=module.in_features, out_features=module.out_features,
             pack_dtype=torch.int32, dtype=torch.float16, device=DEVICE.MPS,
@@ -890,7 +903,7 @@ class _MlxDenseContract(_MlxLinearContract):
     def source_compatible(cls, module):
         if not isinstance(module, cls.SOURCE_LINEAR) or module.adapter is not None:
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits, group_size=-1, desc_act=False, sym=True,
             in_features=module.in_features, out_features=module.out_features,
             pack_dtype=torch.int32, dtype=torch.float16, device=DEVICE.MPS,

@@ -147,11 +147,11 @@ class TorchAtenLinear(PackableQuantLinear):
         super().post_init()
         self.optimize()
 
-    def optimize(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
 
-        super().optimize()
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def _cpu_fused_available(self) -> bool:
         return _has_local_int4pack_cpu_ops()

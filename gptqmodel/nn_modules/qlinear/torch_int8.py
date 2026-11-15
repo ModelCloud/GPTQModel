@@ -389,10 +389,10 @@ class TorchInt8Linear(GPTQQuantLinear):
             self.transform_cpu(dtype=torch.float32)
             return self.int8_module
 
-    def optimize(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
-        super().optimize()
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def _has_all_gptq_buffers(self) -> bool:
         return all(getattr(self, name, None) is not None for name in self.GPTQ_BUFFER_NAMES)

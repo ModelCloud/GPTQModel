@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-"""Default CUDA caching-allocator configuration.
+"""Default accelerator caching-allocator configuration.
 
 ``expandable_segments`` is what stops a long quantization run from shattering a
 device into holes it can never satisfy again: without it the allocator fails a
@@ -15,12 +15,21 @@ therefore imports nothing but :mod:`os` (and :mod:`torch` lazily) and is applied
 from the top of ``gptqmodel/__init__.py`` -- setting it from
 ``gptqmodel/models/auto.py`` is too late, because importing ``gptqmodel.utils``
 already initialises the allocator and the variable is then silently ignored.
+
+On ROCm 10.1 / gfx1201 ``expandable_segments:True`` combined with
+``torch.cuda.empty_cache()`` corrupts ordinary Torch results (wrong rows, or
+``hipErrorIllegalAddress``) while the VMM segments are released and remapped.
+GPT-QModel empties the cache throughout quantization, so ROCm gets a default
+without ``expandable_segments``; the other two knobs are unchanged. CUDA keeps
+the historical value.
 """
 
 from __future__ import annotations
 
 import os
 import warnings
+
+from ._rocm_env import running_on_rocm
 
 
 DEFAULT_ALLOC_CONF = (
@@ -29,10 +38,24 @@ DEFAULT_ALLOC_CONF = (
     "garbage_collection_threshold:0.7"
 )
 
+#: ROCm default: same fragmentation knobs, but never ``expandable_segments``.
+#:
+#: The ROCm/Torch VMM path releases and remaps segments on ``empty_cache()``,
+#: and a subsequent kernel can read stale/incorrect pages. Measured on a
+#: R9700 (gfx1201, torch 2.16.0.dev+rocm10.1): a 2097152x16 matmul recomputed
+#: with ``empty_cache()`` between reps returned up to 4.5M wrong rows with
+#: ``expandable_segments:True`` and 0 with ``False``.
+ROCM_DEFAULT_ALLOC_CONF = "max_split_size_mb:256,garbage_collection_threshold:0.7"
+
 # ``PYTORCH_CUDA_ALLOC_CONF`` is the historical name; ``PYTORCH_ALLOC_CONF`` is
 # the generic alias understood by newer releases. Set both so the default holds
 # across the Torch versions GPTQModel supports.
 ALLOC_CONF_ENV_VARS = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")
+
+# HIP builds also read this alias, and it takes precedence over
+# ``PYTORCH_ALLOC_CONF``. It is only consulted for user-provided detection:
+# GPT-QModel writes the two generic names, which every supported build reads.
+HIP_ALLOC_CONF_ENV_VAR = "PYTORCH_HIP_ALLOC_CONF"
 
 #: Allocator backend that survives a wide-layer Hessian.
 #:
@@ -45,13 +68,27 @@ ALLOC_CONF_ENV_VARS = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")
 LARGE_HESSIAN_ALLOC_CONF = "backend:cudaMallocAsync"
 
 
+def default_alloc_conf() -> str:
+    """Return the default allocator configuration for the running Torch build."""
+
+    return ROCM_DEFAULT_ALLOC_CONF if running_on_rocm() else DEFAULT_ALLOC_CONF
+
+
+def alloc_conf_env_vars() -> tuple[str, ...]:
+    """Environment names that carry a caller configuration for this build."""
+
+    if running_on_rocm():
+        return (*ALLOC_CONF_ENV_VARS, HIP_ALLOC_CONF_ENV_VAR)
+    return ALLOC_CONF_ENV_VARS
+
+
 def alloc_conf_configured() -> bool:
     """Whether the caller already chose an allocator configuration."""
 
-    return any(os.environ.get(name) for name in ALLOC_CONF_ENV_VARS)
+    return any(os.environ.get(name) for name in alloc_conf_env_vars())
 
 
-def _apply_runtime_alloc_conf() -> None:
+def _apply_runtime_alloc_conf(conf: str) -> None:
     """Apply the setting when CUDA came up before this module ran.
 
     Torch parses the environment once, when the caching allocator is created.
@@ -77,13 +114,13 @@ def _apply_runtime_alloc_conf() -> None:
             # Torch deprecates this spelling in favour of a private C++ hook
             # that is not exposed on every supported release.
             warnings.simplefilter("ignore")
-            setter(DEFAULT_ALLOC_CONF)
+            setter(conf)
     except Exception:  # pragma: no cover - best effort, never break the import
         pass
 
 
 def apply_default_alloc_conf() -> str | None:
-    """Install :data:`DEFAULT_ALLOC_CONF` unless the caller configured one.
+    """Install :func:`default_alloc_conf` unless the caller configured one.
 
     Returns the value that was installed, or ``None`` when the caller's own
     configuration was preserved. Safe to call more than once.
@@ -91,10 +128,11 @@ def apply_default_alloc_conf() -> str | None:
 
     if alloc_conf_configured():
         return None
+    conf = default_alloc_conf()
     for name in ALLOC_CONF_ENV_VARS:
-        os.environ[name] = DEFAULT_ALLOC_CONF
-    _apply_runtime_alloc_conf()
-    return DEFAULT_ALLOC_CONF
+        os.environ[name] = conf
+    _apply_runtime_alloc_conf(conf)
+    return conf
 
 
 def allocator_backend() -> str | None:
@@ -126,9 +164,13 @@ def large_hessian_alloc_hint() -> str | None:
 __all__ = [
     "ALLOC_CONF_ENV_VARS",
     "DEFAULT_ALLOC_CONF",
+    "HIP_ALLOC_CONF_ENV_VAR",
     "LARGE_HESSIAN_ALLOC_CONF",
+    "ROCM_DEFAULT_ALLOC_CONF",
     "allocator_backend",
+    "alloc_conf_env_vars",
     "alloc_conf_configured",
     "apply_default_alloc_conf",
+    "default_alloc_conf",
     "large_hessian_alloc_hint",
 ]
