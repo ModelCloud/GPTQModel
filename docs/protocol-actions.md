@@ -5,7 +5,7 @@ The quantization protocol lets a `Rule` carry rule-scoped `actions` such as
 an action method is resolved, where it executes relative to config compilation,
 and which failure paths are fail-closed.
 
-Introduced by PR #3781. The user-facing protocol surface is described in
+Introduced by PR #4106 for issue #3781. The user-facing protocol surface is described in
 [Quantization protocol](quantization_protocol.md).
 
 ## Why actions are a separate stage
