@@ -42,6 +42,24 @@ _TARGET_TILES = 1024
 _MAX_SPLITS = 8
 
 
+def _row_blocks(rows, out_features):
+    """Adjacent 16-column blocks per threadgroup for the dot-product path.
+
+    Every output column needs the same activation values, so decoding several
+    blocks per threadgroup divides the per-step activation loads. The price is
+    ``rows * blocks`` accumulator pairs per thread, so the wide token counts
+    keep fewer blocks and stay out of a register spill, and a short output grid
+    keeps one block so the GPU still has a full wave of threadgroups.
+    """
+    if rows > 12:
+        return 1
+    cap = 4 if rows <= 4 else 2
+    # One wave is 32 threadgroups; a shorter grid costs more than the shared
+    # activation loads save, so the block count shrinks with the output width.
+    blocks = min(cap, out_features // 512)
+    return 1 if blocks < 2 else (2 if blocks < 4 else 4)
+
+
 @lru_cache(maxsize=1)
 def _decode_kernel():
     """Decode the packed stream into the exact BF16 weight matrix."""
@@ -257,26 +275,34 @@ def _reduce_kernel(output_dtype):
     )
 
 
-def _rows_body(rows):
-    """Unrolled slot decode plus one FMA per token row.
+def _rows_body(rows, blocks):
+    """Unrolled slot decode plus one FMA per token row, over ``blocks`` columns.
 
     The decode builds each BF16 word from its meta nibble and low byte with the
     fewest integer ops that fit: the exponent byte is shifted straight to the
     top of the word, the low byte is masked into place, and the loop prefetches
     the next super-atom so the load latency overlaps the current step's ALU.
+
+    A threadgroup owns ``blocks`` adjacent 16-column blocks and decodes them
+    from the same activation values, because ``x`` does not depend on the output
+    column. That is what makes the wide token counts fast: at eight rows the
+    per-step activation loads outnumber the packed loads, and sharing them
+    across blocks removes most of that traffic without touching the weight
+    stream.
     """
 
-    def slots(escaped, pad):
+    def slots(escaped, pad, block):
         out = []
         for s in range(8):
             ch, rh, p = s >> 2, (s >> 1) & 1, s & 1
-            low = "low0" if s < 4 else "low1"
+            low = f"{'low0' if s < 4 else 'low1'}_{block}"
             byte = s & 3
             k = f"k_j + {8 * ch + p}u"
             # (byte << 16) written as a masked shift of the source word.
             shift = {0: "<< 16u", 1: "<< 8u", 2: "", 3: ">> 8u"}[byte]
             if escaped:
-                bits = f"uint(uint16_t(escapes[low0 * 8u + {s}u])) << 16u"
+                # The escape table is indexed by the group's first low word.
+                bits = f"uint(uint16_t(escapes[low0_{block} * 8u + {s}u])) << 16u"
             else:
                 meta = f"m{s >> 1}"
                 high = (f"({meta} & 0x87u)" if p == 0
@@ -288,70 +314,87 @@ def _rows_body(rows):
             out.append(f"{pad}weight = as_type<float>({bits});")
             for r in range(rows):
                 out.append(
-                    f"{pad}sum_{r}_{rh} = metal::fma(float(x[{r} * K + {k}]), weight, sum_{r}_{rh});"
+                    f"{pad}sum_{block}_{r}_{rh} = metal::fma("
+                    f"float(x[{r} * K + {k}]), weight, sum_{block}_{r}_{rh});"
                 )
         return "\n".join(out)
 
     decls = "\n".join(
-        f"            float sum_{r}_{rh} = 0.0f;" for r in range(rows) for rh in (0, 1)
+        f"            float sum_{b}_{r}_{rh} = 0.0f;"
+        for b in range(blocks) for r in range(rows) for rh in (0, 1)
     )
+    pre = ""
+    prefetch = ""
+    advance = ""
+    for b in range(blocks):
+        off = "" if b == 0 else f" + {b}u * SA_BYTES"
+        pre += f"""
+            uint meta_{b} = base[meta_word{off}];
+            uint low0_{b} = base[low_word{off}];
+            uint low1_{b} = base[low_word + 1u{off}];"""
+        prefetch += f"""
+                uint next_meta_{b} = next[meta_word{off}];
+                uint next_low0_{b} = next[low_word{off}];
+                uint next_low1_{b} = next[low_word + 1u{off}];"""
+        advance += f"""
+                meta_{b} = next_meta_{b};
+                low0_{b} = next_low0_{b};
+                low1_{b} = next_low1_{b};"""
+    decode = ""
+    for b in range(blocks):
+        decode += f"""
+                {{
+                    uint meta = meta_{b};
+                    // A group whose four meta bytes are all zero carries its
+                    // eight BF16 words in the escape table.
+                    if (meta == 0u) {{
+{slots(True, "                        ", b)}
+                    }} else {{
+                        uint m0 = meta & 0xFFu;
+                        uint m1 = (meta >> 8u) & 0xFFu;
+                        uint m2 = (meta >> 16u) & 0xFFu;
+                        uint m3 = (meta >> 24u) & 0xFFu;
+{slots(False, "                        ", b)}
+                    }}
+                }}"""
     loop = f"""
 {decls}
 
-            // Double-buffer the super-atom stream: the next step's three words
-            // are in flight while this step decodes and accumulates.
-            const device uint *base = (const device uint *)packed;
-            uint meta = base[meta_word];
-            uint low0 = base[low_word];
-            uint low1 = base[low_word + 1u];
+            // Double-buffer the super-atom stream: the next step's words are in
+            // flight while this step decodes and accumulates.
+            const device uint *base = (const device uint *)packed;{pre}
             for (uint step = 0; step < SA_ROW; ++step) {{
-                const device uint *next = base + min(step + 1u, SA_ROW - 1u) * 384u;
-                uint next_meta = next[meta_word];
-                uint next_low0 = next[low_word];
-                uint next_low1 = next[low_word + 1u];
-                uint k_j = step * 64u + 16u * j + 2u * (lane & 3u);
-                // A group whose four meta bytes are all zero carries its eight
-                // BF16 words in the escape table, indexed by low0.
-                if (meta == 0u) {{
-{slots(True, "                    ")}
-                }} else {{
-                    uint m0 = meta & 0xFFu;
-                    uint m1 = (meta >> 8u) & 0xFFu;
-                    uint m2 = (meta >> 16u) & 0xFFu;
-                    uint m3 = (meta >> 24u) & 0xFFu;
-{slots(False, "                    ")}
-                }}
-                meta = next_meta;
-                low0 = next_low0;
-                low1 = next_low1;
+                const device uint *next = base + min(step + 1u, SA_ROW - 1u) * 384u;{prefetch}
+                uint k_j = step * 64u + 16u * j + 2u * (lane & 3u);{decode}{advance}
             }}
 """
     tail = ""
-    for r in range(rows):
-        tail += f"""
+    for b in range(blocks):
+        for r in range(rows):
+            tail += f"""
             // A butterfly over the 16 threads that share a column halves the
             // tail four times, then the surviving lane writes both weight rows.
-            float v0_{r} = sum_{r}_0;
-            float v1_{r} = sum_{r}_1;
-            v0_{r} += simd_shuffle_xor(v0_{r}, 8u);
-            v0_{r} += simd_shuffle_xor(v0_{r}, 4u);
-            v0_{r} += simd_shuffle_xor(v0_{r}, 2u);
-            v0_{r} += simd_shuffle_xor(v0_{r}, 1u);
-            v1_{r} += simd_shuffle_xor(v1_{r}, 8u);
-            v1_{r} += simd_shuffle_xor(v1_{r}, 4u);
-            v1_{r} += simd_shuffle_xor(v1_{r}, 2u);
-            v1_{r} += simd_shuffle_xor(v1_{r}, 1u);
+            float v0_{b}_{r} = sum_{b}_{r}_0;
+            float v1_{b}_{r} = sum_{b}_{r}_1;
+            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 8u);
+            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 4u);
+            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 2u);
+            v0_{b}_{r} += simd_shuffle_xor(v0_{b}_{r}, 1u);
+            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 8u);
+            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 4u);
+            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 2u);
+            v1_{b}_{r} += simd_shuffle_xor(v1_{b}_{r}, 1u);
             if ((physical & 15u) == 0u) {{
-                uint column = column_block * 16u + (physical >> 4);
-                output[{r} * N + column] = OUTPUT_TYPE(v0_{r} + bias[column]);
-                output[{r} * N + column + 8u] = OUTPUT_TYPE(v1_{r} + bias[column + 8u]);
+                uint column = (column_block + {b}u) * 16u + (physical >> 4);
+                output[{r} * N + column] = OUTPUT_TYPE(v0_{b}_{r} + bias[column]);
+                output[{r} * N + column + 8u] = OUTPUT_TYPE(v1_{b}_{r} + bias[column + 8u]);
             }}
 """
     return loop + tail
 
 
 _ROWS_SOURCE_HEAD = """            uint physical = thread_position_in_threadgroup.x;
-            uint column_block = threadgroup_position_in_grid.y;
+            uint column_block = threadgroup_position_in_grid.y * BLOCKS;
             uint lane = physical >> 2;
             uint j = physical & 3u;
             float weight = 0.0f;
@@ -363,8 +406,8 @@ _ROWS_SOURCE_HEAD = """            uint physical = thread_position_in_threadgrou
 __BODY__"""
 
 
-def _rows_source(rows):
-    """Build the packed-decode GEMV body for one token count.
+def _rows_source(rows, blocks):
+    """Build the packed-decode GEMV body for one token count and block count.
 
     Each thread owns one ``(lane, j)`` group, which is three words that expand
     to eight BF16 values covering two weight rows. The eight slots are unrolled
@@ -373,12 +416,12 @@ def _rows_source(rows):
     packed read amortized across the whole block.
     """
 
-    return _ROWS_SOURCE_HEAD.replace("__BODY__", _rows_body(rows))
+    return _ROWS_SOURCE_HEAD.replace("__BODY__", _rows_body(rows, blocks))
 
 
-@lru_cache(maxsize=32)
-def _rows_kernel(rows, output_dtype):
-    """Decode-plus-dot kernel for 1..16 tokens, 16 output columns per threadgroup."""
+@lru_cache(maxsize=64)
+def _rows_kernel(rows, blocks, output_dtype):
+    """Decode-plus-dot kernel for 1..16 tokens, ``16 * blocks`` columns per group."""
 
     output_types = {
         mx.float16: ("fp16", "half"),
@@ -390,10 +433,10 @@ def _rows_kernel(rows, output_dtype):
     except KeyError as exc:
         raise ValueError(f"Unsupported NF12 activation dtype: {output_dtype}") from exc
     return mx.fast.metal_kernel(
-        name=f"gptqmodel_nf12_rows{rows}_{output_suffix}",
+        name=f"gptqmodel_nf12_rows{rows}x{blocks}_{output_suffix}",
         input_names=["x", "packed", "escapes", "exp_base", "bias"],
         output_names=["output"],
-        source=_rows_source(rows).replace("OUTPUT_TYPE", output_type),
+        source=_rows_source(rows, blocks).replace("OUTPUT_TYPE", output_type),
     )
 
 
@@ -503,16 +546,20 @@ class MlxNF12Linear(nn.Module):
         )[0]
 
     def _rows(self, x, rows):
-        """Packed-decode dot product for 1..16 tokens, 16 columns per threadgroup.
+        """Packed-decode dot product for 1..16 tokens.
 
         One threadgroup reads each 1536-byte super-atom exactly once and keeps
         one accumulator per token row, so a wider block costs FMAs but no extra
-        weight traffic. That beats the MMA tile up to fifteen rows on this GPU,
+        weight traffic. It also owns several adjacent 16-column blocks, because
+        the activation values are shared by every output column: decoding four
+        blocks from one set of activation loads is what makes the wide token
+        counts fast. That beats the MMA tile up to fifteen rows on this GPU,
         where the tile's per-super-atom barriers cost more than the matrix units
         save.
         """
         threads = 128
-        return _rows_kernel(rows, x.dtype)(
+        blocks = _row_blocks(rows, self.out_features)
+        return _rows_kernel(rows, blocks, x.dtype)(
             inputs=[x.reshape(rows, self.in_features), self.packed, self.escapes,
                     self.exp_base, self.bias],
             template=[
@@ -520,8 +567,9 @@ class MlxNF12Linear(nn.Module):
                 ("ROWS", rows), ("SA_ROW", self.in_features // 64),
                 # Words per 16-row block: 16 rows of 1.5 bytes per weight.
                 ("SA_BYTES", self.in_features * 6),
+                ("BLOCKS", blocks),
             ],
-            grid=(threads, self.out_features // 16, 1),
+            grid=(threads, self.out_features // (16 * blocks), 1),
             threadgroup=(threads, 1, 1),
             output_shapes=[(rows, self.out_features)],
             output_dtypes=[x.dtype],

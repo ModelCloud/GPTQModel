@@ -200,10 +200,12 @@ NF12 stays in its 12-byte tiled group stream and `MlxNF12Linear` decodes it on
 Metal. The token count picks the path, because the packed stream is 1.5 bytes per
 weight while a decoded BF16 weight is 2 bytes that must then be read again:
 
-- 1..15 tokens: one decode-plus-dot kernel, one threadgroup per 16 output
-  columns. A super-atom is exactly 16 weight rows by 64 K values, so the
-  threadgroup reads each packed byte once per K step and decodes it in place;
-  no BF16 weight buffer is written and no barrier is paid per super-atom.
+- 1..15 tokens: one decode-plus-dot kernel. A super-atom is exactly 16 weight
+  rows by 64 K values, so the threadgroup reads each packed byte once per K step
+  and decodes it in place; no BF16 weight buffer is written and no barrier is
+  paid per super-atom. A threadgroup also covers several adjacent 16-column
+  blocks (four for 1..4 tokens, two for 5..12) and reuses one set of activation
+  loads across them, which is where most of the wide-token speed comes from.
 - exactly 16 tokens on a wide output: a fused tile kernel decodes one super-atom
   per K step into `[k][out]` threadgroup memory and runs it through the
   simdgroup matrix units, which wins back the FMA cost the dot product pays at
