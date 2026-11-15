@@ -1631,6 +1631,56 @@ def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
     assert inertia_read > centroid_update
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
+def test_vptq_weighted_kmeans_gpu_deterministic():
+    """GPU _weighted_kmeans must produce bit-identical centroids across runs (#4137)."""
+
+    device = torch.device("cuda:0")
+    generator = torch.Generator(device=device).manual_seed(42)
+    data = torch.randn(5000, 8, generator=generator, device=device, dtype=torch.float32)
+    weights = torch.rand(5000, generator=generator, device=device, dtype=torch.float32)
+
+    c1, a1 = _weighted_kmeans(data, 64, weights, iters=10, tol=1e-5, seed=0)
+    c2, a2 = _weighted_kmeans(data, 64, weights, iters=10, tol=1e-5, seed=0)
+
+    assert torch.equal(c1, c2)
+    assert torch.equal(a1, a2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
+def test_vptq_gpu_quantization_is_deterministic():
+    """Quantizing the same layer twice on GPU must yield identical results (#4137)."""
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=42)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=12,
+        enable_norm=True,
+        enable_perm=True,
+    )
+
+    quantizer1 = build_quantizer(weight, qcfg, dtype=torch.float16)
+    quantizer1.layer.to(device)
+    res1, _ = quantizer1.quantize_weight(
+        weight.to(device=device, dtype=torch.float16), hessian.to(device), target_dtype=torch.float16
+    )
+
+    quantizer2 = build_quantizer(weight, qcfg, dtype=torch.float16)
+    quantizer2.layer.to(device)
+    res2, _ = quantizer2.quantize_weight(
+        weight.to(device=device, dtype=torch.float16), hessian.to(device), target_dtype=torch.float16
+    )
+
+    assert torch.equal(res1.indices[1], res2.indices[1])
+    assert torch.equal(res1.res_indices[1], res2.res_indices[1])
+    assert torch.equal(res1.centroids[1], res2.centroids[1])
+    assert torch.equal(res1.res_centroids[1], res2.res_centroids[1])
+    assert torch.equal(res1.quantized_weight, res2.quantized_weight)
+
+
 def test_vptq_partial_dead_hessian_matches_oracle():
     """Dead channels must be neutralized without changing the oracle result."""
 

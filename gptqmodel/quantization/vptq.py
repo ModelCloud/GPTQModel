@@ -156,10 +156,15 @@ def _weighted_kmeans(
         inertia = (residual.double() * weights.double()).sum()
 
         weighted = data * weights.unsqueeze(1)
-        sums = torch.zeros_like(centroids).index_add_(0, assignment, weighted)
-        counts = torch.zeros(num_centroids, dtype=data.dtype, device=data.device).index_add_(
-            0, assignment, weights
-        )
+        prev_deterministic = torch.are_deterministic_algorithms_enabled()
+        try:
+            torch.use_deterministic_algorithms(True)
+            sums = torch.zeros_like(centroids).index_add_(0, assignment, weighted)
+            counts = torch.zeros(num_centroids, dtype=data.dtype, device=data.device).index_add_(
+                0, assignment, weights
+            )
+        finally:
+            torch.use_deterministic_algorithms(prev_deterministic)
         updated = sums / counts.clamp_min(_EPS).unsqueeze(1)
         empty = counts <= 0
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)

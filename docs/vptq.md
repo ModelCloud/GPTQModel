@@ -100,6 +100,11 @@ reported as `config.bits` and can be tuned by changing the codebook sizes
 parameter; passing an explicit `bits` only logs the derived value. Per-layer
 `dynamic` overrides are not supported for VPTQ.
 
+Quantization on GPU uses scoped deterministic algorithms for k-means segment
+reduction (`index_add_`) to guarantee bit-identical codebooks and indices on a
+given device. Cross-platform results between CUDA and ROCm can still vary
+slightly because device `randperm` streams differ between CUDA and ROCm.
+
 Configuration constraints:
 
 - `num_centroids[1]` must be a power of two of at least `2`, and `npercent > 0`
