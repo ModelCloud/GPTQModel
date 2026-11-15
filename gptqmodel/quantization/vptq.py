@@ -52,6 +52,59 @@ _LOSS_CHUNK_BYTES = 64 * 1024 * 1024
 _EPS = 1e-12
 
 
+def _deterministic_segment_sum(
+    num_buckets: int,
+    index: torch.Tensor,
+    source: torch.Tensor,
+) -> torch.Tensor:
+    """Sum ``source`` rows into ``num_buckets`` buckets, deterministically.
+
+    ``index_add_`` reduces with floating-point atomics on CUDA and HIP, so the
+    summation order — and therefore the low bits of every Lloyd codebook —
+    changes from run to run. VPTQ's sequential column pass amplifies that noise
+    into a different checkpoint for the same seed and calibration (issue
+    #4137).
+
+    Sort the rows by bucket, take one cumulative sum, then difference it at
+    each bucket's end and start. The stable sort, integer ``bincount``,
+    ``cumsum`` and gather all run in a fixed order, so repeated runs are
+    bitwise identical. This is deliberately local:
+    ``torch.use_deterministic_algorithms`` is a process-global switch, and
+    quantization runs on a device worker pool, so enabling it around this call
+    would also re-route a concurrent worker's kernels and can raise for an op
+    that has no deterministic implementation.
+    """
+
+    order = torch.argsort(index, stable=True)
+    sorted_source = source.index_select(0, order)
+    counts = torch.bincount(index, minlength=num_buckets)
+    nonzero = counts > 0
+    cumulative = torch.cumsum(counts, dim=0)[nonzero]
+    ends = cumulative - 1
+    starts = cumulative - counts[nonzero]
+    # A float32 prefix over the whole sorted array loses low bits to
+    # cancellation when a late bucket is differenced, so accumulate in float64
+    # and round once at the end. The result is still a fixed-order reduction.
+    # Scan the last dimension of a contiguous tensor: a dim-0 scan of the
+    # row-major `[num_vectors, vector_len]` layout is strided and takes the slow
+    # path (~90 ms vs ~1 ms at 524288x8 on R9700).
+    prefix = torch.cumsum(
+        sorted_source.double().movedim(0, -1).contiguous(), dim=-1
+    ).movedim(-1, 0)
+    ends_sum = prefix.index_select(0, ends)
+    previous_sum = torch.where(
+        (starts > 0).view(-1, *([1] * (ends_sum.dim() - 1))),
+        prefix.index_select(0, (starts - 1).clamp_min(0)),
+        torch.zeros_like(ends_sum),
+    )
+    totals = (ends_sum - previous_sum).to(source.dtype)
+    result = torch.zeros(
+        (num_buckets, *source.shape[1:]), dtype=source.dtype, device=source.device
+    )
+    result[nonzero] = totals
+    return result
+
+
 def _matrix_to_vectors(data: torch.Tensor, vector_len: int) -> Tuple[torch.Tensor, int]:
     """Split a `[rows, cols]` matrix into `vector_len`-sized vectors along rows.
 
@@ -120,7 +173,13 @@ def _weighted_kmeans(
     tol: float,
     seed: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Deterministic weighted k-means (Lloyd) on `[num_vectors, vector_len]`.
+    """Reproducible weighted k-means (Lloyd) on `[num_vectors, vector_len]`.
+
+    The centroid update reduces with
+    :func:`_deterministic_segment_sum`, so repeated runs with the same inputs and
+    seed produce a bitwise-identical codebook on the same device. Cross-vendor
+    results are not bit-identical: `randperm` draws from each device's own RNG
+    stream, and CUDA and ROCm streams differ.
 
     Always returns exactly `num_centroids` rows so the packed codebook keeps
     the size declared by the configuration. When there are fewer vectors than
@@ -156,15 +215,8 @@ def _weighted_kmeans(
         inertia = (residual.double() * weights.double()).sum()
 
         weighted = data * weights.unsqueeze(1)
-        prev_deterministic = torch.are_deterministic_algorithms_enabled()
-        try:
-            torch.use_deterministic_algorithms(True)
-            sums = torch.zeros_like(centroids).index_add_(0, assignment, weighted)
-            counts = torch.zeros(num_centroids, dtype=data.dtype, device=data.device).index_add_(
-                0, assignment, weights
-            )
-        finally:
-            torch.use_deterministic_algorithms(prev_deterministic)
+        sums = _deterministic_segment_sum(num_centroids, assignment, weighted)
+        counts = _deterministic_segment_sum(num_centroids, assignment, weights)
         updated = sums / counts.clamp_min(_EPS).unsqueeze(1)
         empty = counts <= 0
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)

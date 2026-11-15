@@ -21,6 +21,7 @@ codebooks with explicit element indexing.
 """
 
 import math
+import threading
 from pathlib import Path
 
 import pytest
@@ -1627,7 +1628,9 @@ def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
     assert centroids.shape == (8, 4)
     assert assignment.shape == (32,)
     inertia_read = ops.index("aten._local_scalar_dense.default")
-    centroid_update = ops.index("aten.index_add_.default")
+    # The centroid update ends by scattering the segment sums into the result;
+    # the deterministic reduction no longer uses ``index_add_``.
+    centroid_update = ops.index("aten.index_put_.default")
     assert inertia_read > centroid_update
 
 
@@ -3009,3 +3012,102 @@ def test_vptq_inplace_bias_write_reenables_the_wide_epilogue(dtype):
 
     assert promoted.dtype is torch.float32
     assert torch.equal(promoted, torch.full_like(promoted, inexact))
+
+
+def test_vptq_deterministic_segment_sum_matches_reference():
+    """The sorted reduction must agree with a float64 ``index_add_`` oracle."""
+
+    torch.manual_seed(0)
+    source = torch.randn(4096, 8)
+    weights = torch.rand(4096)
+    index = torch.randint(0, 257, (4096,))
+
+    # The 1-D case is the ``counts`` reduction; the 2-D case is ``sums``.
+    for value in (source, weights):
+        reference = torch.zeros(257, *value.shape[1:], dtype=torch.float64).index_add_(
+            0, index, value.double()
+        )
+        actual = vptq_module._deterministic_segment_sum(257, index, value)
+
+        assert actual.shape == reference.shape
+        relative = (actual.double() - reference).norm() / reference.norm()
+        assert relative.item() < 1e-6
+        used = torch.bincount(index, minlength=257) > 0
+        assert torch.equal(actual[~used], torch.zeros_like(actual[~used]))
+        assert torch.equal(
+            actual, vptq_module._deterministic_segment_sum(257, index, value)
+        )
+
+
+def test_vptq_weighted_kmeans_does_not_toggle_global_determinism_across_threads():
+    """Concurrent k-means must not leak ``torch.use_deterministic_algorithms``.
+
+    The switch is process-global, not thread-local. #4142 wrapped the atomic
+    ``index_add_`` reduction in a save/set/restore pair, but ``_weighted_kmeans``
+    runs on ``DEVICE_THREAD_POOL`` workers, so interleaved restores could leave
+    the flag enabled for the rest of the process. A thread that runs no k-means
+    must never observe it enabled, and the caller's value must survive.
+    """
+
+    initial = torch.are_deterministic_algorithms_enabled()
+    if initial:
+        torch.use_deterministic_algorithms(False)
+
+    generator = torch.Generator().manual_seed(0)
+    data = torch.randn(4096, 8, generator=generator)
+    weights = torch.rand(4096, generator=generator)
+
+    stop = threading.Event()
+    observed_true = []
+    errors = []
+    barrier = threading.Barrier(6)
+
+    def observer():
+        barrier.wait()
+        seen = 0
+        while not stop.is_set():
+            seen += int(torch.are_deterministic_algorithms_enabled())
+        observed_true.append(seen)
+
+    def kmeans_worker():
+        barrier.wait()
+        try:
+            for _ in range(20):
+                _weighted_kmeans(data, 128, weights, iters=4, tol=0.0, seed=0)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def matmul_worker():
+        barrier.wait()
+        try:
+            left = torch.randn(128, 128)
+            right = torch.randn(128, 128)
+            for _ in range(400):
+                left @ right
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    workers = [threading.Thread(target=kmeans_worker) for _ in range(4)]
+    workers.append(threading.Thread(target=matmul_worker))
+    watcher = threading.Thread(target=observer)
+    try:
+        for thread in [watcher, *workers]:
+            thread.start()
+        for thread in workers:
+            thread.join(timeout=120)
+        assert not any(thread.is_alive() for thread in workers), "worker threads hung"
+        stop.set()
+        watcher.join(timeout=30)
+        assert not watcher.is_alive(), "observer thread hung"
+
+        assert not errors, errors
+        assert observed_true == [0], (
+            "a thread running no k-means observed deterministic algorithms enabled"
+        )
+        assert torch.are_deterministic_algorithms_enabled() is False
+    finally:
+        stop.set()
+        for thread in [watcher, *workers]:
+            if thread.is_alive():
+                thread.join(timeout=5)
+        torch.use_deterministic_algorithms(initial)
