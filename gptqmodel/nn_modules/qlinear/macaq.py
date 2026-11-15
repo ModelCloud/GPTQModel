@@ -38,6 +38,21 @@ from . import WeightOnlyQuantLinear
 log = setup_logger()
 
 
+def _triton_failure_is_transient(exc: BaseException) -> bool:
+    """Whether a failed Triton launch may succeed on a later forward.
+
+    A transient allocation failure must not poison the module for the rest of
+    the process: the next forward can have enough free memory. Everything
+    else (a compilation/resource limit or a pointer/device mismatch) is a
+    property of this kernel on this device and stays latched.
+    """
+
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    message = str(exc).lower()
+    return "out of memory" in message or "outofmemory" in message
+
+
 class MacaqLinear(WeightOnlyQuantLinear):
     """Weight-only-safe MACaQ Linear with a portable Torch fallback.
 
@@ -279,7 +294,8 @@ class MacaqLinear(WeightOnlyQuantLinear):
             try:
                 output = self._forward_triton(x_flat)
             except Exception as exc:
-                self._triton_disabled = True
+                if not _triton_failure_is_transient(exc):
+                    self._triton_disabled = True
                 log.warn.once(
                     f"MACaQ Triton kernel unavailable on {x_flat.device} "
                     f"({type(exc).__name__}: {exc}); using the portable Torch path."

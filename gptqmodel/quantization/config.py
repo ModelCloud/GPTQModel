@@ -6241,9 +6241,20 @@ class MacaqConfig(PreProcessorConfig):
         out["activation_precision"] = self.activation_precision
 
     def __post_init__(self):
+        if self.dynamic is not None:
+            # `dynamic={pattern: False}` is the documented exclusion form. The
+            # shared normalizer only understands a `-:` rule with a dict
+            # payload, so translate the boolean before it runs.
+            translated = {}
+            for pattern, override in self.dynamic.items():
+                if override is False:
+                    if isinstance(pattern, str):
+                        raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
+                        pattern = f"-:{raw}"
+                    override = {}
+                translated[pattern] = override
+            self.dynamic = translated
         for pattern, override in (self.dynamic or {}).items():
-            if override is False:
-                continue
             if not isinstance(override, dict):
                 raise ValueError(f"MacaqConfig: dynamic rule `{pattern}` must be False or a dictionary.")
             unknown = set(override) - self._DYNAMIC_FIELDS
