@@ -15,7 +15,7 @@ import torch
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
-from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
+from ..nn_modules.hooked_linear import StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
@@ -318,7 +318,7 @@ class StageInputsCapture:
             # In normal repeating layer/sbuset early stop happens on the last module forward
             # but the first model input embedding call we use a simple model register forwar hook
             # and wait for the first instance this callback is called
-            raise STOP_FORWARD_EXCEPTION
+            raise StopForward("Forwarding stopped")
 
         # Parameters attached to the shell root must be ready before embedding forward.
         self._materialize_modules_with_direct_meta_tensors(cur_layer_device)

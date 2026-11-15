@@ -83,6 +83,10 @@ class BACKEND(str, Enum):
     # NF12 (NyoomFloat12) lossless 12-bit BF16 weights
     NF12 = "nf12"
 
+    # MACaQ MXFP4 kernels
+    MACAQ_TORCH = "macaq_torch"
+    MACAQ_TRITON = "macaq_triton"
+
     # GGUF kernels / engines
     GGUF_TORCH = "gguf_torch"
     GGUF_TRITON = "gguf_triton"
@@ -165,6 +169,10 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
     "nf12": {
         BACKEND.TORCH: BACKEND.NF12,
+    },
+    "macaq": {
+        BACKEND.TORCH: BACKEND.MACAQ_TORCH,
+        BACKEND.TRITON: BACKEND.MACAQ_TRITON,
     },
     "qqq": {
         BACKEND.TORCH: BACKEND.QQQ_TORCH,

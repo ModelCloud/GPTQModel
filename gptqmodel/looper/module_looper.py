@@ -2086,7 +2086,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     len(reverse_p.log),
                 )
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptaq", "awq", "exl3"]:
+                if processor_name in ["gptq", "gptaq", "awq", "exl3", "macaq"]:
                     self.gptq_model.quant_log = reverse_p.log
 
                 if emit_finalize_records:

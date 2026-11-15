@@ -20,6 +20,12 @@ int64_t make_q_matrix(
     bool already_shuffled
 )
 {
+    // QMatrix's constructor calls cudaSetDevice(device) and never restores the
+    // caller's device. Guard the whole op so a multi-GPU load leaves
+    // torch.cuda.current_device() unchanged (same class as the GGUF leak in
+    // #4047).
+    const at::cuda::OptionalCUDAGuard device_guard(at::device_of(q_weight));
+
     torch::Tensor q_perm = q_perm_opt.value_or(torch::Tensor());
     torch::Tensor q_invperm = q_invperm_opt.value_or(torch::Tensor());
     torch::Tensor q_scale = q_scale_opt.value_or(torch::Tensor());

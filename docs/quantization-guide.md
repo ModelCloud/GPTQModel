@@ -30,6 +30,7 @@ unquantized modules add storage beyond the nominal weight bit width.
 | BitsAndBytes 8-bit | INT8 | Native INT8 matmul quantizes activations dynamically; fallback arithmetic can differ | Not required |
 | EXL3 | Variable-rate codebooks; `bits` is a target average bits per weight | Floating-point model activations | Required |
 | VPTQ | Vector-codebook indices plus codebooks | Floating-point model activations; effective bits per weight depend on vector and codebook sizes | Required |
+| MACaQ | OCP MXFP4 (E2M1) with one E8M0 scale per 32 values | Native MXFP4 W4A4 (`tl.dot_scaled`) on CUDA; bf16 W4A16 on the portable Torch path | Required |
 | Experimental GPTQ W4A | Packed GPTQ INT4 | Explicit FP8 or NVFP4 activation policy for selected Llama decoder operations | Required for fresh quantization |
 
 This is a recipe map, not a promise that every method, bit width, dtype, and
@@ -345,6 +346,27 @@ backend = BACKEND.VPTQ_TORCH
 This assigns 12 main index bits plus 4 residual index bits per 8-weight vector,
 or nominally 2 bits per weight before codebook overhead. Read the
 [VPTQ guide](vptq.md) for calibration coverage, codebook sizing, and runtime choices.
+
+### MACaQ MXFP4 W4A4
+
+```python
+from gptqmodel.quantization import MacaqConfig
+
+qcfg = MacaqConfig(
+    n_flip_iters=256,
+    had_block=32,
+    pre_alpha=0.5,
+    activation_precision="w4a4",
+)
+backend = BACKEND.MACAQ_TRITON
+```
+
+MACaQ stores nibble-packed E2M1 weights with one E8M0 scale per 32 values and
+applies the same D1 balance plus block-Hadamard transform to activations at
+runtime. Use `BACKEND.MACAQ_TRITON` on CUDA for the native block-scaled GEMM;
+`BACKEND.MACAQ_TORCH` is the portable path (CPU, ROCm, XPU, MPS). Set
+`activation_precision="w4a16"` to keep bf16 activations. See the
+[MACaQ guide](macaq.md) for the recipe, kernel scope, and validation numbers.
 
 ### Experimental GPTQ INT4 with FP8 or NVFP4 activations
 

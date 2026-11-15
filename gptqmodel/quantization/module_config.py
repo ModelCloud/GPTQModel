@@ -194,6 +194,10 @@ def resolve_module_constructor_config(
                 overrides.get("bits", base_width),
                 overrides.get(FORMAT_FIELD_CODE, base_format),
             )
+        elif format == FORMAT.MXFP4_MACAQ:
+            for key in ("had_block", "activation_precision", "pre_mode", "pre_alpha"):
+                if key in overrides:
+                    options[key] = overrides[key]
 
     return ModuleConstructorConfig(
         bits=tmp_bits,
@@ -259,6 +263,18 @@ def module_constructor_config(
         }
     if quant_type == "qqq":
         kind = "qqq"
+    if quant_type == "macaq":
+        kind = "macaq"
+        options = {
+            key: getattr(module, key)
+            for key in (
+                "block_size",
+                "had_block",
+                "activation_precision",
+                "pre_mode",
+                "pre_alpha",
+            )
+        }
 
     return ModuleConstructorConfig(
         bits=getattr(module, "bits", config.runtime_bits),

@@ -28,6 +28,7 @@ from .config import (
                      GPTAQConfig,
                      GPTQConfig,
                      HessianConfig,
+                     MacaqConfig,
                      MSEConfig,
                      NF12Config,
                      NormConfig,

@@ -1945,6 +1945,15 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.VPTQ_TORCH
             elif self.quantize_config.method == METHOD.NF12:
                 preferred_backend = BACKEND.NF12
+            elif self.quantize_config.method == METHOD.MACAQ:
+                from ..utils.macaq_triton import triton_mxfp4_available
+
+                preferred_backend = (
+                    BACKEND.MACAQ_TRITON
+                    if quant_device_type in ("cuda", "rocm")
+                    and triton_mxfp4_available(quant_device)
+                    else BACKEND.MACAQ_TORCH
+                )
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -2541,6 +2550,8 @@ class BaseQModel(nn.Module):
                 processors.append(factory(**fp8_args))
             elif step is ProcessorStep.QQQ:
                 processors.append(factory(**args, backend=run_plan.loop_backend))
+            elif step is ProcessorStep.MACAQ:
+                processors.append(factory(**args, backend=run_plan.pack_backend))
             elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
                 os.environ["AWQ_BATCH_SIZE"] = str(run_plan.batch_size)
                 processors.append(factory(
@@ -6049,11 +6060,12 @@ class BaseQModel(nn.Module):
             METHOD.EXL3,
             METHOD.PARO,
             METHOD.VPTQ,
+            METHOD.MACAQ,
             METHOD.NF12,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/NF12"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/MACAQ/NF12"
             )
             return None
 
