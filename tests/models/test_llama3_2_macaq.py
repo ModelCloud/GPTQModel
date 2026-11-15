@@ -19,11 +19,11 @@ from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 # Fast-mode baseline (128 calibration chunks, 64 flip sweeps, 128 ARC rows,
 # chat template, eager attention, Triton W4A4):
 #   arc_challenge :: accuracy,loglikelihood       0.3281
-#   arc_challenge :: accuracy,loglikelihood_norm  0.3203
+#   arc_challenge :: accuracy,loglikelihood_norm  0.2969
 #
 # Full-model Wikitext-2 perplexity: 128 Wikitext-2 chunks, 128 flips,
 # pre_alpha=0.75, and all 112 projections quantized:
-#   BF16 20.50 | MACaQ W4A16 21.85 | MACaQ W4A4 24.22
+#   BF16 20.50 | MACaQ W4A16 21.81 | MACaQ W4A4 24.34
 class TestLlama3_2_MACaQ(ModelTest):
     NATIVE_MODEL_ID = os.environ.get(
         "GPTQMODEL_LLAMA3_2_MODEL",
@@ -75,7 +75,7 @@ class TestLlama3_2_MACaQ(ModelTest):
                 "ceil_pct": 0.30,
             },
             "acc_norm": {
-                "value": 0.3203125,
+                "value": 0.296875,
                 "floor_pct": 0.10,
                 "ceil_pct": 0.30,
             },

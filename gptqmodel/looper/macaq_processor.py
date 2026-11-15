@@ -66,6 +66,7 @@ class MacaqProcessor(LoopProcessor):
         forward=ForwardConfig(
             required=True,
             replay_after_process=True,
+            all_modules_in_single_pass=True,
             subset_early_stop=True,
         ),
         calibration=CalibrationTypes.EACH_MODULE_NEEDS_INPUT,

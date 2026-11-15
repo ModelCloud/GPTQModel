@@ -64,7 +64,8 @@ flowchart TD
     B -->|explicit backend unsupported by target| F2["select_quant_linear error"]
     T --> C["QuantizationRunPlan.build"]
     P --> C
-    C --> D["MacaqProcessor.preprocess<br/>resolve module config"]
+    C --> S1["build_layer_subset_plans<br/>one combined block subset"]
+    S1 --> D["MacaqProcessor.preprocess<br/>resolve module config"]
     D -->|excluded| S["skip module"]
     D -->|included| E["Macaq.add_batch<br/>capture Hessian"]
     E -->|empty or nonfinite Hessian| F3["ValueError"]
@@ -99,8 +100,9 @@ original `nn.Linear`, so downstream Hessians missed W4A4 activation rounding.
 The temporary packed child now supplies the same activation precision selected
 for inference and is removed before the layer is offloaded.
 
-| Replay step | Earlier PR #4066 implementation | Current implementation |
+| Replay step | Earlier port | Current implementation |
 |---|---|---|
+| Hessian capture | one forward per module group | `all_modules_in_single_pass` merges groups (`macaq_processor.py:69`, `stage_subset.py:668`) |
 | Forward target | original `nn.Linear` with `replay_weight` (`macaq_processor.py:217` at `a8b7b14`) | `_packed_replay_forward` calls the temporary `MacaqLinear` (`macaq_processor.py:154`) |
 | End of layer | no temporary runtime module | `prepare_layer_post_quantize` removes the child before `post_quantize` (`macaq_processor.py:207`) |
 
@@ -128,9 +130,11 @@ MACaQ's per-Linear optimizer needs only that Linear's weight and input Hessian.
 Full-model streaming still uses forward replay: upstream `streaming_quantize`
 captures Hessians from the current block, replaces its Linear layers, then
 re-forwards the now-quantized block to generate inputs for the next block.
-GPT-QModel uses `MacaqProcessor.lifecycle.forward.replay_after_process` and
-`stage_layer._replay_layer_outputs` for the same propagation. Its temporary
-packed module now makes W4A4 activation quantization part of that replay.
+GPT-QModel sets `all_modules_in_single_pass=True` so every projection's Hessian
+is captured in one block forward before any projection is quantized. It then
+uses `MacaqProcessor.lifecycle.forward.replay_after_process` and
+`stage_layer._replay_layer_outputs` for block propagation. Its temporary
+packed module makes W4A4 activation quantization part of that replay.
 
 The paper's quantization-time advantage comes from the local D1 and
 block-Hadamard transforms, screening three exponent candidates, and a
@@ -152,30 +156,47 @@ tokens. See the [paper](https://arxiv.org/html/2611.10649v2) and
 ### Local quantization timing
 
 The repository includes `scripts/benchmark_macaq_quantization.py` to time
-the full calibration, replay, solve, and pack workflow. One exploratory run
-used the local Llama-3.2-1B-Instruct checkpoint, 64 calibration messages
+the full calibration, replay, solve, and pack workflow. Two exploratory
+rounds, with method order reversed between rounds, used the local
+Llama-3.2-1B-Instruct checkpoint, 64 calibration messages
 (28,672 tokens after padding), BF16 source weights, eager attention, 2048-token
 concat size, batch size 1, group size 32, and an RTX 4090 with Torch
 2.15.0+cu132. MACaQ used 128 flips and `pre_alpha=0.75`.
 
-| Method | Activation | Quantization wall time | Summed module times | Peak allocated / reserved |
-|---|---|---:|---:|---:|
-| GPTQ Triton | W4A16 | 28.39 s | 6.15 s | 2.07 / 46.85 GiB |
-| MACaQ Triton | W4A4 | 109.51 s | 160.23 s | 3.49 / 46.88 GiB |
+| Method | Activation | Round 1 | Round 2 | Median | Peak allocated |
+|---|---|---:|---:|---:|---:|
+| GPTQ Triton | W4A16 | 25.35 s | 23.18 s | 24.26 s | 2.07 GiB |
+| MACaQ Triton | W4A4 | 94.86 s | 98.18 s | 96.52 s | 6.08 GiB |
 
-The module-time sum can exceed wall time because modules are processed in
-parallel. Reserved memory includes allocator cache and is not live tensor
-storage. This one run shows the current eager MACaQ port took 3.86 times as
-long as plain GPTQ in this setup; it is exploratory, compares different
-activation precisions, and does not reproduce the paper's matched-quality
-MR-GPTQ/DuQuant++ benchmark. The script alternates method order across rounds;
-use `--rounds 4` or more for a stronger local comparison.
+The current eager MACaQ port took 3.98 times as long as plain GPTQ by
+median in this setup. The summed module times were 6.32 s for GPTQ and
+271.53 s for MACaQ; these sums exceed wall time when workers run in parallel.
+PyTorch reserved about 46.9 GiB in both methods, mostly allocator cache rather
+than live tensors, and emitted memory-mapping retries. These two rounds are
+exploratory, compare different activation precisions, and do not reproduce
+the paper's matched-quality MR-GPTQ/DuQuant++ benchmark. Use `--rounds 4`
+or more for a stronger local comparison.
+
+The unmodified Huawei reference was also timed on the same 1B checkpoint and
+RTX 4090 model, using FP16 weights, 25,532 raw-text calibration tokens, 128
+flips, and its active-set refinement. Its own timing splits show the cost of
+the required block replay and the effect of compiling the repeated flip step:
+
+| Huawei reference | Full quantization | Hessian capture | Weight quantization | Block replay |
+|---|---:|---:|---:|---:|
+| `--compile_flip` | 29.9 s | 1.3 s | 25.4 s | 2.2 s |
+| `--no-compile_flip` | 66.6 s | 1.2 s | 62.8 s | 1.3 s |
+
+Compilation cut this reference run's total time by 2.23 times despite its
+first-use compilation cost. The reference timings are indicative, not a direct
+port comparison: it uses FP16 and a single raw-text token stream, whereas the
+GPT-QModel workflow above uses BF16 and 28,672 padded chat tokens.
 
 ```bash
 python scripts/benchmark_macaq_quantization.py \
   --model /monster/data/model/Llama-3.2-1B-Instruct \
   --calibration /monster/data/model/dataset/nm-calibration/llm.parquet \
-  --rows 64 --order gptq,macaq
+  --rows 64 --order gptq,macaq --rounds 2
 ```
 
 ## Usage
@@ -239,8 +260,8 @@ chunks of 512 tokens:
 | Model | Perplexity | Delta |
 |---|---:|---:|
 | BF16 | 20.50 | — |
-| MACaQ W4A16 (same weights) | 21.85 | +6.6% |
-| MACaQ W4A4 (Triton) | 24.22 | +18.2% |
+| MACaQ W4A16 (same weights) | 21.81 | +6.4% |
+| MACaQ W4A4 (Triton) | 24.34 | +18.7% |
 
 These numbers are a smoke/regression baseline, not a tuned recipe: the upstream
 paper's Llama-3-8B comparison uses 200K calibration tokens and reports W4A4

@@ -251,6 +251,7 @@ def test_macaq_processor_keeps_resolved_pack_backend_and_dynamic_config():
     processor = MacaqProcessor(
         tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.MACAQ_TORCH
     )
+    assert processor.lifecycle.forward.all_modules_in_single_pass
     processor.preprocess(wrapped)
     task = processor.tasks[wrapped.name]
     assert task.qcfg.had_block == 64
