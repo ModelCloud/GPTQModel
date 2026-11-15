@@ -311,3 +311,15 @@ def test_triton_jit_compile_patch_is_installed():
     nogil_patcher.patch_triton_jit_compile()
 
     assert getattr(jit_module.JITFunction, "_gptqmodel_compile_serialized", False)
+
+
+def test_macaq_triton_kernels_use_the_patched_jit_function():
+    jit_module = pytest.importorskip("triton.runtime.jit")
+    macaq = pytest.importorskip("gptqmodel.utils.macaq_triton")
+    if not getattr(macaq, "TRITON_AVAILABLE", False):
+        pytest.skip("triton is not available")
+
+    # MACaQ launches through the same JITFunction.run path as AWQ, so the
+    # process-wide compile lock covers it without a second patch.
+    assert isinstance(macaq._dense_w4a4_kernel, jit_module.JITFunction)
+    assert getattr(jit_module.JITFunction, "_gptqmodel_compile_serialized", False)
