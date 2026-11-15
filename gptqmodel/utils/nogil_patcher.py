@@ -5,6 +5,7 @@
 
 """Straightforward monkey patch helpers for nogil runtimes."""
 
+import functools
 import importlib
 import threading
 import time
@@ -37,7 +38,12 @@ def patch_safetensors_save_file() -> None:
     safetensors_torch.save_file = wrapper
 
 
-__all__ = ["TritonPatch", "patch_safetensors_save_file", "patch_triton_autotuner"]
+__all__ = [
+    "TritonPatch",
+    "patch_safetensors_save_file",
+    "patch_triton_autotuner",
+    "patch_triton_jit_compile",
+]
 
 
 class TritonPatch:
@@ -50,8 +56,70 @@ class TritonPatch:
             if cls._applied:
                 return
 
-            patch_triton_autotuner()
+            errors = []
+            for patch in (patch_triton_autotuner, patch_triton_jit_compile):
+                try:
+                    patch()
+                except Exception as exc:  # keep the other patch installed
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
             cls._applied = True
+
+
+# Triton's compiler uses nanobind objects that are not free-thread safe. Two
+# threads that miss the same kernel cache entry compile the same kernel at the
+# same time and libtriton aborts the process ("attempted to delete an unknown
+# instance", exit 134) under PYTHON_GIL=0. The lock also collapses concurrent
+# misses for one key into a single compile: the loser rechecks the kernel cache
+# after acquiring it. It is process-global because the unsafe state is inside
+# libtriton, not per JITFunction.
+_TRITON_COMPILE_LOCK = threading.RLock()
+
+
+def _single_flight_triton_compile(self, key, device, compile_fn):
+    """Compile ``key`` once, serializing every libtriton compile globally."""
+
+    kernel_cache = None
+    try:
+        kernel_cache = self.device_caches[device][0]
+    except (AttributeError, KeyError, IndexError, TypeError):
+        kernel_cache = None
+
+    with _TRITON_COMPILE_LOCK:
+        if kernel_cache is not None:
+            cached = kernel_cache.get(key)
+            if cached is not None:
+                return cached
+        return compile_fn()
+
+
+def patch_triton_jit_compile() -> None:
+    """Serialize Triton JIT compilation so cold concurrent launches are safe."""
+
+    try:
+        from triton.runtime.jit import JITFunction
+    except ImportError:
+        return
+
+    if getattr(JITFunction, "_gptqmodel_compile_serialized", False):
+        return
+
+    original_do_compile = JITFunction._do_compile
+
+    @functools.wraps(original_do_compile)
+    def patched_do_compile(self, key, *args, **kwargs):
+        device = kwargs.get("device")
+        if device is None and len(args) > 1:
+            device = args[1]
+
+        def compile_fn():
+            return original_do_compile(self, key, *args, **kwargs)
+
+        return _single_flight_triton_compile(self, key, device, compile_fn)
+
+    JITFunction._do_compile = patched_do_compile
+    JITFunction._gptqmodel_compile_serialized = True
 
 # TODO: triton has unfixed threading bugs in the autotuner code
 def patch_triton_autotuner() -> None:

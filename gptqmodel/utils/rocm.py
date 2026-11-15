@@ -5,6 +5,7 @@
 
 import os
 import re
+import threading
 from contextlib import contextmanager
 
 import torch
@@ -236,6 +237,11 @@ def _is_hipblaslt(backend) -> bool:
     return name.rsplit(".", 1)[-1].strip() == "Cublaslt"
 
 
+_QUANT_BLAS_GUARD_LOCK = threading.RLock()
+_QUANT_BLAS_GUARD_DEPTH = 0
+_QUANT_BLAS_GUARD_PREVIOUS = None
+
+
 @contextmanager
 def quant_blas_backend(device=None):
     """Route BLAS work to rocBLAS for the duration of a quantization run.
@@ -247,7 +253,16 @@ def quant_blas_backend(device=None):
     when the platform lacks ``torch.backends.cuda.preferred_blas_library``, when
     the user already selected a non-hipBLASLt backend, and when
     ``GPTQMODEL_ROCM_QUANT_BLAS`` asks to keep torch's default (``hipblaslt``).
+
+    ``torch.backends.cuda.preferred_blas_library`` is process-global. Two
+    concurrent ``quantize()`` calls therefore share one override: the guard is
+    reference-counted under a lock so only the first entry captures the user's
+    setting and only the last exit restores it. Without the count, the first
+    run to finish restored hipBLASLt while the other run was still quantizing
+    (issue #4094).
     """
+
+    global _QUANT_BLAS_GUARD_DEPTH, _QUANT_BLAS_GUARD_PREVIOUS
 
     if not IS_ROCM:
         yield
@@ -255,34 +270,48 @@ def quant_blas_backend(device=None):
 
     requested = quantize_tuning(device)["blas_backend"]
     setter = _preferred_blas_library_getter()
-    previous = preferred_blas_library()
-    if (
-        setter is None
-        or previous is None
-        or not _is_hipblaslt(previous)
-        or requested in QUANT_BLAS_BACKEND_DISABLED
-    ):
+    if setter is None or requested in QUANT_BLAS_BACKEND_DISABLED:
         yield
         return
 
-    try:
-        setter(_QUANT_BLAS_BACKEND_ALIASES.get(requested, requested))
-        applied = preferred_blas_library()
-    except Exception:
-        yield
-        return
-    if applied is None or _is_hipblaslt(applied):
-        # The platform refused the switch; keep the original backend.
+    entered = False
+    with _QUANT_BLAS_GUARD_LOCK:
+        if _QUANT_BLAS_GUARD_DEPTH > 0:
+            _QUANT_BLAS_GUARD_DEPTH += 1
+            entered = True
+        else:
+            previous = preferred_blas_library()
+            if previous is not None and _is_hipblaslt(previous):
+                try:
+                    setter(_QUANT_BLAS_BACKEND_ALIASES.get(requested, requested))
+                    applied = preferred_blas_library()
+                except Exception:
+                    applied = None
+                if applied is not None and not _is_hipblaslt(applied):
+                    _QUANT_BLAS_GUARD_PREVIOUS = previous
+                    _QUANT_BLAS_GUARD_DEPTH = 1
+                    entered = True
+
+    if not entered:
+        # The platform refused the switch or the caller already selected a
+        # non-hipBLASLt backend; keep the original backend.
         yield
         return
 
     try:
         yield
     finally:
-        try:
-            setter(previous)
-        except Exception:
-            # Restoring is best-effort: the quantization result is already
-            # computed, and a platform that refuses the restore must not turn a
-            # successful quantize into a failure.
-            pass
+        with _QUANT_BLAS_GUARD_LOCK:
+            _QUANT_BLAS_GUARD_DEPTH -= 1
+            if _QUANT_BLAS_GUARD_DEPTH == 0:
+                previous = _QUANT_BLAS_GUARD_PREVIOUS
+                _QUANT_BLAS_GUARD_PREVIOUS = None
+                if previous is not None:
+                    try:
+                        setter(previous)
+                    except Exception:
+                        # Restoring is best-effort: the quantization result is
+                        # already computed, and a platform that refuses the
+                        # restore must not turn a successful quantize into a
+                        # failure.
+                        pass

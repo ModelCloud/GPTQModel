@@ -195,3 +195,51 @@ def test_quantize_config_compile_is_runtime_only():
     assert config.quant_linear_init_kwargs()["compile"] is False
     assert "compile" not in config.to_dict()
     assert QuantizeConfig.from_quant_config(config.to_dict()).compile is True
+
+
+def _guard_assertion_from_dynamo_frame():
+    """Build the real dynamo guard error with a ``torch/_dynamo`` origin frame."""
+    source = (
+        "def raise_guard_error():\n"
+        "    raise AssertionError(\n"
+        "        'Guard failed on the same frame it was created. This is a bug - please create an issue.'\n"
+        "        'Guard fail reason: 0/0: GLOBAL_STATE changed: default_dtype'\n"
+        "    )\n"
+    )
+    namespace = {}
+    exec(compile(source, "/site-packages/torch/_dynamo/guards.py", "exec"), namespace)
+    try:
+        namespace["raise_guard_error"]()
+    except AssertionError as exc:
+        return exc
+    raise AssertionError("the fake dynamo frame did not raise")
+
+
+def test_dynamo_guard_assertion_falls_back_to_eager(monkeypatch):
+    calls = []
+
+    def eager(value):
+        calls.append(value)
+        return value * 7
+
+    _dynamo_compile(monkeypatch, _guard_assertion_from_dynamo_frame())
+    compiled = torch_utils.torch_compile(eager)
+
+    assert compiled(3) == 21
+    assert calls == [3]
+    # The fallback is sticky, so the compiler is not retried on the next call.
+    assert compiled(4) == 28
+    assert calls == [3, 4]
+
+
+def test_user_assertion_is_not_misread_as_a_compiler_failure():
+    calls = []
+
+    def eager(_value):
+        calls.append(1)
+        raise AssertionError("user invariant failed")
+
+    compiled = torch_utils.torch_compile(eager)
+    with pytest.raises(AssertionError, match="user invariant failed"):
+        compiled(1)
+    assert calls == [1]

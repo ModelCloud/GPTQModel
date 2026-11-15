@@ -8,6 +8,7 @@ import functools
 import importlib
 import os
 import sys
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -309,6 +310,11 @@ def _restore_tf32_state(state) -> None:
     torch.backends.cudnn.allow_tf32 = state[1]
 
 
+_TF32_GUARD_LOCK = threading.RLock()
+_TF32_GUARD_DEPTH = 0
+_TF32_GUARD_PREVIOUS = None
+
+
 def torch_compile_disabled() -> bool:
     """Report whether torch compilation is switched off for this process.
 
@@ -341,10 +347,15 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
     contract and must still fail closed.
 
-    A plain ``RuntimeError`` is only treated as a compiler failure when it
-    carries a dynamo/inductor exception in its cause chain or was raised inside
-    PyTorch's compiler packages. Otherwise it belongs to the traced user code;
-    retrying eagerly would run that code twice and hide the original error.
+    Any other exception is only treated as a compiler failure when it was
+    raised inside PyTorch's compiler packages. Otherwise it belongs to the
+    traced user code; retrying eagerly would run that code twice and hide the
+    original error. This includes dynamo's guard-check ``AssertionError``
+    (``Guard failed on the same frame it was created ... GLOBAL_STATE changed``)
+    which fires when another thread changes a process-global setting, such as
+    ``torch.set_default_dtype``, during a concurrent first compile
+    (issue #4094). The innermost frame is what matters: user code raising the
+    same exception type has its own frame at the origin.
     """
     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
         return False
@@ -359,18 +370,16 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
         current = current.__cause__ or current.__context__
     if any(isinstance(item, _dynamo_exception("TorchDynamoException")) for item in chain):
         return True
-    if isinstance(exc, RuntimeError):
-        # Dynamo's own frame sits between the caller and the traced body, so a
-        # "contains a compiler frame" test would also match user code raising
-        # RuntimeError. Only the innermost frame identifies where it came from:
-        # compile workers raise outside the traced frame.
-        frames = traceback.extract_tb(exc.__traceback__)
-        origin = (frames[-1].filename or "") if frames else ""
-        return any(
-            token in origin
-            for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
-        )
-    return False
+    # Dynamo's own frame sits between the caller and the traced body, so a
+    # "contains a compiler frame" test would also match user code raising the
+    # same exception. Only the innermost frame identifies where it came from:
+    # compile workers and guard checks raise outside the traced frame.
+    frames = traceback.extract_tb(exc.__traceback__)
+    origin = (frames[-1].filename or "") if frames else ""
+    return any(
+        token in origin
+        for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
+    )
 
 
 def _compile_label(target) -> str:
@@ -1019,16 +1028,38 @@ def torch_streamCtx(stream) -> StreamContext:
 
 @contextmanager
 def tf32_high_precision_guard():
+    """Run with TF32 disabled, reference-counted across concurrent callers.
+
+    ``torch.backends.fp32_precision`` (or ``allow_tf32`` on older builds) is
+    process-global. The quantization loop enters this guard per model, so two
+    concurrent ``quantize()`` calls used to overwrite each other: the first
+    run to finish restored the user's setting while the other run still needed
+    IEEE math. The count under a lock keeps the override until the last caller
+    exits and restores exactly the setting captured by the first caller
+    (issue #4094).
+    """
+
+    global _TF32_GUARD_DEPTH, _TF32_GUARD_PREVIOUS
+
     if not HAS_CUDA:
         yield
         return
 
-    previous_state = _snapshot_tf32_state()
-    _set_tf32_state(False)
+    with _TF32_GUARD_LOCK:
+        if _TF32_GUARD_DEPTH == 0:
+            _TF32_GUARD_PREVIOUS = _snapshot_tf32_state()
+            _set_tf32_state(False)
+        _TF32_GUARD_DEPTH += 1
     try:
         yield
     finally:
-        _restore_tf32_state(previous_state)
+        with _TF32_GUARD_LOCK:
+            _TF32_GUARD_DEPTH -= 1
+            if _TF32_GUARD_DEPTH == 0:
+                previous_state = _TF32_GUARD_PREVIOUS
+                _TF32_GUARD_PREVIOUS = None
+                if previous_state is not None:
+                    _restore_tf32_state(previous_state)
 
 
 @contextmanager
