@@ -1793,6 +1793,12 @@ interpreter; see
 the task and warmup failure paths, the thread-local Triton autotuner state, and
 the Hessian workspace release.
 
+After `quantize()` returns, no device worker retains the last task's replica,
+no shared early-stop exception retains a traceback, and an ExLlamaV2 load
+restores the current CUDA device; see
+[multi-GPU memory retention](docs/multi-gpu-memory.md) for the ownership
+contract, before/after measurements, and the regression tests.
+
 Saved quantization configs preserve the complete P2P policy; see
 [P2P policy persistence](docs/multi_gpu_quantization.md#p2p-policy-persistence)
 for override precedence and validation.
