@@ -12,6 +12,8 @@ pre-scale run in the forward, on the rotated-frame activations the quantizer
 already assumed.
 """
 
+from functools import lru_cache
+
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -19,17 +21,50 @@ import mlx.nn as nn
 _MXFP4_GROUP = 32
 # Row count where MLX's fused activation quantization stops winning.
 _W4A4_FUSED_ROWS = 16
+_PRE_ROTATE_THREADS = 128
 
 
-def _rotate_blocks(x, bh):
-    """Right-multiply the last axis by the block-diagonal Hadamard matrix."""
+@lru_cache(maxsize=3)
+def _pre_rotate_kernel(output_dtype):
+    """Apply the diagonal pre-scale and the block Hadamard in one dispatch.
 
-    block = bh.shape[0]
-    lead = x.shape[:-1]
-    width = x.shape[-1]
-    if width % block:
-        raise ValueError(f"MACaQ: last dimension {width} is not divisible by the Hadamard block {block}")
-    return (x.reshape(*lead, width // block, block) @ bh).reshape(*lead, width)
+    The block rotation is a per-token ``[K / block, block] @ [block, block]``
+    product. A multiply plus a batched matmul needs two dispatches and an
+    intermediate activation buffer; at the token counts that dominate decode and
+    small-batch prefill (4..16) that overhead is a visible share of the layer, so
+    the scale and the rotation are folded into one pass over the activation.
+    """
+
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported MACaQ activation dtype: {output_dtype}") from exc
+    return mx.fast.metal_kernel(
+        name=f"gptqmodel_macaq_pre_rotate_{output_suffix}",
+        input_names=["x", "pre_scale", "bh"],
+        output_names=["output"],
+        source="""
+            uint column = thread_position_in_grid.x;
+            uint row = thread_position_in_grid.y;
+            uint block = column / BLOCK;
+            uint offset = column % BLOCK;
+            uint base = block * BLOCK;
+            float sum = 0.0f;
+            for (uint index = 0; index < BLOCK; ++index) {
+                sum = metal::fma(
+                    float(x[row * K + base + index]) * float(pre_scale[base + index]),
+                    float(bh[index * BLOCK + offset]),
+                    sum
+                );
+            }
+            output[row * K + column] = OUTPUT_TYPE(sum);
+        """.replace("OUTPUT_TYPE", output_type),
+    )
 
 
 class MlxMACaQLinear(nn.Module):
@@ -67,6 +102,17 @@ class MlxMACaQLinear(nn.Module):
         self.bias = mx.zeros((out_features,), dtype=mx.float32)
         self.freeze()
 
+    def _rotate(self, work):
+        """Pre-scale and rotate a ``[rows, in_features]`` activation block."""
+        return _pre_rotate_kernel(self.compute_dtype)(
+            inputs=[work, self.pre_scale, self.BH],
+            template=[("K", self.in_features), ("BLOCK", self.had_block)],
+            grid=(self.in_features, work.shape[0], 1),
+            threadgroup=(_PRE_ROTATE_THREADS, 1, 1),
+            output_shapes=[(work.shape[0], self.in_features)],
+            output_dtypes=[self.compute_dtype],
+        )[0]
+
     def __call__(self, x):
         if x.shape[-1] != self.in_features:
             raise ValueError(f"expected input width {self.in_features}, got {x.shape[-1]}")
@@ -74,9 +120,7 @@ class MlxMACaQLinear(nn.Module):
         if x.size == 0:
             return mx.zeros(output_shape, dtype=x.dtype)
         rows = x.size // self.in_features
-        work = x.reshape(rows, self.in_features).astype(self.compute_dtype)
-        work = work * self.pre_scale
-        work = _rotate_blocks(work, self.BH)
+        work = self._rotate(x.reshape(rows, self.in_features).astype(self.compute_dtype))
         if self.activation_precision == "w4a4":
             # One fused dispatch quantizes the rotated activation to MXFP4 and
             # multiplies it against the packed weight. MLX's fused path loses

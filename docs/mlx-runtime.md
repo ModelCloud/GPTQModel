@@ -150,12 +150,28 @@ stops winning on wide token blocks (measured on this host: equal at 16 rows,
 activation rounding, so W4A4 output tracks the Torch MACaQ kernel within the
 4-bit activation grid rather than bit-for-bit; W4A16 is unaffected.
 
-NF12 stays in its 12-byte tiled group stream. `MlxNF12Linear` decodes it on
-Metal: a single-row forward fuses the decode into the dot product, and a wider
-forward decodes once into BF16 and multiplies. Both paths are exact for the
-checkpoint's BF16 weights, so a decoded layer is bit-identical to the Torch
-codec's `decode()`; only the accumulation order differs from the Torch
-`linear()` oracle.
+NF12 stays in its 12-byte tiled group stream and `MlxNF12Linear` decodes it on
+Metal. The token count picks the path, because the packed stream is 1.5 bytes per
+weight while a decoded BF16 weight is 2 bytes that must then be read again:
+
+- 1 token: the decode is fused into the dot product, one threadgroup per output
+  column.
+- 2..16 tokens: a fused tile kernel. A super-atom is exactly 16 weight rows by
+  64 K values, so the threadgroup that owns those 16 output columns reads each
+  packed byte once per K step, decodes it into `[k][out]` threadgroup memory, and
+  runs it through the simdgroup matrix units. No BF16 weight buffer is written.
+- more tokens: one decode into BF16 followed by an MLX matmul, because the padded
+  16-row MMA tile would re-read the packed stream once per token block while the
+  dense matmul is compute-bound there anyway.
+
+Every path is exact for the checkpoint's BF16 weights, so a decoded layer is
+bit-identical to the Torch codec's `decode()`; only the accumulation order
+differs from the Torch `linear()` oracle.
+
+MACaQ folds its diagonal pre-scale and 32-wide block Hadamard into one Metal
+dispatch instead of a multiply plus a batched matmul, which removes an
+intermediate activation buffer and one dispatch per layer at the token counts
+that matter for decode and small-batch prefill.
 
 ### Measured Metal result
 
@@ -176,6 +192,30 @@ The NF12 prefill number is dominated by the decode pass: at this layer size a
 32 MB elementwise pass already takes 0.27 ms on this GPU, so the fused
 single-row kernel and the decode both sit at the small-workload floor rather
 than at the 650 GB/s the device reaches on 512 MB working sets.
+
+### Small-token result (4, 8 and 16 rows)
+
+One 4096 -> 14336 BF16 projection on the same M5 Ultra, best of five
+50-repetition trials, against the previous dispatch for the same packed
+checkpoint:
+
+| Format | Rows | Before | After | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| NF12 | 4 | 0.45 ms | 0.29 ms | 1.5x |
+| NF12 | 8 | 0.49 ms | 0.30 ms | 1.6x |
+| NF12 | 16 | 0.39 ms | 0.31 ms | 1.2x |
+| MACaQ W4A4 | 8 | 0.11 ms | 0.09 ms | 1.1x |
+| MACaQ W4A16 | 8 | 0.10 ms | 0.09 ms | 1.1x |
+
+The NF12 gain is a traffic reduction, not a tuning artifact: the previous path
+moved 88 MB of packed weights plus a 117 MB dense BF16 write and a 117 MB read
+per layer, while the fused tile moves only the 88 MB of packed weights. That
+ratio is why the fused tile is the default through 16 tokens: on a
+bandwidth-limited M1-class GPU the same layer is bandwidth-bound, so the path
+that avoids the dense round trip wins by the full traffic ratio rather than the
+1.2-1.6x an M5 Ultra shows at its much higher bandwidth. Above 16 tokens the
+padded MMA tile re-reads the packed stream per token block and the dense matmul
+becomes compute-bound, so the decode-plus-matmul path takes over.
 
 ## Not in scope
 
