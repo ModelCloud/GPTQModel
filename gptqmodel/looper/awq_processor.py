@@ -231,6 +231,53 @@ def _awq_bound_affine_codes(
     return codes.clamp_(0, max_code)
 
 
+#: Sentinel for "the root rotary has not been resolved yet". A resolved `None`
+#: must be cached too, otherwise every replayed module rescans the model.
+_ROTARY_UNRESOLVED = object()
+
+#: Wrapper segments that own their own positional embeddings. A vision tower's
+#: rotary embedding (for example `model.visual.rotary_pos_emb` on Qwen2-VL)
+#: never builds the decoder's `position_embeddings`.
+_NON_DECODER_TOWER_SEGMENTS = frozenset({
+    "visual",
+    "vision",
+    "vision_tower",
+    "vision_model",
+    "image_encoder",
+    "image_tower",
+    "audio",
+    "audio_tower",
+    "audio_encoder",
+    "multi_modal_projector",
+    "projector",
+})
+
+
+def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
+    """Whether ``module`` builds ``(cos, sin)`` from a rotary frequency buffer."""
+
+    leaf = leaf_name.lower()
+    class_name = type(module).__name__.lower()
+    named_rotary = leaf in ("rotary_emb", "rotary", "rotary_embedding")
+    if not named_rotary and not ("rotary" in class_name and "embedding" in class_name):
+        return False
+    if "inv_freq" in getattr(module, "_buffers", {}):
+        return True
+    # Some rotaries keep no buffer (they recompute from `base`) but still take
+    # `(hidden_states, position_ids[, layer_type])`.
+    try:
+        parameters = inspect.signature(module.forward).parameters
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 2
+
+
 class AWQProcessor(LoopProcessor):
     """Captures activations and quantizes layers with the AWQ scaling workflow."""
 
@@ -322,12 +369,70 @@ class AWQProcessor(LoopProcessor):
         self._ensure_group_size_divisibility()
 
     def _get_root_rotary(self) -> Optional[nn.Module]:
-        """Returns the model rotary module used to refresh position embeddings."""
+        """Returns the decoder's rotary module used to refresh position embeddings.
 
-        if self.gptq_model.rotary_embedding:
-            rotary, _ = get_module_by_name_prefix(self.model, [self.gptq_model.rotary_embedding])
-            return rotary
-        return getattr(getattr(self.model, "model", self.model), "rotary_emb", None)
+        Multimodal wrappers nest the decoder one level deeper than a text model
+        (``model.language_model.rotary_emb`` on Qwen2-VL, Qwen2.5-VL, Gemma 3
+        and Mistral 3), and most of those definitions do not declare
+        ``rotary_embedding``. Looking only at ``model.rotary_emb`` therefore
+        found nothing, so AWQ dropped the captured ``position_embeddings`` and
+        the attention unpacked ``None``. Resolve the declaration first, then the
+        known text-backbone layouts, then scan for a rotary embedding outside a
+        vision/audio tower.
+        """
+
+        cached = getattr(self, "_root_rotary_resolved", _ROTARY_UNRESOLVED)
+        if cached is not _ROTARY_UNRESOLVED:
+            return cached
+        rotary = self._resolve_root_rotary()
+        self._root_rotary_resolved = rotary
+        return rotary
+
+    def _resolve_root_rotary(self) -> Optional[nn.Module]:
+        declared = getattr(self.gptq_model, "rotary_embedding", None)
+        if declared:
+            rotary, _ = get_module_by_name_prefix(self.model, [declared])
+            if rotary is not None:
+                return rotary
+
+        root = getattr(self.model, "model", self.model)
+        for candidate in ("rotary_emb", "rotary"):
+            rotary = getattr(root, candidate, None)
+            if isinstance(rotary, nn.Module):
+                return rotary
+
+        return self._scan_root_rotary()
+
+    def _scan_root_rotary(self) -> Optional[nn.Module]:
+        """Find the decoder rotary when a wrapper nests it below ``model``."""
+
+        named_modules = getattr(self.model, "named_modules", None)
+        if not callable(named_modules):
+            # Partial models in focused unit tests are not `nn.Module`s.
+            return None
+        best = None
+        best_depth = None
+        for name, module in named_modules():
+            if not isinstance(module, nn.Module) or module is self.model:
+                continue
+            segments = name.split(".")
+            if _NON_DECODER_TOWER_SEGMENTS & set(segments):
+                continue
+            # A rotary inside a numbered container belongs to one decoder layer
+            # (Nanbeige/DeciLM). Those are old-style `(x, seq_len)` modules and
+            # are handled by the module-local fallback in
+            # `_prepare_module_forward`; they are not the outer forward's rotary.
+            if any(segment.isdigit() for segment in segments):
+                continue
+            if not _is_rotary_embedding_module(module, segments[-1]):
+                continue
+            # Shallowest wins: a model-level rotary is the one the outer forward
+            # used, and per-layer rotaries live deeper inside the decoder.
+            depth = len(segments)
+            if best_depth is None or depth < best_depth:
+                best = module
+                best_depth = depth
+        return best
 
     def _get_rotary_device(self, rotary: Optional[nn.Module], fallback: Optional[torch.device] = None) -> Optional[torch.device]:
         """Resolves the effective device for a rotary module or falls back safely."""
