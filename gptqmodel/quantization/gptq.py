@@ -964,9 +964,10 @@ class GPTQ:
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
             # Determinism across processes comes from this fp32 X^T X GEMM
-            # running on rocBLAS (see ``utils/rocm.py``). Scope the override
-            # to the Hessian accumulation so the fp16/bf16 calibration
-            # forward and quantization replay keep hipBLASLt.
+            # running on rocBLAS (see ``utils/rocm.py``). The quantization run
+            # already holds the override for Hessian methods; this per-call
+            # context keeps a direct Hessian computation on the deterministic
+            # path too, and is a reference-counted no-op when nested.
             with quant_blas_backend(matrix.device):
                 xtx = torch.matmul(mat32.T, mat32)
             del mat32
@@ -1796,7 +1797,8 @@ class GPTQ:
             else contextlib.nullcontext()
         )
         # Keep the deterministic rocBLAS selection on the Hessian/linalg path
-        # (rocSOLVER GEMMs included) and nowhere else.
+        # (rocSOLVER GEMMs included) for direct callers; the run-scoped override
+        # in ``models/base.py`` already covers the quantization path.
         with timer_cm, quant_blas_backend(H.device):
             if _log_hessian_verbose():
                 log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")

@@ -81,7 +81,7 @@ forward and replay as well as the fp32 `X^T X` GEMM, because those forward
 activations feed the Hessian: pinning only the Hessian regressed
 Qwen2.5-0.5B-Instruct to 332/795 differing tensors across processes. AWQ, RTN
 and QQQ never enter the override. Measured `F.linear` throughput, bf16
-4096x4096x14336: 9.6 TFLOPS on rocBLAS vs 141.5 TFLOPS on hipBLASLt, which the
+4096x4096x14336: 9.5 TFLOPS on rocBLAS vs 139.0 TFLOPS on hipBLASLt, which the
 no-Hessian methods now keep. Cross-process determinism stayed at 0 differing
 tensors for both GPTQ and AWQ. See
 [ROCm default process environment](rocm-default-environment.md#quantization-blas-scope)

@@ -129,14 +129,6 @@ _HIPBLASLT_ENV = "ROCBLAS_USE_HIPBLASLT"
 _HIPBLASLT_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
 _REPRODUCIBILITY_WARNED = False
 
-# ``preferred_blas_library`` is process-wide. Several quantize worker threads
-# can accumulate Hessians at once under GIL=0, so the switch is reference
-# counted: the first entrant selects rocBLAS, the last one restores the
-# previous backend, and no thread can flip it mid-GEMM.
-_BLAS_SCOPE_LOCK = threading.Lock()
-_BLAS_SCOPE_DEPTH = 0
-_BLAS_SCOPE_RESTORE = None
-
 # Quantize-phase kernel prewarm groups.  ``None`` means the historical full
 # payload.  RDNA4 drops the "shape" group (cat/stack/roll/pad/repeat_interleave).
 # Measured on an AMD Radeon AI PRO R9700 (``gfx1201``, HIP 7.16.26385), cold
@@ -282,26 +274,34 @@ def _is_hipblaslt(backend) -> bool:
     return name.rsplit(".", 1)[-1].strip() == "Cublaslt"
 
 
+_QUANT_BLAS_GUARD_LOCK = threading.RLock()
+_QUANT_BLAS_GUARD_DEPTH = 0
+_QUANT_BLAS_GUARD_PREVIOUS = None
+
+
 @contextmanager
 def quant_blas_backend(device=None):
     """Route one deterministic BLAS phase to rocBLAS.
 
-    The override is entered only around GPTQ's Hessian ``X^T X`` GEMM and its
-    rocSOLVER inversion, not the whole quantization run: the fp16/bf16 forward
-    and replay GEMMs must keep torch's faster hipBLASLt backend. The requested
-    backend comes from ``quantize_tuning(device)``, so CDNA and RDNA4 both
-    default to rocBLAS. It is skipped on non-ROCm hosts, when the platform lacks
+    The override is entered only for a run plan that builds a Hessian (the GPTQ
+    family), not the whole quantization run: AWQ/RTN/QQQ must keep torch's
+    faster hipBLASLt backend for their fp16/bf16 GEMMs. The requested backend
+    comes from ``quantize_tuning(device)``, so CDNA and RDNA4 both default to
+    rocBLAS. It is skipped on non-ROCm hosts, when the platform lacks
     ``torch.backends.cuda.preferred_blas_library``, when the user already
     selected a non-hipBLASLt backend, and when ``GPTQMODEL_ROCM_QUANT_BLAS``
     asks to keep torch's default (``hipblaslt``).
 
-    ``preferred_blas_library`` is process-wide, so the switch is reference
-    counted for concurrent quantization workers: the first entrant selects
-    rocBLAS, the last one restores the previous backend, and no thread can flip
-    it while another thread's GEMM is in flight.
+    ``torch.backends.cuda.preferred_blas_library`` is process-global. Two
+    concurrent ``quantize()`` calls therefore share one override: the guard is
+    reference-counted under a reentrant lock so only the first entry captures
+    the user's setting and only the last exit restores it. Without the count,
+    the first run to finish restored hipBLASLt while the other run was still
+    quantizing (issue #4094). The count also makes the nested per-call contexts
+    in ``quantization/gptq.py`` free while the method-scoped override is active.
     """
 
-    global _BLAS_SCOPE_DEPTH, _BLAS_SCOPE_RESTORE
+    global _QUANT_BLAS_GUARD_DEPTH, _QUANT_BLAS_GUARD_PREVIOUS
 
     if not IS_ROCM:
         yield
@@ -313,8 +313,12 @@ def quant_blas_backend(device=None):
         yield
         return
 
-    with _BLAS_SCOPE_LOCK:
-        if _BLAS_SCOPE_DEPTH == 0:
+    entered = False
+    with _QUANT_BLAS_GUARD_LOCK:
+        if _QUANT_BLAS_GUARD_DEPTH > 0:
+            _QUANT_BLAS_GUARD_DEPTH += 1
+            entered = True
+        else:
             previous = preferred_blas_library()
             if previous is not None and _is_hipblaslt(previous):
                 try:
@@ -323,20 +327,30 @@ def quant_blas_backend(device=None):
                 except Exception:
                     applied = None
                 if applied is not None and not _is_hipblaslt(applied):
-                    _BLAS_SCOPE_RESTORE = previous
-        _BLAS_SCOPE_DEPTH += 1
+                    _QUANT_BLAS_GUARD_PREVIOUS = previous
+                    _QUANT_BLAS_GUARD_DEPTH = 1
+                    entered = True
+
+    if not entered:
+        # The platform refused the switch or the caller already selected a
+        # non-hipBLASLt backend; keep the original backend.
+        yield
+        return
 
     try:
         yield
     finally:
-        with _BLAS_SCOPE_LOCK:
-            _BLAS_SCOPE_DEPTH -= 1
-            if _BLAS_SCOPE_DEPTH == 0 and _BLAS_SCOPE_RESTORE is not None:
-                previous, _BLAS_SCOPE_RESTORE = _BLAS_SCOPE_RESTORE, None
-                try:
-                    setter(previous)
-                except Exception:
-                    # Restoring is best-effort: the quantization result is
-                    # already computed, and a platform that refuses the restore
-                    # must not turn a successful quantize into a failure.
-                    pass
+        with _QUANT_BLAS_GUARD_LOCK:
+            _QUANT_BLAS_GUARD_DEPTH -= 1
+            if _QUANT_BLAS_GUARD_DEPTH == 0:
+                previous = _QUANT_BLAS_GUARD_PREVIOUS
+                _QUANT_BLAS_GUARD_PREVIOUS = None
+                if previous is not None:
+                    try:
+                        setter(previous)
+                    except Exception:
+                        # Restoring is best-effort: the quantization result is
+                        # already computed, and a platform that refuses the
+                        # restore must not turn a successful quantize into a
+                        # failure.
+                        pass

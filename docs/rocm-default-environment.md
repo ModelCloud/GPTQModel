@@ -66,10 +66,16 @@ only for the fp32 `X^T X` GEMM: those forward GEMMs produce the activations that
 are accumulated into the Hessian. Pinning only `compute_hessian_xtx` regressed
 Qwen2.5-0.5B-Instruct to **332/795** differing tensors across processes (the
 #4075 no-pin baseline), because the captured inputs themselves differed. The
-per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:970,982`)
-and `hessian_inverse` (`gptqmodel/quantization/gptq.py:1800`) remain as
+per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:971,983`)
+and `hessian_inverse` (`gptqmodel/quantization/gptq.py:1802`) remain as
 defense-in-depth for direct Hessian calls; the outer method-scoped context is
 what keeps the forward reproducible.
+
+The refcount itself is #4094's `_QUANT_BLAS_GUARD_LOCK` / `_QUANT_BLAS_GUARD_DEPTH`
+/ `_QUANT_BLAS_GUARD_PREVIOUS` primitive (`gptqmodel/utils/rocm.py:277-279`),
+which is reentrant (`threading.RLock`) and therefore already covers the nested
+per-call contexts described above. This change only moves *where* the guard is
+entered.
 
 ```mermaid
 flowchart TD
@@ -93,7 +99,7 @@ flowchart TD
 | AWQ / RTN / QQQ | forced rocBLAS for the whole run | torch default, hipBLASLt on this stack |
 | GPTQ calibration forward and replay | forced rocBLAS | forced rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |
-| Nested / concurrent scopes | not reference counted | process-wide refcount restores only after the last worker exits (`gptqmodel/utils/rocm.py:274`) |
+| Nested / concurrent scopes | not reference counted | #4094's reentrant refcount (`_QUANT_BLAS_GUARD_*`, `gptqmodel/utils/rocm.py:277-279`) restores only after the last worker exits |
 
 ### Measured on gfx1201 (R9700)
 
@@ -103,16 +109,16 @@ is torch's hipBLASLt backend, which methods without a Hessian now keep:
 
 | Shape | dtype | rocBLAS (before) | hipBLASLt (after, no-Hessian methods) | speedup |
 |---|---|---|---|---|
-| 4096x4096x14336 | bf16 | 9.6 | 141.5 | 14.7x |
-| 512x2048x8192 | fp16 | 10.0 | 121.0 | 12.1x |
-| 16x896x4864 | bf16 | 0.5 | 9.4 | 19.8x |
-| 8192x4096 `X^T X` | fp32 | 20.5 | 8.6 | 0.4x (rocBLAS wins) |
+| 4096x4096x14336 | bf16 | 9.5 | 139.0 | 14.6x |
+| 512x2048x8192 | fp16 | 10.2 | 119.8 | 11.7x |
+| 16x896x4864 | bf16 | 0.5 | 7.3 | 13.4x |
+| 8192x4096 `X^T X` | fp32 | 20.5 | 16.3 | 0.8x (rocBLAS wins) |
 
 The fp32 Hessian GEMM is faster on rocBLAS, which is why the GPTQ family keeps
 the pin there. The fp16/bf16 rows are the AWQ/RTN/QQQ paths that no longer pay
 it. GPTQ's end-to-end time is unchanged by design (it keeps the old whole-run
-pin): 62.6 s / 64.7 s for Llama-3.2-1B, 128 samples, against the issue's
-61 s / 56 s. AWQ's 128-sample run measured 54.4 s / 53.6 s, against the issue's
+pin): 58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the issue's
+61 s / 56 s. AWQ's 128-sample run measured 50.7 s / 45.5 s, against the issue's
 128 s / 124 s with the whole-run pin.
 
 ### Cross-process determinism is unchanged
@@ -145,7 +151,7 @@ differing tensors (`qweight` and `scales`, starting at layer 0) against 0/483
 on the default; the issue measured 224/482 for both opt-ins. The divergence
 depends on process history, so a single matching pair does not make the opt-in
 reproducible. GPT-QModel logs a warning once when either opt-in is active
-(`gptqmodel/utils/rocm.py:149`, called from `quantize_tuning`).
+(`gptqmodel/utils/rocm.py:150`, called from `quantize_tuning`).
 
 ```bash
 # Reproducible (default)

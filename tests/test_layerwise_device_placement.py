@@ -25,6 +25,7 @@ from gptqmodel.models.loader import (
     _normalize_explicit_placement,
     _normalize_max_memory,
     _resolve_default_layerwise_device,
+    _resolve_max_memory_device,
 )
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -190,6 +191,49 @@ def test_accelerate_map_string_still_pairs_with_max_memory():
 
     assert requested == "auto"
     assert explicit is None
+
+
+def test_cpu_only_max_memory_selects_cpu_kernels_without_a_device():
+    """#4091 item 7: a CPU-only budget must not keep a CUDA kernel."""
+
+    assert _resolve_max_memory_device({"cpu": "10GiB"}, None) is DEVICE.CPU
+    assert _resolve_max_memory_device({"cpu": "10GiB"}, "cpu") is DEVICE.CPU
+
+
+def test_cpu_only_max_memory_rejects_an_explicit_accelerator_device():
+    """A CPU-only budget and `device="cuda:0"` are contradictory; say so."""
+
+    with pytest.raises(ValueError, match="has no accelerator entry"):
+        _resolve_max_memory_device({"cpu": "10GiB"}, "cuda:0")
+    with pytest.raises(ValueError, match="has no accelerator entry"):
+        _resolve_max_memory_device({"cpu": "10GiB"}, torch.device("cuda:0"))
+
+
+def test_max_memory_with_an_accelerator_keeps_device_resolution():
+    assert _resolve_max_memory_device({"cuda:0": "1GiB", "cpu": "1GiB"}, "cuda:0") is None
+    assert _resolve_max_memory_device({0: "1GiB"}, DEVICE.CUDA) is None
+    assert _resolve_max_memory_device(None, "cuda:0") is None
+
+
+def test_loader_rejects_a_cpu_only_budget_with_an_accelerator_device(tmp_path):
+    """The guard must run before a kernel is selected or a checkpoint is read."""
+
+    from transformers import LlamaConfig
+
+    from gptqmodel import GPTQModel
+
+    config = LlamaConfig(
+        vocab_size=32, hidden_size=32, intermediate_size=64,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+    )
+    config.quantization_config = {
+        "method": "gptq", "quant_method": "gptq", "bits": 4,
+        "group_size": 32, "sym": True, "desc_act": False,
+    }
+    config.save_pretrained(tmp_path)
+
+    with pytest.raises(ValueError, match="has no accelerator entry"):
+        GPTQModel.load(str(tmp_path), device="cuda:0", max_memory={"cpu": "10GiB"})
 
 
 def test_assign_greedy_device_ids_fills_devices_in_order():

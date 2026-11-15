@@ -104,6 +104,7 @@ from ..utils.structure import (
     _get_qualified_name,
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
+    restore_init_owned_rotary_buffers,
 )
 from ..utils.torch import TORCH_HAS_COMPILE, as_torch_device, torch_compile, torch_empty_cache
 from ._const import (
@@ -746,6 +747,18 @@ class BaseQModel(nn.Module):
             if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        # transformers 5 materializes checkpoint-absent non-persistent buffers
+        # with `torch.empty_like`, and only re-derives native rotary buffers in
+        # the default `_init_weights`. Restore constructor-owned rotary buffers
+        # here so every load path (native eval, quantization, quantized reload)
+        # sees real RoPE frequencies instead of uninitialized memory.
+        restored_rotary_buffers = restore_init_owned_rotary_buffers(self.model)
+        if restored_rotary_buffers:
+            log.debug(
+                "Model: restored %d init-owned rotary buffer(s) for `%s`.",
+                restored_rotary_buffers,
+                type(self.model).__name__,
+            )
         hooks = getattr(self, "moe_lifecycle_hooks", None)
         if hooks is not None:
             hooks = copy.copy(hooks)
@@ -2139,7 +2152,7 @@ class BaseQModel(nn.Module):
         # Qwen2.5-0.5B to 332/795 differing tensors across processes. Methods
         # without a Hessian (AWQ, RTN, QQQ) never enter the override, which is
         # where the 8-14x fp16/bf16 GEMM penalty was paid with no determinism
-        # gain. GPTQ's end-to-end cost is unchanged (measured 62.6 s / 64.7 s
+        # gain. GPTQ's end-to-end cost is unchanged (measured 58.1 s / 61.4 s
         # for 128 samples vs the issue's 61 s / 56 s).
         blas_context = (
             quant_blas_backend() if _needs_deterministic_hessian(run_plan) else nullcontext()
