@@ -276,7 +276,8 @@ evaluations, not a guarantee for every supported model or method.
 
 ## Organizations and projects using GPT-QModel 🌐
 
-Selected public references include Hugging Face, Intel, NVIDIA, and Alibaba Cloud.
+Selected public references include Hugging Face, Intel, NVIDIA, Alibaba Cloud,
+Fujitsu, and IBM Research.
 This is not an exhaustive customer list.
 
 ## Contributors and sponsors 🤝
