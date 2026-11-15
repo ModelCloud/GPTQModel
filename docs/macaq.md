@@ -88,8 +88,13 @@ flowchart TD
     S1 --> D["MacaqProcessor.preprocess<br/>resolve module config"]
     D -->|excluded| S["skip module"]
     D -->|included| E["Macaq.add_batch<br/>capture Hessian"]
-    E -->|empty or nonfinite Hessian| F3["ValueError"]
-    E -->|usable Hessian| Q["Macaq.quantize<br/>macaq_quantize_weight"]
+    E -->|empty or nonfinite Hessian| FB{"fallback threshold<br/>configured?"}
+    FB -->|no| F3["ValueError"]
+    E -->|usable Hessian| FB2{"below fallback<br/>threshold?"}
+    FB2 -->|no| Q["Macaq.quantize<br/>macaq_quantize_weight"]
+    FB -->|yes| RTN["MXFP4 RTN<br/>identity H, no D1"]
+    FB2 -->|yes| RTN
+    RTN --> R
     Q --> CF{"compile_flip on<br/>NVIDIA CUDA with GIL<br/>or ROCm gfx1201?"}
     CF -->|yes| KC["_compiled_flip_sweep<br/>serialized Inductor call"]
     CF -->|no| KE["_flip_sweep eager"]
@@ -122,6 +127,89 @@ Each calibration chunk traverses the current block once while hooks capture
 all selected projections. A temporary packed child then supplies the W4A4
 forward for block replay. `prepare_layer_post_quantize` removes that child
 before the final checkpoint module is created.
+
+## Runtime and edge-case contracts
+
+### Activation row offsets are 64-bit
+
+`_quant_mxfp4_kernel`, `_rot_scale_quant_kernel`, and
+`_dequant_w4_to_bf16_kernel` compute the row offset in int64
+(`row = tl.program_id(0).to(tl.int64)`). One large prefill can exceed
+`2**31` elements for a wide projection: with `K=18944` the boundary is
+113,359 tokens. The previous int32 offset wrapped, silently reading a
+different row on CUDA and faulting the HIP context on ROCm. The dense GEMM
+already widened its row indices; the three row-indexed helper kernels now
+match it.
+
+### Triton launches bind the operand device
+
+Every MACaQ launch enters `torch.cuda.device(<operand>.device)` first, the
+same guard GGUF Triton and the W4A kernels use. A layer placed on `cuda:1`
+by a `device_map` previously launched into the current `cuda:0` context,
+raised `ValueError: Pointer argument cannot be accessed from Triton`, and
+then latched `_triton_disabled` for the process. Only a permanent failure
+latches; a transient allocation failure does not poison the module.
+
+```mermaid
+flowchart TD
+    A["MacaqLinear.forward"] --> B{"_can_use_triton"}
+    B -->|no| T["_forward_torch"]
+    B -->|yes| C["with torch.cuda.device(x.device)<br/>Triton launch"]
+    C -->|ok| O["output"]
+    C -->|OOM or 'out of memory'| T2["_forward_torch<br/>Triton stays enabled"]
+    C -->|compile or pointer error| L["_triton_disabled = True<br/>_forward_torch"]
+    classDef error fill:#fdd,stroke:#c00,color:#000;
+    class L error;
+```
+
+### K tiles are at least 64 wide
+
+`_pick_tiles` no longer falls back to `BLOCK_K=32`. On Blackwell (`sm_120`)
+`tl.dot_scaled` lowers to the native `mma.sync` MXFP4 instruction, which
+requires a K tile of at least 64; a 32-wide tile fails to compile and the
+module silently stays on Torch. The GEMM's `kb_mask`/`ks_mask` K-tail masks
+already make a non-divisor tile correct, so `_pick_tiles` keeps the largest
+measured tile and the public entry point shrinks it only down to 64.
+The `sm_120` compile path itself was not re-verified on the hardware used
+for this change; correctness on the K tails was verified on `sm_89` and
+`gfx1201`.
+
+### Calibration fallback for unrouted experts
+
+A MoE expert that never receives a calibration token has no Hessian. When
+the configured `fallback` threshold matches — the default `Fallback()` is
+RTN at `0.5%` — MACaQ runs data-independent MXFP4 RTN with an identity
+metric and no D1 pre-scale instead of raising. Without a fallback threshold
+the module still raises the actionable error. `Macaq.quantize` records
+`fallback=True` in the result stats.
+
+### Single exponent offsets and `dynamic` exclusions
+
+- A one-element `exp_offsets=(n,)` now applies offset `n` on the RTN path
+  instead of silently using `0`.
+- `dynamic={pattern: False}`, the documented exclusion form, is translated
+  to the base `-:pattern` rule before shared normalization, so it no longer
+  crashes `MacaqConfig`.
+
+### Transformers interop
+
+Transformers 5.x only warns `Unknown quantization type` and then loads a
+plain model whose packed tensors were randomly initialized. GPT-QModel
+registers a refusing quantizer for every packed format transformers does
+not implement. The names live in one table
+(`gptqmodel/_quant_methods.py:REFUSED_HF_QUANT_METHODS`) so another format
+extends the same registration.
+
+| `quant_method` | Checkpoint | Transformers loader |
+|---|---|---|
+| `gptqmodel_gguf` | packed GGUF | `GPTQModelGGUFHfQuantizer` refuses |
+| `macaq` | MACaQ MXFP4 | `GPTQModelRefusingHfQuantizer` refuses |
+| `paroquant` | ParoQuant | `GPTQModelRefusingHfQuantizer` refuses |
+| `qqq` | QQQ | `GPTQModelRefusingHfQuantizer` refuses |
+| `nf12` | NF12 | `GPTQModelRefusingHfQuantizer` refuses |
+| `tt-blockfloat` | Tenstorrent block-float | `GPTQModelRefusingHfQuantizer` refuses |
+
+Each refusal names `GPTQModel.load` and vLLM as the supported loaders.
 
 ## Relationship to GPTQ
 
