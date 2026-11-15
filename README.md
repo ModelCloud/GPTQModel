@@ -601,7 +601,9 @@ its `.amdgcn` contains `v_wmma_f32_16x16x16_f16`. The fused small-M GEMM is
 FP16-only on RDNA4: BF16 measured 0.43x-1.42x of the split path there (median 0.85x), so BF16
 falls back to dequantize+matmul (GEMV keeps both dtypes). Set
 `GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
-matrix and known limitations.
+matrix and known limitations, and [`docs/rocm-default-environment.md`](docs/rocm-default-environment.md)
+for the ROCm defaults GPT-QModel installs (`expandable_segments` is not enabled;
+`ROCBLAS_USE_HIPBLASLT=0` makes quantization reproducible across processes).
 
 On Ada (SM 8.9) and Blackwell (SM 10.x), `TritonV2Linear` reuses the same fused
 GEMV / small-M GEMM dispatch and the packed-load kernel covers `M=2..64` with no
