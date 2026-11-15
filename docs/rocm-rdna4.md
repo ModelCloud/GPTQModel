@@ -89,9 +89,11 @@ for the flow and the full table.
 
 An explicit `ROCBLAS_USE_HIPBLASLT=1` (or
 `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`) opts back into hipBLASLt. It is faster
-but not reproducible across processes: two GPTQ runs differ in 224/483 tensors
-(the issue measured 224/482), and GPT-QModel warns once when either opt-in is
-active.
+but not reproducible across processes: `ROCBLAS_USE_HIPBLASLT=1` gave 224/483
+differing tensors across two GPTQ runs, and four
+`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` runs split into two kernel-selection
+groups differing in 222/483 (the issue measured 224/482). GPT-QModel warns once
+when either opt-in is active.
 
 Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
 hipBLASLt remains available as an explicit experiment:

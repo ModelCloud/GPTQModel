@@ -146,12 +146,20 @@ the speed is why they exist:
 
 hipBLASLt selects its kernel per process from the process history, so identical
 GPTQ runs in separate processes can diverge from layer 0. Measured on
-Llama-3.2-1B (128 samples): `ROCBLAS_USE_HIPBLASLT=1` gave **224/483**
-differing tensors (`qweight` and `scales`, starting at layer 0) against 0/483
-on the default; the issue measured 224/482 for both opt-ins. The divergence
-depends on process history, so a single matching pair does not make the opt-in
-reproducible. GPT-QModel logs a warning once when either opt-in is active
-(`gptqmodel/utils/rocm.py:150`, called from `quantize_tuning`).
+Llama-3.2-1B (128 samples, every saved tensor hashed):
+
+| Opt-in | Runs | Differing tensors |
+|---|---|---|
+| none (default) | 2 | 0 / 483 |
+| `ROCBLAS_USE_HIPBLASLT=1` | 2 | **224 / 483** (`qweight` and `scales`, from layer 0) |
+| `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` | 4 | **222 / 483** between the two kernel-selection groups; 0 within a group |
+
+The issue measured 224/482 for both opt-ins. The 4-run result is the useful
+shape of the failure: runs 1, 2 and 4 matched and run 3 differed in 222/483
+tensors, so a single matching pair does not make the opt-in reproducible — the
+choice depends on process history. GPT-QModel logs a warning once when either
+opt-in is active (`gptqmodel/utils/rocm.py:150`, called from
+`quantize_tuning`).
 
 ```bash
 # Reproducible (default)
