@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..utils.logger import setup_logger
+from ..utils.rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -382,6 +384,20 @@ def _flip_sweep(
     return improving
 
 
+_COMPILED_FLIP_LOCK = threading.RLock()
+_COMPILED_FLIP_SWEEP = None
+
+
+def _compiled_flip_sweep(*args, **kwargs):
+    """Serialize Inductor's first-use autotuning across quantization workers."""
+
+    global _COMPILED_FLIP_SWEEP
+    with _COMPILED_FLIP_LOCK:
+        if _COMPILED_FLIP_SWEEP is None:
+            _COMPILED_FLIP_SWEEP = torch.compile(_flip_sweep, dynamic=True)
+        return _COMPILED_FLIP_SWEEP(*args, **kwargs)
+
+
 @torch.no_grad()
 def flip_refine_levels(
     signed_index: torch.Tensor,
@@ -391,6 +407,7 @@ def flip_refine_levels(
     n_iters: int,
     *,
     fast: bool = True,
+    compile_flip: bool = False,
 ) -> None:
     """Greedy fixed-Hessian refinement of the E2M1 level codes, in place.
 
@@ -399,6 +416,10 @@ def flip_refine_levels(
     row takes its best improving single-level move per sweep.  ``fast=True``
     keeps an active set and drops rows that have converged; rows are decoupled
     here, so this is bit-identical to the dense sweep.
+
+    ``compile_flip`` fuses each repeated sweep through ``torch.compile`` on
+    NVIDIA CUDA with the GIL enabled. Other devices and free-threaded PyTorch
+    use the eager sweep; concurrent compiler calls are not qualified there.
     """
 
     out_features, in_features = signed_index.shape
@@ -409,11 +430,19 @@ def flip_refine_levels(
     weight_current = grid[signed_index] * scale_element
     hessian_weight_target = hessian @ weight_target.T
     hessian_weight_current = hessian @ weight_current.T
+    sweep = (
+        _compiled_flip_sweep
+        if (
+            compile_flip and device.type == "cuda" and not IS_ROCM
+            and getattr(sys, "_is_gil_enabled", lambda: True)()
+        )
+        else _flip_sweep
+    )
 
     if not fast:
         rows = torch.arange(out_features, device=device)
         for _ in range(n_iters):
-            improving = _flip_sweep(
+            improving = sweep(
                 signed_index, scale_element, hessian_weight_target, hessian_weight_current,
                 rows, grid, inf, hessian_diagonal, hessian, active=False,
             )
@@ -423,7 +452,7 @@ def flip_refine_levels(
 
     active_rows = torch.arange(out_features, device=device)
     for _ in range(n_iters):
-        active_rows = _flip_sweep(
+        active_rows = sweep(
             signed_index, scale_element, hessian_weight_target, hessian_weight_current,
             active_rows, grid, inf, hessian_diagonal, hessian, active=True,
         )
@@ -465,6 +494,7 @@ def macaq_quantize_weight(
     exp_screen: bool = True,
     exp_offsets: Tuple[int, ...] = (1, 0, -1),
     fast_flip: bool = True,
+    compile_flip: bool = False,
     return_dequantized: bool = False,
 ) -> MacaqQuantResult:
     """Quantize one ``[out, in]`` weight matrix with the MACaQ recipe."""
@@ -507,7 +537,8 @@ def macaq_quantize_weight(
 
     if do_flip:
         flip_refine_levels(
-            signed_index, scale_element, rotated_weight, flip_hessian, n_flip_iters, fast=fast_flip
+            signed_index, scale_element, rotated_weight, flip_hessian, n_flip_iters,
+            fast=fast_flip, compile_flip=compile_flip,
         )
 
     packed, scales = pack_mxfp4_from_signed_index(signed_index, log2_scale, block_size)
@@ -688,6 +719,7 @@ class Macaq:
             exp_screen=bool(self.qcfg.exp_screen),
             exp_offsets=tuple(self.qcfg.exp_offsets),
             fast_flip=bool(self.qcfg.fast_flip),
+            compile_flip=bool(self.qcfg.compile_flip),
             return_dequantized=True,
         )
 

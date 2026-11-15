@@ -20,7 +20,8 @@
 # `value = code * 2 ** (e8m0 - 127)`, so the GEMM needs no correction.
 #
 # Port scope: the dense activation quantizer, fused rotate+quantize kernel,
-# dense W4A4 `tl.dot_scaled` GEMM, and W4A16 dequant GEMM.  The upstream MoE
+# dense W4A4 `tl.dot_scaled` GEMM, decode-aware tiles and fused output epilogue
+# from `vllm/triton_mxfp4_dense.py`, and W4A16 dequant GEMM. The upstream MoE
 # kernels, W4A8 FP8 path, and cuDNN/CUTLASS backend are not included.
 
 from __future__ import annotations
@@ -148,9 +149,9 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def _dense_w4a4_kernel(
-        a_ptr, b_ptr, asc_ptr, bsc_ptr, c_ptr, M, N, K,
+        a_ptr, b_ptr, asc_ptr, bsc_ptr, c_ptr, bias_ptr, M, N, K,
         stride_am, stride_bn, stride_asm, stride_bsn, stride_cm,
-        OUT_SCALE: tl.constexpr,
+        OUT_SCALE: tl.constexpr, HAS_BIAS: tl.constexpr,
         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
@@ -185,6 +186,9 @@ if TRITON_AVAILABLE:
             bsc_ptrs += BLOCK_K // 32
 
         acc = acc * OUT_SCALE
+        if HAS_BIAS:
+            bias = tl.load(bias_ptr + offs_n, mask=n_mask, other=0).to(tl.float32)
+            acc = acc + bias[None, :]
         c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :]
         tl.store(c_ptrs, acc, mask=m_mask[:, None] & n_mask[None, :])
 
@@ -301,6 +305,19 @@ def dequant_w4_to_bf16(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tens
     return out
 
 
+def _pick_tiles(rows: int, k: int) -> tuple[int, int, int, int, int]:
+    """Huawei's decode-aware tiling; choose a K divisor for MXFP4 groups."""
+
+    # The upstream fast path uses <=64; the 4090 benchmark favors the larger
+    # tile at M=64, so keep the skinny decode tile through M=32 only.
+    if rows <= 32:
+        block_m, block_n, k_candidates, warps = 16, 64, (512, 256, 128, 64), 4
+    else:
+        block_m, block_n, k_candidates, warps = 64, 128, (256, 128, 64), 8
+    block_k = next((candidate for candidate in k_candidates if k % candidate == 0), 32)
+    return block_m, block_n, block_k, warps, 3
+
+
 def mxfp4_w4a4_linear(
     x: torch.Tensor,
     w_packed: torch.Tensor,
@@ -310,11 +327,11 @@ def mxfp4_w4a4_linear(
     bh: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     out_scale: float = 1.0,
-    block_m: int = 64,
-    block_n: int = 128,
-    block_k: int = 256,
-    num_warps: int = 8,
-    num_stages: int = 3,
+    block_m: Optional[int] = None,
+    block_n: Optional[int] = None,
+    block_k: Optional[int] = None,
+    num_warps: Optional[int] = None,
+    num_stages: Optional[int] = None,
 ) -> torch.Tensor:
     """Packed MXFP4 weights x MXFP4 activations (native block-scaled GEMM)."""
 
@@ -336,26 +353,31 @@ def mxfp4_w4a4_linear(
 
     rows = x2.shape[0]
     n = w_packed.shape[0]
+    default_m, default_n, default_k, default_warps, default_stages = _pick_tiles(rows, k)
+    block_m = block_m if block_m is not None else default_m
+    block_n = block_n if block_n is not None else default_n
+    block_k = block_k if block_k is not None else default_k
+    num_warps = num_warps if num_warps is not None else default_warps
+    num_stages = num_stages if num_stages is not None else default_stages
     # `tl.dot_scaled` tiles must not straddle the K boundary; pick the largest
     # power-of-two tile (up to the caller's request) that divides K.
     while block_k > 32 and (block_k > k or k % block_k):
         block_k //= 2
-    out = torch.empty(rows, n, device=x.device, dtype=torch.float32)
+    out = torch.empty(rows, n, device=x.device, dtype=x.dtype)
     grid = (triton.cdiv(rows, block_m), triton.cdiv(n, block_n))
     # Triton 3.9's pointer canonicalizer does not accept the E8M0 dtype
     # directly; the bytes are the same and `dot_scaled` consumes them as E8M0.
     w_scales_bytes = w_scales.view(torch.uint8)
+    bias_tensor = bias.contiguous() if bias is not None else w_scales_bytes
     _dense_w4a4_kernel[grid](
-        a_packed, w_packed, a_scales, w_scales_bytes, out, rows, n, k,
+        a_packed, w_packed, a_scales, w_scales_bytes, out, bias_tensor, rows, n, k,
         a_packed.stride(0), w_packed.stride(0), a_scales.stride(0), w_scales_bytes.stride(0),
         out.stride(0),
-        OUT_SCALE=out_scale,
+        OUT_SCALE=out_scale, HAS_BIAS=bias is not None,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
         num_warps=num_warps, num_stages=num_stages,
     )
-    if bias is not None:
-        out = out + bias.float()
-    return out.to(x.dtype).reshape(*lead, n)
+    return out.reshape(*lead, n)
 
 
 def mxfp4_w4a16_linear(

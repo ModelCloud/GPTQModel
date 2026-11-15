@@ -44,10 +44,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--concat-size", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--flip-iters", type=int, default=128)
+    parser.add_argument("--compile-flip", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pre-alpha", type=float, default=0.75)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--attention", default="eager")
-    parser.add_argument("--order", choices=("macaq,gptq", "gptq,macaq"), default="macaq,gptq")
+    parser.add_argument(
+        "--order", choices=("macaq,gptq", "gptq,macaq", "macaq", "gptq"),
+        default="macaq,gptq",
+    )
     parser.add_argument("--rounds", type=int, default=1)
     args = parser.parse_args()
     if args.rows < 1 or args.rounds < 1:
@@ -62,6 +66,7 @@ def _config(method: str, args: argparse.Namespace):
         return (
             MacaqConfig(
                 n_flip_iters=args.flip_iters,
+                compile_flip=args.compile_flip,
                 pre_alpha=args.pre_alpha,
                 offload_to_disk=False,
             ),
@@ -117,6 +122,7 @@ def _run(method: str, calibration, args: argparse.Namespace, round_index: int) -
         "rows": args.rows,
         "concat_size": args.concat_size,
         "flip_iters": args.flip_iters if method == "macaq" else None,
+        "compile_flip": args.compile_flip if method == "macaq" else None,
         "load_seconds": load_seconds,
         "quantize_seconds": quantize_seconds,
         "peak_allocated_gib": torch.cuda.max_memory_allocated(args.device) / 2**30,
@@ -145,14 +151,15 @@ def main() -> None:
             results.append(_run(method, calibration, args, round_index + 1))
 
     summary = {}
-    for method in ("macaq", "gptq"):
+    for method in order:
         times = [record["quantize_seconds"] for record in results if record["method"] == method]
         summary[method] = {
             "median_seconds": statistics.median(times),
             "min_seconds": min(times),
             "max_seconds": max(times),
         }
-    summary["macaq_over_gptq"] = summary["macaq"]["median_seconds"] / summary["gptq"]["median_seconds"]
+    if len(order) == 2:
+        summary["macaq_over_gptq"] = summary["macaq"]["median_seconds"] / summary["gptq"]["median_seconds"]
     summary["rounds"] = args.rounds
     summary["exploratory"] = args.rounds < 4
     print("BENCH_SUMMARY", json.dumps(summary, sort_keys=True), flush=True)

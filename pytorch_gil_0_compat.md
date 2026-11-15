@@ -158,6 +158,7 @@ results below for that build.
 | `torch.unsqueeze` | SAFE (concurrent) | shape plumbing | - |
 | `torch.diagonal` | SAFE (concurrent) | math kernels | - |
 | `torch.matmul` | SAFE (concurrent) | calibration, Hessian | cuBLAS/hipBLAS handle per stream; safe. |
+| `torch.compile` / compiled MACaQ flip sweep | UNVERIFIED under GIL=0 | optional MACaQ quantization speed path | The port invokes compiled sweeps only when `sys._is_gil_enabled()` is true. Free-threaded workers use the eager sweep, which is also the numerical fallback. Qualify compiler creation and concurrent first-use on a free-threaded Torch build before enabling this path there. |
 | `torch.einsum` | SAFE (concurrent) | math kernels | - |
 | `torch.where` | SAFE (concurrent) | masking | - |
 | `torch.maximum` | SAFE (concurrent) | clamping | - |

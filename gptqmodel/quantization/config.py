@@ -6175,6 +6175,8 @@ class MacaqConfig(PreProcessorConfig):
     do_flip: bool = field(default=True)
     n_flip_iters: int = field(default=256)
     fast_flip: bool = field(default=True)
+    # Compile the repeated sweep on NVIDIA CUDA with the GIL enabled.
+    compile_flip: bool = field(default=True)
     ridge: float = field(default=1.0)
     # D1 activation-aware diagonal pre-scale.
     pre_mode: str = field(default="balance")
@@ -6187,7 +6189,7 @@ class MacaqConfig(PreProcessorConfig):
     activation_precision: str = field(default="w4a4")
 
     _DYNAMIC_FIELDS = frozenset({
-        "had_block", "do_flip", "n_flip_iters", "fast_flip", "ridge",
+        "had_block", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
         "pre_mode", "pre_alpha", "exp_screen", "exp_offsets",
         "activation_precision",
     })
@@ -6227,6 +6229,7 @@ class MacaqConfig(PreProcessorConfig):
         out["do_flip"] = self.do_flip
         out["n_flip_iters"] = self.n_flip_iters
         out["fast_flip"] = self.fast_flip
+        out["compile_flip"] = self.compile_flip
         out["ridge"] = self.ridge
         out["pre_mode"] = self.pre_mode
         out["pre_alpha"] = self.pre_alpha
@@ -6261,6 +6264,7 @@ class MacaqConfig(PreProcessorConfig):
         self.pre_alpha = float(self.pre_alpha)
         self.do_flip = bool(self.do_flip)
         self.fast_flip = bool(self.fast_flip)
+        self.compile_flip = bool(self.compile_flip)
         self.exp_screen = bool(self.exp_screen)
 
         if self.block_size != 32:

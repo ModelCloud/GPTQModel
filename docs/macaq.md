@@ -47,6 +47,10 @@ block-Hadamard. The W4A4 Triton GEMM reads packed tiles directly. The Torch
 fallback and W4A16 path reconstruct a temporary dense weight for the current
 forward and release it afterward; no dense weight cache is retained.
 
+The W4A4 CUDA path also ports Huawei's fused activation transform, native
+`tl.dot_scaled` GEMM, decode-aware launch tiles, and fused bias/output cast.
+It keeps only packed weights and E8M0 scales between forwards.
+
 ### MXFP4 values and MACaQ checkpoint format
 
 [OCP MXFP4](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)
@@ -84,7 +88,11 @@ flowchart TD
     D -->|included| E["Macaq.add_batch<br/>capture Hessian"]
     E -->|empty or nonfinite Hessian| F3["ValueError"]
     E -->|usable Hessian| Q["Macaq.quantize<br/>macaq_quantize_weight"]
-    Q --> R["MacaqProcessor.process<br/>_install_packed_replay"]
+    Q --> CF{"compile_flip on<br/>NVIDIA CUDA with GIL?"}
+    CF -->|yes| KC["_compiled_flip_sweep<br/>serialized Inductor call"]
+    CF -->|no| KE["_flip_sweep eager"]
+    KC --> R["MacaqProcessor.process<br/>_install_packed_replay"]
+    KE --> R
     R -->|later block needs inputs| F["stage_layer._replay_layer_outputs<br/>packed W4A4 forward"]
     R -->|last block needs no outputs| C["prepare_layer_post_quantize<br/>_remove_packed_replay"]
     F --> C
@@ -148,11 +156,14 @@ The paper's quantization-time advantage comes from the local D1 and
 block-Hadamard transforms, screening three exponent candidates, and a
 row-parallel flip sweep that updates its Hessian gradient using one column per
 accepted move. It avoids GPTQ's inverse-Hessian factorization and sequential
-column compensation. The upstream implementation can compile repeated flip
+column compensation. The upstream implementation compiles repeated flip
 sweeps and reuses the same `X.T @ X` result for projections sharing an input.
-This GPT-QModel port currently executes eager flip sweeps and accumulates each
-projection's Hessian separately; these are performance gaps relative to the
-paper's implementation.
+GPT-QModel now compiles the sweep by default on NVIDIA CUDA when the Python
+GIL is enabled, serializing Inductor first-use and autotuning across workers.
+`compile_flip=False` selects the eager sweep; CPU, ROCm, and free-threaded
+Python use it regardless of the flag because concurrent compiler calls have
+not been qualified there. GPT-QModel still accumulates each projection's
+Hessian separately.
 
 The paper's **11x quantization-time** result compares MACaQ against MR-GPTQ
 and DuQuant++ at matched W4A4 quality on Llama-3-8B. It does not compare
@@ -164,44 +175,24 @@ tokens. See the [paper](https://arxiv.org/html/2611.10649v2) and
 ### Local quantization timing
 
 The repository includes `scripts/benchmark_macaq_quantization.py` to time
-the full calibration, replay, solve, and pack workflow. Two exploratory
-rounds on a PR snapshot based on `main` at `39b6276`, with method order
-reversed between rounds, used the local
-Llama-3.2-1B-Instruct checkpoint, 64 calibration messages
-(28,672 tokens after padding), BF16 source weights, eager attention, 2048-token
-concat size, batch size 1, group size 32, and an RTX 4090 with Torch
-2.15.0+cu132. MACaQ used 128 flips and `pre_alpha=0.75`.
+the full calibration, replay, solve, and pack workflow. The A/B runs below
+used the same PR code revision and local Llama-3.2-1B-Instruct checkpoint,
+64 calibration messages (28,672 padded tokens), BF16 source weights, eager
+attention, a 2048-token concat size, batch size 1, 128 flips,
+`pre_alpha=0.75`, and an RTX 4090 with Torch 2.15.0+cu132. Both used
+`cudaMallocAsync`; the only configuration change was `compile_flip`.
 
-| Method | Activation | Round 1 | Round 2 | Median | Peak allocated |
-|---|---|---:|---:|---:|---:|
-| GPTQ Triton | W4A16 | 25.35 s | 23.18 s | 24.26 s | 2.07 GiB |
-| MACaQ Triton | W4A4 | 94.86 s | 98.18 s | 96.52 s | 6.08 GiB |
+| MACaQ W4A4 mode | Full quantization | Peak allocated | Peak reserved |
+|---|---:|---:|---:|
+| Eager sweep | 89.10 s | 6.06 GiB | 7.38 GiB |
+| Compiled sweep, including first use | 45.47 s | 4.89 GiB | 5.53 GiB |
 
-The current eager MACaQ port took 3.98 times as long as plain GPTQ by
-median in this setup. The summed module times were 6.32 s for GPTQ and
-271.53 s for MACaQ; these sums exceed wall time when workers run in parallel.
-PyTorch reserved about 46.9 GiB in both methods, mostly allocator cache rather
-than live tensors, and emitted memory-mapping retries. These two rounds are
-exploratory, compare different activation precisions, and do not reproduce
-the paper's matched-quality MR-GPTQ/DuQuant++ benchmark. Use `--rounds 4`
-or more for a stronger local comparison.
-
-A spot check measured on upstream `main` at `323673e` kept the same
-order of magnitude. An explicit async allocator avoided the native allocator's
-mapping retries and substantially lowered reserved memory, but MACaQ remained
-slower than plain GPTQ on this 1B workload:
-
-| Rebased allocator | GPTQ | MACaQ | MACaQ / GPTQ | MACaQ peak reserved |
-|---|---:|---:|---:|---:|
-| Native, one round | 23.20 s | 98.03 s | 4.23x | 46.90 GiB |
-| `cudaMallocAsync`, one round | 13.82 s | 87.44 s | 6.33x | 7.31 GiB |
-
-Both spot checks used the same 64 messages and model settings as the table
-above. The async run had zero allocation retries. The benchmark script records
-its allocator backend and config in every `BENCH_RESULT` line; set
-`PYTORCH_ALLOC_CONF=backend:cudaMallocAsync` before launching it to reproduce
-the second allocator condition. Single rounds are exploratory, and the ratio
-changes with allocator choice.
+The compiled run was 1.96 times faster end to end. Each mode was measured
+once, so this is an exploratory local result. It is also a different
+comparison from the paper's matched-quality MR-GPTQ/DuQuant++ benchmark.
+The script records the allocator backend and config in every result line.
+Set `PYTORCH_ALLOC_CONF=backend:cudaMallocAsync` and use
+`--compile-flip` or `--no-compile-flip` to repeat the A/B measurement.
 
 The unmodified Huawei reference was also timed on the same 1B checkpoint and
 RTX 4090 model, using FP16 weights, 25,532 raw-text calibration tokens, 128
@@ -217,6 +208,30 @@ Compilation cut this reference run's total time by 2.23 times despite its
 first-use compilation cost. The reference timings are indicative, not a direct
 port comparison: it uses FP16 and a single raw-text token stream, whereas the
 GPT-QModel workflow above uses BF16 and 28,672 padded chat tokens.
+
+### Local inference kernel timing
+
+The port's earlier fixed 64×128×256 W4A4 GEMM with a separate bias addition
+and output cast was compared against the decode-aware and fused epilogue path
+on an RTX 4090. Inputs were resident BF16 activations, packed MXFP4 weights,
+an identity 32×32 block transform, unit pre-scale, and a BF16 bias. Each
+measurement includes activation packing and GEMM, using
+`triton.testing.do_bench_cudagraph(..., rep=250)`; it excludes the rest of
+the model.
+
+| M × N × K | Earlier port | Tuned port | Kernel-call speedup |
+|---|---:|---:|---:|
+| 1 × 2048 × 2048 | 41.20 µs | 18.40 µs | 2.24× |
+| 1 × 8192 × 2048 | 42.47 µs | 18.99 µs | 2.24× |
+| 16 × 2048 × 2048 | 40.71 µs | 19.66 µs | 2.07× |
+| 64 × 8192 × 2048 | 45.69 µs | 41.17 µs | 1.11× |
+| 128 × 2048 × 2048 | 42.96 µs | 39.01 µs | 1.10× |
+| 256 × 8192 × 2048 | 116.60 µs | 105.57 µs | 1.10× |
+
+Huawei's vLLM plugin supplied the skinny decode tiles and fused output
+epilogue. The M=64 threshold is 32 in this port: a local M=64 tile A/B on
+the same GPU measured 47.60 µs for the skinny tile versus 41.10 µs for
+the larger tile.
 
 ```bash
 python scripts/benchmark_macaq_quantization.py \
@@ -236,6 +251,7 @@ model = GPTQModel.load(
     "meta-llama/Llama-3.2-1B-Instruct",
     quantize_config=MacaqConfig(
         n_flip_iters=256,
+        compile_flip=True,
         had_block=32,
         pre_alpha=0.75,
         activation_precision="w4a4",
@@ -255,7 +271,7 @@ ROCm, XPU, and MPS; `BACKEND.MACAQ_TRITON` uses the native `tl.dot_scaled`
 E2M1 GEMM on CUDA for W4A4.
 
 `dynamic` may exclude modules with `False` or override `had_block`, `do_flip`,
-`n_flip_iters`, `fast_flip`, `ridge`, `pre_mode`, `pre_alpha`, `exp_screen`,
+`n_flip_iters`, `fast_flip`, `compile_flip`, `ridge`, `pre_mode`, `pre_alpha`, `exp_screen`,
 `exp_offsets`, and `activation_precision` per module. The MXFP4 block size,
 bit width, and symmetric format remain fixed.
 
@@ -269,6 +285,7 @@ bit width, and symmetric format remain fixed.
 | `do_flip` | `True` | enable greedy level refinement |
 | `n_flip_iters` | 256 | maximum flip sweeps |
 | `fast_flip` | `True` | active-set sweep (bit-identical to the dense sweep) |
+| `compile_flip` | `True` | fuse repeated sweeps on NVIDIA CUDA with GIL enabled; eager elsewhere |
 | `ridge` | 1.0 | uniform ridge added to the flip Hessian diagonal |
 | `pre_mode` | `"balance"` | `"none"` or D1 activation-aware balancing |
 | `pre_alpha` | 0.75 | D1 exponent (0.5 symmetric, 1.0 weight-std only) |
