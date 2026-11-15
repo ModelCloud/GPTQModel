@@ -76,15 +76,6 @@
   * **Docs and tooling:** Added the GPTQ FSDP/PEFT LoRA example, multi-GPU MoE quantization guide, and independent Torch-oracle accuracy and CPU speed benchmarks.
   * **Dependencies:** Refreshed runtime and optional dependency floors to current stable releases, including PyTorch 2.14.1, Transformers 5.20.2, Datasets 5.1.0, and Optimum 2.3.0. vLLM/SGLang extras retain their upstream framework pins and should be installed in dedicated environments.
 
-* **7.6.0**:
-  * **Model support:** Added RecursiveSI Flint, Jamba/Jamba2, SmolVLM, Granite MoE, InternVL, EXAONE 4.5, Qwen3-VL MoE, Qwen4-Exp text, OLMoE, ZDTaichu 5.0, Agnes 3.0 Flash, and Xing4.0 quantization support, plus MiMo V2.6 Flash-RL and Pro-RL checkpoint support.
-  * **Apple silicon:** Added native MLX GPTQ/AWQ quantization and an EXL3 weight-quantization pipeline. Expanded Metal quantization and packed inference kernels for ParoQuant, GGUF, FP8, QQQ, and BitsAndBytes, with GPTAQ/FOEM/RTN acceleration, broader GPTQ/AWQ bit-width and group-size support, Marlin/BitBLAS checkpoint loading, and FP16/BF16 output preservation.
-  * **GPTQ performance:** Added fused CUDA block updates for 2–8-bit quantization, faster Hessian collection and factor reuse, lower peak Hessian memory, and faster Cholesky damping recovery.
-  * **Experimental W4A:** Added Llama decoder activation streams using FP8 on NVIDIA SM89+ or NVFP4 on GB10 (SM121), while preserving native packed GPTQ INT4 checkpoints. See the [W4A guide](docs/gptq-w4a-gb10.md) for supported configurations and measured quality.
-  * **Source formats:** Added automatic decoding of native FP8/NVFP4 and OCP MXFP4/MXFP8 source checkpoints for requantization.
-  * **Runtime and integration:** Added stable [`hf_` kernel selection, packing, and repacking APIs](docs/hf_packing_api.md), improved AWQ Triton scheduling, and added opt-in [Marlin scratch-buffer reuse](docs/marlin_scratch.md). Improved SGLang format validation, dtype handling, and generation parameter compatibility.
-  * **Reliability:** Fixed model-tree isolation and dynamic-rule caching/serialization, offloaded tensor device/dtype restoration, fused DeepSeek expert loading, Qwen3.5-MoE multimodal calibration, Gemma4 calibration KV memory retention, ParoQuant positional replay, GLM NoPE configuration handling, and GPTQ damping recovery after inverse-factor failures.
-
 Older releases and development notes: [changelog archive](docs/changelog/archive.md).
 
 ## A unified quantization platform
