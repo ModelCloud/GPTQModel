@@ -20,9 +20,11 @@ cache entry.
 `quant_blas_backend` (`gptqmodel/utils/rocm.py`) and
 `tf32_high_precision_guard` (`gptqmodel/utils/torch.py`) protect a
 process-global setting. They now keep one depth counter and one saved value
-under a module-level `RLock`. The first entry captures the user's setting and
-applies the override; every later entry only increments the depth. Only the
-last exit restores the captured value.
+under a module-level lock (`_BLAS_SCOPE_LOCK`, a `threading.Lock`;
+`_TF32_GUARD_LOCK`, an `RLock`). The first entry captures the user's setting
+and applies the override when the current backend is eligible; every later
+entry only increments the depth. Only the last exit restores the captured
+value.
 
 ```mermaid
 flowchart TD
@@ -52,14 +54,14 @@ backend whose per-process kernel selection #4075/#4079 removed.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| BLAS depth | none; per-entry save/restore (`utils/rocm.py:240-283` at `718256fd7`) | `_QUANT_BLAS_GUARD_LOCK`, `_QUANT_BLAS_GUARD_DEPTH`, `_QUANT_BLAS_GUARD_PREVIOUS` |
+| BLAS depth | none; per-entry save/restore (`utils/rocm.py:240-283` at `718256fd7`) | `_BLAS_SCOPE_LOCK`, `_BLAS_SCOPE_DEPTH`, `_BLAS_SCOPE_RESTORE` (shared with #4092) |
 | TF32 depth | none; per-entry save/restore (`utils/torch.py:1021` at `718256fd7`) | `_TF32_GUARD_LOCK`, `_TF32_GUARD_DEPTH`, `_TF32_GUARD_PREVIOUS` |
 | Restore rule | every exit restores | only the exit that reaches depth 0 restores |
 
-The guards stay scoped where they are entered. #4092 narrows
-`quant_blas_backend` to the Hessian/linalg phase; the counting works for that
-placement too, because it depends only on entry and exit, not on which phase
-wraps the context.
+The BLAS primitive is shared with the #4092 work, which scopes the override to
+the Hessian/linalg phase instead of the whole quantization run. The count
+depends only on entry and exit, not on which phase wraps the context, so the
+same primitive serves either placement (and any future nesting of the two).
 
 ## 2. Triton JIT compilation is single-flight and globally serialized
 
@@ -140,8 +142,8 @@ assertion escaped and aborted a forward that raced another thread's
 
 | Situation | Result |
 | --- | --- |
-| Platform refuses the BLAS switch | guard yields without counting; caller keeps its backend |
-| User already selected a non-hipBLASLt backend | guard yields without counting |
+| Platform refuses the BLAS switch | scope is counted but `_BLAS_SCOPE_RESTORE` stays unset; the last exit restores nothing |
+| User already selected a non-hipBLASLt backend | same: no switch, no restore |
 | Restore raises | swallowed; the quantization result is already computed |
 | Triton compile raises | lock is released; the next miss retries the compile |
 | Triton cache already populated | no lock, no compile |

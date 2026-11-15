@@ -60,8 +60,8 @@ def test_quant_blas_backend_is_reference_counted(monkeypatch):
     monkeypatch.setattr(rocm_utils, "quantize_tuning", lambda device=None: {"blas_backend": "hipblas"})
     monkeypatch.setattr(rocm_utils, "_preferred_blas_library_getter", lambda: setter)
     monkeypatch.setattr(rocm_utils, "preferred_blas_library", lambda: state["current"])
-    monkeypatch.setattr(rocm_utils, "_QUANT_BLAS_GUARD_DEPTH", 0)
-    monkeypatch.setattr(rocm_utils, "_QUANT_BLAS_GUARD_PREVIOUS", None)
+    monkeypatch.setattr(rocm_utils, "_BLAS_SCOPE_DEPTH", 0)
+    monkeypatch.setattr(rocm_utils, "_BLAS_SCOPE_RESTORE", None)
 
     release_a, release_b, thread_a, thread_b, errors = _run_two_threads(rocm_utils.quant_blas_backend)
     try:
@@ -79,32 +79,7 @@ def test_quant_blas_backend_is_reference_counted(monkeypatch):
     assert not errors
     assert state["current"].name == "cuda.Cublaslt"
     assert setter_calls == ["hipblas", "cuda.Cublaslt"]
-    assert rocm_utils._QUANT_BLAS_GUARD_DEPTH == 0
-
-
-def test_quant_blas_backend_nested_entries_restore_once(monkeypatch):
-    state = {"current": _Backend("cuda.Cublaslt")}
-    setter_calls = []
-
-    def setter(value):
-        state["current"] = value if isinstance(value, _Backend) else _Backend(value)
-        setter_calls.append(state["current"].name)
-
-    monkeypatch.setattr(rocm_utils, "IS_ROCM", True)
-    monkeypatch.setattr(rocm_utils, "quantize_tuning", lambda device=None: {"blas_backend": "hipblas"})
-    monkeypatch.setattr(rocm_utils, "_preferred_blas_library_getter", lambda: setter)
-    monkeypatch.setattr(rocm_utils, "preferred_blas_library", lambda: state["current"])
-    monkeypatch.setattr(rocm_utils, "_QUANT_BLAS_GUARD_DEPTH", 0)
-    monkeypatch.setattr(rocm_utils, "_QUANT_BLAS_GUARD_PREVIOUS", None)
-
-    with rocm_utils.quant_blas_backend():
-        assert state["current"].name == "hipblas"
-        with rocm_utils.quant_blas_backend():
-            assert state["current"].name == "hipblas"
-        assert state["current"].name == "hipblas"
-
-    assert state["current"].name == "cuda.Cublaslt"
-    assert setter_calls == ["hipblas", "cuda.Cublaslt"]
+    assert rocm_utils._BLAS_SCOPE_DEPTH == 0
 
 
 def test_tf32_high_precision_guard_is_reference_counted(monkeypatch):

@@ -123,6 +123,14 @@ _QUANT_BLAS_BACKEND_CHOICES = frozenset({"rocblas", "hipblaslt", "cublaslt"})
 # torch names rocBLAS "hipblas" on ROCm and rejects "rocblas" outright.
 _QUANT_BLAS_BACKEND_ALIASES = {"rocblas": "hipblas"}
 
+# ``preferred_blas_library`` is process-wide. Several quantize worker threads
+# can accumulate Hessians at once under GIL=0, so the switch is reference
+# counted: the first entrant selects rocBLAS, the last one restores the
+# previous backend, and no thread can flip it mid-GEMM.
+_BLAS_SCOPE_LOCK = threading.Lock()
+_BLAS_SCOPE_DEPTH = 0
+_BLAS_SCOPE_RESTORE = None
+
 # Quantize-phase kernel prewarm groups.  ``None`` means the historical full
 # payload.  RDNA4 drops the "shape" group (cat/stack/roll/pad/repeat_interleave).
 # Measured on an AMD Radeon AI PRO R9700 (``gfx1201``, HIP 7.16.26385), cold
@@ -237,16 +245,11 @@ def _is_hipblaslt(backend) -> bool:
     return name.rsplit(".", 1)[-1].strip() == "Cublaslt"
 
 
-_QUANT_BLAS_GUARD_LOCK = threading.RLock()
-_QUANT_BLAS_GUARD_DEPTH = 0
-_QUANT_BLAS_GUARD_PREVIOUS = None
-
-
 @contextmanager
 def quant_blas_backend(device=None):
-    """Route BLAS work to rocBLAS for the duration of a quantization run.
+    """Route BLAS work to rocBLAS for the phase that must be reproducible.
 
-    The override is scoped to the quantization phase: the previous backend is
+    The override is scoped to the phase that needs it: the previous backend is
     restored afterwards, so inference and every later call keep the user's
     selection. The requested backend comes from ``quantize_tuning(device)``, so
     CDNA and RDNA4 both default to rocBLAS. It is skipped on non-ROCm hosts,
@@ -254,15 +257,16 @@ def quant_blas_backend(device=None):
     the user already selected a non-hipBLASLt backend, and when
     ``GPTQMODEL_ROCM_QUANT_BLAS`` asks to keep torch's default (``hipblaslt``).
 
-    ``torch.backends.cuda.preferred_blas_library`` is process-global. Two
-    concurrent ``quantize()`` calls therefore share one override: the guard is
-    reference-counted under a lock so only the first entry captures the user's
-    setting and only the last exit restores it. Without the count, the first
-    run to finish restored hipBLASLt while the other run was still quantizing
-    (issue #4094).
+    ``torch.backends.cuda.preferred_blas_library`` is process-wide, so
+    concurrent quantization workers share one override. ``_BLAS_SCOPE_DEPTH``
+    and ``_BLAS_SCOPE_RESTORE`` make it reference counted: the first entrant
+    selects rocBLAS, the last one restores the previous backend, and no thread
+    can flip it while another thread's GEMM is in flight (issue #4094). The
+    same primitive is used by the #4092 Hessian-scoped placement, so the two
+    changes share one implementation.
     """
 
-    global _QUANT_BLAS_GUARD_DEPTH, _QUANT_BLAS_GUARD_PREVIOUS
+    global _BLAS_SCOPE_DEPTH, _BLAS_SCOPE_RESTORE
 
     if not IS_ROCM:
         yield
@@ -274,12 +278,8 @@ def quant_blas_backend(device=None):
         yield
         return
 
-    entered = False
-    with _QUANT_BLAS_GUARD_LOCK:
-        if _QUANT_BLAS_GUARD_DEPTH > 0:
-            _QUANT_BLAS_GUARD_DEPTH += 1
-            entered = True
-        else:
+    with _BLAS_SCOPE_LOCK:
+        if _BLAS_SCOPE_DEPTH == 0:
             previous = preferred_blas_library()
             if previous is not None and _is_hipblaslt(previous):
                 try:
@@ -288,30 +288,20 @@ def quant_blas_backend(device=None):
                 except Exception:
                     applied = None
                 if applied is not None and not _is_hipblaslt(applied):
-                    _QUANT_BLAS_GUARD_PREVIOUS = previous
-                    _QUANT_BLAS_GUARD_DEPTH = 1
-                    entered = True
-
-    if not entered:
-        # The platform refused the switch or the caller already selected a
-        # non-hipBLASLt backend; keep the original backend.
-        yield
-        return
+                    _BLAS_SCOPE_RESTORE = previous
+        _BLAS_SCOPE_DEPTH += 1
 
     try:
         yield
     finally:
-        with _QUANT_BLAS_GUARD_LOCK:
-            _QUANT_BLAS_GUARD_DEPTH -= 1
-            if _QUANT_BLAS_GUARD_DEPTH == 0:
-                previous = _QUANT_BLAS_GUARD_PREVIOUS
-                _QUANT_BLAS_GUARD_PREVIOUS = None
-                if previous is not None:
-                    try:
-                        setter(previous)
-                    except Exception:
-                        # Restoring is best-effort: the quantization result is
-                        # already computed, and a platform that refuses the
-                        # restore must not turn a successful quantize into a
-                        # failure.
-                        pass
+        with _BLAS_SCOPE_LOCK:
+            _BLAS_SCOPE_DEPTH -= 1
+            if _BLAS_SCOPE_DEPTH == 0 and _BLAS_SCOPE_RESTORE is not None:
+                previous, _BLAS_SCOPE_RESTORE = _BLAS_SCOPE_RESTORE, None
+                try:
+                    setter(previous)
+                except Exception:
+                    # Restoring is best-effort: the quantization result is
+                    # already computed, and a platform that refuses the restore
+                    # must not turn a successful quantize into a failure.
+                    pass
