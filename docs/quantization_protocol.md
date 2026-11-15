@@ -222,7 +222,7 @@ stages = [
         name="balance",
         rules=[
             Rule(
-                match=".*self_attn$",
+                match=r".*self_attn\.q_proj$",
                 actions=[smoothquant(alpha=0.5)],
             ),
         ],
@@ -248,7 +248,7 @@ YAML:
 stages:
   - name: balance
     rules:
-      - match: ".*self_attn$"
+      - match: '.*self_attn\.q_proj$'
         actions:
           - method: smoothquant
             alpha: 0.5
@@ -375,9 +375,9 @@ If the action naturally operates on the matched object, omit `aliases`.
 
 Examples:
 
-- `smoothquant(alpha=0.5)`
-- `awq_balance(ratio=0.7)`
-- `calibrate_router(...)`
+- `smoothquant(alpha=0.5)` — implemented
+- `awq_balance(ratio=0.7)` — not implemented yet
+- `calibrate_router(...)` — not implemented yet
 
 Default behavior:
 
@@ -395,6 +395,61 @@ This keeps placement clear:
 
 - SmoothQuant or AWQ-like balancing: `actions`
 - local weight clip / pad / smoother: `weight.prepare`
+
+### Shipped behavior
+
+Action methods are resolved through `ACTION_REGISTRY` in
+`gptqmodel/quantization/protocol.py`. `smoothquant` is the only registered
+method today. `awq_balance`, `calibrate_router`, and any other method raise
+`NotImplementedError` with the known-method list, both at config-compilation
+time and at execution time.
+
+Config compilation stays pure. A plan whose rule has a supported action and a
+compilable weight target compiles normally:
+
+```python
+plan = ExecutionPlan(
+    version=2,
+    stages=(
+        Stage(
+            name="ptq",
+            rules=(
+                Rule(
+                    match="*",
+                    actions=(OperationSpec(method="smoothquant", args={"alpha": 0.5}),),
+                    weight=TargetSpec(quantize=QuantizeSpec(method="gptq", args={"bits": 4})),
+                ),
+            ),
+        ),
+    ),
+)
+config = compile_plan_to_quantize_config(plan)  # GPTQConfig(bits=4)
+```
+
+The action itself runs in the separate execution stage, after plan compilation
+and before quantization:
+
+```python
+apply_plan_actions(model, plan, calibration=lambda: model(input_ids))
+```
+
+`calibration` must run one or more forward passes through the model root.
+`smoothquant(alpha)` derives a per-channel scale from those activations,
+folds its inverse into the preceding norm, and multiplies every consumer of
+that norm output by the same scale. It requires the match to resolve to exactly
+one preceding norm; zero or several predecessors raise `ProtocolActionError`
+naming the rule and module instead of skipping. See
+[Protocol actions](protocol-actions.md) for the resolution flow, the failure
+contract, and the v1 scope limits.
+
+In v1 the match names the linear module that consumes the norm, for example
+`r".*self_attn\.q_proj$"`. Matching the parent attention block instead fails
+closed because a block has no 2-D weight; block-level canonical-structure
+expansion is not implemented.
+
+Note that `compile_plan_to_quantize_config` still supports exactly one stage and
+one rule, and its weight target still requires a global match (`"*"` or
+`["*", "-:..."]`). The separate action stage supports multi-stage plans.
 
 
 ## Tensor Targets
@@ -1206,7 +1261,7 @@ Within a stage, recommended engine order is:
 1. evaluate rules in order
 2. resolve matches
 3. resolve optional aliases
-4. run rule `actions`
+4. run rule `actions` (shipped as `apply_plan_actions`, a separate stage from config compilation)
 5. run target `prepare`
 6. collect calibration / replay data required by quantizers
 7. run target `quantize`
@@ -1214,6 +1269,12 @@ Within a stage, recommended engine order is:
 9. emit stage outputs
 
 Stage order then defines the full pipeline order.
+
+In the shipped implementation, `apply_plan_actions` performs match resolution
+and rule actions (steps 2-4; aliases remain unsupported). The quantization
+pipeline performs steps 5-9. `compile_plan_to_quantize_config` only performs the
+config-compilation part of a single-rule weight target and resolves action
+methods against the registry.
 
 
 ## How Rule Actions And Target Config Work Together
@@ -1224,7 +1285,7 @@ Python:
 
 ```python
 Rule(
-    match=".*self_attn$",
+    match=r".*self_attn\.q_proj$",
     actions=[smoothquant(alpha=0.5)],
 )
 
@@ -1249,7 +1310,7 @@ Rule(
 YAML:
 
 ```yaml
-- match: ".*self_attn$"
+- match: '.*self_attn\.q_proj$'
   actions:
     - method: smoothquant
       alpha: 0.5
@@ -1373,7 +1434,7 @@ Python:
 
 ```python
 Rule(
-    match=".*self_attn$",
+    match=r".*self_attn\.q_proj$",
     actions=[smoothquant(alpha=0.5)],
 )
 ```
@@ -1381,7 +1442,7 @@ Rule(
 YAML:
 
 ```yaml
-match: ".*self_attn$"
+match: '.*self_attn\.q_proj$'
 actions:
   - method: smoothquant
     alpha: 0.5
@@ -1802,7 +1863,7 @@ stages = [
         name="ptq",
         rules=[
             Rule(
-                match=".*self_attn$",
+                match=r".*self_attn\.q_proj$",
                 actions=[smoothquant(alpha=0.5)],
             ),
             Rule(
@@ -1848,7 +1909,7 @@ version: 2
 stages:
   - name: ptq
     rules:
-      - match: ".*self_attn$"
+      - match: '.*self_attn\.q_proj$'
         actions:
           - method: smoothquant
             alpha: 0.5

@@ -407,6 +407,7 @@ not tuned, so rocBLAS remains the default there too.
 * 🚀 Multi-GPU data-parallel quantization with GIL-safe peer copies and device-aware scheduling.
 * ✨ CUDA (NVIDIA), ROCm (AMD), Tenstorrent (Torch/XLA and TTNN), NPU (Huawei Ascend), XPU (Intel), MPS/MLX (Apple silicon), and CPU support. See the platform matrix below for OS and kernel availability.
 * ✨ `Dynamic` per-module mixed quantization control: each layer/module can have a unique quantization config or be excluded from quantization. 
+* ✨ Staged quantization protocol with rule-scoped actions: `smoothquant` folds its inverse into the preceding norm, and unsupported actions fail loudly. See [protocol actions](docs/protocol-actions.md).
 * 🚀 Torch fused kernels for Intel XPU and CPU, plus native AVX512-BF16 GPTQ/AWQ CPU kernels.
 * 🚀 Free-threaded Python support for multi-GPU quantization, with explicit [PyTorch GIL=0 safety contracts](pytorch_gil_0_compat.md).
 * ✨ Asymmetric `Sym=False` support. 
@@ -1844,9 +1845,15 @@ If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, a
 ```python
 from gptqmodel import TritonPatch
 
-# Mitigate Triton kernel-cache crashes under nogil/free-threading Python 3.13+, where the cache storage is not thread-safe.
+# Serialize Triton autotuner state and JIT compilation under nogil/free-threading Python 3.13+.
 TritonPatch.apply()
 ```
+
+`TritonPatch` also makes the first concurrent launch of a kernel safe: libtriton's
+compiler is not free-thread safe, so cold JIT compiles are single-flight and
+globally serialized. See [concurrency guards](docs/concurrency.md) for the
+reference-counted BLAS/TF32 guards, the compile lock, and the dynamo
+compiler-failure classification.
 
 ## License 📜
 
