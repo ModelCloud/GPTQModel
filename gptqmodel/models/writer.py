@@ -53,6 +53,7 @@ from ..utils.checkpoint_paths import (
     resolve_checkpoint_path,
     validate_relative_checkpoint_path,
 )
+from ..utils.checkpoint_state import checkpoint_serialization
 from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
@@ -736,7 +737,13 @@ def _save_module_replacement_safetensors(
             raise ValueError(f"Module replacement module `{prefix}` is not present in the model tree.") from exc
         replacements = replacements_by_shard.setdefault(matched_shards[0], {})
         drop_by_shard.setdefault(matched_shards[0], set())
-        for relative_name, tensor in module.state_dict().items():
+        # This is a checkpoint write: a kernel that replaced its packed tensors
+        # with a private runtime layout must fail closed here instead of
+        # publishing words no loader can read. Read-only `state_dict()` callers
+        # (PEFT) stay outside this context and still get the live tensors.
+        with checkpoint_serialization():
+            module_state = module.state_dict()
+        for relative_name, tensor in module_state.items():
             replacements[f"{prefix}.{relative_name}" if relative_name else prefix] = tensor.detach().cpu()
 
     rewritten_files = []

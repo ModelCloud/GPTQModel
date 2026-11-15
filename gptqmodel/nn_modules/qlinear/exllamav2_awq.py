@@ -152,12 +152,15 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         if getattr(self, "_awq_repacked", False) or getattr(self, "_native_shuffled", False):
-            raise RuntimeError(
-                "ExLlamaV2 AWQ repacks and shuffles `qweight` into its native runtime "
-                "layout; the original checkpoint tensors cannot be reconstructed. Use "
-                "`GPTQModel.save()`/`save_quantized()` for a loadable checkpoint, or "
-                "reload the original checkpoint."
-            )
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    "ExLlamaV2 AWQ repacks and shuffles `qweight` into its native runtime "
+                    "layout; the original checkpoint tensors cannot be reconstructed. Use "
+                    "`GPTQModel.save()`/`save_quantized()` for a loadable checkpoint, or "
+                    "reload the original checkpoint."
+                )
         super()._save_to_state_dict(destination, prefix, keep_vars)
         metadata = getattr(destination, "_metadata", None)
         if metadata is not None:
