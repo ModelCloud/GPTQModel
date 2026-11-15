@@ -24,7 +24,7 @@ from ..looper.loop_processor import (
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import CPU
+from ..models._const import CPU, normalize_device
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -48,6 +48,8 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.rtn import RTN
+from ..utils.backend import BACKEND
+from ..utils.importer import select_quant_linear
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
@@ -176,6 +178,39 @@ class WeightOnlyProcessor(LoopProcessor):
             module.weight.data = wq
         return qcfg_clone
 
+    def _quant_linear_candidates(self, model: BaseQModel, qcfg) -> list:
+        """Return the AUTO candidate order for this module's concrete layout.
+
+        ``model.qlinear_kernel`` is selected from the base quant config. A
+        per-module ``dynamic`` override can resolve to a different GGUF qtype
+        that the selected kernel cannot construct. The load path already tries
+        every validated AUTO candidate (``create_quant_layer``); finalization
+        must do the same instead of aborting on the first module.
+        """
+
+        selected = model.qlinear_kernel
+        if qcfg.method != METHOD.GGUF:
+            return [selected]
+        if getattr(model, "quantize_backend", None) not in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+            # An explicit backend must fail loudly, exactly like the load path.
+            return [selected]
+
+        candidates = select_quant_linear(
+            bits=qcfg.runtime_bits,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
+            backend=model.quantize_backend,
+            format=resolve_quant_format(qcfg.format, qcfg.method),
+            quant_method=qcfg.export_quant_method(),
+            pack=True,
+            device=normalize_device(qcfg.device),
+            pack_dtype=qcfg.pack_dtype,
+            multi_select=True,
+            adapter=qcfg.adapter,
+        )
+        return [selected, *(cls for cls in candidates if cls is not selected)]
+
     def submodule_finalize(
         self,
         module: NamedModule,
@@ -207,33 +242,48 @@ class WeightOnlyProcessor(LoopProcessor):
         timer = getattr(model, "quant_region_timer", None)
 
         create_start = time.perf_counter() if timer is not None else None
-        with log_time_block("create_quant_module", logger=log, module_name=module_label):
-            with parent_module_lock(parent_key):
-                create_quant_module(
-                    name=module.full_name,
-                    linear_cls=model.qlinear_kernel,
-                    bits=active_qcfg.runtime_bits,
-                    desc_act=active_qcfg.desc_act,
-                    dynamic=active_qcfg.dynamic,
-                    group_size=active_qcfg.group_size,
-                    module=model.model,
-                    submodule=module,
-                    sym=active_qcfg.sym,
-                    device=active_qcfg.device,
-                    lm_head_name=model.lm_head,
-                    pack_dtype=active_qcfg.pack_dtype,
-                    format=resolve_quant_format(active_qcfg.format, active_qcfg.method),
-                    register_buffers=False,
-                    init_kwargs=active_qcfg.quant_linear_init_kwargs(),
-                    resolved_module_config=get_resolved_module_config(module),
-                )
+        linear_cls = model.qlinear_kernel
+        last_error = None
+        for candidate in self._quant_linear_candidates(model, active_qcfg):
+            try:
+                with log_time_block("create_quant_module", logger=log, module_name=module_label):
+                    with parent_module_lock(parent_key):
+                        create_quant_module(
+                            name=module.full_name,
+                            linear_cls=candidate,
+                            bits=active_qcfg.runtime_bits,
+                            desc_act=active_qcfg.desc_act,
+                            dynamic=active_qcfg.dynamic,
+                            group_size=active_qcfg.group_size,
+                            module=model.model,
+                            submodule=module,
+                            sym=active_qcfg.sym,
+                            device=active_qcfg.device,
+                            lm_head_name=model.lm_head,
+                            pack_dtype=active_qcfg.pack_dtype,
+                            format=resolve_quant_format(active_qcfg.format, active_qcfg.method),
+                            register_buffers=False,
+                            init_kwargs=active_qcfg.quant_linear_init_kwargs(),
+                            resolved_module_config=get_resolved_module_config(module),
+                        )
+            except NotImplementedError as error:
+                # A validated kernel can still refuse the module's concrete
+                # layout. Retry the next AUTO candidate instead of aborting.
+                last_error = error
+                continue
+            linear_cls = candidate
+            break
+        else:
+            if last_error is not None:
+                raise last_error
+            raise ValueError(f"No compatible quant linear was found for module `{module.full_name}`.")
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
 
         qmodule = model.model.get_submodule(module.full_name)
         qmodules = (
             {module.full_name: qmodule}
-            if isinstance(qmodule, (model.qlinear_kernel, TorchQuantEmbeddings))
+            if isinstance(qmodule, (linear_cls, TorchQuantEmbeddings))
             else {}
         )
 
@@ -307,7 +357,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     q_zeros=q_zeros,
                     q_g_idx=q_g_idx,
                     layers=layers,
-                    quant_linear_cls=model.qlinear_kernel,
+                    quant_linear_cls=linear_cls,
                     lock=self.lock,
                     quantize_config=active_qcfg,
                     device=module.state.get("quant_device"),

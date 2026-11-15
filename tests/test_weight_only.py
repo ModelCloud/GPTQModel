@@ -419,6 +419,8 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
 @pytest.mark.parametrize(
     ("bits", "tensor_qtype", "bit_width", "variant", "quality"),
     [
+        ("q4_0", "Q4_0", 4, "0", None),
+        ("q5_0", "Q5_0", 5, "0", None),
         ("q4_k_s", "Q4_K", 4, "k", "s"),
         ("q4_k_m", "Q4_K", 4, "k", "m"),
         ("q5_k_s", "Q5_K", 5, "k", "s"),
@@ -461,7 +463,12 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GGUF
-    expected_kernel = GGUFTritonKernel if device_type == "cuda" else GGUFTorchLinear
+    # The fused Triton kernel only implements a subset of the ggml layouts;
+    # Q4_0/Q5_0 must fall back to the portable Torch kernel even on CUDA.
+    fused_qtype = tensor_qtype in GGUFTritonKernel.SUPPORTS_GGUF_QTYPES
+    expected_kernel = (
+        GGUFTritonKernel if device_type == "cuda" and fused_qtype else GGUFTorchLinear
+    )
     assert model.qlinear_kernel is expected_kernel
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
@@ -482,6 +489,64 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
         ) * qmodule.gguf_block_size
         assert qmodule.padded_in_features == expected_padded_in_features
         assert qmodule.qweight.shape == (qmodule.out_features, qmodule._bytes_per_row())
+
+
+@pytest.mark.parametrize("bits", ["q4_0", "q5_0"])
+def test_gguf_auto_selection_rejects_triton_for_non_fused_qtype(bits: str):
+    # A bit width alone is ambiguous: width 4 is Q4_0 and Q4_K. AUTO used to
+    # pick GGUFTritonKernel for both, and only the constructor rejected Q4_0.
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.utils.importer import select_quant_linear
+
+    qcfg = GGUFConfig(bits=bits)
+    selected = select_quant_linear(
+        bits=qcfg.runtime_bits,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack=True,
+        pack_dtype=qcfg.pack_dtype,
+    )
+    assert selected is GGUFTorchLinear
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GGUFTritonKernel needs CUDA/ROCm")
+def test_baseqmodel_quantize_gguf_dynamic_qtype_falls_back_to_torch():
+    # The base Q4_K layout selects GGUFTritonKernel, but one dynamic module
+    # overrides it to Q4_0, which the fused kernel cannot construct. The
+    # weight-only finalize path must retry the next AUTO candidate instead of
+    # aborting on the first module.
+    device = torch.device("cuda:0")
+    native = _TinyModel().to(device=device, dtype=torch.float16).eval()
+    qcfg = GGUFConfig(
+        bits="q4_k_m",
+        dynamic={"model.layers.0.mlp.up_proj": {"bits": 4, "format": "q_0"}},
+        smoother=None,
+        offload_to_disk=False,
+        device="cuda",
+    )
+
+    model = _TinyQModel(
+        model=native,
+        quantized=False,
+        quantize_config=qcfg,
+        tokenizer=None,
+    )
+
+    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+
+    assert "weight_only_gguf" in result
+    assert model.qlinear_kernel is GGUFTritonKernel
+    up_proj = model.model.model.layers[0].mlp.up_proj
+    down_proj = model.model.model.layers[0].mlp.down_proj
+    assert up_proj.gguf_tensor_qtype == "Q4_0"
+    assert isinstance(up_proj, GGUFTorchLinear)
+    assert down_proj.gguf_tensor_qtype == "Q4_K"
+    assert isinstance(down_proj, GGUFTritonKernel)
 
 
 def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):

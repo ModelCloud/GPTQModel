@@ -1304,7 +1304,16 @@ def select_quant_linear(
             _validate_selector_device_families(targets)
             device = targets[0] if len(targets) == 1 else targets
 
-    bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
+    concrete_bits = _normalize_quant_bits(bits, format_value=format)
+    bits = quant_bits_width(concrete_bits)
+    gguf_qtype = None
+    if quant_method == METHOD.GGUF:
+        # A GGUF bit width is ambiguous: 4 bits can be Q4_0, Q4_K or IQ4_NL.
+        # Resolve the concrete ggml layout so a candidate that only implements
+        # a subset of them is rejected during selection, not in its constructor.
+        from ..nn_modules.qlinear.gguf import gguf_tensor_qtype
+
+        gguf_qtype = gguf_tensor_qtype(concrete_bits)
 
     supported_formats = get_backend_to_method_format_mapping().get(quant_method)
     if supported_formats is None:
@@ -1343,6 +1352,13 @@ def select_quant_linear(
     auto_inference_only_fallback = None
 
     def validate_candidate(cls, **kwargs):
+        if gguf_qtype is not None and not cls.supports_gguf_qtype(concrete_bits):
+            supported = getattr(cls, "SUPPORTS_GGUF_QTYPES", ())
+            return False, NotImplementedError(
+                f"{cls.__name__} cannot construct the GGUF `{gguf_qtype}` layout "
+                f"(supported: {sorted(supported)}). Select a kernel that supports "
+                "this GGUF qtype."
+            )
         # A kernel selected for a multi-GPU model must be valid on every target
         # ordinal.  Validate each exact target so device-sensitive kernels query
         # the correct capability rather than the process's current device.

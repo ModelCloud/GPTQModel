@@ -190,6 +190,9 @@ documents FP16 operand-width selection for GGUF Torch inference.
 The [GGUF dense fallback precision](docs/gguf-dense-fallback-precision.md)
 page explains BF16 weight reconstruction, FP32 bias reload, CPU autocast reduction,
 and output rounding across formats.
+The [GGUF kernel selection and fallback](docs/gguf-kernel-selection.md) page
+documents how AUTO resolves a concrete ggml layout (Q4_0 versus Q4_K at the same
+bit width) and how the weight-only finalize path retries the validated kernels.
 The [GGUF C++ bias epilogue](docs/gguf-cpp-bias-epilogue.md) explains how CPU
 and CUDA GGML outputs add FP32 bias before low-precision rounding.
 

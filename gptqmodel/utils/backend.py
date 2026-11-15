@@ -276,6 +276,22 @@ def awq_gemm_pack_backend(
     return BACKEND.AWQ_GEMM
 
 
+def awq_gemv_pack_backend(*, is_rocm: bool) -> BACKEND:
+    """Return the AWQ GEMV backend used to pack quantized weights.
+
+    The native AWQ GEMV extension (``gemv_forward``/``gemmv2_forward``) is
+    CUDA-only: its sources include ``cuda_fp16.h`` and CUDA-only inline asm, and
+    its hipified warp-sync reduction rejects wave32.  ``AWQ_GEMV_TRITON`` reads
+    the identical packed GEMV layout with a portable Triton kernel, so ROCm
+    packs with that kernel instead of selecting a CUDA-only class.
+
+    Args:
+        is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
+    """
+
+    return BACKEND.AWQ_GEMV_TRITON if is_rocm else BACKEND.AWQ_GEMV
+
+
 def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:
     """Bind a saved W4A policy to its matching kernel, including AUTO loads."""
     if activation_mode is None:

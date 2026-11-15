@@ -15,7 +15,7 @@ from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from ...utils.rocm import IS_ROCM
 from ._runtime_cache import tensor_cache_key
-from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch
+from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch, gguf_tensor_qtype
 
 
 log = setup_logger()
@@ -1733,6 +1733,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
     SUPPORTS_BITS = [1, 4, 5, 6]
+    # The fused Triton kernels only implement these ggml tensor layouts. The
+    # bit width is not enough to identify one (Q4_0 and Q4_K are both 4-bit),
+    # so AUTO selection must consult the resolved qtype.
+    SUPPORTS_GGUF_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -1783,13 +1787,17 @@ class GGUFTritonKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        if self.gguf_tensor_qtype not in {"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"}:
+        if self.gguf_tensor_qtype not in self.SUPPORTS_GGUF_QTYPES:
             raise NotImplementedError(
                 f"{self.__class__.__name__} only supports fused GGUF Triton formats "
                 f"(Q1_0, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
                 "Use BACKEND.GGUF_TORCH for unsupported GGUF formats."
             )
         self._gguf_triton_cache: dict[tuple[int, str, bool], dict[str, Any]] = {}
+
+    @classmethod
+    def supports_gguf_qtype(cls, bits) -> bool:
+        return gguf_tensor_qtype(bits) in cls.SUPPORTS_GGUF_QTYPES
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
