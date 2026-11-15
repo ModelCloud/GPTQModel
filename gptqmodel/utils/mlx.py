@@ -566,6 +566,10 @@ def _mlx_tokenizer_with_eos(tokenizer, eos_token_ids):
     if current is not None:
         tokenizer.eos_token_ids = set(current) | ids
         return tokenizer
+    if isinstance(tokenizer, TokenizerWrapper):
+        # Older mlx_lm wrappers expose only the private EOS set.
+        tokenizer._eos_token_ids = set(tokenizer._eos_token_ids) | ids
+        return tokenizer
     return TokenizerWrapper(tokenizer, eos_token_ids=ids)
 
 
