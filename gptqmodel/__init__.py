@@ -225,6 +225,67 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
 
 
+def _patch_optimum_gptqmodel_load_bridge():
+    """Route Optimum's GPTQ loading through GPTQModel's native bridge.
+
+    Transformers delegates pre-quantized GPTQ loading to Optimum, which
+    replaces every ``nn.Linear`` with one kernel chosen from the *global*
+    quantization config. GPTQModel checkpoints can carry per-module ``dynamic``
+    settings and structural rewrites (expanded MoE experts, fused blocks), so
+    Optimum's homogeneous replacement silently drops every per-expert tensor.
+    Wrapping ``GPTQQuantizer.convert_model`` / ``post_init_model`` lets
+    ``hf_gptqmodel_prepare_model_for_load`` rebuild the checkpoint's real module
+    manifest first; checkpoints Optimum owns keep Optimum's own path because the
+    bridge returns ``None`` for them.
+    """
+
+    try:
+        from functools import wraps
+
+        from optimum.gptq import GPTQQuantizer
+    except ImportError:
+        # Optimum is an optional dependency of Transformers' GPTQ loader.
+        return
+    except Exception:
+        log.warning("Optimum GPTQ load-bridge compat probe failed", exc_info=True)
+        return
+
+    with _MONKEY_PATCH_LOCK:
+        original_convert_model = GPTQQuantizer.convert_model
+        if getattr(original_convert_model, "_gptqmodel_load_bridge", False):
+            return
+        original_post_init_model = GPTQQuantizer.post_init_model
+
+        @wraps(original_convert_model)
+        def _convert_model_with_gptqmodel_bridge(self, model, **kwargs):
+            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+
+            context = hf_gptqmodel_prepare_model_for_load(
+                model,
+                checkpoint_files=kwargs.get("checkpoint_files"),
+                device_map=kwargs.get("device_map"),
+                dtype=kwargs.get("dtype"),
+            )
+            if context is None:
+                return original_convert_model(self, model, **kwargs)
+            model._gptqmodel_hf_load_context = context
+            return model
+
+        @wraps(original_post_init_model)
+        def _post_init_model_with_gptqmodel_bridge(self, model):
+            context = getattr(model, "_gptqmodel_hf_load_context", None)
+            if context is None:
+                return original_post_init_model(self, model)
+            from .utils.hf_load import hf_gptqmodel_post_init_for_load
+
+            return hf_gptqmodel_post_init_for_load(model, context)
+
+        _convert_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        _post_init_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        GPTQQuantizer.convert_model = _convert_model_with_gptqmodel_bridge
+        GPTQQuantizer.post_init_model = _post_init_model_with_gptqmodel_bridge
+
+
 from .utils import has_gil_disabled
 from .utils.env import env_flag
 from .utils.modelscope import ensure_modelscope_available
@@ -449,3 +510,9 @@ if ensure_modelscope_available():
         raise ModuleNotFoundError(
             "env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`."
         ) from exc
+
+
+# Installed last: `optimum.gptq` imports `gptqmodel` (BACKEND, QuantizeConfig)
+# while it loads, so the bridge can only be wrapped once this package has
+# finished defining its public names.
+_patch_optimum_gptqmodel_load_bridge()

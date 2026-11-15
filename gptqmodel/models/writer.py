@@ -9,6 +9,7 @@ import copy
 import csv
 import json
 import os
+import re
 import shutil
 from contextlib import nullcontext
 from os.path import isfile, join
@@ -212,7 +213,27 @@ def _merge_missing_config_fields(saved: Dict[str, Any], source: Dict[str, Any]) 
             _merge_missing_config_fields(saved[key], value)
 
 
-def hf_compat_warnings(quantize_config: Any, runtime_format: FORMAT) -> List[str]:
+_PER_EXPERT_MODULE_PATTERN = re.compile(r"(?:^|\.)experts\.\d+\.")
+
+
+def _has_per_expert_quantized_modules(model: Optional[torch.nn.Module]) -> bool:
+    """Return whether ``model`` stores its experts as per-expert quantized linears."""
+
+    if model is None:
+        return False
+    for name, module in model.named_modules():
+        if getattr(module, "QUANT_TYPE", None) is None:
+            continue
+        if _PER_EXPERT_MODULE_PATTERN.search(name):
+            return True
+    return False
+
+
+def hf_compat_warnings(
+    quantize_config: Any,
+    runtime_format: FORMAT,
+    model: Optional[torch.nn.Module] = None,
+) -> List[str]:
     """Return the ways this checkpoint is unsafe for a plain HF loader.
 
     GPT-QModel can serialize more than `transformers.AutoModelForCausalLM`
@@ -241,6 +262,17 @@ def hf_compat_warnings(quantize_config: Any, runtime_format: FORMAT) -> List[str
             "wrong order and lose accuracy silently. Load 8-bit AWQ with "
             "`GPTQModel.load`, or export 4-bit AWQ for vLLM."
         )
+    if _has_per_expert_quantized_modules(model):
+        warnings.append(
+            "This checkpoint stores per-expert quantized weights "
+            "(`experts.<n>.*.qweight`). Transformers 5 builds fused 3-D expert "
+            "tensors and Optimum's GPTQ loader only replaces `nn.Linear`, so "
+            "`AutoModelForCausalLM.from_pretrained` reports every expert tensor "
+            "as MISSING/UNEXPECTED and silently random-initializes the experts "
+            "(garbage output, no error). Load this checkpoint with "
+            "`GPTQModel.load`, or import `gptqmodel` before Transformers so its "
+            "native loading bridge is installed."
+        )
     return warnings
 
 
@@ -259,6 +291,7 @@ def _save_model_configs_without_weights(
         model: torch.nn.Module,
         save_dir: str,
         source_model_dir: Optional[str] = None,
+        trust_remote_code: bool = False,
 ) -> None:
     """Serialize HF model metadata without invoking weight-file cleanup.
 
@@ -293,6 +326,7 @@ def _save_model_configs_without_weights(
                 raise ValueError("Model config.json must contain a JSON object.")
 
     config.save_pretrained(save_dir)
+    saved_config_path = os.path.join(save_dir, "config.json")
 
     # Some remote model configurations contain runtime-significant extension
     # fields that their registered Transformers config class does not declare.
@@ -301,13 +335,28 @@ def _save_model_configs_without_weights(
     # including ones nested in sub-configs such as ``text_config``, while
     # allowing the live serialized config—including the new
     # quantization_config—to override every field it knows about.
+    saved_config: Optional[Dict[str, Any]] = None
     if source_config is not None:
-        saved_config_path = os.path.join(save_dir, "config.json")
         with open(saved_config_path, "r", encoding="utf-8") as handle:
             saved_config = json.load(handle)
         if not isinstance(saved_config, dict):
             raise ValueError("Model config.json must contain a JSON object.")
         _merge_missing_config_fields(saved_config, source_config)
+
+    # A natively supported model loaded with the `trust_remote_code` override is
+    # saved without its `.py` files. Keeping the source `auto_map` would then
+    # point at files that are not in the export and make
+    # `AutoConfig.from_pretrained(out, trust_remote_code=True)` fail with a
+    # missing `configuration_*.py`. Drop it whenever remote code is not copied.
+    if not trust_remote_code:
+        if saved_config is None:
+            with open(saved_config_path, "r", encoding="utf-8") as handle:
+                saved_config = json.load(handle)
+            if not isinstance(saved_config, dict):
+                raise ValueError("Model config.json must contain a JSON object.")
+        saved_config.pop("auto_map", None)
+
+    if saved_config is not None:
         with open(saved_config_path, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
 
@@ -1803,6 +1852,10 @@ def ModelWriter(cls):
         runtime_config = getattr(self.model, "config", None)
         if runtime_config is not None and hasattr(runtime_config, "tie_word_embeddings"):
             model_config["tie_word_embeddings"] = bool(runtime_config.tie_word_embeddings)
+        if not getattr(self, "trust_remote_code", False):
+            # The `.py` files are not copied below, so an inherited `auto_map`
+            # would point at missing files and break AutoConfig loading.
+            model_config.pop("auto_map", None)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(model_config, indent=2) + "\n")
 
@@ -2012,7 +2065,11 @@ def ModelWriter(cls):
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPT-QModel version >= {MIN_VERSION_WITH_V2}."
             )
 
-        for compat_warning in hf_compat_warnings(quantize_config, runtime_format):
+        for compat_warning in hf_compat_warnings(
+            quantize_config,
+            runtime_format,
+            model=getattr(self, "model", None),
+        ):
             log.warn(f"Model: {compat_warning}")
 
         if runtime_format == FORMAT.EXL3:
@@ -2084,6 +2141,7 @@ def ModelWriter(cls):
                 model_for_save,
                 save_dir,
                 self.model_local_path,
+                trust_remote_code=bool(getattr(self, "trust_remote_code", False)),
             )
         finally:
             for attr, value in removed_config_attention_attrs.items():

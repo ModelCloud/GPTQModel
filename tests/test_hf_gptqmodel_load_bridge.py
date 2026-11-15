@@ -530,3 +530,72 @@ def test_hf_load_post_init_leaves_non_paged_attention_untouched(monkeypatch):
     hf_gptqmodel_post_init_for_load(model, context)
 
     assert getattr(model, "generation_config", None) is None
+
+
+def test_optimum_gptq_quantizer_is_routed_through_the_native_bridge(monkeypatch):
+    """Optimum's GPTQ hook must call the bridge instead of replacing every Linear.
+
+    A real Optimum install is optional, so this test injects a stand-in
+    ``optimum.gptq`` module and checks the wrapper contract: the bridge context
+    is produced before weights load and consumed by ``post_init_model``.
+    """
+
+    import sys
+    import types
+
+    import gptqmodel
+    from gptqmodel.utils import hf_load
+
+    sentinel_context = object()
+
+    class _FakeQuantizer:
+        def convert_model(self, model, **kwargs):
+            return ("optimum", model)
+
+        def post_init_model(self, model):
+            return ("optimum_post", model)
+
+    fake_optimum = types.ModuleType("optimum")
+    fake_optimum.__path__ = []
+    fake_gptq = types.ModuleType("optimum.gptq")
+    fake_gptq.GPTQQuantizer = _FakeQuantizer
+    monkeypatch.setitem(sys.modules, "optimum", fake_optimum)
+    monkeypatch.setitem(sys.modules, "optimum.gptq", fake_gptq)
+
+    prepared = []
+    post_initialized = []
+
+    def fake_prepare(model, **kwargs):
+        prepared.append((model, kwargs))
+        return sentinel_context
+
+    def fake_post_init(model, context):
+        post_initialized.append((model, context))
+        return model
+
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", fake_prepare)
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_post_init_for_load", fake_post_init)
+
+    gptqmodel._patch_optimum_gptqmodel_load_bridge()
+
+    quantizer = _FakeQuantizer()
+    model = torch.nn.Linear(4, 4)
+    checkpoint_files = ["/tmp/model.safetensors"]
+
+    returned = quantizer.convert_model(model, checkpoint_files=checkpoint_files, dtype=torch.float16)
+
+    assert returned is model
+    assert getattr(model, "_gptqmodel_hf_load_context", None) is sentinel_context
+    assert prepared == [
+        (
+            model,
+            {
+                "checkpoint_files": checkpoint_files,
+                "device_map": None,
+                "dtype": torch.float16,
+            },
+        )
+    ]
+
+    assert quantizer.post_init_model(model) is model
+    assert post_initialized == [(model, sentinel_context)]

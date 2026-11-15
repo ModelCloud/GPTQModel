@@ -129,6 +129,41 @@ def __getattr__(name: str):
 
 log = setup_logger()
 
+
+def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
+    """Return the key converter the quantized loader should apply.
+
+    A definition may declare an explicit ``checkpoint_key_for_load`` /
+    ``checkpoint_key_for_save``. Every other family falls back to its
+    Transformers checkpoint conversion map, inferred from the live model, so a
+    legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
+    and ``visual.*``) is remapped to the runtime names. The map is idempotent
+    for checkpoints already written with runtime keys: their names do not match
+    the checkpoint-side patterns and pass through unchanged.
+    """
+
+    explicit = getattr(
+        cls,
+        "checkpoint_key_for_load" if to_runtime else "checkpoint_key_for_save",
+        None,
+    )
+    if callable(explicit):
+        return explicit
+
+    try:
+        mapping = cls.resolve_hf_conversion_map_reversed(target_model=model)
+    except Exception:
+        log.debug("Loader: could not infer an HF checkpoint conversion map", exc_info=True)
+        return None
+    if mapping is None:
+        return None
+
+    def convert(name: str) -> str:
+        return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    return convert
+
+
 _GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
 
 
@@ -2523,7 +2558,7 @@ def ModelLoader(cls):
             model,
             model_save_name,
             format_code,
-            key_converter=getattr(cls, "checkpoint_key_for_save", None),
+            key_converter=_checkpoint_key_converter(cls, model, to_runtime=False),
         )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
@@ -2812,7 +2847,7 @@ def ModelLoader(cls):
                 device_map=device_map,
                 offload_state_dict=True,
                 offload_buffers=True,
-                key_converter=getattr(cls, "checkpoint_key_for_load", None),
+                key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
             )
 
             load_checkpoint_in_model = False
@@ -2920,7 +2955,7 @@ def ModelLoader(cls):
                 device_map=device_map,
                 # offload_state_dict=True,
                 # offload_buffers=True,
-                key_converter=getattr(cls, "checkpoint_key_for_load", None),
+                key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
             )
 
             if format_code == FORMAT.GPTQ_V2:

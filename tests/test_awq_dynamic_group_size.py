@@ -104,3 +104,52 @@ def test_dynamic_group_size_selects_compatible_kernel_and_packs():
         packed.qweight, packed.qzeros, packed.scales, 4, 16
     )
     torch.testing.assert_close(decoded.T, staged, rtol=2e-3, atol=2e-3)
+
+
+def test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features():
+    """A 448-wide projection must not fail after calibration with group_size 128.
+
+    Phi-tiny-MoE has ``intermediate_size=448``; 448 is not a multiple of 128, so
+    the AWQ weight-mean step raised only after the whole calibration pass. The
+    processor now resolves a supported divisor (64) up front and records it as a
+    per-module ``dynamic`` override.
+    """
+
+    import pytest
+
+    from gptqmodel.looper.awq_processor import AWQProcessor, _accumulate_awq_weight_mean
+
+    class Stub:
+        qcfg = AWQConfig(bits=4, group_size=128, sym=True)
+        format = FORMAT.GEMM
+        gptq_model = SimpleNamespace(qlinear_kernel=AwqGEMMLinear, lm_head="lm_head")
+
+        def __init__(self):
+            self.model = torch.nn.Module()
+            self.model.proj = torch.nn.Linear(448, 8, bias=False)
+
+        _module_group_size = AWQProcessor._module_group_size
+        _module_format = AWQProcessor._module_format
+        _module_bits = AWQProcessor._module_bits
+        _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
+        _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
+        _quant_device_is_npu = AWQProcessor._quant_device_is_npu
+        _largest_supported_group_divisor = AWQProcessor._largest_supported_group_divisor
+        _ensure_group_size_divisibility = AWQProcessor._ensure_group_size_divisibility
+        qlinear_kernel = AwqGEMMLinear
+
+    stub = Stub()
+    weight = stub.model.proj.weight.detach()
+
+    # The original configuration fails inside the weight-mean step.
+    with pytest.raises(ValueError, match="divisible by group_size"):
+        _accumulate_awq_weight_mean([stub.model.proj], [128])
+
+    stub._ensure_group_size_divisibility()
+
+    assert stub._module_group_size("proj") == 64
+    assert stub.qcfg.dynamic["+:^proj$"] == {"group_size": 64}
+    # The step that used to raise now succeeds with the resolved divisor.
+    w_sum, row_count = _accumulate_awq_weight_mean([stub.model.proj], [64])
+    assert w_sum.shape == (448,)
+    assert row_count == weight.shape[0]
