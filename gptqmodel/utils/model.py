@@ -45,7 +45,12 @@ from ..models._const import (
     EXPERT_INDEX_PLACEHOLDER,
     SUPPORTS_MODULE_TYPES,
 )
-from ..nn_modules.qlinear import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import (
+    QZEROS_FORMAT_BUFFER,
+    AWQuantLinear,
+    BaseQuantLinear,
+    GPTQQuantLinear,
+)
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from ..nn_modules.qlinear.marlin import MarlinLinear
@@ -2476,6 +2481,12 @@ def _collect_state_dict_with_offload(
         for buffer_name, buf in module.named_buffers(recurse=False):
             if buffer_name in non_persistent:
                 continue
+            if buffer_name == QZEROS_FORMAT_BUFFER:
+                # State-dict transport metadata, not a checkpoint payload: the
+                # writer resolves the qzero convention from `config.json`, so
+                # emitting a second, possibly stale, label here could only
+                # disagree with the words it writes.
+                continue
             name = f"{module_name}.{buffer_name}" if module_name else buffer_name
             if include_prefixes is not None and not name.startswith(include_prefixes):
                 continue
@@ -2590,6 +2601,9 @@ def get_state_dict_for_save(
             non_persistent = getattr(module, "_non_persistent_buffers_set", ())
             for buffer_name, buf in module.named_buffers(recurse=False):
                 if buffer_name in non_persistent:
+                    continue
+                if buffer_name == QZEROS_FORMAT_BUFFER:
+                    # See `get_state_dict_for_save`.
                     continue
                 name = f"{module_name}.{buffer_name}" if module_name else buffer_name
                 if include_prefixes is not None and not name.startswith(include_prefixes):

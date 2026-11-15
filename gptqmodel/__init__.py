@@ -187,6 +187,48 @@ def _patch_transformers_refusing_quantizers():
             )
 
 
+def _patch_transformers_save_pretrained_runtime_layout_guard():
+    """Refuse an HF checkpoint write while a kernel holds a runtime layout.
+
+    Marlin, AWQ-Marlin, ExLlamaV2 and AWQ-ExLlamaV2 permute or shuffle their
+    packed tensors in place during ``post_init()`` and have no inverse.
+    ``PreTrainedModel.save_pretrained()`` collects ``state_dict()`` directly,
+    so without this guard it publishes that private layout under an ordinary
+    GPTQ/AWQ config; the resulting directory then reloads as garbage (or with a
+    shape error) instead of failing at save.
+
+    The kernels refuse from ``_save_to_state_dict`` only inside
+    ``checkpoint_serialization()``, because PEFT calls ``state_dict()`` merely
+    to read tensors and must keep working. Wrapping the Transformers writer puts
+    every checkpoint write on the refusing side while leaving those read-only
+    callers alone. ``GPTQModel.save()``/``save_quantized()`` build a separate
+    export shell, so they never serialize a runtime layout and are unaffected.
+    """
+
+    try:
+        from transformers import PreTrainedModel
+    except ImportError:
+        log.debug("GPT-QModel save_pretrained guard inactive: transformers API changed", exc_info=True)
+        return
+
+    from functools import wraps
+
+    from .utils.checkpoint_state import checkpoint_serialization
+
+    with _MONKEY_PATCH_LOCK:
+        original = PreTrainedModel.save_pretrained
+        if getattr(original, "_gptqmodel_runtime_layout_guard", False):
+            return
+
+        @wraps(original)
+        def save_pretrained_with_runtime_layout_guard(self, *args, **kwargs):
+            with checkpoint_serialization():
+                return original(self, *args, **kwargs)
+
+        save_pretrained_with_runtime_layout_guard._gptqmodel_runtime_layout_guard = True
+        PreTrainedModel.save_pretrained = save_pretrained_with_runtime_layout_guard
+
+
 def _patch_openvino_gptqmodel_compat():
     """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
     try:
@@ -479,6 +521,7 @@ DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 _patch_transformers_gptq_device_map_compat()
 _patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_transformers_refusing_quantizers()
+_patch_transformers_save_pretrained_runtime_layout_guard()
 _patch_openvino_gptqmodel_compat()
 _patch_transformers_causal_conv1d_hub_kernel_compat()
 

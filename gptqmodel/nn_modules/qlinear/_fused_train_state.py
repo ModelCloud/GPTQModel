@@ -12,6 +12,15 @@ import torch.nn as nn
 _STATE_NAMES = ("qweight", "qzeros", "scales")
 _STATE_BUFFER_PREFIX = "_fused_train_state_"
 
+#: Persistent buffer that records the qzero word layout a state dict carries.
+#:
+#: ``state_dict._metadata`` is not a tensor, so a safetensors round trip
+#: (Trainer/accelerate) or a plain ``{k: v for k, v in sd.items()}`` copy drops
+#: it. The layout therefore has to travel inside the payload. Values:
+#: ``1`` = v1 checkpoint words, ``2`` = v2 checkpoint words, ``0`` = the tensors
+#: are a kernel-private runtime layout and not a checkpoint.
+QZEROS_FORMAT_BUFFER = "qzeros_format"
+
 
 def capture_fused_train_state(module: nn.Module, *, names=None) -> None:
     """Retain packed checkpoint tensors before an inference-only transform.
@@ -149,6 +158,9 @@ def runtime_state_matches_live(module: nn.Module, state_dict, prefix: str = "") 
     for name, live in (*module._parameters.items(), *module._buffers.items()):
         if name in module._non_persistent_buffers_set:
             continue
+        if name == QZEROS_FORMAT_BUFFER:
+            # Serialization metadata, not a packed operand.
+            continue
         incoming = state_dict.get(f"{prefix}{name}")
         if incoming is None:
             continue
@@ -236,6 +248,10 @@ def classify_fused_state_layout(module: nn.Module, state_dict, prefix: str = "")
         return layout
 
     for name in (*module._parameters, *module._buffers):
+        if name == QZEROS_FORMAT_BUFFER:
+            # Layout metadata, not a weight: its presence says nothing about
+            # whether the caller supplied checkpoint or runtime operands.
+            continue
         if name not in module._non_persistent_buffers_set and f"{prefix}{name}" in state_dict:
             return "runtime"
     return "empty"
@@ -254,6 +270,7 @@ def state_dict_matches_runtime_layout(module: nn.Module, state_dict, prefix: str
 
 
 __all__ = [
+    "QZEROS_FORMAT_BUFFER",
     "capture_fused_train_state",
     "classify_fused_state_layout",
     "discard_fused_train_state",
