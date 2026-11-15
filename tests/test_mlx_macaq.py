@@ -131,8 +131,7 @@ def test_macaq_mlx_w4a4_matches_its_own_activation_quantization(monkeypatch):
 
     rng = np.random.default_rng(13)
     x = rng.normal(0, 0.2, (3, source.in_features)).astype(np.float32)
-    work = mx.array(x).astype(mx.bfloat16) * model.proj.pre_scale
-    rotated = (work.reshape(3, source.in_features // 32, 32) @ model.proj.BH).reshape(3, source.in_features)
+    rotated = model.proj._rotate(mx.array(x).astype(mx.bfloat16))
     quantized, scales = mx.quantize(rotated, group_size=32, bits=4, mode="mxfp4")
     rounded = mx.dequantize(quantized, scales, group_size=32, bits=4, mode="mxfp4")
     weight = mx.dequantize(
@@ -175,8 +174,7 @@ def test_macaq_mlx_wide_block_uses_the_split_activation_path(monkeypatch):
     model, _ = _transfer(monkeypatch, source)
     rng = np.random.default_rng(17)
     x = mx.array(rng.normal(0, 0.2, (17, source.in_features)).astype(np.float32)).astype(mx.bfloat16)
-    work = x * model.proj.pre_scale
-    rotated = (work.reshape(17, source.in_features // 32, 32) @ model.proj.BH).reshape(17, source.in_features)
+    rotated = model.proj._rotate(x)
     quantized, scales = mx.quantize(rotated, group_size=32, bits=4, mode="mxfp4")
     rounded = mx.dequantize(quantized, scales, group_size=32, bits=4, mode="mxfp4")
     expected = mx.quantized_matmul(
@@ -223,3 +221,28 @@ def test_macaq_mlx_converts_a_llama_layer_end_to_end(tmp_path):
     logits = mlx_model(mx.array(np.array([[1, 2, 3, 4]], dtype=np.int32)))
     mx.eval(logits)
     assert logits.shape == (1, 4, 128)
+
+
+@pytest.mark.parametrize("had_block", [32, 64])
+def test_macaq_mlx_pre_rotate_folds_the_diagonal_scale(monkeypatch, had_block):
+    """The fused pre-scale plus block Hadamard must equal the reference product."""
+    from gptqmodel.quantization import macaq as macaq_core
+
+    source, result = _quantized_layer(in_features=256, out_features=64)
+    source.had_block = had_block
+    source.BH = macaq_core.make_hadamard(had_block, dtype=torch.bfloat16)
+    model, _ = _transfer(monkeypatch, source)
+
+    rng = np.random.default_rng(41)
+    x = mx.array(rng.normal(0, 0.2, (4, source.in_features)).astype(np.float32)).astype(mx.bfloat16)
+    actual = model.proj._rotate(x)
+    scaled = x.astype(mx.float32) * mx.array(result.pre_scale.float().numpy())
+    expected = (
+        scaled.reshape(4, source.in_features // had_block, had_block)
+        @ mx.array(source.BH.float().numpy())
+    ).reshape(4, source.in_features)
+    mx.eval(actual, expected)
+    np.testing.assert_allclose(
+        np.array(actual.astype(mx.float32)), np.array(expected),
+        rtol=2e-3, atol=2e-3,
+    )

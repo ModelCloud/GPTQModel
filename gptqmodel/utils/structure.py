@@ -844,6 +844,136 @@ def reset_non_layerwise_shard_warning() -> None:
         _NON_LAYERWISE_SHARD_WARNING_EMITTED = False
 
 
+def _build_module_init_template(
+    owner_module: nn.Module,
+    *,
+    fallback_config: Any = None,
+    target_model: Optional[nn.Module] = None,
+) -> Optional[nn.Module]:
+    """Construct a CPU template module for init-only buffers missing from checkpoints."""
+
+    config_source = getattr(owner_module, "config", None)
+    if config_source is None and target_model is not None:
+        config_source = getattr(target_model, "config", None)
+    if config_source is None:
+        config_source = fallback_config
+
+    module_type = type(owner_module)
+    try:
+        signature = inspect.signature(module_type)
+    except (TypeError, ValueError):
+        return None
+
+    params = list(signature.parameters.values())
+    if not params:
+        return None
+
+    args = []
+    kwargs = {}
+
+    for param in params:
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+
+        if param.name == "config":
+            if config_source is None:
+                return None
+            value = copy.deepcopy(config_source)
+        elif param.name == "device":
+            value = torch.device("cpu")
+        elif hasattr(owner_module, param.name):
+            # Some remote-code modules rebuild buffers from constructor attributes instead of config.
+            raw_value = getattr(owner_module, param.name)
+            if isinstance(raw_value, torch.Tensor) and raw_value.device.type == "meta":
+                scalar_attr_name = f"scalar_{param.name}"
+                if hasattr(owner_module, scalar_attr_name):
+                    raw_value = getattr(owner_module, scalar_attr_name)
+                elif param.default is not inspect.Parameter.empty:
+                    continue
+                else:
+                    return None
+            value = copy.deepcopy(raw_value)
+        elif param.default is not inspect.Parameter.empty:
+            continue
+        else:
+            return None
+
+        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            args.append(value)
+        else:
+            kwargs[param.name] = value
+
+    try:
+        return module_type(*args, **kwargs)
+    except Exception as exc:
+        log.debug(
+            "LazyTurtle: failed to build template for `%s`: %s",
+            module_type.__name__,
+            exc,
+        )
+        return None
+
+
+def restore_init_owned_rotary_buffers(model: nn.Module) -> int:
+    """Rebuild rotary buffers that transformers 5 materialized uninitialized.
+
+    transformers 5 initializes models on the meta device and materializes every
+    non-persistent buffer that the checkpoint does not own with
+    ``torch.empty_like`` (``PreTrainedModel._move_missing_keys_from_meta_to_device``).
+    Its default ``_init_weights`` re-derives a native rotary module's ``inv_freq``
+    only when the module exposes ``original_inv_freq``; a model class that
+    overrides ``_init_weights`` (most legacy remote-code families) never gets
+    that restore. The rotary buffers then hold uninitialized memory, which
+    silently corrupts every native baseline (issue #4093 item 10).
+
+    Rebuild each affected module's direct non-persistent buffers from a CPU
+    constructor template. Meta shells are left to LazyTurtle, which restores
+    them when the owning module is materialized.
+    """
+
+    from transformers import PreTrainedModel
+
+    uses_default_init_weights = (
+        getattr(type(model), "_init_weights", None) is PreTrainedModel._init_weights
+    )
+    fallback_config = getattr(model, "config", None)
+    restored = 0
+
+    for module in model.modules():
+        if not isinstance(getattr(module, "inv_freq", None), torch.Tensor):
+            continue
+        if uses_default_init_weights and hasattr(module, "original_inv_freq"):
+            # transformers' default `_init_weights` already re-derived these.
+            continue
+        non_persistent = getattr(module, "_non_persistent_buffers_set", None)
+        if not non_persistent:
+            continue
+        direct_buffers = dict(module.named_buffers(recurse=False))
+        if any(buffer.is_meta for buffer in direct_buffers.values()):
+            # Lazy shell: LazyTurtle restores on materialization.
+            continue
+        template = _build_module_init_template(
+            module,
+            fallback_config=fallback_config,
+        )
+        if template is None:
+            continue
+        template_buffers = dict(template.named_buffers(recurse=False))
+        for name in non_persistent:
+            buffer = direct_buffers.get(name)
+            source = template_buffers.get(name)
+            if buffer is None or source is None or buffer.is_meta:
+                continue
+            module.register_buffer(
+                name,
+                safe_move_to(source, buffer.device, dtype=buffer.dtype),
+                persistent=False,
+            )
+            restored += 1
+
+    return restored
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -1078,12 +1208,14 @@ class LazyTurtle:
                 target_model=target_model,
             )
         except Exception as exc:
-            log.debug(
-                "LazyTurtle: disabled for `%s`: %s",
-                model_local_path,
-                exc,
-            )
-            return None
+            # Every caller treats `None` as a hard failure ("can't open model
+            # path ... for offload_to_disk"), so swallowing the construction
+            # error only replaced the real cause with a misleading one. Surface
+            # it with the path and the original exception chained.
+            raise RuntimeError(
+                f"LazyTurtle: cannot open `{model_local_path}` as a lazy checkpoint source: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     def eval(self) -> "LazyTurtle":
         return self
@@ -1195,6 +1327,14 @@ class LazyTurtle:
                     f"LazyTurtle: `{model_cls.__name__}` does not provide save_pretrained(), "
                     "cannot convert checkpoint via transformers full-model load."
                 )
+            # Older trust_remote_code classes still declare
+            # `_tied_weights_keys = ["lm_head.weight"]`. transformers 5 expects
+            # the `{target: source}` mapping and otherwise raises
+            # `AttributeError: 'list' object has no attribute 'keys'` while
+            # saving. Normalize exactly as the quantized writer does.
+            from .hf import _normalize_legacy_tied_weights_keys
+
+            _normalize_legacy_tied_weights_keys(loaded_model)
             loaded_model.save_pretrained(tempdir, safe_serialization=True)
             return tempdir
         except Exception:
@@ -3560,66 +3700,11 @@ class LazyTurtle:
     ) -> Optional[nn.Module]:
         """Construct a CPU template module for init-only buffers missing from checkpoint shards."""
 
-        config_source = getattr(owner_module, "config", None)
-        if config_source is None:
-            config_source = getattr(target_model, "config", None)
-        if config_source is None:
-            config_source = self.config
-
-        module_type = type(owner_module)
-        try:
-            signature = inspect.signature(module_type)
-        except (TypeError, ValueError):
-            return None
-
-        params = list(signature.parameters.values())
-        if not params:
-            return None
-
-        args = []
-        kwargs = {}
-
-        for param in params:
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-
-            if param.name == "config":
-                if config_source is None:
-                    return None
-                value = copy.deepcopy(config_source)
-            elif param.name == "device":
-                value = torch.device("cpu")
-            elif hasattr(owner_module, param.name):
-                # Some remote-code modules rebuild buffers from constructor attributes instead of config.
-                raw_value = getattr(owner_module, param.name)
-                if isinstance(raw_value, torch.Tensor) and raw_value.device.type == "meta":
-                    scalar_attr_name = f"scalar_{param.name}"
-                    if hasattr(owner_module, scalar_attr_name):
-                        raw_value = getattr(owner_module, scalar_attr_name)
-                    elif param.default is not inspect.Parameter.empty:
-                        continue
-                    else:
-                        return None
-                value = copy.deepcopy(raw_value)
-            elif param.default is not inspect.Parameter.empty:
-                continue
-            else:
-                return None
-
-            if param.kind is inspect.Parameter.POSITIONAL_ONLY:
-                args.append(value)
-            else:
-                kwargs[param.name] = value
-
-        try:
-            return module_type(*args, **kwargs)
-        except Exception as exc:
-            log.debug(
-                "LazyTurtle: failed to build template for `%s`: %s",
-                module_type.__name__,
-                exc,
-            )
-            return None
+        return _build_module_init_template(
+            owner_module,
+            fallback_config=self.config,
+            target_model=target_model,
+        )
 
     def _restore_missing_nonpersistent_buffers(
         self,

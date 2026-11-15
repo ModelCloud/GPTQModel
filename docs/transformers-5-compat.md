@@ -145,6 +145,214 @@ flowchart TD
 The restore hooks keep an already materialized buffer untouched, so they are
 idempotent for ordinary (non-lazy) loads.
 
+## J. Native remote-code RoPE, load, and generate (issue #4093 items 7-12)
+
+Six remote-code gaps share one rule: a compatibility shim has to reproduce the
+*contract* the remote code was written against, and it must not leak into
+transformers' own probes. Item 10 is the silent one: a native model loaded for
+evaluation kept uninitialized RoPE buffers, so every baseline was wrong while
+quantized reloads were correct.
+
+### J.1 Native rotary buffers are restored after every load (item 10)
+
+Transformers 5 initializes a model on the meta device and materializes every
+non-persistent buffer the checkpoint does not own with `torch.empty_like`
+(`PreTrainedModel._move_missing_keys_from_meta_to_device`). Its default
+`_init_weights` re-derives a native rotary module's `inv_freq` only when the
+module exposes `original_inv_freq`. Every legacy remote-code family overrides
+`_init_weights`, so the default restore never runs and `inv_freq` (plus
+DeciLM's `cos_cached`/`sin_cached`) stays uninitialized. The quantize path was
+unaffected because LazyTurtle restores meta buffers while materializing a
+layer; the native eval branch (`gptqmodel/models/loader.py`, plain
+`from_pretrained`) had no equivalent step.
+
+`restore_init_owned_rotary_buffers()` (`gptqmodel/utils/structure.py:917`) now
+runs once in `BaseQModel.__init__` (`gptqmodel/models/base.py:745`) for every
+load path. It rebuilds each affected module's direct non-persistent buffers
+from a CPU constructor template (`_build_module_init_template`, the same
+builder LazyTurtle uses), so the value comes from the module's own constructor
+arguments rather than from the code under test.
+
+```mermaid
+flowchart TD
+    A["from_pretrained or LazyTurtle shell"] --> B["transformers 5 meta init"]
+    B --> C["_move_missing_keys_from_meta_to_device<br/>torch.empty_like for non-persistent buffers"]
+    C --> D{"model class overrides _init_weights?"}
+    D -- No --> E["default _init_weights re-derives<br/>RotaryEmbedding inv_freq"]
+    D -- Yes --> F["rotary buffers hold uninitialized memory"]
+    F --> G["BaseQModel.__init__"]
+    E --> G
+    G --> H["restore_init_owned_rotary_buffers"]
+    H --> I{"inv_freq buffer and not handled<br/>by default _init_weights?"}
+    I -- No --> J["leave untouched"]
+    I -- Yes --> K["_build_module_init_template<br/>constructor args from module attributes"]
+    K --> L["register_buffer inv_freq, cos_cached, sin_cached<br/>persistent=False"]
+    L --> M["native eval, quantization, quantized reload"]
+    J --> M
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class F failure;
+```
+
+Meta shells are skipped so the lazy quantization path keeps its own restore on
+materialization. A model that uses the default `_init_weights` and exposes
+`original_inv_freq` is also skipped, which leaves native transformers rotary
+modules untouched.
+
+Wikitext-2 perplexity, 40 windows of 512 tokens, bf16, native load through
+`GPTQModel.load(quantize_config=None)`, measured on an RTX 4090
+(`GPU-d458708b-c760-bbf1-08fb-8b8803a2157d`). "Before" is the same command on
+`origin/main`; "after" includes the restore.
+
+| Checkpoint | Before | After |
+| --- | --- | --- |
+| `amd/Instella-3B-Instruct` | 704.70 | 23.06 |
+| `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct` | 366.47 | 10.19 |
+| `Deci/DeciLM-7B` | 1304.01 | 7.54 |
+
+### J.2 Legacy unscaled RoPE stays `None` (item 9)
+
+MiniCPM-2B and MobileLLM serialize `rope_scaling: null`. Transformers 5 fills a
+default `{"rope_type": "default", "rope_theta": ...}` dict, and their legacy
+`_init_rope` treats any non-None dict as scaled RoPE and indexes `["type"]`
+(`KeyError: 'type'`). Only Nanbeige was special-cased on `main`
+(`gptqmodel/utils/hf.py:1512`).
+
+The policy is now decided from the config class itself:
+`_declares_legacy_rope_field()` (`gptqmodel/utils/hf.py:1540`) returns True for
+a remote config whose `__init__` declares `rope_scaling` and not
+`rope_parameters`. For such a config, `_normalize_rope_parameters_config_compat`
+(`gptqmodel/utils/hf.py:1572`) clears both aliases when the effective RoPE is
+unscaled; genuinely scaled configs keep their dict and gain the legacy `type`
+key. Native and modern remote configs declare `rope_parameters`, so they keep
+the transformers-5 dict.
+
+```mermaid
+flowchart TD
+    A["normalize_hf_config_compat"] --> B{"class __init__ declares rope_scaling<br/>and not rope_parameters?"}
+    B -- No --> C["fill default rope_parameters<br/>native and modern remote"]
+    B -- Yes --> D{"per-layer dict or scaled rope?"}
+    D -- Yes --> E["keep dict and add legacy type key"]
+    D -- No --> F["rope_scaling = None<br/>rope_parameters = None"]
+    F --> G["remote _init_rope takes the default path"]
+    C --> H["RotaryEmbedding reads rope_type"]
+    X["KeyError type or ValueError Unknown RoPE scaling type"] -.-> F
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+### J.3 ChatGLM generation (item 11)
+
+`attribute_map["max_length"] = "seq_length"` is still required: ChatGLM's
+`__init__` reads `config.max_length`. Transformers 5's
+`_prepare_generation_config` also walks that attribute through
+`_get_generation_parameters()` and raises
+`You have modified the pretrained model configuration ... {'max_length': N}`.
+The alias is now filtered from that probe on the remote config class
+(`gptqmodel/utils/hf.py:1453`), and `num_hidden_layers` aliases `num_layers` so
+cache sizing can read it. Both stay in `attribute_map`, so they are not
+serialized.
+
+`generate()` then hit two more transformers-5 gaps: `DynamicCache` is not
+subscriptable by ChatGLM's legacy `get_masks`, and the remote
+`_update_model_kwargs_for_generation` indexes an all-ones `attention_mask`
+that transformers 5 replaces with `None`. `ChatGLMQModel.after_model_load`
+(`gptqmodel/models/definitions/chatglm.py:33`) installs
+`_patch_generation_compat` (`:39`): `generation_config.use_cache = False` keeps
+the remote forward on its `past_key_values=None` path, and the replacement
+update hook advances `position_ids` and only extends a real mask. Generation
+re-prefills each step instead of using a KV cache.
+
+```mermaid
+flowchart TD
+    A["ChatGLMQModel.after_model_load"] --> B["_patch_generation_compat"]
+    B --> C["generation_config.use_cache = False"]
+    B --> D["replace _update_model_kwargs_for_generation"]
+    C --> E["generate skips DynamicCache creation"]
+    D --> F["None mask stays None, position_ids advance"]
+    E --> G["remote forward: past_key_values None<br/>get_masks past_length 0"]
+    F --> G
+    G --> H["tokens returned"]
+    I["attribute_map max_length and num_hidden_layers"] --> J["remote __init__ reads config.max_length"]
+    I --> K["_get_generation_parameters drops max_length"]
+    X["ValueError max_length or DynamicCache not subscriptable"] -.-> G
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class X failure;
+```
+
+### J.4 `.bin` conversion normalizes legacy tied keys (item 8)
+
+`LazyTurtle._convert_checkpoint_source_to_safetensors` calls
+`save_pretrained` for pickle-only checkpoints. A remote class with
+`_tied_weights_keys = ["lm_head.weight"]` made transformers 5 raise
+`AttributeError: 'list' object has no attribute 'keys'`, and `maybe_create`
+swallowed it, so the user saw only `Loader: can't open model path ... for
+offload_to_disk`. The conversion now calls
+`_normalize_legacy_tied_weights_keys` first
+(`gptqmodel/utils/structure.py:1337`, the helper the quantized writer already
+uses), and `maybe_create` raises a `RuntimeError` that names the path and
+chains the original exception (`gptqmodel/utils/structure.py:1215`).
+
+```mermaid
+flowchart TD
+    A["LazyTurtle.maybe_create"] --> B{"safetensors weight map?"}
+    B -- Yes --> G["lazy checkpoint source"]
+    B -- No --> C["_convert_checkpoint_source_to_safetensors"]
+    C --> D["from_pretrained full CPU load"]
+    D --> E["_normalize_legacy_tied_weights_keys"]
+    E --> F["save_pretrained safe_serialization"]
+    F --> G
+    C --> X["construction error"]
+    X --> Y["RuntimeError with path and chained cause"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class Y failure;
+```
+
+### J.5 AUTO_NF12 source-weight contract (item 7)
+
+Spark-X2.5's decoder reads `self.mlp.gate_proj.weight.dtype`
+(`modeling_spark.py:244`), and the legacy Llama-shaped families read
+`self.q_proj.weight.dtype`. A packed `AutoNF12HookedLinear` has no dense
+`weight`, so GPTQ failed under the default `auto_dtype_cast=auto_nf12`.
+`from_linear` now attaches a one-element, all-zero view with the source dtype,
+shape and device (`_source_weight_contract`,
+`gptqmodel/utils/auto_dtype_cast.py:270`, assigned at `:311`). Zero strides
+give the real shape without materializing the matrix, and a plain attribute
+keeps it out of `state_dict()`.
+
+```mermaid
+flowchart TD
+    A["AutoNF12HookedLinear.from_linear"] --> B["pack_original: nf12_packed and nf12_escapes"]
+    B --> C["_source_weight_contract"]
+    C --> D["zeros 1 element as_strided with zero strides"]
+    D --> E["layer.weight: dtype, shape, device"]
+    E --> F["modeling_spark.py:244 reads weight.dtype"]
+    E --> G["1 element storage, absent from state_dict"]
+```
+
+### J.6 Klear OutputRecorder (item 12)
+
+`modeling_klear.py` imports `check_model_inputs` and `OutputRecorder` from
+`transformers.utils.generic`. Transformers 5 moved `OutputRecorder` to
+`transformers.utils.output_capturing`, so the remote module raised
+`ImportError`. `_patch_transformers_remote_code_compat` now re-exports the real
+recorder into `generic` next to the existing `check_model_inputs` shim
+(`gptqmodel/utils/hf.py:996`).
+
+| Area | Before (on `main`) | After |
+| --- | --- | --- |
+| Item 7 | `AutoNF12HookedLinear` has no `.weight` (`auto_dtype_cast.py:270`) | `_source_weight_contract` (`auto_dtype_cast.py:270`, assigned `:311`) |
+| Item 8 | conversion saved without normalization (`structure.py:1198`); `maybe_create` swallowed the cause (`structure.py:1082`) | normalize at `structure.py:1337`; chained `RuntimeError` at `:1215` |
+| Item 9 | Nanbeige-only branch (`hf.py:1512`) | class-declared policy (`hf.py:1540`, `:1572`) |
+| Item 10 | native branch never restored buffers (`loader.py:1714`) | `base.py:745` calls `structure.py:917` |
+| Item 11 | `max_length` only in `attribute_map` (`hf.py:1446`) | alias filtered from generation probe (`hf.py:1453`) + `chatglm.py:39` generation compat |
+| Item 12 | only `check_model_inputs` shimmed (`hf.py:982`) | `OutputRecorder` re-export (`hf.py:996`) |
+
+Limitations: ChatGLM generation runs without a KV cache, so decode is slower
+than a cache-backed loop. The native rotary restore rebuilds buffers from the
+module constructor; a remote rotary module whose constructor arguments are not
+stored as attributes is left untouched (LazyTurtle keeps its own
+materialization-time restore for the quantize path).
+
 ## Measured behaviour
 
 Tiny random models, GPTQ 4-bit, `group_size=32`, `desc_act=False`, saved and
@@ -174,6 +382,11 @@ quality claims for full checkpoints.
 | `tests/module_tree/test_nemotron_h_model_tree.py` | real-model `model` tree root and native mixer projection coverage |
 | `tests/test_falcon_h1_support.py` | `mup_vector` restoration and idempotence |
 | `tests/module_tree/test_registered_module_plans.py` | updated Nemotron-H registry plan |
+| `tests/test_remote_code_rotary_restore.py` | fp64 oracle for legacy `inv_freq`/cos/sin, meta-shell skip, native-style skip, idempotence |
+| `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim |
+| `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
+| `tests/test_spark2_5_support.py` | AUTO_NF12 source-weight dtype/shape/device contract |
+| `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |
 
 ## E-I. Definition and calibration fixes (issue #4040)
 

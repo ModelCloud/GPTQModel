@@ -2956,6 +2956,9 @@ class AWQProcessor(LoopProcessor):
         them once and replays the result for every ratio in the grid.
         """
 
+        replay_inputs = getattr(self.gptq_model, "awq_module_replay_inputs", None)
+        if callable(replay_inputs):
+            x, module_kwargs = replay_inputs(module, x, module_kwargs)
         module_kwargs = dict(module_kwargs)
 
         target_device = None
@@ -3008,13 +3011,45 @@ class AWQProcessor(LoopProcessor):
             getattr(self.gptq_model, "awq_preserve_explicit_position_embeddings", False)
             and "position_embeddings" in module_kwargs
         )
+        captured_position_ids = module_kwargs.get("position_ids")
+        stale_position_ids = (
+            supports_position_ids
+            and seq_len is not None
+            and (
+                not torch.is_tensor(captured_position_ids)
+                or captured_position_ids.shape[-1] != seq_len
+            )
+        )
+        stale_position_embeddings = (
+            supports_position_embeddings
+            and seq_len is not None
+            and "position_embeddings" in module_kwargs
+            and not self._position_embeddings_match(
+                module_kwargs["position_embeddings"], seq_len
+            )
+        )
+        if (
+            rotary is None
+            and supports_position_embeddings
+            and not preserve_position_embeddings
+            and (stale_position_embeddings or stale_position_ids)
+        ):
+            # Some families keep the rotary on the attention module
+            # (Nanbeige/DeciLM expose `self_attn.rotary_emb`) instead of on the
+            # model root. Use it to rebuild the position scaffolding rather
+            # than replaying another sample's sequence length.
+            rotary = getattr(module, "rotary_emb", None) or getattr(module, "rotary", None)
         if (
             seq_len is not None
             and rotary is not None
             and supports_position_embeddings
             and not preserve_position_embeddings
         ):
-            rotary = self._get_rotary_for_device(target_device or x.device)
+            # `_get_rotary_for_device` resolves the model-root rotary again, so
+            # only use it when that is where `rotary` came from. A module-local
+            # rotary has no root counterpart and must be used as-is.
+            if self._get_root_rotary() is not None:
+                rotary = self._get_rotary_for_device(target_device or x.device)
             rotary_device = self._get_rotary_device(rotary, target_device or x.device)
             pos_ids = module_kwargs.get("position_ids") if supports_position_ids else None
             if not supports_position_ids:
@@ -3037,16 +3072,54 @@ class AWQProcessor(LoopProcessor):
                 pos_for_rotary,
                 **self._rotary_layer_type_kwargs(rotary, module),
             )
-        elif supports_position_ids and seq_len is not None and "position_ids" not in module_kwargs:
+        elif supports_position_ids and seq_len is not None and stale_position_ids:
+            # Rebuild whenever the captured ids describe a different sample.
+            # The old code only filled a *missing* key, so kwargs captured from
+            # a different-length sample were replayed with this sample's
+            # activations and crashed in `apply_rotary_pos_emb` (EXAONE-3.0
+            # 522 vs 430; DeciLM/Nanbeige 48 vs 20).
             pos_values = torch.arange(seq_len, device=target_device or x.device, dtype=torch.long)
             if x.dim() >= 2:
                 pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
             module_kwargs["position_ids"] = pos_values
 
+        if (
+            stale_position_embeddings
+            and not preserve_position_embeddings
+            and not self._position_embeddings_match(
+                module_kwargs.get("position_embeddings"), seq_len
+            )
+        ):
+            # No rotary could rebuild them; drop the other sample's cos/sin so
+            # the module falls back to its own rotary instead of broadcasting
+            # a foreign sequence length into this replay.
+            module_kwargs.pop("position_embeddings", None)
+
         if target_device is not None and x.device != target_device:
             x = x.to(target_device)
 
         return x, module_kwargs
+
+    @staticmethod
+    def _position_embeddings_match(position_embeddings, seq_len: int) -> bool:
+        """Whether ``position_embeddings`` already has ``seq_len`` positions."""
+
+        if position_embeddings is None or seq_len is None:
+            return True
+        values = (
+            position_embeddings
+            if isinstance(position_embeddings, (tuple, list))
+            else (position_embeddings,)
+        )
+        lengths = {
+            int(value.shape[-2])
+            for value in values
+            if torch.is_tensor(value) and value.dim() >= 2
+        }
+        if len(lengths) != 1:
+            # Unknown layout: never drop a value we cannot inspect.
+            return True
+        return lengths.pop() == seq_len
 
     @staticmethod
     def _rotary_layer_type_kwargs(
