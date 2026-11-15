@@ -1324,14 +1324,41 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
     def _load_from_state_dict(self, *args, **kwargs):
         super()._load_from_state_dict(*args, **kwargs)
-        # `_qzeros_format` is not serialized; restore it from the checkpoint
-        # format the module was constructed for. Without this a direct
-        # state_dict round-trip of v2 words keeps the v1 default and
-        # format-aware consumers read every zero point one high.
-        if self.format in (FORMAT.GPTQ, "gptq", "gemm"):
-            self._qzeros_format = 1
-        elif self.format in (FORMAT.GPTQ_V2, "gptq_v2"):
-            self._qzeros_format = 2
+        state_dict = args[0] if args else kwargs.get("state_dict")
+        prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+        # A partial load (for example a PEFT adapter) carries no qzeros. Leave
+        # the runtime layout alone: relabelling the live v2 words as v1 would
+        # make the next save emit them under the wrong checkpoint label.
+        if state_dict is not None and (prefix + "qzeros") in state_dict:
+            # `_qzeros_format` is not serialized. The loader records the layout
+            # of the checkpoint tensors in `_checkpoint_format_on_disk`; that is
+            # the layout `state_dict()` emits, so it is also the layout of a
+            # self round-trip. Only with that record can we tell v1 words from
+            # v2 words and convert them.
+            on_disk_format = getattr(self, "_checkpoint_format_on_disk", None)
+            if on_disk_format in (FORMAT.GPTQ, "gptq", "gemm"):
+                if getattr(self, "REQUIRES_FORMAT_V2", False):
+                    # The checkpoint v1 convention stores `zero_point - 1`, but
+                    # this kernel always decodes v2. Convert the loaded words in
+                    # place so a `load_state_dict(state_dict())` round trip keeps
+                    # the same zero points.
+                    from ...utils.model import convert_gptq_v1_to_v2_format_module
+
+                    convert_gptq_v1_to_v2_format_module(
+                        self, bits=self.bits, pack_dtype=self.pack_dtype,
+                    )
+                else:
+                    self._qzeros_format = 1
+            elif on_disk_format in (FORMAT.GPTQ_V2, "gptq_v2"):
+                self._qzeros_format = 2
+            elif self.format in (FORMAT.GPTQ, "gptq", "gemm"):
+                # No recorded on-disk layout (an export shell being filled by
+                # accelerate, or a directly constructed module). Keep the
+                # historical restore from the format the module was built for;
+                # the caller owns any word conversion.
+                self._qzeros_format = 1
+            elif self.format in (FORMAT.GPTQ_V2, "gptq_v2"):
+                self._qzeros_format = 2
         # Derived packed layouts depend on both the loaded words and the
         # checkpoint format. Invalidate only after the format has been restored.
         self._clear_runtime_weight_cache()

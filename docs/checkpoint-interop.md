@@ -245,6 +245,99 @@ the 3-bit default and raised
 `lm_head` raised a size mismatch. Both now decode exactly against an fp64
 oracle.
 
+## 9. `load_state_dict()` round-trips and partial loads
+
+`state_dict()` emits checkpoint-layout qzeros (v1 for a v1 checkpoint) while
+the Torch/Triton kernels keep v2 words in memory. `GPTQQuantLinear._load_from_state_dict`
+must therefore convert a self round-trip back to v2, and must not touch the
+runtime layout when the incoming state dict has no `qzeros` (PEFT adapters and
+other partial loads).
+
+```mermaid
+flowchart TD
+    A["model.load_state_dict(state_dict)"] --> B["GPTQQuantLinear._load_from_state_dict"]
+    B --> C["super()._load_from_state_dict<br/>copies the words"]
+    C --> D{"prefix + qzeros<br/>in state_dict?"}
+    D -- no --> E["keep _qzeros_format<br/>partial load, no relabel"]
+    D -- yes --> F{"_checkpoint_format_on_disk"}
+    F -- "GPTQ / gemm" --> G{"REQUIRES_FORMAT_V2?"}
+    G -- yes --> H["convert_gptq_v1_to_v2_format_module<br/>_qzeros_format = 2"]
+    G -- no --> I["_qzeros_format = 1"]
+    F -- "GPTQ_V2" --> J["_qzeros_format = 2"]
+    F -- "unset (export shell)" --> K["restore from self.format<br/>caller owns conversion"]
+    E --> L["_clear_runtime_weight_cache"]
+    H --> L
+    I --> L
+    J --> L
+    K --> L
+    style E fill:#d9f2d9,stroke:#2e7d32
+    style H fill:#d9f2d9,stroke:#2e7d32
+```
+
+Before this change a v1 model loaded with `load_state_dict(state_dict())`
+copied `0x77777777` into the live v2 buffer and set `_qzeros_format = 1`; every
+zero point decoded one high and `strict=True` still reported all keys matched.
+On the synthetic 1-layer fixture the logits moved by relative `0.406`; the
+round trip is now bit-identical. A partial `load_state_dict({}, strict=False)`
+used to flip `_qzeros_format` from 2 to 1 while the buffer stayed v2, so the
+next save wrote `0x88888888` under the v1 label. It now leaves the layout and
+the saved bytes unchanged.
+
+## 10. HF `quant_method` for RTN AWQ exports and packed GGUF
+
+`BaseQuantizeConfig.to_dict()` publishes `export_quant_method()`, not the
+internal quantizer `method`. An RTN config with `format="gemm"` therefore
+writes `method: gptq` with `quant_method: awq`, which is what
+`AutoModelForCausalLM.from_pretrained` needs to select an AWQ loader.
+`quant_method` is a deprecated alias for `method`; when both keys are present
+the canonical `method` value wins, so the alias cannot switch the quantizer
+back to GPTQ.
+
+Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
+`GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
+`gptqmodel_gguf` instead and registers a refusing quantizer for that name.
+
+```mermaid
+flowchart TD
+    A["BaseQuantizeConfig.to_dict"] --> B["export_quant_method()"]
+    B --> C["_serialize_export_quant_method"]
+    C -- "METHOD.GGUF" --> D["quant_method: gptqmodel_gguf"]
+    C -- "METHOD.AWQ" --> E["quant_method: awq"]
+    C -- "METHOD.GPTQ" --> F["quant_method: gptq"]
+    D --> G["transformers get_hf_quantizer"]
+    G --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
+    E --> I["AwqHfQuantizer"]
+    F --> J["GptqHfQuantizer"]
+    style H fill:#f8d7da,stroke:#b02a37
+    style I fill:#d9f2d9,stroke:#2e7d32
+    style J fill:#d9f2d9,stroke:#2e7d32
+```
+
+Already-published GGUF checkpoints keep `quant_method: "gguf"` (plus
+`method: "gguf"`) and still load through `GPTQModel.load`; `gguf` remains
+accepted by `_normalize_quant_method`. Only new checkpoints publish the
+non-colliding name. `hf_compat_warnings` also warns at save time that a packed
+GGUF checkpoint is not loadable by plain Transformers.
+
+## 11. `torch.save(model)` after `optimize()`
+
+`TorchLinear.optimize()` replaces the bound `dequantize_weight` method with a
+`torch.compile` wrapper, which pickle cannot serialize. `TorchLinear.__getstate__`
+drops that instance attribute; the class method is the eager fallback, so the
+unpickled module keeps working without the compiled callable.
+
+```mermaid
+flowchart TD
+    A["TorchLinear.optimize()"] --> B["self.dequantize_weight =<br/>torch_compile(bound method)"]
+    B --> C["torch.save(model)"]
+    C --> D["TorchLinear.__getstate__"]
+    D --> E["pop dequantize_weight"]
+    E --> F["pickle succeeds"]
+    F --> G["torch.load restores the class method"]
+    G --> H["eager dequantize_weight fallback"]
+    style H fill:#d9f2d9,stroke:#2e7d32
+```
+
 ## Failure contract
 
 ### Producer filters, format changes, and `save_pretrained` (items 1-3)
@@ -257,6 +350,16 @@ oracle.
 | Format changed to another qzero layout | stale words copied under the new label | exact v1/v2 conversion |
 | Format changed to a different packing | stale words copied, silent garbage | `ValueError` before writing |
 | `save_pretrained()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel |
+
+### State-dict round-trips, HF methods, and pickling (items 9-11)
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `load_state_dict(model.state_dict())` on a v1 model | v1 words copied into a v2 kernel, logits drift | exact v1 to v2 conversion, bit-identical |
+| Partial `load_state_dict` without `qzeros` | `_qzeros_format` flipped to 1, next save garbage | runtime layout kept |
+| RTN `format="gemm"` config | `quant_method: gptq` with `format: gemm` | `quant_method: awq` |
+| New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` raises an actionable `ValueError` |
+| `torch.save(model)` after `optimize()` | `PicklingError` on the compiled bound method | round-trips; unpickled module runs eager |
 
 ### Save, Marlin, export, and mixed-bit dequantization (items 4-8)
 
@@ -274,7 +377,11 @@ oracle.
 
 `tests/test_checkpoint_interop_4053.py` covers the synthetic AWQ exclusion
 oracle, the Optimum inclusion parse, v1 to v2 re-save, the refusal path, the
-`save_pretrained` qzero bytes, and the runtime-layout refusal hooks. The
-items 4-8 tests live beside their modules (`tests/test_q4_marlin.py`,
+`save_pretrained` qzero bytes, the runtime-layout refusal hooks, the
+`load_state_dict(state_dict())` identity (Torch and Triton), the partial-load
+layout, `torch.save`/`torch.load`, and the packed-GGUF refusal. The items 4-8
+tests live beside their modules (`tests/test_q4_marlin.py`,
 `tests/test_model_dequant_dynamic_bits.py`, `tests/test_export.py`, and the
-Marlin `g_idx` regressions).
+Marlin `g_idx` regressions). `tests/qcfg/test_config_serialization.py` pins the
+RTN export method, and `tests/test_checkpoint_compat.py` pins the GGUF
+`quant_method` alias and save-time warning.

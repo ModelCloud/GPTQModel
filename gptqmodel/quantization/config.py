@@ -26,6 +26,7 @@ import pcre
 import torch
 from packaging import version
 
+from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.hf import resolve_checkpoint_subfolder
 from ..utils.logger import setup_logger
@@ -3455,6 +3456,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.BITSANDBYTES
         if value == FORMAT.EXL3:
             return METHOD.EXL3
+        if value == GGUF_EXPORT_QUANT_METHOD:
+            return METHOD.GGUF
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
         try:
@@ -4004,6 +4007,20 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
             return fallback_method
         raise ValueError(f"QuantizeConfig: Unable to resolve export method for format `{format_value}`.")
     return method
+
+
+def _serialize_export_quant_method(method: METHOD) -> str:
+    """Return the HF-facing ``quant_method`` name for an export method.
+
+    ``METHOD.GGUF`` keeps its internal name but is published under
+    ``GGUF_EXPORT_QUANT_METHOD``: transformers reserves ``gguf`` for its own
+    ``GgufHfQuantizer``, which expects a ``.gguf`` file and otherwise loads the
+    checkpoint as randomly initialized weights.
+    """
+
+    if method == METHOD.GGUF:
+        return GGUF_EXPORT_QUANT_METHOD
+    return method.value if isinstance(method, METHOD) else str(method)
 
 
 def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -4866,6 +4883,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             format_auto_inferred = True
 
         field_names = _known_quantize_config_field_names()
+        # `quant_method` is a deprecated alias for the canonical `method`
+        # field. When both are present the canonical value wins: an RTN
+        # checkpoint exported as AWQ writes `method: gptq` with
+        # `quant_method: awq`, and the alias must not switch the quantizer.
+        canonical_method_present = any(
+            isinstance(key, str) and key.lower() == METHOD_FIELD_CODE
+            for key in quantize_cfg
+        )
 
         normalized = {
             METHOD_FIELD_CODE: METHOD.GPTQ,
@@ -4878,6 +4903,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         for key, val in quantize_cfg.items():
             key = key.lower()
+            source_key = key
 
             if key == FORMAT_FIELD_COMPAT_MARLIN:
                 # Accept the `false` value that AutoGPTQ and hugging-quants
@@ -4921,6 +4947,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 val = not bool(val)
 
             if key == METHOD_FIELD_CODE:
+                if source_key == QUANT_METHOD_FIELD and canonical_method_present:
+                    continue
                 if isinstance(val, str) and val.lower() == FORMAT.MARLIN:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif isinstance(val, str) and val.lower() == FORMAT.BITBLAS:
@@ -5194,7 +5222,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "activation": self.activation,
             "auto_dtype_cast": self.auto_dtype_cast.value,
             METHOD_FIELD_CODE: self.method,
-            QUANT_METHOD_FIELD: self.method,
+            QUANT_METHOD_FIELD: _serialize_export_quant_method(self.export_quant_method()),
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],

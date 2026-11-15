@@ -20,8 +20,10 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq, unpack_awq
 from gptqmodel.quantization.config import (
     FORMAT,
+    GGUF_EXPORT_QUANT_METHOD,
     METHOD,
     FOEMConfig,
+    GGUFConfig,
     GPTAQConfig,
 )
 
@@ -193,6 +195,42 @@ def test_hf_compat_warning_for_8bit_awq():
     assert hf_compat_warnings(
         QuantizeConfig(bits=4, group_size=128, method=METHOD.AWQ), FORMAT.GEMM
     ) == []
+
+
+def test_gguf_config_publishes_non_colliding_quant_method():
+    """Packed GGUF must not claim transformers' `gguf` quant method."""
+
+    payload = GGUFConfig(bits="q4_k_m").to_dict()
+
+    assert payload["method"] == "gguf"
+    assert payload["quant_method"] == GGUF_EXPORT_QUANT_METHOD
+    assert GGUF_EXPORT_QUANT_METHOD != "gguf"
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert reloaded.method is METHOD.GGUF
+    # A payload that only carries the published alias still resolves to GGUF.
+    alias_only = dict(payload)
+    alias_only.pop("method")
+    assert QuantizeConfig.from_quant_config(alias_only).method is METHOD.GGUF
+
+
+def test_legacy_gguf_quant_method_still_loads():
+    """Already-published checkpoints keep their `quant_method: gguf`."""
+
+    payload = GGUFConfig(bits="q4_k_m").to_dict()
+    payload["quant_method"] = "gguf"
+
+    assert QuantizeConfig.from_quant_config(payload).method is METHOD.GGUF
+
+
+def test_hf_compat_warning_for_packed_gguf():
+    from gptqmodel.models.writer import hf_compat_warnings
+
+    warnings = hf_compat_warnings(GGUFConfig(bits="q4_k_m"), FORMAT.GGUF)
+
+    assert len(warnings) == 1
+    assert "GgufHfQuantizer" in warnings[0]
+    assert GGUF_EXPORT_QUANT_METHOD in warnings[0]
 
 
 def _reference_pack_8bit(codes: torch.Tensor) -> torch.Tensor:
