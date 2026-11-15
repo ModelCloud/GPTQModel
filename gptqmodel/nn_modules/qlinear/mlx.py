@@ -35,6 +35,8 @@ from .fp8 import TorchFP8Linear
 from .gemv_awq import AwqGEMVLinear
 from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from .gguf import GGUFTorchLinear
+from .macaq import MacaqLinear
+from .nf12 import NF12Linear
 from .paroquant import ParoLinear
 from .qqq import QQQTorchLinear
 from .torch import TorchLinear
@@ -1054,3 +1056,122 @@ class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
             if affine is not None:
                 payload["weight"], payload["scales"], payload["affine_biases"], payload["block_size"] = affine
         return payload
+
+
+class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
+    """MACaQ MXFP4 holder loaded into MLX's native MXFP4 Metal matmul.
+
+    MACaQ's checkpoint bytes are already the OCP MXFP4 layout MLX expects: one
+    E2M1 nibble per value (low nibble first) and one E8M0 byte per 32 values.
+    The transfer is therefore a plain ``uint8 -> uint32`` reinterpretation with
+    no requantization, and the rotated-frame pre-scale/Hadamard state moves
+    across unchanged.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.MACAQ]
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 0}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int32, torch.uint8]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    REQUIRES_FORMAT_V2 = False
+
+    SOURCE_LINEAR = MacaqLinear
+
+    @classmethod
+    def source_compatible(cls, module):
+        if not super().source_compatible(module):
+            return False
+        groups = module.in_features // 32
+        return (
+            module.block_size == 32
+            and tuple(module.W_packed.shape) == (module.out_features, module.in_features // 2)
+            and tuple(module.W_scales.view(torch.uint8).shape) == (module.out_features, groups)
+            and tuple(module.pre_scale.shape) == (module.in_features,)
+            and tuple(module.BH.shape) == (module.had_block, module.had_block)
+        )
+
+    @classmethod
+    def native_payload(cls, module):
+        """Return MLX MXFP4 words, E8M0 scales, and the rotation state."""
+        if not cls.source_compatible(module):
+            raise ValueError(f"MACaQ layer {module.name} cannot be transferred to MLX")
+        words = np.ascontiguousarray(module.W_packed.detach().to("cpu").numpy())
+        return {
+            "weight": words.view(np.uint32).reshape(module.out_features, module.in_features // 8),
+            "scales": module.W_scales.detach().view(torch.uint8).to("cpu").numpy(),
+            "pre_scale": module.pre_scale.detach().to("cpu", torch.float32).numpy(),
+            "BH": module.BH.detach().to("cpu", torch.float32).numpy(),
+            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
+            "had_block": module.had_block,
+            "activation_precision": module.activation_precision,
+            "compute_dtype": module.compute_dtype,
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+        }
+
+
+class NF12MlxQuantLinear(_MlxDenseContract, NF12Linear):
+    """NF12 holder decoded by the MLX Metal kernels.
+
+    NF12 stores a lossless 12-bit BF16 stream, so the packed bytes and the
+    escape table move across unchanged and Metal decodes them exactly.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.NF12]
+    SUPPORTS_FORMATS = {FORMAT.NF12: 0}
+    SUPPORTS_BITS = [12]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    REQUIRES_FORMAT_V2 = False
+
+    SOURCE_LINEAR = NF12Linear
+
+    @classmethod
+    def source_compatible(cls, module):
+        if not super().source_compatible(module):
+            return False
+        return (
+            tuple(module.nf12_packed.shape) == (module.out_features, module.in_features * 3 // 2)
+            and module.nf12_packed.dtype == torch.uint8
+            and module.nf12_escapes.dtype == torch.int16
+            and module.nf12_escapes.dim() == 2
+            and module.nf12_escapes.shape[1] == 8
+            and module.nf12_exp_base.numel() == 1
+        )
+
+    @classmethod
+    def native_payload(cls, module):
+        """Return the packed NF12 stream and escape table unchanged."""
+        if not cls.source_compatible(module):
+            raise ValueError(f"NF12 layer {module.name} cannot be transferred to MLX")
+        escapes = module.nf12_escapes.detach().to("cpu").numpy()
+        if escapes.shape[0] == 0:
+            # Metal buffers need a real row; a weight with no escaped groups
+            # never indexes the table, so one zero row is inert.
+            escapes = np.zeros((1, 8), dtype=np.int16)
+        return {
+            "packed": module.nf12_packed.detach().to("cpu").numpy(),
+            "escapes": escapes,
+            "exp_base": int(module.nf12_exp_base.detach().to("cpu").reshape(-1)[0]),
+            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+        }
