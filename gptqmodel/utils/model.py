@@ -1738,9 +1738,15 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
 
 
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
-                        max_input_length: Optional[int] = None):
+                        max_input_length: Optional[int] = None,
+                        awq_batch_size: Optional[int] = None):
     """
     Initialize model-persistent backend scratch buffers after quantized weights are loaded.
+
+    ``awq_batch_size`` sizes the AWQ ExLlamaV2 scratch. It is an explicit
+    argument rather than the ``AWQ_BATCH_SIZE`` environment variable, which a
+    concurrent ``quantize()`` used to overwrite for every later load in the
+    process (issue #4129).
     """
     fixed_bytes = {}
     model_uses_exllamav2 = False
@@ -1756,7 +1762,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed(
                 max_input_len=max_input_length or 2048,
-                max_batch_size=int(os.getenv("AWQ_BATCH_SIZE", 1))
+                max_batch_size=awq_batch_size if awq_batch_size is not None else 1,
             )
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
 
