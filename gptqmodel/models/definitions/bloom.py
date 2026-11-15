@@ -23,21 +23,16 @@ class BloomQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # BloomGelu between the two projections is not positively homogeneous.
             "mlp": ("dense_h_to_4h:0:nosrc", "dense_4h_to_h:1"),
-        }
+        },
     ]
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        if getattr(module, "apply_residual_connection_post_layernorm", False):
+            return []
+        return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
+
     def awq_module_replay_inputs(self, module, x, module_kwargs):
-        """Provide arguments required for Bloom attention and MLP replay.
-
-        Bloom passes residual and positional information directly into its submodules:
-        - ``BloomMLP.forward(hidden_states, residual)``
-        - ``BloomAttention.forward(hidden_states, residual, alibi, attention_mask, ...)``
-
-        AWQ scores candidate scale losses by replaying the parent module, but per-linear
-        activation capture only records the block input tensor. Supplying the input
-        tensor as residual satisfies the interface without altering scale loss scoring,
-        and synthesized alibi slopes and causal attention masks provide valid shapes.
-        """
+        """Supply a fixed additive residual, but never guess attention context."""
         x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
         try:
             parameters = inspect.signature(module.forward).parameters
@@ -49,30 +44,36 @@ class BloomQModel(BaseQModel):
         kwargs = dict(module_kwargs)
         if x.dim() == 2:
             x = x.unsqueeze(0)
+        if x.dim() != 3:
+            raise NotImplementedError("Bloom AWQ replay requires [batch, sequence, hidden] activations")
         if "residual" in parameters and not torch.is_tensor(kwargs.get("residual")):
             kwargs["residual"] = x
-        if "attention_mask" in parameters and kwargs.get("attention_mask") is None:
-            batch_size, seq_len = x.shape[0], x.shape[1]
-            kwargs["attention_mask"] = torch.zeros(
-                (batch_size, 1, seq_len, seq_len), dtype=x.dtype, device=x.device
-            )
-        if "alibi" in parameters and kwargs.get("alibi") is None:
-            batch_size, seq_len = x.shape[0], x.shape[1]
-            mask = torch.ones((batch_size, seq_len), dtype=torch.long, device=x.device)
-            num_heads = (
-                getattr(module, "num_heads", None)
-                or getattr(getattr(self, "model", None), "config", None)
-                and getattr(self.model.config, "n_head", None)
-                or getattr(getattr(self, "model", None), "config", None)
-                and getattr(self.model.config, "num_attention_heads", None)
-            )
-            try:
-                from transformers.models.bloom.modeling_bloom import build_alibi_tensor
+        if "alibi" not in parameters:
+            return x, kwargs
 
-                kwargs["alibi"] = build_alibi_tensor(mask, num_heads, dtype=x.dtype)
-            except Exception:
-                pass
+        batch_size, seq_len = x.shape[:2]
+        num_heads = getattr(module, "num_heads", None)
+        if not isinstance(num_heads, int) or num_heads < 1:
+            raise NotImplementedError("Bloom AWQ replay requires an explicit attention head count")
+        mask = kwargs.get("attention_mask")
+        if (
+            not torch.is_tensor(mask)
+            or mask.dim() != 4
+            or mask.shape[0] not in (1, batch_size)
+            or mask.shape[1:] != (1, seq_len, seq_len)
+        ):
+            raise NotImplementedError("Bloom AWQ replay requires a captured, sequence-aligned attention_mask")
+        alibi = kwargs.get("alibi")
+        if not torch.is_tensor(alibi) or alibi.shape != (batch_size * num_heads, 1, seq_len):
+            raise NotImplementedError("Bloom AWQ replay requires captured, batch/sequence-aligned alibi")
         return x, kwargs
+
+    def awq_module_replay_chunk_kwargs(self, module, module_kwargs, *, start, length, full_batch_size):
+        alibi = module_kwargs.get("alibi")
+        if not torch.is_tensor(alibi) or "alibi" not in inspect.signature(module.forward).parameters:
+            return {}
+        num_heads = alibi.shape[0] // full_batch_size
+        return {"alibi": alibi[start * num_heads : (start + length) * num_heads]}
 
 
 __all__ = ["BloomQModel"]
