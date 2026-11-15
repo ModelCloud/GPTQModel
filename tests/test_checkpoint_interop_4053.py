@@ -476,14 +476,14 @@ def test_hf_from_pretrained_refuses_packed_gguf(tmp_path):
 @pytest.mark.parametrize(
     "quant_method", ["exl3", "qqq", "paroquant", "macaq", "nf12", "tt-blockfloat"]
 )
-def test_hf_from_pretrained_refuses_every_gptqmodel_only_method(tmp_path, quant_method):
+def test_hf_from_pretrained_refuses_every_refused_method(tmp_path, quant_method):
     """Plain transformers must raise instead of loading random weights (#4091 item 5)."""
 
     from transformers import AutoModelForCausalLM
 
-    from gptqmodel._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
+    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
 
-    assert quant_method in GPTQMODEL_ONLY_QUANT_METHODS
+    assert quant_method in REFUSED_HF_QUANT_METHODS
     source = tmp_path / quant_method
     _build_gptq_v1_checkpoint(str(source))
     config_path = source / "config.json"

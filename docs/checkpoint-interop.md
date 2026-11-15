@@ -297,8 +297,8 @@ Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
 `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
 `gptqmodel_gguf` instead and registers a refusing quantizer for that name.
 Every other GPT-QModel-only layout (`exl3`, `qqq`, `paroquant`, `macaq`,
-`nf12`, `tt-blockfloat`) is registered from the same table in
-`gptqmodel/_quant_methods.py`.
+`nf12`, `tt-blockfloat`) is registered from
+`REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`.
 
 The registration only exists after `import gptqmodel`. Plain `transformers`
 without that import does **not** raise for these names; `5.22` logs
@@ -314,9 +314,11 @@ flowchart TD
     C -- "METHOD.GGUF" --> D["quant_method: gptqmodel_gguf"]
     C -- "METHOD.AWQ" --> E["quant_method: awq"]
     C -- "METHOD.GPTQ" --> F["quant_method: gptq"]
+    C -- "METHOD.EXL3 / QQQ / PARO / MACAQ / NF12 / TT_BLOCKFLOAT" --> L["quant_method: exl3, qqq, ..."]
     D --> G["transformers get_hf_quantizer"]
-    G --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
-    G --> K["GPTQModelOnlyHfQuantizer.__init__<br/>raise ValueError"]
+    L --> G
+    G -- "gptqmodel_gguf" --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
+    G -- "REFUSED_HF_QUANT_METHODS entry" --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     E --> I["AwqHfQuantizer"]
     F --> J["GptqHfQuantizer"]
     style H fill:#f8d7da,stroke:#b02a37
@@ -330,7 +332,7 @@ Already-published GGUF checkpoints keep `quant_method: "gguf"` (plus
 accepted by `_normalize_quant_method`. Only new checkpoints publish the
 non-colliding name. `hf_compat_warnings` also warns at save time that a packed
 GGUF checkpoint is not loadable by plain Transformers, and emits the same
-save-time warning for every method in `GPTQMODEL_ONLY_QUANT_METHODS`.
+save-time warning for every method in `REFUSED_HF_QUANT_METHODS`.
 
 ## 11. `torch.save(model)` after `optimize()`
 

@@ -17,6 +17,7 @@ calling the production helpers, so a packer/rotation regression cannot hide
 behind the implementation it is checking.
 """
 
+import copy
 import math
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -689,7 +690,7 @@ def test_triton_kernels_match_torch():
     not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
 )
-@pytest.mark.parametrize("k", [896, 1152, 2176])
+@pytest.mark.parametrize("k", [896, 1152, 2176, 96, 288, 160])
 def test_triton_dense_kernel_masks_k_tail(k):
     """``BLOCK_K=256`` does not divide these hidden sizes.
 
@@ -775,3 +776,395 @@ def test_checkpoint_restores_recorded_macaq_triton_kernel():
         module_config, name="layer", config=config, kernel=MacaqLinear, lm_head_name="lm_head"
     )
     assert type(restored) is MacaqTritonLinear
+
+
+# ---------------------------------------------------------------------------
+# issue #4090 regressions
+# ---------------------------------------------------------------------------
+_E2M1_VALUES = torch.tensor(
+    [-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+    dtype=torch.float32,
+)
+_E2M1_MAG = torch.tensor([7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8)
+_E2M1_SIGN = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.uint8)
+_E2M1_THRESHOLDS = ((0.25, 1), (0.75, 2), (1.25, 3), (1.75, 4), (2.5, 5), (3.5, 6), (5.0, 7))
+
+
+def _reference_hadamard(block, *, device="cpu"):
+    """Independent normalized Sylvester Hadamard matrix, rounded like the port."""
+
+    matrix = torch.ones((1, 1), dtype=torch.float32)
+    while matrix.shape[0] < block:
+        matrix = torch.cat(
+            [torch.cat([matrix, matrix], dim=1), torch.cat([matrix, -matrix], dim=1)], dim=0
+        )
+    return (matrix / math.sqrt(block)).to(device=device, dtype=torch.bfloat16)
+
+
+def _reference_weight_mxfp4(weight, bh, offset=0):
+    """Independent MXFP4 RTN of the block-rotated weight (strict tie rule)."""
+
+    out_features, in_features = weight.shape
+    rotated = _reference_rotate(weight.to(torch.float32), bh.float())
+    grouped = rotated.reshape(out_features, in_features // 32, 32)
+    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+    exponent = (torch.floor(torch.log2(amax)) - 2.0 + offset).clamp(-127.0, 127.0)
+    scale = torch.exp2(exponent)
+    normalized = (grouped / scale).abs()
+    code = torch.zeros_like(grouped, dtype=torch.long)
+    for threshold, level in _E2M1_THRESHOLDS:
+        code = torch.where(normalized > threshold, torch.full_like(code, level), code)
+    negative = grouped < 0
+    signed = torch.where(
+        code == 0, torch.full_like(code, 7), torch.where(negative, 7 - code, 7 + code)
+    ).reshape(out_features, in_features)
+    values = _E2M1_VALUES.to(weight.device)[signed] * scale.expand(-1, -1, 32).reshape(
+        out_features, in_features
+    )
+    nibbles = (_E2M1_SIGN.to(weight.device)[signed] << 3) | _E2M1_MAG.to(weight.device)[signed]
+    packed = (nibbles[:, 1::2] << 4) | nibbles[:, 0::2]
+    scales = (exponent.squeeze(-1) + 127).clamp(0, 254).to(torch.uint8)
+    return packed.contiguous(), scales, values
+
+
+def _reference_activation_mxfp4(values):
+    """Independent MXFP4 packer for the activation kernel (>= tie rule)."""
+
+    rows, k = values.shape
+    grouped = values.to(torch.float32).reshape(rows, k // 32, 32)
+    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp_min(1e-20)
+    exponent = (torch.floor(torch.log2(amax)) - 2.0).clamp(-127.0, 127.0)
+    scale = torch.exp2(exponent)
+    normalized = (grouped / scale).abs()
+    code = torch.zeros_like(grouped, dtype=torch.long)
+    for threshold, level in _E2M1_THRESHOLDS:
+        code = torch.where(normalized >= threshold, torch.full_like(code, level), code)
+    negative = grouped < 0
+    signed = torch.where(
+        code == 0, torch.full_like(code, 7), torch.where(negative, 7 - code, 7 + code)
+    ).reshape(rows, k)
+    nibbles = (_E2M1_SIGN.to(values.device)[signed] << 3) | _E2M1_MAG.to(values.device)[signed]
+    packed = (nibbles[:, 1::2] << 4) | nibbles[:, 0::2]
+    scales = (exponent.squeeze(-1) + 127).clamp(0, 254).to(torch.uint8)
+    return packed.contiguous(), scales
+
+
+@pytest.mark.skipif(
+    not triton_mxfp4_available(), reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201"
+)
+def test_triton_row_offsets_are_int64_past_2gb():
+    """Rows past 2^31/K must read their own row, not a wrapped 32-bit offset.
+
+    A 1e9-row tensor is not runnable, so the input is a view whose storage
+    starts 2 GiB into a larger allocation: the buggy int32 offset for the
+    first overflowing row wraps to ``data_ptr - 2**31`` and silently reads
+    row 0's neighbourhood instead of the requested row.
+    """
+
+    from gptqmodel.utils.macaq_triton import quantize_mxfp4
+
+    free, _ = torch.cuda.mem_get_info()
+    if free < 8 * 2**30:
+        pytest.skip("int64 row-offset regression needs about 6 GiB of free GPU memory")
+
+    k = 8192
+    offset = 2**31
+    rows = offset // k + 2  # first row whose offset is 2**31
+    storage = torch.empty(offset + rows * k, dtype=torch.uint8, device="cuda")
+    try:
+        activations = storage[offset:offset + rows * k].view(rows, k)
+        torch.manual_seed(4090)
+        first = torch.randint(1, 256, (k,), dtype=torch.uint8, device="cuda")
+        last = torch.randint(1, 256, (k,), dtype=torch.uint8, device="cuda")
+        activations[0].copy_(first)
+        activations[-1].copy_(last)
+
+        packed, scales = quantize_mxfp4(activations)
+
+        expected_packed, expected_scales = _reference_activation_mxfp4(last.float().unsqueeze(0))
+        assert torch.equal(packed[-1], expected_packed[0])
+        assert torch.equal(scales[-1], expected_scales[0])
+
+        first_packed, first_scales = _reference_activation_mxfp4(first.float().unsqueeze(0))
+        assert torch.equal(packed[0], first_packed[0])
+        assert torch.equal(scales[0], first_scales[0])
+    finally:
+        del storage
+        torch.cuda.empty_cache()
+
+
+def test_macaq_row_offsets_widen_to_int64():
+    """All three row-indexed kernels must widen the program id.
+
+    The runtime regression above covers the activation quantizer; the weight
+    dequantizer and fused rotate+quantize use the same row offset and are
+    pinned statically because their 2^31 boundary needs a much larger tensor.
+    """
+
+    import inspect
+
+    from gptqmodel.utils import macaq_triton
+
+    for kernel in (
+        macaq_triton._quant_mxfp4_kernel,
+        macaq_triton._rot_scale_quant_kernel,
+        macaq_triton._dequant_w4_to_bf16_kernel,
+    ):
+        assert "tl.program_id(0).to(tl.int64)" in inspect.getsource(kernel.fn)
+
+
+@pytest.mark.skipif(
+    not triton_mxfp4_available(), reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201"
+)
+def test_macaq_triton_launches_bind_the_operand_device(monkeypatch):
+    """Every launch must enter the device that owns its tensors (#4090 item 3)."""
+
+    from gptqmodel.utils import macaq_triton
+
+    entered = []
+
+    class SpyDevice(torch.cuda.device):
+        def __init__(self, device):
+            entered.append(torch.device(device))
+            super().__init__(device)
+
+    monkeypatch.setattr(torch.cuda, "device", SpyDevice)
+    weight = torch.randn(8, 64, device="cuda")
+    activations = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16)
+    bh = macaq.make_hadamard(32, device="cuda", dtype=torch.bfloat16)
+
+    entered.clear()
+    packed, scales = macaq_triton.quantize_mxfp4(weight)
+    assert entered == [weight.device]
+
+    entered.clear()
+    macaq_triton.rot_scale_quantize_mxfp4(activations, None, bh)
+    assert entered == [activations.device]
+
+    entered.clear()
+    macaq_triton.dequant_w4_to_bf16(packed, scales)
+    assert entered == [packed.device]
+
+    entered.clear()
+    macaq_triton.mxfp4_w4a4_linear(activations, packed, scales, bh=bh)
+    assert entered.count(activations.device) >= 2
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2, reason="requires two visible CUDA/HIP devices"
+)
+@pytest.mark.skipif(
+    not triton_mxfp4_available(), reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201"
+)
+def test_macaq_module_on_non_current_gpu_stays_on_triton():
+    """A layer on ``cuda:1`` must not fall back when ``cuda:0`` is current."""
+
+    _, _, _, module = _quantized_module_pair()
+    other = copy.deepcopy(module).to("cuda:1")
+    x = torch.randn(4, module.in_features, device="cuda:0", dtype=torch.bfloat16)
+    torch.cuda.set_device(0)
+
+    expected = module(x)
+    actual = other(x.to("cuda:1"))
+
+    assert other._triton_disabled is False
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), atol=2e-3, rtol=2e-3)
+
+
+def _cpu_macaq_module():
+    torch.manual_seed(11)
+    layer = torch.nn.Linear(64, 8, bias=False)
+    quantizer = macaq.Macaq(
+        layer,
+        MacaqConfig(
+            n_flip_iters=0, do_flip=False, exp_screen=False, pre_mode="none", offload_to_disk=False
+        ),
+    )
+    quantizer.add_batch(torch.randn(32, 64))
+    result, _, _ = quantizer.quantize()
+    module = MacaqLinear(bits=4, group_size=32, in_features=64, out_features=8, bias=False)
+    module.pack(layer, macaq_result=result)
+    module.backend = BACKEND.MACAQ_TRITON
+    # Keep the latch in the decision so the tests exercise the real gate.
+    module._can_use_triton = lambda x: not module._triton_disabled
+    return module
+
+
+def test_macaq_transient_triton_oom_does_not_latch():
+    module = _cpu_macaq_module()
+    calls = []
+
+    def fail(x):
+        calls.append(1)
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    module._forward_triton = fail
+    x = torch.randn(2, 64, dtype=torch.bfloat16)
+    module(x)
+    assert module._triton_disabled is False
+    module(x)
+    assert len(calls) == 2
+
+
+def test_macaq_permanent_triton_error_latches():
+    module = _cpu_macaq_module()
+    calls = []
+
+    def fail(x):
+        calls.append(1)
+        raise ValueError("Pointer argument cannot be accessed from Triton (cpu tensor?)")
+
+    module._forward_triton = fail
+    x = torch.randn(2, 64, dtype=torch.bfloat16)
+    module(x)
+    assert module._triton_disabled is True
+    module(x)
+    assert len(calls) == 1
+
+
+def test_macaq_tiles_never_use_block_k_below_64():
+    """sm_120's native MXFP4 mma needs a K tile of at least 64 (#4090 item 4)."""
+
+    from gptqmodel.utils import macaq_triton
+
+    for rows, k in ((1, 32), (1, 96), (64, 96), (1, 64), (1, 128), (1, 256), (8, 160), (8, 288)):
+        assert macaq_triton._pick_tiles(rows, k)[2] >= 64
+
+
+def test_macaq_zero_sample_expert_uses_configured_fallback():
+    """An unrouted expert must RTN-quantize instead of crashing (#4090 item 5)."""
+
+    from gptqmodel.quantization import Fallback
+
+    torch.manual_seed(23)
+    layer = torch.nn.Linear(64, 8, bias=False)
+    quantizer = macaq.Macaq(layer, MacaqConfig(n_flip_iters=16, offload_to_disk=False))
+    quantizer.fallback = Fallback()
+    quantizer.expected_nsamples = 4096
+
+    result, _, loss = quantizer.quantize()
+
+    assert result.stats["fallback"] is True
+    assert math.isfinite(loss)
+    # Fallback is data-independent MXFP4 RTN: no D1, no exponent screen, no flip.
+    assert result.pre_scale is None
+    bh = _reference_hadamard(32, device=layer.weight.device)
+    expected_packed, expected_scales, expected_values = _reference_weight_mxfp4(
+        layer.weight.detach(), bh, offset=0
+    )
+    assert torch.equal(result.W_packed, expected_packed)
+    assert torch.equal(result.W_scales.view(torch.uint8), expected_scales)
+    assert torch.equal(result.dequantized_weight, expected_values)
+
+
+def test_macaq_low_sample_expert_uses_configured_fallback():
+    from gptqmodel.quantization import Fallback
+
+    torch.manual_seed(29)
+    layer = torch.nn.Linear(64, 8, bias=False)
+    quantizer = macaq.Macaq(layer, MacaqConfig(n_flip_iters=16, offload_to_disk=False))
+    quantizer.fallback = Fallback(threshold="0.5%")
+    quantizer.expected_nsamples = 1_000_000
+    quantizer.add_batch(torch.randn(1, 64))
+
+    result, _, _ = quantizer.quantize()
+
+    assert result.stats["fallback"] is True
+    assert result.pre_scale is None
+
+
+def test_macaq_zero_sample_expert_without_fallback_raises():
+    layer = torch.nn.Linear(64, 8, bias=False)
+    quantizer = macaq.Macaq(layer, MacaqConfig(n_flip_iters=0, offload_to_disk=False))
+    quantizer.fallback = None
+    quantizer.expected_nsamples = 4096
+
+    with pytest.raises(ValueError, match="no usable calibration signal"):
+        quantizer.quantize()
+
+
+@pytest.mark.parametrize("offset", [-1, 2])
+def test_single_offset_is_applied_to_the_rtn_path(offset):
+    """A one-element `exp_offsets` must pick that exponent (#4090 item 6)."""
+
+    torch.manual_seed(31)
+    weight = torch.randn(8, 64)
+    hessian = torch.eye(64)
+
+    result = macaq.macaq_quantize_weight(
+        weight, hessian, 64, exp_offsets=(offset,), do_flip=False, pre_mode="none"
+    )
+    plain_zero = macaq.macaq_quantize_weight(
+        weight, hessian, 64, exp_offsets=(0,), do_flip=False, pre_mode="none"
+    )
+
+    bh = _reference_hadamard(32, device=weight.device)
+    expected_packed, expected_scales, _ = _reference_weight_mxfp4(weight, bh, offset=offset)
+    assert torch.equal(result.W_packed, expected_packed)
+    assert torch.equal(result.W_scales.view(torch.uint8), expected_scales)
+    assert not torch.equal(
+        result.W_scales.view(torch.uint8), plain_zero.W_scales.view(torch.uint8)
+    )
+
+
+def test_macaq_dynamic_false_excludes_modules():
+    """`dynamic={pattern: False}`, as documented, must not crash (#4090 item 7)."""
+
+    config = MacaqConfig(
+        dynamic={
+            ".*down_proj": False,
+            "model.layers.0.mlp.up_proj": {"do_flip": False},
+        }
+    )
+    assert config.dynamic_get("model.layers.0.mlp.down_proj") is False
+    assert config.dynamic_get("model.layers.0.mlp.up_proj") == {"do_flip": False}
+    assert config.dynamic_get("model.layers.0.mlp.gate_proj") is None
+
+    payload = config.to_dict()
+    assert payload["dynamic"]["-:.*down_proj"] == {}
+    restored = QuantizeConfig.from_quant_config(payload)
+    assert restored.dynamic_get("model.layers.0.mlp.down_proj") is False
+    assert restored.dynamic_get("model.layers.0.mlp.up_proj") == {"do_flip": False}
+
+
+@pytest.mark.parametrize("method", ["macaq", "paroquant", "qqq", "nf12", "tt-blockfloat"])
+def test_transformers_refuses_gptqmodel_only_quant_methods(method):
+    """An unknown HF quant method only warns and random-inits (#4090 item 2)."""
+
+    from transformers.quantizers import auto as hf_quant_auto
+    from transformers.quantizers.auto import AutoHfQuantizer, AutoQuantizationConfig
+
+    from gptqmodel.utils.hf_refusing_quantizer import (
+        GPTQModelRefusingHfQuantizer,
+        GPTQModelRefusingQuantizationConfig,
+    )
+
+    assert hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[method] is GPTQModelRefusingQuantizationConfig
+    assert hf_quant_auto.AUTO_QUANTIZER_MAPPING[method] is GPTQModelRefusingHfQuantizer
+
+    config = AutoQuantizationConfig.from_dict({"quant_method": method, "bits": 4})
+    assert isinstance(config, GPTQModelRefusingQuantizationConfig)
+    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
+        AutoHfQuantizer.from_config(config)
+
+
+def test_hf_from_pretrained_refuses_macaq_checkpoint(tmp_path):
+    from transformers import AutoModelForCausalLM, LlamaConfig
+
+    model_config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    model_config.quantization_config = {
+        "quant_method": "macaq",
+        "bits": 4,
+        "format": "mxfp4_macaq",
+    }
+    model_config.save_pretrained(str(tmp_path))
+
+    with pytest.raises(ValueError, match="MACaQ MXFP4 checkpoints cannot be loaded"):
+        AutoModelForCausalLM.from_pretrained(str(tmp_path), local_files_only=True)

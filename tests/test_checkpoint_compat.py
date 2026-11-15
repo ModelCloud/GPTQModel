@@ -237,10 +237,10 @@ def test_hf_compat_warning_for_every_gptqmodel_only_method():
     """A save must name every layout plain transformers cannot read."""
     from types import SimpleNamespace
 
-    from gptqmodel._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
+    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
     from gptqmodel.models.writer import hf_compat_warnings
 
-    for quant_method in GPTQMODEL_ONLY_QUANT_METHODS:
+    for quant_method in REFUSED_HF_QUANT_METHODS:
         warnings = hf_compat_warnings(
             SimpleNamespace(method=quant_method, lm_head=False, bits=4), FORMAT.GPTQ
         )
@@ -254,22 +254,22 @@ def test_hf_compat_warning_for_every_gptqmodel_only_method():
     ) == []
 
 
-def test_every_gptqmodel_only_method_registers_a_refusing_quantizer():
+def test_every_refused_method_registers_a_refusing_quantizer():
     from transformers.quantizers import auto as hf_auto
 
-    from gptqmodel._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
-    from gptqmodel.utils.hf_quant_refusal import (
-        GPTQModelOnlyHfQuantizer,
-        GPTQModelOnlyQuantizationConfig,
+    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
+    from gptqmodel.utils.hf_refusing_quantizer import (
+        GPTQModelRefusingHfQuantizer,
+        GPTQModelRefusingQuantizationConfig,
     )
 
-    for quant_method in GPTQMODEL_ONLY_QUANT_METHODS:
+    for quant_method in REFUSED_HF_QUANT_METHODS:
         assert (
-            hf_auto.AUTO_QUANTIZER_MAPPING[quant_method] is GPTQModelOnlyHfQuantizer
+            hf_auto.AUTO_QUANTIZER_MAPPING[quant_method] is GPTQModelRefusingHfQuantizer
         )
         assert (
             hf_auto.AUTO_QUANTIZATION_CONFIG_MAPPING[quant_method]
-            is GPTQModelOnlyQuantizationConfig
+            is GPTQModelRefusingQuantizationConfig
         )
 
 

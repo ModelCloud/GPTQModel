@@ -23,7 +23,7 @@ from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
-from .._quant_methods import GPTQMODEL_ONLY_QUANT_METHODS
+from .._quant_methods import REFUSED_HF_QUANT_METHODS
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
@@ -275,7 +275,7 @@ def hf_compat_warnings(
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)
-    if method_name in GPTQMODEL_ONLY_QUANT_METHODS:
+    if method_name in REFUSED_HF_QUANT_METHODS:
         warnings.append(
             f"`quant_method: \"{method_name}\"` is a GPT-QModel-only layout that "
             "`transformers` cannot read: `AutoModelForCausalLM.from_pretrained` "

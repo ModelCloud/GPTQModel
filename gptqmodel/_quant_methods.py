@@ -6,9 +6,6 @@ Kept out of ``gptqmodel.quantization.config`` so ``gptqmodel/__init__.py`` can
 import it before the quantization package finishes initializing.
 """
 
-from typing import Tuple
-
-
 # GPT-QModel's packed GGUF tensors are not readable by transformers' own
 # `GgufHfQuantizer`, which owns the `gguf` name and expects a `.gguf` file.
 # Publish a non-colliding name so an HF loader fails loudly instead of
@@ -16,17 +13,17 @@ from typing import Tuple
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
-# The single table of `quant_method` names GPT-QModel publishes for layouts
-# that plain `transformers` does not implement. `transformers` only warns
-# ("Unknown quantization type ... skip the quantization") and then
-# random-initializes every linear layer, so package import registers a refusing
-# quantizer for each name here and the writer warns at save time. Add a method
-# here, not at a call site, when it becomes GPT-QModel-only.
-GPTQMODEL_ONLY_QUANT_METHODS: Tuple[str, ...] = (
-    "exl3",
-    "qqq",
-    "paroquant",
-    "macaq",
-    "nf12",
-    "tt-blockfloat",
-)
+# Other published `quant_method` names that transformers does not implement.
+# In transformers 5.x an unknown name only emits "Unknown quantization type"
+# and returns a model whose packed weights were randomly initialized, so
+# `gptqmodel/__init__.py` registers a refusing quantizer for every entry here.
+# Keep this as one table: parallel fixes extend the same mapping.
+# Values are the human-readable format labels used in the refusal message.
+REFUSED_HF_QUANT_METHODS = {
+    "exl3": "EXL3",
+    "macaq": "MACaQ MXFP4",
+    "paroquant": "ParoQuant",
+    "qqq": "QQQ",
+    "nf12": "NF12",
+    "tt-blockfloat": "Tenstorrent block-float",
+}

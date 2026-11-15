@@ -157,19 +157,21 @@ publishes several layouts transformers does not implement (`exl3`, `qqq`,
 `gptqmodel_gguf` alias.
 
 `gptqmodel/__init__.py` registers a refusing quantizer for each name from the
-single table in `gptqmodel/_quant_methods.py`:
+single table `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`, using
+the classes in `gptqmodel/utils/hf_refusing_quantizer.py`:
 
 ```mermaid
 flowchart TD
-    A["import gptqmodel"] --> B["_patch_transformers_gptqmodel_only_quantizer_compat"]
-    B --> C["GPTQMODEL_ONLY_QUANT_METHODS"]
-    C --> D["AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault<br/>GPTQModelOnlyQuantizationConfig"]
-    C --> E["AUTO_QUANTIZER_MAPPING.setdefault<br/>GPTQModelOnlyHfQuantizer"]
-    B --> F["GGUF_EXPORT_QUANT_METHOD<br/>GPTQModelGGUFQuantizationConfig"]
+    A["import gptqmodel"] --> B["_patch_transformers_refusing_quantizers"]
+    B --> C["REFUSED_HF_QUANT_METHODS"]
+    C --> D["AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault<br/>GPTQModelRefusingQuantizationConfig"]
+    C --> E["AUTO_QUANTIZER_MAPPING.setdefault<br/>GPTQModelRefusingHfQuantizer"]
+    A --> F["_patch_transformers_gptqmodel_gguf_quantizer_compat"]
+    F --> F2["GGUF_EXPORT_QUANT_METHOD registered"]
     G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.from_config"]
     H --> I{"quant_method registered?"}
     I -- no --> J["warn and skip quantization<br/>random Linear weights"]
-    I -- yes --> K["GPTQModelOnlyHfQuantizer.__init__<br/>raise ValueError"]
+    I -- yes --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     style J fill:#f8d7da,stroke:#b02a37
     style K fill:#d9f2d9,stroke:#2e7d32
 ```
@@ -179,7 +181,8 @@ flowchart TD
 transformers does not implement. The registration runs on package import, so
 a process that never imports `gptqmodel` still only sees transformers'
 warning. The writer emits `hf_compat_warnings` at save time for the same
-table, so a checkpoint is labelled before anyone tries to load it.
+table, so a checkpoint is labelled before anyone tries to load it. The
+per-format table also appears in [the MACaQ page](macaq.md#transformers-interop).
 
 | Situation | Before | After |
 | --- | --- | --- |

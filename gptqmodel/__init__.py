@@ -128,50 +128,62 @@ def _patch_transformers_gptq_device_map_compat():
         GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
 
 
-def _patch_transformers_gptqmodel_only_quantizer_compat():
-    """Make transformers refuse every GPT-QModel-only checkpoint loudly.
+def _patch_transformers_gptqmodel_gguf_quantizer_compat():
+    """Make transformers refuse GPT-QModel packed GGUF checkpoints loudly.
 
-    For an unknown `quant_method`, `transformers` only warns and then
-    random-initializes every linear layer. `gptqmodel_gguf` is a deliberate
-    alias because `transformers` reserves `quant_method: "gguf"` for its own
-    `GgufHfQuantizer`, which expects a `.gguf` file. Both cases register a
-    refusing quantizer from the single table in `._quant_methods`.
+    `transformers` reserves `quant_method: "gguf"` for its own
+    `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
+    `gptqmodel_gguf`; registering a refusing quantizer for that name turns an
+    otherwise silent random-weight load into an actionable error.
     """
     try:
         from transformers.quantizers import auto as hf_quant_auto
     except ImportError:
-        log.debug(
-            "GPT-QModel quantizer guard inactive: transformers quantizer API changed",
-            exc_info=True,
-        )
+        log.debug("GPT-QModel GGUF quantizer guard inactive: transformers quantizer API changed", exc_info=True)
         return
 
-    from ._quant_methods import GGUF_EXPORT_QUANT_METHOD, GPTQMODEL_ONLY_QUANT_METHODS
+    from ._quant_methods import GGUF_EXPORT_QUANT_METHOD
     from .utils.hf_gguf_quantizer import (
         GPTQModelGGUFHfQuantizer,
         GPTQModelGGUFQuantizationConfig,
     )
-    from .utils.hf_quant_refusal import (
-        GPTQModelOnlyHfQuantizer,
-        GPTQModelOnlyQuantizationConfig,
-    )
 
     with _MONKEY_PATCH_LOCK:
-        # `setdefault` keeps a quantizer that transformers already owns. The
-        # GGUF alias is ours, and every table entry is a name transformers
-        # does not implement.
         hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault(
             GGUF_EXPORT_QUANT_METHOD, GPTQModelGGUFQuantizationConfig
         )
         hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
             GGUF_EXPORT_QUANT_METHOD, GPTQModelGGUFHfQuantizer
         )
-        for quant_method in GPTQMODEL_ONLY_QUANT_METHODS:
+
+
+def _patch_transformers_refusing_quantizers():
+    """Make transformers refuse every GPT-QModel-only packed checkpoint format.
+
+    Without a registered quantizer, transformers 5.x only warns about the
+    unknown `quant_method` and returns a plain model with randomly initialized
+    packed weights. The names live in one table so parallel method fixes do not
+    race on this registration.
+    """
+    try:
+        from transformers.quantizers import auto as hf_quant_auto
+    except ImportError:
+        log.debug("GPT-QModel refusing quantizers inactive: transformers quantizer API changed", exc_info=True)
+        return
+
+    from ._quant_methods import REFUSED_HF_QUANT_METHODS
+    from .utils.hf_refusing_quantizer import (
+        GPTQModelRefusingHfQuantizer,
+        GPTQModelRefusingQuantizationConfig,
+    )
+
+    with _MONKEY_PATCH_LOCK:
+        for method in REFUSED_HF_QUANT_METHODS:
             hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault(
-                quant_method, GPTQModelOnlyQuantizationConfig
+                method, GPTQModelRefusingQuantizationConfig
             )
             hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
-                quant_method, GPTQModelOnlyHfQuantizer
+                method, GPTQModelRefusingHfQuantizer
             )
 
 
@@ -465,7 +477,8 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
-_patch_transformers_gptqmodel_only_quantizer_compat()
+_patch_transformers_gptqmodel_gguf_quantizer_compat()
+_patch_transformers_refusing_quantizers()
 _patch_openvino_gptqmodel_compat()
 _patch_transformers_causal_conv1d_hub_kernel_compat()
 
