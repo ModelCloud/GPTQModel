@@ -2076,6 +2076,14 @@ class GGUFTritonKernel(GGUFTorchLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
+        # The fused Triton matmuls are raw launches with no backward. Use the
+        # differentiable GGUF torch path when autograd must flow through the
+        # activation or the bias (#4072).
+        if torch.is_grad_enabled() and (
+            x.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        ):
+            return super().forward(x)
+
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
 

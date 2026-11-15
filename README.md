@@ -223,7 +223,7 @@ For how each decoder layer is replayed with the attention mask and rotary embedd
 For the outer-loop work multimodal models apply outside a decoder layer—DeepStack residuals, Gemma-3 image-block masks, padded batches, and the Qwen2.5-Omni lazy checkpoint aliases—see [multimodal calibration replay](docs/multimodal-calibration.md).
 For the base-type mask, the `super()` contract for definition replay overrides, and AWQ's typed rotary call, see [layer-type replay masks](docs/layer-type-replay-masks.md).
 For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
-For the CPU int4pack group-size gate, CPU-offload kernel selection, `max_memory` layer placement, and the `torch.compile` paths that must stay lowerable, see [CPU and offload dispatch](docs/kernel-dispatch-cpu.md).
+For the CPU int4pack group-size gate, CPU-offload kernel selection, `max_memory` layer placement, the `torch.compile` paths that must stay lowerable, HIP JIT source staging, and the bitsandbytes/GGUF autograd gate, see [CPU and offload dispatch](docs/kernel-dispatch-cpu.md).
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `ResolvedModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.

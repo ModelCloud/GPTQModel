@@ -188,6 +188,46 @@ def test_cpu_fp16_biased_layers_keep_the_fused_path(cls_name):
     assert module.linear_mode in (LinearMode.INFERENCE, "inference")
 
 
+@pytest.mark.parametrize("cls_name", ["TorchAtenLinear", "TorchFusedLinear"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_cpu_fused_layers_compile_through_the_int4pack_path(cls_name, dtype):
+    """#4068: the fused FP32 cast must not stop Inductor from lowering int4pack."""
+
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import (
+        TorchAtenLinear,
+        _has_local_int4pack_cpu_ops,
+    )
+    from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+
+    if not _has_local_int4pack_cpu_ops():
+        pytest.skip("PyTorch CPU int4pack ops unavailable")
+    classes = {
+        "TorchAtenLinear": TorchAtenLinear,
+        "TorchFusedLinear": TorchFusedLinear,
+    }
+    module = _gptq_fixture(classes[cls_name]).to(dtype).eval()
+    x = torch.full((1, K), X_VALUE, dtype=dtype)
+    with torch.inference_mode():
+        eager = module(x)
+        compiled = torch.compile(module, backend="inductor")
+        actual = compiled(x)
+
+    for out in (eager, actual):
+        assert out.dtype == dtype
+        assert torch.isfinite(out).all()
+        if dtype is torch.float16:
+            expected = float(torch.tensor(EXPECTED, dtype=dtype))
+            torch.testing.assert_close(
+                out.float(), torch.full_like(out.float(), expected), rtol=0, atol=0
+            )
+        else:
+            # BF16 spacing at this magnitude is 256; the kernel keeps the
+            # pre-bias product in FP32, so it may land on an adjacent BF16
+            # grid point. The invariant here is finite and one ULP from truth.
+            assert (out.float() - EXPECTED).abs().max().item() <= 256.0
+    torch.testing.assert_close(actual, eager, rtol=0, atol=0)
+
+
 def test_cpu_awq_torch_adds_bias_before_the_cast():
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 

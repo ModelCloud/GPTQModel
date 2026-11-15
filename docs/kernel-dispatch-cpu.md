@@ -45,6 +45,27 @@ flowchart TD
 explicit `backend="gptq_torch_fused"` now fails at selection with the resolved
 size instead of failing on the first forward.
 
+### Kernel `optimize` signature
+
+`BaseQModel.optimize` forwards `(backend, mode, fullgraph)` to every quantized
+module. `TorchAtenLinear`, `TorchFusedLinear`, `TorchFusedAwqLinear`,
+`TorchAtenAwqLinear` and `TorchInt8Linear` overrode `optimize(self)` with no
+parameters, so `model.optimize()` raised `TypeError` before compiling any CPU
+AUTO model. The overrides now match the base signature and forward all three
+options to `super().optimize(...)`.
+
+```mermaid
+flowchart TD
+    A["model.optimize(backend, mode, fullgraph)"] --> B["find_modules(BaseQuantLinear)"]
+    B --> C["module.optimize(fullgraph=False,<br/>backend=..., mode=...)"]
+    C --> D{"CPU kernel override<br/>accepts the keywords?"}
+    D -- "before" --> E["TypeError:<br/>unexpected keyword fullgraph"]
+    D -- "after" --> F["BaseQuantLinear.optimize"]
+    F --> G["model-level torch.compile"]
+    style E fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style G fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
 ## 2. CPU-offload device maps
 
 `normalize_device_device_map` deliberately ignores CPU map entries when it picks
@@ -93,6 +114,14 @@ Measured on Qwen2.5-0.5B-Instruct-GPTQ-Int4 with
 accelerator. `max_memory` was accepted through `**kwargs` and never read, so a
 cap such as `{0: "350MiB", "cpu": "8GiB"}` still put every module on `cuda:0`.
 
+An indexed `device` (`"cuda:0"` or `torch.device("cuda:0")`) was converted to
+`{"": device}` *after* the `device_map`/`max_memory` conflict check, so
+`device="cuda:0", max_memory=...` took the explicit-map branch and silently
+dropped the cap (#4068). `_normalize_explicit_placement` now decides both
+inputs together: an indexed device becomes a full-model map only when there is
+no memory budget; with `max_memory` the device selects the accelerator family
+and the budgeted layer-wise map owns placement.
+
 The map builder now parses the budgets, restricts the candidate devices to the
 named ones, and places units in order:
 
@@ -115,12 +144,29 @@ flowchart TD
     style L fill:#f8d7da,stroke:#b02a37,stroke-width:2px
 ```
 
+```mermaid
+flowchart TD
+    A["from_quantized(device, device_map, max_memory)"] --> B["_normalize_explicit_placement"]
+    B --> C{"explicit device_map dict<br/>and max_memory?"}
+    C -- "yes" --> D["ValueError:<br/>pass one, not both"]
+    C -- "no" --> E{"indexed device and<br/>no max_memory?"}
+    E -- "yes" --> F["explicit_device_map =<br/>full-model map"]
+    E -- "no" --> G["requested_device_map stays None"]
+    G --> H["_resolve_default_layerwise_device(device)"]
+    H --> I["build_layerwise_device_map<br/>max_memory=budgets"]
+    F --> J["honor the explicit map"]
+    style D fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style I fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
 Rules that the implementation pins:
 
 * Only devices named in `max_memory` are candidates; an unlisted GPU is never
   used.
 * `device_map` as a dict and `max_memory` together are rejected instead of
   silently preferring one.
+* An indexed `device` beside `max_memory` selects the accelerator family; it
+  does not replace the budgeted map.
 * A unit that does not fit any budget raises; a memory cap is never exceeded
   silently.
 * Parameterless structural modules (rotary embeddings) stay on an accelerator
@@ -133,6 +179,7 @@ Measured with Qwen2.5-0.5B-Instruct-GPTQ-Int4 on one RTX 4090:
 | --- | --- | --- |
 | `{0: "350MiB", "cpu": "8GiB"}` | 28 modules on `cuda:0`, 0 on CPU | 16 on `cuda:0`, 12 on CPU |
 | `{0: "4GiB"}` | 28 on `cuda:0` | 28 on `cuda:0` |
+| `{0: "300MiB", "cpu": "20GiB"}`, `device="cuda:0"` | every module on `cuda:0` (cap dropped) | 2 modules on `cuda:0`, 18 on CPU |
 
 ## 4. `torch.compile` contracts
 
@@ -169,7 +216,95 @@ decorated with `torch.compiler.disable`: the launch stays eager inside an
 otherwise compiled model. This is a deliberate graph break, not a silent
 fallback to a different kernel.
 
-## 5. Test contracts
+### CPU int4pack under `torch.compile`
+
+`_cpu_int4pack_mm` casts FP16/BF16 operands to FP32 and calls
+`aten::_weight_int4pack_mm_for_cpu`. Inductor fused the cast into a Pointwise
+node and then could not lower the int4pack op on it (`LoweringException`). The
+function is now decorated with `torch.compiler.disable`, so the cast and the op
+run eagerly inside an otherwise compiled model.
+
+```mermaid
+flowchart TD
+    A["TorchAtenLinear.forward / TorchFusedLinear.forward"] --> B{"biased FP16 or BF16?"}
+    B -- "yes" --> C["_cpu_int4pack_mm<br/>FP32 product"]
+    B -- "no" --> D["_cpu_int4pack_mm<br/>activation-dtype product"]
+    C --> E["torch.compiler.disable boundary"]
+    D --> E
+    E --> F["aten::_weight_int4pack_mm_for_cpu<br/>eager"]
+    F --> G["bias add, round once"]
+    style E fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+The FP32 product that #4060 added for a biased FP16 layer is unchanged: only
+the tracing boundary moved. A compiled FP16+Bias and BF16 layer therefore
+still returns the finite, once-rounded result of the eager path.
+
+## 5. HIP JIT source staging
+
+torch's ROCm loader hipifies an out-of-tree source by writing
+`<name>_hip.{hip,cpp}` next to the original. Five loaders passed checkout paths
+directly, so a build mutated `gptqmodel_ext/` (the names are gitignored, which
+hid it) and a read-only site-packages install could not build at all.
+
+`TorchOpsJitExtension(stage_hip_sources=True)` copies the source root into
+`<base_build_root>/_src` before the fingerprint/build, rewrites the source and
+include paths to that copy, and leaves the shipped tree untouched. It is used
+by `allspark_hip`, `hadamard`, `gptq_cuda`, `exllamav3` and `paroquant`;
+`nf12_hip` and `tt_blockfloat_hip` already stage their own sources.
+
+```mermaid
+flowchart TD
+    A["TorchOpsJitExtension.load()"] --> B["_resolved_sources_and_include_paths"]
+    B --> C{"stage_hip_sources and ROCm?"}
+    C -- "no" --> D["build from checkout paths"]
+    C -- "yes" --> E["copy source root to<br/>base_build_root/_src"]
+    E --> F["remap sources and include paths"]
+    F --> G["torch JIT build + hipify"]
+    G --> H["generated files stay in _src"]
+    D --> I["generated files may land<br/>next to the checkout"]
+    style I fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style H fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+## 6. ParoQuant strided decode
+
+`generate()` feeds `hidden_states[:, -1:, :]`, which is a strided view.
+`ParoLinear.forward` packed it after #4047, but `ParoQuantTritonLinear`
+overrode `forward` and passed `x.reshape(-1, K)` to the fused rotation, which
+rejects non-contiguous tensors. The Triton override now calls
+`.contiguous()` on the flat activation.
+
+```mermaid
+flowchart LR
+    A["hidden_states[:, -1:, :]"] --> B["x.reshape(-1, K)"]
+    B --> C{"contiguous?"}
+    C -- "no" --> D["RuntimeError:<br/>rotation tensors must be contiguous"]
+    C -- "yes" --> E["fused rotation + Triton plan"]
+    style D fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style E fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+## 7. bitsandbytes and GGUF autograd gate
+
+The bitsandbytes ROCm Triton GEMM and the fused GGUF Triton matmuls are raw
+Triton launches with no backward. Both dispatch sites now check
+`torch.is_grad_enabled() and x.requires_grad` (GGUF also checks a trainable
+bias) and take the differentiable path instead: the vendor bitsandbytes kernel
+and `GGUFTorchLinear.forward`.
+
+```mermaid
+flowchart TD
+    A["quantized linear forward"] --> B{"grad enabled and<br/>input or bias requires grad?"}
+    B -- "yes" --> C["vendor bnb matmul_4bit<br/>or GGUF torch forward"]
+    B -- "no" --> D["Triton fused matmul"]
+    C --> E["autograd graph retained"]
+    D --> F["inference fast path"]
+    style C fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+    style E fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+## 8. Test contracts
 
 | Test | Invariant |
 | --- | --- |
@@ -179,6 +314,13 @@ fallback to a different kernel.
 | `tests/kernels/test_selection.py::test_auto_cpu_offload_skips_a_cuda_only_post_init` | CPU-offload maps reject CUDA-only `post_init` |
 | `tests/kernels/test_selection.py::test_explicit_cuda_only_backend_rejects_a_cpu_offload_map` | explicit Marlin + CPU offload fails with guidance |
 | `tests/test_layerwise_device_placement.py` | budget parsing, greedy placement, overflow, CPU detection |
+| `tests/test_layerwise_device_placement.py::test_max_memory_keeps_the_indexed_device_for_the_budgeted_map` | an indexed `device` does not displace `max_memory` |
+| `tests/test_cpu_kernel_optimize.py` | `model.optimize()` reaches all five CPU kernel overrides |
+| `tests/test_inference_fp16_overflow.py::test_cpu_fused_layers_compile_through_the_int4pack_path` | FP16+Bias and BF16 int4pack layers compile and stay finite |
+| `tests/test_hip_jit_source_staging.py` | HIP sources are staged under the build cache; no loader writes into the checkout |
+| `tests/kernels/test_paroquant.py::test_paroquant_cuda_forward_packs_a_strided_activation` | both `ParoLinear` and `ParoQuantTritonLinear` accept a strided decode slice |
+| `tests/kernels/test_bitsandbytes_rocm_triton.py::test_triton_dispatch_falls_back_when_the_input_needs_grad` | M=16 grad input uses the vendor kernel |
+| `tests/kernels/test_gguf_triton_bias_epilogue.py::test_grad_input_uses_the_differentiable_torch_path` | GGUF grad input uses `GGUFTorchLinear` |
 | `tests/kernels/test_linear_fp32_reduce.py::test_bias_path_eager_output_is_bitwise_unchanged` | eager bias rounding is bitwise unchanged |
 | `tests/kernels/test_linear_fp32_reduce.py::test_compiled_bias_path_uses_a_lowerable_gemm` | the compiled graph contains no `addmm` |
 | `tests/kernels/test_w4afp8_gb10.py::test_w4afp8_linear_runs_under_torch_compile` | W4A runs inside `torch.compile` |

@@ -532,12 +532,15 @@ def test_linear_wide_bias_promotes_mismatched_cuda_dtypes(dtype):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm GPU required")
 @pytest.mark.cuda
-def test_paroquant_cuda_forward_packs_a_strided_activation():
+@pytest.mark.parametrize("module_cls", [ParoLinear, ParoQuantTritonLinear])
+def test_paroquant_cuda_forward_packs_a_strided_activation(module_cls):
     """A strided decode-step slice must reach the fused rotation packed."""
     from gptqmodel.utils.paroquant import _load_rotation_extension
 
     if not _load_rotation_extension():
         pytest.skip("fused ParoQuant rotation extension unavailable")
+    if module_cls is ParoQuantTritonLinear:
+        pytest.importorskip("triton")
 
     bits = 4
     in_features = 128
@@ -546,7 +549,7 @@ def test_paroquant_cuda_forward_packs_a_strided_activation():
     qweight, qzeros, scales, bias = _make_packed_buffers(
         bits, in_features, out_features, group_size
     )
-    module = ParoLinear(
+    module = module_cls(
         bits=bits,
         group_size=group_size,
         sym=True,
