@@ -98,7 +98,7 @@ def test_nf12_mlx_decode_is_bit_exact(monkeypatch, escapes):
 
 
 @pytest.mark.parametrize("escapes", [False, True])
-@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16, 33])
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 12, 16, 33])
 @requires_metal
 def test_nf12_mlx_forward_matches_torch(monkeypatch, escapes, rows):
     source = _source(escapes=escapes)
@@ -197,7 +197,8 @@ def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, 
 
 @requires_metal
 def test_nf12_mlx_row_count_dispatch(monkeypatch):
-    """1 row uses the GEMV, 2..16 the fused tile, and 17+ one decode."""
+    """1..15 rows use the decode-plus-dot kernel, 16 the tile, 17+ one decode."""
+    from gptqmodel.nn_modules.qlinear import mlx_nf12
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
 
     source = _source(in_features=256, out_features=48)
@@ -206,21 +207,38 @@ def test_nf12_mlx_row_count_dispatch(monkeypatch):
     assert isinstance(proj, MlxNF12Linear)
 
     rng = np.random.default_rng(37)
-    single = mx.array(rng.normal(0, 0.2, (1, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
-    np.testing.assert_array_equal(
-        np.array(model(single).astype(mx.float32)),
-        np.array(proj._gemv16(single).astype(mx.float32)).reshape(1, -1),
-    )
-    for rows in (2, 8, 16):
+    for rows in (1, 2, 4, 8):
         x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
-        # The tile epilogue applies the bias (and the split-K reduce does too).
-        tiled = proj._prefill(mx.array(x), rows)
+        direct = proj._rows(mx.array(x), rows)
         actual = model(mx.array(x))
-        mx.eval(tiled, actual)
-        np.testing.assert_allclose(
-            np.array(actual.astype(mx.float32)), np.array(tiled.astype(mx.float32)),
-            rtol=0, atol=0,
+        mx.eval(direct, actual)
+        np.testing.assert_array_equal(
+            np.array(actual.astype(mx.float32)), np.array(direct.astype(mx.float32)),
         )
+
+    # The decode-plus-dot kernel owns everything below the full 16-row tile,
+    # whatever the output width: the tile's per-super-atom barriers only pay
+    # for themselves at exactly 16 rows.
+    for rows in (9, 12, 16):
+        x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
+        direct = proj._rows(mx.array(x), rows)
+        actual = model(mx.array(x))
+        mx.eval(direct, actual)
+        np.testing.assert_array_equal(
+            np.array(actual.astype(mx.float32)), np.array(direct.astype(mx.float32)),
+        )
+
+    # A 16-row tile on a wide output takes the fused matrix-unit path.
+    monkeypatch.setattr(mlx_nf12, "_TILE_MIN_OUT_FEATURES", 0)
+    rows = 16
+    x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
+    # The tile epilogue applies the bias (and the split-K reduce does too).
+    tiled = proj._prefill(mx.array(x), rows)
+    actual = model(mx.array(x))
+    mx.eval(tiled, actual)
+    np.testing.assert_array_equal(
+        np.array(actual.astype(mx.float32)), np.array(tiled.astype(mx.float32)),
+    )
 
     rows = 17
     x = mx.array(rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
