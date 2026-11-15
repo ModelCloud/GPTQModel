@@ -855,6 +855,13 @@ class GPTQ:
             return torch.bfloat16
 
         if staging_dtype == torch.float16:
+            # float16 has a much narrower exponent range than bfloat16, so a
+            # bf16 activation outside +/-65504 becomes inf when staged. Never
+            # stage to a narrower-range dtype than the input.
+            if input_dtype == torch.bfloat16:
+                if not _device_supports_bfloat16(device):
+                    return torch.float32
+                return torch.bfloat16
             return torch.float16
 
         return torch.float32
