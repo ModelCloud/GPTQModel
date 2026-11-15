@@ -384,13 +384,176 @@ def test_hf_from_pretrained_refuses_packed_gguf(tmp_path):
         AutoModelForCausalLM.from_pretrained(str(source), local_files_only=True)
 
 
-def test_runtime_layout_kernels_refuse_state_dict():
-    marlin = object.__new__(MarlinLinear)
-    marlin._marlin_repacked = True
-    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
-        marlin._save_to_state_dict({}, "", False)
+def _runtime_layout_shell(cls, flag: str):
+    """A module flagged as holding an unrecoverable runtime layout."""
 
-    exllama = object.__new__(ExllamaV2Linear)
-    exllama._native_shuffled = True
-    with pytest.raises(RuntimeError, match="cannot be reconstructed"):
-        exllama._save_to_state_dict({}, "", False)
+    module = object.__new__(cls)
+    # Bypass the kernel constructor (it needs a device and real tensors) but
+    # still initialize the nn.Module bookkeeping that ``state_dict()`` uses.
+    torch.nn.Module.__init__(module)
+    module._qzeros_format = 2
+    setattr(module, flag, True)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("cls", "flag"),
+    [
+        (MarlinLinear, "_marlin_repacked"),
+        (ExllamaV2Linear, "_native_shuffled"),
+    ],
+    ids=["marlin", "exllamav2"],
+)
+def test_runtime_layout_state_dict_is_readable_but_checkpoint_writes_refuse(cls, flag):
+    """Issue #4091 item 4: PEFT calls ``state_dict()`` and must not fail.
+
+    ``set_peft_model_state_dict`` reads ``model.state_dict()``, so an
+    unconditional raise in ``_save_to_state_dict`` broke adapter loading on the
+    default CUDA kernel. Only a real checkpoint write must fail closed; a
+    read-only collection returns the runtime tensors.
+    """
+
+    from gptqmodel.utils.checkpoint_state import checkpoint_serialization
+
+    module = _runtime_layout_shell(cls, flag)
+
+    # Read-only collection: the PEFT path.
+    assert module._save_to_state_dict({}, "", False) is None
+    assert module.state_dict() == {}
+
+    # A checkpoint write must still refuse instead of publishing the layout.
+    with checkpoint_serialization():
+        with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+            module._save_to_state_dict({}, "", False)
+
+
+def _build_gptq_v2_checkpoint(path):
+    """Write a ``gptq_v2`` checkpoint of the same weights as the v1 fixture."""
+
+    os.makedirs(path, exist_ok=True)
+    config, model = _tiny_llama()
+    qcfg = QuantizeConfig(bits=BITS, group_size=GROUP, desc_act=False, sym=True, format=FORMAT.GPTQ_V2)
+    for name, linear in list(model.named_modules()):
+        if not isinstance(linear, torch.nn.Linear) or name == "lm_head":
+            continue
+        quant = TorchLinear(
+            bits=BITS,
+            group_size=GROUP,
+            desc_act=False,
+            sym=True,
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=False,
+            format=FORMAT.GPTQ_V2,
+        )
+        scales = torch.full((linear.out_features, linear.in_features // GROUP), 0.01)
+        zeros = torch.full_like(scales, 8)
+        quant.pack_original(linear, scales, zeros)
+        model.set_submodule(name, quant)
+
+    state = {name: value.clone() for name, value in model.state_dict().items()}
+    save_file(state, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})
+    config.architectures = ["LlamaForCausalLM"]
+    config.save_pretrained(path)
+    qcfg.save_pretrained(path)
+    _save_tokenizer(path)
+    return state
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "target_kind"),
+    [("v1", "v2"), ("v2", "v1")],
+    ids=["v1_into_v2_model", "v2_into_v1_model"],
+)
+def test_state_dict_copy_between_v1_and_v2_models(tmp_path, source_kind, target_kind):
+    """Issue #4091 item 3: a state dict must describe its own qzero layout.
+
+    ``_load_from_state_dict`` used to assume the incoming words matched the
+    *target's* ``_checkpoint_format_on_disk``. Nothing recorded the source
+    layout, so copying a state dict between a v1 and a v2 model shifted every
+    zero point while ``strict=True`` reported success.
+    """
+
+    paths = {}
+    for kind, builder in (("v1", _build_gptq_v1_checkpoint), ("v2", _build_gptq_v2_checkpoint)):
+        directory = tmp_path / kind
+        builder(str(directory))
+        paths[kind] = str(directory)
+
+    source = _load(paths[source_kind])
+    target = _load(paths[target_kind])
+    reference = _logits(target.model)
+
+    state = source.model.state_dict()
+    assert state._metadata["model.layers.0.self_attn.q_proj"]["qzeros_format"] in (1, 2)
+
+    result = target.model.load_state_dict(state)
+    assert not result.missing_keys and not result.unexpected_keys
+
+    # The copy is between models with identical weights, so it must be a no-op
+    # on the output regardless of the two on-disk qzero conventions.
+    assert _relative_error(reference, _logits(target.model)) < 1e-6
+
+    module = target.model.model.layers[0].self_attn.q_proj
+    assert module.qzero_format() == 2
+    # The live words must match the source module's logical zero points, not
+    # the raw words that were on disk in either checkpoint.
+    source_module = source.model.model.layers[0].self_attn.q_proj
+    assert torch.equal(module.qzeros, source_module.qzeros)
+
+
+@pytest.mark.cuda
+def test_marlin_state_dict_is_readable_for_peft():
+    """Issue #4091 item 4: PEFT loads an adapter by reading ``state_dict()``.
+
+    ``set_peft_model_state_dict`` calls ``model.state_dict()``. Marlin used to
+    raise unconditionally once it repacked, so merely *loading* an adapter
+    trained on another kernel failed. A read-only collection now returns the
+    runtime tensors; only a checkpoint write refuses.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for Marlin")
+
+    from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+    from gptqmodel.utils.checkpoint_state import checkpoint_serialization
+    from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
+    from gptqmodel.utils.packing import hf_pack_layer, hf_repack_layer
+
+    if not marlin_runtime_available(torch.float16):
+        pytest.skip(f"Marlin runtime unavailable: {marlin_runtime_error(torch.float16)}")
+
+    device = "cuda:0"
+    linear = torch.nn.Linear(128, 64, bias=False)
+    with torch.no_grad():
+        linear.weight.normal_(0.0, 0.1)
+    scales = torch.full((64, 1), 0.01)
+    g_idx = torch.arange(128, dtype=torch.int32) // 128
+
+    source = TorchLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        format=FORMAT.GPTQ_V2,
+    )
+    hf_pack_layer(source, linear, scales, None, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
+    source.to(device)
+
+    marlin = hf_repack_layer(source, BACKEND.MARLIN, device=device)
+    assert isinstance(marlin, MarlinLinear)
+    assert marlin._marlin_repacked
+
+    # The PEFT path: read-only collection must succeed and expose the runtime
+    # tensors that the kernel actually holds.
+    state = marlin.state_dict()
+    assert torch.equal(state["qweight"], marlin.qweight)
+    assert torch.equal(state["scales"], marlin.scales)
+
+    # A checkpoint write must still fail closed.
+    with checkpoint_serialization():
+        with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+            marlin.state_dict()
