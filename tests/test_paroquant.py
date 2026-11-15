@@ -2296,29 +2296,47 @@ def test_paroquant_run_stage_only_enables_active_gradients(monkeypatch):
     assert {name: param.requires_grad for name, param in model.named_parameters()} == original_flags
 
 
-def test_paroquant_is_not_registered_as_a_transformers_gptq_alias():
+def test_paroquant_is_not_aliased_to_a_transformers_gptq_quantizer():
     """ParoQuant is loaded by GPT-QModel, not through transformers' GPTQ path.
 
     Issue #4074 item 3: mapping `quant_method="paroquant"` to HF's `GPTQConfig`
     renamed the method to `gptq`, so optimum kernel selection rejected the
-    checkpoint with a FORMAT/METHOD mismatch. With no alias, transformers fails
-    cleanly on the unknown method and `GPTQModel.load` still handles ParoQuant.
+    checkpoint with a FORMAT/METHOD mismatch. Issue #4090 item 2: leaving the
+    name unknown is not enough either, because transformers 5.x only warns and
+    returns a randomly initialized model. The registered quantizer must refuse
+    instead of aliasing GPTQ.
     """
     from transformers.quantizers import auto as hf_quant_auto
+    from transformers.quantizers.auto import AutoHfQuantizer
 
-    assert "paroquant" not in hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING
-    assert "paroquant" not in hf_quant_auto.AUTO_QUANTIZER_MAPPING
+    from gptqmodel.utils.hf_gguf_quantizer import GPTQModelGGUFHfQuantizer
+    from gptqmodel.utils.hf_refusing_quantizer import (
+        GPTQModelRefusingHfQuantizer,
+        GPTQModelRefusingQuantizationConfig,
+    )
 
-    with pytest.raises(ValueError, match="Unknown quantization type, got paroquant"):
-        AutoQuantizationConfig.from_dict(
-            {
-                "quant_method": "paroquant",
-                "bits": 4,
-                "group_size": 128,
-                "sym": True,
-                "format": "paroquant",
-            }
-        )
+    assert (
+        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING["paroquant"]
+        is GPTQModelRefusingQuantizationConfig
+    )
+    assert (
+        hf_quant_auto.AUTO_QUANTIZER_MAPPING["paroquant"]
+        is GPTQModelRefusingHfQuantizer
+    )
+    assert hf_quant_auto.AUTO_QUANTIZER_MAPPING["paroquant"] is not GPTQModelGGUFHfQuantizer
+
+    config = AutoQuantizationConfig.from_dict(
+        {
+            "quant_method": "paroquant",
+            "bits": 4,
+            "group_size": 128,
+            "sym": True,
+            "format": "paroquant",
+        }
+    )
+    assert isinstance(config, GPTQModelRefusingQuantizationConfig)
+    with pytest.raises(ValueError, match="ParoQuant checkpoints cannot be loaded"):
+        AutoHfQuantizer.from_config(config)
 
 
 def test_paroquant_kernel_mapping_uses_paroquant_backend():
