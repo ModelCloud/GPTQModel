@@ -34,8 +34,8 @@ unquantized modules add storage beyond the nominal weight bit width.
 | Experimental GPTQ W4A | Packed GPTQ INT4 | Explicit FP8 or NVFP4 activation policy for selected Llama decoder operations | Required for fresh quantization |
 
 This is a recipe map, not a promise that every method, bit width, dtype, and
-device combination works. Check the [method/format/backend matrix](../README.md#quant-method--format--backend-matrix-)
-and [hardware table](../README.md#platform-and-hw-support-). `BACKEND.AUTO`
+device combination works. Check the [method/format/backend matrix](support-matrix.md#methods-formats-and-backends)
+and [hardware table](support-matrix.md#hardware-and-operating-systems). `BACKEND.AUTO`
 selects a compatible installed kernel; it cannot make an unsupported combination
 valid. The portable Torch kernels are useful for establishing a working baseline.
 An FP8 **source checkpoint** decoded for requantization is also distinct from
@@ -383,12 +383,12 @@ imply that attention arithmetic or the KV cache is also entirely FP8/FP4.
 A successful `generate()` checks the save/load path; it does not establish
 accuracy. Evaluate the original unquantized model and each quantized checkpoint
 on the same held-out tasks, rendered prompts, token IDs, generation settings,
-and dtype. Use the [evaluation example](../README.md#pair-with-evaluation-for-post-quantization-llm-benchmarks-)
+and dtype. Use the [evaluation example](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation#evalution-the-current-benchmark-path)
 to run task benchmarks. Compare memory use and latency separately from quality.
 
 Before deploying to vLLM, SGLang, or Transformers, check that runtime's supported
 method, format, dtype, and hardware. Native GPT-QModel support does not imply
-external-engine support. Use the [integration matrix](../README.md#quantization-support-)
+external-engine support. Use the [integration matrix](support-matrix.md#runtime-integrations)
 and keep an engine's pinned dependencies in a separate environment.
 
 ## Explore the remaining features
@@ -397,14 +397,14 @@ and keep an engine's pinned dependencies in a separate environment.
 | --- | --- |
 | Use several GPUs or control calibration memory | [Multi-GPU quantization](multi_gpu_quantization.md) |
 | Resume an interrupted job | [Quantization checkpoints](../checkpoint.md) |
-| Mix weight precisions or exclude modules | [`dynamic` rules and fused-module constraints](../README.md#dynamic-quantization-per-module-quantizeconfig-override-) |
+| Mix weight precisions or exclude modules | [`dynamic` rules and fused-module constraints](support-matrix.md#mixed-precision-and-fused-modules) |
 | Describe quantization as staged rules | [Quantization protocol](quantization_protocol.md) |
-| Requantize FP8/FP4 source modules or smooth weights | [Preprocessors](../README.md#preprocessors-) |
-| Improve GPTQ error compensation | [GPTAQ](../README.md#using-gptaq-experimental-not-moe-compatible-and-results-may-not-be-better-than-original-) and [FOEM](../README.md#using-foem-); these modify the solve, not activation precision |
+| Requantize FP8/FP4 source modules or smooth weights | [Preprocessors](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#preprocessor-pipeline) |
+| Improve GPTQ error compensation | [GPTAQ](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction) and [FOEM](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction); these modify the solve, not activation precision |
 | Recover quality with adapters or train LoRA | [EoRA](eora/README.md) and [PEFT](peft.md) |
-| Handle sparse MoE calibration coverage | [MoE routing and fallback controls](../README.md#moe-quantization-) |
-| Tune normalization after quantization | [Norm tuning](../README.md#norm-tuning) |
-| Quantize on Apple silicon | [Native MLX workflow](../README.md#native-mlx-quantization-on-apple-silicon) |
+| Handle sparse MoE calibration coverage | [MoE routing and fallback controls](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models#moe-configuration-and-examples) |
+| Tune normalization after quantization | [Norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) |
+| Quantize on Apple silicon | [Native MLX workflow](mlx-runtime.md) |
 | Select, pack, or repack individual layer kernels | [HF packing API](hf_packing_api.md) |
 | Change the on-disk shard layout | [Reshard a checkpoint](#reshard-a-checkpoint) |
 

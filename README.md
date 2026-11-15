@@ -9,7 +9,7 @@
 </div>
 <h1 align="center">GPT-QModel ⚡</h1>
 </p>
-<p align="center"><strong>An extensible platform for LLM quantization, validation, and deployment.</strong><br>GPTQ, AWQ, ParoQuant, MACaQ, GGUF, FP8, EXL3, QQQ, NF12, and more—across NVIDIA CUDA, AMD ROCm, Tenstorrent, Huawei Ascend, Intel XPU, Apple silicon, and CPU, with Transformers, vLLM, SGLang, and MLX.</p>
+<p align="center"><strong>An extensible platform for LLM quantization, validation, and deployment.</strong><br>Compress, evaluate, and run models across supported GPUs, accelerators, and CPUs.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -24,1833 +24,323 @@
     </a>
 </p>
 
+<p align="center">
+    <a href="https://github.com/ModelCloud/GPTQModel/wiki">Documentation</a> ·
+    <a href="docs/quantization-guide.md">Quantization guide</a> ·
+    <a href="docs/README.md">Reference index</a> ·
+    <a href="https://github.com/ModelCloud/GPTQModel/releases">Releases</a>
+</p>
+
 ## Latest News 🗞️🚀
 
-* **7.11.0**:
-  * **MACaQ:** Added [native MXFP4 W4A4 quantization](docs/macaq.md) with activation-aware scaling, block-Hadamard rotation, and Hessian-guided refinement. Includes packed checkpoints, CUDA and RDNA4 (`gfx1201`) Triton kernels, native MLX/Metal inference, a W4A16 option, and a portable Torch fallback.
-  * **NF12:** Added lossless 12-bit BF16 weight compression, now the default source storage during calibration for eligible weights, with exact restoration before quantization. Packed linear, embedding, and fused inference APIs use optimized NVIDIA CUDA and AMD RDNA4 HIP kernels or a portable Torch fallback. Added native [MLX/Metal inference](docs/mlx-runtime.md#macaq-and-nf12-metal-kernels) on Apple silicon, including fused decode and small-token kernels.
-  * **Tenstorrent:** Added packed GPTQ inference through Torch/XLA/PJRT and native TTNN, including multi-card execution and opt-in `bf8_b` weights. Added block-float GPTQ calibration and checkpoint export, plus device-resident Llama decode with paged KV caching and chunked prefill up to 64K context. `bf4_b`/`bf8_b` checkpoints also run on NVIDIA CUDA and AMD ROCm; bit-exact CPU kernels support `bf8_b`/`bf4_b`/`bf2_b` without Tenstorrent hardware.
-  * **Quantization and recovery:** Added resumable, distributed EXL3 quantization with mixed-tier allocation, projection-level recovery, and disk-backed calibration replay. Expanded RCO allocation to AWQ, EXL3, and GGUF under packed-weight budgets. Added rule-scoped [SmoothQuant protocol actions](docs/protocol-actions.md) with calibration-driven scale folding.
-  * **Security:** Added startup checks for known-vulnerable PyTorch runtimes, explicit trust requirements for checkpoint-provided code, checkpoint path and index validation, and bounded server requests and remote media downloads.
-  * **Calibration and accuracy:** Fixed AWQ scaling across dense and MoE families, variable-length and packed-sample calibration, and per-sample attention masks and positions. Excluded padding from expert Hessians and restored multimodal and recurrent-layer replay. Corrected FP8 scale semantics, QQQ BF16 inference, and low-precision reductions and checkpoint precision.
-  * **Inference:** Added opt-in QKV and gate/up projection fusion driven by model-defined module plans, preserving native backend selection and packed-weight storage. Accelerated quantized embedding lookups, AWQ/Triton small-batch inference, and packed zero-point conversion. Fixed split-K coverage, strided activations, large-index arithmetic, and backend selection for GGUF and ROCm AWQ.
-  * **Models:** Added OLMo Hybrid, Granite SWA, Granite MoE SWA, and Dots3 Note quantization support. Restored Transformers 5.22 model layouts, remote-code loading and generation, and dense/MoE weight coverage. Fixed routed-expert coverage in Jamba and ERNIE 4.5 VL MoE, and Gemma 3 checkpoint loading.
-  * **Multi-GPU and ROCm:** Added GIL-safe peer copies and bounded disk-backed activation staging. Reduced retained calibration activations and fixed worker cleanup, Hessian placement, and concurrent Triton compilation. Fixed ROCm allocator corruption and calibration reproducibility; HIP builds now stage sources safely, and deterministic BLAS selection is scoped to GPTQ calibration.
-  * **Compat:** Fixed checkpoint and in-memory state round trips, GPTQ v1 zero points, AWQ mixed-bit handling, FP8 save/reload, EXL3 serialization, and dynamic exclusions in Transformers/MLX exports. Unsupported formats now fail clearly instead of loading uninitialized weights. Repaired CPU-only placement and optimization, requantization, rotation, GSQ, LoRA/EoRA, and vLLM/SGLang/OpenAI-compatible generation. Deferred Torch compilation failures fall back to eager inference; NumPy is optional for the core.
+**7.11.0**
 
-* **7.10.0**:
-  * **Models:** Added Ricursive Ripple (`ricursive`) quantization support for the 65B preview checkpoint, including load-time Transformers 5 generation/masking patches, per-head Q/K norm and gated-attention handling, and `v_proj` Hessian isolation. Fixed pre-lm-head norm resolution across multimodal model definitions.
-  * **Performance:** Accelerated Ricursive Ripple decode by up to 10x per row at batch 16 with fused RMSNorm and native GQA attention, and added chunked MLP prefill to bound activation memory. The CUDA expandable-segments allocator is now installed before Torch initializes, so wide-layer multi-GPU runs actually use it.
-  * **Checkpointing:** Added `gptqmodel.reshard()` for per-layer safetensors sharding with one global shard, byte-for-byte tensor copies, preserved metadata, and config/tokenizer copying. Added a one-time warning when quantization shards are not layer-wise.
-  * **Multi-GPU:** Honored explicit device lists for quantization placement, routed cross-device moves per direction to avoid asymmetric ROCm SIGSEGVs, and documented `cudaMallocAsync` for wide-layer Hessian allocation.
-  * **ROCm:** Made AMD device families explicit and enforced kernel support contracts; gated W4A FP8/NVFP4 and ExLlamaV2/VPTQ off unsupported HIP paths with fast failures; fixed QQQ kernel launches to use the tensor's device context.
-  * **Quantization:** Added method-specific integer bit-width validation across GPTQ, AWQ, QQQ, ParoQuant, FP8, bitsandbytes, EXL3, GGUF, and VPTQ; EXL3 now rejects fractional trellis widths; MoE routing-bypass batch sizes are validated.
-  * **Correctness:** Fixed Ricursive Ripple cached decode, mask alignment, per-row positions, and labeled-loss handling, plus EXL3 tile-scratch bounds and sign-vector precision.
+- **MACaQ:** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback. [Guide](docs/macaq.md)
+- **NF12:** Lossless 12-bit compression of BF16 weights reduces source-weight storage during calibration without changing the restored values. Packed inference now includes native Metal support alongside CUDA, HIP, and Torch paths. [NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12) · [MLX](docs/mlx-runtime.md)
+- **Tenstorrent:** Packed GPTQ inference through Torch/XLA and TTNN, multi-card execution, and block-float quantization. Long-context Llama serving adds paged caching and chunked prefill; compatible block-float checkpoints also run on CUDA, ROCm, and CPU. [Guide](docs/tenstorrent.md) · [Serving](docs/tt-llama-paged-serving.md)
+- **Quantization:** Resumable distributed EXL3 jobs, broader mixed-bit allocation across AWQ/EXL3/GGUF, and SmoothQuant preprocessing improve large-model workflows and quality control. [EXL3](docs/exl3-durable-execution.md) · [SmoothQuant](docs/protocol-actions.md)
+- **Inference:** Opt-in attention and MLP projection fusion, faster quantized embedding lookups, and improved small-batch inference. Native backend selection and packed-weight storage are preserved. [Fusion guide](docs/fusion-planner.md)
+- **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](docs/changelog/recent.md#7110)
+- **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](docs/torch-runtime-safety-gate.md) · [Serving security](docs/openai-server-exposure.md)
 
-* **7.9.0**:
-  * **Correctness:** Fixed packing/inference overflow, underflow, FP32 reductions, BF16 bias cancellation, 8-bit BitBLAS zero points, and stale fused Torch metadata after checkpoint loads or tensor changes.
-  * **MoE:** Fixed skipped routed experts in MiniMax M2, Granite MoE/Hybrid, Bailing Hybrid, and AfMoE; added warnings for unresolved module paths.
-  * **Memory:** Removed retained FP8 weight expansion from the experimental NVFP4 path and dense-weight scratch from ExLlamaV2.
-  * **Kernels:** Added measured RTX 4090 (Ada, SM 8.9) and RDNA4 (gfx1200/gfx1201/gfx1250) launch tables to every tuned Triton pipeline — GPTQ GEMV/GEMM/dequant, ParoQuant GEMM, AWQ GEMM/GEMV, GGUF Triton, and bitsandbytes 4-bit — enforced by a hardware-free parity contract; the fused bitsandbytes 4-bit GEMM measured 1.4x-6.3x faster than the vendor HIP kernel on RDNA4 for `M >= 16`, while Ada keeps the vendor kernels. Added opt-in AllSpark W8A16 for compatible per-channel 8-bit GPTQ/AWQ on CUDA and RDNA4 (gfx1200/gfx1201). EXL3 2-bit quantization now fits RDNA4's 64 KiB shared memory.
-  * **MLX:** Accelerated GPTQ/RTN quantization, GPTQ/AWQ group-16 decode and short prefill, and GGUF K-quant/ternary packing.
-  * **GSQ/RCO:** Added teacher-KL optimization, per-projection bit allocation, and native MLX search for dense Llama/Qwen3, with token-based batching and device/disk teacher caches.
-  * **Models:** Added LFM3, LFM3-VL, and LFM3-Omni text-decoder quantization, OLMo/Helium support, and Qwen2 quantization resume.
-  * **Compat:** Added native Transformers/Optimum load hooks preserving dynamic settings, fused/MoE structure, rotation, and W4A policies. Replaced method-specific Marlin/Machete/Swordfish enums with `BACKEND.MARLIN`, `BACKEND.MACHETE`, and `BACKEND.SWORDFISH`; legacy string aliases remain supported by the `hf_` APIs.
+| Recent release | Highlights |
+| --- | --- |
+| [7.10.0](docs/changelog/recent.md#7100) | Ricursive Ripple support, faster decode, checkpoint resharding, and multi-GPU fixes. |
+| [7.9.0](docs/changelog/recent.md#790) | Kernel tuning, MLX improvements, new models, and numerical fixes. |
+| [7.8.0](docs/changelog/recent.md#780) | GSQ/RCO training and allocation, expanded model support, and compatibility fixes. |
 
-* **7.8.0**:
-  * **GSQ:** Added staged GSQ training with public method adapters, distributed staged training that reuses captured activations, and per-block bit allocation driven by an RCO search verified bit-identical against the IST-DASLab reference (measured results on Llama 3.2 1B). Added a paper-reproduction harness, best-epoch restore, HIPRTC-compiled fused scalar relaxation on ROCm, and segment-sum scale gradients.
-  * **ROCm:** Added RDNA4 (gfx1200/gfx1201/gfx1250) kernel and quantization support with per-architecture kernel tuning. MI350/gfx950 behavior is unchanged.
-  * **GGUF:** Added CPU coverage for every ggml tensor type (all K-quant and IQ variants plus explicit MXFP4/NVFP4) and a native ggml SIMD inference path with per-shape autotuning, measured 3–100x faster than the torch paths on AVX2. New `gguf` install extra.
-  * **Multi-GPU:** Added automatic GPU peer-access enablement on CUDA and ROCm with measured-link validation, so multi-GPU quantization copies stay on the interconnect instead of the driver's staging path.
-  * **Experimental W4A:** Revalidated the NVFP4 packed layout at load time, removed the retained E4M3 weight expansion, and relaxed the Triton build requirement on the Gluon FP8 GEMM.
-  * **Performance:** Package import now builds the kernel registry lazily and defers optional backend probes (previously ~9s and 6767 modules). Vectorized the GPTQ/QQQ MSE shrink-grid and AWQ clip-grid evaluation; grid workspace budgets moved from environment variables to a new MSE configuration option.
-  * **Models:** Added RecursiveSI Flint and Raon-1 mini support, Gemma 3 multimodal checkpoint compatibility, Qwen2.5-Omni thinker lm_head quantization, and the Transformers 5.22 Qwen-Omni layout.
-  * **Compat:** Kept the AVX512-BF16 GPTQ/AWQ CPU kernels trainable for PEFT LoRA; fixed OpenAI-server auth, stop handling, and ChatCompletion schema; surfaced compatibility-shim failures instead of failing silently; fixed the Marlin CPU-offload snapshot refresh; fixed the calibration minimum-length setting not reaching the dataset filter; re-checked for an emptied calibration set after min-length filtering; tolerated MoE early-stop in data-parallel forward; bounded remote image fetches; read accelerator memory telemetry from the active device; fixed config serialization mutating dynamic overrides; fixed GPTAQ loss-log capture and evaluation-metadata coercion for fast eval tasks.
+[Detailed release notes](docs/changelog/recent.md) · [Older changelog](docs/changelog/archive.md)
 
-Older releases and development notes: [changelog archive](docs/changelog/archive.md).
+## A unified quantization platform 🧩
 
-## A unified quantization platform
+GPT-QModel brings calibration, quantization, evaluation, conversion, and accelerated
+inference into one workflow. Start from a pretrained model, choose a compression
+recipe, validate its quality, and save a checkpoint for native inference or a
+compatible deployment engine.
 
-GPT-QModel provides a consistent API for calibration, quantization, quality evaluation, model conversion, and accelerated inference. It supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, NF12, GPTAQ, EoRA, GAR, FOEM, and opt-in GSQ refinement for compatible scalar methods across supported hardware and runtime integrations.
+### Methods and compression 🎛️
 
-Its method, format, backend, and kernel layers are modular: method-specific controls remain available where needed, while implementations share the same model lifecycle. This architecture supports mixed and model-specific quantization workflows today and provides a clear integration path for additional methods, formats, kernels, and accelerators.
+| Method | What it provides |
+| --- | --- |
+| **GPTQ** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
+| **AWQ** | Activation-aware weight quantization, including dense and MoE workflows. |
+| **RTN** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
+| **ParoQuant** | Low-bit weight quantization with learned rotations for accuracy recovery. |
+| **MACaQ** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
+| **QQQ** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
+| **GGUF** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. |
+| **FP8** | Floating-point weight quantization with scaled E4M3/E5M2 formats. |
+| **EXL3** | Variable-rate compression with target average bits per weight and mixed-tier allocation. |
+| **VPTQ** | Vector-codebook quantization for low-bit model compression. |
+| **BitsAndBytes** | NF4/FP4 and INT8 quantization options. |
+| **NF12** | Lossless BF16 weight compression, distinct from lossy low-bit quantization. |
 
-GPTQ Hessian capture and repeated finalization are described in the [Hessian accumulation flow](docs/gptq-hessian-accumulation.md).
-Every supported quantization path ends with one [run summary](docs/quantize-run-summary.md) emitted after finalization.
-Disk-backed replay outputs use [bounded staging and shard verification on every read](docs/looper-checkpoint-redesign.md#disk-backed-layer-output-staging-and-reads).
-Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
-Quantized kernels receive packed rows and launch in the operand's device; see the [kernel input contiguity and launch contracts](docs/kernel-input-contiguity.md) for activation packing, 64-bit offsets, empty batches, and per-token compiles.
-The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
-Transformers 5.22 model-family fixes for module trees, Defuser GLM-4.x router tuples, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow. The same page covers the remote-code load and generate contracts: [native rotary buffer restoration](docs/transformers-5-compat.md#j1-native-rotary-buffers-are-restored-after-every-load-item-10), legacy unscaled RoPE, ChatGLM `generate()`, `.bin` tied-key normalization, the AUTO_NF12 source-weight view, and the Klear import shim.
-AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
-Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
-Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
-AWQ scale folding resolves offset gains from the norm's live forward, picks the norm that actually feeds the quantized block, and gauges the scale to `max(s) <= 1` so a BF16 `1 + weight` fold stays neutral; see the [AWQ scale folding](docs/awq-scale-folding.md) flow.
-AWQ scale-search replay chunks are bounded by the leading-dimension row size (`numel / shape[0]`, including the sequence dimension), and a `fallback=` dictionary inherits the `Fallback` 0.5% threshold instead of a second hard-coded default; see the [AWQ scale-search memory and fallback thresholds](docs/awq-scale-search-memory.md) contract.
-AWQ selects fold sources from declared data flow and skips sandwich post-norms and unresolvable gains; see the [AWQ normalization selection](docs/awq-norm-selection.md) flow.
-MoE AWQ folds also scale the router and `shared_expert_gate`, and calibration padding is kept out of expert Hessians; see the [MoE AWQ scale folding and calibration row ownership](docs/moe-awq-calibration.md) flow.
-Padding-only MoE experts stay on the RTN fallback, sibling AWQ captures share one host copy under `inference_mode`, and FP16 CPU fused kernels keep their bias epilogue; see the [MoE padding ownership and calibration capture lifetimes](docs/moe-padding-and-awq-dedup.md) flow.
-GPTAQ and FOEM disable the native-input delta for routed experts (their token subset changes after attention is quantized) and fall back to RTN when an expert receives no rows; GGUF `q*_k_s`/`q*_k_m`/`q*_k_l` names warn that they store a uniform K-quant, and Hessian staging never narrows a bf16 input to float16; see the [quantizer MoE, GGUF alias, and Hessian staging flows](docs/quantizer-moe.md).
-Every AWQ module packs bounded token rows across all variable-length calibration captures and fallback coverage is checked per layer; see the [AWQ calibration aggregation](docs/awq-calibration-aggregation.md) flow.
-AWQ scaling groups are validated against the decoder layer's forward data flow, and a layer with no usable group is quantized plainly; the same page documents the remote-code family trees (Instella, K2-Horizon, TeleChat2), undeclared-leaf coverage, stale position-kwargs replay, looped-decoder capture, and PanGu's top-query layer replay; see the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
-LoRA `rank_pattern` and `alpha_pattern` use PEFT's dot-boundary rule and accept float alphas; see the [adapter pattern matching](docs/adapter-pattern-matching.md) flow.
-AWQ packed readers decode the 4-bit interleave and the natural 8-bit stream separately; see the [AWQ packed layout](docs/awq-packed-layout.md) flow.
-AWQ dequantization dispatches on the saved checkpoint layout and per-module `dynamic` widths; see the [AWQ dequantization layouts](docs/awq-dequant-layouts.md) flow.
-AWQ split-K prefill covers every K tile and the decode-batch bound trims on the tile count; see the [AWQ split-K kernel boundaries](docs/awq-kernel-splitk.md) contract.
-Legacy 5.4.x `meta.gptaq` booleans, untied `lm_head` quantization, and the metadata plain Transformers or vLLM need are described in the [checkpoint compatibility](docs/checkpoint-compat.md) contract.
-Third-party module filters, format-changing re-saves, `save_pretrained()` layout safety, `load_state_dict()` round-trips and partial loads, HF `quant_method` for AWQ exports, packed GGUF and every GPT-QModel-only layout, `torch.save(model)` pickling after `optimize()`, Marlin `g_idx`, `is_marlin_format: false`, dense export, and mixed-bit dequantization are described in the [checkpoint interop](docs/checkpoint-interop.md) contract.
-GPTQ `-:` exclusion declarations for plain HF/Optimum loads, endpoint requantize under AUTO_NF12, post-quant EoRA, fail-closed rotation validation, and FP32 staged GSQ losses are described in the [quantization feature contracts](docs/quantization-features.md) flow.
-Transformers/Optimum GPTQ loading, legacy checkpoint key layouts, AWQ group-size retuning, the saved-config `auto_map` contract, and the refusing quantizer registered for every GPT-QModel-only `quant_method` are described in the [HF interoperability](docs/hf-interop.md) flow.
-FP8 dequantization divides its FP32 buffer in place and AWQ GEMM switches to an FP32-output matmul from 640 rows; see the [FP8 dequantization scaling and AWQ GEMM dispatch](docs/fp8-dequant-scaling.md) flow.
-The native FP8 forward wrapper and the W4A16 quant source resolve one
-`weight_scale_semantics` per checkpoint, so a DeepSeek multiplier and a native
-inverse scale decode identically; see the
-[FP8 checkpoint scale semantics](docs/fp8-scale-semantics.md) flow.
-GPTQ packers validate FP16 scale storage before writing a checkpoint; see the [GPTQ scale storage range](docs/gptq-scale-storage-range.md) contract.
-Checkpoint resaves, GGUF BF16 bytes, packed biases, explicit dtype strings, and
-FP8 block scales preserve their declared precision and bit patterns; see
-[checkpoint dtype boundary preservation](docs/dtype-boundary-preservation.md)
-for the selection and failure flows.
-Quantized saves leave packed payloads (`weight` codes owned by a module with
-`QUANT_TYPE`) to the disk-offload restore instead of aliasing them from the
-dense source checkpoint, and a capture-only AUTO_NF12 forward keeps the dense
-module in the tree; see the
-[packed payload save ownership](docs/fp8-save-offload.md) flow.
-GPTAQ and FOEM consume one native calibration entry per sample, including batched calibration; see the [native calibration batch split](docs/native-calibration-batch-split.md) flow.
-3-bit zero-point packing requires 32-aligned `out_features`, and every packer fails closed instead of truncating the tail; see the [3-bit zero-point packing width contract](docs/3bit-zero-point-packing.md).
-Remote calibration image downloads run in cancellable subprocesses under one wall-clock deadline; expired requests release their sockets and workers, and decoding checks the remaining budget; see the [remote image fetch bounds](docs/remote-image-fetch-bounds.md) contract.
-GPTQ v1/v2 zero-point conversions decode and repack on the checkpoint's device, so a CUDA shard never round-trips through a host loop; see the [qzeros device conversion](docs/gptq-qzero-device-conversion.md) contract.
-A v2 kernel keeps logical zero points in memory while the v1 checkpoint is written from a converted copy, so in-process evaluation and the saved file agree; see the [qzeros runtime vs checkpoint layout](docs/gptq-qzero-runtime-layout.md) contract.
+### Control, scale, and quality ⚙️
 
-`TorchLinear` never retains dense/dequantized weights between inference calls.
-Torch compilation is best-effort: a `torch.compile` failure at first use (for
-example a dead inductor compile-worker pool) logs once and continues eagerly, so
-inference is never aborted; see the [torch compile fallback](docs/torch-compile-fallback.md)
-flow and the `TorchLinear(compile=False)` / `QuantizeConfig(compile=False)` /
-`TORCHDYNAMO_DISABLE=1` opt-outs.
-The legacy `GPTQ_TORCH_CACHE_WEIGHTS` / `GPTQ_TORCH_LOOKAHEAD` flags and
-`enable_weight_cache(True)` / `enable_lookahead(True)` APIs now warn and leave
-these features disabled. CUDA streaming uses per-forward tiles, not persistent
-dequantized workspaces. Only zero-point and group-index metadata is cached;
-call `clear_weight_cache()` after manually mutating inference-mode tensors
-without version counters. Normal tensor mutations, checkpoint loads, and
-device/dtype moves invalidate this metadata automatically.
-The [ParoQuant rotation identity lifecycle](docs/paroquant.md#rotation-identity-lifecycle)
-explains how rotation buffer changes, state loads, and module moves refresh its
-identity shortcut.
-QuaRot/SpinQuant Hadamard rotation resolves its backend per call from the
-tensor's device, so a rotated checkpoint runs on CPU and a CPU-only host can
-apply the exact Hadamard; see the
-[rotation Hadamard device dispatch](docs/rotation-device-dispatch.md) flow.
-The [quantized embedding row decode](docs/quantized-embedding-row-decode.md)
-page explains how a token lookup reads only its packed rows, why small tables
-and large token counts still use whole-table decode, and what that means for
-packed-weight storage.
-The [CUDA quantized linear epilogue](docs/cuda-quantized-bias-epilogue.md)
-documents wide streaming reductions, bias before low-precision output
-rounding, fallback for empty FP8 inputs, and CUDA gradient propagation for the
-portable backends.
-The [GPTQ Torch CPU bias epilogue](docs/gptq-torch-cpu-bias-epilogue.md)
-documents fused low-precision bias addition and FP32 checkpoint bias handling.
-The [low-precision bias epilogues](docs/low-precision-bias-epilogue.md)
-reference keeps FP4, VPTQ, FP8, GGUF, and NF12 bias widths and their
-failure paths in one place.
-The [fused kernel dispatch and bias epilogues](docs/fused-kernel-epilogues.md)
-page covers live GPTQ dispatch metadata, BF16 fused dispatch, and the
-ExLlamaV2 FP32-output epilogue.
-The [FP16 inference overflow and bias epilogues](docs/inference-fp16-overflow-epilogues.md)
-page covers BF16-through-FP16 activation quantization and every kernel that now
-adds the stored bias before the final cast.
-The [AllSpark W8A16 bias epilogue](docs/allspark-bias-epilogue.md)
-documents how the CUDA and RDNA4 kernels add a checkpoint bias to the
-FP32 accumulator before output rounding.
-The [GGUF Triton packed metadata cache](docs/gguf-triton-packed-cache.md)
-documents weight update invalidation and the explicit-clear contract for
-inference tensors.
-The [GGUF Triton activation range](docs/gguf-triton-activation-range.md)
-documents per-row BF16/FP32 normalization before fused GGUF matmuls.
-The [GGUF packed scale overflow cache](docs/gguf-k-scale-overflow-cache.md)
-documents FP16 operand-width selection for GGUF Torch inference.
-The [GGUF dense fallback precision](docs/gguf-dense-fallback-precision.md)
-page explains BF16 weight reconstruction, FP32 bias reload, CPU autocast reduction,
-and output rounding across formats.
-The [GGUF kernel selection and fallback](docs/gguf-kernel-selection.md) page
-documents how AUTO resolves a concrete ggml layout (Q4_0 versus Q4_K at the same
-bit width) and how the weight-only finalize path retries the validated kernels.
-The [GGUF C++ bias epilogue](docs/gguf-cpp-bias-epilogue.md) explains how CPU
-and CUDA GGML outputs add FP32 bias before low-precision rounding.
+- **Choose where to spend precision.** Mix bit widths, keep sensitive modules
+  unquantized, and use activation-quantization or preprocessing policies where
+  supported. Quantization protocols let you organize multi-stage recipes.
+- **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
+  execution help manage memory and recover interrupted jobs. Distributed EXL3
+  workflows support durable replay and resume.
+- **Recover accuracy.** Use GSQ refinement, EoRA low-rank compensation, rotation,
+  smoothing, and norm tuning for supported recipes. LoRA training and adapter
+  loading support further task adaptation.
+- **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
+  against a non-quantized baseline, and test prompts representative of your users.
+  Compression settings trade model size, calibration cost, speed, and quality.
 
-`BACKEND.GPTQ_TORCH_INT8` (including its `TORCH_INT8` alias) accepts only
-8-bit GPTQ sources. Converting 2/4-bit weights into a persistent 8-bit runtime
-representation is no longer supported. `AWQ_TORCH_INT8` / `TORCH_INT8_AWQ`
-are retired and fail with migration guidance. Use `BACKEND.AUTO` to select a
-compatible packed kernel or `BACKEND.TORCH` for a portable fallback. Native
-8-bit GPTQ keeps the checkpoint's own per-group scales and zero points, so the
-runtime layout is a lossless repack of grouped/asymmetric GPTQ weights rather
-than a second quantization: a group whose scale is far smaller than its
-sibling's no longer collapses to zero.
-See [Torch INT8 checkpoint lifecycle](docs/torch-int8-checkpoint-lifecycle.md)
-for save/reload ownership, the group-preserving layout, and runtime cache
-invalidation.
+### Inference and deployment 🚢
 
-## Quantization Support 🛠️
+Run compatible checkpoints directly with GPT-QModel, integrate with Transformers,
+or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
+native MLX quantization and packed inference. Optional projection fusion can
+combine supported attention and MLP operations without changing the saved format.
 
-Start with the **[quantization guide and end-to-end recipes](docs/quantization-guide.md)**
-to choose weight and activation precision, prepare calibration data, quantize,
-save, reload, and validate a model. It also maps advanced features to their guides.
+EoRA/LoRA adapters, mixed-precision checkpoints, and external engines have their
+own compatibility limits; support for a method does not imply support in every engine.
 
-For checkpoint reshaping, see [reshard source selection](docs/reshard-source-selection.md).
-For how tensor-derived layer directories and `weight_map` shard names are kept
-inside the output directory, see [checkpoint path containment](docs/checkpoint-path-containment.md).
-For how checkpoint index tensors (`g_idx`, NF12 escapes, ParoQuant pairs, VPTQ
-outliers, EXL3 `K`) are validated before any native kernel indexes memory, see
-[checkpoint index validation](docs/checkpoint-index-validation.md).
-For checkpoint-backed module loading, see [lazy checkpoint materialization](docs/lazy-checkpoint-materialization.md).
-For how Transformers 5.22 class-keyed conversion maps, legacy mixer patch guards, the Nemotron-H tree root, and non-persistent Mamba buffers are handled, see [Transformers 5.22 model compatibility](docs/transformers-5-compat.md).
-For a checkpoint that lives in a repository subfolder, see [quantized checkpoint subfolder resolution](docs/quantized-checkpoint-subfolder-resolution.md) for how model-type detection, the quantize config, the tokenizer, the shards, and the adapter manifest all stay inside the requested directory and revision.
-For how `from_pretrained` hands an already-quantized checkpoint to `from_quantized` without dropping explicit load options, see [quantized-checkpoint redirect](docs/loader-quantized-redirect.md).
-For the temporary model mutation during calibration input capture and how it is released, see [input capture cleanup lifecycle](docs/input-capture-cleanup-lifecycle.md).
-For how each decoder layer is replayed with the attention mask and rotary embeddings of its own `config.layer_types` entry, see [calibration layer replay](docs/calibration-replay.md).
-For the outer-loop work multimodal models apply outside a decoder layer—DeepStack residuals, Gemma-3 image-block masks, padded batches, and the Qwen2.5-Omni lazy checkpoint aliases—see [multimodal calibration replay](docs/multimodal-calibration.md).
-For the base-type mask, the `super()` contract for definition replay overrides, and AWQ's typed rotary call, see [layer-type replay masks](docs/layer-type-replay-masks.md).
-For how kernel dispatch caches torch.ops handles, ExLlamaV2 q-matrix handles, bitsandbytes validation, and the AWQ FP16 bias add, see [kernel dispatch caching](docs/kernel-dispatch-caching.md).
-For the CPU int4pack group-size gate, CPU-offload kernel selection, `max_memory` layer placement, the `torch.compile` paths that must stay lowerable, HIP JIT source staging, and the bitsandbytes/GGUF autograd gate, see [CPU and offload dispatch](docs/kernel-dispatch-cpu.md).
-
-Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
-The [quantization lifecycle contracts](docs/quantization-lifecycle-contracts.md) show how `QuantizationRunPlan`, `ProcessorLifecycleConfig`, and `ResolvedModuleConfig` connect method selection, calibration policies, per-module settings, packing, and checkpoint support.
-For how VPTQ and QQQ fold per-device calibration partials into a reusable Hessian, see [calibration Hessian materialization](docs/calibration-hessian-materialization.md).
-For how QQQ and GPTQ capture convolution inputs—including `padding="same"` and non-zero `padding_mode`—see [convolution capture padding](docs/conv-capture-padding.md).
-QQQ selects its in-memory kernel from the model dtype's `SUPPORTS_DTYPES` declaration and defaults to GPTQ's Hessian damping; see the [QQQ kernel selection](docs/qqq-kernel-selection.md) and [QQQ default damping](docs/qqq-default-damp.md) contracts.
-See [quantization scale storage](docs/quantization-scale-storage.md) for near-dead group handling and checkpoint precision requirements.
-
-Module roles—attention projections, MLP projections, MoE experts and shared experts, and quantizable leaves—are resolved from each architecture's declared module tree, not from runtime module names. See **[model tree resolution](docs/model-tree-resolution.md)** for the resolution flow, the declaration syntax, and the fail-closed contracts. Expert cardinality follows the same rule: a `#` placeholder expands only when the definition declares `dynamic_expert_index` and the owning config node resolves it, so **[expert cardinality resolution](docs/model-tree-resolution.md#expert-cardinality-resolution)** covers that step and why a surviving placeholder is a silent miss.
-
-Models whose text, vision, or audio decoders are concurrent siblings can declare one complete tree variant per stack. For an unregistered model, `module_tree="auto"` discovers every stack and keeps each branch's leaves separate. See **[parallel module trees](docs/parallel-module-trees.md)** for the discovery loop, the per-branch resolution contract, and the supported/unsupported cases.
-
-Subset digits order the quantization blocks: a projection that consumes another projection's output must live in a later subset. See **[module tree subset ordering](docs/module-tree-ordering.md)** for the producer-before-consumer contract and the rule that every called `nn.Linear` is either quantized or explicitly excluded.
-
-Use the **[module-plan guide](docs/module-plan-guide.md)** for `model.module_plan()`, terminal/JSON inspection, model-definition tags, and the required new-model tests. The **[DeepSeek V4.1 Flash inventory](docs/deepseek-v41-module-inventory.md)** shows its verified checkpoint structure and remaining integration requirements.
-
-The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `FusableConfig` and uses the compiled module plan for opt-in post-quantization QKV and gate/up fusion. The [model qualification matrix](docs/fusion-model-coverage.md) lists validated profiles for 101 model types and explicit qualification gaps for the remaining registry entries. Definitions reuse immutable role profiles with `FusableConfig("qwen2").merge(LlamaFusableConfig())`; concrete paths and parents resolve exclusively from the compiled tree, with no HF class-path allowlist; unqualified model types raise when fusion is requested. Fusion is disabled by default. Use `plan = model.fuse()` to apply it and receive the plan, `plan.print()` or `plan.to_dict()` to inspect eligibility and skip reasons, and `model.fuse(False)` to disable it and return `None`. Original projection weights become views into the fused packed storage, preserving checkpoint keys without retaining duplicate weights. AUTO retains native ATen/AVX512 on CPU, Marlin on NVIDIA, and eligible Torch/Triton paths on AMD. See [CPU, CUDA and ROCm validation](docs/fusion-device-validation.md), the [complete kernel inventory](docs/fusion-kernel-inventory.md), and the [ExLlamaV2 descriptor lifecycle](docs/exllamav2-descriptor-lifecycle.md) for native handle ownership and cache invalidation.
-
-| Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
-|---------------------------|------------|---|---|---|---------------|
-| GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
-| AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
-| ParoQuant                 | ✅          | x | x | x | ✅             |
-| GGUF                      | ✅          | x | x | x | x             |
-| FP8                       | ✅          | x | x | x | x             |
-| Exllama V3 / EXL3         | ✅          | x | x | x | x             |
-| EoRA                      | ✅          | ✅ | ✅ | ✅ | x             | 
-| Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
-| QQQ                       | ✅          | x | x | x | x             | 
-| VPTQ                      | ✅          | x | x | x | x             |
-| MACaQ (MXFP4 W4A4)        | ✅          | x | x | x | x             |
-| NF12                      | ✅          | x | x | x | x             |
-| BitsAndBytes              | ✅          | x | x | x | x             |
-| Rotation                  | ✅          | x | x | x | x             |  
-| GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
-| FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
-| GSQ (GPTQ, AWQ, RTN, QQQ, FP8, ParoQuant) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
-
-`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
-
-`BaseQuantizeConfig.auto_dtype_cast` defaults to `AUTO_NF12`, which uses
-lossless NF12 storage for eligible BF16 source matrices during calibration
-forwards and restores the exact source dtype before quantization. See
-[automatic NF12 source storage](docs/auto-nf12-dtype-cast.md) for the decision
-flow, FP16 eligibility rule, and native floatx precedence, and
-[excluded-layer replay and AUTO_NF12](docs/auto-nf12-excluded-layers.md) for the
-`dynamic` exclusion contract and the writer's fail-closed check.
-
-† GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
-
-SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
-
-Prompts and attention masks are translated before they reach vLLM or SGLang. Only boolean or 0/1 masks that remove contiguous left or right padding are accepted; an interior hole, a non-binary value, or a mask supplied with a text prompt is rejected instead of silently changing the prompt. See [runtime prompt input normalization](docs/runtime-prompt-input-normalization.md) for the contract and the vLLM/SGLang comparison.
-
-Device requests are translated per runtime: SGLang's `cuda` spelling aliases an explicit `rocm` request only on a HIP build, and an AMD request on an NVIDIA-only build is rejected rather than silently launched on NVIDIA hardware. See [external runtime device mapping](docs/external-runtime-device-mapping.md).
-
-### Quant Method / Format / Backend Matrix 📋
-
-Canonical backend names are shown below. Method-specific aliases are only accepted where explicitly implemented by that quant method.
-
-| Quant Method | Formats | Backends / Kernels |
-| --- | --- | --- |
-| `METHOD.GPTQ` CPU | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2` | `BACKEND.GPTQ_TORCH_CPU_AVX512` |
-| `METHOD.AWQ` CPU | `FORMAT.GEMM` | `BACKEND.AWQ_TORCH_CPU_AVX512` |
-| `METHOD.GPTQ` Tenstorrent | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2` | `BACKEND.GPTQ_TT_XLA`, `BACKEND.GPTQ_TTNN`, `BACKEND.GPTQ_TT_BF8` (opt-in `bf8_b` conversion) |
-| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.GPTQ_P`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.MACHETE`, `BACKEND.MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_P`: `BACKEND.GPTQ_TORCH`<br>`FORMAT.MARLIN`: `BACKEND.MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
-| `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.MACHETE`, `BACKEND.MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`, `BACKEND.AWQ_GEMV_TRITON`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.MACHETE`, `BACKEND.MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
-| `METHOD.GPTQ` / `METHOD.AWQ` Swordfish | `FORMAT.GPTQ` / `FORMAT.GEMM` | `BACKEND.SWORDFISH` |
-| `METHOD.GPTQ` / `METHOD.AWQ` AllSpark | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2` / `FORMAT.GEMM` | `BACKEND.ALLSPARK` (per-channel 8-bit) |
-| `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
-| `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
-| `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
-| `METHOD.MACAQ` | `FORMAT.MXFP4_MACAQ` | `BACKEND.MACAQ_TRITON`, `BACKEND.MACAQ_TORCH` |
-| `METHOD.NF12` (`nf12`) | `FORMAT.NF12` (`nf12`) | `BACKEND.NF12` (`nf12`) |
-| `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
-| `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
-| `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
-| `METHOD.EXL3` | `FORMAT.EXL3` | `BACKEND.EXL3_EXLLAMA_V3`, `BACKEND.EXL3_TORCH` |
-
-Marlin, Machete, and Swordfish are each one backend (`BACKEND.MARLIN`,
-`BACKEND.MACHETE`, `BACKEND.SWORDFISH`). The quantization method and checkpoint
-format select the GPTQ or AWQ sub-kernel automatically, so `gptq_marlin`/
-`awq_marlin`, `gptq_machete`/`awq_machete`, and `gptq_swordfish`/
-`awq_swordfish` are no longer separate backend names. The stable `hf_` packing
-and repacking APIs still accept those legacy strings and resolve them to the
-shared backend.
-
-`BACKEND.GPTQ_TORCH_CPU_AVX512` and `BACKEND.AWQ_TORCH_CPU_AVX512` share the
-same AVX512-BF16 int4 GEMM on Linux x86-64 hosts with AVX512-BF16,
-AVX512-VBMI, and OS AVX512 state enabled. GPTQ and AWQ use separate fused
-checkpoint-to-kernel packers but no separate compute kernels. `AUTO` selects
-the AVX512 path ahead of the ATen int4pack fallback when the layer shape
-satisfies the kernel's 32-row and group-size alignment requirements. Supported
-group sizes are 16, 32, 64, 128, 256, and 512.
-
-`BACKEND.GPTQ_TORCH_FUSED` keeps INT4 weights in the packed `int4pack` layout
-and reorders activations only when the `g_idx` permutation is not the identity;
-`BACKEND.AWQ_TORCH_FUSED` uses the same packed layout without a `g_idx`
-activation reorder. See
-[Torch Fused INT4 transformations](docs/torch_fused_int4_transformations.md)
-for asymmetric GPTQ zero-point offsets, packing, activation-reorder contracts,
-and the checkpoint-layout restore versus runtime `state_dict()` round-trip.
-
-`BACKEND.QQQ_TORCH` uses the same packed INT4 CPU layout with a QQQ-specific
-integer GEMM that preserves round-to-nearest-even and INT8 saturation for
-group size 128, plus the signed per-channel layout for group size -1.
-Small batches use AVX512 integer dot products; larger batches use oneDNN
-integer GEMM with temporary 128-by-32 weight tiles when available. Runtime
-caches retain only packed INT4 codes and scales. Unsupported hosts use the
-Torch fallback without retaining dequantized weights. Both FP16 and BF16
-activations keep their output dtype.
-
-`BACKEND.EXL3_TORCH` uses oneDNN BF16x3 FP32 matmul on AVX512-BF16 hosts for
-GEMMs large enough to amortize dispatch. Forward decodes at most 512 output
-columns at a time and never retains a dense dequantized weight;
-`get_weight_tensor()` materializes one on demand for export and tests. Set
-`GPTQMODEL_EXL3_CPU_BF16X3=0` to disable the BF16x3 path.
-
-The [EXL3 runtime weight lifecycle](docs/exl3-runtime-weights.md) describes how
-deferred dense replay weights are refreshed before every layer forward, why the
-generic path zero-pads output columns to 128 and rejects unaligned input
-features before calibration, and why the layer inventory keeps `NamedModule`
-wrappers so the AUTO_NF12 path reaches EXL3's deferred replay state.
-
-`BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
-
-Native backend availability, shape validation, wide activation inputs, and
-derived cache invalidation follow the
-[kernel validation and cache lifecycle](docs/kernel-validation-and-cache-lifecycle.md)
-contract. Opt-in AllSpark W8A16 keeps its GPTQ/AWQ checkpoint tensors
-authoritative and its N32K16/WMMA kernel layout a derived cache; see
-[AllSpark checkpoint layout](docs/allspark-checkpoint-layout.md).
-
-Tenstorrent Blackhole uses the explicit `DEVICE.XLA` family. Packed 4-bit
-GPTQ runs through Torch/XLA/PJRT (`BACKEND.GPTQ_TT_XLA`, selected by `AUTO`)
-or native TTNN (`BACKEND.GPTQ_TTNN`, opt-in), with optional multi-card
-execution. `BACKEND.GPTQ_TT_BF8` explicitly converts GPTQ weights to `bf8_b`
-for hardware-native unpacking. See the [Tenstorrent execution guide](docs/tenstorrent.md)
-for runtime pins, numerical results, and backend constraints, and the
-[validated hardware inventory](hw/tenstorrent.md) for Blackhole measurements. Out-axis block-float Llama checkpoints are served fully on device with a paged KV cache and chunked prefill; see [Tenstorrent Llama serving](docs/tt-llama-paged-serving.md).
-Install the runtime from [`requirements/tenstorrent-py312.txt`](requirements/tenstorrent-py312.txt);
-the PJRT plugin is not on the default PyPI index.
-
-Packed `bf4_b` / `bf8_b` checkpoints also run without Tenstorrent cards using
-the JIT-loaded [CUDA](gptqmodel_ext/tt_blockfloat_cuda/README.md) and
-[ROCm HIP](gptqmodel_ext/tt_blockfloat_hip/README.md) kernels. These preserve
-the checkpoint's block-float values without re-quantizing the weights;
-GEMM arithmetic depends on the execution backend. For CPU format validation
-and fused GEMM, see [Tenstorrent block floats on CPU](#tenstorrent-block-floats-on-cpu).
-The [kernel dispatch contract](docs/tenstorrent.md#block-float-kernel-dispatch)
-records when the native block-float kernels are used.
-
-FP8 source weights must be finite before quantization; see the
-[FP8 source weight validation contract](docs/quantization-guide.md#fp8-source-weight-validation).
-
-GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `METHOD.QQQ`, `METHOD.FP8`, `METHOD.PARO`, and `METHOD.RTN` paths. Staged block training currently supports dense Llama GPTQ and AWQ export. Each path retains its method's existing checkpoint format; method-specific GSQ constraints are described below.
-
-AWQ FP16 boundary staging and packed decode follow the [AWQ affine range contract](docs/awq-affine-range.md).
-
-Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
-The [Marlin device-profile validator](docs/marlin-device-profile-validation.md)
-checks device ordinals before asking Torch or the extension for a profile.
-
-On ROCm, methods that build a Hessian (the GPTQ family) run their calibration
-forward, replay and fp32 `X^T X`/rocSOLVER inversion on rocBLAS, which keeps
-checkpoints reproducible across processes. AWQ, RTN and QQQ have no Hessian and
-keep torch's hipBLASLt backend, which is 8-14x faster on gfx1201 for the
-fp16/bf16 GEMMs. `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` (or
-`ROCBLAS_USE_HIPBLASLT=1`) keeps hipBLASLt for the GPTQ family too; that is
-faster but not reproducible across processes, so GPT-QModel warns once. This
-applies to RDNA4 as well; the RDNA4 hipBLASLt Tensile libraries exist but are
-not tuned. HIP JIT builds stage their sources in the build cache by default, so
-a CUDA-only extension can never hipify over the tracked `gptqmodel_ext`
-sources. See [the ROCm default environment](docs/rocm-default-environment.md#quantization-blas-scope)
-and [HIP JIT source staging](docs/rocm-rdna4.md#hip-jit-source-staging).
-
-## Features ✨
-* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
-* ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
-* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
-* ✨ GPTQ, AWQ, ParoQuant, [MACaQ](docs/macaq.md), QQQ, VPTQ, GGUF, FP8, EXL3, NF12, GPTAQ, and FOEM quantization support, plus opt-in GSQ refinement for compatible GPTQ, AWQ, RTN, QQQ, FP8, and ParoQuant paths.
-* ✨ All current GGUF quantized tensor types are supported end to end for CPU quantization and inference: every `Q*_0`/`Q*_1`, `Q2_K`-`Q8_K`, `IQ1_S`-`IQ4_XS`, `TQ1_0`/`TQ2_0`, `MXFP4`, `NVFP4`, `Q1_0`, `Q2_0`, and the `Q1_0_g128` sign-only variant. Install the bindings with `pip install gptqmodel[gguf]` (`gguf>=0.19.0`, `llama-cpp-python>=0.3.36`). CPU inference uses llama.cpp's native SIMD kernels (`BACKEND.GGUF_CPP_CPU`) with a per-shape autotuned Torch fallback. Native ggml dot kernels also quantize activations, so outputs can differ from weight-only Torch inference; set `GPTQMODEL_GGUF_CPP_NATIVE_MATMUL=0` to keep the Torch path. `Q8_1`/`Q8_K` always use Torch, including when native execution is forced, since upstream ggml exposes no matmul for them. CPU dequantization reconstructs weights in FP32 before casting to FP16/BF16. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
-* 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
-* 🚀 Multi-GPU data-parallel quantization with GIL-safe peer copies and device-aware scheduling.
-* ✨ CUDA (NVIDIA), ROCm (AMD), Tenstorrent (Torch/XLA and TTNN), NPU (Huawei Ascend), XPU (Intel), MPS/MLX (Apple silicon), and CPU support. See the platform matrix below for OS and kernel availability.
-* ✨ `Dynamic` per-module mixed quantization control: each layer/module can have a unique quantization config or be excluded from quantization. 
-* ✨ Staged quantization protocol with rule-scoped actions: `smoothquant` folds its inverse into the preceding norm, and unsupported actions fail loudly. See [protocol actions](docs/protocol-actions.md).
-* 🚀 Torch fused kernels for Intel XPU and CPU, plus native AVX512-BF16 GPTQ/AWQ CPU kernels.
-* 🚀 Free-threaded Python support for multi-GPU quantization, with explicit [PyTorch GIL=0 safety contracts](pytorch_gil_0_compat.md).
-* ✨ Asymmetric `Sym=False` support. 
-* ✨ `lm_head` module quant inference support for further VRAM reduction.
-* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
-* Unit, kernel, model-plan, and post-quantization quality regression tests. See [accelerator test gates](docs/accelerator-test-gates.md) for hardware requirements and skip/failure rules.
-
-## Organizations and projects using GPT-QModel 🌐
-
-Selected public references where teams or companies explicitly mention GPT-QModel in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
-
-* <img src="https://cdn.simpleicons.org/huggingface/FFD21E" alt="Hugging Face logo" height="14"> Hugging Face
-* <img src="https://cdn.simpleicons.org/intel/0071C5" alt="Intel logo" height="14"> Intel
-* <img src="https://cdn.simpleicons.org/nvidia/76B900" alt="NVIDIA logo" height="14"> NVIDIA
-* <img src="https://cdn.simpleicons.org/alibabacloud/FF6A00" alt="Alibaba Cloud logo" height="14"> Alibaba Cloud
-
-
-## Quality: GPTQ 4-bit evaluation 🏆
-🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
-
-<img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
-
-## Model Support 🤖
-
-The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MAP`, including text-model and backward-compatibility aliases. Qwen 3.5 registrations require Transformers 5.2.0 or newer.
-
-<!-- model-types:start -->
-| Model family | Registered Transformers `model_type` values |
-|---|---|
-| A.X-K2 | `axk2` |
-| AfMoE / Trinity | `afmoe` |
-| Agnes 3.0 Flash | `agnes` |
-| Apertus 1 / 1.5 | `apertus`, `apertus1p5`, `apertus1p5_text` |
-| Baichuan | `baichuan` |
-| Bailing MoE / Hybrid (LING / RING) | `bailing_moe`, `bailing_hybrid` |
-| Bloom | `bloom` |
-| Brumby | `brumby` |
-| ChatGLM | `chatglm` |
-| CodeGen | `codegen` |
-| Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) | `cohere`, `cohere2`, `cohere2_moe`, `cohere_compass` |
-| DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
-| DeciLM | `deci` |
-| DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
-| KRAFTON Raon-1 mini | `raon1_mini` |
-| DiffusionGemma | `diffusion_gemma` |
-| Dots1 / Dots3 Note | `dots1`, `dots3_note` |
-| Dream | `dream` |
-| ERNIE 4.5 / MoE / VL MoE | `ernie4_5`, `ernie4_5_moe`, `ernie4_5_moe_vl`, `ernie4_5_vl_moe` |
-| EXAONE 3 / 4 / 4.5 | `exaone`, `exaone4`, `exaone4_5`, `exaone4_5_text` |
-| Falcon / Falcon H1 / Falcon Mamba | `falcon`, `falcon_h1`, `falcon_mamba` |
-| RecursiveSI Flint | `flint` |
-| Gemma 1-4 / 3n / Unified | `gemma`, `gemma2`, `gemma3`, `gemma3_text`, `gemma3n`, `gemma3n_text`, `gemma4`, `gemma4_text`, `gemma4_unified`, `gemma4_unified_text` |
-| GLM / GLM4 / GLM4V / GLM5 / OCR / ASR | `glm`, `glm4`, `glm4_moe`, `glm4_moe_lite`, `glm4v`, `glm4v_moe`, `glm4v_moe_text`, `glm5_next`, `glm_moe_dsa`, `glm_ocr`, `glmasr` |
-| GPT-2 | `gpt2` |
-| GPT BigCode | `gpt_bigcode` |
-| GPT-Neo / GPT-NeoX | `gpt_neo`, `gpt_neox` |
-| GPT-OSS | `gpt_oss` |
-| GPT-J | `gptj` |
-| Granite / Granite SWA / Granite MoE / Granite MoE SWA / Granite MoE Hybrid | `granite`, `granite_swa`, `granitemoe`, `granitemoe_swa`, `granitemoehybrid` |
-| GRIN-MoE | `grinmoe` |
-| Helium | `helium` |
-| HRM | `hrm_text` |
-| Hunyuan V1 / VL / OCR | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `hunyuan_vl` |
-| HY-V3 | `hy_v3` |
-| Hymba | `hymba` |
-| Inkling | `inkling_mm_model` |
-| Instella | `instella` |
-| Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
-| InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
-| InternVL 3 / InternVL Chat | `internvl`, `internvl_chat` |
-| Jamba / Jamba2 | `jamba` |
-| K2-Horizon (Dense / MoVA) | `k2_horizon` |
-| Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
-| Kimi K3 / Linear (bounded native-source calibration) | `kimi_k3`, `kimi_linear` |
-| Klear | `klear` |
-| Laguna | `laguna` |
-| LFM2 / LFM2 MoE / LFM2-VL | `lfm2`, `lfm2_moe`, `lfm2_vl` |
-| LFM3 / LFM3 Omni / LFM3-VL | `lfm3`, `lfm3_omni`, `lfm3_vl` |
-| LLaDA2 MoE | `llada2_moe` |
-| Llama 1-4 / TinyLlama / Nemotron Ultra | `llama`, `llama4`, `llama4_text` |
-| Llama 3.2 VL | `mllama`, `mllama_text_model` |
-| LLaVA-1.5 | `llava` |
-| FastVLM / LLaVA-Qwen2 | `llava_qwen2` |
-| LocateAnything | `locateanything` |
-| LongCat Flash | `longcat_flash` |
-| LongLLaMA | `longllama` |
-| Mage-VL | `mage_vl` |
-| Marin | `marin` |
-| MiMo / MiMo V2 | `mimo`, `mimo_v2` |
-| MiniCPM / MiniCPM3 / MiniCPM-O / MiniCPM-V | `minicpm`, `minicpm3`, `minicpmo`, `minicpmv`, `minicpmv4_6` |
-| MiniMax M2 / M3-VL | `minimax`, `minimax_m2`, `minimax_m3_vl` |
-| Mistral / Mistral3 / Ministral3 | `mistral`, `mistral3`, `ministral3` |
-| Mixtral | `mixtral` |
-| MobileLLM | `mobilellm` |
-| MOSS | `moss` |
-| MPT | `mpt` |
-| Muse Glimmer | `muse_glimmer` |
-| Nanbeige 4.2 | `nanbeige` |
-| Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
-| OLMo / OLMo 2 / 3 / Hybrid / OLMoE | `olmo`, `olmo2`, `olmo3`, `olmo_hybrid`, `olmoe` |
-| OpenVLA | `openvla` |
-| OPT | `opt` |
-| Ouro | `ouro` |
-| Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
-| PanGu-α | `gpt_pangu` |
-| Phi 1-4 / Phi MoE | `phi`, `phi3`, `phi4mm`, `phimoe` |
-| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp`, `qwen4_exp_text` |
-| Qwen 2 / 2.5 / 3 VL / 3 VL MoE | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl`, `qwen3_vl_moe` |
-| Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
-| Qwen2-Audio | `qwen2_audio` |
-| Qwen-Drive 1.0 | `qwen_drive` |
-| RefinedWeb | `refinedWeb`, `refinedWebModel` |
-| [Ricursive Ripple](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) ([cached generation](docs/ricursive-cached-generation.md)) | `ricursive` |
-| Seed-OSS | `seed_oss` |
-| SmolLM3 | `smollm3` |
-| SmolVLM | `smolvlm` |
-| Solar Open / Open 2 | `solar_open`, `solar_open2` |
-| Spark 2.5 | `spark2_5` |
-| StableLM | `stablelm`, `stablelm_epoch` |
-| StarCoder2 | `starcoder2` |
-| TeleChat2 | `telechat` |
-| Unlimited-OCR | `unlimited_ocr`, `unlimited-ocr` |
-| Voxtral | `voxtral` |
-| [Xing4.0 (29B-A4B)](https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B) | `xing4_0` |
-| XVERSE | `xverse` |
-| Yi | `yi` |
-| Zamba / Zamba2 | `zamba`, `zamba2` |
-| ZDTaichu 5.0 | `zdtaichu5_0` |
-<!-- model-types:end -->
-
-Kimi K3 / Linear quantization requires the bounded native-source runner to
-preserve AttnRes prefix/residual state; the ordinary `GPTQModel.quantize()`
-looper rejects it. See the [Kimi K3 calibration contract](docs/kimi-k3-native-source.md).
-
-Qwen2.5-Omni supports quantizing its text output head with `lm_head=True`.
-The head is `thinker.lm_head`; GPTQ defaults it to 8-bit, group size 32.
-To use a 4-bit head, configure an explicit dynamic override:
-
-```python
-from gptqmodel import QuantizeConfig
-
-quantize_config = QuantizeConfig(
-    bits=4,
-    group_size=128,
-    lm_head=True,
-    dynamic={r"thinker\.lm_head$": {"bits": 4, "group_size": 32, "desc_act": False}},
-)
-```
-
-This option quantizes the thinker's text head; the talker and audio decoder
-retain their original weights. Tied output-head weights must be untied first.
+Start with the [quantization guide](docs/quantization-guide.md).
+External runtimes support only specific method/format combinations; check the
+[integration and backend tables](docs/support-matrix.md) before exporting.
 
 ## Platform and HW Support 🖥️
 
-GPT-QModel is validated on Linux, macOS, and Windows 11:
+| Platform | Hardware | Runtime overview |
+| --- | --- | --- |
+| Linux | NVIDIA GPUs | CUDA kernels; Turing or newer, with backend-specific minimums |
+| Linux | AMD GPUs | ROCm 10.1+; architecture-specific Torch/Triton/HIP paths |
+| Linux | Tenstorrent | Torch/XLA/PJRT and native TTNN |
+| Linux | Huawei Ascend | Native Torch through `torch-npu` / CANN |
+| Linux | Intel XPU | Torch and TorchFused |
+| Linux | Intel/AMD CPUs | Torch and optimized x86 kernels |
+| macOS | Apple silicon | Native MLX/Metal quantization and inference; MPS/Torch |
+| Windows 11 | NVIDIA GPUs / CPU | Torch |
 
-| Platform | Device |  | Optimized Arch | Kernels |
-|---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`); NF12 and block-float CUDA `sm_80+`; backend-specific limits apply | Machete, Marlin, Swordfish, AllSpark, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, MACaQ Triton/Torch, GGUF CUDA/Triton, QQQ, VPTQ, NF12, `bf4_b`/`bf8_b` CUDA, BitBLAS, Triton, BitsAndBytes, Torch |
-| 🐧 Linux | AMD GPU | ✅ | `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4); backend-specific limits apply | AWQ Triton GEMM/GEMV, ParoQuant Triton, MACaQ Triton (`gfx1201`) / Torch, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, NF12 HIP (RDNA4), AllSpark (gfx1200/1201), `bf4_b`/`bf8_b` HIP, FP8 Torch, Torch |
-| 🐧 Linux | Tenstorrent | ✅ | `Blackhole p300c`, `DEVICE.XLA` | Packed GPTQ via Torch/XLA/PJRT or native TTNN; opt-in `bf8_b` TTNN; multi-card execution |
-| 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
-| 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
-| 🐧 Linux | Intel/AMD CPU | ✅ | x86-64; AVX2, AVX512-BF16, or AMX for applicable optimized paths | GPTQ/AWQ AVX512-BF16, TorchFused, TorchFusedAWQ, TorchAten int4, GPTQ INT8 (8-bit sources), GGUF C++, BitsAndBytes, VPTQ, NF12 Torch, `ttbfp` block floats, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference (GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, MACaQ, NF12, EXL3); MPS/Torch, FP8 Torch, NF12 Torch |
-| 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
+Support depends on the chosen method, backend, dtype, and device architecture.
+See the [full hardware and kernel matrix](docs/support-matrix.md#hardware-and-operating-systems),
+[ROCm guide](docs/rocm-rdna4.md), [Tenstorrent guide](docs/tenstorrent.md),
+and [Apple silicon guide](docs/mlx-runtime.md).
 
-Availability depends on each backend's architecture, dtype, shape, and runtime
-requirements; a platform row does not imply that every listed kernel runs on
-every device in that family. Tenstorrent hardware inference and CPU block-float
-execution are separate paths; the CPU kernels do not require TTNN or PJRT.
+Tenstorrent-compatible block-float formats also run on CPU without Tenstorrent
+hardware. See the [CPU block-float guide](docs/tt-blockfloat-cpu.md).
 
-**ROCm 10.1 or newer is required.** GPT-QModel only supports and validates
-ROCm >= 10.1; older releases are unsupported and `import gptqmodel` or model
-loading logs a warning asking you to upgrade. Use the latest ROCm release and a
-matching ROCm PyTorch build. ROCm 10.1 ships HIP 7.16; `torch.version.hip`
-reports the HIP runtime version, not the ROCm release, so version checks use
-`torch.version.rocm`.
+## Model Support 🤖
 
-ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` use the
-matching expanded `rocm-sdk-devel` tree, and otherwise fall back to the
-version-matched `/opt/rocm/core-*` SDK for the template headers, the
-`libamdhip64.so` symlink and the device bitcode. See
-[`docs/rocm-jit-toolkit-paths.md`](docs/rocm-jit-toolkit-paths.md) for the
-resolution order and failure paths.
-JIT builds on ROCm always use the HIP/torch headers only: NVIDIA `nvidia` wheel
-headers are never added to a hipcc command line, even when those packages are
-installed in the environment, because their `vector_types.h` conflicts with
-HIP's vector type aliases.
+Support spans dense, mixture-of-experts (MoE), vision-language, and audio-language
+families. The compact list below keeps model coverage visible; the
+[complete registry](docs/supported-models.md) lists exact model-type aliases and
+model-specific limitations.
 
-On gfx950 (CDNA4) and the gfx120*/gfx125* RDNA4 family, the Torch GPTQ backend
-uses a fused Triton GEMV for single-token 2/4/8-bit inference and a fused
-small-M GEMM for M=2..16, and falls back to the existing path for other shapes
-or unregistered architectures. Launch constants are selected per architecture
-by `gptqmodel/utils/arch.py`. On gfx1201 (R9700) the fused small-M GEMM measured
-1.1x-3.2x faster than dequantize+matmul for M=2..16 in FP16 up to K=17408, and
-its `.amdgcn` contains `v_wmma_f32_16x16x16_f16`. The fused small-M GEMM is
-FP16-only on RDNA4: BF16 measured 0.43x-1.42x of the split path there (median 0.85x), so BF16
-falls back to dequantize+matmul (GEMV keeps both dtypes). Set
-`GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
-matrix and known limitations, and [`docs/rocm-default-environment.md`](docs/rocm-default-environment.md)
-for the ROCm defaults GPT-QModel installs (`expandable_segments` is not enabled;
-`ROCBLAS_USE_HIPBLASLT=0` plus the Hessian-scoped rocBLAS override makes
-quantization reproducible across processes, while the forward/replay GEMMs keep
-hipBLASLt; HIP JIT builds stage their sources outside the checkout).
+| Families | Supported models and variants |
+| --- | --- |
+| A | A.X-K2; AfMoE / Trinity; Agnes 3.0 Flash; Apertus 1 / 1.5 |
+| B–C | Baichuan; Bailing MoE / Hybrid (LING / RING); Bloom; Brumby; ChatGLM; CodeGen; Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) |
+| D | DBRX / DBRX Converted; DeciLM; DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2; DiffusionGemma; Dots1 / Dots3 Note; Dream |
+| E–F | ERNIE 4.5 / MoE / VL MoE; EXAONE 3 / 4 / 4.5; Falcon / Falcon H1 / Falcon Mamba; FastVLM / LLaVA-Qwen2 |
+| G | Gemma 1–4 / 3n / Unified; GLM / GLM4 / GLM4V / GLM5 / OCR / ASR; GPT-2; GPT BigCode; GPT-Neo / GPT-NeoX; GPT-OSS; GPT-J; Granite / Granite SWA / MoE / MoE SWA / MoE Hybrid; GRIN-MoE |
+| H | Helium; HRM; Hunyuan V1 / VL / OCR; HY-V3; Hymba |
+| I–J | Inkling; Instella; Intern S1 / S2 Preview; InternLM 1 / 2 / 2.5; InternVL 3 / InternVL Chat; Jamba / Jamba2 |
+| K | K2-Horizon (Dense / MoVA); Kimi K2 / K2.5 / K3 / Linear; Klear; KRAFTON Raon-1 mini |
+| L | Laguna; LFM2 / LFM2 MoE / LFM2-VL; LFM3 / LFM3 Omni / LFM3-VL; LLaDA2 MoE; Llama 1–4 / TinyLlama / Nemotron Ultra; Llama 3.2 VL; LLaVA-1.5; LocateAnything; LongCat Flash; LongLLaMA |
+| M | Mage-VL; Marin; MiMo / MiMo V2 / MiMo V2 Flash; MiniCPM / MiniCPM3 / MiniCPM-O / MiniCPM-V; MiniMax M2 / M3-VL; Mistral / Mistral3 / Ministral3; Mixtral; MobileLLM; MOSS; MPT; Muse Glimmer |
+| N | Nanbeige 4.2; Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion |
+| O | OLMo / OLMo 2 / 3 / Hybrid / OLMoE; OpenVLA; OPT; Ouro; Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next |
+| P | PanGu-α; Phi 1–4 / Phi MoE |
+| Q | Qwen 1–4 / 3.5 / 3.6 / 3.8 / MoE / Next; Qwen 2 / 2.5 / 3 VL / 3 VL MoE; Qwen 2.5 / 3 Omni; Qwen2-Audio; Qwen-Drive 1.0 |
+| R | RecursiveSI Flint; RefinedWeb; Ricursive Ripple |
+| S | Seed-OSS; SmolLM3; SmolVLM; Solar Open / Open 2; Spark 2.5; StableLM; StarCoder2 |
+| T–V | TeleChat2; Unlimited-OCR; Voxtral |
+| X–Z | Xing4.0 (29B-A4B); XVERSE; Yi; Zamba / Zamba2; ZDTaichu 5.0 |
 
-On Ada (SM 8.9) and Blackwell (SM 10.x), `TritonV2Linear` reuses the same fused
-GEMV / small-M GEMM dispatch and the packed-load kernel covers `M=2..64` with no
-K/N caps: decode and small-batch forward measured 2.4x-6.8x faster than the
-previous TritonV2 path. See the [GPTQ Triton decode and small-M dispatch](docs/triton-dispatch.md)
-flow for the gate, split-K and bitwise contracts.
+For multimodal checkpoints, support may target the language decoder rather than
+every vision/audio component. Kimi K3 / Linear requires the dedicated native-source
+calibration workflow; Qwen 3.5 requires Transformers 5.2.0 or newer. Check the
+[model notes](docs/supported-models.md) before starting a large run.
 
-bitsandbytes 4-bit (NF4/FP4) inference on ROCm routes `M >= 16` through a fused
-Triton GEMM that dequantizes the packed codes inside the matmul, because the
-vendor HIP kernel switches to a much slower path at that row count. Measured on
-gfx1201 (R9700, FP16) it is 1.4x-6.3x faster than `bnb.matmul_4bit`; below
-`M = 16` bitsandbytes' own GEMV is faster and is kept. CUDA/Ada keeps the
-vendor kernels, which are faster there; set `GPTQMODEL_BNB_TRITON=1` to force
-the Triton path for A/B runs.
-
-Marlin supports NVIDIA Turing and newer (`sm_75+`); other JIT CUDA kernels
-enforce their own minimum architecture rather than sharing a universal cutoff.
-Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
-
-### Tenstorrent block floats on CPU
-
-[`gptqmodel_ext/ttbfp/`](gptqmodel_ext/ttbfp/) provides a bit-exact CPU
-implementation of Tenstorrent's `bf8_b` / `bf4_b` / `bf2_b` block-float
-formats, so models and kernels that use them can run without Tenstorrent
-hardware. It ships a quantizer validated against the upstream `tt-llk`
-helpers, fused dequantize+GEMM microkernels for scalar / AVX2+FMA / AVX-512,
-block-major and bf8_b-only int8 kernel-native layouts, and bitwise-parity
-tests. See the [CPU block-float guide](docs/tt-blockfloat-cpu.md) for dtype
-naming, dispatch flow and measured performance.
-
-### Native MLX quantization on Apple silicon
-
-Install the optional MLX dependency and quantize a dense model directly to an
-MLX-LM checkpoint:
-
-```bash
-pip install 'gptqmodel[mlx]'
-```
-
-```python
-from gptqmodel import GPTQModel
-
-GPTQModel.quantize_mlx(
-    "Qwen/Qwen3-0.6B",
-    "./qwen3-mlx-gptq",
-    method="gptq",  # or "awq"
-    bits=4,
-    group_size=64,
-    num_samples=128,
-)
-```
-
-GPTQ uses MLX for calibration and weight updates, with one fused Metal dispatch
-per weight group. MLX currently performs the Cholesky factorization on its CPU
-stream. AWQ uses MLX-LM's native scale and clip search. The output uses MLX-LM's
-quantized model format and can be loaded with `mlx_lm.load`.
-Pass an MLX token array as `calibration_data` to use your own calibration set.
-To drive a GPTQ/AWQ checkpoint through the MLX runtime with the standard
-`generate()` API, or to export one with `GPTQModel.export(..., format="mlx")`,
-see the [MLX runtime and export flow](docs/mlx-runtime.md), including batched
-attention-mask handling, per-call EOS scoping, and the stock-compatible
-`mlx_lm.load` export layout. MACaQ MXFP4 and NF12
-checkpoints load into dedicated Metal kernels as well: MACaQ's OCP MXFP4 words
-feed MLX's native MXFP4 matmul, and NF12's 12-bit BF16 stream is decoded by a
-fused Metal GEMV or a decode-plus-matmul prefill.
-
+[Browse quantized models on Hugging Face](https://huggingface.co/modelcloud/)
 
 ## Install 💾
 
-### PIP/UV 💿
+Use a Python environment with a compatible PyTorch build for your hardware:
 
 ```bash
-# vLLM and SGLang publish their own Torch/Transformers pins. Install one engine
-# in a dedicated environment aligned to that engine's release.
-# Example optional module: pip install -v "gptqmodel[bitblas]"
-pip install -v gptqmodel
-uv pip install -v gptqmodel
+pip install gptqmodel
+# Or: uv pip install gptqmodel
 ```
 
-Compiled package backends build and cache their extensions on first use (JIT),
-not during `pip install`. The package depends on `ninja` for these builds;
-install a compatible compiler and the CUDA/ROCm toolkit required by the chosen
-backend. Pure Torch paths do not require building an extension.
-NumPy is not a base dependency: the quantization core is NumPy-free, and the
-`gguf`, `bitblas`, and `mlx` extras declare it for the paths that need it. See
-[NumPy-free core](docs/numpy-free-core.md).
+PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
+blocked by the [runtime safety check](docs/torch-runtime-safety-gate.md).
+Compiled package backends build and cache extensions on first use (JIT),
+so install the compiler and CUDA/ROCm toolkit required by your backend.
 
-AMD ROCm support requires **ROCm >= 10.1** and a matching ROCm PyTorch build.
-Older ROCm releases are unsupported; GPT-QModel logs a warning at import/model
-load time and asks you to upgrade.
+See [installation and optional extras](https://github.com/ModelCloud/GPTQModel/wiki/Installation-and-Quickstart)
+for source installs and platform setup. Install vLLM or SGLang in a separate
+environment aligned with that engine's dependency pins.
 
-PyTorch **2.13.x or >= 2.15.0** is required. Importing GPT-QModel on a `torch`
-release below `2.13.0` raises `UnsafeTorchVersionError` because that range
-is affected by [GHSA-rrmf-rvhw-rf47](https://github.com/advisories/GHSA-rrmf-rvhw-rf47)
-(CVE-2025-3000, memory corruption in `torch.jit.script`), and `2.14.x` raises because it is affected by
-[GHSA-v32g-mr63-3j83](https://github.com/pytorch/pytorch/security/advisories/GHSA-v32g-mr63-3j83)
-(`torch.load(weights_only=True)` arbitrary file read, patched in `2.15.0`). The check runs before the
-CUDA allocator is initialized. Python 3.10 has no patched wheel and therefore installs the
-`2.13.x` line. See
-[PyTorch runtime safety gate](docs/torch-runtime-safety-gate.md) for the affected ranges, the
-bypass, and why the comparison uses the PEP 440 public version.
+## Quick start 🚀
 
-### Install from source 🛠️
+### Inference 💬
 
-```bash
-# clone repo
-git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
+Load an existing quantized checkpoint and generate text. GPT-QModel selects a
+compatible installed backend for the checkpoint and your device; you can choose
+an explicit backend when tuning a deployment.
 
-# python3-dev is required for some source installs
-apt install python3-dev
-
-# pip: install from source
-# Example optional module: pip install -v ".[bitblas]"
-pip install -v .
-```
-
-### Inference 🔮
-Three-line API to use `GPT-QModel` for GPTQ model inference:
-
-```py
+```python
 from gptqmodel import GPTQModel
 
 model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v2.5")
-result = model.generate("Uncovering deep insights begins with")[0] # tokens
-print(model.tokenizer.decode(result)) # string output
+tokens = model.generate("Uncovering deep insights begins with", max_new_tokens=64)[0]
+print(model.tokenizer.decode(tokens))
 ```
 
-Loading, saving and dequantizing a checkpoint only execute its bundled Python
-when you pass `trust_remote_code=True`; see the
-[trusted remote-code boundary](docs/trust-remote-code-isolation.md) for the
-enforced flow.
+[Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
+covers backend selection, generation, and adapters. Only enable
+`trust_remote_code=True` for checkpoint code you trust.
 
-On Apple Silicon, install the optional MLX runtime with `pip install "gptqmodel[mlx]"`.
-`GPTQModel.load(..., backend=BACKEND.AUTO)` selects MLX Metal for supported 4-bit
-GPTQ and AWQ GEMM checkpoints when the model architecture is supported by MLX-LM.
-The converter transfers compatible packed weights directly to MLX's quantized
-matmul layout. Supported affine group sizes are 32, 64, and 128. Explicit backend
-choices remain available.
+### Quantization 🗜️
 
-```py
-from gptqmodel import GPTQModel
+This example creates a 4-bit GPTQ checkpoint using 256 streamed C4 samples.
+Use calibration text representative of your workload; the dataset and precision
+settings affect the quality of the resulting model.
 
-model = GPTQModel.load("ModelCloud/Qwen2.5-0.5B-Instruct-gptqmodel-w4a16")
-print(model.generate(prompt="The capital of France is", max_tokens=16))
-```
-
-To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFace Hub, set an environment variable:
-```shell
-export GPTQMODEL_USE_MODELSCOPE=True
-```
-
-### FP32 accumulation toggle 🔢
-
-Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to reduce numerical drift during fused quantized matmul. This setting defaults to `True` because accuracy is prioritized over speed.
-Biased ParoQuant Triton calls always accumulate and add bias in FP32 before
-output rounding, including when this toggle is `0`. See the
-[ParoQuant Triton bias epilogue](docs/paroquant.md#triton-bias-epilogue).
-ParoQuant's native CUDA GEMM is selected only for the shapes and devices its own
-validator accepts, so advertised configurations such as `group_size=16` and
-narrow output widths that the packer supports run the portable fallback instead
-of raising. Output widths must be a multiple of eight, because the shared INT4
-AWQ packer stores eight codes per `int32`; an unaligned width is rejected at
-validation time rather than failing during packing. See the
-[ParoQuant native dispatch gate](docs/paroquant.md#native-dispatch-gate) and
-[output width alignment](docs/paroquant.md#output-width-alignment).
-
-```shell
-# default behavior: higher accuracy, slightly lower speed on some kernels
-export GPTQMODEL_FP32_ACCUM=1
-
-# optional speed-first mode for some kernels
-export GPTQMODEL_FP32_ACCUM=0
-```
-
-### JIT kernel cache and multi-process quantization ⚙️
-
-JIT-compiled kernels are cached at `~/.cache/gptqmodel/torch_extensions` by default. Multiple processes on one host may safely share the cache: builds are serialized with a cross-process file lock that the OS releases automatically if a process dies.
-
-Machete's pinned CUTLASS checkout and generated CUDA sources are kept in the
-versioned user cache (`~/.cache/gptqmodel`, or `GPTQMODEL_CACHE_DIR`; when set,
-`XDG_CACHE_HOME/gptqmodel` is used). Set `GPTQMODEL_CUTLASS_DIR` to use an
-already-installed, read-only CUTLASS 4.7.1 checkout. `GPTQMODEL_OFFLINE=1`
-disables downloads and requires that checkout or a verified cache hit already
-exist. For environments where compilation is not allowed, point
-`GPTQMODEL_MACHETE_PRECOMPILED_LIBRARY` at a compatible Machete shared library;
-an invalid or missing explicit library is reported as an error and does not
-fall back to JIT. The generated source cache can be populated ahead of time by
-prewarming the extension:
-
-```shell
-python -c "from gptqmodel import extension; extension.load('machete')"
-```
-
-```shell
-# optional: relocate the kernel cache (e.g. one cache per process)
-export GPTQMODEL_TORCH_EXTENSIONS_DIR=/path/to/cache
-
-# optional: max seconds to wait for another process's in-flight build before
-# falling back to non-JIT paths. Default: 600 or 5x the kernel's compile
-# baseline, whichever is larger.
-export GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT=600
-```
-
-Notes:
-* This is a runtime toggle. It does not change model weights or saved checkpoints.
-* It mainly affects some fused AWQ and ParoQuant CUDA/Triton kernels. Dense/dequantize fallback paths are mostly unaffected.
-* `1` is recommended for regression testing and quality-sensitive evaluation. `0` may be useful when chasing a small latency win and the quality tradeoff is acceptable.
-
-### OpenAI API compatible endpoint 🌐
-```py
-# load model using above inference guide first
-model.serve(host="127.0.0.1", port=8000)  # the bind address is your choice
-
-# Exposing the port beyond localhost requires an API key (or GPTQMODEL_OPENAI_API_KEY).
-model.serve(host="0.0.0.0", port=8000, api_key="<secret>")
-
-# Multiple keys are accepted; any of them authorizes a request.
-model.serve(host="0.0.0.0", port=8000, api_key=["<k1>", "<k2>"])
-```
-
-When at least one key is configured, every path under `/v1`, `/v2` and
-`/inference` requires `Authorization: Bearer <key>`; `/health`, `/` and CORS
-preflight stay open. An explicitly passed `api_key` replaces (does not merge
-with) `GPTQMODEL_OPENAI_API_KEY`, and blank keys are ignored. Starting on a
-non-loopback host without a key is refused; pass `api_key=` to opt in. The
-default listener is `127.0.0.1`, request sizes are bounded, and a loopback
-listener validates the Host header. `/shutdown` is limited to loopback callers
-unless a valid key is presented. See
-[OpenAI server exposure and media fetch bounds](docs/openai-server-exposure.md)
-for the bind, Host, request-limit, and calibration-fetch contracts.
-
-### Quantization 🔧
-Example: quantizing an LLM with `GPT-QModel`:
-
-```py
+```python
 from datasets import load_dataset
 from gptqmodel import GPTQConfig, GPTQModel
 
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
-
-calibration_dataset = load_dataset(
-    "allenai/c4",
-    data_files="en/c4-train.00001-of-01024.json.gz",
-    split="train"
-  ).select(range(1024))["text"]
-
-quant_config = GPTQConfig(bits=4, group_size=128)
-
-model = GPTQModel.load(model_id, quant_config)
-
-# increase `batch_size` to match GPU/VRAM specs to speed up quantization
-model.quantize(calibration_dataset, batch_size=1)
-
-model.save(quant_path)
-```
-
-#### Calibration grid workspaces
-
-GPTQ/QQQ MSE shrink searches and AWQ clipping searches evaluate candidates in
-chunks. Their temporary workspace targets can be adjusted per
-`QuantizeConfig` via `MSEConfig` on the `mse` field (a bare float, e.g.
-`mse=2.4`, still works and only sets the search exponent `norm`):
-
-```py
-from gptqmodel import GPTQConfig, MSEConfig
-
-quant_config = GPTQConfig(
-    bits=4,
-    group_size=128,
-    mse=MSEConfig(norm=2.4, grid_budget="64M", clip_grid_budget="64M"),
-)
-```
-
-| `MSEConfig` field | Search | CPU default | GPU default |
-|---|---|---:|---:|
-| `norm` | MSE objective exponent (`0` disables the search) | — | — |
-| `grid_budget` | GPTQ/QQQ MSE shrink grid | `16M` | `256M` |
-| `clip_grid_budget` | AWQ clipping grid | `16M` | `256M` |
-
-Budget values are byte counts (ints) or strings with a `K`/`M`/`G` postfix
-(e.g. `"256M"`, `"1G"`).
-
-Set either field to `0` to evaluate one candidate at a time; AWQ also uses
-one-token product tiles. These are chunk-sizing targets, not limits on total
-process memory: AWQ sizes its scratch buffers independently, and a single
-candidate, full-token error buffer, or minimum product tile can exceed the
-target. These settings affect calibration scratch only, not stored quantized
-weights.
-
-#### Checkpoint and Resume Long Quantization Jobs 💾
-
-Checkpointing commits completed transformer layers so an interrupted
-quantization job can reload the original model and continue without repeating
-those layers. Use an explicit checkpoint path that survives process restarts:
-
-```py
-from gptqmodel import CheckpointConfig, CheckpointStopped, GPTQConfig, GPTQModel
-
-quant_config = GPTQConfig(
-    bits=4,
-    group_size=128,
-    offload_to_disk=True,
-)
-model = GPTQModel.load(model_id, quant_config)
-
-try:
-    model.quantize(
-        calibration_dataset,
-        batch_size=1,
-        checkpoint=CheckpointConfig(
-            path="checkpoints/Llama-3.2-1B-Instruct-gptqmodel-4bit",
-            resume="auto",
-            interval="layer:1",
-            keep_last=2,
-        ),
-    )
-except CheckpointStopped:
-    # Run the script again with the same source, calibration, config, and path.
-    raise SystemExit(75)
-
-model.save(quant_path)
-```
-
-Ctrl+C and `SIGTERM` finish the current layer, publish a safe checkpoint, and
-raise `CheckpointStopped`. A hard kill resumes from the last published layer;
-the unfinished layer is repeated. Resume validation requires the same source
-weights, calibration data, quantization settings, software versions, and device
-topology. Current checkpoint support is limited to Llama and Qwen3 MoE model
-types, requires `offload_to_disk=True`, and supports per-module dynamic
-overrides and exclusions. Rotation and embedding/`lm_head` quantization remain
-unsupported.
-
-See **[Quantization checkpointing and resume](checkpoint.md)** for resume
-policies, supported methods, safe-stop behavior, storage requirements, recovery
-procedures, and operational gotchas.
-
-For writers that reference an existing safetensors payload instead of making a
-second offload copy, see [Safetensors reference offload](docs/safetensors-reference-offload.md).
-For nested offload tensor names, see [Offload index resolution](docs/offload-index-resolution.md).
-
-#### Other Quantization Formats 📦
-
-`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `NF12Config`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
-
-For the factory validation contract, EXL3 field normalisation, and the
-checkpoint metadata round trip, see [quantization config serialization](docs/config-serialization.md).
-
-`GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF`, `FP8`, `BitsAndBytes`, and `NF12` are weight-only and should be quantized with `calibration=None`.
-
-##### QQQ Example: Llama 3.2 1B Instruct
-
-QQQ supports 4-bit symmetric weights with `group_size=-1` or `group_size=128`. Use `desc_act=False`: the packed QQQ runtime stores contiguous group scales and does not support GPTQ-style activation reordering. MSE scale search (`mse=2.4`) is the recommended quality recipe.
-
-```py
-import torch
-from datasets import load_dataset
-from gptqmodel import GPTQModel, QQQConfig
-
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-QQQ-4bit"
-
-calibration_dataset = load_dataset(
+dataset = load_dataset(
     "allenai/c4",
     data_files="en/c4-train.00001-of-01024.json.gz",
     split="train",
-).select(range(256))["text"]
-
-quant_config = QQQConfig(
-    bits=4,
-    group_size=128,
-    desc_act=False,
-    mse=2.4,
+    streaming=True,
 )
+calibration = [row["text"] for row in dataset.take(256)]
 
-model = GPTQModel.load(model_id, quant_config, dtype=torch.float16)
-model.quantize(
-    calibration_dataset,
-    batch_size=1,
-    calibration_concat_size=2048,
-)
-model.save(quant_path)
-```
-
-Experimental W4A streams on NVIDIA GB10 (SM121) keep GPTQ INT4 weights and quantize the *activations*: E4M3 FP8 with a per-token scale, or E2M1 NVFP4 with E4M3 block scales. Selected Llama decoder operators pass encoded activations and scales across module and layer boundaries instead of decoding to BF16. See the **[W4A guide](docs/gptq-w4a-gb10.md)** for the policy reference, and the [accuracy appendix](docs/gptq-w4a-accuracy-notes.md) for measured quality.
-
-##### Preprocessors 🧹
-
-`preprocessors=[...]` adds optional module-weight preparation steps before quantization or repacking. They are available on `GPTQConfig`, `AWQConfig`, `ParoConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, and `BitsAndBytesConfig`.
-
-- `SmootherConfig`: apply weight smoothing before quantization.
-- `AutoModuleDecoderConfig`: decode FP8/FP4 source modules to a dense `target_dtype` before downstream quantization or repacking.
-- `TensorParallelPadderConfig`: opt-in tensor-parallel padding metadata for TP-aligned packing.
-
-```py
-import torch
-from gptqmodel import GGUFConfig, GPTQConfig
-from gptqmodel.quantization import (
-    AutoModuleDecoderConfig,
-    SmoothMAD,
-    SmootherConfig,
-    TensorParallelPadderConfig,
-)
-
-gptq_cfg = GPTQConfig(
-    bits=4,
-    group_size=128,
-    preprocessors=[
-        SmootherConfig(smooth=SmoothMAD(k=2.0)),
-        AutoModuleDecoderConfig(target_dtype=torch.bfloat16),
-        TensorParallelPadderConfig(),
-    ],
-)
-
-gguf_cfg = GGUFConfig(
-    bits=4,
-    format="q_k_m",
-    preprocessors=[
-        AutoModuleDecoderConfig(target_dtype=torch.bfloat16),
-        TensorParallelPadderConfig(),
-    ],
-)
-```
-
-##### GGUF Example: Llama 3.2 1B Instruct
-
-```py
-from gptqmodel import BACKEND, GGUFConfig, GPTQModel
-
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-GGUF-Q4_K_M"
-
-qcfg = GGUFConfig(
-    bits=4,
-    format="q_k_m",
-)
-
-model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration=None, backend=BACKEND.GGUF_TORCH)
-model.save(quant_path)
-```
-
-##### FP8 Example: Llama 3.2 1B Instruct
-
-See [FP8 inverse-scale checkpoint loading](docs/fp8-inverse-scale-checkpoint-loading.md)
-for how FP32 scales are preserved when loading a BF16 model.
-See [packed FP8 weight lifecycle](docs/fp8-packed-weight-lifecycle.md) for
-checkpoint reload, module moves, and persistent storage.
-
-```py
-from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.quantization import FP8Config
-
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
-
-qcfg = FP8Config(
-    format="float8_e4m3fn",  # or "float8_e5m2"
-    bits=8,
-    weight_scale_method="row",
-)
-
-model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration=None, backend=BACKEND.GPTQ_TORCH)
-model.save(quant_path)
-```
-
-##### Exllama V3 / EXL3 Example: Llama 3.2 1B Instruct
-
-```py
-from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.quantization import EXL3Config
-
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-EXL3"
-
-calibration_dataset = load_dataset(
-    "allenai/c4",
-    data_files="en/c4-train.00001-of-01024.json.gz",
-    split="train",
-).select(range(1024))["text"]
-
-qcfg = EXL3Config(
-    bits=4.0,        # target average bits-per-weight
-    head_bits=6.0,   # optional higher bitrate for attention heads / sensitive tensors
-    codebook="mcg",  # one of: mcg, mul1, 3inst
-)
-
-model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V3)
-model.save(quant_path)
-```
-
-See [EXL3 inference buffer lifecycle](docs/exl3-native-bias-lifecycle.md) for
-native-handle invalidation and checkpoint-stable Torch wide-input inference.
-See [EXL3 wide activation dispatch](docs/exl3-wide-activation-dispatch.md) for
-BF16/FP32 routing, the 32-row native boundary, and packed-weight reconstruction.
-
-##### VPTQ Example: Llama 3.2 1B Instruct
-
-VPTQ learns vector codebooks from calibration data with GPTQ-style error
-compensation; Hessians are accumulated online, so no pre-generated Hessian
-files are needed. See the **[VPTQ guide](docs/vptq.md)** for the full
-configuration reference and [group layout validation flow](docs/vptq.md#group-layout-resolution).
-
-```py
-from datasets import load_dataset
-from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.quantization import VPTQConfig
-
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-VPTQ"
-
-calibration_dataset = load_dataset(
-    "allenai/c4",
-    data_files="en/c4-train.00001-of-01024.json.gz",
-    split="train",
-).select(range(1024))["text"]
-
-qcfg = VPTQConfig(
-    vector_lens=[-1, 8],         # 8-weight vectors, no outlier codebook
-    num_centroids=[-1, 4096],    # 4096-entry main codebook
-    num_res_centroids=[-1, 16],  # 16-entry residual codebook
-)
-
-model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.VPTQ_TORCH)
-model.save(quant_path)
-```
-
-##### NF12 Example: lossless 12-bit BF16
-
-NF12 stores BF16 weights in Together AI's lossless 12-bit NF12 format,
-using AlpinDale's tiled layout and CUDA kernels ([dphnAI/nf12](https://github.com/dphnAI/nf12)).
-It is weight-only, needs no calibration data, and decodes back to the exact
-BF16 matrix. The modules must satisfy `in_features % 64 == 0` and
-`out_features % 16 == 0`. The native RDNA4 path was validated on
-ROCm 10.1.0 / HIP 7.16.26385 with Radeon AI PRO R9700 (`gfx1201`); see
-the [NF12 HIP toolchain notes](gptqmodel_ext/nf12_hip/README.md).
-
-```py
-import torch
-from gptqmodel import GPTQModel
-from gptqmodel.quantization import NF12Config
-
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-NF12"
-
-model = GPTQModel.load(model_id, NF12Config(), dtype=torch.bfloat16)
-model.quantize(calibration=None)
-model.save(quant_path)
-```
-
-The packed weight is saved as `nf12_packed` (uint8, `N x K*3/2`) with
-`nf12_escapes` and `nf12_exp_base`, so loaders treat it as a quantized
-checkpoint rather than a dense weight.
-The [four-copy embedding path](docs/nf12-embedding-repeat4.md) decodes one
-packed row and writes the initial hyper-connection activations in one launch.
-
-The [NF12 validation backend and performance flow](docs/nf12-validation-backends.md)
-explains device selection, native encoder measurements, and Torch fallback.
-The [NF12 fallback epilogue](docs/nf12-bias-epilogue.md) explains mixed-dtype
-bias handling and BF16 weight-range preservation before output rounding.
-The [NF12 vendored runtime flow](docs/nf12-installed-extension.md) describes
-how GPT-QModel owns the NF12 Python API, native build, and inference dispatch.
-The [CUDA dispatch and weight-readiness contract](docs/nf12-cuda-dispatch.md)
-describes the upstream Blackwell kernel routes and explicit static-weight option.
-The [NF12 staged B1 and prefill projection flow](docs/nf12-staged-b1-projections.md) explains
-the verifier-row fusion, prepared compressed FP32 router view, and Ampere profile.
-The [NF12 embedding prefill dispatch](docs/nf12-embedding-prefill-dispatch.md) records
-the SM80 packed lookup geometry, exact-row contract, and observed Lite shapes.
-The [NF12 HIP device and workspace flow](docs/nf12-hip-device-workspace.md)
-describes matrix-core device selection, split-K scratch ownership, activation
-layout normalization, routing bounds, and exact-byte encoder scheduling.
-The [NF12 HIP embedding dispatch](docs/nf12-hip-embedding-dispatch.md)
-documents the one-ID and packed-ID CTA geometry, exact invalid-row contract,
-and 32-bit/64-bit index boundary.
-The [NF12 row-major embedding storage](docs/nf12-row-major-embedding.md)
-describes the lookup-oriented packed record, exact restore path, and measured
-CUDA and ROCm speedups.
-The [NF12 linear reduction association](docs/nf12-reduction-association.md)
-explains the architecture-specific pairwise reductions and their measured
-effect on Llama 3.2 1B logits drift.
-The [NF12 short-M dispatch](docs/nf12-short-m-dispatch.md) documents the
-M=1/4/8/16 launch plans, batched embedding shapes, and measured CUDA and ROCm
-speedups.
-
-##### W4A Example: Llama 3.2 1B Instruct (GB10)
-
-W4A quantizes activations while leaving the saved GPTQ checkpoint in its native
-INT32-packed INT4 layout. It requires NVIDIA GB10 (SM121), a Llama decoder
-model, `bits=4`, `group_size=128`, `sym=True`, `desc_act=False`,
-`pack_dtype="int32"`, `lm_head=False`, and Triton.
-
-```py
-import torch
-from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.quantization import QuantizeConfig
-
-model_id = "unsloth/Llama-3.2-1B-Instruct"
-quant_path = "Llama-3.2-1B-Instruct-W4A"
-
-qcfg = QuantizeConfig(
-    bits=4, group_size=128, sym=True, desc_act=False,
-    pack_dtype="int32", rotation="hadamard", offload_to_disk=False,
-    activation={
-        "mode": "w4a_nvfp4",
-        "recipe": "least_squares_grid",
-        "attention": {"mode": "w4afp8"},
-    },
-)
-
-model = GPTQModel.load(model_id, qcfg, device="cuda", dtype=torch.bfloat16)
-model.quantize(calibration, backend=BACKEND.GPTQ_W4A_NVFP4)
-model.save(quant_path)
-
-loaded = GPTQModel.load(quant_path, backend=BACKEND.AUTO, device="cuda", dtype=torch.bfloat16)
-```
-
-`activation` accepts a bare mode string as shorthand for that stream
-(`activation="w4afp8"` or `activation="w4a_nvfp4"`). The dict form adds
-`recipe`, `attention`, `mlp`, and `global_scales`; see the
-**[activation policy reference](docs/gptq-w4a-gb10.md#activation-policy-reference)**
-for every field and its validation rules.
-
-Two configurations are worth calling out. `activation="w4afp8"` is the highest
-accuracy option and matches W4A16 within noise. The balanced NVFP4-MLP /
-FP8-attention config above is the accepted W4A4 operating point; it costs about
-2.3 percentage points against W4A16 on full GSM8K Platinum, which is the
-measured price of the 4-bit activation grid on this model.
-
-#### MoE Quantization 🧩
-
-Some MoE (mixture of experts) models have extremely uneven/biased routing (distribution of tokens) to the `experts` causing some expert modules to receive close-to-zero activated tokens, thus failing to complete calibration-based quantization (GPTQ/AWQ).
-To better quantize these heavily biased `MoE` routed modules, GPT-QModel exposes 3 controls:
-
-* `Moe.Routing = ExpertsRoutingOverride`: Manually override the `num_experts_per_tok` used for model `routing` math, i.e., if a model only routes 4 experts per token out of 48 total experts, you can set this equal to 24 for 50% routing or 48 for 100% routing.
-`ExpertsRoutingOverride` requires the model exposes `num_experts_per_tok` or equivalent configuration control.
-* `Moe.Routing = ExpertsRoutingBypass`: Brute-force and bypass all `routing` math so all `experts` receive `all` activated tokens. This is akin to `ExpertsRoutingOverride.num_experts_per_tok` set to total number of experts. 
-`ExpertsRoutingBypass` is enabled/tested for some models and, due to the lifecycle complexity, it needs to be validated for every model.
-* `FailSafe`: This is `enabled` by `default` and is a naive weight-only quantization technique using simple (naive) quantization methods such as `nearest` with optional `smoothing`. 
-There are various `FailSafeStrategy` options, along with `SmoothMethod` options, to complement this feature. `FailSafe` does not require `activations` but has higher quantization error loss than normally activated GPTQ/AWQ. It is fast and applicable for all MoE models.
-
-`FailSafe` can be combined with `ExpertsRoutingOverride`. There is no single best way to quantize MoE, and we recommend users to test all three methods.
-
-### Quantized Inference 🔍
-```py
-# test post-quant inference
-model = GPTQModel.load(quant_path)
-result = model.generate("Uncovering deep insights begins with")[0] # tokens
-print(model.tokenizer.decode(result)) # string output
-```
-
-### EoRA Accuracy Recovery: Enhanced Post-Quant Error Recovery via Lora 🎯
-
-GPT-QModel supports EoRA, a LoRA method developed by Nvidia that can further improve the accuracy of the quantized model.
-```py
-# EoRa is currently only validated for GPTQ
-# higher rank improves accuracy at the cost of VRAM usage
-# suggestion: test rank 64 and 32 before 128 or 256 as latter may overfit while increasing memory usage
-eora = Lora(
-  # for eora generation, path is adapter save path; for load, it is loading path
-  path=f"{quant_path}/eora_rank32", 
-  rank=32,
-)
-
-# provide a previously GPTQ-quantized model path
-GPTQModel.adapter.generate(
-  adapter=eora,
-  model_id_or_path=model_id,
-  quantized_model_id_or_path=quant_path,
-  calibration_dataset=calibration_dataset,
-  calibration_dataset_concat_size=0,
-)
-
-# post-eora inference
 model = GPTQModel.load(
-  model_id_or_path=quant_path,
-  adapter=eora
+    "Qwen/Qwen3-0.6B", GPTQConfig(bits=4, group_size=128),
 )
-
-tokens = model.generate("Capital of France is")[0]
-result = model.tokenizer.decode(tokens)
-
-print(f"Result: {result}")
-# For more details on EoRA, please see docs/eora/
-# Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
+model.quantize(calibration, batch_size=1)
+model.save("Qwen3-0.6B-GPTQ-4bit")
 ```
 
-See [runtime LoRA output composition](docs/lora-runtime-output.md) for how
-quantized CUDA outputs and adapter gradients are combined.
+The [end-to-end guide](docs/quantization-guide.md) covers other methods,
+calibration, saving, reloading, and validation.
+For Apple silicon, use the [native MLX workflow](docs/mlx-runtime.md).
 
-### Remote LoRA Adapters 🔒
+### What to tune next 🔧
 
-Adapter paths stored in `quantize_config.json` are confined to the checkpoint's own storage (including same-repository Hugging Face cache blobs); metadata cannot authorize Hub downloads. Loading an adapter hosted on the Hub requires an explicit opt-in with an immutable commit pin and a SHA-256 digest of `adapter_model.safetensors`:
+- **Quality versus size:** Start from a supported recipe, then compare bit widths
+  and group sizes. Use mixed precision or exclusions for sensitive layers rather
+  than assuming one configuration suits the whole model.
+- **Calibration:** Choose representative text and enough examples to cover your
+  use case. MoE and multimodal models may need specialized data preparation.
+- **Memory and recovery:** Configure multi-GPU placement and offload before a
+  large run, and use checkpoint/resume where supported.
+- **Deployment:** Reload the saved checkpoint, evaluate it, and verify its format
+  in the intended engine. A successful native load is not an external-engine
+  compatibility guarantee.
 
-```py
-model = GPTQModel.load(
-  model_id_or_path=quant_path,
-  adapter=Lora(path="org/adapter-repo", rank=32),
-  allow_remote_adapter=True,
-  adapter_revision="<40-char Hub commit sha>",
-  adapter_sha256="<sha256 of adapter_model.safetensors>",
-)
-```
+See the [configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference)
+and [quantization recipes](docs/quantization-guide.md) for the available controls.
 
-Manifest adapter directories must be checkpoint-relative and cannot contain directory symlinks.
-Adapter-file symlinks are rejected except for the standard Hugging Face cache links into the
-same repository's `blobs` directory. This confinement also applies when using
-`QuantizeConfig.from_pretrained()` and initializing its adapter directly.
-Explicit local `adapter=` arguments remain available for adapters stored elsewhere.
-For pinned Hugging Face blob URLs, the config and weights are loaded from the URL's
-containing folder at the supplied revision.
+## Guides and reference 🧭
 
-### PEFT LoRA Training and Adapter Loading 🤗
+| Task | Documentation |
+| --- | --- |
+| Choose precision, format, and backend | [Quantization recipes](docs/quantization-guide.md) · [Support matrix](docs/support-matrix.md) |
+| Configure mixed precision and advanced options | [Configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference) · [Protocols](docs/quantization_protocol.md) |
+| Quantize large or MoE models | [Multi-GPU and memory](docs/multi_gpu_quantization.md) · [MoE and multimodal](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models) |
+| Resume a job | [Checkpoint and resume](checkpoint.md) · [Distributed EXL3](docs/exl3-durable-execution.md) |
+| Recover accuracy or fine-tune | [EoRA](docs/eora/README.md) · [PEFT/LoRA](docs/peft.md) · [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) |
+| Evaluate quality and performance | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Benchmark methodology](docs/benchmark-methodology.md) |
+| Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](docs/openai-server-exposure.md) |
+| Add a model or inspect its plan | [Module-plan guide](docs/module-plan-guide.md) · [Developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide) |
+| Diagnose runtime issues | [Troubleshooting](https://github.com/ModelCloud/GPTQModel/wiki/Troubleshooting-and-FAQ) · [Concurrency](docs/concurrency.md) |
 
-GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded through `PeftModel`. Use a current PEFT release with `optimum>=2.3.0`; older combinations may warn that the quantized layer type is unsupported. For training, select the method-specific trainable backend (`gptq_torch` for GPTQ, `torch_awq` for AWQ); default inference kernels do not propagate gradients.
+Kernel contracts, implementation flows, and focused technical notes are in the
+[documentation index](docs/README.md), not repeated on this page.
 
-PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter separate for quantized inference, or merge it into the original full-precision model and then quantize the merged model. See [docs/peft.md](docs/peft.md) for tested training, loading, and merge examples.
+## Quality: GPTQ 4-bit evaluation 🏆
 
-Per-module `rank_pattern` overrides match canonical, case-sensitive module names and are applied in full-name, suffix, then regex order; see [adapter rank-pattern matching](docs/adapter-rank-pattern-matching.md) for the matching flow and the legacy lowercase fallback.
-Saved adapters resolve `lora_alpha`, `use_rslora`, `rank_pattern`, and
-`alpha_pattern` per module; EoRA exports mirror dynamic ranks into alphas and
-normalize calibration covariance once. See [LoRA and EoRA scaling
-semantics](docs/lora-eora-scaling.md) for the load, export, and covariance flows.
-Adapter weights are cached per source path for the life of the process; see [adapter weight cache](docs/adapter-weight-cache.md) for how a load that uses only a subset of an adapter's target modules leaves the cached tensors intact for the next load.
+Quantization quality depends on the source model, recipe, and calibration data.
+The Vortex collection provides GPTQ examples; the charts below illustrate selected
+evaluations, not a guarantee for every supported model or method.
 
-### How to Add Support for a New Model 🛠️
+[ModelCloud quantized Vortex models](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
-Follow **[Add and validate a new model](docs/module-plan-guide.md#add-and-validate-a-new-model)** and the current [Llama definition](gptqmodel/models/definitions/llama.py). Every new model type or alias needs an explicit registry plan case and a real-model module-plan unit test, including non-quantized checkpoint-owned decoder weights. See the [module-plan wiki](https://github.com/ModelCloud/GPTQModel/wiki/Module-Plan-Guide) for the same guide online.
+<img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
-#### Shared-input metadata (`:in=<tag>`) 🔗
+## Organizations and projects using GPT-QModel 🌐
 
-Modules that consume the *same* activation tensor (e.g. `q_proj`/`k_proj`/`v_proj` after `input_layernorm`) produce identical GPTQ Hessians (`H = XᵀX`), so the Hessian only needs to be collected once per group. `BaseQModel.shared_input_plan(model_config, quantize_config)` derives these groups from `module_tree`:
+Selected public references include Hugging Face, Intel, NVIDIA, and Alibaba Cloud.
+This is not an exhaustive customer list.
 
-- Default: every quantizable leaf is its own singleton group. Subset digits (`:0`) describe execution/quantization order, not tensor identity, so they are never used to infer sharing.
-- Opt in with `:in=<tag>`: sibling leaves (same parent) with the same tag share an input, e.g. `"q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x"` or `"gate_proj:0:in=x", "up_proj:0:in=x"`. Tags are scoped per parent. Different tags never share (MLA: `"q_b_proj:1:in=q_a", "kv_b_proj:1:in=kv_a"` read different latents).
-- A leaf repeated across `module_tree` variants must carry identical flags; conflicts raise at plan time.
-- `:!` / `:?` leaves and `:in=` tags never change the emitted subset blocks or quantization order.
-- Runtime dedup is per subset block: the looper captures one block at a time and elects the first group member in that block as leader; the other members in the *same* block skip Hessian capture and adopt a private copy of the leader's `H`. A tag whose members sit in different blocks (e.g. `in_proj_qkv:0` / `in_proj_z:1`) is still validated by the probe but deduplicates nothing (`SharedInputGroup.dedup_followers`, `SharedInputPlan.dedup_count` reflect this).
-- Tags are inert until the definition lists the `model_type` in its own `shared_input_verified_model_types` (not inherited). Unlisted model types (including Llama-clone subclasses that inherit `module_tree`) get singleton plans and never skip capture; `tests/module_tree/test_shared_input_cpu_forward.py` enforces that every listed type has a real-forward case.
+## Contributors and sponsors 🤝
 
-Only add `:in=` tags after verifying them against a real (tiny, CPU) model with `gptqmodel.models.shared_input.probe_shared_inputs(layer, plan, forward)`; it hooks every planned module, runs `forward`, and reports groups whose inputs differ (`mismatches`), identical inputs that were not declared (`undeclared`), planned modules that do not exist (`missing_modules`) and groups that never ran (`unverified`, e.g. un-routed experts). `report.ok` is strict (`fully_verified`); use `has_errors` when un-routed experts are expected. See `tests/module_tree/test_shared_input*.py` for the covered definitions.
+### Contributions welcome 🛠️
 
-### Pair with Evaluation for post-quantization LLM Benchmarks 📊
+We welcome all contributors, including people working with human-guided AI
+agents. Code, model and hardware support, documentation, bug reports, reviews,
+and testing all help move GPT-QModel forward. See the
+[developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide)
+to get started.
 
-For kernel timing claims, follow the [A/B benchmark methodology](docs/benchmark-methodology.md).
+### Support ongoing development 💛
 
-GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a benchmarking toolkit with 153 benchmark suites.
-Use Evalution to measure post-quantization accuracy recovery instead of relying only on narrow regression language-model metrics.
+Supporting a wide range of hardware and models requires continuous CI testing,
+accuracy validation, and compatibility work. That takes substantial compute and
+AI-agent tokens. Contributions of compute, model/API credits, or financial
+support of any size help sustain project maintenance and future development.
 
-```
-# install Evalution
-pip install Evalution
-```
-
-Example: running `gsm8k_platinum` through Evalution's native GPT-QModel engine.
-
-```py
-import evalution as eval
-
-run = (
-    eval.GPTQModel(
-        backend="marlin",
-        device="cuda:0",
-    )
-    .model(eval.Model(path="ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"))
-    .run(eval.benchmarks.gsm8k_platinum(apply_chat_template=True, batch_size=16))
-)
-
-print(run.to_dict()["tests"][0]["metrics"])
-
-```
-### Dynamic Quantization (Per Module QuantizeConfig Override) ⚙️
-
-`QuantizeConfig.dynamic` is a dynamic control that allows specific matching `modules` to be skipped for quantization (negative matching)
-or have a unique `[bits, group_size, sym, desc_act, mse, pack_dtype]` property override per matching `module` vs base `QuantizeConfig` (positive match with override). 
-
-Sample `QuantizeConfig.dynamic` usage:
-
-```py
-dynamic = { 
-    # `.*\.` matches the layers_node prefix 
-    # layer index starts at 0 
-    
-    # positive match: layer 19, gate module 
-    r"+:.*\.18\..*gate.*": {"bits": 4, "group_size": 32},  
-    
-    # positive match: layer 20, gate module (prefix defaults to positive if missing)
-    r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  
-    
-    # negative match: skip layer 21, gate module
-    r"-:.*\.20\..*gate.*": {}, 
-    
-    # negative match: skip all down modules for all layers.
-    r"-:.*down.*": {},  
- } 
-
-```
-
-#### Fused Modules in Inference Engines (vLLM / SGLang) 🧩
-
-Inference engines merge modules before they resolve the quantization config, and each merged module carries one precision and one
-quantization config:
-
-* every routed expert of one decoder layer is merged into one module (`<prefix>.experts`),
-* `gate_proj` + `up_proj` are merged into `gate_up_proj`, and `q_proj` + `k_proj` + `v_proj` into `qkv_proj`.
-
-A rule that matches just part of a merged module (for example
-`-:.*down.*`, which matches `...experts.<id>.down_proj` but not the merged `...experts` module) therefore produces a checkpoint that
-loads in GPT-QModel but fails in vLLM/SGLang, because those engines mix float and quantized shards of the same merged module. GPT-QModel
-detects this before quantization starts and warns, naming the offending rules and a pattern that covers both. A rule must match the merged
-module **and** its shards: routed experts live below their merged module, so one pattern on `...mlp.experts` covers everything, while
-`gate_up_proj`/`qkv_proj` are siblings of their shards and need an alternation (for example `(gate_proj|up_proj|gate_up_proj)`).
-
-```py
-dynamic = {
-    # skip the whole merged routed-expert module of layer 20
-    r"-:.*\.20\.mlp\.experts(\.|$)": {},
-
-    # give the whole merged routed-expert module of layer 18 one config
-    r"+:.*\.18\.mlp\.experts(\.|$)": {"bits": 4, "group_size": 32},
-}
-```
-
-Experts that never receive calibration traffic are a special case: with `fallback` disabled (`fallback=None`) GPT-QModel skips them and
-they keep their source dtype. Those engines load a merged expert module with a single precision, so keep `fallback` enabled (the default)
-when the checkpoint must load in vLLM/SGLang.
-
-### Group Aware Reordering (GAR) 🔄
-
-Group Aware Reordering (GAR) is an enhanced activation reordering scheme developed by Intel to improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
-
-How to enable GAR:
-
-Set the `act_group_aware` parameter to `True` and disable the default activation reordering by setting `desc_act` to `False` in your `QuantizeConfig`. For example:
-
-```python
-quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
-```
-
-The [GPTQ static-group ordering guide](docs/gptq-static-group-ordering.md)
-shows how reordered columns, group parameters, and packed weights stay aligned.
-
-### Experimental Features 🧪
-
-#### Norm tuning
-
-After quantization, `requantize()` can tune the parameters of normalization
-modules tagged by the model definition while leaving packed quantized tensors
-unchanged. Pass an unquantized teacher model (or its Hugging Face path) with the
-`norm` argument:
-
-```py
-from gptqmodel import BACKEND, GPTQModel, NormConfig
-
-model = GPTQModel.load("path/to/saved-quantized-model", backend=BACKEND.TORCH)
-model.requantize(
-    calibration=calibration,
-    norm=NormConfig(teacher="Qwen/Qwen3-0.6B", steps=400),
-)
-```
-
-`NormConfig.types` selects which normalization families are tuned and defaults
-to `(NormType.RMSNORM,)`. Pass
-`NormType.LAYERNORM` (or both) to also tune LayerNorm gains and biases:
-
-```py
-from gptqmodel import BACKEND, GPTQModel, NormConfig, NormType
-
-model.requantize(
-    calibration=calibration,
-    norm=NormConfig(teacher="teacher-model", types=(NormType.RMSNORM, NormType.LAYERNORM)),
-)
-```
-
-Both normalization styles are covered by the underlying method: the
-normalization parameters are distilled against the teacher's next-token
-distribution. Gain parameterizations are detected per module, so
-Gemma-style `1 + weight` gains are handled without extra configuration.
-
-This feature requires a backend with autograd support through the quantized
-linears, such as `BACKEND.TORCH`. After fresh `quantize()`, save and reload
-before tuning: the live quantization model may still contain offloaded/meta
-or inference tensors, or checkpoint-format GPTQ-v1 zero points. These states
-are rejected before tuning rather than trained with incorrectly decoded weights.
-
-For GPTQ-v1 embedding requantization, use two separate passes:
-
-```py
-from gptqmodel import QuantizeEmbed
-
-model.requantize(calibration=calibration, embed_quant_mode=QuantizeEmbed.OUTPUT)
-model.save("embedding-requantized")
-model = GPTQModel.load("embedding-requantized", backend=BACKEND.TORCH)
-model.requantize(calibration=calibration, norm=NormConfig(teacher="teacher-model"))
-model.save("norm-tuned")
-```
-
-The embedding checkpoint writer [replaces affected shards atomically](docs/embedding-checkpoint-shard-replacement.md),
-including when saving over an existing checkpoint.
-
-A combined embedding/Norm call remains supported for training-capable GPTQ-v2
-models.
-
-Use `NormConfig` with the `norm=` keyword; tuning statistics are returned under
-the `"norm"` result key. Model definitions mark eligible modules with `:norm`.
-
-#### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
-
-Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
-```py
-# GPTAQ is experimental, is not MoE compatible, and requires 2-4x more VRAM.
-# It may not improve quality relative to GPTQ; evaluate it for the target model and workload.
-# If one GPU OOMs, set CUDA_VISIBLE_DEVICES=0,1; GPTQModel will use the second GPU automatically.
-quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
-```
-
-#### Using FOEM 🧮
-
-FOEM (First-order error matters) adds first-order error compensation for GPTQ-style quantization. Enable FOEM by setting `foem = FOEMConfig(...)`.
-```py
-# FOEM default hyperparameters are alpha=0.0 and beta=0.2
-quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
-```
-
-#### Using GSQ scalar refinement and staged training
-
-[GSQ by Dadgarnia et al. at IST-DASLab](https://arxiv.org/abs/2604.18556) motivates two opt-in paths. `GSQConfig` refines compatible scalar code assignments against a method-specific local reconstruction objective and retains the initializer unless hard stored codes improve that objective. `GSQTrainingConfig` trains dense Llama decoder blocks in stages and exports through existing GPTQ or AWQ checkpoint formats.
-
-The staged path trains query and key projections separately, value and output jointly against attention output, then the MLP projections against the decoder block output. Each packed block is installed before capturing the next block's inputs. It trains assignments and scales with Lion and temperature/logit-scale schedules. The public recipe does not yet include the paper's final 2-bit scale-only pass or its full calibration and epoch schedule unless those settings are supplied. The paper's reported quality gains do not transfer automatically to either option.
-
-```py
-from gptqmodel.quantization import GSQConfig, QuantizeConfig
-
-quant_config = QuantizeConfig(
-    bits=4,
-    group_size=128,
-    gsq=GSQConfig(enabled=True, steps=100, candidates=16, learn_scales=False),
-)
-```
-
-For GPTQ, local GSQ applies to calibrated linear layers in scalar GPTQ, GPTQ_V2, and GPTQ_P formats; `modules=(r"q_proj$",)` can restrict it by module name. It supports 2–8 bits and all GPTQ group sizes. The same `gsq=GSQConfig(...)` option also has native adapters for AWQ 4-bit GEMM/GEMV, RTN scalar GPTQ/AWQ export, QQQ 4-bit, FP8 E4M3/E5M2, and ParoQuant 4-bit module optimization. FP8 can additionally collect calibration statistics with `gsq_calibration=True`; its default local mode is weight-only. These adapters keep each method's native scales, zero points, packing, and format constraints. `max_candidate_bytes` bounds the code-candidate bank per output-row chunk (64 MiB by default); the optimizer and temporary tensors need additional memory. Refinement increases quantization time. `learn_scales=True` is available only where the method supports tuning stored scales. Measure downstream quality on your target workload before using it broadly.
-
-```py
-from gptqmodel.quantization import AWQConfig, FORMAT, GPTQConfig, GSQTrainingConfig
-
-training = GSQTrainingConfig(enabled=True, epochs=20, qk_steps=2000)
-gptq_config = GPTQConfig(bits=4, group_size=128, format=FORMAT.GPTQ_V2,
-                         act_group_aware=False, offload_to_disk=False,
-                         gsq_training=training)
-awq_config = AWQConfig(bits=4, group_size=128, format=FORMAT.GEMM,
-                       gsq_training={"enabled": True, "epochs": 20, "qk_steps": 2000})
-```
-
-Staged training currently requires a fully materialized, eval-mode dense Llama model on one CPU or CUDA device with eager attention. It trains all seven projections in every decoder block, without dynamic skipping, activation ordering, rotation, adapters, or disk offload. GPTQ accepts symmetric 2-, 3-, and 4-bit scalar export; AWQ accepts 4-bit GEMM export and uses AWQ's scaled weights, integer zero points, and packer. The configuration is saved with the checkpoint. Reduce `epochs` and `qk_steps` for a quick functional check; use matched calibration and evaluation data before comparing quality.
-
-The [GSQ CUDA empty-geometry dispatch](docs/gsq-cuda-empty-geometry.md)
-describes how optional fused training kernels handle empty activations.
-
-Non-uniform per-block bit allocation at an exact bits-per-parameter budget — the paper's 2.37 and 2.62 bpp Llama rows — is available through `gptqmodel/quantization/rco.py`, a port of [IST-DASLab's RCO](https://arxiv.org/abs/2605.00649) by Helcig and Alistarh. `scripts/gsq_paper/rco_allocate.py` searches a width assignment and `scripts/gsq_paper/rco_materialize.py` exports it as a mixed-width checkpoint; see [docs/experiments/gsq-paper-reproduction.md](docs/experiments/gsq-paper-reproduction.md) for usage and measured results.
-
-### Migrating from AutoGPTQ and AutoAWQ 🔄
-
-GPT-QModel supports GPTQ and AWQ workflows that integrate with HF Transformers, Optimum, and PEFT. Existing inference integrations can generally be retained; verify configuration compatibility when migrating.
-
-For model quantization, there are some config changes for AutoAWQ:
-
-* AutoAWQ: `version` property is now `format`. `zero_point` is now `sym` (Symmetric Quantization): `sym = True` is equivalent to `zero_point = False`
-
-Models quantized by GPT-QModel are inference compatible with HF Transformers (minus `dynamic`), vLLM, and SGLang. 
-
-## Attributions 📚
-
-* GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
-* AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
-* ParoQuant: Z-Lab, main-authors: Yesheng Liang, Haisheng Chen, Song Han, and Zhijian Liu. [Official implementation](https://github.com/z-lab/paroquant), [Paper](https://openreview.net/forum?id=1USeVjsKau)
-* EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
-* GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
-* GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
-* Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
-* Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
-* NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12 inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
-* QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
-* VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
-* MACaQ: Huawei CSL, main-authors Lorenz K. Muller, Philippe Bich, Chiara Boretti, Hyun-Min Chang, Jiawei Zhuang, and Lukas Cavigelli. [Official implementation](https://github.com/huawei-csl/MACaQ), [Paper](https://arxiv.org/abs/2611.10649)
-* Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
-* FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
-* GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training above are adaptations of this work.
-* RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
-
-## Citations 📖
-
-```bibtex
-# GPT-QModel
-@misc{qubitium2024gptqmodel,
-  author = {ModelCloud.ai and qubitium@modelcloud.ai},
-  title = {GPT-QModel},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
-  note = {Contact: qubitium@modelcloud.ai},
-  year = {2024},
-}
-
-# GPTQ
-@article{frantar-gptq,
-  title={{GPTQ}: Accurate Post-training Compression for Generative Pretrained Transformers}, 
-  author={Elias Frantar and Saleh Ashkboos and Torsten Hoefler and Dan Alistarh},
-  journal={arXiv preprint arXiv:2210.17323},
-  year={2022}
-  
-}
-
-# MACaQ
-@misc{muller2026macaq,
-  title         = {{MACaQ}: Fast, Model Agnostic Calibrated Quantization for Low-Precision Weights and Activations},
-  author        = {Muller, Lorenz K. and Bich, Philippe and Boretti, Chiara and Chang, Hyun-Min and Zhuang, Jiawei and Cavigelli, Lukas},
-  year          = {2026},
-  eprint        = {2611.10649},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.LG},
-  url           = {https://arxiv.org/abs/2611.10649}
-}
-
-# GSQ
-@article{dadgarnia2026gsq,
-  title={GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling},
-  author={Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Kleinegger, Max and Alistarh, Dan},
-  journal={arXiv preprint arXiv:2604.18556},
-  year={2026}
-}
-
-# RCO
-@misc{helcig2026rco,
-  title={Model Compression with Exact Budget Constraints via Riemannian Manifolds},
-  author={Helcig, Michael and Alistarh, Dan},
-  journal={arXiv preprint arXiv:2605.00649},
-  year={2026}
-}
-
-# AWQ
-@article{lin2023awq,
-  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
-  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
-  journal={arXiv},
-  year={2023}
-}
-
-# ParoQuant
-@inproceedings{liang2026paroquant,
-  title     = {{ParoQuant: Pairwise Rotation Quantization for Efficient Reasoning LLM Inference}},
-  author    = {Liang, Yesheng and Chen, Haisheng and Han, Song and Liu, Zhijian},
-  booktitle = {International Conference on Learning Representations (ICLR)},
-  year      = {2026}
-}
-
-# GGUF / llama.cpp
-@misc{ggerganov2023gguf,
-  author = {Georgi Gerganov and ggml-org contributors},
-  title = {llama.cpp and the GGUF model format},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/ggml-org/llama.cpp}},
-  note = {Canonical GGUF implementation and format reference; see also \url{https://github.com/ggml-org/llama.cpp/wiki/dev-notes}},
-  year = {2023}
-}
-
-# EoRA
-@article{liu2024eora,
-  title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
-  author={Liu, Shih-Yang and Yang, Huck and Wang, Chien-Yi and Fung, Nai Chit and Yin, Hongxu and Sakr, Charbel and Muralidharan, Saurav and Cheng, Kwang-Ting and Kautz, Jan and Wang, Yu-Chiang Frank and others},
-  journal={arXiv preprint arXiv:2410.21271},
-  year={2024}
-}
-
-# GPTAQ
-@article{li2025gptaq,
-  title={GPTAQ: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
-  author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
-  journal={arXiv preprint arXiv:2504.02692},
-  year={2025}
-}
-
-# FOEM
-@inproceedings{zheng2026first,
-  title={First-order error matters: Accurate compensation for quantized large language models},
-  author={Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong},
-  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-  volume={40},
-  number={34},
-  pages={28883--28891},
-  year={2026}
-}
-
-# QQQ 
-@article{zhang2024qqq,
-      title={QQQ: Quality Quattuor-Bit Quantization for Large Language Models}, 
-      author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
-      journal={arXiv preprint arXiv:2406.09904},
-      year={2024}
-}
-
-# VPTQ
-@inproceedings{liu2024vptq,
-  title={{VPTQ}: Extreme Low-bit Vector Post-Training Quantization for Large Language Models},
-  author={Liu, Yifei and Wen, Jicheng and Wang, Yang and Ye, Shengyu and Zhang, Li Lyna and Cao, Ting and Li, Cheng and Yang, Mao},
-  booktitle={Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
-  year={2024}
-}
-
-# Norm Tweaking
-@misc{li2023normtweakinghighperformancelowbit,
-  title={Norm Tweaking: High-performance Low-bit Quantization of Large Language Models},
-  author={Liang Li and Qingyuan Li and Bo Zhang and Xiangxiang Chu},
-  year={2023},
-  eprint={2309.02784},
-  archivePrefix={arXiv},
-  primaryClass={cs.LG},
-  url={https://arxiv.org/abs/2309.02784}
-}
-
-# ExLlama V3 / EXL3
-@misc{turboderp2026exllamav3,
-  author = {turboderp and exllamav3 contributors},
-  title = {ExLlamaV3 and the EXL3 quantization format},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/turboderp-org/exllamav3}},
-  note = {Project repository and EXL3 format documentation: \url{https://github.com/turboderp-org/exllamav3/blob/master/doc/exl3.md}},
-  year = {2026}
-}
-
-# Group Aware Reordering (GAR)
-@article{gar,
-  title={Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference, CVPRW 2025.},
-  author={T. Gafni, A. Karnieli, Y. Hanani},
-  journal={arXiv preprint arXiv:2505.14638},
-  year={2025}
-}
-
-# Marlin Kernel
-@article{frantar2024marlin,
-  title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
-  author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
-  journal={arXiv preprint arXiv:2408.11743},
-  year={2024}
-}
-
-# Swordfish Kernel
-@misc{alpindale2026swordfish,
-  author = {AlpinDale},
-  title = {Swordfish: A Weight-Quantized {GEMM} Family for {NVIDIA} Blackwell},
-  howpublished = {\url{https://blog.alpindale.net/posts/swordfish/}},
-  year = {2026}
-}
-
-# NF12 / NyoomFloat12
-@article{liberman2026nyoomfloat12,
-  title   = {NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression},
-  author  = {Liberman and Fang and Zhang and Dao and Fu},
-  year    = {2026},
-  note    = {Together AI}
-}
-
-@misc{alpindale2026nf12,
-  author = {AlpinDale},
-  title = {{NF12}: Lossless 12-bit {BF16} weight compression},
-  howpublished = {\url{https://github.com/dphnAI/nf12}},
-  year = {2026}
-}
-
-# Machete Kernel
-@misc{vllm2024machete,
-  author = {vLLM contributors},
-  title = {Machete: Hopper-optimized mixed-precision {GEMM} kernels},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/vllm-project/vllm/tree/main/csrc/quantization/machete}},
-  note = {CUTLASS-based mixed-precision kernel implementation},
-  year = {2024}
-}
-
-```
-
-## Operational notes 🗒️
-
-For MoE quantization across multiple GPUs, see the [multi-GPU quantization guide](docs/multi_gpu_quantization.md). Setting `CUDA_VISIBLE_DEVICES` exposes GPUs to the process; MoE device placement and free-threaded parallel quantization also need to be configured. Multi-GPU runs auto-enable CUDA/HIP peer access and use GIL-safe peer copies for module moves, calibration input staging, and Hessian reduction; a one-time warning reports motherboard/BIOS/hardware P2P incompatibility. Control the behavior with `BaseQuantizeConfig.p2p` (or `GPTQModel.load(..., p2p=...)` for inference): `P2PConfig(mode="off")` skips pre-enablement and `P2PConfig(probe=True)` runs bandwidth diagnostics. Native allocators on CUDA and ROCm delegate peer enablement and direct copies to PyTorch, including after allocator settings change; a non-native ROCm backend such as `cudaMallocAsync` stages through pinned host memory. See [allocator-managed peer enablement](docs/multi_gpu_quantization.md#allocator-managed-peer-enablement). On free-threaded builds never call `torch.cuda.comm.*` from worker threads; see [`pytorch_gil_0_compat.md`](pytorch_gil_0_compat.md).
-
-Device worker locks are acquired per lock scope, not per device name, so a virtual pool key such as `model_loader:cpu` cannot make a family read scope take its parent's lock twice while a writer waits; see [CPU pool lock scopes](docs/cpu-pool-lock-scopes.md) for the acquisition order and the deadlock it prevents.
-
-Shutting down a device thread pool drains every task it already accepted and
-rejects any later submission; see
-[device thread pool shutdown](docs/device-thread-pool-shutdown.md) for the
-accept/drain/reject flow and the race it closes.
-
-A worker task failure propagates through its future instead of terminating the
-interpreter; see
-[device thread pool error propagation](docs/thread-pool-error-contract.md) for
-the task and warmup failure paths, the thread-local Triton autotuner state, and
-the Hessian workspace release.
-
-After `quantize()` returns, no device worker retains the last task's replica,
-no shared early-stop exception retains a traceback, and an ExLlamaV2 load
-restores the current CUDA device; see
-[multi-GPU memory retention](docs/multi-gpu-memory.md) for the ownership
-contract, before/after measurements, and the regression tests.
-
-Saved quantization configs preserve the complete P2P policy; see
-[P2P policy persistence](docs/multi_gpu_quantization.md#p2p-policy-persistence)
-for override precedence and validation.
-
-For asynchronous activation copies from CUDA forward hooks, see the
-[CUDA activation copy lifecycle](docs/cuda-activation-copy-lifecycle.md) for
-device and pinned host buffer ownership across streams.
-
-### Limit log level 🔇
-
-`GPT-QModel` uses a shared `LogBar` logger. Set the level once near process startup:
-
-```python
-from logbar import LogBar
-
-LogBar.shared().setLevel("WARNING")  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-```
-
-### Apply Triton nogil patch early in multi-package scripts 🩹
-
-If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, and `sglang`), apply the patch at the very top before other Triton-related imports:
-
-```python
-from gptqmodel import TritonPatch
-
-# Serialize Triton autotuner state and JIT compilation under nogil/free-threading Python 3.13+.
-TritonPatch.apply()
-```
-
-`TritonPatch` also makes the first concurrent launch of a kernel safe: libtriton's
-compiler is not free-thread safe, so cold JIT compiles are single-flight and
-globally serialized. See [concurrency guards](docs/concurrency.md) for the
-reference-counted BLAS/TF32 guards, the compile lock, and the dynamo
-compiler-failure classification.
+Interested in sponsoring? [Message Qubitium on X](https://x.com/Qubitium).
+If you find GPT-QModel useful, sending even a couple of dollars through X is
+also appreciated. Ongoing sponsors will be credited on this README page.
 
 ## License 📜
 
-GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kernel sources vendored under `gptqmodel_ext/swordfish/` are licensed under the AGPL-3.0-or-later license and are only compiled/linked at runtime via JIT. A copy of the Swordfish license is included in `gptqmodel_ext/swordfish/licenses/LICENSE` and `licenses/SWORDFISH`.
+GPT-QModel is licensed under [Apache-2.0](LICENSE). The optional, JIT-loaded
+Swordfish kernel is [AGPL-3.0-or-later](licenses/SWORDFISH).
+
+## Attributions and citations 📚
+
+GPT-QModel builds on the research and open-source projects below. Please cite
+GPT-QModel and the methods you use; full author lists, BibTeX, and attribution
+details are available in the [citation reference](docs/citations.md).
+
+<details>
+<summary>Cite GPT-QModel (BibTeX)</summary>
+
+```bibtex
+@misc{qubitium2024gptqmodel,
+  author = {ModelCloud.ai and qubitium@modelcloud.ai},
+  title = {GPT-QModel},
+  year = {2024},
+  howpublished = {\url{https://github.com/ModelCloud/GPTQModel}}
+}
+```
+
+</details>
+
+| Work | Authors / project | Paper or reference |
+| --- | --- | --- |
+| GPT-QModel | ModelCloud.ai and contributors | [Project](https://github.com/ModelCloud/GPTQModel) |
+| GPTQ | Elias Frantar et al., IST-DASLab | [Paper](https://arxiv.org/abs/2210.17323) |
+| AWQ | Ji Lin et al. | [Paper](https://arxiv.org/abs/2306.00978) |
+| ParoQuant | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
+| MACaQ | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |
+| QQQ | Ying Zhang et al., Meituan | [Paper](https://arxiv.org/abs/2406.09904) |
+| VPTQ | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |
+| GGUF / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
+| ExLlama V3 / EXL3 | turboderp and contributors | [Project](https://github.com/turboderp-org/exllamav3) |
+| NF12 / NyoomFloat12 | Liberman et al., Together AI | [Research and codec](https://github.com/dphnAI/nf12) |
+| EoRA | Shih-Yang Liu et al., NVIDIA | [Paper](https://arxiv.org/abs/2410.21271) |
+| GSQ | Alireza Dadgarnia et al., IST-DASLab | [Paper](https://arxiv.org/abs/2604.18556) · [Code](https://github.com/IST-DASLab/GSQ) |
+| RCO | Michael Helcig and Dan Alistarh, IST-DASLab | [Paper](https://arxiv.org/abs/2605.00649) · [Code](https://github.com/IST-DASLab/RCO) |
+| GPTAQ | Yuhang Li et al., Yale Intelligent Computing Lab | [Paper](https://arxiv.org/abs/2504.02692) |
+| GAR | T. Gafni, A. Karnieli, and Y. Hanani, Intel | [Paper](https://arxiv.org/abs/2505.14638) |
+| FOEM | Xingyu Zheng et al. | [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123) |
+| Norm Tweaking | Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu | [Paper](https://arxiv.org/abs/2309.02784) |
+| Fast Hadamard Transform | Tri Dao, Dao-AILab | [Code](https://github.com/Dao-AILab/fast-hadamard-transform) |
+| Marlin | Elias Frantar et al. | [Paper](https://arxiv.org/abs/2408.11743) |
+| Machete | vLLM contributors | [Code](https://github.com/vllm-project/vllm/tree/main/csrc/quantization/machete) |
+| Swordfish | AlpinDale | [Article](https://blog.alpindale.net/posts/swordfish/) |
