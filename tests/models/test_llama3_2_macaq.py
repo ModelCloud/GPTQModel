@@ -13,6 +13,7 @@ from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import macaq as macaq_linear_module
 from gptqmodel.nn_modules.qlinear.macaq import MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import macaq as macaq_core
 from gptqmodel.quantization.config import MacaqConfig
 from gptqmodel.utils import macaq_triton
 from gptqmodel.utils.macaq_triton import triton_mxfp4_available
@@ -20,10 +21,13 @@ from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 
 # MACaQ MXFP4 W4A4 on Llama-3.2-1B-Instruct.
 #
-# Fast-mode baseline (128 calibration chunks, 64 flip sweeps, 128 ARC rows,
-# chat template, eager attention, Triton W4A4):
+# Fast-mode NVIDIA baseline (64 calibration rows, 64 flip sweeps,
+# 128 ARC rows, chat template, eager attention, Triton W4A4):
 #   arc_challenge :: accuracy,loglikelihood       0.3281
 #   arc_challenge :: accuracy,loglikelihood_norm  0.2969
+# R9700 ROCm 10.1, GIL=0, compiled flips by default (two runs):
+#   arc_challenge :: accuracy,loglikelihood       0.3438, 0.3516
+#   arc_challenge :: accuracy,loglikelihood_norm  0.3281
 #
 # Full-model Wikitext-2 perplexity: 128 Wikitext-2 chunks, 128 flips,
 # pre_alpha=0.75, and all 112 projections quantized:
@@ -157,4 +161,13 @@ class TestLlama3_2_MACaQ(ModelTest):
     def test_llama3_2_macaq(self):
         if not triton_mxfp4_available():
             pytest.skip("MACaQ Triton inference requires NVIDIA CUDA or ROCm gfx1201")
-        self.quantize_and_evaluate()
+        assert self._build_quantize_config().compile_flip is True
+        compiled_expected = macaq_core._compiled_flip_supported(
+            torch.device("cuda", torch.cuda.current_device())
+        )
+        with patch.object(macaq_core, "_COMPILED_FLIP_SWEEP", None):
+            self.quantize_and_evaluate()
+            if compiled_expected:
+                assert macaq_core._COMPILED_FLIP_SWEEP is not None, (
+                    "MACaQ did not compile the default flip sweep during quantization."
+                )

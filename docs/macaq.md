@@ -90,7 +90,7 @@ flowchart TD
     D -->|included| E["Macaq.add_batch<br/>capture Hessian"]
     E -->|empty or nonfinite Hessian| F3["ValueError"]
     E -->|usable Hessian| Q["Macaq.quantize<br/>macaq_quantize_weight"]
-    Q --> CF{"compile_flip on<br/>NVIDIA CUDA with GIL?"}
+    Q --> CF{"compile_flip on<br/>NVIDIA CUDA with GIL<br/>or ROCm gfx1201?"}
     CF -->|yes| KC["_compiled_flip_sweep<br/>serialized Inductor call"]
     CF -->|no| KE["_flip_sweep eager"]
     KC --> R["MacaqProcessor.process<br/>_install_packed_replay"]
@@ -108,12 +108,12 @@ flowchart TD
     class F1,F2,F3,F4 error;
 ```
 
-| Stage | `main` at `701e58b` | This PR |
+| Stage | GPTQ flow | MACaQ flow |
 |---|---|---|
-| Method plan | GPTQ branch at `base.py:1839` | MACaQ step at `quantization_run_plan.py:41` |
-| Capture grouping | module groups at `stage_subset.py:666` | combined block subset via `macaq_processor.py:69` |
-| Replay | GPTQ at `gptq_processor.py:191` | packed W4A4 via `macaq_processor.py:158` |
-| Inference | generic selection at `base.py:2017` | MACaQ W4A4 at `nn_modules/qlinear/macaq.py:244` |
+| Method plan | GPTQ step | MACaQ step in `quantization_run_plan.py` |
+| Capture grouping | grouped subsets | combined block subset in `macaq_processor.py` |
+| Replay | `gptq_processor.py` | packed W4A4 in `macaq_processor.py` |
+| Inference | GPTQ kernel selector | W4A4 in `nn_modules/qlinear/macaq.py` |
 
 The diagram and table describe the flow introduced in
 [PR #4066](https://github.com/ModelCloud/GPTQModel/pull/4066).
@@ -121,7 +121,7 @@ The diagram and table describe the flow introduced in
 Each calibration chunk traverses the current block once while hooks capture
 all selected projections. A temporary packed child then supplies the W4A4
 forward for block replay. `prepare_layer_post_quantize` removes that child
-before the final checkpoint module is created (`macaq_processor.py:208`).
+before the final checkpoint module is created.
 
 ## Relationship to GPTQ
 
@@ -160,12 +160,14 @@ row-parallel flip sweep that updates its Hessian gradient using one column per
 accepted move. It avoids GPTQ's inverse-Hessian factorization and sequential
 column compensation. The upstream implementation compiles repeated flip
 sweeps and reuses the same `X.T @ X` result for projections sharing an input.
-GPT-QModel now compiles the sweep by default on NVIDIA CUDA when the Python
-GIL is enabled, serializing Inductor first-use and autotuning across workers.
-`compile_flip=False` selects the eager sweep; CPU, ROCm, and free-threaded
-Python use it regardless of the flag because concurrent compiler calls have
-not been qualified there. GPT-QModel still accumulates each projection's
-Hessian separately.
+`MacaqConfig`, `macaq_quantize_weight`, and `flip_refine_levels` default to
+`compile_flip=True`. GPT-QModel compiles the sweep on NVIDIA CUDA when the
+Python GIL is enabled and on ROCm `gfx1201`, including free-threaded Python.
+Compiled calls are serialized so Inductor first use and autotuning cannot
+race between quantization workers. `compile_flip=False` selects the eager
+sweep; CPU, other ROCm architectures, and free-threaded NVIDIA Python also
+use eager sweeps. GPT-QModel still accumulates each projection's Hessian
+separately.
 
 The paper's **11x quantization-time** result compares MACaQ against MR-GPTQ
 and DuQuant++ at matched W4A4 quality on Llama-3-8B. It does not compare
@@ -195,6 +197,24 @@ comparison from the paper's matched-quality MR-GPTQ/DuQuant++ benchmark.
 The script records the allocator backend and config in every result line.
 Set `PYTORCH_ALLOC_CONF=backend:cudaMallocAsync` and use
 `--compile-flip` or `--no-compile-flip` to repeat the A/B measurement.
+
+The same full workflow was also measured on one Radeon AI PRO R9700
+(`gfx1201`) with Python 3.14.10t, `PYTHON_GIL=0`, Torch
+2.16.0.dev20261025+rocm10.1, ROCm 10.1, and the native allocator. Both
+runs used the same Llama-3.2-1B-Instruct checkpoint, 64 calibration rows,
+2048-token concat, BF16 weights, batch size 1, eager attention, 64 flip
+sweeps, `pre_alpha=0.75`, and all 112 Linear projections. The benchmark
+script's default compiled mode was compared with `--no-compile-flip`:
+
+| R9700 W4A4 mode | Full quantization | Peak allocated | Peak reserved |
+|---|---:|---:|---:|
+| Eager sweep | 121.18 s | 5.97 GiB | 9.04 GiB |
+| Compiled sweep, including first use | 81.56 s | 4.99 GiB | 7.62 GiB |
+
+The compiled run was 1.49 times faster end to end in this single-run A/B.
+It includes calibration, packed block replay, solve, and packing, rather
+than only timing the sweep kernel. The result is exploratory; run multiple
+alternating rounds for a narrower performance estimate.
 
 The unmodified Huawei reference was also timed on the same 1B checkpoint and
 RTX 4090 model, using FP16 weights, 25,532 raw-text calibration tokens, 128
@@ -276,7 +296,6 @@ model = GPTQModel.load(
     "meta-llama/Llama-3.2-1B-Instruct",
     quantize_config=MacaqConfig(
         n_flip_iters=256,
-        compile_flip=True,
         had_block=32,
         pre_alpha=0.75,
         activation_precision="w4a4",
@@ -312,7 +331,7 @@ bit width, and symmetric format remain fixed.
 | `do_flip` | `True` | enable greedy level refinement |
 | `n_flip_iters` | 256 | maximum flip sweeps |
 | `fast_flip` | `True` | active-set sweep (bit-identical to the dense sweep) |
-| `compile_flip` | `True` | fuse repeated sweeps on NVIDIA CUDA with GIL enabled; eager elsewhere |
+| `compile_flip` | `True` | fuse sweeps on NVIDIA CUDA with GIL or ROCm `gfx1201`; eager elsewhere |
 | `ridge` | 1.0 | uniform ridge added to the flip Hessian diagonal |
 | `pre_mode` | `"balance"` | `"none"` or D1 activation-aware balancing |
 | `pre_alpha` | 0.75 | D1 exponent (0.5 symmetric, 1.0 weight-std only) |
@@ -349,9 +368,11 @@ fast run is a lifecycle smoke test; the full-model perplexity measurements
 above use all 112 packed projections. The full checkpoint also reloads with
 both Torch and Triton backends.
 
-The same fast e2e test passed on R9700 with `PYTHON_GIL=0` and the ROCm
-runtime above: ARC-Challenge accuracy was 0.3359 and normalized accuracy
-0.3281. Its reloaded projections used the native W4A4 packer and GEMM.
+The same fast e2e test passed twice on R9700 with `PYTHON_GIL=0` and the
+ROCm runtime above. ARC-Challenge accuracy was 0.3438 and 0.3516;
+normalized accuracy was 0.3281 in both runs. It verifies that the default
+flip path compiled during quantization; its reloaded projections used the
+native W4A4 packer and GEMM.
 The 43 MACaQ unit tests also passed on R9700, including FP16/BF16/FP32
 numerical comparisons, K tails, and repeated forwards. For a 7×128
 activation and 64×128 weight, all 448 visible outputs matched the
@@ -361,6 +382,12 @@ with output scale 1.0 or 0.5 (six cases). The 64×128 weight stays in
 A separate two-R9700 free-threaded probe passed three processes with eight
 threads × four calls each after serial kernel prewarm. It does not qualify
 concurrent cold JIT compilation.
+The compiled flip probe passed three more two-R9700 free-threaded processes
+with eight threads × four calls each, including serialized first-use
+compilation and exact packed-code comparison to eager sweeps.
+On fixed 128×512 and 256×2048 weight/Hessian fixtures with 64 flip sweeps,
+compiled and eager paths produced zero differing E2M1 codes and identical
+Hessian-weighted objectives.
 
 ## Port scope
 

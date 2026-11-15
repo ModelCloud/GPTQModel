@@ -47,6 +47,7 @@ import torch.nn as nn
 import transformers
 
 from ..looper.named_module import NamedModule
+from ..utils.arch import rocm_arch
 from ..utils.logger import setup_logger
 from ..utils.rocm import IS_ROCM
 
@@ -398,6 +399,15 @@ def _compiled_flip_sweep(*args, **kwargs):
         return _COMPILED_FLIP_SWEEP(*args, **kwargs)
 
 
+def _compiled_flip_supported(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    if IS_ROCM:
+        # Qualified on R9700 with free-threaded Python and serialized calls.
+        return rocm_arch(device) == "gfx1201"
+    return getattr(sys, "_is_gil_enabled", lambda: True)()
+
+
 @torch.no_grad()
 def flip_refine_levels(
     signed_index: torch.Tensor,
@@ -407,7 +417,7 @@ def flip_refine_levels(
     n_iters: int,
     *,
     fast: bool = True,
-    compile_flip: bool = False,
+    compile_flip: bool = True,
 ) -> None:
     """Greedy fixed-Hessian refinement of the E2M1 level codes, in place.
 
@@ -418,8 +428,9 @@ def flip_refine_levels(
     here, so this is bit-identical to the dense sweep.
 
     ``compile_flip`` fuses each repeated sweep through ``torch.compile`` on
-    NVIDIA CUDA with the GIL enabled. Other devices and free-threaded PyTorch
-    use the eager sweep; concurrent compiler calls are not qualified there.
+    NVIDIA CUDA with the GIL enabled and on ROCm gfx1201. Other devices use
+    the eager sweep. Calls to the compiled function are serialized because
+    concurrent Inductor autotuning is not qualified.
     """
 
     out_features, in_features = signed_index.shape
@@ -430,14 +441,7 @@ def flip_refine_levels(
     weight_current = grid[signed_index] * scale_element
     hessian_weight_target = hessian @ weight_target.T
     hessian_weight_current = hessian @ weight_current.T
-    sweep = (
-        _compiled_flip_sweep
-        if (
-            compile_flip and device.type == "cuda" and not IS_ROCM
-            and getattr(sys, "_is_gil_enabled", lambda: True)()
-        )
-        else _flip_sweep
-    )
+    sweep = _compiled_flip_sweep if compile_flip and _compiled_flip_supported(device) else _flip_sweep
 
     if not fast:
         rows = torch.arange(out_features, device=device)
@@ -494,7 +498,7 @@ def macaq_quantize_weight(
     exp_screen: bool = True,
     exp_offsets: Tuple[int, ...] = (1, 0, -1),
     fast_flip: bool = True,
-    compile_flip: bool = False,
+    compile_flip: bool = True,
     return_dequantized: bool = False,
 ) -> MacaqQuantResult:
     """Quantize one ``[out, in]`` weight matrix with the MACaQ recipe."""

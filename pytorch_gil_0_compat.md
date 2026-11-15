@@ -134,6 +134,12 @@ results below for that build.
 | Tensor `_version`, `data_ptr`, `device`, `dtype`, `shape`, `is_inference` | SAFE (concurrent), NVIDIA CUDA in measured build | NF12 prepared-view revision key | `scripts/gil0_api_probe.py --only 'Tensor cache revision metadata'` passed three child processes on 2026-11-12, each 8 threads × 4 iterations, on the same free-threaded Python 3.14.10, PyTorch 2.16.0.dev20261102+cu130, two RTX 4090s. The probe checks that ordinary `copy_` increments `_version` while identity/metadata stay stable, and that inference tensors report no version counter. It does not test concurrent mutation of one shared source tensor. |
 | `gptqmodel_nf12.linear_fp32` Ampere prefill gate | SAFE (concurrent), NVIDIA CUDA | 384x5120 FP32 router prefill from NF12 weights | `scripts/gil0_api_probe.py --only gptqmodel_nf12.prefill_gate` passed three separate processes on 2026-11-11, each 8 threads × 4 iterations on two NVIDIA PG506 SM80 GPUs with Python 3.14.7 GIL disabled and PyTorch 2.15.0+cu132. The probe prewarms the Triton kernel, gives each worker a device and input, checks the FP32 output and bias, and synchronizes its stream. It covers `torch.cuda.get_device_capability`, call-local `nf12.decode`, `torch.empty`, and the Triton launch. ROCm takes the existing fallback. |
 
+## MACaQ compiled quantization
+
+| API | Result | Where we use it | Evidence and limit |
+|---|---|---|---|
+| `torch.compile` / `_compiled_flip_sweep` | SAFE when serialized, ROCm `gfx1201` | MACaQ default flip refinement | `scripts/gil0_api_probe.py --only 'MACaQ compiled flips ROCm'` passed three separate processes on two Radeon AI PRO R9700 GPUs with Python 3.14.10t, PyTorch 2.16.0.dev20261025+rocm10.1, and `PYTHON_GIL=0`. Each process used eight threads × four calls, including first-use compilation, thread-local devices and streams, and exact packed-code comparison to eager sweeps. The probe asserts that compilation actually occurred. `_COMPILED_FLIP_LOCK` serializes compiler creation and all compiled calls; this does not qualify unsynchronized compiler calls, other ROCm architectures, or free-threaded NVIDIA Python. |
+
 ## Tensor creation and elementwise ops
 
 | API | Result | Where we use it | Notes / workaround |

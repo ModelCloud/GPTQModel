@@ -90,6 +90,15 @@ def test_macaq_default_balance_matches_reference_recipe():
     assert config.pre_alpha == 0.75
     assert config.had_block == config.block_size == 32
     assert config.compile_flip is True
+    assert config.to_dict()["compile_flip"] is True
+
+
+def test_macaq_weight_quantizer_requests_compiled_flips_by_default():
+    weight = torch.randn(8, 64)
+    hessian = torch.eye(64)
+    with patch.object(macaq, "flip_refine_levels", wraps=macaq.flip_refine_levels) as sweep:
+        macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=1)
+    assert sweep.call_args.kwargs["compile_flip"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +173,8 @@ def test_flip_refinement_reduces_hessian_weighted_error():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="compiled flip parity needs CUDA")
 @pytest.mark.parametrize("fast", [True, False])
 def test_compiled_flip_matches_eager_packed_codes(fast):
+    if not macaq._compiled_flip_supported(torch.device("cuda:0")):
+        pytest.skip("compiled flips are not qualified on this GPU/runtime")
     torch.manual_seed(71)
     weight = torch.randn(48, 128, device="cuda")
     activations = torch.randn(256, 128, device="cuda")
@@ -173,7 +184,8 @@ def test_compiled_flip_matches_eager_packed_codes(fast):
     eager = initial.clone()
     compiled = initial.clone()
 
-    macaq.flip_refine_levels(eager, scale_element, weight, hessian, 24, fast=fast)
+    macaq.flip_refine_levels(eager, scale_element, weight, hessian, 24,
+                             fast=fast, compile_flip=False)
     macaq.flip_refine_levels(
         compiled, scale_element, weight, hessian, 24,
         fast=fast, compile_flip=True,
@@ -186,13 +198,16 @@ def test_compiled_flip_matches_eager_packed_codes(fast):
                for a, b in zip(eager_packed, compiled_packed))
 
 
-def test_compiled_flip_uses_eager_on_free_threaded_python():
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is not None,
+                    reason="NVIDIA CUDA free-threaded fallback check")
+def test_compiled_flip_uses_eager_on_free_threaded_nvidia():
     torch.manual_seed(73)
-    weight = torch.randn(8, 32)
-    hessian = torch.eye(32)
+    weight = torch.randn(8, 32, device="cuda")
+    hessian = torch.eye(32, device="cuda")
     initial, _, scale_element = macaq.mxfp4_rtn_signed_index(weight)
     eager, guarded = initial.clone(), initial.clone()
-    macaq.flip_refine_levels(eager, scale_element, weight, hessian, 4)
+    macaq.flip_refine_levels(eager, scale_element, weight, hessian, 4,
+                             compile_flip=False)
     with patch.object(sys, "_is_gil_enabled", return_value=False, create=True), patch.object(
         torch, "compile", side_effect=AssertionError("compiler used from GIL=0 worker")
     ):
@@ -200,9 +215,24 @@ def test_compiled_flip_uses_eager_on_free_threaded_python():
     assert torch.equal(guarded, eager)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiled flips need a GPU")
+def test_compiled_flip_is_default_on_supported_gpu():
+    if not macaq._compiled_flip_supported(torch.device("cuda:0")):
+        pytest.skip("compiled flips are not qualified on this GPU/runtime")
+    weight = torch.randn(8, 32, device="cuda")
+    hessian = torch.eye(32, device="cuda")
+    initial, _, scale_element = macaq.mxfp4_rtn_signed_index(weight)
+    with patch.object(macaq, "_compiled_flip_sweep", wraps=macaq._flip_sweep) as sweep:
+        macaq.flip_refine_levels(initial, scale_element, weight, hessian, 1)
+    assert sweep.called
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="compiled flip needs CUDA")
 def test_compiled_flip_concurrent_first_use_matches_eager():
     """Quantization workers can enter the same Inductor autotuner together."""
+
+    if not macaq._compiled_flip_supported(torch.device("cuda:0")):
+        pytest.skip("compiled flips are not qualified on this GPU/runtime")
 
     def run(seed):
         generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -211,7 +241,8 @@ def test_compiled_flip_concurrent_first_use_matches_eager():
         hessian = x.T @ x
         initial, _, scale = macaq.mxfp4_rtn_signed_index(weight)
         eager, compiled = initial.clone(), initial.clone()
-        macaq.flip_refine_levels(eager, scale, weight, hessian, 12)
+        macaq.flip_refine_levels(eager, scale, weight, hessian, 12,
+                                 compile_flip=False)
         macaq.flip_refine_levels(compiled, scale, weight, hessian, 12, compile_flip=True)
         return torch.equal(eager, compiled)
 

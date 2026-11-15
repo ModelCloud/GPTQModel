@@ -6175,7 +6175,7 @@ class MacaqConfig(PreProcessorConfig):
     do_flip: bool = field(default=True)
     n_flip_iters: int = field(default=256)
     fast_flip: bool = field(default=True)
-    # Compile the repeated sweep on NVIDIA CUDA with the GIL enabled.
+    # Compile the repeated sweep on supported NVIDIA CUDA or ROCm gfx1201.
     compile_flip: bool = field(default=True)
     ridge: float = field(default=1.0)
     # D1 activation-aware diagonal pre-scale.

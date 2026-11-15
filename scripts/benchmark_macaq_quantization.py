@@ -57,7 +57,7 @@ def _parse_args() -> argparse.Namespace:
     if args.rows < 1 or args.rounds < 1:
         parser.error("--rows and --rounds must be positive")
     if torch.device(args.device).type != "cuda" or not torch.cuda.is_available():
-        parser.error("a CUDA device is required for both explicit Triton backends")
+        parser.error("an NVIDIA CUDA or ROCm device is required for Triton backends")
     return args
 
 
