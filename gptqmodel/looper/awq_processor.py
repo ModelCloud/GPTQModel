@@ -510,43 +510,119 @@ class AWQProcessor(LoopProcessor):
             self._full_module_name(layer_module, module)
         )
 
+    def _resolve_module_kernel(self, module_name: Optional[str], resolved_cfg=None):
+        """Resolve the packing kernel for one module, falling back to the default."""
+
+        try:
+            return self._resolve_qlinear_kernel(module_name, resolved_cfg=resolved_cfg)
+        except Exception:
+            return self.qlinear_kernel
+
+    def _kernel_group_size_supported(
+        self,
+        kernel,
+        module_name: Optional[str],
+        in_features: int,
+        out_features: int,
+        group_size: int,
+        *,
+        dtype: Optional[torch.dtype] = None,
+        resolved_cfg=None,
+    ) -> bool:
+        """Ask the resolved kernel whether it can pack this shape at ``group_size``.
+
+        The kernel owns the packing contract. ``AwqGEMMLinear`` requires both
+        ``in_features`` and ``out_features`` to be multiples of the group size,
+        so checking only the input axis let ``gate_proj``/``up_proj`` with
+        ``out_features=448`` reach ``create_quant_module`` and raise there.
+        Re-running the kernel's own ``validate`` keeps this retune decision and
+        the packing gate in lockstep instead of duplicating a partial predicate.
+
+        ``dtype`` and ``device`` are left to ``create_quant_module`` when they
+        are not known yet: this runs from the processor constructor, before the
+        final per-module placement is resolved.
+        """
+
+        validate = getattr(kernel, "validate", None)
+        if not callable(validate):
+            return in_features % group_size == 0
+        try:
+            ok, _ = validate(
+                bits=self._module_bits(module_name, resolved_cfg=resolved_cfg),
+                group_size=group_size,
+                desc_act=self.qcfg.desc_act,
+                sym=self.qcfg.sym,
+                in_features=in_features,
+                out_features=out_features,
+                pack_dtype=self.qcfg.pack_dtype,
+                dtype=dtype,
+            )
+        except Exception:
+            return False
+        return bool(ok)
+
     def _largest_supported_group_divisor(
         self,
         module_name: Optional[str],
         in_features: int,
+        out_features: int,
         configured_group_size: int,
+        *,
+        dtype: Optional[torch.dtype] = None,
+        resolved_cfg=None,
     ) -> int:
-        """Pick the largest supported group size that divides ``in_features``.
+        """Pick the largest group size the kernel can pack this module with.
 
-        Returns ``-1`` (per-channel) when no supported group size divides the
-        input axis. ``BaseQuantLinear`` normalizes ``-1`` to ``in_features``,
-        so every AWQ stage sees one full-width group.
+        Returns ``-1`` (per-channel) when no positive supported group size
+        passes the kernel's own packing validation but per-channel does;
+        ``BaseQuantLinear`` normalizes ``-1`` to ``in_features``, so every AWQ
+        stage sees one full-width group. When even per-channel does not pack
+        the shape, the configured size is returned unchanged so the caller does
+        not record an override for a module the kernel cannot quantize (for
+        example a non-quantized MoE router).
         """
 
-        try:
-            kernel = self._resolve_qlinear_kernel(module_name)
-        except Exception:
-            kernel = self.qlinear_kernel
+        kernel = self._resolve_module_kernel(module_name, resolved_cfg=resolved_cfg)
         supported = {
             int(size)
             for size in getattr(kernel, "SUPPORTS_GROUP_SIZE", ()) or ()
             if isinstance(size, int) and size > 0
         }
         for size in sorted(supported, reverse=True):
-            if size <= configured_group_size and in_features % size == 0:
+            if size <= configured_group_size and self._kernel_group_size_supported(
+                kernel,
+                module_name,
+                in_features,
+                out_features,
+                size,
+                dtype=dtype,
+                resolved_cfg=resolved_cfg,
+            ):
                 return size
-        return -1
+        if self._kernel_group_size_supported(
+            kernel,
+            module_name,
+            in_features,
+            out_features,
+            -1,
+            dtype=dtype,
+            resolved_cfg=resolved_cfg,
+        ):
+            return -1
+        return configured_group_size
 
     def _ensure_group_size_divisibility(self) -> None:
-        """Retune AWQ modules whose ``in_features`` is not a group multiple.
+        """Retune AWQ modules whose shape the kernel cannot pack as configured.
 
         AWQ's weight-mean, clip search, pseudo-quantization and packing all
-        reshape the input axis into fixed-size groups, so a module whose
-        ``in_features`` is not a multiple of the configured ``group_size``
-        cannot be quantized as-is. The failure previously surfaced only after
-        the whole calibration pass. Resolve a supported divisor up front and
-        record it as a per-module ``dynamic`` override so staging, packing,
-        saving and reload all resolve the same value.
+        reshape the weight matrix into fixed-size groups, so a module whose
+        ``in_features`` *or* ``out_features`` is not a multiple of the
+        configured ``group_size`` cannot be quantized as-is. The failure
+        previously surfaced only after the whole calibration pass (or, for the
+        output axis, not until ``create_quant_module`` packing). Resolve a
+        supported group size up front and record it as a per-module ``dynamic``
+        override so staging, packing, saving and reload all resolve the same
+        value.
         """
 
         if self.model is None:
@@ -570,10 +646,35 @@ class AWQProcessor(LoopProcessor):
             in_features = int(getattr(module, "in_features", 0) or 0)
             if in_features <= 0:
                 continue
-            configured = self._module_group_size(name, resolved_cfg=resolved_cfg)
-            if configured <= 0 or in_features % configured == 0:
+            out_features = int(getattr(module, "out_features", 0) or 0)
+            if out_features <= 0:
                 continue
-            chosen = self._largest_supported_group_divisor(name, in_features, configured)
+            configured = self._module_group_size(name, resolved_cfg=resolved_cfg)
+            if configured <= 0:
+                continue
+            weight = getattr(module, "weight", None)
+            dtype = weight.dtype if isinstance(weight, torch.Tensor) else None
+            kernel = self._resolve_module_kernel(name, resolved_cfg=resolved_cfg)
+            if self._kernel_group_size_supported(
+                kernel,
+                name,
+                in_features,
+                out_features,
+                configured,
+                dtype=dtype,
+                resolved_cfg=resolved_cfg,
+            ):
+                continue
+            chosen = self._largest_supported_group_divisor(
+                name,
+                in_features,
+                out_features,
+                configured,
+                dtype=dtype,
+                resolved_cfg=resolved_cfg,
+            )
+            if chosen == configured:
+                continue
             adjusted.append((name, configured, chosen, resolved_cfg.overrides))
 
         if not adjusted:
@@ -595,8 +696,8 @@ class AWQProcessor(LoopProcessor):
         )
         suffix = "" if len(adjusted) <= 4 else f", ... ({len(adjusted)} modules)"
         log.warning(
-            "AWQ: in_features is not divisible by group_size for %s%s; using a "
-            "supported per-module group size so calibration can proceed.",
+            "AWQ: group_size is not supported by the packing kernel for %s%s; "
+            "using a supported per-module group size so calibration can proceed.",
             examples,
             suffix,
         )

@@ -97,7 +97,7 @@ Disk-backed replay outputs use [bounded staging and shard verification on every 
 Replayed batches and AWQ captures release their device and host memory as soon as the consuming step ends, and sibling projections share one capture; see the [quantization memory and tensor lifetimes](docs/quantization-memory.md) contract.
 Quantized kernels receive packed rows and launch in the operand's device; see the [kernel input contiguity and launch contracts](docs/kernel-input-contiguity.md) for activation packing, 64-bit offsets, empty batches, and per-token compiles.
 The [GPTQ mock quantization group flow](docs/gptq-mock-group-flow.md) describes group-boundary handling and metadata ordering.
-Transformers 5.22 model-family fixes for module trees, Defuser GLM-4.x router tuples, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow.
+Transformers 5.22 model-family fixes for module trees, Defuser GLM-4.x router tuples, native Kimi-Linear dispatch, and HRM recurrent calibration are described in the [Transformers 5.22 compatibility](docs/transformers-5-compat.md) flow. The same page covers the remote-code load and generate contracts: [native rotary buffer restoration](docs/transformers-5-compat.md#j1-native-rotary-buffers-are-restored-after-every-load-item-10), legacy unscaled RoPE, ChatGLM `generate()`, `.bin` tied-key normalization, the AUTO_NF12 source-weight view, and the Klear import shim.
 AWQ module overrides follow the [dynamic group-size flow](docs/awq-dynamic-group-size.md) through search, staging, and packing.
 Torch AWQ inference keeps checkpoint-precision scales and bias; see the [AWQ runtime dtype precision](docs/awq-runtime-dtype-precision.md) flow.
 Torch AWQ reconstruction is tiled over input rows and broadcasts one scale row per group; see the [AWQ GEMM dequantization tiling](docs/awq-dequantize-tiling.md) flow.
@@ -1843,9 +1843,15 @@ If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, a
 ```python
 from gptqmodel import TritonPatch
 
-# Mitigate Triton kernel-cache crashes under nogil/free-threading Python 3.13+, where the cache storage is not thread-safe.
+# Serialize Triton autotuner state and JIT compilation under nogil/free-threading Python 3.13+.
 TritonPatch.apply()
 ```
+
+`TritonPatch` also makes the first concurrent launch of a kernel safe: libtriton's
+compiler is not free-thread safe, so cold JIT compiles are single-flight and
+globally serialized. See [concurrency guards](docs/concurrency.md) for the
+reference-counted BLAS/TF32 guards, the compile lock, and the dynamo
+compiler-failure classification.
 
 ## License 📜
 
