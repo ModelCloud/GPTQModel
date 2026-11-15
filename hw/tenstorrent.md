@@ -824,7 +824,7 @@ mask, so the captured context and the resulting report are unchanged.
 flowchart TD
     W["calibration window"] --> F["dense backbone forward"]
     F --> H["pre-hook on every decoder block"]
-    H --> C["captured[i] = args + kwargs<br/>mask / rotary / position ids"]
+    H --> C["captured extras i = args + kwargs<br/>mask / rotary / position ids"]
     C --> L{"last block reached?"}
     L -->|no| F
     L -->|yes| STOP["raise _StopForward"]
