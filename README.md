@@ -26,8 +26,8 @@
 
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/wiki">Documentation</a> ·
-    <a href="docs/quantization-guide.md">Quantization guide</a> ·
-    <a href="docs/README.md">Reference index</a> ·
+    <a href="https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md">Quantization guide</a> ·
+    <a href="https://github.com/ModelCloud/GPTQModel/blob/main/docs/README.md">Reference index</a> ·
     <a href="https://github.com/ModelCloud/GPTQModel/releases">Releases</a>
 </p>
 
@@ -35,21 +35,21 @@
 
 **7.11.0**
 
-- **[MACaQ](docs/macaq.md):** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback.
-- **[NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12):** Lossless 12-bit compression of BF16 weights reduces source-weight storage during calibration without changing the restored values. Packed inference now includes native Metal support alongside CUDA, HIP, and Torch paths. [MLX](docs/mlx-runtime.md)
-- **Tenstorrent:** Packed GPTQ inference through Torch/XLA and TTNN, multi-card execution, and block-float quantization. Long-context Llama serving adds paged caching and chunked prefill; compatible block-float checkpoints also run on CUDA, ROCm, and CPU. [Guide](docs/tenstorrent.md) · [Serving](docs/tt-llama-paged-serving.md)
-- **Quantization:** Resumable [distributed EXL3](docs/exl3-durable-execution.md) jobs, broader mixed-bit allocation across [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)/[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)/[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF), and [SmoothQuant](docs/protocol-actions.md) preprocessing improve large-model workflows and quality control.
-- **Inference:** Opt-in attention and MLP projection fusion, faster quantized embedding lookups, and improved small-batch inference. Native backend selection and packed-weight storage are preserved. [Fusion guide](docs/fusion-planner.md)
-- **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](docs/changelog/recent.md#7110)
-- **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](docs/torch-runtime-safety-gate.md) · [Serving security](docs/openai-server-exposure.md)
+- **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md):** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback.
+- **[NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12):** Lossless 12-bit compression of BF16 weights reduces source-weight storage during calibration without changing the restored values. Packed inference now includes native Metal support alongside CUDA, HIP, and Torch paths. [MLX](https://github.com/ModelCloud/GPTQModel/blob/main/docs/mlx-runtime.md)
+- **Tenstorrent:** Packed GPTQ inference through Torch/XLA and TTNN, multi-card execution, and block-float quantization. Long-context Llama serving adds paged caching and chunked prefill; compatible block-float checkpoints also run on CUDA, ROCm, and CPU. [Guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tenstorrent.md) · [Serving](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tt-llama-paged-serving.md)
+- **Quantization:** Resumable [distributed EXL3](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-durable-execution.md) jobs, broader mixed-bit allocation across [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)/[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)/[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF), and [SmoothQuant](https://github.com/ModelCloud/GPTQModel/blob/main/docs/protocol-actions.md) preprocessing improve large-model workflows and quality control.
+- **Inference:** Opt-in attention and MLP projection fusion, faster quantized embedding lookups, and improved small-batch inference. Native backend selection and packed-weight storage are preserved. [Fusion guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/fusion-planner.md)
+- **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#7110)
+- **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md) · [Serving security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md)
 
 | Recent release | Highlights |
 | --- | --- |
-| [7.10.0](docs/changelog/recent.md#7100) | Ricursive Ripple support, faster decode, checkpoint resharding, and multi-GPU fixes. |
-| [7.9.0](docs/changelog/recent.md#790) | Kernel tuning, MLX improvements, new models, and numerical fixes. |
-| [7.8.0](docs/changelog/recent.md#780) | [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ)/[RCO](https://github.com/ModelCloud/GPTQModel/wiki/GSQ#non-uniform-bit-allocation-rco) training and allocation, expanded model support, and compatibility fixes. |
+| [7.10.0](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#7100) | Ricursive Ripple support, faster decode, checkpoint resharding, and multi-GPU fixes. |
+| [7.9.0](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#790) | Kernel tuning, MLX improvements, new models, and numerical fixes. |
+| [7.8.0](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#780) | [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ)/[RCO](https://github.com/ModelCloud/GPTQModel/wiki/GSQ#non-uniform-bit-allocation-rco) training and allocation, expanded model support, and compatibility fixes. |
 
-[Detailed release notes](docs/changelog/recent.md) · [Older changelog](docs/changelog/archive.md)
+[Detailed release notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md) · [Older changelog](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/archive.md)
 
 ## A unified quantization platform 🧩
 
@@ -64,9 +64,9 @@ compatible deployment engine.
 | --- | --- |
 | **[GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ)** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
-| **[RTN](docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
+| **[RTN](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
 | **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. |
-| **[MACaQ](docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
+| **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
 | **[QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ)** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
 | **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. |
 | **[FP8](https://github.com/ModelCloud/GPTQModel/wiki/FP8-and-NVFP4)** | Floating-point weight quantization with scaled E4M3/E5M2 formats. |
@@ -84,18 +84,18 @@ compatible deployment engine.
   execution help manage memory and recover interrupted jobs. Distributed EXL3
   workflows support durable replay and resume.
 - **Recover accuracy.** Use [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) refinement, [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) low-rank compensation, [rotation](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#rotations),
-  [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](docs/peft.md) training and adapter
+  [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) training and adapter
   loading support further task adaptation.
 - **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
   a quantized block, including multimodal wrappers and hybrid layer shapes; see
-  the [AWQ scaling groups](docs/awq-scaling-groups.md) contract. Scale search keeps
+  the [AWQ scaling groups](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md) contract. Scale search keeps
   routing in the original-input coordinates, validates replay coverage, and
-  restores temporary weights on failure; see [search safety](docs/awq-scaling-groups.md#scale-search-safety).
+  restores temporary weights on failure; see [search safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md#scale-search-safety).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.
 - **Preserve causal replay.** Bloom AWQ keeps captured attention context and
-  rejects unsafe residual folds; see [Bloom replay safety](docs/awq-bloom-replay.md).
+  rejects unsafe residual folds; see [Bloom replay safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-bloom-replay.md).
 
 ### Inference and deployment 🚢
 
@@ -104,12 +104,12 @@ or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
 native MLX quantization and packed inference. Optional projection fusion can
 combine supported attention and MLP operations without changing the saved format.
 
-[EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA)/[LoRA](docs/peft.md) adapters, mixed-precision checkpoints, and external engines have their
+[EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA)/[LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) adapters, mixed-precision checkpoints, and external engines have their
 own compatibility limits; support for a method does not imply support in every engine.
 
-Start with the [quantization guide](docs/quantization-guide.md).
+Start with the [quantization guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md).
 External runtimes support only specific method/format combinations; check the
-[integration and backend tables](docs/support-matrix.md) before exporting.
+[integration and backend tables](https://github.com/ModelCloud/GPTQModel/blob/main/docs/support-matrix.md) before exporting.
 
 ## Platform and HW Support 🖥️
 
@@ -125,18 +125,18 @@ External runtimes support only specific method/format combinations; check the
 | Windows 11 | NVIDIA GPUs / CPU | Torch |
 
 Support depends on the chosen method, backend, dtype, and device architecture.
-See the [full hardware and kernel matrix](docs/support-matrix.md#hardware-and-operating-systems),
-[ROCm guide](docs/rocm-rdna4.md), [Tenstorrent guide](docs/tenstorrent.md),
-and [Apple silicon guide](docs/mlx-runtime.md).
+See the [full hardware and kernel matrix](https://github.com/ModelCloud/GPTQModel/blob/main/docs/support-matrix.md#hardware-and-operating-systems),
+[ROCm guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rocm-rdna4.md), [Tenstorrent guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tenstorrent.md),
+and [Apple silicon guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/mlx-runtime.md).
 
 Tenstorrent-compatible block-float formats also run on CPU without Tenstorrent
-hardware. See the [CPU block-float guide](docs/tt-blockfloat-cpu.md).
+hardware. See the [CPU block-float guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tt-blockfloat-cpu.md).
 
 ## Model Support 🤖
 
 Support spans dense, mixture-of-experts (MoE), vision-language, and audio-language
 families. The compact list below keeps model coverage visible; the
-[complete registry](docs/supported-models.md) lists exact model-type aliases and
+[complete registry](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md) lists exact model-type aliases and
 model-specific limitations.
 
 | Families | Supported models and variants |
@@ -163,7 +163,7 @@ model-specific limitations.
 For multimodal checkpoints, support may target the language decoder rather than
 every vision/audio component. Kimi K3 / Linear requires the dedicated native-source
 calibration workflow; Qwen 3.5 requires Transformers 5.2.0 or newer. Check the
-[model notes](docs/supported-models.md) before starting a large run.
+[model notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md) before starting a large run.
 
 [Browse quantized models on Hugging Face](https://huggingface.co/modelcloud/)
 
@@ -177,7 +177,7 @@ pip install gptqmodel
 ```
 
 PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
-blocked by the [runtime safety check](docs/torch-runtime-safety-gate.md).
+blocked by the [runtime safety check](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md).
 Compiled package backends build and cache extensions on first use (JIT),
 so install the compiler and CUDA/ROCm toolkit required by your backend.
 
@@ -230,9 +230,9 @@ model.quantize(calibration, batch_size=1)
 model.save("Qwen3-0.6B-GPTQ-4bit")
 ```
 
-The [end-to-end guide](docs/quantization-guide.md) covers other methods,
+The [end-to-end guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md) covers other methods,
 calibration, saving, reloading, and validation.
-For Apple silicon, use the [native MLX workflow](docs/mlx-runtime.md).
+For Apple silicon, use the [native MLX workflow](https://github.com/ModelCloud/GPTQModel/blob/main/docs/mlx-runtime.md).
 
 ### What to tune next 🔧
 
@@ -248,25 +248,25 @@ For Apple silicon, use the [native MLX workflow](docs/mlx-runtime.md).
   compatibility guarantee.
 
 See the [configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference)
-and [quantization recipes](docs/quantization-guide.md) for the available controls.
+and [quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md) for the available controls.
 
 ## Guides and reference 🧭
 
 | Task | Documentation |
 | --- | --- |
-| Choose precision, format, and backend | [Quantization recipes](docs/quantization-guide.md) · [Support matrix](docs/support-matrix.md) |
-| Configure mixed precision and advanced options | [Configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference) · [Protocols](docs/quantization_protocol.md) |
-| Quantize large or MoE models | [Multi-GPU and memory](docs/multi_gpu_quantization.md) · [MoE and multimodal](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models) |
-| Resume a job | [Checkpoint and resume](checkpoint.md) · [Distributed EXL3](docs/exl3-durable-execution.md) |
-| Recover accuracy or fine-tune | [EoRA](docs/eora/README.md) · [PEFT/LoRA](docs/peft.md) · [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) · [RCO](https://github.com/ModelCloud/GPTQModel/wiki/GSQ#non-uniform-bit-allocation-rco) |
-| Evaluate quality and performance | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Benchmark methodology](docs/benchmark-methodology.md) |
-| Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](docs/openai-server-exposure.md) |
-| Add a model or inspect its plan | [Module-plan guide](docs/module-plan-guide.md) · [Developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide) |
-| Load legacy remote-code models on Transformers 5 | [Transformers 5 compatibility](docs/transformers-5-compat.md#k-native-loads-run-the-pre-load-hook-one-legacy-generate-adapter-issue-4121-items-2-3) |
-| Diagnose runtime issues | [Troubleshooting](https://github.com/ModelCloud/GPTQModel/wiki/Troubleshooting-and-FAQ) · [Concurrency](docs/concurrency.md) |
+| Choose precision, format, and backend | [Quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md) · [Support matrix](https://github.com/ModelCloud/GPTQModel/blob/main/docs/support-matrix.md) |
+| Configure mixed precision and advanced options | [Configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference) · [Protocols](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization_protocol.md) |
+| Quantize large or MoE models | [Multi-GPU and memory](https://github.com/ModelCloud/GPTQModel/blob/main/docs/multi_gpu_quantization.md) · [MoE and multimodal](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models) |
+| Resume a job | [Checkpoint and resume](https://github.com/ModelCloud/GPTQModel/blob/main/checkpoint.md) · [Distributed EXL3](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-durable-execution.md) |
+| Recover accuracy or fine-tune | [EoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/eora/README.md) · [PEFT/LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) · [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) · [RCO](https://github.com/ModelCloud/GPTQModel/wiki/GSQ#non-uniform-bit-allocation-rco) |
+| Evaluate quality and performance | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Benchmark methodology](https://github.com/ModelCloud/GPTQModel/blob/main/docs/benchmark-methodology.md) |
+| Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md) |
+| Add a model or inspect its plan | [Module-plan guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/module-plan-guide.md) · [Developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide) |
+| Load legacy remote-code models on Transformers 5 | [Transformers 5 compatibility](https://github.com/ModelCloud/GPTQModel/blob/main/docs/transformers-5-compat.md#k-native-loads-run-the-pre-load-hook-one-legacy-generate-adapter-issue-4121-items-2-3) |
+| Diagnose runtime issues | [Troubleshooting](https://github.com/ModelCloud/GPTQModel/wiki/Troubleshooting-and-FAQ) · [Concurrency](https://github.com/ModelCloud/GPTQModel/blob/main/docs/concurrency.md) |
 
 Kernel contracts, implementation flows, and focused technical notes are in the
-[documentation index](docs/README.md), not repeated on this page.
+[documentation index](https://github.com/ModelCloud/GPTQModel/blob/main/docs/README.md), not repeated on this page.
 
 ## Quality: GPTQ 4-bit evaluation 🏆
 
@@ -307,14 +307,14 @@ also appreciated. Ongoing sponsors will be credited on this README page.
 
 ## License 📜
 
-GPT-QModel is licensed under [Apache-2.0](LICENSE). The optional, JIT-loaded
-Swordfish kernel is [AGPL-3.0-or-later](licenses/SWORDFISH).
+GPT-QModel is licensed under [Apache-2.0](https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE). The optional, JIT-loaded
+Swordfish kernel is [AGPL-3.0-or-later](https://github.com/ModelCloud/GPTQModel/blob/main/licenses/SWORDFISH).
 
 ## Attributions and citations 📚
 
 GPT-QModel builds on the research and open-source projects below. Please cite
 GPT-QModel and the methods you use; full author lists, BibTeX, and attribution
-details are available in the [citation reference](docs/citations.md).
+details are available in the [citation reference](https://github.com/ModelCloud/GPTQModel/blob/main/docs/citations.md).
 
 <details>
 <summary>Cite GPT-QModel (BibTeX)</summary>
@@ -336,7 +336,7 @@ details are available in the [citation reference](docs/citations.md).
 | [GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ) | Elias Frantar et al., IST-DASLab | [Paper](https://arxiv.org/abs/2210.17323) |
 | [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ) | Ji Lin et al. | [Paper](https://arxiv.org/abs/2306.00978) |
 | [ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant) | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
-| [MACaQ](docs/macaq.md) | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |
+| [MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md) | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |
 | [QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ) | Ying Zhang et al., Meituan | [Paper](https://arxiv.org/abs/2406.09904) |
 | [VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ) | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |
 | [GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF) / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
