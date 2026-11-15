@@ -58,7 +58,7 @@ that report.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -898,7 +898,7 @@ def quantize_model_blockfloat(
 
 
 class _StopForward(Exception):
-    """Raised by the capture hook once the first decoder block's inputs are seen."""
+    """Raised by the capture hook once the last decoder block's inputs are seen."""
 
 
 def _solve_module_onto_grid(module, hessian, *, bits, damp, block_axis, act_order):
@@ -919,7 +919,17 @@ def _solve_module_onto_grid(module, hessian, *, bits, damp, block_axis, act_orde
 def _quantize_sequential(
     model, tokenizer, *, bits, damp, nsamples, seqlen, text, block_axis, act_order, verbose
 ) -> dict:
-    """Block-by-block GPTQ: calibrate each block on its quantized predecessors' outputs."""
+    """Block-by-block GPTQ: calibrate each block on its quantized predecessors' outputs.
+
+    A decoder block's side inputs (attention mask, rotary embeddings, position
+    ids, cache positions) belong to that block, not to the first one. Hybrid
+    attention models such as Gemma2/3 build a different causal mask per
+    ``attention_type``, so replaying block 0's kwargs through every block would
+    calibrate a full-attention layer on the sliding-window mask (and vice
+    versa). Capture the kwargs of every block from one dense forward, then
+    replay each block with its own; only the hidden states are propagated
+    through the quantized blocks.
+    """
 
     import torch.nn as nn
 
@@ -931,19 +941,43 @@ def _quantize_sequential(
     if not windows:
         raise ValueError("no calibration windows")
 
-    # Capture what the first block receives -- hidden states plus whatever the
+    # Capture what every block receives -- hidden states plus whatever the
     # backbone passes alongside (rotary embeddings, masks, cache positions) --
-    # by stopping the forward at its entry.  Those side inputs do not depend on
-    # the weights being quantized, so they are reused for every block.
-    captured = []
+    # by stopping the forward at the last block's entry.  Those side inputs do
+    # not depend on the weights being quantized, so each block replays with the
+    # ones its own native forward saw.  The shared tensors (a mask, a rotary
+    # tuple) are references, so this does not copy them per block.
+    captured_extras: List[list] = [[] for _ in blocks]
+    captured_hidden: List[torch.Tensor] = []
 
-    def _capture(_module, args, kwargs):
-        captured.append((args, kwargs))
-        raise _StopForward
+    def _capture(block_index):
+        def hook(_module, args, kwargs):
+            # Keep only the side inputs.  Holding every block's input hidden
+            # state would retain the whole dense activation chain (one
+            # [1, seqlen, hidden] tensor per block per window) for no reason:
+            # replay only needs block 0's input, then propagates its own.
+            captured_extras[block_index].append(
+                (
+                    args[1:],
+                    {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in ("hidden_states", "past_key_values", "past_key_value", "use_cache")
+                    },
+                )
+            )
+            if block_index == 0:
+                captured_hidden.append(args[0])
+            if block_index == len(blocks) - 1:
+                raise _StopForward
+        return hook
 
     backbone = getattr(model, "model", None)
     runner = backbone if isinstance(backbone, nn.Module) and type(backbone).forward is not nn.Module.forward else model
-    handle = blocks[0].register_forward_pre_hook(_capture, with_kwargs=True)
+    handles = [
+        block.register_forward_pre_hook(_capture(index), with_kwargs=True)
+        for index, block in enumerate(blocks)
+    ]
     model.eval()
     try:
         with torch.no_grad():
@@ -951,17 +985,21 @@ def _quantize_sequential(
                 try:
                     runner(window)
                 except _StopForward:
-                    # Expected: pre-hook raises this to stop forward once inputs are captured.
+                    # Expected: the last block's pre-hook stops the forward
+                    # once every block's inputs are captured.
                     continue
     finally:
-        handle.remove()
-    if len(captured) != len(windows):
-        raise RuntimeError("failed to capture the first decoder block's inputs")
-    hidden = [args[0] for args, _ in captured]
-    extras = [(args[1:], {k: v for k, v in kwargs.items() if k not in ("hidden_states", "past_key_values", "past_key_value", "use_cache")}) for args, kwargs in captured]
+        for handle in handles:
+            handle.remove()
+    if len(captured_hidden) != len(windows) or any(
+        len(block_captured) != len(windows) for block_captured in captured_extras
+    ):
+        raise RuntimeError("failed to capture every decoder block's inputs")
+    hidden = captured_hidden
+    extras = captured_extras
 
-    def _run(block, index):
-        args, kwargs = extras[index]
+    def _run(block, block_index, index):
+        args, kwargs = extras[block_index][index]
         out = block(hidden[index], *args, use_cache=False, **kwargs)
         return out[0] if isinstance(out, tuple) else out
 
@@ -991,7 +1029,7 @@ def _quantize_sequential(
             with torch.no_grad():
                 for index in range(len(hidden)):
                     shared.clear()
-                    _run(block, index)
+                    _run(block, block_index, index)
         finally:
             for h in handles:
                 h.remove()
@@ -1015,7 +1053,7 @@ def _quantize_sequential(
         sums.clear()  # release the Hessians before propagating
         # Propagate through the *quantized* block for the next one.
         with torch.no_grad():
-            hidden = [_run(block, index) for index in range(len(hidden))]
+            hidden = [_run(block, block_index, index) for index in range(len(hidden))]
     return report
 
 

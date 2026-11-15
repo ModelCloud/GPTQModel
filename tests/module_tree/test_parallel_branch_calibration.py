@@ -123,7 +123,8 @@ class _VisionBlock(nn.Module):
         self.self_attn = _Attention(hidden)
         self.mlp = _VisionMlp(hidden)
 
-    def forward(self, hidden_states, **kwargs):
+    def forward(self, hidden_states, cu_seqlens=None, **kwargs):
+        del cu_seqlens
         return hidden_states + self.mlp(hidden_states + self.self_attn(hidden_states))
 
 
@@ -150,7 +151,14 @@ class TinyParallelCalibrationModel(PreTrainedModel):
         )
         self.lm_head = nn.Linear(config.text_hidden, config.vocab_size, bias=False)
 
-    def forward(self, input_ids=None, attention_mask=None, pixel_values=None, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        pixel_values=None,
+        cu_seqlens=None,
+        **kwargs,
+    ):
         text = self.model.embed_tokens(input_ids)
         for layer in self.model.layers:
             text = layer(text, attention_mask=attention_mask)
@@ -159,7 +167,7 @@ class TinyParallelCalibrationModel(PreTrainedModel):
             pixel_values = pixel_values.to(self.vision_tower.patch_embed.weight.dtype)
             vision = self.vision_tower.patch_embed(pixel_values)
             for layer in self.vision_tower.layers:
-                vision = layer(vision)
+                vision = layer(vision, cu_seqlens=cu_seqlens)
         return self.lm_head(text)
 
 
@@ -188,10 +196,13 @@ AutoModelForCausalLM.register(
 )
 
 
-def _build_fixture(tmp_path, *, text_hidden: int, vision_hidden: int):
+def _build_fixture(
+    tmp_path, *, text_hidden: int, vision_hidden: int, num_vision_layers: int = 2
+):
     config = TinyParallelCalibrationConfig(
         text_hidden=text_hidden,
         vision_hidden=vision_hidden,
+        num_vision_layers=num_vision_layers,
     )
     TinyParallelCalibrationModel(config).save_pretrained(tmp_path)
     tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
@@ -225,11 +236,23 @@ def _calibration(tokenizer, *, include_pixel_values: bool):
             row["pixel_values"] = torch.randn(
                 1, _PIXEL_TOKENS, _PIXEL_FEATURES, dtype=torch.float32
             )
+            # A vision-only replay kwarg: the text branch never passes it, so
+            # seeing it proves the layer used its own branch's context.
+            row["cu_seqlens"] = torch.tensor(
+                [[0, _PIXEL_TOKENS]], dtype=torch.int32
+            )
         rows.append(row)
     return rows
 
 
-def _quantize(tmp_path, *, text_hidden: int, vision_hidden: int, include_pixel_values: bool):
+def _quantize(
+    tmp_path,
+    *,
+    text_hidden: int,
+    vision_hidden: int,
+    include_pixel_values: bool,
+    record_vision_kwargs: bool = False,
+):
     tokenizer = _build_fixture(
         tmp_path, text_hidden=text_hidden, vision_hidden=vision_hidden
     )
@@ -245,6 +268,7 @@ def _quantize(tmp_path, *, text_hidden: int, vision_hidden: int, include_pixel_v
 
     vision_inputs = []
     text_outputs = []
+    vision_kwargs = {}
     text_last = model.model.model.layers[-1]
     vision_first = model.model.vision_tower.layers[0]
 
@@ -254,8 +278,23 @@ def _quantize(tmp_path, *, text_hidden: int, vision_hidden: int, include_pixel_v
     def _record_vision(module, args):
         vision_inputs.append(args[0].detach().clone())
 
+    def _record_vision_kwargs(index):
+        def hook(module, args, kwargs):
+            del module, args
+            vision_kwargs.setdefault(index, []).append(dict(kwargs))
+
+        return hook
+
     text_handle = text_last.register_forward_hook(_record_text)
     vision_handle = vision_first.register_forward_pre_hook(_record_vision)
+    vision_kwarg_handles = []
+    if record_vision_kwargs:
+        vision_kwarg_handles = [
+            layer.register_forward_pre_hook(
+                _record_vision_kwargs(index), with_kwargs=True
+            )
+            for index, layer in enumerate(model.model.vision_tower.layers)
+        ]
     try:
         model.quantize(
             _calibration(tokenizer, include_pixel_values=include_pixel_values),
@@ -266,8 +305,10 @@ def _quantize(tmp_path, *, text_hidden: int, vision_hidden: int, include_pixel_v
     finally:
         text_handle.remove()
         vision_handle.remove()
+        for handle in vision_kwarg_handles:
+            handle.remove()
 
-    return model, vision_inputs, text_outputs
+    return model, vision_inputs, text_outputs, vision_kwargs
 
 
 def _count_quantized(model, prefix: str) -> int:
@@ -280,7 +321,7 @@ def _count_quantized(model, prefix: str) -> int:
 
 @pytest.mark.parametrize("vision_hidden", [_TEXT_HIDDEN, _VISION_HIDDEN])
 def test_parallel_branch_calibration_uses_each_branch_inputs(tmp_path, vision_hidden):
-    model, vision_inputs, text_outputs = _quantize(
+    model, vision_inputs, text_outputs, _ = _quantize(
         tmp_path,
         text_hidden=_TEXT_HIDDEN,
         vision_hidden=vision_hidden,
@@ -305,6 +346,103 @@ def test_parallel_branch_calibration_uses_each_branch_inputs(tmp_path, vision_hi
 
     assert _count_quantized(model, "vision_tower.layers.") == 12
     assert _count_quantized(model, "model.layers.") == 14
+
+
+def test_parallel_branch_replays_each_layer_with_its_own_kwargs(tmp_path):
+    """Every vision layer, not just the branch's first, must use vision kwargs.
+
+    ``cu_seqlens`` is passed only by the vision branch; the text branch passes
+    ``attention_mask``.  Asserting on ``vision_tower.layers.1`` is the point:
+    layer 0 is restarted from the branch cache even in the broken code, so a
+    layer-0-only check cannot catch #4150.
+    """
+
+    _, _, _, vision_kwargs = _quantize(
+        tmp_path,
+        text_hidden=_TEXT_HIDDEN,
+        vision_hidden=_VISION_HIDDEN,
+        include_pixel_values=True,
+        record_vision_kwargs=True,
+    )
+
+    assert 0 in vision_kwargs and 1 in vision_kwargs
+    for index, recordings in vision_kwargs.items():
+        assert recordings, f"vision layer {index} never replayed"
+        for kwargs in recordings:
+            assert "cu_seqlens" in kwargs, (
+                f"vision layer {index} replayed without the vision branch's "
+                f"cu_seqlens; keys={sorted(kwargs)}"
+            )
+            assert kwargs.get("attention_mask") is None, (
+                f"vision layer {index} replayed with the text branch's "
+                f"attention_mask {None if kwargs.get('attention_mask') is None else tuple(kwargs['attention_mask'].shape)}"
+            )
+
+
+def test_branch_replay_cache_resolves_the_owning_branch():
+    from gptqmodel.looper.stage_layer import _branch_replay_cache
+
+    # No branch map is the historical single-stack path.
+    assert _branch_replay_cache(None, 3) == (None, False)
+
+    caches = {0: "text", 2: "vision", 5: "audio"}
+    assert _branch_replay_cache(caches, 0) == ("text", True)
+    assert _branch_replay_cache({0: "text"}, 1) == ("text", False)
+    assert _branch_replay_cache({0: "text"}, 9) == ("text", False)
+    assert _branch_replay_cache({2: "vision"}, 1) == (None, False)
+    assert _branch_replay_cache({2: "vision"}, 2) == ("vision", True)
+    assert _branch_replay_cache({2: "vision"}, 4) == ("vision", False)
+    assert _branch_replay_cache({2: "vision"}, 5) == ("vision", False)
+    assert _branch_replay_cache(caches, 4) == ("vision", False)
+    assert _branch_replay_cache(caches, 5) == ("audio", True)
+    assert _branch_replay_cache(caches, 9) == ("audio", False)
+
+
+def test_single_branch_replay_context_is_unchanged(tmp_path):
+    """Without concurrent branches the historical top-level cache is still used."""
+
+    tokenizer = _build_fixture(
+        tmp_path,
+        text_hidden=64,
+        vision_hidden=64,
+        num_vision_layers=0,
+    )
+    model = ParallelCalibrationQModel.from_pretrained(
+        str(tmp_path),
+        quantize_config=QuantizeConfig(
+            bits=4, group_size=32, device="cpu", desc_act=False
+        ),
+        backend=BACKEND.TORCH,
+        module_tree="auto",
+    )
+    assert model.extract_layers_node() == ["model.layers"]
+
+    calibration = _calibration(tokenizer, include_pixel_values=False)
+    expected_mask = calibration[0]["attention_mask"]
+    recorded = []
+
+    def _record(module, args, kwargs):
+        del module, args
+        recorded.append(dict(kwargs))
+
+    handle = model.model.model.layers[1].register_forward_pre_hook(
+        _record, with_kwargs=True
+    )
+    try:
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+        )
+    finally:
+        handle.remove()
+
+    assert recorded
+    for kwargs in recorded:
+        mask = kwargs.get("attention_mask")
+        assert mask is not None
+        assert torch.equal(mask, expected_mask)
 
 
 def test_parallel_branch_calibration_fails_when_branch_is_unreached(tmp_path):
