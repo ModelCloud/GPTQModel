@@ -993,6 +993,22 @@ def _patch_transformers_remote_code_compat() -> None:
 
             generic.check_model_inputs = check_model_inputs
 
+        if not hasattr(generic, "OutputRecorder"):
+            # transformers 5.x moved `OutputRecorder` to
+            # `transformers.utils.output_capturing`, but older remote model files
+            # still import it from `transformers.utils.generic` (for example
+            # `modeling_klear.py`). Re-export the real recorder so the remote
+            # `can_record_outputs` mapping keeps working.
+            try:
+                from transformers.utils.output_capturing import OutputRecorder
+            except Exception:
+                log.debug(
+                    "remote-code compat skipped: transformers.utils.output_capturing unavailable",
+                    exc_info=True,
+                )
+            else:
+                generic.OutputRecorder = OutputRecorder
+
         if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
             # transformers 5.x also collapsed the legacy HybridCache entrypoint
             # into StaticCache, which already instantiates hybrid/sliding layers
@@ -1445,6 +1461,30 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
     # newer transformers only preserves the serialized `seq_length` field.
     config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
     config.attribute_map["max_length"] = "seq_length"
+    if not hasattr(config, "num_hidden_layers") and hasattr(config, "num_layers"):
+        # transformers 5's DynamicCache sizes itself from `num_hidden_layers`;
+        # ChatGLM serializes the same value as `num_layers`. The attribute map
+        # keeps it out of the serialized config while `generate()` can read it.
+        config.attribute_map["num_hidden_layers"] = "num_layers"
+
+    # `attribute_map` resolves `config.max_length` for the remote model's
+    # `__init__`, but transformers 5's `_prepare_generation_config` walks the
+    # same attribute and treats it as a user-modified generation parameter:
+    # `_get_generation_parameters()` raises for every `generate()` call because
+    # `max_length` is not a declared config field. The alias is a compatibility
+    # view, not generation state, so hide it from that probe on this config
+    # class. The attribute itself stays available to the remote code.
+    config_cls = type(config)
+    if not getattr(config_cls, "_gptqmodel_max_length_alias", False):
+        original_get_generation_parameters = config_cls._get_generation_parameters
+
+        def _get_generation_parameters(self):
+            parameters = original_get_generation_parameters(self)
+            parameters.pop("max_length", None)
+            return parameters
+
+        config_cls._get_generation_parameters = _get_generation_parameters
+        config_cls._gptqmodel_max_length_alias = True
 
     if not hasattr(config, "use_cache"):
         # transformers v5 removed `use_cache` from PretrainedConfig,
@@ -1497,7 +1537,41 @@ def _rope_parameters_are_per_layer(config: Any, rope_parameters: Any) -> bool:
     )
 
 
-def _normalize_rope_parameters_config_compat(config: Any) -> None:
+def _declares_legacy_rope_field(config: Any) -> bool:
+    """Whether the config class exposes the pre-5.x `rope_scaling` constructor field.
+
+    Legacy remote configs declare `rope_scaling` in `__init__` and read
+    `config.rope_scaling` from their modeling code, treating `None` as the
+    unscaled RoPE path. Transformers 5 configs (native and modern remote code)
+    declare `rope_parameters` instead and require it to stay populated.
+    """
+
+    try:
+        parameters = inspect.signature(type(config).__init__).parameters
+    except (TypeError, ValueError):
+        return False
+    return "rope_scaling" in parameters and "rope_parameters" not in parameters
+
+
+def _rope_config_is_scaled(config: Any) -> bool:
+    """Whether either RoPE alias declares a non-default scaling configuration."""
+
+    for candidate in (
+        getattr(config, "rope_scaling", None),
+        getattr(config, "rope_parameters", None),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("type", candidate.get("rope_type")) not in (None, "default"):
+            return True
+        if candidate.get("factor") not in (None, 1, 1.0):
+            return True
+    return False
+
+
+def _normalize_rope_parameters_config_compat(
+    config: Any, *, clear_unscaled_legacy_rope: bool = False
+) -> None:
     # HunYuanVL is a composite config: RoPE belongs exclusively to its text
     # sub-config. Adding a synthetic top-level rope_parameters value is not
     # harmless here because HunYuanVLConfig treats flat text fields as legacy
@@ -1506,31 +1580,27 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
     if getattr(config, "model_type", None) == "hunyuan_vl":
         text_config = getattr(config, "text_config", None)
         if text_config is not None:
-            _normalize_rope_parameters_config_compat(text_config)
+            _normalize_rope_parameters_config_compat(
+                text_config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+            )
         return
 
-    if str(getattr(config, "model_type", "")).lower() == "nanbeige":
-        # Nanbeige's remote modeling code owns RoPE construction and treats
-        # `rope_scaling is None` as the unscaled/default path. Transformers 5
-        # derives a default `rope_scaling` dictionary from `rope_parameters`,
-        # which the legacy code mistakes for scaled RoPE and then indexes at
-        # `["type"]`. Keep only genuinely scaled Nanbeige configurations.
-        rope_candidates = (
-            getattr(config, "rope_scaling", None),
-            getattr(config, "rope_parameters", None),
-        )
-        has_scaled_rope = any(
-            isinstance(candidate, dict)
-            and (
-                candidate.get("type", candidate.get("rope_type")) not in (None, "default")
-                or candidate.get("factor") not in (None, 1, 1.0)
-            )
-            for candidate in rope_candidates
-        )
-        if not has_scaled_rope:
-            config.rope_scaling = None
-            config.rope_parameters = None
-            return
+    if (
+        clear_unscaled_legacy_rope
+        and not _rope_parameters_are_per_layer(config, getattr(config, "rope_parameters", None))
+        and not _rope_config_is_scaled(config)
+    ):
+        # Legacy remote modeling code (MiniCPM, MobileLLM, Nanbeige, ...) owns
+        # RoPE construction and treats `rope_scaling is None` as the unscaled
+        # path; any dict is indexed at `["type"]` and fails when transformers 5
+        # synthesized a default `{"rope_type": "default"}` dict. Clear both
+        # aliases (they are the same property in transformers 5) so the remote
+        # code sees the unscaled contract it was written for. Genuinely scaled
+        # configs keep their dict, which the remote-code pass below augments
+        # with the legacy `type` key.
+        config.rope_scaling = None
+        config.rope_parameters = None
+        return
 
     rope_parameters = getattr(config, "rope_parameters", None)
     if _rope_parameters_are_per_layer(config, rope_parameters):
@@ -1749,7 +1819,10 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # Some transformers 5.x model classes now read `config.rope_parameters`
     # directly during `from_config()`, but older local configs may only carry
     # legacy RoPE fields or nothing but a default `rope_theta`.
-    _normalize_rope_parameters_config_compat(config)
+    clear_unscaled_legacy_rope = trust_remote_code and _declares_legacy_rope_field(config)
+    _normalize_rope_parameters_config_compat(
+        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+    )
 
     # `auto_map` is checkpoint data, not an opt-in. A config can carry a native
     # `model_type` (so it loads as a built-in class) and still list remote
@@ -1764,15 +1837,20 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # remote-code normalization that clears legacy default `rope_scaling` can
     # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
     # after remote-code field cleanup so from_config() sees stable metadata.
-    _normalize_rope_parameters_config_compat(config)
+    _normalize_rope_parameters_config_compat(
+        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+    )
     # Re-apply remote-code field aliases after RoPE parameter backfill, since
     # some config classes synchronize `rope_scaling` from `rope_parameters` and
     # can drop legacy keys like `rope_scaling["type"]`.
     _normalize_remote_code_config_compat(config)
     # Some config classes can still nullify rope_parameters during the second
-    # remote-code field normalization pass. Ensure final config always carries
-    # valid rope_parameters for model classes that directly subscript it.
-    _normalize_rope_parameters_config_compat(config)
+    # remote-code field normalization pass. Re-apply the same policy: a modern
+    # config keeps a valid `rope_parameters` dict, while a legacy unscaled
+    # remote config stays on its `None` contract.
+    _normalize_rope_parameters_config_compat(
+        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+    )
 
 
 def prepare_remote_code_compat(config: Any) -> None:
