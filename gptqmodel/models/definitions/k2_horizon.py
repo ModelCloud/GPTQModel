@@ -140,20 +140,27 @@ class K2HorizonQModel(BaseQModel):
             "self_attn": {
                 "q_norm": ("q_norm:!",),
                 "k_norm": ("k_norm:!",),
-                "q_proj": ("q_proj:0",),
-                "k_proj": ("k_proj:0",),
-                # Dense layers expose v_proj; MoVA layers expose routed value
-                # experts instead.  Strict=False makes this one tree valid for
-                # both layer variants.
-                "v_proj": ("v_proj:0",),
-                "gate_proj": ("gate_proj:0",),
+                # One flat group: q/k/v/gate/o all read the same attention
+                # input. Declaring each projection as its own node made AWQ
+                # fold `input_layernorm` into `q_proj` alone and then chain
+                # `q_proj -> k_proj -> ...` (PPL 1100 vs RTN 21.03). Dense
+                # layers expose v_proj; MoVA layers expose routed value experts
+                # instead. Strict=False makes this one tree valid for both.
+                # `gate_proj` is the attention gate: `o_proj` reads
+                # `attn * sigmoid(gate)`, which is not positively homogeneous.
+                "": (
+                    "q_proj:0",
+                    "k_proj:0",
+                    "v_proj:0",
+                    "gate_proj:0:nosrc",
+                    "o_proj:1",
+                ),
                 "v_router": ("v_router:!",),
                 "v_experts": {
                     # ('#',) denotes the ModuleList element itself, whose
                     # runtime module is a Linear rather than an MLP wrapper.
                     "#": ("#",),
                 },
-                "o_proj": ("o_proj:1",),
             },
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
