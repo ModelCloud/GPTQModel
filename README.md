@@ -94,6 +94,8 @@ compatible deployment engine.
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.
+- **Preserve causal replay.** Bloom AWQ keeps captured attention context and
+  rejects unsafe residual folds; see [Bloom replay safety](docs/awq-bloom-replay.md).
 
 ### Inference and deployment 🚢
 

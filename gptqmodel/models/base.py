@@ -3830,6 +3830,23 @@ class BaseQModel(nn.Module):
 
         return x, module_kwargs
 
+    def awq_module_replay_chunk_kwargs(
+        self,
+        module: nn.Module,
+        module_kwargs: Dict[str, Any],
+        *,
+        start: int,
+        length: int,
+        full_batch_size: int,
+    ) -> Dict[str, Any]:
+        """Override chunk kwargs whose batch layout is not a leading batch axis.
+
+        ``module_kwargs`` is the full, prepared replay context, before generic
+        batch slicing. Return only keys needing model-specific slicing.
+        """
+
+        return {}
+
     def _apply_layer_type_replay_kwargs(
         self,
         *,

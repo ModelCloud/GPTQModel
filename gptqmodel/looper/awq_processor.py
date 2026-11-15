@@ -12,7 +12,7 @@ import time
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 import torch
 from torch import nn
@@ -3418,7 +3418,10 @@ class AWQProcessor(LoopProcessor):
 
         replay_inputs = getattr(self.gptq_model, "awq_module_replay_inputs", None)
         if callable(replay_inputs):
-            x, module_kwargs = replay_inputs(module, x, module_kwargs)
+            try:
+                x, module_kwargs = replay_inputs(module, x, module_kwargs)
+            except NotImplementedError as exc:
+                raise _AWQScaleGroupError(f"AWQ: unsupported replay for {type(module).__name__}: {exc}") from exc
         module_kwargs = dict(module_kwargs)
 
         target_device = None
@@ -3705,12 +3708,22 @@ class AWQProcessor(LoopProcessor):
                 return type(val)(sliced)
             return val
 
+        chunk_kwargs = getattr(self.gptq_model, "awq_module_replay_chunk_kwargs", None)
         batch_offset = 0
         for x_partial in torch.split(x, effective_quant_batch_size, dim=0):
             partial_kwargs = {
                 key: _slice_value(value, batch_offset, x_partial.shape[0])
                 for key, value in module_kwargs.items()
             }
+            if callable(chunk_kwargs):
+                overrides = cast(Dict[str, Any], chunk_kwargs(
+                    module,
+                    module_kwargs,
+                    start=batch_offset,
+                    length=x_partial.shape[0],
+                    full_batch_size=full_batch_size,
+                ))
+                partial_kwargs.update(overrides)
             partial_output = module(x_partial, **partial_kwargs)
             if isinstance(partial_output, tuple):
                 partial_output = partial_output[0]
