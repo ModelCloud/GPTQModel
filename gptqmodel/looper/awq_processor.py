@@ -1032,7 +1032,8 @@ class AWQProcessor(LoopProcessor):
         tensors: List[torch.Tensor],
         *,
         max_tokens: int,
-    ) -> Tuple[torch.Tensor, int]:
+        with_provenance: bool = False,
+    ) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, List[Tuple[int, int]]]:
         """Pack ragged pointwise activations into deterministic bounded token rows.
 
         The returned tensor always has shape ``[1, retained_tokens, hidden]``.
@@ -1045,17 +1046,23 @@ class AWQProcessor(LoopProcessor):
         full concatenated activation tensor first. When ``max_tokens`` is
         smaller than the batch count, one row is taken from each of
         ``max_tokens`` evenly spaced batches instead.
+
+        ``with_provenance`` additionally returns ``(source_batch, row)`` for
+        every retained row, so a replay can rebuild a per-document attention
+        mask and the original position ids for the packed sequence.
         """
 
         if not tensors:
-            return torch.empty(0), 0
+            empty = torch.empty(0)
+            return (empty, 0, []) if with_provenance else (empty, 0)
         if max_tokens <= 0:
             raise ValueError(f"AWQ token-row max_tokens must be positive, got {max_tokens}.")
 
         hidden = int(tensors[0].shape[-1])
         rows = []
+        row_sources: List[int] = []
         total_tokens = 0
-        for tensor in tensors:
+        for source_index, tensor in enumerate(tensors):
             if tensor.dim() < 2 or int(tensor.shape[-1]) != hidden:
                 raise ValueError(
                     "AWQ token-row aggregation requires tensors with one common "
@@ -1065,13 +1072,23 @@ class AWQProcessor(LoopProcessor):
             total_tokens += int(flattened.shape[0])
             if flattened.shape[0] > 0:
                 rows.append(flattened)
+                row_sources.append(source_index)
 
         if total_tokens == 0:
-            return tensors[0].new_empty((1, 0, hidden)), 0
+            empty = tensors[0].new_empty((1, 0, hidden))
+            return (empty, 0, []) if with_provenance else (empty, 0)
 
         retained_tokens = min(total_tokens, max_tokens)
         if retained_tokens == total_tokens:
-            return torch.cat(rows, dim=0).unsqueeze(0), total_tokens
+            packed = torch.cat(rows, dim=0).unsqueeze(0)
+            if not with_provenance:
+                return packed, total_tokens
+            provenance = [
+                (row_sources[batch_index], row_index)
+                for batch_index, tensor_rows in enumerate(rows)
+                for row_index in range(int(tensor_rows.shape[0]))
+            ]
+            return packed, total_tokens, provenance
 
         lengths = [int(tensor_rows.shape[0]) for tensor_rows in rows]
         batch_count = len(rows)
@@ -1086,8 +1103,12 @@ class AWQProcessor(LoopProcessor):
                     int(i * (batch_count - 1) // (retained_tokens - 1))
                     for i in range(retained_tokens)
                 ]
-            selected = [rows[batch_id][:1] for batch_id in dict.fromkeys(batch_ids)]
-            return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
+            batch_ids = list(dict.fromkeys(batch_ids))
+            selected = [rows[batch_id][:1] for batch_id in batch_ids]
+            packed = torch.cat(selected, dim=0).unsqueeze(0)
+            if not with_provenance:
+                return packed, total_tokens
+            return packed, total_tokens, [(row_sources[batch_id], 0) for batch_id in batch_ids]
 
         # Reserve one row per batch, then hand out the remaining budget
         # proportionally to batch length (largest remainder, ties by order).
@@ -1121,12 +1142,16 @@ class AWQProcessor(LoopProcessor):
                     break
 
         selected = []
-        for tensor_rows, quota, length in zip(rows, quotas, lengths):
+        provenance: List[Tuple[int, int]] = []
+        for batch_index, (tensor_rows, quota, length) in enumerate(zip(rows, quotas, lengths)):
             quota = min(quota, length)
             if quota <= 0:
                 continue
             if quota == length:
                 selected.append(tensor_rows)
+                if with_provenance:
+                    source_index = row_sources[batch_index]
+                    provenance.extend((source_index, row_index) for row_index in range(length))
                 continue
             if quota == 1:
                 local_indices = torch.zeros(1, dtype=torch.int64)
@@ -1137,7 +1162,15 @@ class AWQProcessor(LoopProcessor):
                     // (quota - 1)
                 )
             selected.append(tensor_rows.index_select(0, local_indices))
-        return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
+            if with_provenance:
+                source_index = row_sources[batch_index]
+                provenance.extend(
+                    (source_index, int(row_index)) for row_index in local_indices.tolist()
+                )
+        packed = torch.cat(selected, dim=0).unsqueeze(0)
+        if not with_provenance:
+            return packed, total_tokens
+        return packed, total_tokens, provenance
 
     @staticmethod
     def _concat_batch_metadata(values: List[Any]) -> Any:
@@ -1308,6 +1341,171 @@ class AWQProcessor(LoopProcessor):
 
         return AWQProcessor._pack_kept_token_rows(position_ids, keep_mask)
 
+    @staticmethod
+    def _token_row_source_structure(
+        mask: Optional[torch.Tensor],
+        row_count: int,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Map one capture batch's kept rows back onto its document grid.
+
+        ``row_count`` is the number of kept rows the capture hook stored for
+        this batch (padding already removed). Returns ``(documents, positions,
+        allowed)`` where ``documents``/``positions`` index the original
+        ``[batch, seq]`` grid for every kept row and ``allowed`` is the
+        ``[row_count, row_count]`` attention relation among those rows.
+        ``None`` means the cached mask does not describe exactly these rows.
+        """
+
+        if mask is None or row_count <= 0 or not torch.is_tensor(mask):
+            return None
+
+        m = mask.detach().to(device="cpu")
+        if m.dim() == 4:
+            # [B, heads, S, S]; every head sees the same keep pattern.
+            m = m[:, 0]
+
+        allowed_grid = None
+        if m.dim() == 3 and m.shape[-1] == m.shape[-2]:
+            # [B, S, S] additive or boolean attention. A query row keeps every
+            # key the model itself attends to, so the retained rows match the
+            # ones the capture hook filtered with.
+            allowed_grid = (m >= 0) if m.dtype != torch.bool else m
+            keep = allowed_grid.any(dim=-1)
+        else:
+            try:
+                keep = normalize_seq_mask(m)
+            except ValueError:
+                return None
+
+        if keep is None or keep.dim() != 2:
+            return None
+
+        seq_len = int(keep.shape[-1])
+        if seq_len <= 0:
+            return None
+        flat_keep = keep.reshape(-1)
+        if int(flat_keep.sum().item()) != row_count:
+            return None
+
+        flat_index = torch.nonzero(flat_keep, as_tuple=False).reshape(-1)
+        documents = torch.div(flat_index, seq_len, rounding_mode="floor")
+        positions = flat_index % seq_len
+        if allowed_grid is not None:
+            allowed = allowed_grid[documents, positions][:, positions]
+        else:
+            allowed = positions.unsqueeze(1) >= positions.unsqueeze(0)
+        return documents, positions, allowed
+
+    def _token_row_replay_kwargs(
+        self,
+        tensors: List[torch.Tensor],
+        batch_indices: List[Optional[int]],
+        provenance: List[Tuple[int, int]],
+        dtype: torch.dtype,
+    ) -> Dict[str, Any]:
+        """Rebuild the attention mask and positions for packed ``token_rows``.
+
+        ``token_rows`` concatenates rows sampled from several calibration
+        documents into one ``[1, tokens, hidden]`` replay tensor. Replaying it
+        with ``attention_mask=None`` gives the attention module a single causal
+        mask across that synthetic sequence, so document A attends to document
+        B, and models whose attention requires the mask argument raise instead
+        (issue #4091). Keeping every retained row on its original document and
+        position makes the replay attention block-diagonal per document, and
+        rotary sees the original offsets instead of synthetic ones.
+        """
+
+        cache = getattr(self, "inputs_cache", None)
+        masks = getattr(cache, "attention_masks", None) or []
+        if cache is None or not provenance or not masks:
+            # Without a captured mask there is no document structure to replay;
+            # keep the previous kwargs rather than invent one.
+            return {}
+
+        cached_position_ids = getattr(cache, "position_ids", None) or []
+
+        packed_count = len(provenance)
+        allowed = torch.zeros((packed_count, packed_count), dtype=torch.bool)
+        positions = torch.zeros((packed_count,), dtype=torch.long)
+        extended_mask = False
+        observed_2d_mask = False
+
+        grouped: Dict[int, List[Tuple[int, int]]] = {}
+        for packed_index, (source_index, row_index) in enumerate(provenance):
+            grouped.setdefault(int(source_index), []).append((packed_index, int(row_index)))
+
+        for source_index, entries in grouped.items():
+            source = tensors[source_index]
+            hidden = max(int(source.shape[-1]), 1)
+            row_count = int(source.numel() // hidden)
+            batch_index = (
+                batch_indices[source_index] if source_index < len(batch_indices) else None
+            )
+            mask = None
+            if batch_index is not None and 0 <= int(batch_index) < len(masks):
+                mask = masks[int(batch_index)]
+            if torch.is_tensor(mask):
+                if mask.dim() >= 3:
+                    # The model consumes an additive [B, 1, S, S] style mask.
+                    extended_mask = True
+                else:
+                    observed_2d_mask = True
+
+            packed_indices = torch.tensor([item[0] for item in entries], dtype=torch.long)
+            local_rows = torch.tensor([item[1] for item in entries], dtype=torch.long)
+            structure = self._token_row_source_structure(mask, row_count)
+            if structure is None:
+                documents = torch.zeros_like(local_rows)
+                source_positions = local_rows.clone()
+                source_allowed = (
+                    source_positions.unsqueeze(1) >= source_positions.unsqueeze(0)
+                )
+            else:
+                source_documents, kept_positions, kept_allowed = structure
+                documents = source_documents[local_rows]
+                source_positions = kept_positions[local_rows]
+                source_allowed = kept_allowed[local_rows][:, local_rows]
+
+            same_document = documents.unsqueeze(1) == documents.unsqueeze(0)
+            allowed[
+                packed_indices.unsqueeze(1), packed_indices.unsqueeze(0)
+            ] = source_allowed & same_document
+
+            row_positions = source_positions
+            if batch_index is not None and 0 <= int(batch_index) < len(cached_position_ids):
+                cached = cached_position_ids[int(batch_index)]
+                if torch.is_tensor(cached):
+                    cached = cached.detach().to(device="cpu")
+                    usable = (
+                        cached.dim() == 2
+                        and int(cached.shape[-1]) > int(source_positions.max())
+                    )
+                    if usable and int(cached.shape[0]) == 1:
+                        row_positions = cached[0, source_positions]
+                    elif usable and int(cached.shape[0]) > int(documents.max()):
+                        row_positions = cached[documents, source_positions]
+
+            positions[packed_indices] = row_positions.to(dtype=torch.long)
+
+        if not dtype.is_floating_point:
+            dtype = torch.float32
+        if extended_mask or not observed_2d_mask:
+            # Additive block-diagonal form. This is also the fallback when no
+            # mask was captured: the module then relied on its internal causal
+            # path, and an explicit causal mask is the equivalent replay.
+            additive = torch.zeros((packed_count, packed_count), dtype=dtype)
+            additive.masked_fill_(~allowed, torch.finfo(dtype).min)
+            attention_mask = additive.unsqueeze(0).unsqueeze(0)
+        else:
+            # A captured 2-D mask means the attention implementation (for
+            # example FlashAttention) expects a [batch, seq] keep mask. Keep
+            # that form; every packed row is a kept token.
+            attention_mask = torch.ones((1, packed_count), dtype=torch.bool)
+        return {
+            "attention_mask": attention_mask,
+            "position_ids": positions.unsqueeze(0),
+        }
+
     def _align_module_kwargs_to_input(
         self,
         inp: torch.Tensor,
@@ -1461,6 +1659,10 @@ class AWQProcessor(LoopProcessor):
         # input lists are the same objects in the same order. Concatenate that
         # identical list once and hand every sibling the same result.
         cat_cache: Dict[Tuple[int, ...], torch.Tensor] = {}
+        # Sibling projections share one captured input list, so their packed
+        # replay mask and position ids are identical too. Build the (bounded,
+        # but quadratic) block-diagonal mask once per unique capture list.
+        token_row_kwargs_cache: Dict[Tuple[int, ...], Dict[str, Any]] = {}
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
@@ -1505,12 +1707,24 @@ class AWQProcessor(LoopProcessor):
                 if max_tokens == 0 and configured_max_tokens is None:
                     features[name] = tensors[0].new_empty((1, 0, tensors[0].shape[-1]))
                     raw_tokens = 0
+                    replay_kwargs: Dict[str, Any] = {}
                 else:
-                    features[name], raw_tokens = self._pack_token_rows(
+                    features[name], raw_tokens, provenance = self._pack_token_rows(
                         tensors,
                         max_tokens=max_tokens,
+                        with_provenance=True,
                     )
-                feature_kwargs[name] = {}
+                    cache_key = tuple(id(tensor) for tensor in tensors)
+                    replay_kwargs = token_row_kwargs_cache.get(cache_key)
+                    if replay_kwargs is None:
+                        replay_kwargs = self._token_row_replay_kwargs(
+                            tensors,
+                            batch_indices,
+                            provenance,
+                            features[name].dtype,
+                        )
+                        token_row_kwargs_cache[cache_key] = replay_kwargs
+                feature_kwargs[name] = replay_kwargs
                 retained_tokens = int(features[name].shape[-2])
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [None]

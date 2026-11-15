@@ -91,13 +91,21 @@ live module buffers. Some kernels keep a converted runtime layout:
 | Kernel | Runtime state | Save behaviour |
 | --- | --- | --- |
 | Torch / Triton v2 | v2 qzeros | emits v1 qzeros when the checkpoint is v1 |
-| Marlin / AWQ Marlin | repacked `qweight`, empty `qzeros`/`g_idx` | raises |
-| ExLlamaV2 / AWQ ExLlamaV2 | shuffled `qweight` | raises |
+| Marlin / AWQ Marlin | repacked `qweight`, empty `qzeros`/`g_idx` | raises on a checkpoint write; read-only `state_dict()` returns the runtime tensors |
+| ExLlamaV2 / AWQ ExLlamaV2 | shuffled `qweight` | raises on a checkpoint write; read-only `state_dict()` returns the runtime tensors |
+| TorchAten / TorchFused / AVX512 | int4pack `qweight`, float affine offsets | emits the captured checkpoint snapshot |
 
 `GPTQQuantLinear._save_to_state_dict` compares `_qzeros_format` with
 `_checkpoint_format_on_disk` and writes a converted copy into the destination;
-it never mutates the live module. Kernels whose weight permutation has no
-inverse raise from their own `_save_to_state_dict`.
+it never mutates the live module.
+
+Kernels whose weight permutation has no inverse raise from their own
+`_save_to_state_dict`, but only while a checkpoint is actually being written.
+`gptqmodel.utils.checkpoint_state.checkpoint_serialization()` marks that scope
+with a `ContextVar`; outside it, `state_dict()` is a read-only collection and
+returns the runtime tensors. This is required because PEFT's
+`set_peft_model_state_dict` calls `model.state_dict()`, so an unconditional
+raise made *loading* an adapter fail on the default CUDA kernel.
 
 ```mermaid
 flowchart TD
@@ -107,10 +115,15 @@ flowchart TD
     D -- yes --> E["write live buffers"]
     D -- "no (v1 checkpoint, v2 runtime)" --> F["write v1-converted copy"]
     B --> G["Marlin / ExLlamaV2 hook"]
-    G --> H{"runtime layout applied"}
+    G --> H{"runtime layout applied<br/>AND checkpoint_serialization() active"}
     H -- yes --> I["raise: checkpoint layout<br/>cannot be reconstructed"]
-    H -- no --> E
+    H -- "no (read-only, e.g. PEFT)" --> E
 ```
+
+GPT-QModel's own writers enter that scope before they collect tensors: the
+module-replacement path in `models/writer.py` wraps `module.state_dict()`.
+`save_quantized()` builds a separate export shell that owns the raw checkpoint
+tensors, so it never serializes a runtime layout in the first place.
 
 `GPTQModel.save()` is unaffected: it rebuilds the export shell from the source
 checkpoint and never serializes the runtime kernel layout.
@@ -253,13 +266,30 @@ must therefore convert a self round-trip back to v2, and must not touch the
 runtime layout when the incoming state dict has no `qzeros` (PEFT adapters and
 other partial loads).
 
+The receiving module cannot infer the *source* layout: a state dict may be
+copied between a model loaded from a `gptq` (v1) checkpoint and one loaded from
+`gptq_v2`, and each target has its own `_checkpoint_format_on_disk`. So
+`_save_to_state_dict` records the layout it just emitted in the state dict's
+per-module metadata as `qzeros_format`, and `_load_from_state_dict` converts
+from that recorded layout. Metadata adds no tensor keys, so `strict=True`
+loading of a plain HF checkpoint is unaffected; a checkpoint read from disk has
+no such entry and falls back to `_checkpoint_format_on_disk`, then to the
+module's constructed `format`.
+
 ```mermaid
 flowchart TD
     A["model.load_state_dict(state_dict)"] --> B["GPTQQuantLinear._load_from_state_dict"]
     B --> C["super()._load_from_state_dict<br/>copies the words"]
     C --> D{"prefix + qzeros<br/>in state_dict?"}
     D -- no --> E["keep _qzeros_format<br/>partial load, no relabel"]
-    D -- yes --> F{"_checkpoint_format_on_disk"}
+    D -- yes --> M{"local_metadata qzeros_format<br/>(written by state_dict)"}
+    M -- "1" --> F1{"REQUIRES_FORMAT_V2?"}
+    M -- "2" --> F2{"REQUIRES_FORMAT_V2?"}
+    M -- absent --> F{"_checkpoint_format_on_disk"}
+    F1 -- yes --> H["convert_gptq_v1_to_v2_format_module<br/>_qzeros_format = 2"]
+    F1 -- no --> I["_qzeros_format = 1"]
+    F2 -- yes --> J["_qzeros_format = 2"]
+    F2 -- "no" --> N["convert_gptq_v2_to_v1_format_module<br/>_qzeros_format = 1"]
     F -- "GPTQ / gemm" --> G{"REQUIRES_FORMAT_V2?"}
     G -- yes --> H["convert_gptq_v1_to_v2_format_module<br/>_qzeros_format = 2"]
     G -- no --> I["_qzeros_format = 1"]
@@ -269,9 +299,11 @@ flowchart TD
     H --> L
     I --> L
     J --> L
+    N --> L
     K --> L
     style E fill:#d9f2d9,stroke:#2e7d32
     style H fill:#d9f2d9,stroke:#2e7d32
+    style N fill:#d9f2d9,stroke:#2e7d32
 ```
 
 Before this change a v1 model loaded with `load_state_dict(state_dict())`
@@ -282,6 +314,12 @@ round trip is now bit-identical. A partial `load_state_dict({}, strict=False)`
 used to flip `_qzeros_format` from 2 to 1 while the buffer stayed v2, so the
 next save wrote `0x88888888` under the v1 label. It now leaves the layout and
 the saved bytes unchanged.
+
+Copying a state dict between a v1-loaded model and a v2-loaded model used the
+target's marker for the source's words. On the same fixture that moved the
+logits by `0.251` (v2 words into a v1-labelled target) and `0.130` (v1 words
+into a v2 target); both directions are now exact because the words describe
+their own layout.
 
 ## 10. HF `quant_method` for RTN AWQ exports and packed GGUF
 
@@ -357,6 +395,48 @@ flowchart TD
     style H fill:#d9f2d9,stroke:#2e7d32
 ```
 
+## 12. CPU int4pack kernels serialize their checkpoint snapshot
+
+`TorchAtenLinear` (the CPU AUTO kernel for FP16) and `TorchFusedLinear` (BF16)
+rewrite `qweight` and `qzeros` **in place** on the first eval forward: `qweight`
+becomes an int4pack operand and `qzeros` becomes float affine offsets. The
+original checkpoint tensors survive only in the `_fused_train_state` snapshot
+captured before the transform.
+
+Serializing the live buffers was therefore corrupt: `checkpoint_layout_qzeros`
+applies the *integer* v1 conversion to the float offsets, which yields `inf` or
+`65536`, and the next `load_state_dict` produced `inf`/`NaN` logits. A
+self round-trip did not catch it, because copying the runtime layout back into
+the same transformed module is trivially an identity — the damage only appears
+when the state dict is loaded into a module that never ran a forward.
+
+`GPTQQuantLinear._save_to_state_dict` now emits the snapshot tensors under
+their checkpoint names before applying the qzero conversion. The snapshot is
+`persistent=False`, so it never appears in the state dict itself.
+
+```mermaid
+flowchart TD
+    A["first eval forward"] --> B["capture_fused_train_state<br/>snapshot checkpoint tensors"]
+    B --> C["transform_cpu<br/>in-place int4pack qweight + float offsets"]
+    C --> D["state_dict()"]
+    D --> E{"_fused_train_state present?"}
+    E -- no --> F["emit live buffers"]
+    E -- yes --> G{"_fused_train_state_exportable?"}
+    G -- no --> X["raise: modified runtime state<br/>has no checkpoint inverse"]
+    G -- yes --> H["emit snapshot qweight/qzeros"]
+    H --> I["checkpoint_layout_qzeros<br/>v2 to v1 copy"]
+    I --> J["checkpoint bytes"]
+    style X fill:#f8d7da,stroke:#b02a37
+    style J fill:#d9f2d9,stroke:#2e7d32
+```
+
+`load_state_dict` classifies the incoming operands by shape: a state dict that
+matches the snapshot is a checkpoint and restores it before the copy (the next
+forward re-transforms), while one that matches the live int4pack operands is
+the module's own runtime layout and is copied as-is. A runtime layout that no
+longer matches the snapshot has no inverse, so export raises instead of writing
+`inf`.
+
 ## Failure contract
 
 ### Producer filters, format changes, and `save_pretrained` (items 1-3)
@@ -368,7 +448,7 @@ flowchart TD
 | Missing `qweight` on an AWQ module | no validation, zero placeholder | clear `Missing required quantized weights` |
 | Format changed to another qzero layout | stale words copied under the new label | exact v1/v2 conversion |
 | Format changed to a different packing | stale words copied, silent garbage | `ValueError` before writing |
-| `save_pretrained()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel |
+| `save_pretrained()` on a Marlin/ExLlamaV2 model | runtime layout written as v1 | `RuntimeError` naming the kernel; read-only `state_dict()` still returns the runtime tensors |
 
 ### State-dict round-trips, HF methods, and pickling (items 9-11)
 
@@ -376,6 +456,9 @@ flowchart TD
 | --- | --- | --- |
 | `load_state_dict(model.state_dict())` on a v1 model | v1 words copied into a v2 kernel, logits drift | exact v1 to v2 conversion, bit-identical |
 | Partial `load_state_dict` without `qzeros` | `_qzeros_format` flipped to 1, next save garbage | runtime layout kept |
+| `state_dict()` on a transformed CPU int4pack layer | int4pack `qweight`, float offsets, `inf`/`65536` qzeros | checkpoint snapshot emitted |
+| State dict copied between v1 and v2 models | source words read as the target's layout, logits drift | layout recorded in state-dict metadata, exact both ways |
+| `PeftModel.from_pretrained()` on a Marlin base | `RuntimeError` from `state_dict()` | adapter loads; only checkpoint writes refuse |
 | RTN `format="gemm"` config | `quant_method: gptq` with `format: gemm` | `quant_method: awq` |
 | New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` raises an actionable `ValueError` once `gptqmodel` is imported; otherwise HF only warns |
 | `exl3` / `qqq` / `paroquant` / `macaq` / `nf12` / `tt-blockfloat` checkpoint in plain HF | `Unknown quantization type ... skip the quantization`, random weights | refusing quantizer raises once `gptqmodel` is imported; save-time warning otherwise |
