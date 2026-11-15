@@ -609,4 +609,125 @@ class MlxNF12Linear(nn.Module):
         return output.astype(x.dtype).reshape(output_shape)
 
 
-__all__ = ["MlxNF12Linear"]
+_EMBED_SOURCE = """            uint physical = thread_position_in_threadgroup.x;
+            uint id_chunk = threadgroup_position_in_grid.y;
+            uint slot = physical >> 4;
+            uint lane = physical >> 2;
+            uint j = physical & 3u;
+            uint t = lane & 3u;
+            uint id_pos = id_chunk * 8u + slot;
+            if (id_pos >= NUM_IDS) {{
+                return;
+            }}
+            uint k_j = 16u * j + 2u * t;
+            uint out_base = id_pos * K + k_j;
+            int row = ids[id_pos];
+            if (row < 0 || uint(row) >= N) {{
+                // Vocab-parallel shards hand out-of-range IDs and expect +0.0.
+                for (uint step = 0; step < SA_ROW; ++step) {{
+                    uint base = out_base + step * 64u;
+                    *(device uint *)(output + base) = 0u;
+                    *(device uint *)(output + base + 8u) = 0u;
+                }}
+                return;
+            }}
+            uint block = uint(row) >> 4;
+            uint upper = (uint(row) >> 3) & 1u;
+            uint wlane = 4u * (uint(row) & 7u) + t;
+            uint meta_word = block * SA_BYTES + wlane * 4u + j;
+            uint low_word = block * SA_BYTES + 128u + (j >> 1) * 128u + wlane * 4u + (j & 1u) * 2u;
+            // The selected row takes the lower or upper half of the paired
+            // group, so both the meta byte and the low byte move by 8 bits.
+            uint meta_shift = upper * 8u;
+            uint byte_shift = upper * 16u;
+            uint escape_base = upper * 2u;
+            uint exp_base_value = uint(exp_base[0]);
+            const device uint *base = (const device uint *)packed;
+            for (uint step = 0; step < SA_ROW; ++step) {{
+                const device uint *sa = base + step * 384u;
+                uint meta = sa[meta_word];
+                uint low0 = sa[low_word];
+                uint low1 = sa[low_word + 1u];
+                uint m_lo = (meta >> meta_shift) & 0xFFu;
+                uint m_hi = (meta >> (16u + meta_shift)) & 0xFFu;
+                uint l0 = (low0 >> byte_shift) & 0xFFu;
+                uint l1 = (low0 >> (byte_shift + 8u)) & 0xFFu;
+                uint l2 = (low1 >> byte_shift) & 0xFFu;
+                uint l3 = (low1 >> (byte_shift + 8u)) & 0xFFu;
+                uint v0, v1, v2, v3;
+                if (meta == 0u) {{
+                    v0 = uint(uint16_t(escapes[low0 * 8u + escape_base])) << 16u;
+                    v1 = uint(uint16_t(escapes[low0 * 8u + escape_base + 1u])) << 16u;
+                    v2 = uint(uint16_t(escapes[low0 * 8u + escape_base + 4u])) << 16u;
+                    v3 = uint(uint16_t(escapes[low0 * 8u + escape_base + 5u])) << 16u;
+                }} else {{
+                    uint hi_lo = m_lo & 0x87u;
+                    uint hi_lo1 = ((m_lo << 1u) & 0x80u) | ((m_lo >> 3u) & 0x07u);
+                    uint hi_hi = m_hi & 0x87u;
+                    uint hi_hi1 = ((m_hi << 1u) & 0x80u) | ((m_hi >> 3u) & 0x07u);
+                    v0 = (((hi_lo + exp_base_value) << 24u) | (l0 << 16u));
+                    v1 = (((hi_lo1 + exp_base_value) << 24u) | (l1 << 16u));
+                    v2 = (((hi_hi + exp_base_value) << 24u) | (l2 << 16u));
+                    v3 = (((hi_hi1 + exp_base_value) << 24u) | (l3 << 16u));
+                }}
+                // The BF16 word is the top half of the assembled float bits.
+                uint out = out_base + step * 64u;
+                *(device uint *)(output + out) = (v0 >> 16u) | ((v1 >> 16u) << 16u);
+                *(device uint *)(output + out + 8u) = (v2 >> 16u) | ((v3 >> 16u) << 16u);
+            }}
+"""
+
+
+@lru_cache(maxsize=1)
+def _embed_kernel():
+    """Packed NF12 embedding lookup: 8 IDs per threadgroup, 4 values per thread."""
+    return mx.fast.metal_kernel(
+        name="gptqmodel_nf12_embedding",
+        input_names=["ids", "packed", "escapes", "exp_base"],
+        output_names=["output"],
+        source=_EMBED_SOURCE,
+    )
+
+
+class MlxNF12Embedding(nn.Module):
+    """Gather BF16 rows from an NF12 table without materializing it dense.
+
+    ``ids`` of any shape select rows of a ``[num_embeddings, embedding_dim]``
+    table; out-of-range IDs give ``+0.0`` rows, matching the Torch codec.
+    """
+
+    def __init__(self, *, num_embeddings, embedding_dim, num_escapes=0):
+        super().__init__()
+        num_embeddings = int(num_embeddings)
+        embedding_dim = int(embedding_dim)
+        if embedding_dim % 64 or num_embeddings % 16:
+            raise ValueError("NF12 MLX embedding needs dim % 64 and num_embeddings % 16")
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.packed = mx.zeros((num_embeddings, embedding_dim * 3 // 2), dtype=mx.uint8)
+        self.escapes = mx.zeros((max(int(num_escapes), 1), 8), dtype=mx.int16)
+        self.exp_base = mx.zeros((1,), dtype=mx.uint8)
+        self.freeze()
+
+    def __call__(self, ids):
+        flat = ids.reshape(-1)
+        count = flat.size
+        if count == 0:
+            return mx.zeros((*ids.shape, self.embedding_dim), dtype=mx.bfloat16)
+        output = _embed_kernel()(
+            inputs=[flat.astype(mx.int32), self.packed, self.escapes, self.exp_base],
+            template=[
+                ("K", self.embedding_dim), ("N", self.num_embeddings),
+                ("SA_ROW", self.embedding_dim // 64),
+                ("SA_BYTES", self.embedding_dim * 6),
+                ("NUM_IDS", count),
+            ],
+            grid=(128, (count + 7) // 8, 1),
+            threadgroup=(128, 1, 1),
+            output_shapes=[(count, self.embedding_dim)],
+            output_dtypes=[mx.bfloat16],
+        )[0]
+        return output.reshape((*ids.shape, self.embedding_dim))
+
+
+__all__ = ["MlxNF12Embedding", "MlxNF12Linear"]
