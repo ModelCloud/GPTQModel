@@ -175,3 +175,30 @@ def test_spark2_5_after_model_load_leaves_dense_model_unchanged():
 
     assert returned is model
     assert dense.weight is original_weight
+
+
+def test_auto_nf12_hooked_linear_exposes_source_weight_contract():
+    """Issue #4093 item 7: remote forwards read `.weight.dtype`/`.shape`.
+
+    Spark-X2.5 reads `self.mlp.gate_proj.weight.dtype` inside the decoder
+    forward (modeling_spark.py:244), and the legacy Llama-shaped `q_proj.weight`
+    dtype casts do the same. The packed NF12 replacement must expose that
+    contract without materializing the matrix.
+    """
+
+    from gptqmodel.nn_modules.hooked_linear import HookedLinear
+    from gptqmodel.utils.auto_dtype_cast import AutoNF12HookedLinear
+
+    source = HookedLinear(64, 16)
+    source.weight = torch.randn(16, 64, dtype=torch.bfloat16)
+    source.bias = None
+
+    layer = AutoNF12HookedLinear.from_linear(source)
+
+    assert isinstance(layer.weight, torch.Tensor)
+    assert layer.weight.shape == source.weight.shape
+    assert layer.weight.dtype is source.weight.dtype
+    assert layer.weight.device == source.weight.device
+    # A one-element storage with zero strides, not a materialized matrix.
+    assert layer.weight.untyped_storage().nbytes() == layer.weight.element_size()
+    assert "weight" not in layer.state_dict()
