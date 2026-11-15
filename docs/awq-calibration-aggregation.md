@@ -48,13 +48,18 @@ flowchart TD
     C --> E["AWQProcessor._layer_input_features"]
     D --> E
     E --> F["_token_row_budget<br/>max of largest batch rows and batch count"]
-    F --> G["_pack_token_rows<br/>deterministic bounded sample<br/>every non-empty batch contributes"]
-    G --> H["feature_stats<br/>mode token_rows, raw_tokens, retained_tokens, batches"]
-    H --> I["_should_fallback_group"]
-    I --> J{"every layer individually covered?"}
-    J -- yes --> K["AWQ scale search on packed rows"]
-    J -- no --> L["RTN fallback for the whole group"]
-    style L fill:#ffe9b3,stroke:#b38600
+    F --> G["_pack_token_rows with_provenance<br/>deterministic bounded sample<br/>every non-empty batch contributes<br/>returns source batch and row per retained row"]
+    G --> H["_token_row_replay_kwargs"]
+    H --> H1["_token_row_source_structure<br/>kept row maps to document and position"]
+    H1 --> H2["block-diagonal attention_mask<br/>causal inside one document only"]
+    H1 --> H3["position_ids<br/>original per-document offsets"]
+    H2 --> I["feature_stats<br/>mode token_rows, raw_tokens, retained_tokens, batches"]
+    H3 --> I
+    I --> J["_should_fallback_group"]
+    J --> K{"every layer individually covered?"}
+    K -- yes --> L["AWQ scale search on packed rows<br/>replayed with the packed mask and positions"]
+    K -- no --> M["RTN fallback for the whole group"]
+    style M fill:#ffe9b3,stroke:#b38600
 ```
 
 `AWQProcessor._feature_aggregation_policy` still asks the model class, so a
@@ -84,6 +89,53 @@ module, and the raw per-batch captures are dropped by
 `AWQProcessor._finalize_quantized_layer` after the layer is quantized. The bound
 does not grow with the number of calibration documents.
 
+The replay mask adds `retained * retained` boolean entries plus one additive
+copy in the activation dtype (8 MiB for 2048 retained rows in fp16). It is
+built once per unique capture list per layer, shared by sibling projections,
+and released with the layer state.
+
+## Replay mask and positions
+
+`AWQProcessor._pack_token_rows(..., with_provenance=True)` also reports, for
+every retained row, the capture batch it came from and its row inside that
+batch. `AWQProcessor._token_row_replay_kwargs` turns that provenance into the
+`attention_mask` and `position_ids` the packed `[1, retained, hidden]` replay
+needs:
+
+- `AWQProcessor._token_row_source_structure` maps each kept row back to its
+  `[document, position]` cell using the cached mask's keep pattern. A `[B, S, S]`
+  mask supplies the model's own per-query relation (causal, padding, sliding
+  window); a `[B, S]` mask supplies the kept set and the replay adds causal
+  order among kept rows.
+- The packed mask is additive and block-diagonal: a retained row may only
+  attend to retained rows of the same document at or before its own position.
+  Document A can no longer attend to document B through the concatenated
+  sequence, which was the semantic defect behind #4095.
+- `position_ids` keep each row's original offset (taken from the cached
+  `position_ids` when available), so rotary embeddings are evaluated at the
+  real positions instead of a synthetic `0..retained-1` range.
+- The mask keeps the captured form: a 3-D/4-D captured mask produces the
+  additive block-diagonal mask, while a 2-D captured mask (FlashAttention)
+  produces a 2-D packed keep mask and leaves causal masking to the attention
+  implementation. When the capture stored no mask at all (`batch_size=1`), the
+  additive block-diagonal fallback is used; it is the explicit form of the
+  causal path the module already took.
+- Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
+  the quadratic mask is built once per unique capture list per layer.
+
+```mermaid
+sequenceDiagram
+    participant Hook as capture hook
+    participant Pack as pack token rows
+    participant Kw as replay kwargs
+    participant Attn as attention module
+    Hook->>Pack: kept rows per document
+    Pack->>Kw: provenance source batch and row
+    Kw->>Kw: source structure maps row to document and position
+    Kw->>Attn: attention_mask and position_ids for packed rows
+    Note over Attn: same-document causal only
+```
+
 ## Fallback coverage contract
 
 `AWQProcessor._should_fallback_group` now evaluates every member of the group:
@@ -106,6 +158,11 @@ to the memory bound.
 | --- | --- | --- |
 | Dense module, ragged captures | latest (shortest) capture | bounded rows from every capture |
 | Dense module, equal-length captures | batch concat | bounded token rows from every capture |
+| `batch_size>1`, batched capture | replay ran with `attention_mask=None`; `Qwen2Attention.forward` raised `TypeError` and the synthetic sequence attended across documents | replay carries a per-document block mask and original positions |
+| Cached mask does not match the captured rows | mask dropped, cross-document attention | each capture batch replayed as one contiguous document |
+| No cached mask entries at all | `attention_mask=None` | kwargs left unchanged |
+| Captured masks are all `None` (`batch_size=1`) | `attention_mask=None`, synthetic positions | additive block-diagonal fallback with original positions |
+| 2-D captured mask (FlashAttention) | mask dropped | 2-D packed keep mask and original positions; causal masking stays inside the attention implementation, so cross-document separation is not expressible |
 | One starved member in a group | hidden by sibling sum | group falls back to RTN |
 | Empty capture for a module | group falls back | group falls back |
 | Token-row budget below batch count | n/a for dense | one row from evenly spaced batches |
@@ -148,3 +205,29 @@ safety.
 Qwen2.5-0.5B retains 5,405 of 55,091 rows (one largest-document equivalent) and
 Llama-3.2-1B retains 5,384 of 54,302. Peak allocated VRAM for the Qwen AWQ run
 rose from 0.423 GB to 0.498 GB.
+
+### Replay-mask A/B (#4091 item 1)
+
+The mask/position fix changes the packed replay from "one synthetic causal
+sequence" to "block-diagonal per document". The table below measures both
+revisions on the same harness and checkpoints. "AWQ before" is `main` at
+`1732d2ae3`; "AWQ after" is this change. RTN does not use the AWQ replay, so
+one RTN column serves both.
+
+| Model | sym AWQ before | sym AWQ after | sym RTN | asym AWQ before | asym AWQ after | asym RTN |
+| --- | --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B-Instruct | 24.92 | 24.26 | 24.84 | 22.23 | 22.09 | 22.77 |
+| Llama-3.2-1B-Instruct | 22.61 | 22.57 | 25.35 | 21.23 | 21.29 | 24.03 |
+| gemma-3-1b-it | 66.52 | 68.79 | 76.62 | 70.32 | 68.29 | 73.00 |
+
+AWQ still beats RTN in all six cells after the fix. The Qwen cells improve by
+0.66 and 0.14 PPL, Llama symmetric by 0.04 and asymmetric by 0.06 in the other
+direction, and gemma symmetric loses 2.27 while gemma asymmetric gains 2.03.
+
+The absolute gemma values are much higher than the 44.19 / 48.01 recorded in
+#4095. The only gemma-3-1b checkpoint available here is `gemma-3-1b-it`, and it
+measures 59.6 PPL unquantized in this harness, so the #4095 gemma row was taken
+with a different checkpoint (inference: the base `gemma-3-1b-pt`, which is not
+present locally). The Llama values differ from #4095 as well because `main`
+moved after that table was taken: #4089 changed replay chunk sizing. Qwen RTN
+reproduces #4063's 24.84 / 22.77 exactly, which anchors the harness.
