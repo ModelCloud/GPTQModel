@@ -18,9 +18,11 @@ from gptqmodel.models.loader import (
     _device_map_uses_cpu,
     _explicit_layerwise_devices,
     _explicit_requested_devices,
+    _indexed_device_request,
     _layerwise_device_count,
     _layerwise_device_strings,
     _module_tensor_bytes,
+    _normalize_explicit_placement,
     _normalize_max_memory,
     _resolve_default_layerwise_device,
 )
@@ -151,6 +153,43 @@ def test_normalize_max_memory_rejects_an_unknown_device_key():
 def test_normalize_max_memory_rejects_non_positive_budgets():
     with pytest.raises(ValueError, match="greater than zero"):
         _normalize_max_memory({0: "0GiB"}, DEVICE.CUDA)
+
+
+@pytest.mark.parametrize("device", ["cuda:0", torch.device("cuda:0")])
+def test_indexed_device_is_a_full_model_map_without_a_memory_budget(device):
+    assert _indexed_device_request(device) == "cuda:0"
+    requested, explicit = _normalize_explicit_placement(device, None, None)
+
+    assert requested == {"": "cuda:0"}
+    assert explicit == {"": "cuda:0"}
+
+
+@pytest.mark.parametrize("device", ["cuda:0", torch.device("cuda:0")])
+def test_max_memory_keeps_the_indexed_device_for_the_budgeted_map(device):
+    """#4068: the cap must survive when the caller also passes device="cuda:0"."""
+
+    requested, explicit = _normalize_explicit_placement(
+        device, None, {0: "300MiB", "cpu": "20GiB"}
+    )
+
+    assert requested is None
+    assert explicit is None
+
+
+def test_max_memory_and_an_explicit_device_map_still_conflict():
+    with pytest.raises(ValueError, match="not both"):
+        _normalize_explicit_placement(
+            "cuda:0", {"": "cuda:0"}, {0: "300MiB", "cpu": "20GiB"}
+        )
+
+
+def test_accelerate_map_string_still_pairs_with_max_memory():
+    requested, explicit = _normalize_explicit_placement(
+        None, "auto", {0: "300MiB", "cpu": "20GiB"}
+    )
+
+    assert requested == "auto"
+    assert explicit is None
 
 
 def test_assign_greedy_device_ids_fills_devices_in_order():

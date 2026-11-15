@@ -124,6 +124,7 @@ _EXTENSION = TorchOpsJitExtension(
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,
+    stage_hip_sources=True,
 )
 
 _SELFTESTED = False

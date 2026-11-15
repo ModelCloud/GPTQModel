@@ -742,6 +742,40 @@ def _normalize_requested_device_map(device, device_map):
     return normalized
 
 
+def _indexed_device_request(device) -> Optional[str]:
+    """Return an indexed ``device`` request as a placement string, if any."""
+
+    if isinstance(device, str) and ":" in device:
+        return device
+    if isinstance(device, torch.device) and device.index is not None:
+        return str(device)
+    return None
+
+
+def _normalize_explicit_placement(device, device_map, max_memory):
+    """Resolve ``device``/``device_map``/``max_memory`` into placement inputs.
+
+    An indexed ``device`` such as ``"cuda:0"`` is shorthand for a full-model
+    map, but only when the caller did not also supply a memory budget. With
+    ``max_memory`` the indexed device selects the accelerator family for the
+    budgeted layer-wise map; converting it to ``{"": device}`` first would
+    silently drop the cap.
+    """
+
+    requested_device_map = _normalize_requested_device_map(device, device_map)
+    explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+    if max_memory is not None and explicit_device_map is not None:
+        raise ValueError(
+            "Pass either an explicit `device_map` dict or `max_memory`, not both."
+        )
+    if requested_device_map is None and max_memory is None:
+        explicit_device = _indexed_device_request(device)
+        if explicit_device is not None:
+            explicit_device_map = {"": explicit_device}
+            requested_device_map = explicit_device_map
+    return requested_device_map, explicit_device_map
+
+
 def _external_runtime_device_kwargs(
     device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
@@ -1945,12 +1979,9 @@ def ModelLoader(cls):
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
         max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map = _normalize_requested_device_map(device, device_map)
-        explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
-        if max_memory is not None and explicit_device_map is not None:
-            raise ValueError(
-                "Pass either an explicit `device_map` dict or `max_memory`, not both."
-            )
+        requested_device_map, explicit_device_map = _normalize_explicit_placement(
+            device, device_map, max_memory
+        )
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
@@ -1962,17 +1993,6 @@ def ModelLoader(cls):
             str(key).strip().lower() == "cpu" for key in max_memory
         ):
             cpu_offload = True
-
-        if requested_device_map is None:
-            explicit_device = None
-            if isinstance(device, str) and ":" in device:
-                explicit_device = device
-            elif isinstance(device, torch.device) and device.index is not None:
-                explicit_device = str(device)
-
-            if explicit_device is not None:
-                explicit_device_map = {"": explicit_device}
-                requested_device_map = explicit_device_map
 
         # Keep string inputs compatible while allowing canonical method-prefixed names.
         backend = normalize_backend(backend)

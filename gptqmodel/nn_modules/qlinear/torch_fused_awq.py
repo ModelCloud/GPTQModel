@@ -162,11 +162,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
         super().post_init()
         self.optimize()
 
-    def optimize(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
 
-        super().optimize()
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def prepare_awq_fused_tensors(self, need_zeros: bool = True):
         self.scales.to(torch.float16).contiguous()
