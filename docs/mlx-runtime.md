@@ -200,12 +200,14 @@ NF12 stays in its 12-byte tiled group stream and `MlxNF12Linear` decodes it on
 Metal. The token count picks the path, because the packed stream is 1.5 bytes per
 weight while a decoded BF16 weight is 2 bytes that must then be read again:
 
-- 1 token: the decode is fused into the dot product, one threadgroup per output
-  column.
-- 2..16 tokens: a fused tile kernel. A super-atom is exactly 16 weight rows by
-  64 K values, so the threadgroup that owns those 16 output columns reads each
-  packed byte once per K step, decodes it into `[k][out]` threadgroup memory, and
-  runs it through the simdgroup matrix units. No BF16 weight buffer is written.
+- 1..15 tokens: one decode-plus-dot kernel, one threadgroup per 16 output
+  columns. A super-atom is exactly 16 weight rows by 64 K values, so the
+  threadgroup reads each packed byte once per K step and decodes it in place;
+  no BF16 weight buffer is written and no barrier is paid per super-atom.
+- exactly 16 tokens on a wide output: a fused tile kernel decodes one super-atom
+  per K step into `[k][out]` threadgroup memory and runs it through the
+  simdgroup matrix units, which wins back the FMA cost the dot product pays at
+  16 rows.
 - more tokens: one decode into BF16 followed by an MLX matmul, because the padded
   16-row MMA tile would re-read the packed stream once per token block while the
   dense matmul is compute-bound there anyway.
@@ -255,13 +257,16 @@ checkpoint:
 
 The NF12 gain is a traffic reduction, not a tuning artifact: the previous path
 moved 88 MB of packed weights plus a 117 MB dense BF16 write and a 117 MB read
-per layer, while the fused tile moves only the 88 MB of packed weights. That
-ratio is why the fused tile is the default through 16 tokens: on a
+per layer, while the packed paths move only the 88 MB of packed weights. That
+ratio is why a packed path is the default through 16 tokens: on a
 bandwidth-limited M1-class GPU the same layer is bandwidth-bound, so the path
 that avoids the dense round trip wins by the full traffic ratio rather than the
-1.2-1.6x an M5 Ultra shows at its much higher bandwidth. Above 16 tokens the
-padded MMA tile re-reads the packed stream per token block and the dense matmul
-becomes compute-bound, so the decode-plus-matmul path takes over.
+1.2-1.6x an M5 Ultra shows at its much higher bandwidth. The later
+decode-plus-dot kernel replaced the fused tile for 1..15 rows on this host,
+because it keeps the same traffic without paying a barrier per super-atom; the
+tile now covers exactly 16 rows on wide outputs. Above 16 tokens the padded MMA
+tile re-reads the packed stream per token block and the dense matmul becomes
+compute-bound, so the decode-plus-matmul path takes over.
 
 ## Not in scope
 
