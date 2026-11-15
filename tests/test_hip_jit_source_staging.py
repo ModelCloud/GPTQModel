@@ -210,3 +210,53 @@ def test_include_roots_inside_the_checkout_are_staged(monkeypatch, tmp_path):
     assert (Path(includes[0]) / "cutlass_extensions" / "epilogue.h").is_file()
     after = {path.relative_to(checkout): path.read_bytes() for path in checkout.rglob("*") if path.is_file()}
     assert after == before
+
+
+def test_staged_include_root_refreshes_when_a_header_changes(monkeypatch, tmp_path):
+    """The fingerprint hashes the staged copy, so a stale stage must not persist.
+
+    Copying an in-checkout include root only once would leave the fingerprint
+    hashing the old header, and a later edit would silently reuse a binary
+    built against it (issue #4123).
+    """
+
+    checkout = tmp_path / "checkout"
+    include_root = checkout / "gptqmodel_ext"
+    (include_root / "cutlass_extensions").mkdir(parents=True)
+    header = include_root / "cutlass_extensions" / "epilogue.h"
+    header.write_text("// header v1\n", encoding="utf-8")
+    repo_source = include_root / "machete" / "machete_pytorch.cu"
+    repo_source.parent.mkdir(parents=True)
+    # A real kernel includes the header, which is how the fingerprint reaches
+    # it: the include is resolved through the (staged) include root.
+    repo_source.write_text(
+        '#include "cutlass_extensions/epilogue.h"\n// source\n', encoding="utf-8"
+    )
+
+    monkeypatch.setattr(cpp, "IS_ROCM", True)
+    monkeypatch.setattr(cpp, "_source_checkout_root", lambda: checkout)
+    extension = TorchOpsJitExtension(
+        name="machete_ops",
+        namespace="demo",
+        required_ops=("run",),
+        sources=lambda: [str(repo_source)],
+        build_root_env=None,
+        default_build_root=tmp_path / "build",
+        display_name="Machete",
+        extra_include_paths=lambda: [str(include_root)],
+        requires_cuda=False,
+    )
+
+    first_fingerprint = extension._cache_fingerprint()
+    _, includes = extension._resolved_sources_and_include_paths()
+    staged_header = Path(includes[0]) / "cutlass_extensions" / "epilogue.h"
+    assert staged_header.read_text(encoding="utf-8") == "// header v1\n"
+
+    header.write_text("// header v2\n", encoding="utf-8")
+
+    second_fingerprint = extension._cache_fingerprint()
+    _, includes = extension._resolved_sources_and_include_paths()
+    staged_header = Path(includes[0]) / "cutlass_extensions" / "epilogue.h"
+
+    assert staged_header.read_text(encoding="utf-8") == "// header v2\n"
+    assert second_fingerprint != first_fingerprint, "a header edit must change the cache key"

@@ -142,14 +142,29 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
-def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
-    """Whether a run accumulates a Hessian whose inputs must be reproducible.
+# Processor steps that accumulate an input Hessian/Gram from calibration
+# activations and then invert or consume it. Their fp32 GEMMs must run on
+# rocBLAS to be reproducible across processes (issues #4075, #4092, #4123).
+_HESSIAN_PROCESSOR_STEPS = frozenset({
+    ProcessorStep.GPTQ,
+    ProcessorStep.QQQ,
+    ProcessorStep.VPTQ,
+    ProcessorStep.MACAQ,
+    ProcessorStep.EXL3,
+    ProcessorStep.FP8_GSQ,
+})
 
-    Only the GPTQ-family processors build one. AWQ/RTN/QQQ have no Hessian, so
-    they must not pay the ROCm rocBLAS override for their fp16/bf16 GEMMs.
+
+def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
+    """Whether a run accumulates a Hessian whose GEMMs must be reproducible.
+
+    GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+    Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+    AWQ, ParoQuant and weight-only (RTN) do not, so they keep hipBLASLt for the
+    fp16/bf16 GEMMs that are 8-14x faster there on gfx1201.
     """
 
-    return ProcessorStep.GPTQ in run_plan.processors
+    return not _HESSIAN_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
 
 
 def _torch_cuda_device(value: object) -> Optional[torch.device]:
@@ -2161,16 +2176,17 @@ class BaseQModel(nn.Module):
         self._warn_fused_unit_dynamic_overrides()
 
         # On ROCm the deterministic rocBLAS selection is scoped to methods that
-        # build a Hessian. Their calibration forward and replay produce the
-        # activations that are accumulated into the Hessian, so those GEMMs must
-        # be reproducible too: pinning only the fp32 X^T X GEMM regressed
-        # Qwen2.5-0.5B to 332/795 differing tensors across processes. Methods
-        # without a Hessian (AWQ, RTN, QQQ) never enter the override, which is
-        # where the 8-14x fp16/bf16 GEMM penalty was paid with no determinism
-        # gain. GPTQ's end-to-end cost is unchanged (measured 58.1 s / 61.4 s
-        # for 128 samples vs the issue's 61 s / 56 s).
-        blas_context = (
-            quant_blas_backend() if _needs_deterministic_hessian(run_plan) else nullcontext()
+        # accumulate a Hessian (GPTQ, QQQ, VPTQ, MACaQ, EXL3, calibrated FP8
+        # GSQ). Their calibration forward and replay produce the activations
+        # accumulated into the Hessian, so those GEMMs must be reproducible
+        # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
+        # 332/795 differing tensors across processes. Methods without a Hessian
+        # (AWQ, ParoQuant, RTN) keep hipBLASLt, which is 8-14x faster for their
+        # fp16/bf16 GEMMs on gfx1201. Every run pins its backend for the whole
+        # run; a concurrent run that needs the other one waits rather than
+        # flipping it mid-run (issue #4123).
+        blas_context = quant_blas_backend(
+            deterministic=_needs_deterministic_hessian(run_plan)
         )
         with blas_context:
             if run_plan.weight_only:

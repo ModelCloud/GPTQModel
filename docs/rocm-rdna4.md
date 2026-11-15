@@ -94,26 +94,32 @@ set it, so rocBLAS runs its own deterministic kernels.
 
 That pin is scoped to methods that build a Hessian. #4079 forced rocBLAS for
 every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16 kernels, so AWQ
-and RTN paid 8-14x on their GEMMs with no determinism gain. Now only a run plan
-containing `ProcessorStep.GPTQ` enters the override (`_needs_deterministic_hessian`
-in `gptqmodel/models/base.py`). The GPTQ family keeps it for the calibration
-forward and replay as well as the fp32 `X^T X` GEMM, because those forward
-activations feed the Hessian: pinning only the Hessian regressed
-Qwen2.5-0.5B-Instruct to 332/795 differing tensors across processes. AWQ, RTN
-and QQQ never enter the override. Measured `F.linear` throughput, bf16
-4096x4096x14336: 9.5 TFLOPS on rocBLAS vs 139.0 TFLOPS on hipBLASLt, which the
-no-Hessian methods now keep. Cross-process determinism stayed at 0 differing
-tensors for both GPTQ and AWQ. See
+and RTN paid 8-14x on their GEMMs with no determinism gain. A run plan that
+contains a Hessian builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3 or calibrated FP8 GSQ
+(`_needs_deterministic_hessian` in `gptqmodel/models/base.py`) - now pins
+rocBLAS, and every other method pins hipBLASLt for its whole run. #4105 gated
+this on `ProcessorStep.GPTQ` alone and therefore dropped QQQ, which does build a
+Hessian: four QQQ runs then produced three distinct checkpoints differing in
+490/627 tensors (issue #4123). The Hessian builders keep the pin for the
+calibration forward and replay as well as the fp32 `X^T X` GEMM, because those
+forward activations feed the Hessian: pinning only the Hessian regressed
+Qwen2.5-0.5B-Instruct to 332/795 differing tensors across processes. Measured
+`F.linear` throughput, bf16 4096x4096x14336: 9.5 TFLOPS on rocBLAS vs 139.0
+TFLOPS on hipBLASLt, which the methods without a Hessian now keep. With the gate
+corrected, cross-process determinism is 0 differing tensors for GPTQ, QQQ, EXL3
+and MACaQ; VPTQ still differs 11-12/305 because its k-means `index_add_` is
+nondeterministic, independently of BLAS. See
 [ROCm default process environment](rocm-default-environment.md#quantization-blas-scope)
 for the flow and the full table.
 
 An explicit `ROCBLAS_USE_HIPBLASLT=1` (or
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`) opts back into hipBLASLt. It is faster
-but not reproducible across processes: `ROCBLAS_USE_HIPBLASLT=1` gave 224/483
+`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`, or the opt-out spellings `""`, `0`, `off`
+and `default`) opts back into hipBLASLt. It is faster but not reproducible
+across processes: `ROCBLAS_USE_HIPBLASLT=1` gave 224/483
 differing tensors across two GPTQ runs, and four
 `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` runs split into two kernel-selection
 groups differing in 222/483 (the issue measured 224/482). GPT-QModel warns once
-when either opt-in is active.
+whenever the pin is skipped, including the opt-out spellings.
 
 Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
 hipBLASLt remains available as an explicit experiment:
@@ -530,6 +536,15 @@ now uses `split_k_iters=1` on RDNA4 (`_single_split_required`, matched from
 at those shapes: 229.6 → 106.6 us, 249.3 → 152.4 us, 224.6 → 104.7 us
 (1.6-2.2x, median of 20 repeats, FP16). `mode="legacy"` and training keep the
 historical split-K=8 contract.
+
+The speedup is shape-specific. Those shapes have `K = 2048/4096`; at
+decode-sized `M` with larger `K` the single-split kernel is slower. Measured on
+gfx1201 at `(N, K, M)`: (2048, 8192, 1) 152.9 vs 84.5 us, (2048, 8192, 8)
+153.2 vs 88.1 us, (4096, 14336, 1) 228.7 vs 155.5 us, (4096, 14336, 16) 210.3
+vs 176.3 us - 1.2-1.8x slower than split-K=8. End-to-end greedy decode on
+Qwen2.5-0.5B-AWQ is unchanged (37.0 vs 36.6 tok/s over 48 tokens, 4-bit
+`FORMAT.GEMM`), so split-K=1 on RDNA4 is a determinism fix, not a decode
+speedup; the prefill / `M >= 16` band is where it also wins.
 
 `tests/kernels/test_awq_rdna4_plan.py` pins the guard without a GPU: the exact
 profile matches, a wrong arch/name/CU/memory does not, non-FP16 returns `None`,
