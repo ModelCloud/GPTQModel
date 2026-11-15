@@ -535,8 +535,11 @@ def macaq_quantize_weight(
             rotated_weight, flip_hessian.diagonal(), block_size, exp_offsets
         )
     else:
+        # A single configured offset is still an exponent choice; passing the
+        # one-element tuple through here silently used offset 0 instead.
+        single_offset = exp_offsets[0] if len(exp_offsets) == 1 else 0
         signed_index, log2_scale, scale_element = mxfp4_rtn_signed_index(
-            rotated_weight, block_size
+            rotated_weight, block_size, single_offset
         )
 
     if do_flip:
@@ -625,6 +628,10 @@ class Macaq:
         self.dev = weight.device
         self.nsamples = 0
         self.fwd_counter = 0
+        # The looper overwrites both from the resolved module rule; keep direct
+        # `Macaq(...)` use on the config's default fallback threshold.
+        self.fallback = getattr(self.qcfg, "fallback", None)
+        self.expected_nsamples: Optional[float] = None
         self.lock = threading.Lock()
         self.H2: Optional[torch.Tensor] = None
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
@@ -695,6 +702,8 @@ class Macaq:
     def quantize(self) -> Tuple[MacaqQuantResult, float, float]:
         """Run MACaQ and return ``(result, duration_seconds, hessian_weighted_loss)``."""
 
+        from ..utils.fallback import resolve_fallback_strategy, should_use_fallback
+
         start = time.time()
         hessian = self.materialize_hessian(self.dev)
         weight = self._layer_weight().to(self.dev)
@@ -703,11 +712,29 @@ class Macaq:
                 f"MACaQ: Hessian shape {tuple(hessian.shape)} does not match "
                 f"{self.columns} input features."
             )
-        if not torch.isfinite(hessian).all() or hessian.diagonal().abs().sum() == 0:
+        hessian_usable = bool(torch.isfinite(hessian).all()) and bool(
+            hessian.diagonal().abs().sum() != 0
+        )
+        fallback_requested = should_use_fallback(
+            self.fallback, float(self.nsamples), self.expected_nsamples
+        )
+        if not hessian_usable and not fallback_requested:
             raise ValueError(
                 f"MACaQ: Hessian for `{self.name}` has no usable calibration signal; "
-                "increase calibration data or enable fallback."
+                "increase calibration data or set a `fallback` threshold."
             )
+        fallback_used = fallback_requested or not hessian_usable
+        if fallback_used:
+            # An expert that received no calibration tokens has no Hessian to
+            # invert or screen. Mirror GPTQ/GPTAQ: fall back to data-independent
+            # MXFP4 RTN (identity metric, no D1) instead of failing the run.
+            strategy = resolve_fallback_strategy(self.fallback)
+            log.warn(
+                f"MACaQ: Module `{self.name}` -> using `{strategy.value}` fallback "
+                f"quantization (observed {self.nsamples} calibration tokens); "
+                "MXFP4 RTN with an identity metric and no D1 pre-scale."
+            )
+            hessian = torch.eye(self.columns, dtype=_HESSIAN_DTYPE, device=self.dev)
 
         result = macaq_quantize_weight(
             weight,
@@ -717,10 +744,10 @@ class Macaq:
             had_block=int(self.qcfg.had_block),
             n_flip_iters=int(self.qcfg.n_flip_iters),
             ridge=float(self.qcfg.ridge),
-            do_flip=bool(self.qcfg.do_flip),
-            pre_mode=str(self.qcfg.pre_mode),
+            do_flip=False if fallback_used else bool(self.qcfg.do_flip),
+            pre_mode="none" if fallback_used else str(self.qcfg.pre_mode),
             pre_alpha=float(self.qcfg.pre_alpha),
-            exp_screen=bool(self.qcfg.exp_screen),
+            exp_screen=False if fallback_used else bool(self.qcfg.exp_screen),
             exp_offsets=tuple(self.qcfg.exp_offsets),
             fast_flip=bool(self.qcfg.fast_flip),
             compile_flip=bool(self.qcfg.compile_flip),
@@ -735,7 +762,12 @@ class Macaq:
             bh=result.BH,
         )
         duration = time.time() - start
-        result.stats.update(loss=loss, nsamples=self.nsamples, duration=duration)
+        result.stats.update(
+            loss=loss,
+            nsamples=self.nsamples,
+            duration=duration,
+            fallback=fallback_used,
+        )
         self.quant_result = result
         return result, duration, loss
 
