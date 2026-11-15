@@ -189,6 +189,7 @@ results below for that build.
 | `torch.floor_divide` | SAFE (concurrent) | packing | - |
 | `torch.abs` / `exp` / `log` / `pow` | SAFE (concurrent) | math kernels | - |
 | `torch.save` + `torch.load` | SAFE (concurrent), process-wide | checkpoints | File I/O; safe but serializes on the filesystem. Write distinct paths per worker. |
+| `torch.set_default_dtype` / `torch.get_default_dtype` | UNSAFE (torn process state) when overlapped; serialized by `_MODEL_LOAD_LOCK` | transformers model construction in `ModelLoader.from_pretrained` / `from_quantized` | Process-global, not thread-local. transformers' `from_pretrained` saves/sets/restores it and enters meta-device and no-init contexts; two overlapping loads produced mixed dtypes, a meta `lm_head`, untied embeddings and a stuck default dtype (issue #4129, manual finding 11). All model construction holds `gptqmodel.models.loader._MODEL_LOAD_LOCK` (an `RLock`). |
 | `torch.Generator(device="cuda")` | SAFE (concurrent), per-thread | deterministic sampling | One generator per worker. Never share a generator across threads. |
 | `Tensor.to` (cuda:0 -> cuda:1) | SAFE (concurrent) (needs 2 GPUs) | fallback for every P2P fast path | Goes through the PyTorch copy machinery. Correct, but per-tensor and slower than `peer_copy_batch`; use it only as the fallback. |
 | `Tensor.copy_` (non_blocking, cross-device) | SAFE (concurrent) (needs 2 GPUs) | P2P verify, Hessian adopt | Must synchronize the destination stream before reading the result. |
@@ -424,6 +425,26 @@ Regression: `tests/test_awq_triton_cold_jit.py` runs a `PYTHON_GIL=0` child
 with an empty `TRITON_CACHE_DIR` and 24 concurrent `generate()` calls, twice,
 and asserts exit 0. `tests/test_triton_patch_api.py` pins single-flight for one
 key and serialization across distinct keys.
+
+### 11. transformers model construction mutates the process-global default dtype
+
+`transformers`' `from_pretrained` saves, sets and restores
+`torch.set_default_dtype` and builds parameters through the meta-device and
+no-init contexts. Those are process-global, not thread-local. Two dense
+`GPTQModel.load()` calls in different threads interleaved them: on an R9700
+with Python 3.14.10t, Qwen2.5-0.5B and Qwen3-0.6B at `dtype=float16` came back
+with mixed fp16/fp32 parameters (252 fp16 / 38 fp32 in the first round), a meta
+`lm_head.weight`, untied embeddings and `torch.get_default_dtype()` stuck at
+fp16. Measured 6/6 corrupted rounds at `PYTHON_GIL=0` and 5/6 with the GIL on;
+the same loads serially were clean.
+
+`ModelLoader.from_pretrained` and `from_quantized` now hold `_MODEL_LOAD_LOCK`
+(an `RLock`) for the whole construction, and `assert_loaded_model_state`
+rejects a mixed-dtype, meta or stuck-default-dtype result. Do not call
+`torch.set_default_dtype` from a worker that can overlap a model load.
+
+Regression: `tests/test_concurrent_load.py` (two threads, six rounds, both GIL
+modes) and `tests/test_load_state_assertions.py`.
 
 ## Adding a probe
 
