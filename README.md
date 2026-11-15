@@ -571,7 +571,7 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | x86-64; AVX2, AVX512-BF16, or AMX for applicable optimized paths | GPTQ/AWQ AVX512-BF16, TorchFused, TorchFusedAWQ, TorchAten int4, GPTQ INT8 (8-bit sources), GGUF C++, BitsAndBytes, VPTQ, NF12 Torch, `ttbfp` block floats, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference; MPS/Torch, FP8 Torch, NF12 Torch |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference (GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, MACaQ, NF12, EXL3); MPS/Torch, FP8 Torch, NF12 Torch |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 Availability depends on each backend's architecture, dtype, shape, and runtime
@@ -671,7 +671,10 @@ To drive a GPTQ/AWQ checkpoint through the MLX runtime with the standard
 `generate()` API, or to export one with `GPTQModel.export(..., format="mlx")`,
 see the [MLX runtime and export flow](docs/mlx-runtime.md), including batched
 attention-mask handling, per-call EOS scoping, and the stock-compatible
-`mlx_lm.load` export layout.
+`mlx_lm.load` export layout. MACaQ MXFP4 and NF12
+checkpoints load into dedicated Metal kernels as well: MACaQ's OCP MXFP4 words
+feed MLX's native MXFP4 matmul, and NF12's 12-bit BF16 stream is decoded by a
+fused Metal GEMV or a decode-plus-matmul prefill.
 
 
 ## Install 💾

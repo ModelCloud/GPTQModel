@@ -83,7 +83,7 @@ flowchart TD
     B2 --> C
     C -- "bits unsupported" --> D["ValueError"]
     C -- ok --> E["_packed_mlx_weights(model, config, lm_head_name)"]
-    E --> F{"custom-runtime layer?<br/>group 16, paro, qqq, fp8, gguf, bnb, exl3"}
+    E --> F{"custom-runtime layer?<br/>group 16, paro, qqq, fp8, gguf, bnb, exl3, macaq, nf12"}
     F -- "yes, stock_compatible=True" --> G["return None"]
     F -- "no" --> H["repack exact words into direct<br/>weight / scales / biases names"]
     F -- "yes, runtime load" --> I["custom MLX runtime class"]
@@ -132,7 +132,7 @@ custom kernels are unchanged.
 | Situation | Before #4091 | After #4091 |
 | --- | --- | --- |
 | Linux export of a GPTQ/AWQ checkpoint | `*.linear.*` keys + custom-runtime flag; stock `mlx_lm.load` rejects | direct keys; stock `nn.QuantizedLinear`; `mlx_lm.load` succeeds |
-| Export of a group-16 / ParoQuant / QQQ / FP8 / GGUF / bitsandbytes / EXL3 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
+| Export of a group-16 / ParoQuant / QQQ / FP8 / GGUF / bitsandbytes / EXL3 / MACaQ / NF12 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
 | Runtime `GPTQModel.load(backend="mlx")` | exact packed transfer + custom runtime | unchanged |
 
 ### Before/after mechanism
@@ -178,11 +178,57 @@ The after column is an exact packed transfer: the exported affine words are the
 source layer's own codes, with the source scales cast to float16 as MLX
 requires.
 
+## MACaQ and NF12 Metal kernels
+
+Two additional formats transfer their packed checkpoint state unchanged and run
+on dedicated Metal kernels.
+
+MACaQ's MXFP4 storage is already OCP MXFP4: one E2M1 nibble per value with the
+low nibble holding the even column, plus one E8M0 scale byte per 32 values. That
+is byte-identical to MLX's `mxfp4` quantization mode, so the transfer is a
+`uint8 -> uint32` reinterpretation with no repack and no requantization. The
+module keeps MACaQ's 32-wide block Hadamard matrix and diagonal pre-scale and
+applies them to the activations, then calls MLX's MXFP4 matmul. `w4a16` uses
+`quantized_matmul`; `w4a4` uses the fused `qqmm` through 16 rows and an explicit
+quantize/dequantize pair above it, because MLX's fused activation quantization
+stops winning on wide token blocks (measured on this host: equal at 16 rows,
+5x slower at 512). MLX chooses its own E8M0 exponent and tie handling for that
+activation rounding, so W4A4 output tracks the Torch MACaQ kernel within the
+4-bit activation grid rather than bit-for-bit; W4A16 is unaffected.
+
+NF12 stays in its 12-byte tiled group stream. `MlxNF12Linear` decodes it on
+Metal: a single-row forward fuses the decode into the dot product, and a wider
+forward decodes once into BF16 and multiplies. Both paths are exact for the
+checkpoint's BF16 weights, so a decoded layer is bit-identical to the Torch
+codec's `decode()`; only the accumulation order differs from the Torch
+`linear()` oracle.
+
+### Measured Metal result
+
+One 4096x4096 BF16 layer on an M5 Ultra (36-core CPU, 256 GiB unified memory),
+median of 20 timed repetitions after three warmups, against the portable Torch
+MPS path for the same packed checkpoint:
+
+| Format | Rows | Torch MPS | MLX Metal | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| MACaQ W4A16 | 1 | 4.46 ms | 0.26 ms | 17x |
+| MACaQ W4A16 | 512 | 3.67 ms | 0.46 ms | 8x |
+| MACaQ W4A4 | 1 | 4.46 ms | 0.24 ms | 19x |
+| MACaQ W4A4 | 512 | 5.45 ms | 0.47 ms | 12x |
+| NF12 | 1 | 5.10 ms | 0.26 ms | 20x |
+| NF12 | 512 | 5.17 ms | 0.50 ms | 10x |
+
+The NF12 prefill number is dominated by the decode pass: at this layer size a
+32 MB elementwise pass already takes 0.27 ms on this GPU, so the fused
+single-row kernel and the decode both sit at the small-workload floor rather
+than at the 650 GB/s the device reaches on 512 MB working sets.
+
 ## Not in scope
 
 The custom MLX runtime classes (`MlxGPTQLinear`, `MlxGroup16Linear`,
 `MlxParoLinear`, `MlxQQQLinear`, `MlxFP8Linear`, `MlxGGUFLinear`) are still
-used by the in-process `GPTQModel.load(backend="mlx")` path. Export no longer
+used by the in-process `GPTQModel.load(backend="mlx")` path, as are
+`MacaqMlxQuantLinear` and `NF12MlxQuantLinear`. Export no longer
 writes a checkpoint that depends on them: `GPTQModel.export(...,
 format="mlx")` emits the stock `mlx_lm` layout described above. Checkpoints
 written by earlier versions with `*.linear.*` keys and the
