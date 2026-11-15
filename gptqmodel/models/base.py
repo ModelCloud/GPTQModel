@@ -1950,7 +1950,8 @@ class BaseQModel(nn.Module):
 
                 preferred_backend = (
                     BACKEND.MACAQ_TRITON
-                    if torch.cuda.is_available() and TRITON_AVAILABLE and not IS_ROCM
+                    if quant_device_type == "cuda" and torch.cuda.is_available()
+                    and TRITON_AVAILABLE and not IS_ROCM
                     else BACKEND.MACAQ_TORCH
                 )
             elif self.quantize_config.method == METHOD.PARO:
@@ -2549,6 +2550,8 @@ class BaseQModel(nn.Module):
                 processors.append(factory(**fp8_args))
             elif step is ProcessorStep.QQQ:
                 processors.append(factory(**args, backend=run_plan.loop_backend))
+            elif step is ProcessorStep.MACAQ:
+                processors.append(factory(**args, backend=run_plan.pack_backend))
             elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
                 os.environ["AWQ_BATCH_SIZE"] = str(run_plan.batch_size)
                 processors.append(factory(

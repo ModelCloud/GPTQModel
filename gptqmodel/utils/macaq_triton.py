@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2026 the MACAQ authors
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
@@ -30,6 +31,7 @@ from typing import Optional
 import torch
 
 from .logger import setup_logger
+from .rocm import IS_ROCM
 
 
 log = setup_logger()
@@ -50,7 +52,7 @@ _E2M1_MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 def triton_mxfp4_available() -> bool:
     """Whether the Triton MXFP4 kernels can run on the current host."""
 
-    return TRITON_AVAILABLE and torch.cuda.is_available()
+    return TRITON_AVAILABLE and torch.cuda.is_available() and not IS_ROCM
 
 
 def make_hadamard(block: int, device="cpu") -> torch.Tensor:
@@ -275,7 +277,8 @@ def dequantize_mxfp4(packed: torch.Tensor, e8m0: torch.Tensor, k: int) -> torch.
     code = torch.stack([lo, hi], dim=-1).reshape(rows, k).long()
     sign = torch.where((code >> 3) & 1 == 1, -1.0, 1.0)
     value = sign * _E2M1_MAG.to(packed.device)[code & 7]
-    scale = torch.exp2((e8m0.float() - 127.0)).repeat_interleave(32, dim=1)
+    scale_bytes = e8m0.view(torch.uint8)[:rows, :k // MXFP4_BLOCK]
+    scale = torch.exp2((scale_bytes.float() - 127.0)).repeat_interleave(32, dim=1)
     return value * scale
 
 
@@ -319,15 +322,17 @@ def mxfp4_w4a4_linear(
         raise RuntimeError("MACaQ: Triton is not available.")
     lead = x.shape[:-1]
     k = x.shape[-1]
-    x2 = x.reshape(-1, k).contiguous().to(torch.bfloat16)
+    x2 = x.reshape(-1, k).contiguous()
     if bh is not None and bh.shape[0] == MXFP4_BLOCK:
         a_packed, a_scales = rot_scale_quantize_mxfp4(x2, pre_scale, bh)
     else:
+        work = x2.float()
         if pre_scale is not None:
-            x2 = x2 * pre_scale.to(x2.dtype)
+            work = work * pre_scale.float()
+        work = work.to(torch.bfloat16).float()
         if bh is not None:
-            x2 = rotate_blocks(x2, bh)
-        a_packed, a_scales = quantize_mxfp4(x2.contiguous())
+            work = rotate_blocks(work, bh.float()).to(torch.bfloat16).float()
+        a_packed, a_scales = quantize_mxfp4(work.contiguous())
 
     rows = x2.shape[0]
     n = w_packed.shape[0]
@@ -348,10 +353,9 @@ def mxfp4_w4a4_linear(
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
         num_warps=num_warps, num_stages=num_stages,
     )
-    out = out.to(torch.bfloat16)
     if bias is not None:
-        out = out + bias.to(out.dtype)
-    return out.reshape(*lead, n)
+        out = out + bias.float()
+    return out.to(x.dtype).reshape(*lead, n)
 
 
 def mxfp4_w4a16_linear(
@@ -362,15 +366,19 @@ def mxfp4_w4a16_linear(
     pre_scale: Optional[torch.Tensor] = None,
     bh: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
+    compute_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
-    """Packed MXFP4 weights with bf16 activations (functional weight-only path)."""
+    """Packed MXFP4 weights with full-precision activations in ``compute_dtype``."""
 
     if not TRITON_AVAILABLE:
         raise RuntimeError("MACaQ: Triton is not available.")
-    xb = x.to(torch.bfloat16)
+    compute_dtype = compute_dtype or x.dtype
+    xb = x.to(compute_dtype)
     if pre_scale is not None:
-        xb = xb * pre_scale.to(torch.bfloat16)
+        xb = xb * pre_scale.to(compute_dtype)
     if bh is not None:
         xb = rotate_blocks(xb, bh)
-    weight = dequant_w4_to_bf16(w_packed, w_scales)
-    return torch.nn.functional.linear(xb, weight, bias)
+    weight = dequant_w4_to_bf16(w_packed, w_scales).to(compute_dtype)
+    return torch.nn.functional.linear(
+        xb, weight, None if bias is None else bias.to(xb.dtype)
+    )

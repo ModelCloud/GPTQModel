@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2026 the MACAQ authors
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
@@ -27,6 +28,8 @@ from ..looper.loop_processor import (
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
+    bind_resolved_module_config,
+    get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -47,9 +50,7 @@ from ..quantization.macaq import Macaq
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.macaq_triton import TRITON_AVAILABLE
 from ..utils.model import create_quant_module, move_to
-from ..utils.rocm import IS_ROCM
 from ..utils.torch import CPU
 
 
@@ -76,6 +77,7 @@ class MacaqProcessor(LoopProcessor):
         calibration,
         forward: Optional[ForwardConfig] = None,
         calculate_w_wq_diff: bool = False,
+        backend: BACKEND = BACKEND.MACAQ_TORCH,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -85,16 +87,26 @@ class MacaqProcessor(LoopProcessor):
         )
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        if backend not in (BACKEND.MACAQ_TORCH, BACKEND.MACAQ_TRITON):
+            raise ValueError(f"MACaQ requires a resolved Torch or Triton pack backend, got {backend!r}.")
+        self.pack_backend = backend
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("MacaqProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         del kwargs
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:  # noqa: E712
+        resolved_cfg = self.qcfg.resolve_module_config(module.full_name)
+        if resolved_cfg.excluded:
             return
+        bind_resolved_module_config(module, resolved_cfg)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
+        overrides = resolved_cfg.overrides
+        for key, value in overrides.items():
+            setattr(qcfg_clone, key, value)
+        if overrides:
+            qcfg_clone.__post_init__()
         task = Macaq(module=module, qcfg=qcfg_clone)
         task.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         task.expected_nsamples = getattr(self, "total_calibration_tokens", None)
@@ -175,7 +187,7 @@ class MacaqProcessor(LoopProcessor):
             DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
             QUANT_LOG_LOSS: loss_display,
             QUANT_LOG_NSAMPLES: f"{nsamples}",
-            QUANT_LOG_DAMP: f"{self.qcfg.ridge:.5f}",
+            QUANT_LOG_DAMP: f"{task.qcfg.ridge:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
         }
@@ -198,7 +210,7 @@ class MacaqProcessor(LoopProcessor):
         module.weight.data = replay_weight
 
     def _linear_cls(self):
-        if TRITON_AVAILABLE and torch.cuda.is_available() and not IS_ROCM:
+        if self.pack_backend == BACKEND.MACAQ_TRITON:
             return MacaqTritonLinear, BACKEND.MACAQ_TRITON
         return MacaqLinear, BACKEND.MACAQ_TORCH
 
@@ -238,6 +250,7 @@ class MacaqProcessor(LoopProcessor):
                 register_buffers=False,
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 dtype=module.module_dtype,
+                resolved_module_config=get_resolved_module_config(module),
             )
 
         qmodule = model.model.get_submodule(module.full_name)

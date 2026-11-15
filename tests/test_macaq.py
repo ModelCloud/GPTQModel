@@ -230,6 +230,151 @@ def test_macaq_config_rejects_unsupported_settings():
         MacaqConfig(activation_precision="w8a8")
     with pytest.raises(ValueError):
         MacaqConfig(lm_head=True)
+    with pytest.raises(ValueError, match="unsupported dynamic keys"):
+        MacaqConfig(dynamic={"layer": {"bits": 3}})
+
+
+def test_macaq_processor_keeps_resolved_pack_backend_and_dynamic_config():
+    from gptqmodel.looper.macaq_processor import MacaqProcessor
+    from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.quantization.module_config import resolve_module_constructor_config
+
+    config = MacaqConfig(
+        had_block=32,
+        activation_precision="w4a4",
+        dynamic={"model.layer": {"had_block": 64, "activation_precision": "w4a16"}},
+        offload_to_disk=False,
+    )
+    wrapped = NamedModule(
+        torch.nn.Linear(128, 32), name="layer", full_name="model.layer", layer_index=0
+    )
+    processor = MacaqProcessor(
+        tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.MACAQ_TORCH
+    )
+    processor.preprocess(wrapped)
+    task = processor.tasks[wrapped.name]
+    assert task.qcfg.had_block == 64
+    assert task.qcfg.activation_precision == "w4a16"
+    assert processor._linear_cls() == (MacaqLinear, BACKEND.MACAQ_TORCH)
+
+    module_config = resolve_module_constructor_config(
+        bits=4, group_size=32, desc_act=False, sym=True, pack_dtype=torch.int32,
+        format=FORMAT.MACAQ, init_kwargs=config.quant_linear_init_kwargs(),
+        overrides=config.resolve_module_config(wrapped.full_name).overrides,
+    )
+    assert module_config.options_dict()["had_block"] == 64
+    assert module_config.options_dict()["activation_precision"] == "w4a16"
+
+    processor_triton = MacaqProcessor(
+        tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.MACAQ_TRITON
+    )
+    assert processor_triton._linear_cls() == (MacaqTritonLinear, BACKEND.MACAQ_TRITON)
+    with pytest.raises(ValueError, match="resolved Torch or Triton"):
+        MacaqProcessor(tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.AUTO)
+
+
+def test_macaq_triton_dequant_accepts_padded_e8m0_grid():
+    from gptqmodel.utils.macaq_triton import dequantize_mxfp4
+
+    packed = torch.zeros(2, 48, dtype=torch.uint8)
+    scales = torch.full((2, 4), 127, dtype=torch.uint8)
+    packed[:, :48] = 0x22  # E2M1 1.0 on both nibbles
+    decoded = dequantize_mxfp4(packed, scales, 96)
+    assert decoded.shape == (2, 96)
+    assert torch.equal(decoded, torch.ones_like(decoded))
+
+
+@pytest.mark.skipif(
+    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    reason="MACaQ Triton kernels require CUDA and Triton",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_triton_w4a16_matches_torch_with_bias(dtype):
+    from gptqmodel.utils.macaq_triton import mxfp4_w4a16_linear, quantize_mxfp4
+
+    torch.manual_seed(17)
+    x = torch.randn(3, 64, device="cuda", dtype=dtype)
+    weight = torch.randn(8, 64, device="cuda", dtype=torch.float32)
+    packed, scales = quantize_mxfp4(weight)
+    bias = torch.randn(8, device="cuda", dtype=dtype)
+    pre_scale = torch.rand(64, device="cuda", dtype=dtype) + 0.5
+    bh = macaq.make_hadamard(32, device=x.device, dtype=dtype)
+
+    actual = mxfp4_w4a16_linear(
+        x, packed, scales, pre_scale=pre_scale, bh=bh,
+        bias=bias, compute_dtype=dtype,
+    )
+    expected_input = macaq.rotate_blocks(x * pre_scale, bh)
+    expected_weight = macaq.dequantize_mxfp4(packed, scales, 64, dtype=dtype)
+    expected = torch.nn.functional.linear(expected_input, expected_weight, bias)
+    assert actual.dtype == dtype
+    assert torch.allclose(actual, expected, atol=2e-3, rtol=2e-3)
+
+
+@pytest.mark.skipif(
+    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    reason="MACaQ Triton kernels require CUDA and Triton",
+)
+def test_triton_fp16_activation_quantizes_before_bf16_cast():
+    from gptqmodel.utils.macaq_triton import rot_scale_quantize_mxfp4
+
+    torch.manual_seed(101)
+    x = torch.randn(7, 64, device="cuda", dtype=torch.float16)
+    pre_scale = (torch.rand(64, device="cuda") + 0.5).to(torch.float16)
+    bh = macaq.make_hadamard(32, device=x.device, dtype=torch.bfloat16)
+    packed, scales = rot_scale_quantize_mxfp4(x, pre_scale, bh)
+
+    work = (x.float() * pre_scale.float()).to(torch.bfloat16).float()
+    work = macaq.rotate_blocks(work, bh.float()).to(torch.bfloat16).float()
+    grouped = work.reshape(7, 2, 32)
+    exponent = torch.floor(torch.log2(grouped.abs().amax(dim=-1).clamp_min(1e-12))) - 2
+    scale = torch.exp2(exponent)
+    normalized = grouped.abs() / scale.unsqueeze(-1)
+    thresholds = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], device=x.device)
+    magnitude = (normalized.unsqueeze(-1) >= thresholds).sum(dim=-1).to(torch.uint8)
+    nibble = magnitude | ((grouped < 0).to(torch.uint8) << 3)
+    expected_packed = (nibble[..., 1::2] << 4 | nibble[..., 0::2]).reshape(7, 32)
+    expected_scales = (exponent + 127).to(torch.uint8)
+    assert torch.equal(packed, expected_packed)
+    assert torch.equal(scales, expected_scales)
+
+
+@pytest.mark.skipif(
+    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    reason="MACaQ Triton kernels require CUDA and Triton",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_triton_w4a4_accumulates_bias_before_output_rounding(dtype):
+    from gptqmodel.utils.macaq_triton import mxfp4_w4a4_linear, quantize_mxfp4
+
+    torch.manual_seed(21)
+    x = torch.randn(7, 128, device="cuda", dtype=dtype)
+    weight = torch.randn(64, 128, device="cuda")
+    packed, scales = quantize_mxfp4(weight)
+    pre_scale = (torch.rand(128, device="cuda") + 0.5).to(dtype)
+    bh = macaq.make_hadamard(32, device=x.device, dtype=dtype)
+    bias = torch.randn(64, device="cuda", dtype=dtype)
+
+    actual = mxfp4_w4a4_linear(
+        x, packed, scales, pre_scale=pre_scale, bh=bh, bias=bias
+    )
+    activation = macaq.macaq_quantize_activations(x, pre_scale, bh)
+    decoded_weight = macaq.dequantize_mxfp4(packed, scales, 128)
+    expected = (activation.float() @ decoded_weight.T + bias.float()).to(dtype)
+    assert actual.dtype == dtype
+    assert torch.allclose(actual.float(), expected.float(), atol=2e-3, rtol=2e-3)
+
+
+def test_macaq_module_does_not_retain_dense_weight_between_forwards():
+    _, _, module, _ = _quantized_module_pair()
+    x = torch.randn(3, module.in_features, device=module.W_packed.device, dtype=torch.bfloat16)
+    for _ in range(2):
+        module(x)
+        assert set(module._buffers) == {"BH", "pre_scale", "bias", "W_packed", "W_scales"}
+        assert all(
+            tensor.numel() < module.in_features * module.out_features
+            for tensor in module._buffers.values() if tensor is not None
+        )
 
 
 # ---------------------------------------------------------------------------

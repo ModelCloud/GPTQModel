@@ -43,8 +43,51 @@ The per-Linear recipe is:
 
 The packed artifact is `W_packed` (`uint8`, two E2M1 nibbles per byte),
 `W_scales` (E8M0 bytes, one per 32 values), the pre-scale vector, and the shared
-block-Hadamard. The runtime reconstructs only the current tile; no dense
-dequantized weight cache is retained between calls.
+block-Hadamard. The W4A4 Triton GEMM reads packed tiles directly. The Torch
+fallback and W4A16 path reconstruct a temporary dense weight for the current
+forward and release it afterward; no dense weight cache is retained.
+
+## Quantization and runtime flow
+
+The backend is resolved once during preflight. `MACAQ_TORCH` remains selected
+when explicitly requested, including on a CUDA host. Automatic selection uses
+the configured quantization device, and only a CUDA target on a non-ROCm host
+with Triton selects `MACAQ_TRITON`. The module's winning `dynamic` rule is
+captured before calibration and reused for packing.
+
+```mermaid
+flowchart TD
+    A["MacaqConfig.__post_init__"] -->|valid| B["BaseQModel.quantize<br/>resolve pack_backend"]
+    A -->|invalid config or dynamic key| F1["ValueError"]
+    B -->|AUTO on NVIDIA CUDA with Triton| T["MACAQ_TRITON"]
+    B -->|AUTO elsewhere or explicit Torch| P["MACAQ_TORCH"]
+    B -->|explicit backend unsupported by target| F2["select_quant_linear error"]
+    T --> C["QuantizationRunPlan.build"]
+    P --> C
+    C --> D["MacaqProcessor.preprocess<br/>resolve module config"]
+    D -->|excluded| S["skip module"]
+    D -->|included| E["Macaq.add_batch<br/>capture Hessian"]
+    E -->|empty or nonfinite Hessian| F3["ValueError"]
+    E -->|usable Hessian| Q["Macaq.quantize<br/>macaq_quantize_weight"]
+    Q --> R["MacaqProcessor.process<br/>replay effective weight"]
+    R --> U["submodule_finalize<br/>create_quant_module and pack"]
+    U --> V["BaseQModel.save<br/>safetensors"]
+    V --> L["GPTQModel.load<br/>MacaqLinear.forward"]
+    L -->|Triton supported| K["mxfp4_w4a4_linear or mxfp4_w4a16_linear"]
+    L -->|Torch or Triton execution error| O["MacaqLinear._forward_torch"]
+    classDef error fill:#fdd,stroke:#c00,color:#000;
+    class F1,F2,F3 error;
+```
+
+| Mechanism | Before this port (`origin/main`) | With MACaQ |
+|---|---|---|
+| Method recognition | `config.py:161-175` had no `METHOD.MACAQ` | `config.py:6079` validates `MacaqConfig` and its method fields |
+| Automatic backend | `models/base.py:1940-1955` had no MACaQ case | `models/base.py:1944-1952` uses the configured device and Triton availability |
+| Calibrated processor | `models/quantization_run_plan.py:36-43` had no MACaQ step | `models/quantization_run_plan.py:41` selects `MacaqProcessor` |
+| Per-module storage | No MACaQ packed payload | `looper/macaq_processor.py:216-258` installs `MacaqLinear` and packs MXFP4 bytes |
+
+The diagram and table describe the flow introduced in
+[PR #4066](https://github.com/ModelCloud/GPTQModel/pull/4066).
 
 ## Relationship to GPTQ
 
@@ -88,10 +131,15 @@ model.save("./llama-3.2-1b-macaq")
 quantized = GPTQModel.load("./llama-3.2-1b-macaq", backend=BACKEND.MACAQ_TRITON)
 ```
 
-`activation_precision="w4a16"` keeps bf16 activations and stores only the
+`activation_precision="w4a16"` keeps full-precision activations and stores only the
 4-bit weights. The portable Torch path (`BACKEND.MACAQ_TORCH`) runs on CPU,
 ROCm, XPU, and MPS; `BACKEND.MACAQ_TRITON` uses the native `tl.dot_scaled`
-E2M1 GEMM on CUDA.
+E2M1 GEMM on CUDA for W4A4.
+
+`dynamic` may exclude modules with `False` or override `had_block`, `do_flip`,
+`n_flip_iters`, `fast_flip`, `ridge`, `pre_mode`, `pre_alpha`, `exp_screen`,
+`exp_offsets`, and `activation_precision` per module. The MXFP4 block size,
+bit width, and symmetric format remain fixed.
 
 ### Configuration
 

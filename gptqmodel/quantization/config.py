@@ -6186,6 +6186,12 @@ class MacaqConfig(PreProcessorConfig):
     # `w4a16` keeps bf16 activations and only stores 4-bit weights.
     activation_precision: str = field(default="w4a4")
 
+    _DYNAMIC_FIELDS = frozenset({
+        "had_block", "do_flip", "n_flip_iters", "fast_flip", "ridge",
+        "pre_mode", "pre_alpha", "exp_screen", "exp_offsets",
+        "activation_precision",
+    })
+
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.MACAQ,)
 
@@ -6229,6 +6235,16 @@ class MacaqConfig(PreProcessorConfig):
         out["activation_precision"] = self.activation_precision
 
     def __post_init__(self):
+        for pattern, override in (self.dynamic or {}).items():
+            if override is False:
+                continue
+            if not isinstance(override, dict):
+                raise ValueError(f"MacaqConfig: dynamic rule `{pattern}` must be False or a dictionary.")
+            unknown = set(override) - self._DYNAMIC_FIELDS
+            if unknown:
+                raise ValueError(
+                    f"MacaqConfig: unsupported dynamic keys for `{pattern}`: {sorted(unknown)}."
+                )
         self.pre_mode = str(self.pre_mode).strip().lower()
         self.activation_precision = str(self.activation_precision).strip().lower()
         if self.exp_offsets is None:

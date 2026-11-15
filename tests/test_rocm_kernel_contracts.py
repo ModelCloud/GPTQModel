@@ -29,6 +29,7 @@ ROCM_KERNELS = set("""
     GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
     GGUFTorchLinear ParoLinear ParoQuantTritonLinear VPTQLinear NF12Linear
+    MacaqLinear
     TTBlockfloatLinear
 """.split())
 CUDA_ONLY_KERNELS = set("""
@@ -36,7 +37,7 @@ CUDA_ONLY_KERNELS = set("""
     MarlinLinear AwqMarlinLinear MacheteLinear AwqMacheteLinear
     SwordfishLinear AwqSwordfishLinear BitblasLinear AWQBitBlasKernel
     AwqGEMMLinear AwqGEMVLinear AwqGEMVFastLinear LLMAwqLinear QQQLinear
-    VPTQCudaLinear GGUFCudaKernel
+    VPTQCudaLinear GGUFCudaKernel MacaqTritonLinear
 """.split())
 OTHER_KERNELS = set("""
     TorchFusedLinear TorchFusedAwqLinear TorchAtenLinear TorchAtenAwqLinear

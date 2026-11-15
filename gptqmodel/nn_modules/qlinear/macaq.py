@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2026 the MACAQ authors
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 #
@@ -31,6 +32,7 @@ from ...utils.macaq_triton import (
     mxfp4_w4a16_linear,
     triton_mxfp4_available,
 )
+from ...utils.rocm import IS_ROCM
 from . import WeightOnlyQuantLinear
 
 
@@ -51,7 +53,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_DEVICES = [DEVICE.ALL]
@@ -256,6 +258,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
             pre_scale=self.pre_scale,
             bh=self.BH,
             bias=self.bias,
+            compute_dtype=self.compute_dtype,
         )
 
     def _can_use_triton(self, x: torch.Tensor) -> bool:
@@ -264,6 +267,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
             and self.backend == BACKEND.MACAQ_TRITON
             and TRITON_AVAILABLE
             and x.is_cuda
+            and not IS_ROCM
         )
 
     def forward(self, x: torch.Tensor):
@@ -300,7 +304,7 @@ class MacaqTritonLinear(MacaqLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.uint8]
@@ -313,7 +317,7 @@ class MacaqTritonLinear(MacaqLinear):
     def validate_once(cls):
         if not TRITON_AVAILABLE:
             return False, RuntimeError("MacaqTritonLinear requires Triton.")
-        if not torch.cuda.is_available():
+        if not torch.cuda.is_available() or IS_ROCM:
             return False, RuntimeError("MacaqTritonLinear requires an available CUDA device.")
         return True, None
 
