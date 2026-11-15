@@ -79,7 +79,8 @@ flowchart TD
     A["AWQProcessor._quantize_layer"] --> B["_validate_scale_group_conflicts"]
     B --> C{"source or target overlap?"}
     C -- "yes" --> X["raise _AWQScaleGroupError<br/>no folds applied"]
-    C -- "no" --> D["_search_best_scale<br/>_validate_scale_group"]
+    C -- "no" --> P["filter low-sample / missing-feature groups"]
+    P --> D["_search_best_scale<br/>_validate_scale_group"]
     D --> E{"exact live bindings, widths,<br/>and targets inside replay boundary?"}
     E -- "no" --> F{"configured fallback enabled?"}
     E -- "yes" --> G["reference forward<br/>temporary target observation hooks"]
@@ -129,6 +130,10 @@ objective. Until then, the complete shared-source group falls back together.
 Default `AWQConfig.fallback` behavior is preserved; set `fallback=None` to make
 these unsafe replay groups raise instead. Existing no-group/missing-feature
 paths are not redesigned here.
+
+Conflicts are checked **before** low-sample, width or missing-feature filtering.
+Dropping one conflicting group first would let another group divide the shared
+norm (or modify tied target weights) without compensating the filtered branch.
 
 CPU regressions cover eager and chunked search, FP32/FP16/BF16 router neutrality,
 an independent Torch folded-model quantization oracle, failure rollback,

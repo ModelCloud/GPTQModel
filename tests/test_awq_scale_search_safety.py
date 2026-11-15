@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# GPU=-1
 
 """CPU oracles for AWQ candidate coordinates, replay coverage and rollback."""
 
@@ -327,3 +328,40 @@ def test_layer_uses_configured_fallback_for_incomplete_group(allow_fallback, mon
             processor._quantize_layer(0, state)
         assert not state.quantized
         assert not quantized
+
+
+@pytest.mark.parametrize("filtered", ["low_sample", "missing_features"])
+@pytest.mark.parametrize("conflict", ["source", "tied_target"])
+def test_filtering_cannot_hide_a_conflicting_fold(filtered, conflict, monkeypatch):
+    layer = _ParallelLayer()
+    layer.other_norm = nn.LayerNorm(2)
+    before = _snapshot(layer)
+    processor = _processor(layer, fallback={})
+    state = _AWQLayerState(layer_module=layer, modules={
+        name: NamedModule(getattr(layer, name), name=name, full_name=f"layer.{name}", layer_index=0)
+        for name in ("left", "right")
+    })
+    features = {name: torch.ones(1, 2) for name in state.modules}
+    groups = [
+        {"prev_op": layer.norm, "layers": [layer.left], "inp": features["left"], "module2inspect": layer.left},
+        {"prev_op": layer.norm if conflict == "source" else layer.other_norm,
+         "layers": [layer.right], "inp": features["right"], "module2inspect": layer.right},
+    ]
+    if conflict == "tied_target":
+        layer.right.weight = layer.left.weight
+        before = _snapshot(layer)
+    if filtered == "missing_features":
+        del features["right"]
+    monkeypatch.setattr(processor, "_layer_input_features", lambda _state: features)
+    monkeypatch.setattr(processor, "_should_fallback_group",
+                        lambda names, _features: filtered == "low_sample" and names == ["right"])
+    processor.gptq_model.awq_get_modules_for_scaling = lambda *_args: groups
+
+    def must_not_search(*_args, **_kwargs):
+        pytest.fail("A filtered conflict reached candidate search")
+
+    monkeypatch.setattr(processor, "_search_best_scale", must_not_search)
+    with pytest.raises(_AWQScaleGroupError):
+        processor._quantize_layer(0, state)
+    _assert_pristine(layer, before)
+    assert not state.quantized

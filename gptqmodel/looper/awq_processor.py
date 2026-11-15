@@ -2233,6 +2233,7 @@ class AWQProcessor(LoopProcessor):
             entry["kwargs"] = self._sanitize_kwargs(entry_kwargs, inspect_module)
             sanitized_module_config.append(entry)
 
+        self._validate_scale_group_conflicts(layer_module_ref, sanitized_module_config)
         filtered_module_config: List[Dict] = []
         skipped_groups: List[Tuple[List[str], List[str]]] = []
         fallback_names = set()
@@ -2290,7 +2291,6 @@ class AWQProcessor(LoopProcessor):
             )
 
         sanitized_module_config = filtered_module_config
-        self._validate_scale_group_conflicts(layer_module_ref, sanitized_module_config)
         # Siblings such as q/k/v can share one host tensor object, so several names
         # may map to the same id. Keep the first (declaration order) for the
         # telemetry column instead of letting dict order pick one arbitrarily.
@@ -2485,18 +2485,19 @@ class AWQProcessor(LoopProcessor):
         targets = set()
         for group in groups:
             source = group.get("prev_op")
-            source_name = get_op_name(module, source)
             source_weight = getattr(source, "weight", None)
             source_key = id(source_weight) if isinstance(source_weight, torch.Tensor) else id(source)
             if source_key in sources:
+                source_name = get_op_name(module, source)
                 raise _AWQScaleGroupError(f"AWQ: source `{source_name}` has multiple scaling groups; merge them first.")
             sources.add(source_key)
             group_targets = list(group.get("layers") or [])
             group_targets.extend(get_op_by_name(module, name) for name in group.get("_scale_consumers") or [])
             for target in group_targets:
-                target_name = get_op_name(module, target)
-                target_key = id(target.weight)
+                target_weight = getattr(target, "weight", None)
+                target_key = id(target_weight) if isinstance(target_weight, torch.Tensor) else id(target)
                 if target_key in targets:
+                    target_name = get_op_name(module, target)
                     raise _AWQScaleGroupError(f"AWQ: target `{target_name}` has overlapping scaling groups or tied weights.")
                 targets.add(target_key)
 
