@@ -42,12 +42,21 @@ DEFAULT_ROWS = (1, 4, 8, 16)
 
 
 def _median_us(fn: Callable[[], object], *, mx, warmup: int, trials: int, iterations: int) -> float:
+    """Per-call time, with the graph built outside the timed region.
+
+    Building the calls inside the timer measures Python's lazy-graph overhead
+    for small kernels: it costs about 2 us per call, which is comparable to the
+    kernels themselves. Building the nodes first and timing only ``mx.eval``
+    leaves the GPU work plus one dispatch per call, and the iteration count is
+    chosen high enough that the fixed ~240 us eval round-trip is amortized.
+    """
     for _ in range(warmup):
-        mx.eval(fn())
+        mx.eval(*[fn() for _ in range(iterations)])
     samples = []
     for _ in range(trials):
+        nodes = [fn() for _ in range(iterations)]
         start = time.perf_counter_ns()
-        mx.eval(*[fn() for _ in range(iterations)])
+        mx.eval(*nodes)
         samples.append((time.perf_counter_ns() - start) / iterations / 1_000)
     return statistics.median(samples)
 
@@ -78,8 +87,8 @@ def main() -> None:
     parser.add_argument("--shapes", default=None, help="Comma separated NxK pairs, for example 2048x2048")
     parser.add_argument("--rows", default=None, help="Comma separated M values, for example 1,4,8,16")
     parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--trials", type=int, default=7)
-    parser.add_argument("--iterations", type=int, default=40)
+    parser.add_argument("--trials", type=int, default=9)
+    parser.add_argument("--iterations", type=int, default=400)
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
@@ -98,6 +107,23 @@ def main() -> None:
     device = mx.device_info()
     print(f"device: {device.get('device_name')} ({device.get('architecture')})")
     print(f"mlx: {mx.__version__}")
+    # Null kernel: what one dispatch plus the amortized eval costs, so a reader
+    # can tell how much of a small-shape number is launch rather than work.
+    probe = mx.fast.metal_kernel(
+        name="gptqmodel_nf12_bench_probe",
+        input_names=["probe_in"],
+        output_names=["probe_out"],
+        source="probe_out[thread_position_in_grid.x] = probe_in[thread_position_in_grid.x];",
+    )
+    probe_in = mx.zeros((256,), dtype=mx.float32)
+    floor_us = _median_us(
+        lambda: probe(
+            inputs=[probe_in], grid=(256, 1, 1), threadgroup=(256, 1, 1),
+            output_shapes=[(256,)], output_dtypes=[mx.float32],
+        )[0],
+        mx=mx, warmup=args.warmup, trials=args.trials, iterations=400,
+    )
+    print(f"dispatch floor: {floor_us:.2f} us/call (included in every row)")
     results = []
     print(f"{'shape':>14} {'M':>3} {'dense us':>9} {'nf12 us':>9} {'ratio':>7}")
     for n, k in shapes:
@@ -106,9 +132,10 @@ def main() -> None:
             x = mx.array(
                 np.random.default_rng(m).normal(0, 0.2, (m, k)).astype(np.float32)
             ).astype(mx.bfloat16)
-            # Keep the enqueued graph near a fixed footprint: a 192 MB weight
-            # matrix cannot hold 40 live copies.
-            iterations = max(4, min(args.iterations, int(2e9 // max(n * k * 2, 1))))
+            # Keep the enqueued graph near a fixed footprint: every call keeps
+            # its output alive until the eval, so budget ~400 MB of outputs and
+            # then cap the iteration count.
+            iterations = max(8, min(args.iterations, int(4e8 // max(n * m * 2, 1))))
             dense = _median_us(
                 lambda: mx.matmul(x, weight.T),
                 mx=mx, warmup=args.warmup, trials=args.trials, iterations=iterations,
@@ -129,7 +156,8 @@ def main() -> None:
         payload = {
             "device": device,
             "mlx": mx.__version__,
-            "method": "batched queue, median of trials",
+            "method": "prebuilt graph, batched eval, median of trials",
+            "dispatch_floor_us": round(floor_us, 3),
             "warmup": args.warmup,
             "trials": args.trials,
             "iterations": args.iterations,
