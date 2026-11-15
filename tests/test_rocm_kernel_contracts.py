@@ -51,10 +51,35 @@ OTHER_KERNELS = set("""
     XLALinear
     TTNNLinear TTNNBlockFloat8Linear
 """.split())
+# Kernels registered for a non-Linux platform only. An MPS/Darwin kernel can
+# never execute on a ROCm host, so it is classified by its declared platform
+# instead of by device family. `_platform_restricted_kernels()` derives the
+# bucket from `SUPPORTS_PLATFORM`, so the next MPS-only kernel is covered
+# without editing this inventory; the explicit entries below are the ones
+# reviewed for #4130 and are asserted to really be platform-restricted.
+PLATFORM_RESTRICTED_KERNELS = set("""
+    MacaqMlxQuantLinear NF12MlxQuantLinear
+""".split())
 KERNELS = sorted(
     [*importer.iter_quant_linear_kernels(), TorchQuantEmbeddings, TTNNBlockFloat8Linear],
     key=lambda c: c.__name__,
 )
+
+
+def _platform_restricted_kernels() -> set[str]:
+    """Registered kernels that declare no Linux platform.
+
+    These cannot run on the Linux ROCm hosts this audit targets. The set is
+    derived from the shipped declaration rather than a hand-written list so a
+    newly registered MPS-only kernel is classified automatically.
+    """
+
+    return {
+        cls.__name__
+        for cls in KERNELS
+        if model_const.PLATFORM.LINUX not in cls.SUPPORTS_PLATFORM
+        and model_const.PLATFORM.ALL not in cls.SUPPORTS_PLATFORM
+    }
 
 
 @pytest.fixture
@@ -94,7 +119,29 @@ def test_macaq_triton_rejects_mixed_rocm_architectures(hip_runtime, monkeypatch)
 
 
 def test_audit_covers_every_registered_kernel():
-    assert {c.__name__ for c in KERNELS} == ROCM_KERNELS | CUDA_ONLY_KERNELS | OTHER_KERNELS
+    platform_restricted = _platform_restricted_kernels()
+    # The explicitly reviewed entries must really be platform-restricted; a
+    # kernel listed here without a non-Linux platform is a stale classification.
+    assert PLATFORM_RESTRICTED_KERNELS <= platform_restricted
+    assert {c.__name__ for c in KERNELS} == (
+        ROCM_KERNELS | CUDA_ONLY_KERNELS | OTHER_KERNELS | platform_restricted
+    )
+
+
+def test_platform_restricted_kernels_declare_reachable_families():
+    # A kernel that excludes Linux cannot advertise ROCm, and CUDA does not
+    # exist on Darwin. Without these checks the derived bucket would let an
+    # MPS-only kernel claim an accelerator family it can never reach and still
+    # pass the audit.
+    platform_restricted = _platform_restricted_kernels()
+    assert platform_restricted
+    for cls in KERNELS:
+        if cls.__name__ not in platform_restricted:
+            continue
+        assert model_const.PLATFORM.LINUX not in cls.SUPPORTS_PLATFORM, cls.__name__
+        assert model_const.DEVICE.ROCM not in cls.SUPPORTS_DEVICES, cls.__name__
+        if model_const.PLATFORM.DARWIN in cls.SUPPORTS_PLATFORM:
+            assert model_const.DEVICE.CUDA not in cls.SUPPORTS_DEVICES, cls.__name__
 
 
 @pytest.mark.parametrize("cls,devices", [
