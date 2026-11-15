@@ -154,7 +154,9 @@ class EoraProcessor(LoopProcessor):
                 input=input,
                 name=name,
                 sample_size=self.num_batches,
-                device=module.weight.data.device,
+                # AUTO_NF12 forwards a packed wrapper that has no `weight`
+                # attribute; its buffers still identify the execution device.
+                device=get_device(module),
             )
 
             self._accumulate_eora_contribution(

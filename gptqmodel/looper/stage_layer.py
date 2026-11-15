@@ -244,6 +244,31 @@ def _collect_hook_skip_modules(planning_layer_modules: List[List[str]]) -> set[s
     return skip_modules
 
 
+def _resolve_live_endpoint_module(
+    looper: "ModuleLooper",
+    *,
+    is_input_embeddings: bool,
+    is_output_embeddings: bool,
+    is_lm_head: bool,
+) -> Optional[torch.nn.Module]:
+    """Return the endpoint module currently installed in the model tree.
+
+    AUTO_NF12 and deferred dense-source materialization both replace the
+    endpoint object itself rather than one of its children. A local reference
+    captured before that swap points at a detached module that direct-state
+    materialization can no longer resolve by identity.
+    """
+
+    gptq_model = looper.gptq_model
+    if is_input_embeddings:
+        return gptq_model.get_input_embeddings()
+    if is_output_embeddings:
+        return gptq_model.get_output_embeddings()
+    if is_lm_head:
+        return get_module(gptq_model.model, key=gptq_model.lm_head)
+    return None
+
+
 def _replay_layer_outputs(
     looper: "ModuleLooper",
     *,
@@ -938,19 +963,26 @@ def run_layer_stage(
                     fallback=fallback,
                     embedding_module_name=embedding_module_name,
                 )
-            if is_lm_head_module:
-                # Subset planning may have swapped the live head for the
-                # auto-dtype-cast forward wrapper, which replaces the module
-                # object itself rather than one of its children. Re-read the
-                # head from the model tree: direct-state materialization
-                # resolves modules by identity inside that tree and cannot
-                # find the replaced object (`utils/structure.py:542`).
-                live_lm_head = get_module(
-                    looper.gptq_model.model, key=looper.gptq_model.lm_head
+            if is_embeddings_module:
+                # Subset planning may have swapped the live endpoint (input
+                # embedding, output embedding, or lm_head) for the
+                # auto-dtype-cast forward wrapper. That replacement swaps the
+                # module object itself rather than one of its children, so the
+                # local `module` still points at the detached dense source.
+                # Re-read the endpoint from the model tree: direct-state
+                # materialization resolves modules by identity inside that
+                # tree and cannot find the replaced object
+                # (`utils/structure.py:542`).
+                live_endpoint = _resolve_live_endpoint_module(
+                    looper,
+                    is_input_embeddings=is_input_embeddings_module,
+                    is_output_embeddings=is_output_embeddings_module,
+                    is_lm_head=is_lm_head_module,
                 )
-                if live_lm_head is not None and live_lm_head is not module:
-                    module = live_lm_head
-                    full = find_modules(module, name=looper.gptq_model.lm_head)
+                if live_endpoint is not None and live_endpoint is not module:
+                    module = live_endpoint
+                    if is_lm_head_module:
+                        full = find_modules(module, name=looper.gptq_model.lm_head)
                     cur_layer_device = get_device(module)
                     if getattr(cur_layer_device, "type", None) == "meta":
                         cur_layer_device = normalize_device_like(
@@ -1063,6 +1095,27 @@ def run_layer_stage(
 
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
+
+            if is_embeddings_module:
+                # Quantization replaces the endpoint object a second time when
+                # the deferred dense source is materialized for the quantizer
+                # (`shell_module_materialize(role="quant_source")`). Re-read
+                # the live endpoint before replay: the detached AUTO_NF12
+                # wrapper has had its packed buffers released, so forwarding
+                # it would either fail or run on empty storage.
+                live_endpoint = _resolve_live_endpoint_module(
+                    looper,
+                    is_input_embeddings=is_input_embeddings_module,
+                    is_output_embeddings=is_output_embeddings_module,
+                    is_lm_head=is_lm_head_module,
+                )
+                if live_endpoint is not None and live_endpoint is not module:
+                    module = live_endpoint
+                    cur_layer_device = get_device(module)
+                    if getattr(cur_layer_device, "type", None) == "meta":
+                        cur_layer_device = normalize_device_like(
+                            looper.gptq_model.quantize_config.device
+                        ) or CPU
 
             # A processor may need one layer-wide decision after all individual
             # modules have finished but before the only authoritative replay.

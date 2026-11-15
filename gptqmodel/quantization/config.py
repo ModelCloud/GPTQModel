@@ -4744,6 +4744,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     ) -> Union[Dict, int, bool, float]:
         return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
 
+    def has_dynamic_exclusions(self) -> bool:
+        """Return True when a `-:` rule leaves at least one module unquantized."""
+
+        return any(
+            isinstance(pattern, str) and pattern.startswith("-:")
+            for pattern in (self.dynamic or ())
+        )
+
     def external_module_inclusions(self) -> Optional[Tuple[str, ...]]:
         """Return Optimum's `modules_in_block_to_quantize` inclusion list.
 

@@ -2458,7 +2458,10 @@ def ModelLoader(cls):
                 inclusion_match = (
                     external_inclusions is None
                     or relative is None
-                    or any(relative.endswith(entry) for entry in external_inclusions)
+                    or any(
+                        relative.endswith(entry) or name.endswith(entry)
+                        for entry in external_inclusions
+                    )
                 )
                 if layer_prefix is None or any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")

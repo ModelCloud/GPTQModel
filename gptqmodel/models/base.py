@@ -69,7 +69,11 @@ from ..quantization.dtype import (
     quark_floatx_formats,
 )
 from ..quantization.norm_tuning import norm_type_of
-from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
+from ..quantization.rotation.rotation import (
+    fuse_layer_norms,
+    rotate_model,
+    validate_rotation_dimensions,
+)
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, awq_gemm_pack_backend, backend_for_activation, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
@@ -2037,6 +2041,15 @@ class BaseQModel(nn.Module):
                 raise ValueError(f"rotation only supports: llama/qwen2 model, "
                                     f"current model is {self.__class__.__name__}")
 
+            # Validate every width rotation will transform before
+            # `fuse_layer_norms` mutates the model in place. A width without an
+            # exact Hadamard factor otherwise fails inside `rotate_mlp_output`
+            # only after embeddings, head, norms and attention have already
+            # been rotated and fused.
+            validate_rotation_dimensions(
+                self.model.config, self.quantize_config.rotation
+            )
+
             if self.model.config.tie_word_embeddings:
                 log.info("Rotation requires word embeddings to be untied. Untying.")
                 self.model.config.tie_word_embeddings = False
@@ -2668,6 +2681,21 @@ class BaseQModel(nn.Module):
 
         assert isinstance(self.quantize_config.adapter, Lora)
 
+        # EoRA generation consumes and rewrites dense native weights: it needs
+        # `w - wq` and installs `wq + BA` back into each module. AUTO_NF12
+        # replaces the native linear with a packed wrapper that has no
+        # `weight` attribute, so the generator runs on the dense source
+        # instead. This is a generation-time layout choice, not a change to the
+        # saved adapter dtype or to the quantized checkpoint.
+        if self.quantize_config.auto_dtype_cast == AutoDtypeCast.AUTO_NF12:
+            log.warn(
+                "EoRA generation disables AUTO_NF12 for this pass: the adapter "
+                "generator rewrites dense native weights (`w - wq`, then "
+                "`wq + BA`) and cannot do that through the packed NF12 wrapper. "
+                "The saved adapter is unaffected."
+            )
+            self.quantize_config.auto_dtype_cast = AutoDtypeCast.OFF
+
         # init processor with EoRA processor
         calibration_config = self._build_calibration_config(
             calibration_dataset,
@@ -2689,6 +2717,7 @@ class BaseQModel(nn.Module):
             [
                 DequantizeProcessor(
                     quantized_modules=quantized_modules,
+                    qcfg=self.quantize_config,
                 ),
                 EoraProcessor(
                     tokenizer=self.tokenizer,

@@ -41,6 +41,99 @@ def test_scalar_relaxation_matches_autograd(with_initial):
         torch.testing.assert_close(actual_grad, reference_grad, rtol=1e-12, atol=1e-12)
 
 
+def test_reconstruction_stage_loss_reduces_in_fp32():
+    """An FP16 residual of 300 already squares to `inf`; the reduction must not."""
+
+    from gptqmodel.quantization.gsq_training import reconstruction_stage_loss
+
+    class _Scalar(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros((), dtype=torch.float16))
+
+        def forward(self):
+            return self.weight
+
+    module = _Scalar()
+    student = {"weight": torch.tensor(300.0, dtype=torch.float16)}
+    teacher = {"weight": torch.tensor(0.0, dtype=torch.float16)}
+    loss = reconstruction_stage_loss(
+        module, (), {}, student_weights=student, teacher_weights=teacher
+    )
+    assert torch.isfinite(loss), loss
+    torch.testing.assert_close(loss, torch.tensor(90000.0), rtol=1e-3, atol=1e-3)
+
+
+def test_relaxed_scalar_weights_wide_multiplier_stays_finite_in_half_precision():
+    """`logits * multiplier` overflows FP16; the exponent must be evaluated wide."""
+
+    from gptqmodel.quantization.gsq_training import relaxed_scalar_weights
+
+    logits = torch.full((5, 3, 8), 200.0, dtype=torch.float16)
+    scales = torch.ones(3, 2, dtype=torch.float16)
+    candidates = torch.arange(-2, 3, dtype=torch.float16)[:, None, None].expand(5, 3, 8)
+    groups = torch.arange(8) // 4
+    uniform = torch.full((5, 3, 8), 0.5, dtype=torch.float16)
+    result = relaxed_scalar_weights(
+        logits, scales, candidates, groups, uniform=uniform,
+        temperature=1.0, multiplier=500.0,
+    )
+    assert torch.isfinite(result).all(), result
+
+
+def test_train_stage_update_raises_recoverable_nonfinite_error(monkeypatch):
+    """A nonfinite stage must raise a Python error, not poison the device context."""
+
+    from gptqmodel.quantization.gsq_training import train_stage_update
+
+    def _device_side_assert(*_args, **_kwargs):
+        raise AssertionError("train_stage_update must not call torch._assert_async")
+
+    # The device-side primitive poisons a CUDA context when it fires.
+    monkeypatch.setattr(torch, "_assert_async", _device_side_assert)
+
+    class _Quantizer:
+        def __init__(self):
+            self.logits = torch.zeros(1, requires_grad=True)
+
+        def __call__(self, **_kwargs):
+            return self.logits
+
+    quantizer = _Quantizer()
+    optimizer = torch.optim.SGD([quantizer.logits], lr=0.1)
+
+    def nonfinite_objective(_batch, weights):
+        return weights["w"].sum() * float("nan")
+
+    with pytest.raises(RuntimeError, match="nonfinite"):
+        train_stage_update(
+            {"w": quantizer},
+            optimizer,
+            [(None, 4)],
+            nonfinite_objective,
+            generator=torch.Generator(),
+            temperature=1.0,
+            multiplier=1.0,
+        )
+
+    # A device-side assert would have made the next operation fail instead.
+    assert torch.isfinite(torch.ones(1)).all()
+
+    def finite_objective(_batch, weights):
+        return weights["w"].sum()
+
+    reported = train_stage_update(
+        {"w": quantizer},
+        optimizer,
+        [(None, 4)],
+        finite_objective,
+        generator=torch.Generator(),
+        temperature=1.0,
+        multiplier=1.0,
+    )
+    assert torch.isfinite(reported).all()
+
+
 def _stage_quantizer(bits=2, rows=4, columns=8, group_size=8):
     from gptqmodel.quantization.gsq_training import GSQScalarTrainingModule
 

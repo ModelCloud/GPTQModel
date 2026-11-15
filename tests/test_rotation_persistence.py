@@ -52,6 +52,42 @@ def test_quantize_config_rotation_none_omitted():
     assert "rotation" not in d
 
 
+def test_hadamard_supported_matches_get_hadK():
+    from gptqmodel.quantization.rotation.hadamard_utils import (
+        get_hadK,
+        hadamard_supported,
+    )
+
+    for width in (12, 28, 40, 64, 896, 1536, 2048, 3584, 4864, 8960, 18944):
+        try:
+            get_hadK(width)
+        except AssertionError:
+            expected = False
+        else:
+            expected = True
+        assert hadamard_supported(width) is expected, width
+
+
+def test_rotation_rejects_unsupported_intermediate_size_before_mutation():
+    from transformers import Qwen2Config
+
+    from gptqmodel.quantization.rotation.rotation import validate_rotation_dimensions
+
+    config = Qwen2Config(hidden_size=896, intermediate_size=4864)
+    with pytest.raises(ValueError, match=r"intermediate_size`=4864"):
+        validate_rotation_dimensions(config, "hadamard")
+    with pytest.raises(ValueError, match=r"intermediate_size`=4864"):
+        validate_rotation_dimensions(config, "random")
+
+    # Supported widths must still pass.
+    validate_rotation_dimensions(
+        Qwen2Config(hidden_size=896, intermediate_size=896), "hadamard"
+    )
+    validate_rotation_dimensions(
+        Qwen2Config(hidden_size=2048, intermediate_size=8192), "hadamard"
+    )
+
+
 class _DummyQuantLinear(BaseQuantLinear):
     def __init__(self, in_features, out_features):
         torch.nn.Module.__init__(self)
