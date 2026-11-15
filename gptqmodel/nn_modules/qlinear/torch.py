@@ -397,6 +397,19 @@ class TorchLinear(PackableQuantLinear):
 
         super().optimize()
 
+    def __getstate__(self):
+        """Drop the compiled ``dequantize_weight`` so the module stays picklable.
+
+        ``optimize()`` replaces the bound method with a ``torch.compile``
+        wrapper, which pickle cannot serialize. The class method is the eager
+        fallback, so omitting the instance override restores it on unpickle and
+        the module keeps running (uncompiled).
+        """
+
+        state = super().__getstate__()
+        state.pop("dequantize_weight", None)
+        return state
+
     def train(self, mode: bool = True):
         old_train = self.training
         if mode == old_train:

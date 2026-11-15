@@ -16,6 +16,7 @@ The synthetic fixtures are CPU-only and use an independent dense oracle for the
 AWQ case; the GPTQ cases compare logits before and after the round trip.
 """
 
+import json
 import os
 import shutil
 
@@ -165,11 +166,11 @@ def _build_gptq_v1_checkpoint(path):
     return state
 
 
-def _load(path, backend=BACKEND.GPTQ_TORCH):
+def _load(path, backend=BACKEND.GPTQ_TORCH, device="cpu"):
     return GPTQModel.load(
         path,
         backend=backend,
-        device="cpu",
+        device=device,
         dtype=torch.float16,
         local_files_only=True,
     )
@@ -267,6 +268,120 @@ def test_save_pretrained_emits_checkpoint_qzeros(tmp_path):
 
     reloaded = _load(str(target))
     assert _relative_error(reference, _logits(reloaded.model)) < 1e-5
+
+
+@pytest.mark.parametrize(
+    ("backend", "device"),
+    [
+        (BACKEND.GPTQ_TORCH, "cpu"),
+        (BACKEND.GPTQ_TRITON, "cuda"),
+    ],
+    ids=["gptq_torch", "gptq_triton"],
+)
+def test_load_state_dict_round_trip_preserves_v1_model(tmp_path, backend, device):
+    """`load_state_dict(model.state_dict())` must be an identity on a v1 model.
+
+    `state_dict()` emits checkpoint-layout v1 qzeros, but the Torch/Triton
+    kernels decode v2. Copying the words back unchanged shifted every zero
+    point by one while `strict=True` reported success.
+    """
+
+    if backend == BACKEND.GPTQ_TRITON and (
+        not torch.cuda.is_available() or torch.version.hip is not None
+    ):
+        pytest.skip("gptq_triton requires a CUDA device")
+
+    source = tmp_path / "v1"
+    state = _build_gptq_v1_checkpoint(str(source))
+    model = _load(str(source), backend=backend, device=device)
+    reference = _logits(model.model)
+
+    qzeros_key = "model.layers.0.self_attn.q_proj.qzeros"
+    round_trip = model.model.state_dict()
+    assert torch.equal(round_trip[qzeros_key].cpu(), state[qzeros_key])
+
+    result = model.model.load_state_dict(round_trip)
+    assert not result.missing_keys and not result.unexpected_keys
+
+    module = model.model.model.layers[0].self_attn.q_proj
+    assert module.qzero_format() == 2
+    assert _relative_error(reference, _logits(model.model)) < 1e-6
+    # The live buffer holds v2 words; the next state_dict must still emit the
+    # same checkpoint v1 words as the original file.
+    assert torch.equal(model.model.state_dict()[qzeros_key].cpu(), state[qzeros_key])
+
+
+def test_partial_load_state_dict_keeps_runtime_qzeros_layout(tmp_path):
+    """A load without `qzeros` must not relabel the live v2 words as v1.
+
+    PEFT adapters and other partial loads carry no quantized tensors. The old
+    hook reset `_qzeros_format` from the checkpoint format anyway, so the next
+    save wrote v2 words under the v1 label and the reload was garbage.
+    """
+
+    source = tmp_path / "v1"
+    state = _build_gptq_v1_checkpoint(str(source))
+    model = _load(str(source))
+    reference = _logits(model.model)
+
+    qzeros_key = "model.layers.0.self_attn.q_proj.qzeros"
+    module = model.model.model.layers[0].self_attn.q_proj
+    live_words = module.qzeros.clone()
+    assert module.qzero_format() == 2
+
+    model.model.load_state_dict({}, strict=False)
+
+    assert module.qzero_format() == 2
+    assert torch.equal(module.qzeros, live_words)
+    assert _relative_error(reference, _logits(model.model)) < 1e-6
+    # The next checkpoint write must still emit the original v1 words.
+    assert torch.equal(model.model.state_dict()[qzeros_key], state[qzeros_key])
+
+    target = tmp_path / "hf"
+    model.model.save_pretrained(str(target))
+    saved_qzeros = load_file(str(target / "model.safetensors"))[qzeros_key]
+    assert torch.equal(saved_qzeros, state[qzeros_key])
+
+
+def test_optimized_torch_linear_model_pickles(tmp_path):
+    """`torch.save(model)` must survive `optimize()`'s compiled callable."""
+
+    source = tmp_path / "v1"
+    _build_gptq_v1_checkpoint(str(source))
+    model = _load(str(source))
+    module = model.model.model.layers[0].self_attn.q_proj
+    assert module.optimized
+    if "dequantize_weight" not in module.__dict__:
+        pytest.skip("torch.compile is disabled for this TorchLinear")
+
+    target = tmp_path / "model.pt"
+    torch.save(model.model, str(target))
+    restored = torch.load(str(target), weights_only=False)
+
+    assert "dequantize_weight" not in restored.model.layers[0].self_attn.q_proj.__dict__
+    assert _relative_error(_logits(model.model), _logits(restored)) < 1e-6
+
+
+def test_hf_from_pretrained_refuses_packed_gguf(tmp_path):
+    """A GPT-QModel GGUF checkpoint must not silently random-init in HF."""
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel._quant_methods import GGUF_EXPORT_QUANT_METHOD
+
+    source = tmp_path / "gguf"
+    _build_gptq_v1_checkpoint(str(source))
+    config_path = source / "config.json"
+    config = json.loads(config_path.read_text())
+    config["quantization_config"] = {
+        "method": "gguf",
+        "quant_method": GGUF_EXPORT_QUANT_METHOD,
+        "bits": BITS,
+    }
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="packed GGUF checkpoints cannot be loaded"):
+        AutoModelForCausalLM.from_pretrained(str(source), local_files_only=True)
 
 
 def test_runtime_layout_kernels_refuse_state_dict():

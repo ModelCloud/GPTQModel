@@ -27,6 +27,7 @@ from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..quantization.config import (
     FORMAT,
+    GGUF_EXPORT_QUANT_METHOD,
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
@@ -240,6 +241,15 @@ def hf_compat_warnings(quantize_config: Any, runtime_format: FORMAT) -> List[str
             "interleave, so they decode these weights and zero points in the "
             "wrong order and lose accuracy silently. Load 8-bit AWQ with "
             "`GPTQModel.load`, or export 4-bit AWQ for vLLM."
+        )
+    if getattr(quantize_config, "method", None) == METHOD.GGUF:
+        warnings.append(
+            "Packed GGUF checkpoints are not readable by `transformers`' "
+            "`GgufHfQuantizer`, which owns `quant_method: \"gguf\"` and expects a "
+            "`.gguf` file. This checkpoint publishes "
+            f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
+            "refuses it instead of random-initializing every linear layer. Load "
+            "it with `GPTQModel.load` or vLLM."
         )
     return warnings
 

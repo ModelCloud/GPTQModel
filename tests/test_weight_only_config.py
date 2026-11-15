@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from gptqmodel.quantization.config import (
+    GGUF_EXPORT_QUANT_METHOD,
     METHOD,
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
@@ -116,7 +117,7 @@ def test_gguf_quantize_config_round_trip():
     payload = cfg.to_dict()
     assert payload["bits"] == 4
     assert payload["method"] == "gguf"
-    assert payload["quant_method"] == "gguf"
+    assert payload["quant_method"] == GGUF_EXPORT_QUANT_METHOD
     assert payload["format"] == "q_0"
     assert payload["checkpoint_format"] == "q_0"
     assert "group_size" not in payload

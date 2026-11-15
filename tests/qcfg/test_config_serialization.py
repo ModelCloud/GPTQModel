@@ -12,6 +12,7 @@ so ``auto_dtype_cast``, ``telemetry``, and ``mse`` stayed raw strings/dicts and
 import pytest
 
 from gptqmodel.quantization.config import (
+    FORMAT,
     AutoDtypeCast,
     AWQConfig,
     BitsAndBytesConfig,
@@ -23,6 +24,7 @@ from gptqmodel.quantization.config import (
     NF12Config,
     ParoConfig,
     QQQConfig,
+    QuantizeConfig,
     RTNConfig,
     TelemetryConfig,
     TTBlockfloatConfig,
@@ -78,6 +80,37 @@ def test_exl3_config_round_trips_serialized_fields():
     assert isinstance(reloaded.telemetry, TelemetryConfig)
     assert isinstance(reloaded.mse, MSEConfig)
     assert reloaded.to_dict() == payload
+
+
+@pytest.mark.parametrize(
+    ("format_value", "expected_quant_method"),
+    [
+        (FORMAT.GPTQ, "gptq"),
+        (FORMAT.GPTQ_V2, "gptq"),
+        (FORMAT.GEMM, "awq"),
+        (FORMAT.GEMV, "awq"),
+        (FORMAT.GEMV_FAST, "awq"),
+        (FORMAT.LLM_AWQ, "awq"),
+    ],
+)
+def test_rtn_config_serializes_export_quant_method(format_value, expected_quant_method):
+    """RTN's AWQ export formats must not be labelled `quant_method: gptq`."""
+
+    from transformers.quantizers import AutoQuantizationConfig
+
+    config = RTNConfig(bits=4, group_size=128, format=format_value)
+    payload = config.to_dict()
+
+    assert payload["method"] == "gptq"
+    assert payload["quant_method"] == expected_quant_method
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded, RTNConfig)
+    assert reloaded.export_quant_method().value == expected_quant_method
+    # transformers must route the serialized payload to the matching loader.
+    assert type(AutoQuantizationConfig.from_dict(payload)).__name__ == (
+        "AwqConfig" if expected_quant_method == "awq" else "GPTQConfig"
+    )
 
 
 def test_exl3_config_rejects_invalid_auto_dtype_cast():
