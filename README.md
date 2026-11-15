@@ -407,6 +407,7 @@ not tuned, so rocBLAS remains the default there too.
 * 🚀 Multi-GPU data-parallel quantization with GIL-safe peer copies and device-aware scheduling.
 * ✨ CUDA (NVIDIA), ROCm (AMD), Tenstorrent (Torch/XLA and TTNN), NPU (Huawei Ascend), XPU (Intel), MPS/MLX (Apple silicon), and CPU support. See the platform matrix below for OS and kernel availability.
 * ✨ `Dynamic` per-module mixed quantization control: each layer/module can have a unique quantization config or be excluded from quantization. 
+* ✨ Staged quantization protocol with rule-scoped actions: `smoothquant` folds its inverse into the preceding norm, and unsupported actions fail loudly. See [protocol actions](docs/protocol-actions.md).
 * 🚀 Torch fused kernels for Intel XPU and CPU, plus native AVX512-BF16 GPTQ/AWQ CPU kernels.
 * 🚀 Free-threaded Python support for multi-GPU quantization, with explicit [PyTorch GIL=0 safety contracts](pytorch_gil_0_compat.md).
 * ✨ Asymmetric `Sym=False` support. 
