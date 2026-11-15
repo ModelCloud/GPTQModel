@@ -20,11 +20,12 @@ from gptqmodel.utils.exllamav2 import (
     exllamav2_free_q_matrix,
     exllamav2_make_q_matrix,
 )
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 pytestmark = [
     pytest.mark.skipif(
-        not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+        IS_ROCM or not torch.cuda.is_available() or torch.cuda.device_count() < 2,
         reason="two CUDA GPUs required",
     ),
     pytest.mark.cuda,
