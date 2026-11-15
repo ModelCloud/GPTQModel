@@ -1277,6 +1277,20 @@ class BaseQModel(nn.Module):
         """
         return cls._collect_flagged_layer_modules(POST_NORM_FLAG)
 
+    def awq_post_norm_modules(self, layer: nn.Module) -> Set[str]:
+        """Layer-relative post-norms for ``layer``.
+
+        `get_post_norm_modules` is static because most definitions declare one
+        `:postnorm` set for every layer. A hybrid model whose decoder layers
+        alternate between pre-norm and post-norm shapes cannot: OLMo Hybrid's
+        full-attention layer post-norms the attention output and adds it to the
+        residual, while its linear-attention layer feeds the same norm straight
+        into the MLP. Such a definition overrides this to add the norm only on
+        the shapes where it sits on the residual branch.
+        """
+
+        return set(self.get_post_norm_modules())
+
     @classmethod
     def has_norm_flag(cls, module_spec: str) -> bool:
         """Check if a module specification has the `:norm` flag."""
@@ -4959,7 +4973,7 @@ class BaseQModel(nn.Module):
         # the tree immediately before the next consumer and share that
         # consumer's width, so position and width cannot identify a fold
         # source. The definition marks it explicitly instead.
-        post_norm_modules = set(self.get_post_norm_modules())
+        post_norm_modules = set(self.awq_post_norm_modules(module))
 
         def _select_feature_name(names):
             """Return the first quantized child that has captured activations."""
