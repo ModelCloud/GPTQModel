@@ -28,6 +28,7 @@ from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
+from ..utils.rocm import quant_blas_backend
 from .conv_padding import conv_padding_pairs, pad_mode
 from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
 from .gar import (
@@ -962,7 +963,12 @@ class GPTQ:
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
-            xtx = torch.matmul(mat32.T, mat32)
+            # Determinism across processes comes from this fp32 X^T X GEMM
+            # running on rocBLAS (see ``utils/rocm.py``). Scope the override
+            # to the Hessian accumulation so the fp16/bf16 calibration
+            # forward and quantization replay keep hipBLASLt.
+            with quant_blas_backend(matrix.device):
+                xtx = torch.matmul(mat32.T, mat32)
             del mat32
             return xtx
 
@@ -973,7 +979,8 @@ class GPTQ:
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
-                xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
+                with quant_blas_backend(matrix.device):
+                    xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
         return xtx_accum
 
@@ -1788,7 +1795,9 @@ class GPTQ:
             if timer is not None
             else contextlib.nullcontext()
         )
-        with timer_cm:
+        # Keep the deterministic rocBLAS selection on the Hessian/linalg path
+        # (rocSOLVER GEMMs included) and nowhere else.
+        with timer_cm, quant_blas_backend(H.device):
             if _log_hessian_verbose():
                 log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
             try:

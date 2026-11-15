@@ -179,3 +179,45 @@ def test_warp_multiple_block_keeps_cdna_and_rdna_blocks_aligned():
     assert gsq_cuda_relaxation._warp_multiple_block(128, 48) == 144
     assert gsq_cuda_relaxation._warp_multiple_block(128, 0) == 128
 
+
+
+def _capture_warnings(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(rocm.log, "warning", lambda *args, **kwargs: warnings.append(args))
+    monkeypatch.setattr(rocm, "_REPRODUCIBILITY_WARNED", False)
+    return warnings
+
+
+def test_hipblaslt_opt_in_warns_once_about_reproducibility(monkeypatch):
+    warnings = _capture_warnings(monkeypatch)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, "hipblaslt")
+    monkeypatch.delenv("ROCBLAS_USE_HIPBLASLT", raising=False)
+
+    rocm.quantize_tuning("gfx1201")
+    rocm.quantize_tuning("gfx1201")
+
+    assert len(warnings) == 1
+    assert "hipBLASLt" in warnings[0][0]
+
+
+def test_rocblas_forwarding_switch_warns_about_reproducibility(monkeypatch):
+    warnings = _capture_warnings(monkeypatch)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "1")
+
+    rocm.quantize_tuning("gfx1201")
+
+    assert len(warnings) == 1
+
+
+def test_default_rocblas_path_does_not_warn(monkeypatch):
+    warnings = _capture_warnings(monkeypatch)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
+
+    rocm.quantize_tuning("gfx1201")
+
+    assert warnings == []

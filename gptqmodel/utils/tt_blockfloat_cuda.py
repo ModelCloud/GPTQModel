@@ -134,6 +134,12 @@ def available(device: torch.device | str | None = None) -> bool:
 def prewarm() -> bool:
     """Compile/load the extension ahead of the first forward pass."""
 
+    # This is a CUDA-only kernel. On HIP, ``load()`` would hand the sources to
+    # torch's ROCm loader, which hipifies them next to the originals; refusing
+    # here keeps a direct ``prewarm()`` call from touching the checkout even if
+    # a future loader ever stopped staging.
+    if not supported():
+        return False
     return _EXTENSION.load()
 
 
@@ -162,6 +168,11 @@ def ready(device: torch.device | str | None = None) -> bool:
 
 
 def _ops():
+    if torch.version.hip is not None:
+        raise RuntimeError(
+            "the Tenstorrent block-float CUDA extension is unavailable: "
+            "the CUDA-only kernels do not run on this device (ROCm uses the HIP loader)"
+        )
     if not _EXTENSION.load():
         raise RuntimeError(
             f"the Tenstorrent block-float CUDA extension is unavailable: {_EXTENSION.last_error_message()}"
