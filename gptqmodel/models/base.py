@@ -136,6 +136,16 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
+def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
+    """Whether a run accumulates a Hessian whose inputs must be reproducible.
+
+    Only the GPTQ-family processors build one. AWQ/RTN/QQQ have no Hessian, so
+    they must not pay the ROCm rocBLAS override for their fp16/bf16 GEMMs.
+    """
+
+    return ProcessorStep.GPTQ in run_plan.processors
+
+
 def _torch_cuda_device(value: object) -> Optional[torch.device]:
     """Resolve one pool entry to a concrete CUDA device, or None."""
 
@@ -2135,10 +2145,19 @@ class BaseQModel(nn.Module):
         # load there (issue #1455).
         self._warn_fused_unit_dynamic_overrides()
 
-        # On ROCm, hipBLASLt's lazy Tensile-library loading dominates a cold
-        # quantize while rocBLAS covers the same math for a fraction of the
-        # loading cost. The override spans only the quantization phase.
-        with quant_blas_backend():
+        # On ROCm the deterministic rocBLAS selection is scoped to methods that
+        # build a Hessian. Their calibration forward and replay produce the
+        # activations that are accumulated into the Hessian, so those GEMMs must
+        # be reproducible too: pinning only the fp32 X^T X GEMM regressed
+        # Qwen2.5-0.5B to 332/795 differing tensors across processes. Methods
+        # without a Hessian (AWQ, RTN, QQQ) never enter the override, which is
+        # where the 8-14x fp16/bf16 GEMM penalty was paid with no determinism
+        # gain. GPTQ's end-to-end cost is unchanged (measured 58.1 s / 61.4 s
+        # for 128 samples vs the issue's 61 s / 56 s).
+        blas_context = (
+            quant_blas_backend() if _needs_deterministic_hessian(run_plan) else nullcontext()
+        )
+        with blas_context:
             if run_plan.weight_only:
                 result = self._quantize_weight_only(
                     run_plan=run_plan,

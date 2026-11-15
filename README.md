@@ -391,13 +391,18 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 The [Marlin device-profile validator](docs/marlin-device-profile-validation.md)
 checks device ordinals before asking Torch or the extension for a profile.
 
-On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hipBLASLt
-loads one Tensile library per (dtype, layout) pair on first use, and those one-time loads
-dominate a cold quantize while rocBLAS covers the same math. The override is scoped to the
-quantization phase and the previous backend is restored afterwards. Set
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` to keep torch's default backend. This
+On ROCm, methods that build a Hessian (the GPTQ family) run their calibration
+forward, replay and fp32 `X^T X`/rocSOLVER inversion on rocBLAS, which keeps
+checkpoints reproducible across processes. AWQ, RTN and QQQ have no Hessian and
+keep torch's hipBLASLt backend, which is 8-14x faster on gfx1201 for the
+fp16/bf16 GEMMs. `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` (or
+`ROCBLAS_USE_HIPBLASLT=1`) keeps hipBLASLt for the GPTQ family too; that is
+faster but not reproducible across processes, so GPT-QModel warns once. This
 applies to RDNA4 as well; the RDNA4 hipBLASLt Tensile libraries exist but are
-not tuned, so rocBLAS remains the default there too.
+not tuned. HIP JIT builds stage their sources in the build cache by default, so
+a CUDA-only extension can never hipify over the tracked `gptqmodel_ext`
+sources. See [the ROCm default environment](docs/rocm-default-environment.md#quantization-blas-scope)
+and [HIP JIT source staging](docs/rocm-rdna4.md#hip-jit-source-staging).
 
 ## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
@@ -612,7 +617,9 @@ falls back to dequantize+matmul (GEMV keeps both dtypes). Set
 `GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
 matrix and known limitations, and [`docs/rocm-default-environment.md`](docs/rocm-default-environment.md)
 for the ROCm defaults GPT-QModel installs (`expandable_segments` is not enabled;
-`ROCBLAS_USE_HIPBLASLT=0` makes quantization reproducible across processes).
+`ROCBLAS_USE_HIPBLASLT=0` plus the Hessian-scoped rocBLAS override makes
+quantization reproducible across processes, while the forward/replay GEMMs keep
+hipBLASLt; HIP JIT builds stage their sources outside the checkout).
 
 On Ada (SM 8.9) and Blackwell (SM 10.x), `TritonV2Linear` reuses the same fused
 GEMV / small-M GEMM dispatch and the packed-load kernel covers `M=2..64` with no

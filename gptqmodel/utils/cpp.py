@@ -383,6 +383,20 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def _source_checkout_root() -> Path:
+    """Root of the checkout whose tracked sources must never be hipified in place."""
+
+    return Path(__file__).resolve().parents[2]
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _torch_ops_file_lock_timeout_seconds() -> float:
     """Resolve how long one process waits on another's in-flight JIT build."""
 
@@ -1149,7 +1163,7 @@ class TorchOpsJitExtension:
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
         prebuilt_library_env: Optional[str] = None,
-        stage_hip_sources: bool = False,
+        stage_hip_sources: bool = True,
     ) -> None:
         self.name = name
         self.namespace = namespace
@@ -1172,7 +1186,8 @@ class TorchOpsJitExtension:
         self.prebuilt_library_env = prebuilt_library_env
         # torch's HIP loader hipifies out-of-tree sources next to the
         # originals, which mutates (or fails on) a read-only install. Staging
-        # copies the source root into the writable build cache first.
+        # is the default for every HIP build; a caller may only opt out when
+        # the sources live outside the checkout (see ``_stage_hip_sources``).
         self.stage_hip_sources = bool(stage_hip_sources)
         self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
@@ -1227,50 +1242,95 @@ class TorchOpsJitExtension:
 
         torch's ROCm loader writes ``<name>_hip.{hip,cpp}`` next to each source
         it hipifies. Passing checkout paths directly therefore mutates the
-        shipped ``gptqmodel_ext`` tree (the generated names are gitignored, so
-        it goes unnoticed) and fails when site-packages is read-only. The
-        staged tree keeps every generated file under the writable cache and
+        shipped ``gptqmodel_ext`` tree -- hipify also rewrites ``cuda`` to
+        ``hip`` in output paths, so a CUDA-only kernel can overwrite a tracked
+        hand-written ``*.hip`` source -- and fails when site-packages is
+        read-only. Every HIP build stages by default; a caller may only opt out
+        when none of its sources or include roots live inside the checkout,
+        because hipifying those in place is always a source-tree mutation.
+
+        The staged tree keeps every generated file under the writable cache and
         preserves the relative layout so local ``#include`` directives and the
-        caller's include paths keep resolving.
+        caller's include paths keep resolving. Include roots inside the
+        checkout but outside the staged source root (for example Machete's
+        ``gptqmodel_ext`` headers) are staged too, because hipify rewrites
+        every header under its include roots.
         """
 
         resolved_sources = [str(source) for source in sources]
         resolved_includes = [str(path) for path in include_paths]
-        if not self.stage_hip_sources or not IS_ROCM or not resolved_sources:
+        if not IS_ROCM or not resolved_sources:
             return resolved_sources, resolved_includes
 
         source_paths = [Path(source).expanduser().resolve(strict=False) for source in resolved_sources]
-        source_root = Path(os.path.commonpath([str(path.parent) for path in source_paths]))
-        staging_root = self._staging_root()
-        if staging_root == source_root or staging_root.is_relative_to(source_root):
-            raise RuntimeError(
-                f"{self.display_name}: the JIT build root `{staging_root}` is inside the "
-                f"source tree `{source_root}`; choose a build root outside the checkout."
-            )
-        staging_root.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+        include_paths_resolved = [Path(include).expanduser().resolve(strict=False) for include in resolved_includes]
+        checkout = _source_checkout_root()
+        in_checkout_sources = [path for path in source_paths if _path_is_within(path, checkout)]
 
-        def staged(path: Path) -> Path:
+        if not self.stage_hip_sources:
+            unsafe = [path for path in [*source_paths, *include_paths_resolved] if _path_is_within(path, checkout)]
+            if unsafe:
+                raise RuntimeError(
+                    f"{self.display_name}: refusing to hipify `{unsafe[0]}` in place inside the "
+                    f"source checkout `{checkout}`; HIP builds must stage their sources. Remove "
+                    f"`stage_hip_sources=False` or choose a build root outside the checkout."
+                )
+            return resolved_sources, resolved_includes
+
+        # Sources that live outside the checkout (for example a downloaded
+        # CUTLASS/Machete generated tree) are already writable and not tracked;
+        # staging them would only copy an unrelated tree. Stage the tracked
+        # sources, or every source when none is inside the checkout (tests and
+        # third-party callers use a scratch tree).
+        staging_root = self._staging_root()
+        # A loader may already stage its own sources (NF12 HIP does). Staging
+        # them again would copy the cache into itself.
+        if all(_path_is_within(path, staging_root) for path in source_paths):
+            source_root = staging_root
+        else:
+            staged_inputs = in_checkout_sources or source_paths
+            source_root = Path(os.path.commonpath([str(path.parent) for path in staged_inputs]))
+            if source_root == Path(source_root.anchor):
+                raise RuntimeError(
+                    f"{self.display_name}: HIP sources span unrelated filesystem roots and cannot be "
+                    f"staged together; move them under one build tree."
+                )
+            if staging_root == source_root or _path_is_within(staging_root, source_root):
+                raise RuntimeError(
+                    f"{self.display_name}: the JIT build root `{staging_root}` is inside the "
+                    f"source tree `{source_root}`; choose a build root outside the checkout."
+                )
+            staging_root.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+
+        def staged(path: Path) -> Path | None:
             try:
                 relative = path.relative_to(source_root)
             except ValueError:
-                return path
+                return None
             return staging_root / relative
 
-        staged_sources = [str(staged(path)) for path in source_paths]
+        staged_sources: list[str] = []
+        for path in source_paths:
+            target = staged(path)
+            staged_sources.append(str(target) if target is not None else str(path))
+
         staged_includes: list[str] = []
-        for include in resolved_includes:
-            path = Path(include).expanduser()
-            if path.exists():
-                resolved = path.resolve(strict=False)
-                try:
-                    resolved.relative_to(source_root)
-                except ValueError:
-                    staged_includes.append(include)
-                else:
-                    staged_includes.append(str(staged(resolved)))
-            else:
-                staged_includes.append(include)
+        for include, resolved in zip(resolved_includes, include_paths_resolved):
+            target = staged(resolved) if resolved.exists() else None
+            if target is not None:
+                staged_includes.append(str(target))
+                continue
+            if resolved.exists() and _path_is_within(resolved, checkout):
+                # An include root inside the checkout outside the staged source
+                # root is still hipified in place; stage it under the cache.
+                external = staging_root / "_checkout" / resolved.relative_to(checkout)
+                if not external.exists():
+                    external.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(resolved, external, dirs_exist_ok=True)
+                staged_includes.append(str(external))
+                continue
+            staged_includes.append(include)
         return staged_sources, _dedupe_path_strings(staged_includes)
 
     def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
