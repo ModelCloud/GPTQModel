@@ -82,7 +82,14 @@ class QQQProcessor(LoopProcessor):
         if self.requested_backend not in (None, BACKEND.AUTO, BACKEND.QQQ, BACKEND.QQQ_TORCH):
             raise ValueError("QQQ quantization requires QQQ or QQQ_TORCH backend")
 
-    def _quant_linear_kernel(self):
+    def _quant_linear_kernel(self, dtype: Optional[torch.dtype] = None):
+        """Select the in-memory QQQ kernel for ``dtype`` activations.
+
+        ``QQQLinear`` is an FP16-only kernel; the reload path already rejects
+        it for a BF16 model through ``SUPPORTS_DTYPES``. The in-memory module
+        must follow the same declaration or ``quantize()`` leaves a model whose
+        first forward raises ``NotImplementedError``.
+        """
         if self.requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         # QQQ's Marlin-derived W4A8 kernel is CUDA-only in practice; its JIT
@@ -97,12 +104,19 @@ class QQQProcessor(LoopProcessor):
         if isinstance(device, DEVICE):
             if device in (DEVICE.CPU, DEVICE.NPU):
                 return QQQTorchLinear, BACKEND.QQQ_TORCH
-            return QQQLinear, BACKEND.QQQ
-        if isinstance(device, torch.device):
+        elif isinstance(device, torch.device):
             if device.type in ("cpu", "npu"):
                 return QQQTorchLinear, BACKEND.QQQ_TORCH
-            return QQQLinear, BACKEND.QQQ
-        if isinstance(device, str) and device.split(":")[0].lower() in ("cpu", "npu"):
+        elif isinstance(device, str) and device.split(":")[0].lower() in ("cpu", "npu"):
+            return QQQTorchLinear, BACKEND.QQQ_TORCH
+
+        if not QQQLinear.supports_dtype(dtype):
+            if self.requested_backend == BACKEND.QQQ:
+                raise NotImplementedError(
+                    f"QQQ (BACKEND.QQQ) only supports `{QQQLinear.SUPPORTS_DTYPES}` "
+                    f"activations; the model dtype is `{dtype}`. Use "
+                    "BACKEND.QQQ_TORCH, which AUTO selects for non-FP16 models."
+                )
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         return QQQLinear, BACKEND.QQQ
 
@@ -295,7 +309,7 @@ class QQQProcessor(LoopProcessor):
 
         layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
-        quant_linear_cls, backend = self._quant_linear_kernel()
+        quant_linear_cls, backend = self._quant_linear_kernel(dtype=module.weight.dtype)
 
         # replace module with quantized module
         with log_time_block(

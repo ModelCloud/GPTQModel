@@ -111,37 +111,6 @@ def _patch_transformers_gptq_device_map_compat():
         GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
 
 
-def _patch_transformers_paroquant_quantizer_compat():
-    """Teach transformers to treat ParoQuant checkpoints as GPTQ-backed configs.
-
-    Upstream transformers currently rejects `quant_method="paroquant"` before
-    the GPT-QModel loader path gets a chance to handle the checkpoint. ParoQuant
-    artifacts reuse GPT-QModel/Optimum loading semantics, so register the method
-    alongside GPTQ only when upstream has not provided native support yet.
-    """
-    try:
-        from transformers.quantizers import auto as hf_quant_auto
-        from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
-        from transformers.utils.quantization_config import GPTQConfig
-    except ImportError:
-        log.warning(
-            "ParoQuant quantizer compat is inactive: transformers quantizer API changed",
-            exc_info=True,
-        )
-        return
-    except Exception:
-        log.warning("ParoQuant quantizer compat probe failed", exc_info=True)
-        return
-
-    with _MONKEY_PATCH_LOCK:
-        if getattr(hf_quant_auto, "_gptqmodel_paroquant_quantizer_compat", False):
-            return
-
-        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault("paroquant", GPTQConfig)
-        hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault("paroquant", GptqHfQuantizer)
-        hf_quant_auto._gptqmodel_paroquant_quantizer_compat = True
-
-
 def _patch_openvino_gptqmodel_compat():
     """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
     try:
@@ -371,7 +340,6 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
-_patch_transformers_paroquant_quantizer_compat()
 _patch_openvino_gptqmodel_compat()
 _patch_transformers_causal_conv1d_hub_kernel_compat()
 
