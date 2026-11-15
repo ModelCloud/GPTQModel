@@ -774,10 +774,18 @@ def run_layer_stage(
             processor.log_call_count = 0
             processor.collect_memory_info(layer_index)
             cache = processor.inputs_cache
-            layer_inputs = cache.layer_inputs
-            layer_input_kwargs = cache.layer_input_kwargs
-            position_ids = cache.position_ids
-            attention_masks = cache.attention_masks
+            branch_caches = getattr(cache, "branch_first_layer_inputs", None)
+            branch_cache = branch_caches.get(layer_index) if branch_caches else None
+            if branch_cache is not None:
+                layer_inputs = branch_cache.layer_inputs
+                layer_input_kwargs = branch_cache.layer_input_kwargs
+                position_ids = branch_cache.position_ids
+                attention_masks = branch_cache.attention_masks
+            else:
+                layer_inputs = cache.layer_inputs
+                layer_input_kwargs = cache.layer_input_kwargs
+                position_ids = cache.position_ids
+                attention_masks = cache.attention_masks
             looper._prepare_layer_direct_state_for_forward(
                 module,
                 cur_layer_device,
@@ -905,10 +913,30 @@ def run_layer_stage(
             # one forward config instead of a group of unrelated flags.
             forward = processor.forward
 
-            if is_input_embeddings_module:
-                layer_inputs = processor.inputs_cache.src_inputs
+            branch_caches = getattr(
+                processor.inputs_cache, "branch_first_layer_inputs", None
+            )
+            branch_cache = (
+                branch_caches.get(layer_index)
+                if branch_caches and not is_embeddings_module and not is_lm_head_module
+                else None
+            )
+            if branch_cache is not None:
+                # Concurrent module-tree branches restart from their own
+                # captured first-layer inputs instead of the previous branch's
+                # final hidden state.
+                layer_inputs = branch_cache.layer_inputs
+                layer_input_kwargs = branch_cache.layer_input_kwargs
+                position_ids = branch_cache.position_ids
+                attention_masks = branch_cache.attention_masks
             else:
-                layer_inputs = processor.inputs_cache.layer_inputs
+                if is_input_embeddings_module:
+                    layer_inputs = processor.inputs_cache.src_inputs
+                else:
+                    layer_inputs = processor.inputs_cache.layer_inputs
+                layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
+                position_ids = processor.inputs_cache.position_ids
+                attention_masks = processor.inputs_cache.attention_masks
             input_lifetime_diagnostic = getattr(
                 layer_inputs, "lifetime_diagnostic", None
             )
@@ -918,9 +946,6 @@ def run_layer_stage(
                 ).lifetime_diagnostic
             if (is_output_embeddings_module or is_lm_head_module) and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
-            layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
-            position_ids = processor.inputs_cache.position_ids
-            attention_masks = processor.inputs_cache.attention_masks
             output_requirement = getattr(
                 looper.gptq_model, "quantization_layer_output_required", None
             )

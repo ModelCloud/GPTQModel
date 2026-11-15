@@ -550,5 +550,6 @@ tagging every definition would allow the map to be deleted.
 | `tests/module_tree/test_explicit_module_plan.py` | roles, shared containers, renamed leaves, sibling rejection, fail-closed |
 | `tests/module_tree/test_module_tree_variants.py` | tree variants produce identical declared paths |
 | `tests/module_tree/test_auto_detect.py` | auto-detection discovers every concurrent branch and stays opt-in |
+| `tests/module_tree/test_parallel_branch_calibration.py` | concurrent branches are calibrated on their own inputs; an unreachable branch fails loudly |
 | `tests/test_afmoe_support.py`, `tests/test_k2_horizon_support.py` | real MoE definitions resolve without name overrides |
 | `tests/module_tree/test_flash_model_tree_consumption.py` | real Flash-family meta models: quantizable specs, every checkpoint weight owner, roles, MoE hooks, looper helpers, Ripple custom code |

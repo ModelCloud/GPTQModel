@@ -3,8 +3,7 @@
 Some checkpoints expose more than one decoder stack as **concurrent siblings**
 under the root module. A text/vision OCR model can look like
 `model`, `vision_tower`, `lm_head`; thinker/talker pairs have the same shape.
-Those stacks are not alternatives for different layer types — they are all
-quantizable in the same run.
+Those stacks are not alternatives for different layer types.
 
 GPT-QModel represents each stack as one complete `module_tree` variant. A
 variant is a full prefix ending at the decoder `#` boundary:
@@ -16,22 +15,30 @@ module_tree = [
 ]
 ```
 
-The declaration format already supported this shape. The gap was the structural
-**auto-detection** helper: it probed a fixed candidate list and returned the
-first match, so an unregistered model could only expose one branch. This page
-describes the discovery and per-branch resolution added for
-[issue #1998](https://github.com/ModelCloud/GPTQModel/issues/1998).
+A concurrent tree is quantizable in one run only when the calibration forward
+executes **each stack's first layer**. Discovery, per-branch leaves, and
+per-branch calibration are all required: without the last one, the vision stack
+is replayed on the text decoder's final hidden state and its GPTQ Hessians are
+built from the wrong activations. A stack that the calibration data never
+reaches is now rejected instead of being silently calibrated on another stack.
+
+This page covers the discovery and per-branch resolution added for
+[issue #1998](https://github.com/ModelCloud/GPTQModel/issues/1998) and the
+per-branch calibration added for
+[issue #4116 item 1](https://github.com/ModelCloud/GPTQModel/issues/4116).
 
 ## What changed
 
 | Area | Before | After |
 | --- | --- | --- |
-| Auto-detection (`gptqmodel/models/base.py:6053`) | Fixed candidate list; first matching `ModuleList` wins. | Recursive structural walk; every concurrent decoder stack becomes a variant. |
-| Unknown-model loading (`gptqmodel/models/loader.py:1550`) | Fail-closed with no way to opt into detection. | Explicit `module_tree="auto"` opt-in; default remains fail-closed. |
-| Layer leaf resolution (`gptqmodel/looper/module_looper.py:2125`) | One flat union of every variant's leaves applied to every layer. | Each layer uses the variant that owns its prefix. |
-| Subset planning (`gptqmodel/looper/stage_subset.py:665`) | Sibling-only leaves were requested from the wrong branch. | Branch-local `simple_layer_modules` / `full_layer_modules`. |
-| Hook skipping (`gptqmodel/looper/stage_layer.py:660`) | One global `:!` set. | Per-branch `:!` set for decoder layers. |
-| Failure contract | A candidate with no leaves silently fell through to `None`. | Actionable `ValueError` when no branch is resolvable. |
+| Auto-detection (`gptqmodel/models/base.py:6118`) | Fixed candidate list; first matching `ModuleList` wins. | Recursive structural walk; every concurrent decoder stack becomes a variant. |
+| Unknown-model loading (`gptqmodel/models/loader.py:1579`) | Fail-closed with no way to opt into detection. | Explicit `module_tree="auto"` opt-in; default remains fail-closed. |
+| Layer leaf resolution (`gptqmodel/looper/module_looper.py:2133`) | One flat union of every variant's leaves applied to every layer. | Each layer uses the variant that owns its prefix. |
+| Subset planning (`gptqmodel/looper/stage_subset.py`) | Sibling-only leaves were requested from the wrong branch. | Branch-local `simple_layer_modules` / `full_layer_modules`. |
+| Hook skipping (`gptqmodel/looper/stage_layer.py`) | One global `:!` set. | Per-branch `:!` set for decoder layers. |
+| Calibration capture (`gptqmodel/looper/stage_inputs_capture.py:136`) | One pre-hook on `layers[0]`; `StopForward` after the first text layer. | One pre-hook per branch first layer; full forward; per-branch caches. |
+| Replay boundary (`gptqmodel/looper/stage_layer.py:908`) | Every layer replayed on the previous layer's output. | A branch's first layer restarts from that branch's captured inputs. |
+| Unreachable branch | Silently calibrated on another branch's activations. | `ValueError` naming the branch and calibration batch. |
 
 ## Discovery flow
 
@@ -122,6 +129,65 @@ The full dotted layer name is preserved end to end. `model.layers.0` and
 patterns, ignore/disable globs, and per-module configs keep resolving without a
 branch-index rewrite.
 
+## Per-branch calibration capture
+
+`get_layers_with_prefixes()` concatenates the variants into one flat layer
+list. `_branch_first_layer_indices(layer_names)` finds the index where the
+prefix changes. A single-stack model keeps the historical early-stop capture:
+hook `layers[0]`, capture one batch, raise `StopForward`.
+
+A multi-stack model cannot early-stop at the first stack, because the later
+stack's real input is produced by the model forward, not by the first stack.
+The capture stage therefore:
+
+1. Materializes every decoder layer so the full forward can execute.
+2. Registers one pre-hook on each branch's first layer.
+3. Runs the calibration forward once per batch.
+4. Captures each branch's first-layer inputs, attention mask, position ids and
+   replay kwargs into `InputCache.branch_first_layer_inputs`.
+5. Raises `StopForward` once every branch's first layer has been captured.
+6. Raises `ValueError` if any branch's first layer was not reached in a batch.
+
+```mermaid
+flowchart TD
+    G["get_layers_with_prefixes()"] --> B["_branch_first_layer_indices(layer_names)"]
+    B --> N{"branch count"}
+    N -->|1| OLD["historical path:<br/>hook layers[0], early stop"]
+    N -->|N| MAT["materialize every decoder layer"]
+    MAT --> H["pre-hook each branch first layer"]
+    H --> F["run full calibration forward"]
+    F --> C{"all branch first layers captured?"}
+    C -->|no| ERR["ValueError:<br/>branch never reached<br/>name branch + batch"]
+    C -->|yes| CACHE["InputCache.branch_first_layer_inputs"]
+    CACHE --> REPLAY["run_layer_stage()"]
+    REPLAY --> R{"layer is a branch first layer?"}
+    R -->|yes| RESET["restore branch layer_inputs / kwargs / masks"]
+    R -->|no| PREV["use previous layer output"]
+    RESET --> Q["quantize branch layers"]
+    PREV --> Q
+    style ERR fill:#ffa39e,stroke:#a8071a
+    style CACHE fill:#d9f7be,stroke:#237804
+```
+
+The replay stage checks the flat `layer_index` against
+`InputCache.branch_first_layer_inputs`. A branch boundary replaces
+`layer_inputs`, `layer_input_kwargs`, `position_ids` and `attention_masks` with
+that branch's captured values; the next layer in the branch continues from the
+branch's own output chain. The old behavior fed `vision_tower.layers.0` the
+text decoder's last hidden state and the text attention mask.
+
+### Cost and scope
+
+- Multi-branch capture materializes all decoder layers and runs the full model
+  forward once per calibration batch. The single-stack path keeps the
+  early-stop optimization and is byte-identical.
+- A branch is identified by a prefix change in the flattened layer names. The
+  registered multi-variant trees (`mllama`, `qwen2.5-omni`, `qwen3-omni`,
+  `hrm_text`) are layout alternatives where only one stack exists in the live
+  model, so they take the single-stack path and are unaffected.
+- A recurrent branch that invokes its first layer more than once per sample is
+  captured once per batch at the first invocation.
+
 ## Failure and ambiguity contract
 
 ```mermaid
@@ -136,22 +202,28 @@ flowchart TD
     F -->|yes| OK["attach multi-variant tree"]
     D --> G{"stack has no Linear/Conv?"}
     G -->|yes| SKIP["warn and skip that stack"]
+    OK --> CAP["per-branch calibration capture"]
+    CAP --> H{"branch first layer reached?"}
+    H -->|no| E4["ValueError:<br/>branch never reached"]
+    H -->|yes| RUN["quantize every branch"]
     style E1 fill:#ffa39e,stroke:#a8071a
     style E2 fill:#ffa39e,stroke:#a8071a
     style E3 fill:#ffa39e,stroke:#a8071a
+    style E4 fill:#ffa39e,stroke:#a8071a
     style SKIP fill:#fff1b8,stroke:#ad8b00
-    style OK fill:#d9f7be,stroke:#237804
+    style RUN fill:#d9f7be,stroke:#237804
 ```
 
 | Situation | Behavior |
 | --- | --- |
 | Unknown model, no `module_tree` argument | `ValueError`; fail-closed default is unchanged. |
-| `module_tree="auto"`, one stack | Returns the historical flat tree. |
+| `module_tree="auto"`, one stack | Returns the historical flat tree; early-stop capture unchanged. |
 | `module_tree="auto"`, N stacks | Returns N complete variants with full prefixes. |
 | `module_tree="auto"`, no stack | `ValueError` naming the model type and the two remedies. |
 | `module_tree="auto"` on `from_quantized` | `ValueError`; quantized weights no longer expose dense `Linear` leaves. |
 | Several variants share one decoder prefix | Falls back to the historical merged declaration instead of picking one alternative. |
 | Explicit list/tuple `module_tree` | Attached to the loaded model before tree resolution. |
+| Calibration forward never reaches a branch first layer | `ValueError` naming the branch and batch; no branch is calibrated on another branch's activations. |
 
 ## Usage
 
@@ -167,6 +239,11 @@ model = GPTQModel.load(
     module_tree="auto",
 )
 ```
+
+The calibration data must execute each declared stack. For a text/vision model,
+that means examples carrying the image inputs the model forward consumes; a
+text-only sample that never runs the vision tower is rejected with an actionable
+error rather than silently quantizing it from text hidden states.
 
 Explicit declaration, for a branch shape discovery cannot infer:
 
@@ -192,6 +269,9 @@ model.gptqmodel_effective_module_tree = module_tree
 
 - **Quantized checkpoints.** `module_tree="auto"` requires the dense source
   model; pass an explicit tree to `from_quantized`.
+- **Unreachable branches.** A branch whose first layer is never executed by the
+  calibration forward is rejected. Provide calibration data that exercises it,
+  or remove the branch from the tree.
 - **MoE leaf discovery.** Auto-detection maps direct transformer parents
   (`self_attn`, `mlp`, ...). A branch whose routed experts are nested below
   those parents needs an explicit `:moe` declaration; the detector does not
@@ -201,6 +281,10 @@ model.gptqmodel_effective_module_tree = module_tree
   declaration rather than selecting one alternative per layer.
 - **Non-sequence stacks.** A decoder exposed as a single module or
   `nn.Sequential` is not detected as a branch. Declare it explicitly.
+- **Deferred packed-floatx branches.** Multi-branch capture materializes every
+  decoder layer before the forward. A branch that only supports deferred
+  packed-floatx materialization may fail at that boundary; declare it in a
+  separate run or extend the model's `prepare_input_capture_layer`.
 
 ## Tests
 
@@ -209,6 +293,7 @@ model.gptqmodel_effective_module_tree = module_tree
 | `tests/module_tree/test_auto_detect.py::test_auto_detect_discovers_every_concurrent_branch` | Two sibling stacks produce two variants. |
 | `tests/module_tree/test_auto_detect.py::test_auto_detected_parallel_tree_resolves_every_prefixed_layer` | Both prefixes and every layer name are reachable. |
 | `tests/module_tree/test_auto_detect.py::test_each_branch_keeps_its_own_leaf_declaration` | A text layer never requests a vision-only leaf and vice versa. |
-| `tests/module_tree/test_auto_detect.py::test_auto_module_tree_requires_an_unquantized_source_and_resolvable_branch` | The fail-closed errors are actionable. |
+| `tests/module_tree/test_parallel_branch_calibration.py::test_parallel_branch_calibration_uses_each_branch_inputs` | Equal-width and different-width branches are calibrated on their own inputs; no vision input equals a text output. |
+| `tests/module_tree/test_parallel_branch_calibration.py::test_parallel_branch_calibration_fails_when_branch_is_unreached` | A text-only forward raises the actionable branch/batch error. |
 | `tests/module_tree/test_module_tree_variants.py` | Existing explicit multi-variant trees still resolve. |
 | `tests/test_tiny_moe_quant_smoke.py` | Single-branch full quantization still passes. |
