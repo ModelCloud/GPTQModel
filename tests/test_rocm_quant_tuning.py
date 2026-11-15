@@ -221,3 +221,29 @@ def test_default_rocblas_path_does_not_warn(monkeypatch):
     rocm.quantize_tuning("gfx1201")
 
     assert warnings == []
+
+
+@pytest.mark.parametrize("value", ["", "0", "off", "default"])
+def test_opt_out_spellings_warn_about_reproducibility(monkeypatch, value):
+    """Every spelling that skips the pin must be visible (issue #4123)."""
+
+    warnings = _capture_warnings(monkeypatch)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
+
+    tuning = rocm.quantize_tuning("gfx1201")
+
+    assert tuning["blas_backend"] == value
+    assert len(warnings) == 1
+    assert "will not pin rocBLAS" in warnings[0][0]
+
+
+def test_unknown_spelling_still_falls_back_to_rocblas_without_warning(monkeypatch):
+    warnings = _capture_warnings(monkeypatch)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, "bogus")
+    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
+
+    assert rocm.quantize_tuning("gfx1201")["blas_backend"] == "rocblas"
+    assert warnings == []

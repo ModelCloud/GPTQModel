@@ -61,10 +61,19 @@ backend whose per-process kernel selection #4075/#4079 removed.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| BLAS depth | none; per-entry save/restore (`utils/rocm.py:240-283` at `718256fd7`) | `_QUANT_BLAS_GUARD_LOCK`, `_QUANT_BLAS_GUARD_DEPTH`, `_QUANT_BLAS_GUARD_PREVIOUS` |
+| BLAS depth | none; per-entry save/restore (`utils/rocm.py:240-283` at `718256fd7`) | `_QUANT_BLAS_GUARD_LOCK`, `_QUANT_BLAS_GUARD_DEPTH`, `_QUANT_BLAS_GUARD_PREVIOUS`, `_QUANT_BLAS_GUARD_TARGET` |
 | TF32 depth | none; per-entry save/restore (`utils/torch.py:1021` at `718256fd7`) | `_TF32_GUARD_LOCK`, `_TF32_GUARD_DEPTH`, `_TF32_GUARD_PREVIOUS` |
 | BF16x3 depth | none; per-entry save/restore in two copies (`utils/cpu_features.py:88` and `nn_modules/exllamav3_torch.py:74` at `fe302047d`) | `_CPU_BF16X3_LOCK` (`RLock`), `_CPU_BF16X3_DEPTH`, `_CPU_BF16X3_RESTORE` in `cpu_features.py`; the EXL3 copy is deleted |
 | Restore rule | every exit restores | only the exit that reaches depth 0 restores |
+
+The BLAS guard also carries a *target*, because a quantization run may need
+rocBLAS (it accumulates a Hessian) or hipBLASLt (it does not). Runs that need
+the same target share the refcount. Runs that need different targets cannot
+share one process-wide setting, so the later run waits for the active one to
+finish rather than flipping the backend under it; without that, a concurrent
+AWQ run quantized part of its layers on each backend and its checkpoint
+depended on when the other thread exited (issue #4123). See
+[ROCm default process environment](rocm-default-environment.md#quantization-blas-scope).
 
 The BF16x3 guard used to exist twice. `nn_modules/exllamav3_torch.py` kept its
 own `_cpu_bf16x3_matmul` copy of the save/restore pair next to the one in

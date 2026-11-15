@@ -227,8 +227,13 @@ def _cached_quantization_model():
 
 
 @pytest.mark.skipif(not IS_ROCM, reason="ROCm-only cross-process bug")
-def test_quantization_is_reproducible_across_processes(tmp_path):
-    """Two separate quantization processes must save identical tensors."""
+@pytest.mark.parametrize("method", ["gptq", "qqq"])
+def test_quantization_is_reproducible_across_processes(tmp_path, method):
+    """Two separate quantization processes must save identical tensors.
+
+    Both methods accumulate a calibration Hessian, so both must run it on
+    rocBLAS: GPTQ's fp32 ``X^T X`` and QQQ's ``add_batch`` GEMM (issue #4123).
+    """
 
     model_id = _cached_quantization_model()
     if model_id is None:
@@ -241,14 +246,17 @@ def test_quantization_is_reproducible_across_processes(tmp_path):
         from gptqmodel import GPTQModel, QuantizeConfig
 
         out_path = sys.argv[1]
+        method = sys.argv[2]
         samples = [
             f"Calibration sample {i}: GPT-QModel quantizes large language models with GPTQ, "
             "AWQ and ParoQuant while keeping the checkpoint in its packed representation."
             for i in range(32)
         ]
+        kwargs = dict(bits=4, group_size=128, sym=True, offload_to_disk=False)
+        if method != "gptq":
+            kwargs["method"] = method
         model = GPTQModel.load(
-            os.environ["REPRO_MODEL_ID"],
-            QuantizeConfig(bits=4, group_size=128, sym=True, offload_to_disk=False),
+            os.environ["REPRO_MODEL_ID"], QuantizeConfig(**kwargs)
         )
         model.quantize(samples, batch_size=1)
 
@@ -256,12 +264,16 @@ def test_quantization_is_reproducible_across_processes(tmp_path):
         for name, tensor in model.model.state_dict().items():
             if not torch.is_tensor(tensor) or tensor.device.type == "meta":
                 continue
-            payload = tensor.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes()
+            # reshape(-1) handles 0-dim scalars, which some checkpoint layouts
+            # now carry (view() rejects a 0-dim tensor of a different dtype).
+            flat = tensor.detach().to("cpu").contiguous().reshape(-1)
+            payload = flat.view(torch.uint8).numpy().tobytes()
             hashes[name] = hashlib.sha256(payload).hexdigest()
         with open(out_path, "w") as handle:
             json.dump(hashes, handle, sort_keys=True)
         print(json.dumps({
             "blas": os.environ.get("ROCBLAS_USE_HIPBLASLT"),
+            "method": method,
             "tensors": len(hashes),
         }))
     """
@@ -272,6 +284,7 @@ def test_quantization_is_reproducible_across_processes(tmp_path):
         proc = _run_child(
             script,
             str(out_path),
+            method,
             env=_child_env(REPRO_MODEL_ID=model_id),
             timeout=3600,
         )
@@ -283,6 +296,8 @@ def test_quantization_is_reproducible_across_processes(tmp_path):
     # Deterministic regression for the default itself: the child inherited no
     # caller value, so the installed default is what rocBLAS saw.
     assert [run["blas"] for run in runs] == ["0", "0"]
+
+    assert [run["method"] for run in runs] == [method, method]
 
     first, second = runs[0]["hashes"], runs[1]["hashes"]
     assert first and len(first) == len(second)

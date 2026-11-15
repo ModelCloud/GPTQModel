@@ -1324,10 +1324,12 @@ class TorchOpsJitExtension:
             if resolved.exists() and _path_is_within(resolved, checkout):
                 # An include root inside the checkout outside the staged source
                 # root is still hipified in place; stage it under the cache.
+                # Refresh on every call: the cache fingerprint hashes the
+                # *staged* copy, so a stale stage would hide a header edit and
+                # reuse a binary built against the old header.
                 external = staging_root / "_checkout" / resolved.relative_to(checkout)
-                if not external.exists():
-                    external.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(resolved, external, dirs_exist_ok=True)
+                external.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(resolved, external, dirs_exist_ok=True)
                 staged_includes.append(str(external))
                 continue
             staged_includes.append(include)

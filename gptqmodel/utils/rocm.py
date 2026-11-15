@@ -6,6 +6,7 @@
 import os
 import re
 import threading
+import time
 from contextlib import contextmanager
 
 import torch
@@ -148,28 +149,36 @@ def _requested_quant_blas_backend() -> str:
 
 
 def _warn_if_blas_is_not_reproducible(blas_backend: str) -> None:
-    """Warn once when the opt-in gives up cross-process reproducibility.
+    """Warn once when the configuration gives up cross-process reproducibility.
 
-    The opt-in exists for speed, so it is not silently made deterministic.
-    hipBLASLt selects a different GEMM kernel per process for the same shape,
-    so two identical runs in separate processes can save different
-    checkpoints. Both opt-in spellings are covered: the GPT-QModel variable and
-    rocBLAS's own forwarding switch.
+    Every spelling that skips the rocBLAS pin is covered, because all of them
+    leave torch on hipBLASLt, which selects a different GEMM kernel per process
+    for the same shape:
+
+    * ``hipblaslt`` / ``cublaslt`` - the documented opt-in.
+    * ``""`` / ``0`` / ``off`` / ``default`` - the documented opt-out, which
+      leaves torch's backend alone (hipBLASLt by default on this stack).
+    * ``ROCBLAS_USE_HIPBLASLT`` truthy - rocBLAS forwards to hipBLASLt.
+
+    The opt-ins exist for speed, so none of them is silently made
+    deterministic; they only have to be visible.
     """
 
     global _REPRODUCIBILITY_WARNED
     if _REPRODUCIBILITY_WARNED:
         return
     forwarded = os.getenv(_HIPBLASLT_ENV, "").strip().lower()
-    if blas_backend not in ("hipblaslt", "cublaslt") and forwarded not in _HIPBLASLT_ENV_TRUTHY:
+    if blas_backend not in QUANT_BLAS_BACKEND_DISABLED and forwarded not in _HIPBLASLT_ENV_TRUTHY:
         return
     _REPRODUCIBILITY_WARNED = True
     log.warning(
-        "ROCm hipBLASLt is selected for quantization (%s). hipBLASLt chooses a "
-        "different GEMM kernel per process for the same shape, so identical runs in "
-        "separate processes can save different checkpoints. The reproducible default "
-        "keeps rocBLAS (ROCBLAS_USE_HIPBLASLT=0); see docs/rocm-default-environment.md.",
+        "ROCm quantization will not pin rocBLAS (%s), so hipBLASLt may choose a "
+        "different GEMM kernel in another process for the same shape and identical "
+        "runs can save different checkpoints. The reproducible default is "
+        "`%s=rocblas` with `%s` unset; see docs/rocm-default-environment.md.",
         f"{QUANT_BLAS_BACKEND_ENV}={blas_backend}, {_HIPBLASLT_ENV}={forwarded or 'unset'}",
+        QUANT_BLAS_BACKEND_ENV,
+        _HIPBLASLT_ENV,
     )
 
 
@@ -274,34 +283,59 @@ def _is_hipblaslt(backend) -> bool:
     return name.rsplit(".", 1)[-1].strip() == "Cublaslt"
 
 
+# The two backends this guard can pin. ``torch`` spells rocBLAS ``hipblas``.
+_QUANT_BLAS_TARGET_ROCBLAS = _QUANT_BLAS_BACKEND_ALIASES[QUANT_BLAS_BACKEND_DEFAULT]
+_QUANT_BLAS_TARGET_HIPBLASLT = "cublaslt"
+
 _QUANT_BLAS_GUARD_LOCK = threading.RLock()
+_QUANT_BLAS_GUARD_COND = threading.Condition(_QUANT_BLAS_GUARD_LOCK)
 _QUANT_BLAS_GUARD_DEPTH = 0
 _QUANT_BLAS_GUARD_PREVIOUS = None
+# Backend the active scopes require, or ``None`` when the guard is not
+# controlling the process backend (the caller's selection is authoritative).
+_QUANT_BLAS_GUARD_TARGET = None
+_QUANT_BLAS_GUARD_RESTORE = False
+# A mixed-backend overlap waits for the active run instead of switching the
+# backend under it. The bound only exists so a wedged run cannot hang a CI job
+# forever; the degraded path is loud rather than silent.
+_QUANT_BLAS_GUARD_WAIT_SECONDS = 1800.0
+_QUANT_BLAS_GUARD_WAIT_WARNED = False
+# Per-thread nesting depth. A nested scope always adopts the pin its own run
+# already holds; waiting for itself would deadlock.
+_QUANT_BLAS_GUARD_THREAD_LOCAL = threading.local()
 
 
 @contextmanager
-def quant_blas_backend(device=None):
-    """Route one deterministic BLAS phase to rocBLAS.
+def quant_blas_backend(device=None, *, deterministic: bool | None = None):
+    """Pin the quantization BLAS backend for the duration of one run.
 
-    The override is entered only for a run plan that builds a Hessian (the GPTQ
-    family), not the whole quantization run: AWQ/RTN/QQQ must keep torch's
-    faster hipBLASLt backend for their fp16/bf16 GEMMs. The requested backend
-    comes from ``quantize_tuning(device)``, so CDNA and RDNA4 both default to
-    rocBLAS. It is skipped on non-ROCm hosts, when the platform lacks
-    ``torch.backends.cuda.preferred_blas_library``, when the user already
-    selected a non-hipBLASLt backend, and when ``GPTQMODEL_ROCM_QUANT_BLAS``
-    asks to keep torch's default (``hipblaslt``).
+    ``deterministic=True`` pins rocBLAS: the method accumulates an input
+    Hessian from calibration activations, and its fp32 GEMMs must be
+    reproducible across processes. ``deterministic=False`` pins hipBLASLt: the
+    method has no Hessian, so it keeps the fast fp16/bf16 kernels. ``None``
+    resolves to ``True`` when ``quantize_tuning`` reports a rocBLAS-class
+    backend, which keeps the historical behaviour for direct callers such as
+    the per-call Hessian contexts in ``quantization/gptq.py``.
 
-    ``torch.backends.cuda.preferred_blas_library`` is process-global. Two
-    concurrent ``quantize()`` calls therefore share one override: the guard is
-    reference-counted under a reentrant lock so only the first entry captures
-    the user's setting and only the last exit restores it. Without the count,
-    the first run to finish restored hipBLASLt while the other run was still
-    quantizing (issue #4094). The count also makes the nested per-call contexts
-    in ``quantization/gptq.py`` free while the method-scoped override is active.
+    The pin is skipped on non-ROCm hosts, when the platform lacks
+    ``torch.backends.cuda.preferred_blas_library``, when the caller already
+    selected a backend the guard must not override, and when
+    ``GPTQMODEL_ROCM_QUANT_BLAS`` is one of ``QUANT_BLAS_BACKEND_DISABLED``
+    (the documented reproducibility opt-out).
+
+    ``torch.backends.cuda.preferred_blas_library`` is process-global, so the
+    guard is reference-counted under a reentrant lock: runs that need the same
+    backend share it, and the backend is restored only when the last one exits
+    (issue #4094). Runs that need *different* backends cannot share one
+    process-wide setting, so the later run waits for the active one to finish
+    instead of flipping the backend under it. Without that, a concurrent AWQ
+    run quantized part of its layers on rocBLAS and the rest on hipBLASLt, and
+    its checkpoint depended on when the other thread exited (issue #4123).
     """
 
     global _QUANT_BLAS_GUARD_DEPTH, _QUANT_BLAS_GUARD_PREVIOUS
+    global _QUANT_BLAS_GUARD_TARGET, _QUANT_BLAS_GUARD_RESTORE
+    global _QUANT_BLAS_GUARD_WAIT_WARNED
 
     if not IS_ROCM:
         yield
@@ -313,39 +347,79 @@ def quant_blas_backend(device=None):
         yield
         return
 
-    entered = False
-    with _QUANT_BLAS_GUARD_LOCK:
-        if _QUANT_BLAS_GUARD_DEPTH > 0:
-            _QUANT_BLAS_GUARD_DEPTH += 1
-            entered = True
-        else:
-            previous = preferred_blas_library()
-            if previous is not None and _is_hipblaslt(previous):
-                try:
-                    setter(_QUANT_BLAS_BACKEND_ALIASES.get(requested, requested))
-                    applied = preferred_blas_library()
-                except Exception:
-                    applied = None
-                if applied is not None and not _is_hipblaslt(applied):
-                    _QUANT_BLAS_GUARD_PREVIOUS = previous
-                    _QUANT_BLAS_GUARD_DEPTH = 1
-                    entered = True
+    if deterministic is None:
+        deterministic = True
+    want = _QUANT_BLAS_TARGET_ROCBLAS if deterministic else _QUANT_BLAS_TARGET_HIPBLASLT
 
-    if not entered:
-        # The platform refused the switch or the caller already selected a
-        # non-hipBLASLt backend; keep the original backend.
-        yield
-        return
+    with _QUANT_BLAS_GUARD_COND:
+        deadline = time.monotonic() + _QUANT_BLAS_GUARD_WAIT_SECONDS
+        announced = False
+        while (
+            _QUANT_BLAS_GUARD_DEPTH > 0
+            and _QUANT_BLAS_GUARD_TARGET not in (None, want)
+            and getattr(_QUANT_BLAS_GUARD_THREAD_LOCAL, "depth", 0) == 0
+        ):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not announced:
+                announced = True
+                log.info(
+                    "ROCm BLAS guard: another quantization run holds the %s backend; "
+                    "waiting for it to finish so neither run changes backend mid-way.",
+                    _QUANT_BLAS_GUARD_TARGET,
+                )
+            _QUANT_BLAS_GUARD_COND.wait(timeout=min(remaining, 60.0))
+
+        if _QUANT_BLAS_GUARD_DEPTH == 0:
+            previous = preferred_blas_library()
+            _QUANT_BLAS_GUARD_PREVIOUS = previous
+            _QUANT_BLAS_GUARD_TARGET = None
+            _QUANT_BLAS_GUARD_RESTORE = False
+            if previous is not None:
+                if want == _QUANT_BLAS_TARGET_ROCBLAS and _is_hipblaslt(previous):
+                    try:
+                        setter(want)
+                        applied = preferred_blas_library()
+                    except Exception:
+                        applied = None
+                    if applied is not None and not _is_hipblaslt(applied):
+                        _QUANT_BLAS_GUARD_TARGET = want
+                        _QUANT_BLAS_GUARD_RESTORE = True
+                elif want == _QUANT_BLAS_TARGET_HIPBLASLT and _is_hipblaslt(previous):
+                    # Already the fast backend. Record ownership anyway so a
+                    # Hessian run that starts now waits instead of flipping it.
+                    _QUANT_BLAS_GUARD_TARGET = want
+        elif _QUANT_BLAS_GUARD_TARGET not in (None, want):
+            # The wait above expired: adopt the active backend instead of
+            # changing it under the running quantization.
+            if not _QUANT_BLAS_GUARD_WAIT_WARNED:
+                _QUANT_BLAS_GUARD_WAIT_WARNED = True
+                log.warning(
+                    "ROCm BLAS guard: waited %.0fs for another quantization run pinned "
+                    "to %s; continuing on that backend. The resulting checkpoint may "
+                    "differ from a serial run.",
+                    _QUANT_BLAS_GUARD_WAIT_SECONDS,
+                    _QUANT_BLAS_GUARD_TARGET,
+                )
+        _QUANT_BLAS_GUARD_THREAD_LOCAL.depth = getattr(_QUANT_BLAS_GUARD_THREAD_LOCAL, "depth", 0) + 1
+        _QUANT_BLAS_GUARD_DEPTH += 1
 
     try:
         yield
     finally:
-        with _QUANT_BLAS_GUARD_LOCK:
+        with _QUANT_BLAS_GUARD_COND:
+            _QUANT_BLAS_GUARD_THREAD_LOCAL.depth = (
+                getattr(_QUANT_BLAS_GUARD_THREAD_LOCAL, "depth", 1) - 1
+            )
             _QUANT_BLAS_GUARD_DEPTH -= 1
             if _QUANT_BLAS_GUARD_DEPTH == 0:
                 previous = _QUANT_BLAS_GUARD_PREVIOUS
+                restore = _QUANT_BLAS_GUARD_RESTORE
                 _QUANT_BLAS_GUARD_PREVIOUS = None
-                if previous is not None:
+                _QUANT_BLAS_GUARD_TARGET = None
+                _QUANT_BLAS_GUARD_RESTORE = False
+                if restore and previous is not None:
                     try:
                         setter(previous)
                     except Exception:
@@ -354,3 +428,4 @@ def quant_blas_backend(device=None):
                         # restore must not turn a successful quantize into a
                         # failure.
                         pass
+                _QUANT_BLAS_GUARD_COND.notify_all()
