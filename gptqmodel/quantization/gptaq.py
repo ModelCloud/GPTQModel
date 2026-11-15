@@ -16,9 +16,14 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
+from ..utils.fallback import resolve_fallback_strategy
+from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .gptq import GPTQ
 from .quantizer import _neutralize_dead_columns
+
+
+log = setup_logger()
 
 
 class GPTAQ(GPTQ):
@@ -39,6 +44,13 @@ class GPTAQ(GPTQ):
         self._gptaq_batch_request_count = 0
 
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
+        # Routed experts receive a different token subset on the quantized path
+        # than they did on the full-precision pass, so `native_inps` cannot be
+        # paired by call order. Fall back to dXXT = 0 (plain GPTQ) for them;
+        # the structural mark comes from the model's module plan.
+        self._use_native_delta = not bool(module.state.get("is_routed_expert", False))
+        if not self._use_native_delta:
+            self.native_inps = []
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
@@ -76,19 +88,23 @@ class GPTAQ(GPTQ):
 
     def process_batch(self, inp):
         inp = inp.to(dtype=torch.float32)
-        native_inp = self.native_inps.pop(0).to(device=inp.device, dtype=torch.float32)
+        if self._use_native_delta:
+            native_inp = self.native_inps.pop(0).to(device=inp.device, dtype=torch.float32)
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-            native_inp = native_inp.unsqueeze(0)
+            if self._use_native_delta:
+                native_inp = native_inp.unsqueeze(0)
 
         batch_request_count = inp.shape[0]
 
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
-                native_inp = native_inp.reshape((-1, inp.shape[-1]))
+                if self._use_native_delta:
+                    native_inp = native_inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
-            native_inp = native_inp.t()
+            if self._use_native_delta:
+                native_inp = native_inp.t()
 
         if isinstance(self.module, nn.Conv2d):
             unfold = nn.Unfold(
@@ -100,28 +116,32 @@ class GPTAQ(GPTQ):
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
-            native_inp = unfold(native_inp)
-            native_inp = native_inp.permute([1, 0, 2]).flatten(1)
+            if self._use_native_delta:
+                native_inp = unfold(native_inp)
+                native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32,
                                  device=inp.device)
-            self.dXXT = self.H.clone()
+            if self._use_native_delta:
+                self.dXXT = self.H.clone()
         else:
             ratio = self._gptaq_batch_request_count / (
                 self._gptaq_batch_request_count + batch_request_count
             )
             self.H *= ratio
-            self.dXXT *= ratio
+            if self._use_native_delta and self.dXXT is not None:
+                self.dXXT *= ratio
 
         self._gptaq_batch_request_count += batch_request_count
         scale = math.sqrt(2 / self._gptaq_batch_request_count)
         inp = scale * inp.float()
 
         self.H += inp.matmul(inp.t())
-        native_inp = scale * native_inp
-        self.dXXT += (native_inp - inp).matmul(inp.t())
+        if self._use_native_delta:
+            native_inp = scale * native_inp
+            self.dXXT += (native_inp - inp).matmul(inp.t())
         self.nsamples += inp.shape[1]
 
     @staticmethod
@@ -148,6 +168,21 @@ class GPTAQ(GPTQ):
             self,
             blocksize=128,
     ):
+        if self.nsamples == 0 or self.H is None:
+            # No calibration rows reached this module (for example an unrouted
+            # expert). GPTQ falls back to data-independent quantization; mirror
+            # that here instead of dereferencing a missing Hessian.
+            strategy = resolve_fallback_strategy(self.fallback)
+            log.warn(
+                "Quantization: Module `%s` -> GPTAQ received no calibration "
+                "samples; using `%s` fallback quantization.",
+                self.name,
+                strategy.value,
+            )
+            self.native_inps = []
+            self.dXXT = None
+            return self._fallback_quantize(strategy, blocksize)
+
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
@@ -167,7 +202,10 @@ class GPTAQ(GPTQ):
 
         H = self.H
         del self.H
-        _neutralize_dead_columns(H, W, self.dXXT)
+        if self._use_native_delta:
+            _neutralize_dead_columns(H, W, self.dXXT)
+        else:
+            _neutralize_dead_columns(H, W)
 
         # g_idx = []
         scale = []
@@ -190,7 +228,8 @@ class GPTAQ(GPTQ):
             perm = torch.argsort(torch.diag(H), descending=True)
             W = W[:, perm]
             H = H[perm][:, perm]
-            self.dXXT = self.dXXT[perm][:, perm]
+            if self._use_native_delta:
+                self.dXXT = self.dXXT[perm][:, perm]
             invperm = torch.argsort(perm)
 
         Losses = torch.zeros_like(W)
@@ -199,8 +238,11 @@ class GPTAQ(GPTQ):
         Hinv, damp = self.hessian_inverse(H)
         if self.qcfg.gptaq is None:
             raise ValueError("GPTAQ requires `gptaq` configuration.")
-        P = self.qcfg.gptaq.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
-        del self.dXXT
+        if self._use_native_delta:
+            P = self.qcfg.gptaq.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
+            del self.dXXT
+        else:
+            P = None
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -211,7 +253,7 @@ class GPTAQ(GPTQ):
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
-            P1 = P[i1:i2, i1:i2]
+            P1 = P[i1:i2, i1:i2] if P is not None else None
 
             for i in range(count):
                 w = W1[:, i]
@@ -238,14 +280,20 @@ class GPTAQ(GPTQ):
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(
-                    P1[i, i:].unsqueeze(0))
+                if P1 is None:
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                else:
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0)) - w.unsqueeze(1).matmul(
+                        P1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
 
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
+            if P is None:
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+            else:
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:]) - W1.matmul(P[i1:i2, i2:])
 
         del Hinv
         del P

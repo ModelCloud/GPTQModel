@@ -2014,3 +2014,31 @@ def test_q4_k_s_and_q4_k_m_export_identical_tensor_bytes():
         atol=0.0,
         rtol=0.0,
     )
+
+
+def test_gguf_k_quality_aliases_warn_and_report_uniform_bpw(monkeypatch):
+    """`q*_k_s/_m/_l` names must disclose that they store a uniform K-quant."""
+
+    from gptqmodel.quantization import config as config_module
+
+    warnings = []
+    infos = []
+
+    def fake_warn(message, *args, **kwargs):
+        warnings.append(message % args if args else message)
+
+    def fake_info(message, *args, **kwargs):
+        infos.append(message % args if args else message)
+
+    monkeypatch.setattr(config_module.log, "warn", fake_warn)
+    monkeypatch.setattr(config_module.log, "info", fake_info)
+
+    GGUFConfig(bits="q4_k_m")
+    GGUFConfig(bits="q5_k_s")
+
+    assert any("q4_k_m" in message and "Q4_K" in message for message in warnings)
+    assert any("q5_k_s" in message and "Q5_K" in message for message in warnings)
+
+    # `q5_k_s` is stored as uniform Q5_K (5.5 bpw), not 5.0.
+    GGUFConfig(bits="q5_k_s").calculate_bits_per_weight()
+    assert any("5.5 bpw" in message for message in infos)

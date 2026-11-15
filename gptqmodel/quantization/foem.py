@@ -19,9 +19,14 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
+from ..utils.fallback import resolve_fallback_strategy
+from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
 from .gptq import GPTQ
 from .quantizer import _neutralize_dead_columns
+
+
+log = setup_logger()
 
 
 _MLX_FOEM_MIN_ELEMENTS = 256 * 1024
@@ -112,13 +117,18 @@ class FOEM(GPTQ):
         self.dXXT = None
 
 
-        if self.qcfg.foem.alpha == 0:
-            self.gptaq = False
-        else:
-            self.gptaq =True
+        self._routed_expert = bool(module.state.get("is_routed_expert", False))
+        alpha_active = self.qcfg.foem.alpha != 0
+        # Routed experts receive a different token subset on the quantized path
+        # than on the full-precision pass, so their native inputs cannot be
+        # paired by call order. Keep FOEM's beta term but disable the GPTAQ
+        # (alpha) delta for them: dXXT = 0.
+        self.gptaq = alpha_active and not self._routed_expert
 
-        if self.gptaq:
+        if alpha_active:
             self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
+            if self._routed_expert:
+                self.native_inps = []
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
@@ -212,6 +222,22 @@ class FOEM(GPTQ):
             self,
             blocksize=128,
     ):
+        if self.nsamples == 0 or self.H is None:
+            # No calibration rows reached this module (for example an unrouted
+            # expert). GPTQ falls back to data-independent quantization; mirror
+            # that here instead of dereferencing a missing Hessian.
+            strategy = resolve_fallback_strategy(self.fallback)
+            log.warn(
+                "Quantization: Module `%s` -> FOEM received no calibration "
+                "samples; using `%s` fallback quantization.",
+                self.name,
+                strategy.value,
+            )
+            if self.gptaq:
+                self.native_inps = []
+            self.dXXT = None
+            return self._fallback_quantize(strategy, blocksize)
+
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
