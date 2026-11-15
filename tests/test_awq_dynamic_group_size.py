@@ -15,6 +15,25 @@ from gptqmodel.quantization.config import AWQConfig
 from gptqmodel.utils.model import create_quant_module
 
 
+def _shape_only_awq_gemm():
+    """AwqGEMMLinear's packing contract without the CUDA-extension platform gate.
+
+    ``verify_supports_params`` requires every ``SUPPORTS_*`` declaration to be
+    restated on a subclass, so copy them instead of inheriting them silently.
+    """
+
+    declarations = {
+        name: getattr(AwqGEMMLinear, name)
+        for name in dir(AwqGEMMLinear)
+        if name.startswith("SUPPORTS_")
+    }
+    declarations["validate_once"] = classmethod(lambda cls: (True, None))
+    return type("ShapeOnlyAwqGemm", (AwqGEMMLinear,), declarations)
+
+
+ShapeOnlyAwqGemm = _shape_only_awq_gemm()
+
+
 def _stub(bits=4, dynamic=None):
     class Stub:
         qcfg = AWQConfig(bits=bits, group_size=-1, sym=True, dynamic=dynamic)
@@ -59,6 +78,7 @@ def test_dynamic_group_size_selects_compatible_kernel_and_packs():
         gptq_model = SimpleNamespace(qlinear_kernel=AwqGEMMLinear)
         _module_bits = AWQProcessor._module_bits
         _module_group_size = AWQProcessor._module_group_size
+        _module_format = AWQProcessor._module_format
         _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
         _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
         _quant_device_is_npu = AWQProcessor._quant_device_is_npu
@@ -122,21 +142,24 @@ def test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features
     class Stub:
         qcfg = AWQConfig(bits=4, group_size=128, sym=True)
         format = FORMAT.GEMM
-        gptq_model = SimpleNamespace(qlinear_kernel=AwqGEMMLinear, lm_head="lm_head")
+        gptq_model = SimpleNamespace(qlinear_kernel=ShapeOnlyAwqGemm, lm_head="lm_head")
 
         def __init__(self):
             self.model = torch.nn.Module()
-            self.model.proj = torch.nn.Linear(448, 8, bias=False)
+            # Phi-tiny-MoE expert down_proj: in_features=448, out_features=4096.
+            self.model.proj = torch.nn.Linear(448, 4096, bias=False, dtype=torch.float16)
 
         _module_group_size = AWQProcessor._module_group_size
         _module_format = AWQProcessor._module_format
         _module_bits = AWQProcessor._module_bits
+        _resolve_module_kernel = AWQProcessor._resolve_module_kernel
+        _kernel_group_size_supported = AWQProcessor._kernel_group_size_supported
         _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
         _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
         _quant_device_is_npu = AWQProcessor._quant_device_is_npu
         _largest_supported_group_divisor = AWQProcessor._largest_supported_group_divisor
         _ensure_group_size_divisibility = AWQProcessor._ensure_group_size_divisibility
-        qlinear_kernel = AwqGEMMLinear
+        qlinear_kernel = ShapeOnlyAwqGemm
 
     stub = Stub()
     weight = stub.model.proj.weight.detach()
@@ -153,3 +176,106 @@ def test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features
     w_sum, row_count = _accumulate_awq_weight_mean([stub.model.proj], [64])
     assert w_sum.shape == (448,)
     assert row_count == weight.shape[0]
+
+
+def test_awq_retunes_group_size_for_non_divisible_out_features():
+    """Phi-tiny-MoE expert gate/up: in_features divides 128, out_features=448 does not.
+
+    ``AwqGEMMLinear`` requires both axes to be group multiples. The previous
+    retune only checked ``in_features``, so a 4096->448 expert projection kept
+    group_size 128 and raised in ``create_quant_module`` after calibration.
+    """
+
+    from gptqmodel.looper.awq_processor import AWQProcessor
+
+    class Stub:
+        qcfg = AWQConfig(bits=4, group_size=128, sym=True)
+        format = FORMAT.GEMM
+        gptq_model = SimpleNamespace(qlinear_kernel=ShapeOnlyAwqGemm, lm_head="lm_head")
+
+        def __init__(self):
+            self.model = torch.nn.Module()
+            # Phi-tiny-MoE expert gate_proj/up_proj: in_features=4096, out_features=448.
+            self.model.proj = torch.nn.Linear(4096, 448, bias=False, dtype=torch.float16)
+
+        _module_group_size = AWQProcessor._module_group_size
+        _module_format = AWQProcessor._module_format
+        _module_bits = AWQProcessor._module_bits
+        _resolve_module_kernel = AWQProcessor._resolve_module_kernel
+        _kernel_group_size_supported = AWQProcessor._kernel_group_size_supported
+        _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
+        _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
+        _quant_device_is_npu = AWQProcessor._quant_device_is_npu
+        _largest_supported_group_divisor = AWQProcessor._largest_supported_group_divisor
+        _ensure_group_size_divisibility = AWQProcessor._ensure_group_size_divisibility
+        qlinear_kernel = ShapeOnlyAwqGemm
+
+    stub = Stub()
+    assert stub._module_group_size("proj") == 128
+
+    # The input axis divides 128, so the old predicate accepted this module.
+    assert stub.model.proj.in_features % 128 == 0
+    # The kernel rejects it because 448 is not a multiple of 128.
+    assert not stub._kernel_group_size_supported(
+        ShapeOnlyAwqGemm,
+        "proj",
+        4096,
+        448,
+        128,
+        dtype=torch.float16,
+    )
+
+    stub._ensure_group_size_divisibility()
+
+    assert stub._module_group_size("proj") == 64
+    assert stub.qcfg.dynamic["+:^proj$"] == {"group_size": 64}
+    assert stub._kernel_group_size_supported(
+        ShapeOnlyAwqGemm,
+        "proj",
+        4096,
+        448,
+        64,
+        dtype=torch.float16,
+    )
+
+
+def test_awq_leaves_unpackable_module_untouched():
+    """Phi-tiny-MoE router (4096 -> 16) packs at no group size; do not rewrite it.
+
+    The router is declared non-quantized with ``router:!``. Retuning it to
+    per-channel would add a dynamic override that is itself invalid, so the
+    processor must leave the configured size alone.
+    """
+
+    from gptqmodel.looper.awq_processor import AWQProcessor
+
+    class Stub:
+        qcfg = AWQConfig(bits=4, group_size=128, sym=True)
+        format = FORMAT.GEMM
+        gptq_model = SimpleNamespace(qlinear_kernel=ShapeOnlyAwqGemm, lm_head="lm_head")
+
+        def __init__(self):
+            self.model = torch.nn.Module()
+            self.model.proj = torch.nn.Linear(4096, 16, bias=False, dtype=torch.float16)
+
+        _module_group_size = AWQProcessor._module_group_size
+        _module_format = AWQProcessor._module_format
+        _module_bits = AWQProcessor._module_bits
+        _resolve_module_kernel = AWQProcessor._resolve_module_kernel
+        _kernel_group_size_supported = AWQProcessor._kernel_group_size_supported
+        _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
+        _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
+        _quant_device_is_npu = AWQProcessor._quant_device_is_npu
+        _largest_supported_group_divisor = AWQProcessor._largest_supported_group_divisor
+        _ensure_group_size_divisibility = AWQProcessor._ensure_group_size_divisibility
+        qlinear_kernel = ShapeOnlyAwqGemm
+
+    stub = Stub()
+    assert not stub._kernel_group_size_supported(
+        ShapeOnlyAwqGemm, "proj", 4096, 16, -1, dtype=torch.float16
+    )
+
+    stub._ensure_group_size_divisibility()
+
+    assert stub._module_group_size("proj") == 128
+    assert stub.qcfg.dynamic is None
