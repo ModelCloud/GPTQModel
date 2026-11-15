@@ -127,6 +127,64 @@ The eight-way split reduced `2048x8192` at M=16 from about `45.29 us` to
 `23.17 us` during tuning. The retained table above is the final paired run;
 run-to-run variation on R9700 is visible in the small M values.
 
+### Apple M5 Ultra, MLX Metal
+
+The Metal kernels use the same shape set and the same M values, measured with
+`scripts/benchmark_mlx_nf12_short_m.py`. Dense BF16 `x @ W.T` on the same
+resident input is the baseline; the ratio is dense divided by NF12, so values
+below 1.0 are slower than dense.
+
+| Shape `(N, K)` | M=1 | M=4 | M=8 | M=16 |
+| --- | ---: | ---: | ---: | ---: |
+| `2048x2048` | 0.49x | 0.29x | 0.40x | 0.33x |
+| `512x2048` | 0.67x | 0.51x | 0.51x | 0.46x |
+| `8192x2048` | 0.50x | 0.40x | 0.40x | 0.29x |
+| `2048x8192` | 0.57x | 0.34x | 0.45x | 0.27x |
+| `4096x4096` | 0.60x | 0.34x | 0.42x | 0.27x |
+| `128256x2048` | 1.09x | 1.10x | 1.74x | 0.49x |
+
+The Metal measurement cannot synchronize per call: one `mx.eval` costs about
+240 us on this host regardless of the work it waits for, which is an order of
+magnitude above these kernels. Each trial therefore enqueues a bounded number
+of calls and evaluates them once, and both sides of every ratio use the same
+harness. Absolute values are steady-state throughput, not single-shot latency.
+
+The Metal dispatch differs from the CUDA and ROCm plans because the bottleneck
+does:
+
+- **M=1** runs a GEMV with 16 output columns per threadgroup. A super-atom is
+  1536 contiguous bytes covering 16 rows by 64 K values, so the threadgroup
+  reads it with coalesced `uint32` loads and each thread decodes one
+  `(lane, j)` group: three shared reads expand to eight BF16 values. The two
+  row sums a thread owns are reduced once at the end, so the K loop carries no
+  per-step reduction.
+- **M=2..16** runs a fused tile: one super-atom per K step is decoded into
+  `[k][out]` threadgroup memory and multiplied on the simdgroup matrix units,
+  so no dense BF16 weight is ever written. A split-K pass fills the grid when
+  the 16-column tile count would leave the GPU idle, and a reduce pass folds
+  the partials and applies the bias.
+- **M>16** decodes once and multiplies, because the padded 16-row MMA tile
+  would re-read the packed stream once per token block.
+
+Both packed paths read the checkpoint bytes exactly once per output block. The
+earlier Metal kernels decoded each value from scattered 1-byte loads, which
+cost a memory transaction per byte; staging the super-atom and unrolling the
+eight slots of a group is what closed most of the gap. On this host the change
+measured 24.8 us vs 31.5 us at `2048x2048` M=1 and 66.7 us vs 124.0 us at
+`8192x2048` M=4.
+
+NF12 still loses to dense BF16 at these shapes on this GPU, and the reason is
+measurable rather than incidental: a 6.3 MB packed read with no decode at all
+already costs 13.7 us (459 GB/s) in this grid shape, while an elementwise pass
+over the same bytes reaches 745 GB/s and dense BF16 `4096x4096` reaches about
+1.1 TB/s at large sizes. The tiled NF12 layout is built for `m16n8k16` MMA, so
+every value needs a decode step that dense BF16 does not, and at small M the
+decode costs as much as the weight traffic it saves. The win at
+`128256x2048` is not a decode advantage either: it appears where the dense
+baseline is itself launch-bound and slow, so the NF12 kernel's steadier
+throughput wins by default. Closing the small-M gap needs the kind of
+hand-scheduled decode the CUDA and HIP kernels use, not a launch-plan change.
+
 ## Remaining gaps
 
 The sweep is not uniformly faster:

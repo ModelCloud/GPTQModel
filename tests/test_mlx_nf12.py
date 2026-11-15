@@ -197,7 +197,7 @@ def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, 
 
 @requires_metal
 def test_nf12_mlx_row_count_dispatch(monkeypatch):
-    """1 row fuses the dot, 2..16 fuse the tile, and 17+ decode once."""
+    """1 row uses the GEMV, 2..16 the fused tile, and 17+ one decode."""
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
 
     source = _source(in_features=256, out_features=48)
@@ -206,9 +206,15 @@ def test_nf12_mlx_row_count_dispatch(monkeypatch):
     assert isinstance(proj, MlxNF12Linear)
 
     rng = np.random.default_rng(37)
+    single = mx.array(rng.normal(0, 0.2, (1, proj.in_features)).astype(np.float32)).astype(mx.bfloat16)
+    np.testing.assert_array_equal(
+        np.array(model(single).astype(mx.float32)),
+        np.array(proj._gemv16(single).astype(mx.float32)).reshape(1, -1),
+    )
     for rows in (2, 8, 16):
         x = rng.normal(0, 0.2, (rows, proj.in_features)).astype(np.float32)
-        tiled = proj._prefill(mx.array(x), rows) + proj.bias
+        # The tile epilogue applies the bias (and the split-K reduce does too).
+        tiled = proj._prefill(mx.array(x), rows)
         actual = model(mx.array(x))
         mx.eval(tiled, actual)
         np.testing.assert_allclose(
