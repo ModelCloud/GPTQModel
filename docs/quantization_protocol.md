@@ -400,57 +400,102 @@ This keeps placement clear:
 
 Action methods are resolved through `ACTION_REGISTRY` in
 `gptqmodel/quantization/protocol.py`. `smoothquant` is the only registered
-method today. `awq_balance`, `calibrate_router`, and any other method raise
-`NotImplementedError` with the known-method list, both at config-compilation
-time and at execution time.
+method today; build it with the `smoothquant(alpha)` helper. `awq_balance`,
+`calibrate_router`, and any other method raise `NotImplementedError` with the
+known-method list, both at config-compilation time and at execution time.
 
-Config compilation stays pure. A plan whose rule has a supported action and a
-compilable weight target compiles normally:
+One plan carries both steps: an action stage that folds norms, and the weight
+stage that supplies the quantizer configuration. `compile_and_apply_plan` runs
+both and returns the config plus an `ActionReport`:
 
 ```python
+from gptqmodel.quantization.protocol import (
+    ExecutionPlan,
+    QuantizeSpec,
+    Rule,
+    Stage,
+    TargetSpec,
+    compile_and_apply_plan,
+    smoothquant,
+)
+
 plan = ExecutionPlan(
     version=2,
     stages=(
+        Stage(name="balance", rules=(Rule(match=r".*self_attn\.q_proj$", actions=(smoothquant(0.5),)),)),
         Stage(
             name="ptq",
             rules=(
                 Rule(
                     match="*",
-                    actions=(OperationSpec(method="smoothquant", args={"alpha": 0.5}),),
                     weight=TargetSpec(quantize=QuantizeSpec(method="gptq", args={"bits": 4})),
                 ),
             ),
         ),
     ),
 )
-config = compile_plan_to_quantize_config(plan)  # GPTQConfig(bits=4)
+
+config, report = compile_and_apply_plan(model, plan, calibration=lambda: model(input_ids))
 ```
 
-The action itself runs in the separate execution stage, after plan compilation
-and before quantization:
-
-```python
-apply_plan_actions(model, plan, calibration=lambda: model(input_ids))
-```
+`compile_plan_to_quantize_config(plan)` on the same plan returns the
+`GPTQConfig` and validates every action's method and arguments; it never
+executes one. `apply_plan_actions(model, plan, calibration=...)` runs the action
+stage alone. Both accept multi-stage plans as long as exactly one rule carries a
+`weight` target, and its weight target still requires a global match (`"*"` or
+`["*", "-:..."]`).
 
 `calibration` must run one or more forward passes through the model root.
-`smoothquant(alpha)` derives a per-channel scale from those activations,
-folds its inverse into the preceding norm, and multiplies every consumer of
-that norm output by the same scale. It requires the match to resolve to exactly
-one preceding norm; zero or several predecessors raise `ProtocolActionError`
-naming the rule and module instead of skipping. See
-[Protocol actions](protocol-actions.md) for the resolution flow, the failure
-contract, and the v1 scope limits.
+`smoothquant(alpha)` derives a per-channel scale from those activations, folds
+its inverse into the preceding norm, and multiplies every consumer of that norm
+output by the same scale.
 
-In v1 the match names the linear module that consumes the norm, for example
-`r".*self_attn\.q_proj$"`. Matching the parent attention block instead fails
-closed because a block has no 2-D weight; block-level canonical-structure
-expansion is not implemented.
+### Resolution and verification
 
-Note that `compile_plan_to_quantize_config` still supports exactly one stage and
-one rule, and its weight target still requires a global match (`"*"` or
-`["*", "-:..."]`). The separate action stage supports multi-stage plans.
+`smoothquant` resolves the fold from the first calibration pass:
 
+- A norm output is matched to a consumer by **tensor identity** through a weak
+  reference, not by a raw address. The allocator reuses freed addresses, so an
+  address match also fired for unrelated layers; a weak reference dereferences
+  to `None` once the tensor is gone, so a recycled address can never match.
+- Every consumer of the folded norm output must be a module with a 2-D weight.
+  One that is not raises, because the fold would change its input and it cannot
+  be rescaled.
+- A consumer whose weight is shared with a module that does not consume the same
+  norm output (a tied `lm_head` / `embed_tokens`) raises, because scaling one
+  would silently change the other.
+- The fold is then **verified numerically**: the captured calibration call is
+  replayed and the output must match the pre-fold output within
+  `1e-3 + 8 * eps(dtype) * max|logits|`. Anything larger - a functional residual,
+  a fused expert parameter, a consumer the resolver cannot see - rolls the fold
+  back and raises.
+
+A broad match such as `match="*"` also matches containers (`ModuleList`,
+`Qwen2DecoderLayer`, ...). Those are skipped and recorded in
+`ActionReport.skipped`; a rule that resolves no foldable `norm -> linear` pair
+raises instead. Matching the parent attention block alone therefore fails closed;
+match the linear that consumes the norm.
+
+Every rule's action methods, arguments, and matches are resolved before the first
+handler runs, and a handler that fails rolls back every earlier rule, so a plan
+is never partly applied. See [Protocol actions](protocol-actions.md) for the
+diagrams, the failure contract, and the v1 scope limits.
+
+### Quality note
+
+SmoothQuant is an activation-balancing transform, not a quality improvement for
+weight-only quantization. On Wikitext-2 with Qwen2.5-0.5B, rule
+`q_proj|gate_proj`, `alpha=0.5`, fp16 (the unquantized baseline is 18.548 with and
+without SmoothQuant, as the fold preserves the function):
+
+| | without SmoothQuant | with SmoothQuant |
+| --- | --- | --- |
+| GPTQ 4-bit | 20.92 | 21.31 |
+| RTN 4-bit | 24.82 | 25.96 |
+| AWQ 4-bit | 24.01 | 23.69 |
+
+Weight-only perplexity gets slightly worse, which is expected: the benefit of
+SmoothQuant appears when activations are also quantized.
 
 ## Tensor Targets
 
@@ -1270,11 +1315,12 @@ Within a stage, recommended engine order is:
 
 Stage order then defines the full pipeline order.
 
-In the shipped implementation, `apply_plan_actions` performs match resolution
-and rule actions (steps 2-4; aliases remain unsupported). The quantization
-pipeline performs steps 5-9. `compile_plan_to_quantize_config` only performs the
-config-compilation part of a single-rule weight target and resolves action
-methods against the registry.
+In the shipped implementation, `apply_plan_actions` resolves every rule's
+matches and actions before running any of them (steps 2-4; aliases remain
+unsupported), and rolls every applied action back if a later one fails. The
+quantization pipeline performs steps 5-9. `compile_plan_to_quantize_config`
+performs the config-compilation part of the plan's single weight target and
+validates action methods and arguments without executing them.
 
 
 ## How Rule Actions And Target Config Work Together
