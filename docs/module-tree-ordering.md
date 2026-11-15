@@ -32,7 +32,7 @@ flowchart TD
 
 The digit is a dependency order, not a tensor-identity hint. Sibling leaves
 that read the same activation use `:in=<tag>` instead; that metadata is
-documented in [Shared-input metadata](../README.md#shared-input-metadata-intag-)
+documented in [Shared-input metadata](module-plan-guide.md#shared-input-needs-a-separate-proof)
 and never changes the emitted blocks.
 
 ## Producer before consumer
