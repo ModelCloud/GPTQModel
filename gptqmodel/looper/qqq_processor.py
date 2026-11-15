@@ -138,7 +138,12 @@ class QQQProcessor(LoopProcessor):
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
-        tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
+        # A per-module `dynamic` fallback override outranks the processor-level
+        # fallback, so it is merged as the value rather than as the default.
+        tmp.fallback = normalize_fallback(
+            resolved_cfg.get("fallback", None),
+            normalize_fallback(fallback, qcfg_clone.fallback),
+        )
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         if qcfg_clone.mse.norm > 0.0:
