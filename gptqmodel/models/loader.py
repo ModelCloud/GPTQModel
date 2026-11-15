@@ -11,9 +11,10 @@ import copy
 import json
 import os
 import shutil
+import threading
 import time
 import weakref
-from functools import partial
+from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
@@ -64,6 +65,7 @@ from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
+    assert_loaded_model_state,
     get_config_selection_kwargs,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
@@ -1220,6 +1222,27 @@ def compare_versions(installed_version, required_version, operator):
         raise ValueError(f"Unsupported operator: {operator}")
 
 
+# transformers' ``from_pretrained`` / ``from_config`` mutate process-wide state:
+# they save, set and restore ``torch.set_default_dtype``
+# (``transformers/modeling_utils.py``) and build parameters through meta-device
+# and no-init contexts. Two loads in different threads interleave those changes
+# and hand back models with mixed fp16/fp32 parameters, a meta ``lm_head`` and
+# untied embeddings (issue #4129). Model construction is serialized process-wide
+# through this lock; ``quantize()`` on already-loaded models stays concurrent.
+_MODEL_LOAD_LOCK = threading.RLock()
+
+
+def _serialized_model_load(method):
+    """Serialize a model-construction entry point across threads."""
+
+    @wraps(method)
+    def wrapper(*args, **kwargs):
+        with _MODEL_LOAD_LOCK:
+            return method(*args, **kwargs)
+
+    return wrapper
+
+
 def _is_meta_shell_build_error(exc: Exception) -> bool:
     # Some trust_remote_code model constructors call int()/item() on tensors
     # during __init__, which breaks when the shell is built on the meta device.
@@ -1677,6 +1700,7 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
+        default_dtype_before = torch.get_default_dtype()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -1689,6 +1713,7 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_pretrained",
             explicit_dtype=dtype,
         )
+        requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         backend = normalize_backend(backend)
         profile = normalize_profile(profile)
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
@@ -1851,6 +1876,13 @@ def ModelLoader(cls):
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
+            assert_loaded_model_state(
+                model,
+                api_name=f"{cls.__name__}.from_pretrained",
+                default_dtype_before=default_dtype_before,
+                expected_dtype=requested_dtype,
+                require_uniform_dtype=True,
+            )
             return instance
 
         load_start = time.perf_counter()
@@ -2047,9 +2079,20 @@ def ModelLoader(cls):
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
             timer.record("model_load", time.perf_counter() - load_start, source=source_label)
 
+        # ``offload_to_disk`` builds a meta shell that ``LazyTurtle`` fills in
+        # later, so only the default-dtype invariant applies to it.
+        materialized = turtle_model is None
+        assert_loaded_model_state(
+            model,
+            api_name=f"{cls.__name__}.from_pretrained",
+            default_dtype_before=default_dtype_before,
+            expected_dtype=requested_dtype if materialized else None,
+            require_uniform_dtype=materialized,
+            require_materialized=materialized,
+        )
         return instance
 
-    cls.from_pretrained = from_pretrained
+    cls.from_pretrained = classmethod(_serialized_model_load(from_pretrained.__func__))
 
     @classmethod
     def from_quantized(
@@ -2069,7 +2112,6 @@ def ModelLoader(cls):
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ):
-
         warn_unsupported_rocm()
 
         # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
@@ -2089,6 +2131,7 @@ def ModelLoader(cls):
 
         import torch._dynamo
         torch._dynamo.reset()
+        default_dtype_before = torch.get_default_dtype()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -3233,8 +3276,18 @@ def ModelLoader(cls):
         _set_paged_attention_safe_cuda_graphs(instance.model)
         if qcfg.dynamic:
             log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before, dynamic=qcfg.dynamic)
+        # Quantized loads keep their own scale dtypes, so the strict dtype
+        # contract only applies to dense loads. A CPU-offloaded map may hold
+        # meta placeholders by design, so only the default-dtype invariant is
+        # asserted there.
+        assert_loaded_model_state(
+            model,
+            api_name=f"{cls.__name__}.from_quantized",
+            default_dtype_before=default_dtype_before,
+            require_materialized=not cpu_offload,
+        )
         return instance
 
-    cls.from_quantized = from_quantized
+    cls.from_quantized = classmethod(_serialized_model_load(from_quantized.__func__))
 
     return cls

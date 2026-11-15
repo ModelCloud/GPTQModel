@@ -9,7 +9,9 @@ import ntpath
 import os
 import shutil
 import sys
+import threading
 import warnings
+from collections import Counter
 from contextlib import contextmanager
 from functools import lru_cache, wraps
 from typing import Any, Optional
@@ -75,6 +77,7 @@ from ..utils.logger import setup_logger
 __all__ = [
     "no_init_weights",
     "suspend_hf_weight_init",
+    "assert_loaded_model_state",
     "get_hf_config_dtype",
     "normalize_torch_dtype_kwarg",
     "normalize_hf_config_compat",
@@ -300,37 +303,157 @@ def normalize_torch_dtype_kwarg(
     return current_dtype
 
 
-@contextmanager
-def suspend_hf_weight_init():
-    """Disable HF/torch parameter init temporarily and always restore globals."""
+_HF_INIT_LOCK = threading.RLock()
+_HF_INIT_DEPTH = 0
+_HF_INIT_SUSPENSION = None
+
+
+def _install_init_suspension():
+    """Patch the process-wide init entry points and return the originals."""
 
     def _skip_init(*args, **kwargs):
         return None
 
-    original_kaiming_uniform = torch.nn.init.kaiming_uniform_
-    original_uniform = torch.nn.init.uniform_
-    original_normal = torch.nn.init.normal_
-
     modeling_utils = transformers.modeling_utils
-    had_init_flag = hasattr(modeling_utils, "_init_weights")
-    original_init_flag = getattr(modeling_utils, "_init_weights", None)
+    originals = {
+        "kaiming_uniform": torch.nn.init.kaiming_uniform_,
+        "uniform": torch.nn.init.uniform_,
+        "normal": torch.nn.init.normal_,
+        "had_init_flag": hasattr(modeling_utils, "_init_weights"),
+        "init_flag": getattr(modeling_utils, "_init_weights", None),
+    }
 
     torch.nn.init.kaiming_uniform_ = _skip_init
     torch.nn.init.uniform_ = _skip_init
     torch.nn.init.normal_ = _skip_init
     modeling_utils._init_weights = False
 
+    # transformers' own guard patches many more torch initializers and
+    # ``PreTrainedModel.init_weights``. Keep it entered for the whole outermost
+    # scope: re-entering it per caller is what makes overlapping entries lose
+    # the originals.
+    no_init = no_init_weights()
+    no_init.__enter__()
+    originals["no_init"] = no_init
+    return originals
+
+
+def _restore_init_suspension(originals):
+    modeling_utils = transformers.modeling_utils
     try:
-        with no_init_weights():
-            yield
+        originals["no_init"].__exit__(None, None, None)
     finally:
-        torch.nn.init.kaiming_uniform_ = original_kaiming_uniform
-        torch.nn.init.uniform_ = original_uniform
-        torch.nn.init.normal_ = original_normal
-        if had_init_flag:
-            modeling_utils._init_weights = original_init_flag
+        torch.nn.init.kaiming_uniform_ = originals["kaiming_uniform"]
+        torch.nn.init.uniform_ = originals["uniform"]
+        torch.nn.init.normal_ = originals["normal"]
+        if originals["had_init_flag"]:
+            modeling_utils._init_weights = originals["init_flag"]
         elif hasattr(modeling_utils, "_init_weights"):
             delattr(modeling_utils, "_init_weights")
+
+
+@contextmanager
+def suspend_hf_weight_init():
+    """Disable HF/torch parameter init until the last overlapping entry exits.
+
+    ``transformers``' ``no_init_weights`` patches process-wide initializers and
+    ``PreTrainedModel.init_weights``, and this module also silences three torch
+    initializers. Both are process-global, so overlapping entries are reference
+    counted: the first entry installs the patches, later entries only increment
+    the depth, and the last exit restores the originals. Without the count the
+    first caller to leave restored the real initializers while another thread
+    was still building its model, and the second exit then restored the
+    ``_skip_init`` stubs, disabling weight init for the rest of the process
+    (issue #4129).
+    """
+
+    global _HF_INIT_DEPTH, _HF_INIT_SUSPENSION
+
+    with _HF_INIT_LOCK:
+        if _HF_INIT_DEPTH == 0:
+            _HF_INIT_SUSPENSION = _install_init_suspension()
+        _HF_INIT_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _HF_INIT_LOCK:
+            _HF_INIT_DEPTH -= 1
+            if _HF_INIT_DEPTH == 0:
+                originals, _HF_INIT_SUSPENSION = _HF_INIT_SUSPENSION, None
+                _restore_init_suspension(originals)
+
+
+def assert_loaded_model_state(
+    model,
+    *,
+    api_name: str,
+    default_dtype_before: Optional[torch.dtype] = None,
+    expected_dtype: Optional[torch.dtype] = None,
+    require_uniform_dtype: bool = False,
+    require_materialized: bool = True,
+) -> None:
+    """Fail loudly when a load left the process or the model in a mixed state.
+
+    transformers' ``from_pretrained`` saves, sets and restores the process-wide
+    default dtype and builds parameters through meta-device and no-init
+    contexts. When two loads overlap, a model can come back with mixed
+    fp16/fp32 parameters, a tied weight left on the meta device, or the process
+    default dtype stuck at the load dtype (issue #4129). A silently mixed model
+    is worse than a slow, serialized load, so the loaders call this after every
+    build and raise instead of returning the corrupted model.
+
+    ``require_materialized`` and the dtype checks are skipped for the
+    ``offload_to_disk`` meta shell, which is intentionally meta until its
+    ``LazyTurtle`` materializes each layer. Objects without
+    ``named_parameters`` (the MLX runtime model) only get the default-dtype
+    check.
+    """
+
+    problems = []
+
+    if default_dtype_before is not None:
+        default_dtype_after = torch.get_default_dtype()
+        if default_dtype_after != default_dtype_before:
+            problems.append(
+                "torch.get_default_dtype() changed from "
+                f"{default_dtype_before} to {default_dtype_after}"
+            )
+
+    named_parameters = getattr(model, "named_parameters", None)
+    if named_parameters is not None and (
+        require_materialized or require_uniform_dtype or expected_dtype is not None
+    ):
+        dtypes = Counter()
+        meta = []
+        for name, parameter in named_parameters():
+            if not parameter.is_floating_point():
+                continue
+            if parameter.is_meta:
+                meta.append(name)
+                continue
+            dtypes[parameter.dtype] += 1
+
+        if require_materialized and meta:
+            problems.append(
+                f"{len(meta)} floating parameter(s) stayed on the meta device, "
+                f"e.g. {meta[:3]}"
+            )
+        if expected_dtype is not None:
+            wrong = {str(dtype): count for dtype, count in dtypes.items() if dtype != expected_dtype}
+            if wrong:
+                problems.append(
+                    f"floating parameters are not all {expected_dtype}: {wrong}"
+                )
+        elif require_uniform_dtype and len(dtypes) > 1:
+            problems.append(
+                "floating parameters have mixed dtypes: "
+                + str({str(dtype): count for dtype, count in dtypes.items()})
+            )
+
+    if problems:
+        raise RuntimeError(
+            f"{api_name}: model load left a corrupted state: " + "; ".join(problems)
+        )
 
 
 def _raise_public_gguf_file_arg_error(api_name: str) -> None:

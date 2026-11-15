@@ -4,11 +4,13 @@
 # Concurrency guards
 
 GPT-QModel runs quantization and inference from several threads, including on
-free-threaded CPython (`PYTHON_GIL=0`). Four process-global resources are
+free-threaded CPython (`PYTHON_GIL=0`). Five process-global resources are
 shared by those threads: the ROCm BLAS backend selection, the TF32 precision
-setting, the CPU oneDNN BF16x3 matmul precision, and libtriton's JIT compiler.
-This page documents how the guards for those resources behave, and why they are
-reference-counted, serialized, or classified as compiler failures.
+setting, the CPU oneDNN BF16x3 matmul precision, libtriton's JIT compiler, and
+the transformers model-construction state (default dtype plus the meta-device
+and no-init contexts). This page documents how the guards for those resources
+behave, and why they are reference-counted, serialized, or classified as
+compiler failures.
 
 The shapes are deliberate: a guard that saves and restores a process-global
 value per entry is wrong as soon as two callers overlap, and a compiler that is
@@ -158,6 +160,66 @@ assertion escaped and aborted a forward that raced another thread's
 | Guard `AssertionError` | propagated, forward failed | eager fallback, one warning |
 | User `AssertionError` | propagated | propagated, no retry |
 
+## 4. Model loads are serialized
+
+`ModelLoader.from_pretrained` and `ModelLoader.from_quantized` are wrapped with
+`_serialized_model_load` (`gptqmodel/models/loader.py`), which holds
+`_MODEL_LOAD_LOCK` (an `RLock`) for the whole construction. transformers'
+`from_pretrained` saves, sets and restores `torch.set_default_dtype`
+(`transformers/modeling_utils.py`) and builds parameters through meta-device and
+no-init contexts; `from_config` does the same for the quantized shell. Those are
+process-global, so two overlapping loads interleave them and hand back models
+with mixed dtypes, a meta tied weight, or untied embeddings.
+
+```mermaid
+flowchart TD
+    A["thread 1: GPTQModel.load"] --> B["acquire _MODEL_LOAD_LOCK"]
+    C["thread 2: GPTQModel.load"] --> D{"lock free"}
+    D -- no --> E["wait for the other load"]
+    B --> F["transformers from_pretrained or from_config"]
+    F --> G["assert_loaded_model_state"]
+    G -- "invariant violated" --> H["RuntimeError: load fails loudly"]
+    G -- "consistent" --> I["release lock, return model"]
+    E --> B
+    I --> D
+```
+
+`quantize()` itself is not serialized: once a model is loaded, overlapping
+quantization stays supported (section 1).
+
+### Safety net
+
+Every build ends with `assert_loaded_model_state` (`gptqmodel/utils/hf.py`),
+which raises `RuntimeError` when
+
+- `torch.get_default_dtype()` differs from the value captured before the load;
+- a floating parameter is still on the meta device, which is how
+  `lm_head.weight` stayed meta and the embeddings untied;
+- the requested dtype is explicit and a floating parameter has another dtype;
+- or, when no dtype was requested, the floating parameters disagree with each
+  other.
+
+The `offload_to_disk` meta shell is exempt from the dtype and meta checks
+because it is intentionally meta until `LazyTurtle` fills each layer.
+
+### Init suspension is reference-counted
+
+`suspend_hf_weight_init` (`gptqmodel/utils/hf.py`) patches process-wide torch
+initializers and `PreTrainedModel.init_weights`. It keeps
+`_HF_INIT_LOCK`/`_HF_INIT_DEPTH`/`_HF_INIT_SUSPENSION`: the first entry installs
+the patches, overlapping entries only increment the depth, and the last exit
+restores the originals. The old per-entry restore let the first caller to leave
+re-enable init for a thread still building a model, and the second exit then
+restored the no-op stubs for the rest of the process.
+
+### No cross-run AWQ scratch size
+
+`quantize()` used to write `AWQ_BATCH_SIZE` into `os.environ`, and
+`gptqmodel_post_init` read it to size the AWQ ExLlamaV2 scratch on a later load,
+so one run could size another run's scratch. The variable is gone from both
+sides: `gptqmodel_post_init(..., awq_batch_size=...)` takes the value explicitly
+and defaults to 1.
+
 ## Failure and ambiguity contract
 
 | Situation | Result |
@@ -170,6 +232,9 @@ assertion escaped and aborted a forward that raced another thread's
 | Triton cache already populated | no lock, no compile |
 | Dynamo guard fails on a user frame | exception propagates; no double execution |
 | `fullgraph=True` capture failure | exception propagates; no silent fallback |
+| Two `GPTQModel.load()` calls overlap | the second waits, then builds; both models are consistent |
+| A load leaves a mixed dtype, a meta tied weight, or a changed default dtype | `RuntimeError`; the corrupted model is never returned |
+| Overlapping `suspend_hf_weight_init` scopes | patches stay installed until the last exit |
 
 ## Validation
 
@@ -195,6 +260,8 @@ Measured on 2026-11-15 with the ROCm 10.1 R9700 (`gfx1201`) venv and the CUDA
 | BF16x3 chunks in a 2048-wide EXL3 CPU forward while the other call site exits | `bf16, bf16, none, none`; 5/5 forwards differ | `bf16, bf16, bf16, bf16`; 0/5 differ |
 | BF16x3 race, 30 trials, `PYTHON_GIL=0` | 11/30 forwards differ | 0/30 forwards differ |
 | BF16x3 race, 30 trials, `PYTHON_GIL=1` | 2/30 forwards differ | 0/30 forwards differ |
+| Concurrent dense loads of Qwen2.5-0.5B and Qwen3-0.6B at fp16, 6 rounds, `PYTHON_GIL=0` | 6/6 rounds corrupted (an earlier run: 5/6) | 0/6 rounds corrupted |
+| Same loads, 6 rounds, `PYTHON_GIL=1` | 5/6 rounds corrupted (an earlier run: 6/6) | 0/6 rounds corrupted |
 
 The 268/504 count is this host's reproduction; the issue measured 177-210 of
 794 on its checkpoint layout. Both counts are the same defect: the second

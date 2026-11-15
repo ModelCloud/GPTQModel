@@ -2624,7 +2624,6 @@ class BaseQModel(nn.Module):
             elif step is ProcessorStep.MACAQ:
                 processors.append(factory(**args, backend=run_plan.pack_backend))
             elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
-                os.environ["AWQ_BATCH_SIZE"] = str(run_plan.batch_size)
                 processors.append(factory(
                     **args, gptq_model=self, model=self.model,
                 ))
