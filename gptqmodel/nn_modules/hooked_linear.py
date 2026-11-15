@@ -24,6 +24,10 @@ class StopForward(Exception):
     """Signal an intentional early stop of the forward pass."""
     pass
 
+# Retained for import compatibility only. Call sites must raise a fresh
+# `StopForward()`: a shared instance keeps the last raise's `__traceback__`,
+# which pins every frame (and its tensors) from the worker down to the MoE
+# block that raised it. See issue #4078.
 STOP_FORWARD_EXCEPTION = StopForward("Forwarding stopped")
 
 _HOOKED_LINEAR_RUNTIME_ATTRIBUTES = (
@@ -223,7 +227,7 @@ class HookedConv1D(transformers.Conv1D):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+                raise StopForward("Forwarding stopped")
 
         return _restore_output_device(output, original_device)
 
@@ -285,7 +289,7 @@ class HookedConv1d(torch.nn.Conv1d):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+                raise StopForward("Forwarding stopped")
         return _restore_output_device(output, original_device)
 
 # Models using conv2d: ovis
@@ -347,7 +351,7 @@ class HookedConv2d(torch.nn.Conv2d):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+                raise StopForward("Forwarding stopped")
         return _restore_output_device(output, original_device)
 
 # Models using transformers.conv1d: gpt2
@@ -377,7 +381,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+                raise StopForward("Forwarding stopped")
         return _restore_output_device(output, original_device)
 
 class HookedLinear(torch.nn.Linear):
@@ -449,7 +453,7 @@ class HookedLinear(torch.nn.Linear):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+                raise StopForward("Forwarding stopped")
         return _restore_output_device(output, original_device)
 
 

@@ -10,8 +10,8 @@ import torch
 from torch import nn
 
 from ..nn_modules.hooked_linear import (
-    STOP_FORWARD_EXCEPTION,
     HookedLinear,
+    StopForward,
     _restore_output_device,
     copy_hooked_linear_runtime,
     prepare_hooked_linear_input,
@@ -305,7 +305,7 @@ class AutoNF12HookedLinear(NF12Linear):
         if hook is not None:
             hook(self, (prepared.value,), output)
             if getattr(self, "forward_hook_last", False):
-                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+                raise StopForward("Forwarding stopped")
         return _restore_output_device(output, original_device)
 
 

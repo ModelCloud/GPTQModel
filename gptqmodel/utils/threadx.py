@@ -568,6 +568,13 @@ class _DeviceWorker:
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
             finally:
                 self._q.task_done()
+                # A worker frame outlives the task it just ran. Without this
+                # the last task's callable, arguments, result and future stay
+                # bound here until another task arrives; after `quantize()`
+                # none does, so the last data-parallel layer replica stays
+                # resident on every GPU for the life of the process. Dropping
+                # them here is a reference-count change only (no sync point).
+                fn = args = kwargs = fut = result = None
         try:
             self._on_worker_exit(self.key, self)
         finally:
