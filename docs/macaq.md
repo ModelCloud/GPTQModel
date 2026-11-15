@@ -84,27 +84,20 @@ flowchart TD
     class F1,F2,F3,F4 error;
 ```
 
-| Mechanism | Before (`origin/main`) | With MACaQ |
+| Stage | `main` at `701e58b` | This PR |
 |---|---|---|
-| Method | absent at `config.py:161` | `config.py:6079` |
-| AUTO backend | GPTQ fallback at `base.py:1954` | `base.py:1944` |
-| Processor | no entry at `quantization_run_plan.py:36` | `quantization_run_plan.py:41` |
-| Payload | no MACaQ layout | `macaq_processor.py:272,305` |
+| Method plan | GPTQ branch at `base.py:1839` | MACaQ step at `quantization_run_plan.py:41` |
+| Capture grouping | module groups at `stage_subset.py:666` | combined block subset via `macaq_processor.py:69` |
+| Replay | GPTQ at `gptq_processor.py:191` | packed W4A4 via `macaq_processor.py:158` |
+| Inference | generic selection at `base.py:2017` | MACaQ W4A4 at `nn_modules/qlinear/macaq.py:244` |
 
 The diagram and table describe the flow introduced in
 [PR #4066](https://github.com/ModelCloud/GPTQModel/pull/4066).
 
-The replay path was corrected after the first port: previously
-`MacaqProcessor.process` installed a dense reconstructed weight into the
-original `nn.Linear`, so downstream Hessians missed W4A4 activation rounding.
-The temporary packed child now supplies the same activation precision selected
-for inference and is removed before the layer is offloaded.
-
-| Replay step | Earlier port | Current implementation |
-|---|---|---|
-| Hessian capture | one forward per module group | `all_modules_in_single_pass` merges groups (`macaq_processor.py:69`, `stage_subset.py:668`) |
-| Forward target | original `nn.Linear` with `replay_weight` (`macaq_processor.py:217` at `a8b7b14`) | `_packed_replay_forward` calls the temporary `MacaqLinear` (`macaq_processor.py:154`) |
-| End of layer | no temporary runtime module | `prepare_layer_post_quantize` removes the child before `post_quantize` (`macaq_processor.py:207`) |
+Each calibration chunk traverses the current block once while hooks capture
+all selected projections. A temporary packed child then supplies the W4A4
+forward for block replay. `prepare_layer_post_quantize` removes that child
+before the final checkpoint module is created (`macaq_processor.py:208`).
 
 ## Relationship to GPTQ
 
@@ -130,9 +123,10 @@ MACaQ's per-Linear optimizer needs only that Linear's weight and input Hessian.
 Full-model streaming still uses forward replay: upstream `streaming_quantize`
 captures Hessians from the current block, replaces its Linear layers, then
 re-forwards the now-quantized block to generate inputs for the next block.
-GPT-QModel sets `all_modules_in_single_pass=True` so every projection's Hessian
-is captured in one block forward before any projection is quantized. It then
-uses `MacaqProcessor.lifecycle.forward.replay_after_process` and
+GPT-QModel sets `all_modules_in_single_pass=True` so each calibration chunk
+captures every selected projection's Hessian in one block traversal before
+any projection is quantized. It then uses
+`MacaqProcessor.lifecycle.forward.replay_after_process` and
 `stage_layer._replay_layer_outputs` for block propagation. Its temporary
 packed module makes W4A4 activation quantization part of that replay.
 
@@ -157,7 +151,8 @@ tokens. See the [paper](https://arxiv.org/html/2611.10649v2) and
 
 The repository includes `scripts/benchmark_macaq_quantization.py` to time
 the full calibration, replay, solve, and pack workflow. Two exploratory
-rounds, with method order reversed between rounds, used the local
+rounds on a PR snapshot based on `main` at `39b6276`, with method order
+reversed between rounds, used the local
 Llama-3.2-1B-Instruct checkpoint, 64 calibration messages
 (28,672 tokens after padding), BF16 source weights, eager attention, 2048-token
 concat size, batch size 1, group size 32, and an RTX 4090 with Torch
@@ -177,7 +172,7 @@ exploratory, compare different activation precisions, and do not reproduce
 the paper's matched-quality MR-GPTQ/DuQuant++ benchmark. Use `--rounds 4`
 or more for a stronger local comparison.
 
-A spot check after rebasing onto upstream `main` at `323673e` kept the same
+A spot check measured on upstream `main` at `323673e` kept the same
 order of magnitude. An explicit async allocator avoided the native allocator's
 mapping retries and substantially lowered reserved memory, but MACaQ remained
 slower than plain GPTQ on this 1B workload:
