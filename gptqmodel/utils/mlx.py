@@ -45,7 +45,7 @@ from ..nn_modules.qlinear.qqq import QQQTorchLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization import FORMAT
-from ..quantization.config import resolve_quant_format
+from ..quantization.config import dynamic_get, resolve_quant_format
 from .logger import setup_logger
 from .torch import torch_empty_cache
 
@@ -56,6 +56,7 @@ try:
     from mlx.utils import tree_map_with_path
     from mlx_lm import generate
     from mlx_lm.sample_utils import make_logits_processors, make_sampler
+    from mlx_lm.tokenizer_utils import TokenizerWrapper
     from mlx_lm.utils import _get_classes, load_config, quantize_model
 
     from ..nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
@@ -390,6 +391,31 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
         return _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_name)
 
 
+def _mlx_quant_predicate(dynamic, default_bits, default_group_size):
+    """Map GPT-QModel `dynamic` rules onto MLX-LM's quant predicate."""
+
+    def quant_predicate(path, module):
+        # The exact packed transfer honors `dynamic` through the source
+        # layer's own bits/group; this predicate keeps the requantization
+        # fallback on the same contract: `-:` exclusions stay float, `+:`
+        # overrides keep their bits/group.
+        override = dynamic_get(dynamic, path)
+        if override is False:
+            return False
+        if override is None:
+            return True
+        group_size = override.get("group_size", default_group_size)
+        if group_size in (-1, 16):
+            group_size = 64
+        return {
+            "group_size": group_size,
+            "bits": override.get("bits", default_bits),
+            "mode": "affine",
+        }
+
+    return quant_predicate
+
+
 def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_name):
 
     quant_format = resolve_quant_format(gptq_config.get("format"), gptq_config.get("method", gptq_config.get("quant_method")))
@@ -402,12 +428,13 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
                             FORMAT.BITSANDBYTES, FORMAT.EXL3]:
         raise ValueError("MLX conversion requires a supported GPT-QModel quantization format")
 
-    if gptq_config.get("dynamic") is not None:
-        print(gptq_config["dynamic"])
-        for _, config in gptq_config["dynamic"].items():
+    dynamic = gptq_config.get("dynamic") or {}
+    if dynamic:
+        for _, config in dynamic.items():
             if config != {}:
-                if config["bits"] not in [2, 3, 4, 5, 6, 7, 8]:
-                    raise ValueError(f'MLX GPTQ conversion does not support {config["bits"]} bits in dynamic config')
+                dynamic_bits = config.get("bits", gptq_config["bits"])
+                if dynamic_bits not in [2, 3, 4, 5, 6, 7, 8]:
+                    raise ValueError(f'MLX GPTQ conversion does not support {dynamic_bits} bits in dynamic config')
 
     model_path = Path(model_id_or_path)
     if not model_path.exists():
@@ -432,6 +459,10 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
     # Requantization needs an MLX-supported group size.
     if gptq_config["group_size"] in [-1, 16]:
         gptq_config["group_size"] = 64
+
+    default_bits = gptq_config["bits"]
+    default_group_size = gptq_config["group_size"]
+    quant_predicate = _mlx_quant_predicate(dynamic, default_bits, default_group_size)
 
     # Convert weights
     weights = {}
@@ -485,10 +516,58 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
     log.info("Starting MLX quantization...")
     mlx_model.load_weights(list(weights.items()))
     weights, mlx_config = quantize_model(mlx_model, config, group_size=gptq_config["group_size"],
-                                     bits=gptq_config["bits"])
+                                     bits=gptq_config["bits"], quant_predicate=quant_predicate)
     log.info("MLX quantization completed")
 
     return weights, mlx_config
+
+
+def _mlx_prompt_list(prompt):
+    """Normalize ``generate()`` inputs to the prompt list mlx_lm accepts."""
+    if isinstance(prompt, str):
+        return [prompt]
+    if torch.is_tensor(prompt):
+        prompt = prompt.detach().to("cpu").tolist()
+    elif hasattr(prompt, "tolist"):
+        prompt = prompt.tolist()
+    if isinstance(prompt, (list, tuple)):
+        if not prompt:
+            raise ValueError("MLX requires a non-empty prompt")
+        if all(isinstance(token, int) for token in prompt):
+            return [list(prompt)]
+        return [list(tokens) if not isinstance(tokens, str) else tokens for tokens in prompt]
+    raise TypeError(f"MLX prompt must be a string, token list, or tensor: {type(prompt).__name__}")
+
+
+def _mlx_stop_strings(stop):
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop]
+    return [item for item in stop if isinstance(item, str)]
+
+
+def _mlx_strip_stop(text, stop_strings):
+    """Trim a generated string at the earliest stop sequence."""
+    if not isinstance(text, str):
+        return text
+    earliest = None
+    for stop in stop_strings:
+        index = text.find(stop)
+        if index != -1 and (earliest is None or index < earliest):
+            earliest = index
+    return text if earliest is None else text[:earliest]
+
+
+def _mlx_tokenizer_with_eos(tokenizer, eos_token_ids):
+    """Return a tokenizer whose EOS set includes the caller's explicit ids."""
+    ids = {int(token) for token in eos_token_ids}
+    current = getattr(tokenizer, "eos_token_ids", None)
+    if current is not None:
+        tokenizer.eos_token_ids = set(current) | ids
+        return tokenizer
+    return TokenizerWrapper(tokenizer, eos_token_ids=ids)
+
 
 @torch.inference_mode()
 def mlx_generate(model, tokenizer, **kwargs,):
@@ -497,17 +576,51 @@ def mlx_generate(model, tokenizer, **kwargs,):
 
     prompt = kwargs.pop("prompt", None)
     if prompt is None:
-        raise ValueError("MLX requires prompts to be provided")
+        prompt = kwargs.pop("prompts", None)
+    else:
+        kwargs.pop("prompts", None)
+    if prompt is None:
+        prompt = kwargs.pop("input_ids", None)
+    else:
+        kwargs.pop("input_ids", None)
+    if prompt is None:
+        raise ValueError("MLX requires prompts or input_ids to be provided")
+    prompts = _mlx_prompt_list(prompt)
 
     verbose = kwargs.pop("verbose", False)
     kwargs.pop("formatter", None)
 
     sampling_params = {}
-    sampling_params["max_tokens"] = kwargs.pop("max_tokens", 256)
+    max_new_tokens = kwargs.pop("max_new_tokens", None)
+    max_tokens = kwargs.pop("max_tokens", None)
+    sampling_params["max_tokens"] = (
+        max_new_tokens if max_new_tokens is not None else (256 if max_tokens is None else max_tokens)
+    )
+
+    seed = kwargs.pop("seed", None)
+    if seed is not None:
+        mx.random.seed(int(seed))
+
+    eos_token_id = kwargs.pop("eos_token_id", None)
+    if eos_token_id is not None:
+        eos_ids = [eos_token_id] if isinstance(eos_token_id, int) else list(eos_token_id)
+        tokenizer = _mlx_tokenizer_with_eos(tokenizer, eos_ids)
+
+    stop_strings = _mlx_stop_strings(kwargs.pop("stop", None))
+
     sampler = kwargs.pop("sampler", None)
     temperature = kwargs.pop("temp", None)
     if temperature is None:
         temperature = kwargs.pop("temperature", None)
+    do_sample = kwargs.pop("do_sample", None)
+    if temperature is None:
+        # HF's `do_sample` selects greedy or temperature sampling. MLX's
+        # sampler is greedy at temp 0.0, so translate the flag instead of
+        # dropping it.
+        if do_sample is False:
+            temperature = 0.0
+        elif do_sample is True:
+            temperature = 1.0
     top_p = kwargs.pop("top_p", None)
     min_p = kwargs.pop("min_p", None)
     min_tokens_to_keep = kwargs.pop("min_tokens_to_keep", None)
@@ -549,4 +662,11 @@ def mlx_generate(model, tokenizer, **kwargs,):
     if "prompt_progress_callback" in kwargs:
         sampling_params["prompt_progress_callback"] = kwargs.pop("prompt_progress_callback", None)
 
-    return generate(model=model, tokenizer=tokenizer, prompt=prompt, verbose=verbose, **sampling_params)
+    results = [
+        _mlx_strip_stop(
+            generate(model=model, tokenizer=tokenizer, prompt=item, verbose=verbose, **sampling_params),
+            stop_strings,
+        )
+        for item in prompts
+    ]
+    return results[0] if len(results) == 1 else results

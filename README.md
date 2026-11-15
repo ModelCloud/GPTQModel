@@ -658,6 +658,9 @@ per weight group. MLX currently performs the Cholesky factorization on its CPU
 stream. AWQ uses MLX-LM's native scale and clip search. The output uses MLX-LM's
 quantized model format and can be loaded with `mlx_lm.load`.
 Pass an MLX token array as `calibration_data` to use your own calibration set.
+To drive a GPTQ/AWQ checkpoint through the MLX runtime with the standard
+`generate()` API, or to export one with `GPTQModel.export(..., format="mlx")`,
+see the [MLX runtime and export flow](docs/mlx-runtime.md).
 
 
 ## Install 💾
