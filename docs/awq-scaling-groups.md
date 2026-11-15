@@ -63,6 +63,77 @@ The tracker update runs for every block, including blocks skipped because
 `prev_op is None`. That keeps the "previous linear in tree order" fallback
 available for the next block instead of leaving `last_module` unset.
 
+## Scale-search safety
+
+The existing group dictionaries and definition tags are unchanged. Search uses
+the original captured activation `x` and candidate weights `Q(W * s) / s`.
+Non-quantized routers and shared gates therefore keep their original weights
+during search. Only final `apply_scale`, which changes the source to emit
+`x / s`, multiplies those consumers by `s`. Scaling them during search would
+change routing even with identity quantization.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._quantize_layer"] --> B["_validate_scale_group_conflicts"]
+    B --> C{"source or target overlap?"}
+    C -- "yes" --> X["raise _AWQScaleGroupError<br/>no folds applied"]
+    C -- "no" --> D["_search_best_scale<br/>_validate_scale_group"]
+    D --> E{"exact live bindings, widths,<br/>and targets inside replay boundary?"}
+    E -- "no" --> F{"configured fallback enabled?"}
+    E -- "yes" --> G["reference forward<br/>temporary target observation hooks"]
+    G --> H["finally remove observation hooks"]
+    H --> I{"every declared target executed?"}
+    I -- "no" --> F
+    I -- "yes" --> J["_compute_best_scale<br/>20 candidates: Q(W * s) / s<br/>routers and shared gates unchanged"]
+    J --> K["finally restore original weights"]
+    K --> L{"candidate evaluation succeeded?"}
+    L -- "yes" --> M["collect scale results<br/>apply_scale once per source<br/>apply_quant"]
+    L -- "no" --> Y["propagate evaluation exception"]
+    F -- "yes" --> N["warn with group and reason<br/>exclude group from folding and clipping<br/>apply_quant with empty scales"]
+    F -- "no" --> X
+    style X fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style Y fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style N fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+| Before (baseline `c9efdbacf`) | Now |
+| --- | --- |
+| Candidate search multiplies non-quantized consumer weights (`awq_processor.py:3099-3119`). | Search leaves them unchanged; final folding still compensates them. |
+| Shared-source merge retains the first inspection module for cross-root groups (`models/base.py:5540-5546`). | Group construction remains unchanged, but search rejects boundaries missing any member rather than scoring only one branch. |
+| A contained target need not execute during replay (`awq_processor.py:2551-2572`). | Reference-forward observation rejects unexecuted targets before candidate mutation; observation hooks are always removed. |
+| Weight restoration occurs only after successful grid evaluation (`awq_processor.py:3267-3278`). | Restoration is in `finally`, covering quantizer, replay, and loss exceptions. |
+| Search results are collected without a group-validation fallback (`awq_processor.py:2352-2359`). | Unsafe replay groups use the existing configured fallback with a warning, or raise with fallback disabled. Conflicting folds always raise. |
+
+All paths above are layer-owned: `process` holds `_AWQLayerState.lock` while
+calling `_quantize_layer`. Observation state, hooks and master weights are local
+to a search; no process-global trace or persistent weight cache is installed.
+The hook APIs are already used for calibration. This change does not qualify
+new concurrent mutation of the same module or claim free-threaded validation.
+
+Validation checks **both** containment and execution. An MoE expert not reached
+by the retained reference samples makes the group unsupported for that replay;
+fallback is conservative even if earlier calibration batches reached it. Code
+that bypasses module calls and reads weights functionally also requires a
+compatible existing Python group/replay override, or fallback. The checks do
+not prove an entire dynamic graph or discover undeclared functional consumers.
+
+Cross-root groups are not split: independently folding their shared norm would
+divide it repeatedly. Nor is inspection automatically widened to the decoder
+layer: its input can differ from the captured norm output. A Python override
+may supply an existing-format group with a compatible input, kwargs and full
+objective. Until then, the complete shared-source group falls back together.
+Default `AWQConfig.fallback` behavior is preserved; set `fallback=None` to make
+these unsafe replay groups raise instead. Existing no-group/missing-feature
+paths are not redesigned here.
+
+CPU regressions cover eager and chunked search, FP32/FP16/BF16 router neutrality,
+an independent Torch folded-model quantization oracle, failure rollback,
+complete/incomplete parallel objectives, and real Qwen2/Qwen3 MoE and
+Cohere/Cohere2 topologies. Inference kernels, persistent quantized weight storage,
+architecture declaration syntax, and replay mask/position reconstruction are
+unchanged. A declarative graph/DSL and automatic cross-root replay are out of
+scope.
+
 ## One group per norm
 
 `_merge_shared_source_nodes` merges every node whose `prev_op` is the same gain
@@ -71,7 +142,8 @@ multiplies every quantized consumer (all routed experts plus `shared_experts`,
 or both parallel branches) and every declared `_scale_consumers` entry (router,
 `shared_expert_gate`, `g_proj`, `output_gate`) by the same scale. The merged
 group re-inspects a common parent when every consumer shares one, so the scale
-search still scores the combined block.
+search still scores the combined block. If the retained inspection boundary
+cannot cover the complete group, the search-safety checks above reject it.
 
 ## Parallel branches
 

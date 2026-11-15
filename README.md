@@ -88,7 +88,9 @@ compatible deployment engine.
   loading support further task adaptation.
 - **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
   a quantized block, including multimodal wrappers and hybrid layer shapes; see
-  the [AWQ scaling groups](docs/awq-scaling-groups.md) contract.
+  the [AWQ scaling groups](docs/awq-scaling-groups.md) contract. Scale search keeps
+  routing in the original-input coordinates, validates replay coverage, and
+  restores temporary weights on failure; see [search safety](docs/awq-scaling-groups.md#scale-search-safety).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.

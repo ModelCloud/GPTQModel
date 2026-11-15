@@ -68,6 +68,9 @@ class _DummyQwen3SelfAttention(nn.Module):
         self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
 
+    def forward(self, x):
+        return self.q_proj(x) + self.k_proj(x) + self.v_proj(x)
+
 
 class _DummyQwen3MoeExpert(nn.Module):
     def __init__(self) -> None:
@@ -1032,7 +1035,7 @@ def test_awq_early_layer_completion_releases_all_feature_state(completion_path):
         QuantizeConfig(
             quant_method=METHOD.AWQ,
             format=FORMAT.GEMM,
-            group_size=128,
+            group_size=4,
         )
     )
     layer = nn.Module()
@@ -1894,7 +1897,7 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
             layers[0],
             layers,
             inp,
-            module2inspect=layers[0],
+            module2inspect=attn,
             kwargs={},
         )
     finally:
