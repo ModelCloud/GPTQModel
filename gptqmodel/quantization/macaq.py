@@ -461,7 +461,7 @@ def macaq_quantize_weight(
     ridge: float = 1.0,
     do_flip: bool = True,
     pre_mode: str = "balance",
-    pre_alpha: float = 0.5,
+    pre_alpha: float = 0.75,
     exp_screen: bool = True,
     exp_offsets: Tuple[int, ...] = (1, 0, -1),
     fast_flip: bool = True,

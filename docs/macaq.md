@@ -47,6 +47,20 @@ block-Hadamard. The W4A4 Triton GEMM reads packed tiles directly. The Torch
 fallback and W4A16 path reconstruct a temporary dense weight for the current
 forward and release it afterward; no dense weight cache is retained.
 
+### MXFP4 values and MACaQ checkpoint format
+
+[OCP MXFP4](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)
+defines E2M1 elements with one E8M0 scale per 32 values. Those numerical
+values and scales are generic; MACaQ does not define a new 4-bit number system.
+
+`FORMAT.MACAQ` names GPT-QModel's native **checkpoint contract** for the
+MACaQ-transformed Linear. In addition to the MXFP4 weight codes and scales,
+the checkpoint stores `pre_scale` and `BH`; its quantization config records
+`activation_precision` and the transform settings. The tensor names, nibble
+packing, and transform metadata are part of this implementation's layout.
+A generic MXFP4 checkpoint cannot be loaded as `FORMAT.MACAQ` without
+converting that layout and supplying the required transform state.
+
 ## Quantization and runtime flow
 
 The backend is resolved once during preflight. `MACAQ_TORCH` remains selected
