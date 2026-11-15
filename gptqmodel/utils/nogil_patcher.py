@@ -105,7 +105,11 @@ def patch_triton_jit_compile() -> None:
     if getattr(JITFunction, "_gptqmodel_compile_serialized", False):
         return
 
-    original_do_compile = JITFunction._do_compile
+    original_do_compile = getattr(JITFunction, "_do_compile", None)
+    if original_do_compile is None:
+        # Unknown Triton layout: leave it alone rather than breaking the
+        # autotuner patch that is already installed.
+        return
 
     @functools.wraps(original_do_compile)
     def patched_do_compile(self, key, *args, **kwargs):
