@@ -144,6 +144,28 @@ loudly, which is the minimum contract for a transport this library does not
 own. A module that is *itself* in a runtime layout keeps its own round trip,
 because that is how ExLlamaV2 rebinds finalized words between matching layers.
 
+That marker is deliberately **not** persisted in a checkpoint.
+`PackedGroupedQuantLinear._write_state_dict_layout_marker` removes the
+persistent buffer from the destination while `checkpoint_serialization()` is
+active, so HF `save_pretrained()` writes exactly the tensor set that
+`GPTQModel.save()` writes: no `*.qzeros_format` key per quantized layer. The
+tensor is still emitted for read-only `state_dict()` transports — a plain dict
+copy or a safetensors round trip within a live process — which is what keeps
+the v1/v2 label attached when `_metadata` is dropped (#4125 item 3). A
+checkpoint reload resolves its layout from `config.json`'s `checkpoint_format`,
+so the persisted marker is redundant and was only publishing a key that the
+GPTQ/AWQ format does not describe.
+
+```mermaid
+flowchart TD
+    A["PackedGroupedQuantLinear._save_to_state_dict"] --> B["nn.Module emits the persistent qzeros_format buffer"]
+    B --> C{"is_checkpoint_serialization()?"}
+    C -- yes --> D["pop qzeros_format<br/>checkpoint matches GPTQModel.save()"]
+    C -- "no (read-only state_dict)" --> E["write the layout code tensor<br/>survives safetensors and dict copies"]
+    style D fill:#d9f2d9,stroke:#2e7d32
+    style E fill:#fff4cc,stroke:#b8860b
+```
+
 `GPTQModel.save()` is unaffected: it rebuilds the export shell from the source
 checkpoint and never serializes the runtime kernel layout.
 
