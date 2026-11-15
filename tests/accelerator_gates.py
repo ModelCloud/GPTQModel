@@ -13,6 +13,8 @@ capability is read, and the NVIDIA-specific checks run only on CUDA builds.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 
 from gptqmodel.models._const import DEVICE, normalize_device
@@ -145,3 +147,50 @@ def nf12_skip_reason() -> str | None:
     except _MissingBuildTools as exc:
         return f"gptqmodel_nf12 source build is unavailable: {exc}"
     return None
+
+
+def _probe_metal_backend(mx) -> str | None:
+    """Run a one-thread Metal kernel and return why it failed, or None.
+
+    ``mx.metal.is_available()`` and platform strings describe the build, not
+    whether this process can actually launch a Metal kernel. A Linux MLX wheel
+    can be imported on a host with no Metal device, so the gate compiles and
+    evaluates a trivial ``mx.fast.metal_kernel`` and treats any failure as a
+    missing backend.
+    """
+    try:
+        kernel = mx.fast.metal_kernel(
+            name="gptqmodel_metal_capability_probe",
+            input_names=["x"],
+            output_names=["y"],
+            source="""
+                uint index = thread_position_in_grid.x;
+                y[index] = x[index] + 1.0f;
+            """,
+        )
+        output = kernel(
+            inputs=[mx.array([0.0], dtype=mx.float32)],
+            grid=(1, 1, 1),
+            threadgroup=(1, 1, 1),
+            output_shapes=[(1,)],
+            output_dtypes=[mx.float32],
+        )[0]
+        mx.eval(output)
+    except Exception as exc:
+        return f"MLX Metal backend is unavailable: {type(exc).__name__}: {exc}"
+    return None
+
+
+@lru_cache(maxsize=1)
+def mlx_metal_skip_reason() -> str | None:
+    """Return why MLX Metal kernels cannot run here, or None when they can.
+
+    The probe result is cached because collecting the MLX suite asks once per
+    module, and compiling a Metal kernel is the expensive part.
+    """
+    try:
+        import mlx.core as mx
+    except ImportError as exc:
+        return f"MLX Metal backend is unavailable: mlx.core is not installed ({exc})"
+
+    return _probe_metal_backend(mx)
