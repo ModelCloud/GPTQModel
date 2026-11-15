@@ -18,6 +18,7 @@ class TestGpt2(ModelTest):
     TORCH_DTYPE = torch.float16
     TRUST_REMOTE_CODE = True
     INPUTS_MAX_LENGTH = 1024
+    ASSERT_INFERENCE = True
 
     def test_gpt2(self):
         self.quantize_and_evaluate()

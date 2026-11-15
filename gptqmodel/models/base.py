@@ -86,7 +86,7 @@ from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config
+from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.model import (
@@ -764,6 +764,16 @@ class BaseQModel(nn.Module):
             log.debug(
                 "Model: restored %d init-owned rotary buffer(s) for `%s`.",
                 restored_rotary_buffers,
+                type(self.model).__name__,
+            )
+        # transformers 5 always hands `generate()`'s cache to the remote
+        # `prepare_inputs_for_generation`, even before the first prefill, and
+        # replaced the tuple/attribute cache interface those implementations
+        # were written against. Install the shared legacy adapter here so every
+        # load path (native eval, quantization, quantized reload) gets it.
+        if install_legacy_generation_compat(self.model):
+            log.debug(
+                "Model: installed legacy generate() adapter for `%s`.",
                 type(self.model).__name__,
             )
         hooks = getattr(self, "moe_lifecycle_hooks", None)
