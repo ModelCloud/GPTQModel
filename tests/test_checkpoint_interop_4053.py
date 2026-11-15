@@ -19,6 +19,7 @@ AWQ case; the GPTQ cases compare logits before and after the round trip.
 import json
 import os
 import shutil
+import types
 
 import pytest
 import torch
@@ -362,6 +363,94 @@ def test_optimized_torch_linear_model_pickles(tmp_path):
     assert _relative_error(_logits(model.model), _logits(restored)) < 1e-6
 
 
+def _optimized_pickle_kernel(kind):
+    """Build and `optimize()` one CPU kernel that stores a compiled callable."""
+
+    from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+    from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+
+    if kind == "torch":
+        return TorchLinear(
+            bits=4, group_size=32, sym=True, desc_act=False,
+            in_features=128, out_features=64, bias=False,
+            pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
+        )
+    if kind == "fp8":
+        return TorchFP8Linear(
+            bits=8, group_size=-1, sym=True, desc_act=False,
+            in_features=128, out_features=64, register_buffers=True,
+        )
+    if kind == "exl3":
+        in_features, out_features, bits = 128, 128, 4
+        generator = torch.Generator().manual_seed(731)
+        return ExllamaV3TorchLinear.from_tensors(
+            in_features=in_features,
+            out_features=out_features,
+            name="pickle_exl3",
+            tensors={
+                "trellis": torch.randint(
+                    -32768, 32767,
+                    (in_features // 16, out_features // 16, bits * 16),
+                    dtype=torch.int16, generator=generator,
+                ),
+                "suh": (torch.rand(in_features, generator=generator) * 0.02 + 0.001).half(),
+                "svh": (torch.rand(out_features, generator=generator) * 0.02 + 0.001).half(),
+                "bias": torch.zeros(out_features, dtype=torch.float16),
+            },
+        )
+    if kind == "vptq":
+        module = VPTQLinear(
+            bits=2, in_features=64, out_features=64, bias=False,
+            vector_lens=[-1, 4], num_centroids=[-1, 16],
+            num_res_centroids=[-1, -1], group_size=64, group_num=-1,
+            enable_norm=False, enable_perm=False, dtype=torch.float16,
+        )
+        module._allocate_buffers(bias=False)
+        return module
+    raise AssertionError(kind)
+
+
+@pytest.mark.parametrize("kind", ["torch", "fp8", "exl3", "vptq"])
+def test_optimized_cpu_kernels_pickle_round_trip(tmp_path, kind):
+    """#4091 item 6: every kernel that stores a compiled callable must pickle."""
+
+    module = _optimized_pickle_kernel(kind).eval()
+    module.optimize()
+    if not module.optimized:
+        pytest.skip(f"torch.compile is disabled for {type(module).__name__}")
+
+    compiled_attr = {
+        "torch": "dequantize_weight",
+        "fp8": "_compiled_forward",
+        "exl3": "_compiled_forward",
+        "vptq": "dequantize",
+    }[kind]
+    assert compiled_attr in module.__dict__, f"{type(module).__name__} did not compile"
+
+    target = tmp_path / f"{kind}.pt"
+    torch.save(module, str(target))
+    restored = torch.load(str(target), weights_only=False)
+
+    x = torch.randn(2, module.in_features, dtype=torch.float16)
+    with torch.inference_mode():
+        eager = restored(x)
+        compiled = module(x)
+    # The restored module runs eager; compiled and eager differ only by fp16
+    # rounding in the fused epilogue.
+    torch.testing.assert_close(eager, compiled, rtol=1e-2, atol=1e-5)
+
+    assert restored.optimized is False
+    if compiled_attr == "_compiled_forward":
+        # The FP8/EXL3 forward reads the attribute directly.
+        assert restored._compiled_forward is None
+    else:
+        assert compiled_attr not in restored.__dict__
+        # The eager class method is restored instead of a compiled shadow.
+        assert isinstance(getattr(restored, compiled_attr), types.MethodType)
+
+
 def test_hf_from_pretrained_refuses_packed_gguf(tmp_path):
     """A GPT-QModel GGUF checkpoint must not silently random-init in HF."""
 
@@ -394,6 +483,36 @@ def _runtime_layout_shell(cls, flag: str):
     module._qzeros_format = 2
     setattr(module, flag, True)
     return module
+
+
+@pytest.mark.parametrize(
+    "quant_method", ["exl3", "qqq", "paroquant", "macaq", "nf12", "tt-blockfloat"]
+)
+def test_hf_from_pretrained_refuses_every_refused_method(tmp_path, quant_method):
+    """Plain transformers must raise instead of loading random weights (#4091 item 5)."""
+
+    from transformers import AutoModelForCausalLM
+
+    from gptqmodel._quant_methods import REFUSED_HF_QUANT_METHODS
+
+    assert quant_method in REFUSED_HF_QUANT_METHODS
+    source = tmp_path / quant_method
+    _build_gptq_v1_checkpoint(str(source))
+    config_path = source / "config.json"
+    config = json.loads(config_path.read_text())
+    config["quantization_config"] = {
+        "method": quant_method,
+        "quant_method": quant_method,
+        "bits": BITS,
+    }
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError) as excinfo:
+        AutoModelForCausalLM.from_pretrained(str(source), local_files_only=True)
+
+    message = str(excinfo.value)
+    assert "cannot be loaded by `transformers`" in message
+    assert quant_method in message
 
 
 @pytest.mark.parametrize(

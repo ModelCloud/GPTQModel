@@ -35,12 +35,17 @@ flowchart TD
     I --> J{"prompt / prompts / input_ids present?"}
     J -- no --> K["ValueError: MLX requires prompts or input_ids"]
     J -- yes --> L["_mlx_prompt_list -> list of str or token lists"]
-    L --> M["map max_new_tokens or max_tokens"]
-    M --> N["map seed, eos_token_id, stop, do_sample, sampler"]
-    N --> O["mlx_lm.generate per prompt"]
+    L --> L2["_mlx_strip_padding<br/>attention_mask rows or pad_token_id"]
+    L2 --> M["map max_new_tokens or max_tokens"]
+    M --> N["map seed, per-call eos_token_id, stop, do_sample, sampler"]
+    N --> N2{"unsupported kwargs left?"}
+    N2 -- yes --> N3["warn with the argument names"]
+    N2 -- no --> O["mlx_lm.generate per prompt"]
+    N3 --> O
     O --> P{"one prompt?"}
     P -- yes --> Q["return str"]
     P -- no --> R["return list[str]"]
+    style K fill:#f8d7da,stroke:#b02a37
 ```
 
 Option mapping:
@@ -49,15 +54,18 @@ Option mapping:
 | --- | --- |
 | `prompts=` (str or list of str) | each string is passed to `mlx_lm.generate` |
 | `input_ids=` (tensor or token list) | tensor is moved to CPU and converted to a token list; a 2-D tensor is treated as a batch |
+| `attention_mask=` (tensor or nested list) | pad positions are removed from each token row before generation; a row/length mismatch raises `ValueError` |
+| `pad_token_id` | fallback when no mask is given: leading and trailing pad ids are trimmed |
 | `prompt=` (legacy adapter argument) | still accepted, unchanged |
 | `max_new_tokens` | wins over `max_tokens`; becomes `mlx_lm` `max_tokens` |
 | `max_tokens` | legacy fallback, default `256` |
-| `eos_token_id` (int or list) | added to the tokenizer's EOS id set (`TokenizerWrapper`) |
+| `eos_token_id` (int or list) | added to a per-call copy of the tokenizer's EOS id set; the shared tokenizer is not mutated |
 | `stop` (str or list of str) | generation result is trimmed at the earliest stop string |
 | `seed` | `mx.random.seed(seed)` before generation |
 | `do_sample=False` / `True` | greedy (`temperature=0.0`) / `temperature=1.0` when no temperature is supplied |
 | `temperature`, `top_p`, `min_p`, `min_tokens_to_keep`, `sampler` | passed to `make_sampler` |
 | `repetition_penalty` | `make_logits_processors(repetition_penalty=...)` |
+| any other keyword | logged as unsupported instead of being dropped silently |
 
 ## Export and conversion path
 
@@ -69,29 +77,63 @@ does conversion fall back to `quantize_model`, and that fallback now receives
 
 ```mermaid
 flowchart TD
-    A["GPTQModel.export(path, target, 'mlx')"] --> B["convert_gptq_to_mlx_weights"]
+    A["GPTQModel.export(..., 'mlx')"] --> B["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
+    R["GPTQModel.load(backend='mlx')"] --> B2["convert_gptq_to_mlx_weights<br/>stock_compatible=False"]
     B --> C{"dynamic override valid?"}
+    B2 --> C
     C -- "bits unsupported" --> D["ValueError"]
     C -- ok --> E["_packed_mlx_weights(model, config, lm_head_name)"]
-    E --> F{"all packed source layers transferable?"}
-    F -- yes --> G["repack_gptq / repack_awq / repack_gguf / ... in numpy"]
-    G --> H["mlx_config.quantization carries per-layer bits/group"]
-    H --> I["_gptqmodel_custom_mlx_runtime or _gptqmodel_group16_runtime"]
-    F -- no --> J["quantize_model(..., quant_predicate=_mlx_quant_predicate)"]
-    J --> K{"dynamic_get(path)"}
-    K -- "False (-: exclusion)" --> L["return False: layer stays float16"]
-    K -- "None (no rule)" --> M["return True: default bits/group"]
-    K -- "override dict" --> N["return bits/group override"]
-    L --> O["MLX-LM checkpoint"]
-    M --> O
-    N --> O
-    I --> O
+    E --> F{"custom-runtime layer?<br/>group 16, paro, qqq, fp8, gguf, bnb, exl3, macaq, nf12"}
+    F -- "yes, stock_compatible=True" --> G["return None"]
+    F -- "no" --> H["repack exact words into direct<br/>weight / scales / biases names"]
+    F -- "yes, runtime load" --> I["custom MLX runtime class"]
+    G --> J["quantize_model(..., quant_predicate=_mlx_quant_predicate)"]
+    J --> K{"format requantizable?"}
+    K -- no --> L["ValueError naming the format"]
+    K -- yes --> M["stock MLX-LM checkpoint"]
+    H --> N{"stock_compatible?"}
+    N -- yes --> M
+    N -- no --> I
+    I --> O["custom-runtime checkpoint<br/>_gptqmodel_*_runtime flag"]
+    style G fill:#fff3cd,stroke:#997404
+    style L fill:#f8d7da,stroke:#b02a37
+    style M fill:#d9f2d9,stroke:#2e7d32
 ```
 
 `_mlx_quant_predicate` uses `dynamic_get(dynamic, path)`, so the same
 first-match and `-:` exclusion semantics as quantization apply to the
 requantization fallback. A `+:` override without a `bits` key keeps the base
 bit width.
+
+### Stock-compatible export (#4091 item 10)
+
+Before this fix, the export path called `convert_gptq_to_mlx_weights` with the
+same packed transfer as the runtime loader. On Linux, #4083 made that transfer
+available, so every GPTQ/AWQ `TorchLinear` was wrapped in `MlxGPTQLinear` /
+`MlxAWQLinear` and written with `*.linear.*` key names plus a
+`_gptqmodel_custom_mlx_runtime` flag. Stock `mlx_lm.load` builds
+`nn.QuantizedLinear` and rejected those names:
+
+```
+ValueError: Received 576 parameters not in model:
+model.layers.0.mlp.down_proj.linear.biases ...
+```
+
+`GPTQModel.export(..., format="mlx")` now passes `stock_compatible=True`. The
+exact packed transfer still runs for layers that map onto a stock
+`nn.QuantizedLinear` (direct `weight` / `scales` / `biases` names), and layers
+that need the custom runtime (group 16, ParoQuant, QQQ, FP8, GGUF,
+bitsandbytes, EXL3) go through the stock `quantize_model` fallback. Formats
+with no requantization path fail with the existing `ValueError` naming the
+format instead of writing an unreadable layout. The in-process
+`GPTQModel.load(backend="mlx")` path keeps `stock_compatible=False`, so its
+custom kernels are unchanged.
+
+| Situation | Before #4091 | After #4091 |
+| --- | --- | --- |
+| Linux export of a GPTQ/AWQ checkpoint | `*.linear.*` keys + custom-runtime flag; stock `mlx_lm.load` rejects | direct keys; stock `nn.QuantizedLinear`; `mlx_lm.load` succeeds |
+| Export of a group-16 / ParoQuant / QQQ / FP8 / GGUF / bitsandbytes / EXL3 / MACaQ / NF12 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
+| Runtime `GPTQModel.load(backend="mlx")` | exact packed transfer + custom runtime | unchanged |
 
 ### Before/after mechanism
 
@@ -115,6 +157,10 @@ bit width.
 | Packed layer names do not match the MLX model | warning, then float conversion fallback (`_packed_mlx_weights` returns `None`) |
 | Unsupported format with no transferable packed state | `ValueError` naming the format |
 | MLX runtime on non-Apple hardware | kernel selection still rejects it through `validate_once`; only export/convert is platform-free |
+| `attention_mask` row or length mismatch | `ValueError` before generation |
+| `attention_mask` with string prompts | warning; the mask is ignored because there are no token positions |
+| `eos_token_id` on one call | applied to a per-call tokenizer copy; the shared tokenizer keeps its EOS set |
+| Export layer needs the custom runtime | stock requantization when the format supports it, otherwise `ValueError` naming the format |
 
 ## Measured export result
 
@@ -179,7 +225,11 @@ than at the 650 GB/s the device reaches on 512 MB working sets.
 
 ## Not in scope
 
-The custom-runtime checkpoint emitted when the packed transfer succeeds keeps
-`*.linear.*`-prefixed tensors and the `_gptqmodel_custom_mlx_runtime` flag.
-Loading that checkpoint with stock `mlx_lm.load` (as opposed to the GPT-QModel
-MLX loader) is not changed by this page.
+The custom MLX runtime classes (`MlxGPTQLinear`, `MlxGroup16Linear`,
+`MlxParoLinear`, `MlxQQQLinear`, `MlxFP8Linear`, `MlxGGUFLinear`) are still
+used by the in-process `GPTQModel.load(backend="mlx")` path, as are
+`MacaqMlxQuantLinear` and `NF12MlxQuantLinear`. Export no longer
+writes a checkpoint that depends on them: `GPTQModel.export(...,
+format="mlx")` emits the stock `mlx_lm` layout described above. Checkpoints
+written by earlier versions with `*.linear.*` keys and the
+`_gptqmodel_custom_mlx_runtime` flag still require the GPT-QModel MLX loader.
