@@ -28,6 +28,17 @@ from ._alloc_conf import apply_default_alloc_conf  # noqa: E402
 
 _installed_alloc_conf = apply_default_alloc_conf()
 
+# Still before any other submodule import: rocBLAS forwards its GEMMs to
+# hipBLASLt on ROCm 10.1/gfx1201, and hipBLASLt picks a different kernel per
+# process for the same shape. That makes two identical quantization runs in
+# separate processes save different checkpoints. ``ROCBLAS_USE_HIPBLASLT=0``
+# keeps the GEMMs in rocBLAS and is deterministic; the user's explicit value,
+# if any, wins. rocBLAS reads it on first use, so it has to be set before the
+# first BLAS call.
+from ._rocm_env import apply_default_rocm_blas_env  # noqa: E402
+
+_installed_rocm_blas_env = apply_default_rocm_blas_env()
+
 # Still before any other Torch use: HIP reports no last-level cache, so on
 # RDNA3/RDNA4 Torch exposes only L2 (8 MiB on an R9700) and never the 64 MiB
 # Infinity Cache / MALL behind it. Anything that sizes a cache-flush buffer
@@ -56,6 +67,12 @@ if _installed_alloc_conf is not None:
     log.info(
         "ENV: Auto setting PYTORCH_ALLOC_CONF='%s' for memory saving.",
         _installed_alloc_conf,
+    )
+
+if _installed_rocm_blas_env is not None:
+    log.info(
+        "ENV: Auto setting ROCBLAS_USE_HIPBLASLT='%s' for reproducible quantization.",
+        _installed_rocm_blas_env,
     )
 
 # Fail loudly (once) on ROCm releases older than the supported floor.
