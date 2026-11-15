@@ -204,7 +204,7 @@ flowchart TD
     B -- "yes" --> C["TeleChat2: promote x to 3-D,<br/>add residual and causal bool mask"]
     B -- "no" --> D["module_kwargs = dict(module_kwargs)"]
     C --> D
-    D --> E{"position_ids.shape[-1] == seq_len?"}
+    D --> E{"position_ids length == seq_len?"}
     E -- "no" --> F["stale_position_ids = True"]
     E -- "yes" --> G["keep captured position_ids"]
     F --> H{"root rotary found?"}
@@ -266,9 +266,9 @@ relative error on query embeddings dropped from GPTQ 0.130 (worse than RTN
 
 ```mermaid
 flowchart TD
-    A["BaseQModel.prepare_layer_replay_kwargs"] --> B{"blocks[-1] is layer?"}
+    A["BaseQModel.prepare_layer_replay_kwargs"] --> B{"last block is layer?"}
     B -- "no" --> C["replay kwargs unchanged"]
-    B -- "yes" --> D["layer_input[0] = ln_f(hidden_states)"]
+    B -- "yes" --> D["layer input = ln_f(hidden_states)"]
     D --> E{"position_ids tensor?"}
     E -- "no" --> F["arange over seq_len"]
     E -- "yes" --> G["use captured position_ids"]
