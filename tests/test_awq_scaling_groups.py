@@ -20,6 +20,7 @@ import torch
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.quantization.awq.quantize.scale import apply_scale, is_foldable_source
@@ -449,6 +450,24 @@ def test_issue_4039_families_are_covered():
     assert not missing, f"issue #4039 families missing from FAMILIES: {sorted(missing)}"
 
 
+@pytest.mark.parametrize("family", ["cohere", "cohere2"])
+def test_parallel_norm_group_cannot_score_only_attention(family):
+    _hf_model, qmodel, layers, tree = _tiny_model(family)
+    layer = layers[0]
+    features = _features(layer, ModulePlan.from_tree(tree))
+    nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
+    node = next(node for node in nodes if node["prev_op"] is layer.input_layernorm)
+    names = [get_op_name(layer, target) for target in node["layers"]]
+    assert "self_attn.q_proj" in names
+    assert "mlp.gate_proj" in names
+    assert node["module2inspect"] is layer.self_attn
+    with pytest.raises(_AWQScaleGroupError, match="mlp.gate_proj"):
+        AWQProcessor._validate_scale_group(
+            layer, node["prev_op"], node["layers"], node["inp"],
+            node["module2inspect"], node.get("_scale_consumers"),
+        )
+
+
 @pytest.mark.parametrize("family", sorted(FAMILIES))
 def test_scaling_groups_preserve_decoder_layer_output(family):
     hf_model, qmodel, layers, tree = _tiny_model(family)
@@ -481,7 +500,6 @@ MOE_SHARED_FAMILIES = [
     "solar_open",
     "deepseek_v2",
     "deepseek_v4",
-    "axk2",
     "qwen2_moe",
 ]
 

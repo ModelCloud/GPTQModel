@@ -63,6 +63,146 @@ The tracker update runs for every block, including blocks skipped because
 `prev_op is None`. That keeps the "previous linear in tree order" fallback
 available for the next block instead of leaving `last_module` unset.
 
+## Scale-search safety
+
+The search-safety checks were introduced in [#4144](https://github.com/ModelCloud/GPTQModel/pull/4144).
+
+The existing group dictionaries and tag syntax are unchanged. Search uses
+the original captured activation `x` and candidate weights `Q(W * s) / s`.
+Non-quantized routers and shared gates therefore keep their original weights
+during search. Only final `apply_scale`, which changes the source to emit
+`x / s`, multiplies those consumers by `s`. Scaling them during search would
+change routing even with identity quantization.
+
+```mermaid
+flowchart TD
+    A["AWQProcessor._quantize_layer"] --> B["_validate_scale_group_conflicts"]
+    B --> C{"source or target overlap?"}
+    C -- "yes" --> X["raise _AWQScaleGroupError<br/>no folds applied"]
+    C -- "no" --> P["filter low-sample / missing-feature groups"]
+    P --> D["_search_best_scale<br/>_validate_scale_group"]
+    D --> E{"exact live bindings, widths,<br/>and targets inside replay boundary?"}
+    E -- "no" --> F{"configured fallback enabled?"}
+    E -- "yes" --> G["reference forward<br/>temporary target observation hooks"]
+    G --> H["finally remove observation hooks"]
+    H --> R{"reference replay succeeded?"}
+    R -- "no" --> Y["propagate evaluation exception"]
+    R -- "yes" --> I{"every declared target executed?"}
+    I -- "no" --> F
+    I -- "yes" --> J["_compute_best_scale<br/>20 candidates: Q(W * s) / s<br/>routers and shared gates unchanged"]
+    J --> K["finally restore original weights"]
+    K --> L{"candidate evaluation succeeded?"}
+    L -- "yes" --> M["collect scale results<br/>apply_scale once per source<br/>apply_quant"]
+    L -- "no" --> Y
+    F -- "yes" --> N["warn with group and reason<br/>exclude group from folding and clipping<br/>apply_quant with empty scales"]
+    F -- "no" --> X
+    style X fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style Y fill:#f8d7da,stroke:#842029,stroke-width:2px
+    style N fill:#fff3cd,stroke:#997404,stroke-width:2px
+```
+
+| Before (baseline `c9efdbacf`) | Now |
+| --- | --- |
+| Candidate search multiplies non-quantized consumer weights (`awq_processor.py:3099-3119`). | Search leaves them unchanged; final folding still compensates them. |
+| Shared-source merge retains the first inspection module for cross-root groups (`models/base.py:5540-5546`). | Group construction remains unchanged, but search rejects boundaries missing any member rather than scoring only one branch. |
+| A contained target need not execute during replay (`awq_processor.py:2551-2572`). | Reference-forward observation rejects unexecuted targets before candidate mutation; observation hooks are always removed. |
+| Weight restoration occurs only after successful grid evaluation (`awq_processor.py:3267-3278`). | Restoration is in `finally`, covering quantizer, replay, and loss exceptions. |
+| Search results are collected without a group-validation fallback (`awq_processor.py:2352-2359`). | Unsafe replay groups use the existing configured fallback with a warning, or raise with fallback disabled. Conflicting folds always raise. |
+
+All paths above are layer-owned: `process` holds `_AWQLayerState.lock` while
+calling `_quantize_layer`. Observation state, hooks and master weights are local
+to a search; no process-global trace or persistent weight cache is installed.
+The hook APIs are already used for calibration. This change does not qualify
+new concurrent mutation of the same module or claim free-threaded validation.
+
+Validation checks **both** containment and execution. An MoE expert not reached
+by the retained reference samples makes the group unsupported for that replay;
+fallback is conservative even if earlier calibration batches reached it. Code
+that bypasses module calls and reads weights functionally also requires a
+compatible existing Python group/replay override, or fallback. The checks do
+not prove an entire dynamic graph or discover undeclared functional consumers.
+
+Cross-root groups are not split: independently folding their shared norm would
+divide it repeatedly. Nor is inspection automatically widened to the decoder
+layer: its input can differ from the captured norm output. A Python override
+may supply an existing-format group with a compatible input, kwargs and full
+objective. Until then, the complete shared-source group falls back together.
+Default `AWQConfig.fallback` behavior is preserved; set `fallback=None` to make
+these unsafe replay groups raise instead. Existing no-group/missing-feature
+paths are not redesigned here.
+
+Conflicts are checked **before** low-sample, width or missing-feature filtering.
+Dropping one conflicting group first would let another group divide the shared
+norm (or modify tied target weights) without compensating the filtered branch.
+
+CPU regressions cover eager and chunked search, FP32/FP16/BF16 router neutrality,
+an independent Torch folded-model quantization oracle, failure rollback,
+complete/incomplete parallel objectives, and real Qwen2/Qwen3 MoE and
+Cohere/Cohere2 topologies. Inference kernels, persistent quantized weight storage,
+architecture declaration syntax, and replay mask/position reconstruction are
+unchanged. A declarative graph/DSL and automatic cross-root replay are out of
+scope.
+
+## Architecture relationship qualification
+
+The source audit covered all 206 registered model types (182 definitions) at
+`388f82f01`, without downloading checkpoint weights. It recorded 14 unsafe
+model-type entries across 13 definition families. Those are counterexamples to
+the inference rule, not a claim that every released checkpoint reaches the
+same invalid fold. Matching channel widths and executing every **declared**
+target cannot prove producer identity or discover an undeclared consumer.
+
+The immediate repairs use existing declarations, not a graph compiler or DSL:
+
+| Definition | Incorrect relationship before | Existing-format repair |
+| --- | --- | --- |
+| `cohere_compass` | The input norm also feeds the parallel MLP; `o_proj` is not its producer. | Shared `:in=normalized` on Q/K/V and gate/up, `o_proj:nosrc`; incomplete cross-root replay is rejected. |
+| `granitemoe_swa` | Routed experts omitted the sibling shared MLP. | Shared input tags include `shared_mlp.input_linear`; incomplete cross-root replay is rejected. |
+| `hunyuan_v1_moe` | The weightless gate container hid the actual router weight. | Declare the non-quantized affine consumer `mlp.gate.wg`. |
+| `falcon_mamba` | Matching widths allowed a fold across SSM and nonlinear computation. | Mark mixer projections `:nosrc`; explicitly exclude convolution, time-step and state owners. |
+| `moss` | Parallel attention/MLP and GELU were treated as sequential linear paths. | Mark the shared norm, attention output and activated MLP source `:nosrc`. |
+| `internlm2` | The attention input and output projections shared stage zero. | Stage `wqkv:0`, `wo:1`. |
+| `minicpm` | Parallel Q/K/V were sequential; MLP input and output stages were combined. | Group Q/K/V at stage zero and gate/up together; keep output projections in the next stage. |
+| `gemma3n`, `gemma3n_text` | Folds omitted Laurel, crossed value normalization, or crossed AltUp/residual/activation boundaries. | Exclude the corresponding sources with `:nosrc`, declare AltUp/Laurel owners, and place per-layer output normalization after its projection. |
+| `axk2`, `glm_moe_dsa` | An indexer projection was mistaken for a low-rank query producer; GLM's input fold omitted an indexer consumer. | Conservatively disable internal attention source folds and declare nested norm/indexer owners. FFN folds remain eligible. |
+| `longcat_flash` | Indexed norms and dual residual sublayers were treated as one sequential path. | Declare indexed norm owners and nested router weights; disable the ambiguous attention/output sources. |
+| `inkling_mm_model` | The norm fed unhandled native 3-D shared experts as well as routed experts. | Disable that norm's fold and explicitly exclude shared-expert, scale, convolution and relative-logit owners. |
+| `qwen` | The inferred `w2` source crosses SiLU. | Mark `w2:nosrc`. |
+
+```mermaid
+flowchart TD
+    A["architecture module_tree<br/>parallel stages, :in, nested :!, :nosrc"] --> B["awq_get_modules_for_scaling"]
+    B --> C["_merge_shared_source_nodes"]
+    C --> D["_filter_awq_scaling_sources"]
+    D --> E{"selected source is :nosrc?"}
+    E -- "yes" --> P["drop smoothing group<br/>existing plain quantization path"]
+    E -- "no" --> F["AWQProcessor._quantize_layer<br/>conflict, boundary and execution checks"]
+    F --> G{"complete supported replay?"}
+    G -- "yes" --> H["search and fold once"]
+    G -- "no: _AWQScaleGroupError" --> I{"configured fallback enabled?"}
+    I -- "yes" --> P
+    I -- "no" --> X["raise; no unsafe fold"]
+    F -- "raw forward exception" --> Y["propagate; not a safe fallback"]
+    style P fill:#fff3cd,stroke:#997404
+    style X fill:#f8d7da,stroke:#842029
+    style Y fill:#f8d7da,stroke:#842029
+```
+
+Declaring a source `:nosrc` retains the pre-existing unconditional plain
+quantization path for that group; this is different from rejecting a generated
+group under `fallback=None`. The safety checks are not expanded to infer an
+arbitrary graph. Raw replay exceptions (for example a native Bloom forward
+missing its residual argument) remain errors, not configured fallback.
+
+`tests/module_tree/test_awq_relationships.py` uses real tiny CPU model modules,
+their `state_dict()` owners, nontrivial synthetic folds and full text outputs.
+It covers shared/no-shared Granite, nested Hunyuan routing, a Falcon Mamba width
+collision, AXK2/GLM indexers, LongCat residuals, dense/sparse Inkling text layers,
+MHA/GQA CohereCompass and Gemma3n's AltUp/Laurel decoder. The legacy remote-code
+families also have pinned-source audit probes; their CI declaration checks do
+not claim that remote implementations were loaded by the CPU job. The
+always-run registry contract covers every registered alias and method case.
+
 ## One group per norm
 
 `_merge_shared_source_nodes` merges every node whose `prev_op` is the same gain
@@ -71,7 +211,8 @@ multiplies every quantized consumer (all routed experts plus `shared_experts`,
 or both parallel branches) and every declared `_scale_consumers` entry (router,
 `shared_expert_gate`, `g_proj`, `output_gate`) by the same scale. The merged
 group re-inspects a common parent when every consumer shares one, so the scale
-search still scores the combined block.
+search still scores the combined block. If the retained inspection boundary
+cannot cover the complete group, the search-safety checks above reject it.
 
 ## Parallel branches
 
@@ -402,6 +543,20 @@ Issue #4121 item coverage:
 | --- | --- |
 | `tests/test_awq_scaling_groups.py` (`gpt_pangu`, `olmo_hybrid`, `gemma4`, `gemma4_unified`, `nemotron_h`) | fold preserves the decoder layer's logits to `1e-5` relative |
 | `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
+
+### Real-checkpoint CPU CI
+
+The `AWQ CPU` pull-request workflow runs the offline regressions plus
+`tests/test_awq_hf_cpu.py` against revision-pinned, trained SmolLM2-135M and
+TinyMoE-100M checkpoints from Hugging Face. The integration tests download real
+safetensors, compare held-out logits and next-token loss before/after 4-bit AWQ,
+check all expected packed projections and unquantized MoE routers, then save,
+reload with the same activation dtype, and check logits and greedy generation.
+Network/download failures fail the integration job rather than silently skip it.
+The MoE test permits configured fallback when calibration does not execute all
+experts and records how many groups used it. These short deterministic checks
+guard against catastrophic drift; they are not a corpus-level perplexity or
+model-quality qualification.
 
 ## Not in scope
 

@@ -63,6 +63,10 @@ from ..utils.torch import CPU
 log = setup_logger()
 
 
+class _AWQScaleGroupError(ValueError):
+    """A declared group cannot be evaluated safely with its current replay."""
+
+
 def _resolve_module_exec_device(module: nn.Module) -> torch.device:
     """Prefer a module's planned target device, then fall back to its current device."""
 
@@ -2229,6 +2233,7 @@ class AWQProcessor(LoopProcessor):
             entry["kwargs"] = self._sanitize_kwargs(entry_kwargs, inspect_module)
             sanitized_module_config.append(entry)
 
+        self._validate_scale_group_conflicts(layer_module_ref, sanitized_module_config)
         filtered_module_config: List[Dict] = []
         skipped_groups: List[Tuple[List[str], List[str]]] = []
         fallback_names = set()
@@ -2349,14 +2354,21 @@ class AWQProcessor(LoopProcessor):
                 if consumer_name not in consumer_map[prev_op_name]:
                     consumer_map[prev_op_name].append(consumer_name)
 
-        scales_list = [
-            self._search_best_scale(
-                layer_module_ref,
-                scale_consumers=scale_consumers,
-                **layer,
-            )
-            for layer, scale_consumers in zip(sanitized_module_config, scale_consumers_by_group)
-        ]
+        scales_list = []
+        for layer, scale_consumers in zip(sanitized_module_config, scale_consumers_by_group):
+            try:
+                scales_list.append(self._search_best_scale(
+                    layer_module_ref, scale_consumers=scale_consumers, **layer,
+                ))
+            except _AWQScaleGroupError as exc:
+                if not self.fallback:
+                    raise
+                layer_names = [get_op_name(layer_module_ref, target) for target in layer["layers"]]
+                fallback_names.update(layer_names)
+                log.warning(
+                    "AWQProcessor: layer %s using configured plain-quantization fallback for %s: %s",
+                    layer_index, layer_names, exc,
+                )
 
         try:
             apply_scale(
@@ -2465,6 +2477,65 @@ class AWQProcessor(LoopProcessor):
 
         self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
 
+    @staticmethod
+    def _validate_scale_group_conflicts(module, groups):
+        """Reject overlapping folds before any group can modify the layer."""
+
+        sources = set()
+        targets = set()
+        for group in groups:
+            source = group.get("prev_op")
+            source_weight = getattr(source, "weight", None)
+            source_key = id(source_weight) if isinstance(source_weight, torch.Tensor) else id(source)
+            if source_key in sources:
+                source_name = get_op_name(module, source)
+                raise _AWQScaleGroupError(f"AWQ: source `{source_name}` has multiple scaling groups; merge them first.")
+            sources.add(source_key)
+            group_targets = list(group.get("layers") or [])
+            group_targets.extend(get_op_by_name(module, name) for name in group.get("_scale_consumers") or [])
+            for target in group_targets:
+                target_weight = getattr(target, "weight", None)
+                target_key = id(target_weight) if isinstance(target_weight, torch.Tensor) else id(target)
+                if target_key in targets:
+                    target_name = get_op_name(module, target)
+                    raise _AWQScaleGroupError(f"AWQ: target `{target_name}` has overlapping scaling groups or tied weights.")
+                targets.add(target_key)
+
+    @staticmethod
+    def _validate_scale_group(module, prev_op, layers, inp, module2inspect, scale_consumers):
+        """Check exact bindings, widths and the existing replay boundary."""
+
+        try:
+            source_name = get_op_name(module, prev_op)
+            inspect_name = get_op_name(module, module2inspect)
+            targets = [(get_op_name(module, layer), layer) for layer in layers]
+            consumers = [(name, get_op_by_name(module, name)) for name in scale_consumers or ()]
+        except ValueError as exc:
+            raise _AWQScaleGroupError(f"AWQ: scaling group does not resolve on the live layer: {exc}") from exc
+        if not targets or not isinstance(inp, torch.Tensor) or inp.ndim < 2 or inp.numel() == 0:
+            raise _AWQScaleGroupError(f"AWQ: source `{source_name}` requires targets and nonempty replay features.")
+        width = inp.shape[-1]
+        weights = set()
+        for name, target in targets + consumers:
+            weight = getattr(target, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.ndim != 2 or weight.shape[1] != width:
+                raise _AWQScaleGroupError(f"AWQ: target `{name}` does not accept the {width}-channel source input.")
+            if id(weight) in weights:
+                raise _AWQScaleGroupError(f"AWQ: duplicate or tied target `{name}` in one scaling group.")
+            weights.add(id(weight))
+        source_weight = getattr(prev_op, "weight", None)
+        if isinstance(source_weight, torch.Tensor) and prev_op is not layers[0]:
+            if source_weight.ndim in (1, 2) and source_weight.shape[0] != width:
+                raise _AWQScaleGroupError(f"AWQ: source `{source_name}` cannot produce {width} channels.")
+        inspection_modules = {id(child) for child in module2inspect.modules()}
+        outside = [name for name, target in targets + consumers if id(target) not in inspection_modules]
+        if outside:
+            raise _AWQScaleGroupError(
+                f"AWQ: replay boundary `{inspect_name}` does not contain targets {outside} for source "
+                f"`{source_name}`; a matching replay input and boundary are required."
+            )
+        return targets + consumers
+
     @torch.inference_mode()
     def _search_best_scale(
             self,
@@ -2482,15 +2553,19 @@ class AWQProcessor(LoopProcessor):
         Unless explicitly overridden by ``bits``, evaluate each member at its
         own configured width, even though the group shares one channel scale.
         ``scale_consumers`` names the non-quantized modules that read the same
-        normed input (MoE router, ``shared_expert_gate``). They are multiplied by
-        each candidate scale while the group is scored, so the search measures
-        the layer the model will actually run.
+        normed input (MoE router, ``shared_expert_gate``). Search replays the
+        original input with ``Q(W * s) / s`` weights, so these consumers stay
+        unchanged until the final fold compensates the scaled source.
         """
 
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
 
+        replay_targets = self._validate_scale_group(
+            module, prev_op, layers, inp, module2inspect, scale_consumers,
+        )
+        kwargs = dict(kwargs)
         if "use_cache" in kwargs:
             kwargs.pop("use_cache")
 
@@ -2548,25 +2623,44 @@ class AWQProcessor(LoopProcessor):
         replay_batch_size = self._scale_search_replay_batch_size(inp)
         prepared_forward = None
 
-        if use_chunked_scale_search:
-            # Resolve the device placement and rotary scaffolding once. Both the FP
-            # reference and every candidate-scale replay reuse this prepared forward.
-            prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
-            prepared_forward = (prepared_x, prepared_kwargs)
+        observed = set()
+        handles = []
 
-            fp16_output = self._build_chunked_reference_outputs(
-                prepared_x,
-                module2inspect,
-                prepared_kwargs,
-                replay_batch_size,
+        def record_target(target, _args):
+            observed.add(id(target))
+
+        try:
+            for _name, target in replay_targets:
+                handles.append(target.register_forward_pre_hook(record_target))
+            if use_chunked_scale_search:
+                # Resolve the device placement and rotary scaffolding once. Both the FP
+                # reference and every candidate-scale replay reuse this prepared forward.
+                prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
+                prepared_forward = (prepared_x, prepared_kwargs)
+
+                fp16_output = self._build_chunked_reference_outputs(
+                    prepared_x,
+                    module2inspect,
+                    prepared_kwargs,
+                    replay_batch_size,
+                )
+            else:
+                # Legacy path: run the full forward eagerly on the module device and keep
+                # the dense activation tensor for the later reconstruction-loss pass.
+                inp = inp.to(next(module2inspect.parameters()).device)
+                with ctx(torch.inference_mode()):
+                    fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
+                fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+
+        finally:
+            for handle in handles:
+                handle.remove()
+        unobserved = [name for name, target in replay_targets if id(target) not in observed]
+        if unobserved:
+            raise _AWQScaleGroupError(
+                f"AWQ: reference replay did not execute targets {unobserved}; "
+                "the scale objective would not score the complete group."
             )
-        else:
-            # Legacy path: run the full forward eagerly on the module device and keep
-            # the dense activation tensor for the later reconstruction-loss pass.
-            inp = inp.to(next(module2inspect.parameters()).device)
-            with ctx(torch.inference_mode()):
-                fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
-            fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
         # [STEP 4]: Compute loss
         best_scale_kwargs = {
@@ -3026,8 +3120,8 @@ class AWQProcessor(LoopProcessor):
         s: per channel scaling factor   | s^-1 * X
 
         ``scale_consumers`` are non-quantized modules that read the same normed
-        input as ``linears2scale``. They are not quantized; they are multiplied
-        by the candidate scale so the scored block matches the folded layer.
+        input as ``linears2scale``. They stay unchanged: replay uses the original
+        input and folds the inverse scale into the quantized weights instead.
         """
         n_grid = 20
         history = []
@@ -3075,26 +3169,12 @@ class AWQProcessor(LoopProcessor):
                 master = master.to("cpu").contiguous()
             orig_weights[fc] = master
 
-        consumer_masters: Dict[nn.Module, torch.Tensor] = {}
-        for consumer in scale_consumers or ():
-            weight = getattr(consumer, "weight", None)
-            if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
-                continue
-            master = weight.detach().to(dtype=weight.dtype, copy=True)
-            if master_to_host:
-                master = master.to("cpu").contiguous()
-            consumer_masters[consumer] = master
-
         def restore_weights():
             for fc in linears2scale:
                 master = orig_weights[fc]
                 if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
                 fc.weight.copy_(master)
-            for consumer, master in consumer_masters.items():
-                if master.device != consumer.weight.device or master.dtype != consumer.weight.dtype:
-                    master = master.to(device=consumer.weight.device, dtype=consumer.weight.dtype)
-                consumer.weight.copy_(master)
 
         def apply_scaled_weights(scales_view: torch.Tensor) -> None:
             """Restore the pristine master and apply the candidate scale in one pass.
@@ -3110,13 +3190,6 @@ class AWQProcessor(LoopProcessor):
                 if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
                 torch.mul(master, scales_view, out=fc.weight)
-            # The router / shared-expert gate read the same normed input, so the
-            # candidate scale has to reach them too. Otherwise the search scores
-            # a block whose routing differs from the layer `apply_scale` produces.
-            for consumer, master in consumer_masters.items():
-                if master.device != consumer.weight.device or master.dtype != consumer.weight.dtype:
-                    master = master.to(device=consumer.weight.device, dtype=consumer.weight.dtype)
-                torch.mul(master, scales_view.to(master.dtype), out=consumer.weight)
 
         try:
             device = next(module2inspect.parameters()).device
@@ -3153,122 +3226,122 @@ class AWQProcessor(LoopProcessor):
                 for chunk in self._iter_reference_output_chunks(x, fp16_output)
             ]
 
-        for ratio in range(n_grid):
-            # create new scales
-            ratio = ratio / n_grid
+        try:
+            for ratio in range(n_grid):
+                # create new scales
+                ratio = ratio / n_grid
 
-            # NOTE: s^-1 * x is fused here, according to paper
-            if self.duo_scaling:
-                scales = (x_mean.pow(ratio) / (w_mean.pow(1 - ratio) + 1e-4)).clamp(min=1e-4)
-            else:
-                scales = x_mean.pow(ratio).clamp(min=1e-4).view(-1)
-            scales = scales / (scales.max() * scales.min()).sqrt()
-            scales_view = scales.view(1, -1).to(device)
-
-            # Avoid scaling values that overflow. The in-place `nan_to_num_` replaces the
-            # two masked assignments (four kernels: two predicates plus two index writes)
-            # with one elementwise pass, and keeps them in place so `scales_view`, which
-            # aliases `scales` whenever the scales are already on the module device, still
-            # observes the fixups.
-            scales.nan_to_num_(nan=1.0, posinf=1.0, neginf=1.0)
-
-            # Q(W * s)
-            # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
-            # and rely on the master copy to restore the original FP values after evaluation.
-            # `apply_scaled_weights` rebuilds the product from that master, so the
-            # restore the previous iteration needed is folded into this step.
-            apply_scaled_weights(scales_view)
-            for fc, module_bits, module_group_size, module_format in zip(
-                linears2scale, layer_bits, layer_group_sizes, layer_formats
-            ):
-                quantize_kwargs = {
-                    "bits": module_bits,
-                    "group_size": module_group_size,
-                }
-                if module_format != default_format:
-                    quantize_kwargs["format"] = module_format
-                self._pseudo_quantize_tensor_into(
-                    fc.weight,
-                    fc.weight,
-                    **quantize_kwargs,
-                )
-                fc.weight.div_(scales_view)
-
-            # W * X
-            if use_chunked_scale_search:
-                # Compare chunked reference outputs against chunked quantized outputs
-                # so reconstruction loss is accumulated without assembling the full
-                # output activation on GPU.
-                #
-                # The running sum stays on the device in float64 and is only
-                # materialized once per ratio. Reducing each micro-batch chunk
-                # with `.item()` stalls the stream after every chunk forward and
-                # leaves the GPU idle between them. Accumulating in float64 keeps
-                # the reduction bit-identical to the previous host-side sum.
-                sq_sum = None
-                total_elements = 0
-                for ref_chunk, int_w_output in zip(
-                    reference_chunks,
-                    self._iter_prepared_forward_outputs(
-                        prepared_x,
-                        module2inspect,
-                        prepared_kwargs,
-                        batch_size=replay_batch_size,
-                    ),
-                ):
-                    int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
-                    ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
-                    diff = (ref_chunk - int_w_output).float()
-                    chunk_sq = diff.pow(2).sum().double()
-                    sq_sum = chunk_sq if sq_sum is None else sq_sum + chunk_sq
-                    total_elements += diff.numel()
-
-                if sq_sum is None:
-                    loss = torch.zeros((), dtype=torch.float64, device=device)
+                # NOTE: s^-1 * x is fused here, according to paper
+                if self.duo_scaling:
+                    scales = (x_mean.pow(ratio) / (w_mean.pow(1 - ratio) + 1e-4)).clamp(min=1e-4)
                 else:
-                    # A Python scalar denominator selects a CUDA division path
-                    # that rounds one ULP away from host IEEE division. A
-                    # float64 device denominator keeps the legacy loss exact.
-                    loss = sq_sum / torch.tensor(
-                        max(total_elements, 1),
-                        dtype=torch.float64,
-                        device=sq_sum.device,
+                    scales = x_mean.pow(ratio).clamp(min=1e-4).view(-1)
+                scales = scales / (scales.max() * scales.min()).sqrt()
+                scales_view = scales.view(1, -1).to(device)
+
+                # Avoid scaling values that overflow. The in-place `nan_to_num_` replaces the
+                # two masked assignments (four kernels: two predicates plus two index writes)
+                # with one elementwise pass, and keeps them in place so `scales_view`, which
+                # aliases `scales` whenever the scales are already on the module device, still
+                # observes the fixups.
+                scales.nan_to_num_(nan=1.0, posinf=1.0, neginf=1.0)
+
+                # Q(W * s)
+                # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
+                # and rely on the master copy to restore the original FP values after evaluation.
+                # `apply_scaled_weights` rebuilds the product from that master, so the
+                # restore the previous iteration needed is folded into this step.
+                apply_scaled_weights(scales_view)
+                for fc, module_bits, module_group_size, module_format in zip(
+                    linears2scale, layer_bits, layer_group_sizes, layer_formats
+                ):
+                    quantize_kwargs = {
+                        "bits": module_bits,
+                        "group_size": module_group_size,
+                    }
+                    if module_format != default_format:
+                        quantize_kwargs["format"] = module_format
+                    self._pseudo_quantize_tensor_into(
+                        fc.weight,
+                        fc.weight,
+                        **quantize_kwargs,
                     )
-            else:
-                # Legacy eager scoring path: compute one dense quantized output tensor
-                # and evaluate loss against the dense FP reference tensor.
-                int_w_output = self._module_forward(x, module2inspect, kwargs)
-                int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
-                loss = self._compute_loss(fp16_output, int_w_output, device)
+                    fc.weight.div_(scales_view)
 
-            # Keep the whole grid on the device. Comparing a 0-D loss in Python
-            # forces a host synchronization after every ratio; instead, update
-            # the running minimum and its scale tensor with the same strict `<`
-            # predicate the host loop used, which also preserves the first
-            # minimum on ties. The scalar is read once after the grid.
-            history.append(loss)
-            if best_error is None:
-                best_error = torch.full(
-                    (),
-                    float("inf"),
-                    dtype=loss.dtype,
-                    device=loss.device,
-                )
-                # The first candidate can alias the local scales tensor; every
-                # later replacement writes through `where` into that tensor.
-                best_scales = scales
-                improved = loss < best_error
-                torch.where(improved, loss, best_error, out=best_error)
-            else:
-                improved = loss < best_error
-                torch.where(improved, loss, best_error, out=best_error)
-                torch.where(improved, scales, best_scales, out=best_scales)
+                # W * X
+                if use_chunked_scale_search:
+                    # Compare chunked reference outputs against chunked quantized outputs
+                    # so reconstruction loss is accumulated without assembling the full
+                    # output activation on GPU.
+                    #
+                    # The running sum stays on the device in float64 and is only
+                    # materialized once per ratio. Reducing each micro-batch chunk
+                    # with `.item()` stalls the stream after every chunk forward and
+                    # leaves the GPU idle between them. Accumulating in float64 keeps
+                    # the reduction bit-identical to the previous host-side sum.
+                    sq_sum = None
+                    total_elements = 0
+                    for ref_chunk, int_w_output in zip(
+                        reference_chunks,
+                        self._iter_prepared_forward_outputs(
+                            prepared_x,
+                            module2inspect,
+                            prepared_kwargs,
+                            batch_size=replay_batch_size,
+                        ),
+                        strict=True,
+                    ):
+                        int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
+                        ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
+                        diff = (ref_chunk - int_w_output).float()
+                        chunk_sq = diff.pow(2).sum().double()
+                        sq_sum = chunk_sq if sq_sum is None else sq_sum + chunk_sq
+                        total_elements += diff.numel()
 
-        # The last grid step leaves its quantized product in place, so reset once
-        # more to hand callers the pristine FP copy.
-        restore_weights()
-        orig_weights.clear()
-        consumer_masters.clear()
+                    if sq_sum is None:
+                        loss = torch.zeros((), dtype=torch.float64, device=device)
+                    else:
+                        # A Python scalar denominator selects a CUDA division path
+                        # that rounds one ULP away from host IEEE division. A
+                        # float64 device denominator keeps the legacy loss exact.
+                        loss = sq_sum / torch.tensor(
+                            max(total_elements, 1),
+                            dtype=torch.float64,
+                            device=sq_sum.device,
+                        )
+                else:
+                    # Legacy eager scoring path: compute one dense quantized output tensor
+                    # and evaluate loss against the dense FP reference tensor.
+                    int_w_output = self._module_forward(x, module2inspect, kwargs)
+                    int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
+                    loss = self._compute_loss(fp16_output, int_w_output, device)
+
+                # Keep the whole grid on the device. Comparing a 0-D loss in Python
+                # forces a host synchronization after every ratio; instead, update
+                # the running minimum and its scale tensor with the same strict `<`
+                # predicate the host loop used, which also preserves the first
+                # minimum on ties. The scalar is read once after the grid.
+                history.append(loss)
+                if best_error is None:
+                    best_error = torch.full(
+                        (),
+                        float("inf"),
+                        dtype=loss.dtype,
+                        device=loss.device,
+                    )
+                    # The first candidate can alias the local scales tensor; every
+                    # later replacement writes through `where` into that tensor.
+                    best_scales = scales
+                    improved = loss < best_error
+                    torch.where(improved, loss, best_error, out=best_error)
+                else:
+                    improved = loss < best_error
+                    torch.where(improved, loss, best_error, out=best_error)
+                    torch.where(improved, scales, best_scales, out=best_scales)
+
+        finally:
+            restore_weights()
+            orig_weights.clear()
 
         best_error_value = best_error.item()
         if best_error_value == float("inf"):

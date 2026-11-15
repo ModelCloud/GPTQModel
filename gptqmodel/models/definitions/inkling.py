@@ -53,19 +53,22 @@ class InklingMMQModel(BaseQModel):
                 "q_norm:!",
                 "k_norm:!",
                 "o_proj:1",
+                "k_sconv.conv1d:!:nosrc",
+                "v_sconv.conv1d:!:nosrc",
+                "rel_logits_proj:!:nosrc",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe": {
+            "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
+            "mlp:moe:!": {
                 # Inkling's first decoder blocks use a dense MLP.
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "gate": ("gate:!",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
-                # Shared experts are native 3D parameters rather than Linear
-                # modules. Keep these two accuracy-sensitive experts dense;
-                # routed experts are expanded and quantized individually.
+                "shared_experts": ("shared_experts:!:nosrc",),
             },
+            "attn_sconv": ("conv1d:!:nosrc",),
+            "mlp_sconv": ("conv1d:!:nosrc",),
         },
     ]
 

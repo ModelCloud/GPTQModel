@@ -23,17 +23,18 @@ class LongCatFlashQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
+            "input_layernorm": ("0:!:nosrc", "1:!:nosrc"),
             "self_attn": {
-                "0": ("q_a_proj:0", "q_b_proj:0:in=q_a", "kv_a_proj_with_mqa:0", "kv_b_proj:0:in=kv_a", "o_proj:1"),
-                "1": ("q_a_proj:0", "q_b_proj:0:in=q_a", "kv_a_proj_with_mqa:0", "kv_b_proj:0:in=kv_a", "o_proj:1")
+                "0": ("q_a_layernorm:!:nosrc", "kv_a_layernorm:!:nosrc", "q_a_proj:0:nosrc", "q_b_proj:0:in=q_a:nosrc", "kv_a_proj_with_mqa:0:nosrc", "kv_b_proj:0:in=kv_a:nosrc", "o_proj:1:nosrc"),
+                "1": ("q_a_layernorm:!:nosrc", "kv_a_layernorm:!:nosrc", "q_a_proj:0:nosrc", "q_b_proj:0:in=q_a:nosrc", "kv_a_proj_with_mqa:0:nosrc", "kv_b_proj:0:in=kv_a:nosrc", "o_proj:1:nosrc")
             },
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "post_attention_layernorm": ("0:!:nosrc", "1:!:nosrc"),
             "mlps": {
-                "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "1": ("gate_proj:0", "up_proj:0", "down_proj:1")
+                "0": ("gate_proj:0", "up_proj:0", "down_proj:1:nosrc"),
+                "1": ("gate_proj:0", "up_proj:0", "down_proj:1:nosrc")
             },
             "mlp:moe": {
+                "router:!": ("classifier:!:nosrc",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1")
                 }

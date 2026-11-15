@@ -14,8 +14,8 @@ class MossQModel(BaseQModel):
         "h",
         "#",
         {
-            "ln_1": ("ln_1:!",),
-            "attn": ("qkv_proj:0", "out_proj:1"),
-            "mlp": ("fc_in:0", "fc_out:1"),
+            "ln_1": ("ln_1:!:nosrc",),
+            "attn": ("qkv_proj:0", "out_proj:1:nosrc"),
+            "mlp": ("fc_in:0:nosrc", "fc_out:1"),
         }
     ]

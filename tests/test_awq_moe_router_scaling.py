@@ -14,6 +14,7 @@ copy of the layer, plus the closed-form ``w * s`` weight ratio.
 """
 
 import copy
+from types import SimpleNamespace
 
 import defuser
 import pytest
@@ -26,11 +27,14 @@ from transformers import (
     Qwen3MoeForCausalLM,
 )
 
+from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.models.base import NON_QUANTIZE_FLAGS
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
 from gptqmodel.quantization.awq.utils.module import get_op_name
+from gptqmodel.quantization.config import AWQConfig
 
 
 def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -154,6 +158,49 @@ def test_qwen3_moe_fold_declares_router_consumer():
     consumer_map = _consumer_map(nodes, layer)
 
     assert consumer_map == {"post_attention_layernorm": ["mlp.gate"]}, consumer_map
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize(
+    "definition,builder",
+    [(Qwen2MoeQModel, _tiny_qwen2_moe), (Qwen3MoeQModel, _tiny_qwen3_moe)],
+    ids=["qwen2_moe", "qwen3_moe"],
+)
+@torch.inference_mode()
+def test_moe_identity_search_preserves_router_logits(definition, builder, chunked, monkeypatch):
+    hf_model = builder()
+    layer = hf_model.model.layers[0]
+    qmodel = _bare_qmodel(definition, hf_model)
+    nodes = qmodel.awq_get_modules_for_scaling(layer, _features(definition, hf_model, hf_model.config), {})
+    node = next(node for node in nodes if node["prev_op"] is layer.post_attention_layernorm)
+    inp = layer.post_attention_layernorm(torch.randn(1, 64, hf_model.config.hidden_size))
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(device="cpu", group_size=16, scale_search_chunked_activations=chunked, fallback=None),
+        calibration=CalibrationConfig(), gptq_model=SimpleNamespace(rotary_embedding=None),
+        model=hf_model, calculate_w_wq_diff=False,
+    )
+    processor._quant_batch_size = 0
+    baseline = torch.nn.functional.linear(inp.reshape(-1, inp.shape[-1]), layer.mlp.gate.weight)
+    weights = {name: value.clone() for name, value in layer.state_dict().items()}
+    logits = []
+    hook = layer.mlp.gate.register_forward_pre_hook(
+        lambda gate, args: logits.append(torch.nn.functional.linear(args[0], gate.weight).clone())
+    )
+    monkeypatch.setattr(processor, "_pseudo_quantize_tensor_into", lambda src, dst, **_kwargs: dst.copy_(src))
+    try:
+        processor._search_best_scale(
+            layer, node["prev_op"], node["layers"], inp, module2inspect=node["module2inspect"],
+            scale_consumers=node.get("_scale_consumers"),
+        )
+    finally:
+        hook.remove()
+    assert len(logits) == 21
+    for candidate in logits:
+        assert torch.equal(candidate, baseline)
+        assert torch.equal(candidate.topk(2).indices, baseline.topk(2).indices)
+    for name, value in layer.state_dict().items():
+        assert torch.equal(value, weights[name]), name
 
 
 @pytest.mark.parametrize(
