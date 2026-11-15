@@ -9,7 +9,7 @@
 </div>
 <h1 align="center">GPT-QModel ⚡</h1>
 </p>
-<p align="center"><strong>An extensible platform for LLM quantization, validation, and deployment.</strong><br>GPTQ, AWQ, ParoQuant, GGUF, FP8, EXL3, QQQ, NF12, and more—across NVIDIA CUDA, AMD ROCm, Tenstorrent, Huawei Ascend, Intel XPU, Apple silicon, and CPU, with Transformers, vLLM, SGLang, and MLX.</p>
+<p align="center"><strong>An extensible platform for LLM quantization, validation, and deployment.</strong><br>GPTQ, AWQ, ParoQuant, MACaQ, GGUF, FP8, EXL3, QQQ, NF12, and more—across NVIDIA CUDA, AMD ROCm, Tenstorrent, Huawei Ascend, Intel XPU, Apple silicon, and CPU, with Transformers, vLLM, SGLang, and MLX.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -255,6 +255,7 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | VPTQ                      | ✅          | x | x | x | x             |
+| MACaQ (MXFP4 W4A4)        | ✅          | x | x | x | x             |
 | NF12                      | ✅          | x | x | x | x             |
 | BitsAndBytes              | ✅          | x | x | x | x             |
 | Rotation                  | ✅          | x | x | x | x             |  
@@ -262,7 +263,7 @@ The **[fusion planner](docs/fusion-planner.md)** requires a model definition's `
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 | GSQ (GPTQ, AWQ, RTN, QQQ, FP8, ParoQuant) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 `BaseQuantizeConfig.auto_dtype_cast` defaults to `AUTO_NF12`, which uses
 lossless NF12 storage for eligible BF16 source matrices during calibration
@@ -296,6 +297,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
+| `METHOD.MACAQ` | `FORMAT.MXFP4_MACAQ` | `BACKEND.MACAQ_TRITON`, `BACKEND.MACAQ_TORCH` |
 | `METHOD.NF12` (`nf12`) | `FORMAT.NF12` (`nf12`) | `BACKEND.NF12` (`nf12`) |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
@@ -398,7 +400,7 @@ not tuned, so rocBLAS remains the default there too.
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
-* ✨ GPTQ, AWQ, ParoQuant, QQQ, VPTQ, GGUF, FP8, EXL3, NF12, GPTAQ, and FOEM quantization support, plus opt-in GSQ refinement for compatible GPTQ, AWQ, RTN, QQQ, FP8, and ParoQuant paths.
+* ✨ GPTQ, AWQ, ParoQuant, [MACaQ](docs/macaq.md), QQQ, VPTQ, GGUF, FP8, EXL3, NF12, GPTAQ, and FOEM quantization support, plus opt-in GSQ refinement for compatible GPTQ, AWQ, RTN, QQQ, FP8, and ParoQuant paths.
 * ✨ All current GGUF quantized tensor types are supported end to end for CPU quantization and inference: every `Q*_0`/`Q*_1`, `Q2_K`-`Q8_K`, `IQ1_S`-`IQ4_XS`, `TQ1_0`/`TQ2_0`, `MXFP4`, `NVFP4`, `Q1_0`, `Q2_0`, and the `Q1_0_g128` sign-only variant. Install the bindings with `pip install gptqmodel[gguf]` (`gguf>=0.19.0`, `llama-cpp-python>=0.3.36`). CPU inference uses llama.cpp's native SIMD kernels (`BACKEND.GGUF_CPP_CPU`) with a per-shape autotuned Torch fallback. Native ggml dot kernels also quantize activations, so outputs can differ from weight-only Torch inference; set `GPTQMODEL_GGUF_CPP_NATIVE_MATMUL=0` to keep the Torch path. `Q8_1`/`Q8_K` always use Torch, including when native execution is forced, since upstream ggml exposes no matmul for them. CPU dequantization reconstructs weights in FP32 before casting to FP16/BF16. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
 * 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Multi-GPU data-parallel quantization with GIL-safe peer copies and device-aware scheduling.
@@ -562,8 +564,8 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`); NF12 and block-float CUDA `sm_80+`; backend-specific limits apply | Machete, Marlin, Swordfish, AllSpark, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, NF12, `bf4_b`/`bf8_b` CUDA, BitBLAS, Triton, BitsAndBytes, Torch |
-| 🐧 Linux | AMD GPU | ✅ | `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4); backend-specific limits apply | AWQ Triton GEMM/GEMV, ParoQuant Triton, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, NF12 HIP (RDNA4), AllSpark (gfx1200/1201), `bf4_b`/`bf8_b` HIP, FP8 Torch, Torch |
+| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`); NF12 and block-float CUDA `sm_80+`; backend-specific limits apply | Machete, Marlin, Swordfish, AllSpark, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, MACaQ Triton/Torch, GGUF CUDA/Triton, QQQ, VPTQ, NF12, `bf4_b`/`bf8_b` CUDA, BitBLAS, Triton, BitsAndBytes, Torch |
+| 🐧 Linux | AMD GPU | ✅ | `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4); backend-specific limits apply | AWQ Triton GEMM/GEMV, ParoQuant Triton, MACaQ Triton (`gfx1201`) / Torch, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, NF12 HIP (RDNA4), AllSpark (gfx1200/1201), `bf4_b`/`bf8_b` HIP, FP8 Torch, Torch |
 | 🐧 Linux | Tenstorrent | ✅ | `Blackhole p300c`, `DEVICE.XLA` | Packed GPTQ via Torch/XLA/PJRT or native TTNN; opt-in `bf8_b` TTNN; multi-card execution |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
@@ -1588,6 +1590,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * NF12 / NyoomFloat12: [Together AI](https://www.together.ai/), from *"NyoomFloat12: Accelerating LLM Inference via Lossless 12-bit Weight Compression"* by Liberman, Fang, Zhang, Dao, and Fu (2026): the lossless 12-bit BF16 format, its escape coding, and the reference codec. NF12 inference kernels and the reference implementation are by [AlpinDale](https://x.com/AlpinDale) at [dphnAI/nf12](https://github.com/dphnAI/nf12), vendored into `gptqmodel_ext/nf12/` under the Apache-2.0 license with the original attribution headers. The AMD RDNA4 port in `gptqmodel_ext/nf12_hip/` is a GPT-QModel contribution that decodes the identical byte stream on gfx1200/gfx1201/gfx1250.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
+* MACaQ: Huawei CSL, main-authors Lorenz K. Muller, Philippe Bich, Chiara Boretti, Hyun-Min Chang, Jiawei Zhuang, and Lukas Cavigelli. [Official implementation](https://github.com/huawei-csl/MACaQ), [Paper](https://arxiv.org/abs/2611.10649)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training above are adaptations of this work.
@@ -1614,6 +1617,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   journal={arXiv preprint arXiv:2210.17323},
   year={2022}
   
+}
+
+# MACaQ
+@misc{muller2026macaq,
+  title         = {{MACaQ}: Fast, Model Agnostic Calibrated Quantization for Low-Precision Weights and Activations},
+  author        = {Muller, Lorenz K. and Bich, Philippe and Boretti, Chiara and Chang, Hyun-Min and Zhuang, Jiawei and Cavigelli, Lukas},
+  year          = {2026},
+  eprint        = {2611.10649},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2611.10649}
 }
 
 # GSQ

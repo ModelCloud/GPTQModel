@@ -149,6 +149,8 @@ class FORMAT(str, Enum):
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
     PAROQUANT = "paroquant"
+    # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales.
+    MXFP4_MACAQ = "mxfp4_macaq"
 
 
 class AutoDtypeCast(str, Enum):
@@ -171,6 +173,7 @@ class METHOD(str, Enum):
     EXL3 = "exl3"
     PARO = "paroquant"
     VPTQ = "vptq"
+    MACAQ = "macaq"
     NF12 = "nf12"
     # Tenstorrent native block-float weights (`bf4_b` / `bf8_b`).
     TT_BLOCKFLOAT = "tt-blockfloat"
@@ -201,6 +204,8 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # VPTQ's nominal bpw label is derived from codebook sizes and clamped to
     # 1-8; the vector codebooks can realize any integer width in that range.
     METHOD.VPTQ: (1, 2, 3, 4, 5, 6, 7, 8),
+    # MACaQ packs OCP MXFP4: E2M1 values plus one E8M0 scale per 32 values.
+    METHOD.MACAQ: (4,),
     # NF12 is a lossless 12-bit encoding of BF16. The width is fixed by the
     # format, so 12 is the only valid request.
     METHOD.NF12: (12,),
@@ -1028,6 +1033,8 @@ def resolve_quant_format(
         return FORMAT.EXL3
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
+    if method == METHOD.MACAQ:
+        return FORMAT.MXFP4_MACAQ
     if method == METHOD.NF12:
         return FORMAT.NF12
 
@@ -2282,6 +2289,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.VPTQ: {
         FORMAT.VPTQ,
     },
+    METHOD.MACAQ: {
+        FORMAT.MXFP4_MACAQ,
+    },
     METHOD.NF12: {
         FORMAT.NF12,
     },
@@ -2336,6 +2346,9 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.VPTQ,
 )
+MACAQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.MXFP4_MACAQ,
+)
 NF12_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.NF12,
 )
@@ -2359,6 +2372,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
+    FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
     FORMAT.NF12: METHOD.NF12,
     FORMAT.TT_BLOCKFLOAT: METHOD.TT_BLOCKFLOAT,
 }
@@ -4073,6 +4087,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+    elif target_cls is MacaqConfig:
+        expected_method = METHOD.MACAQ
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.MXFP4_MACAQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.MXFP4_MACAQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.MXFP4_MACAQ
     elif target_cls is VPTQConfig:
         expected_method = METHOD.VPTQ
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -6118,6 +6145,157 @@ class VPTQConfig(GPTQConfig):
 
 
 @dataclass
+class MacaqConfig(PreProcessorConfig):
+    """Configuration for MACaQ MXFP4 (W4A4) quantization.
+
+    MACaQ is Huawei CSL's model-agnostic calibrated quantizer
+    (https://github.com/huawei-csl/MACaQ, Apache-2.0; arXiv:2611.10649).
+    It quantizes weights to OCP MXFP4 (E2M1 values with one E8M0 scale per
+    32-element block) and, at inference, applies the same D1 balance and
+    32-wide block-Hadamard transform to activations before a block-scaled
+    E2M1 GEMM.
+
+    The defaults follow the reference recipe: 32-wide MXFP4 groups, a 32-wide
+    block-Hadamard, the H-weighted exponent screen over offsets ``(1, 0, -1)``,
+    and up to 256 greedy flip sweeps with a ``1.0`` ridge.
+    """
+
+    bits: int = field(default=4, metadata={"choices": [4]})
+    method: METHOD = field(default=METHOD.MACAQ)
+    format: FORMAT = field(default=FORMAT.MXFP4_MACAQ)
+    # MXFP4 always uses 32 values per E8M0 scale.
+    group_size: int = field(default=32)
+    block_size: int = field(default=32)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    # Block-Hadamard width. 32 matches the MXFP4 scale group and enables the
+    # fused rotate+quantize Triton kernel; larger powers of two are supported.
+    had_block: int = field(default=32)
+    # Greedy single-level flip refinement in the fixed Hessian metric.
+    do_flip: bool = field(default=True)
+    n_flip_iters: int = field(default=256)
+    fast_flip: bool = field(default=True)
+    # Compile the repeated sweep on supported NVIDIA CUDA or ROCm gfx1201.
+    compile_flip: bool = field(default=True)
+    ridge: float = field(default=1.0)
+    # D1 activation-aware diagonal pre-scale.
+    pre_mode: str = field(default="balance")
+    pre_alpha: float = field(default=0.75)
+    # Hessian-weighted per-(row, block) E8M0 exponent screen.
+    exp_screen: bool = field(default=True)
+    exp_offsets: Tuple[int, ...] = field(default=(1, 0, -1))
+    # Runtime activation precision. `w4a4` uses the native MXFP4 GEMM;
+    # `w4a16` keeps bf16 activations and only stores 4-bit weights.
+    activation_precision: str = field(default="w4a4")
+
+    _DYNAMIC_FIELDS = frozenset({
+        "had_block", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
+        "pre_mode", "pre_alpha", "exp_screen", "exp_offsets",
+        "activation_precision",
+    })
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.MACAQ,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return MACAQ_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return False
+
+    def calculate_bits_per_weight(self):
+        bpw = 4.0 + 8.0 / self.block_size
+        log.info(
+            f"Estimated Quantization BPW (bits per weight): {bpw:.4f} bpw, "
+            f"based on [MXFP4 E2M1: 4 bits, E8M0 scale: 8 bits / {self.block_size}]"
+        )
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "block_size": self.block_size,
+            "had_block": self.had_block,
+            "activation_precision": self.activation_precision,
+            "pre_mode": self.pre_mode,
+            "pre_alpha": self.pre_alpha,
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["sym"] = self.sym
+        out["block_size"] = self.block_size
+        out["had_block"] = self.had_block
+        out["do_flip"] = self.do_flip
+        out["n_flip_iters"] = self.n_flip_iters
+        out["fast_flip"] = self.fast_flip
+        out["compile_flip"] = self.compile_flip
+        out["ridge"] = self.ridge
+        out["pre_mode"] = self.pre_mode
+        out["pre_alpha"] = self.pre_alpha
+        out["exp_screen"] = self.exp_screen
+        out["exp_offsets"] = list(self.exp_offsets)
+        out["activation_precision"] = self.activation_precision
+
+    def __post_init__(self):
+        for pattern, override in (self.dynamic or {}).items():
+            if override is False:
+                continue
+            if not isinstance(override, dict):
+                raise ValueError(f"MacaqConfig: dynamic rule `{pattern}` must be False or a dictionary.")
+            unknown = set(override) - self._DYNAMIC_FIELDS
+            if unknown:
+                raise ValueError(
+                    f"MacaqConfig: unsupported dynamic keys for `{pattern}`: {sorted(unknown)}."
+                )
+        self.pre_mode = str(self.pre_mode).strip().lower()
+        self.activation_precision = str(self.activation_precision).strip().lower()
+        if self.exp_offsets is None:
+            self.exp_offsets = ()
+        elif isinstance(self.exp_offsets, str):
+            self.exp_offsets = tuple(int(part) for part in self.exp_offsets.split(",") if part.strip())
+        else:
+            self.exp_offsets = tuple(int(part) for part in self.exp_offsets)
+
+        self.block_size = int(self.block_size)
+        self.had_block = int(self.had_block)
+        self.n_flip_iters = int(self.n_flip_iters)
+        self.ridge = float(self.ridge)
+        self.pre_alpha = float(self.pre_alpha)
+        self.do_flip = bool(self.do_flip)
+        self.fast_flip = bool(self.fast_flip)
+        self.compile_flip = bool(self.compile_flip)
+        self.exp_screen = bool(self.exp_screen)
+
+        if self.block_size != 32:
+            raise ValueError("MacaqConfig: OCP MXFP4 requires `block_size=32`.")
+        if self.had_block <= 0 or self.had_block & (self.had_block - 1):
+            raise ValueError("MacaqConfig: `had_block` must be a positive power of two.")
+        if self.had_block < 32:
+            raise ValueError("MacaqConfig: `had_block` must be at least 32.")
+        if self.n_flip_iters < 0:
+            raise ValueError("MacaqConfig: `n_flip_iters` must be non-negative.")
+        if self.ridge < 0:
+            raise ValueError("MacaqConfig: `ridge` must be non-negative.")
+        if self.pre_mode not in ("none", "balance"):
+            raise ValueError("MacaqConfig: `pre_mode` must be `none` or `balance`.")
+        if not 0.0 <= self.pre_alpha <= 1.0:
+            raise ValueError("MacaqConfig: `pre_alpha` must be between 0 and 1.")
+        if not self.exp_offsets:
+            raise ValueError("MacaqConfig: `exp_offsets` must contain at least one offset.")
+        if self.activation_precision not in ("w4a4", "w4a16"):
+            raise ValueError("MacaqConfig: `activation_precision` must be `w4a4` or `w4a16`.")
+
+        if self.lm_head:
+            raise ValueError("MacaqConfig: MACaQ does not quantize the LM head.")
+        self.group_size = self.block_size
+        self.bits = 4
+        self.desc_act = False
+        self.sym = True
+        super().__post_init__()
+
+
+@dataclass
 class FP8Config(PreProcessorConfig):
     gsq: Optional[GSQConfig] = field(default=None)
     gsq_calibration: bool = field(default=False)
@@ -7121,6 +7299,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig
+    if method == METHOD.MACAQ or format_value == FORMAT.MXFP4_MACAQ:
+        return MacaqConfig
     if method == METHOD.NF12 or format_value == FORMAT.NF12:
         return NF12Config
     if method == METHOD.TT_BLOCKFLOAT or format_value == FORMAT.TT_BLOCKFLOAT:
@@ -7147,6 +7327,7 @@ def _known_quantize_config_field_names() -> set[str]:
         ParoConfig,
         QQQConfig,
         VPTQConfig,
+        MacaqConfig,
         NF12Config,
         TTBlockfloatConfig,
         FP8Config,

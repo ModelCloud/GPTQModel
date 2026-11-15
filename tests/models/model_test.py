@@ -1006,9 +1006,13 @@ class ModelTest(unittest.TestCase):
             return BACKEND.PARO
         if self.METHOD == METHOD.GGUF:
             return BACKEND.GGUF_TORCH
+        if self.METHOD == METHOD.MACAQ:
+            return BACKEND.MACAQ_TORCH
         return BACKEND.TORCH
 
     def _torch_fused_backend(self) -> BACKEND:
+        if self.METHOD == METHOD.MACAQ:
+            return BACKEND.MACAQ_TORCH
         return BACKEND.TORCH_FUSED_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH_FUSED
 
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
@@ -1027,7 +1031,7 @@ class ModelTest(unittest.TestCase):
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
-        elif format_family == FORMAT.PAROQUANT:
+        elif format_family in (FORMAT.PAROQUANT, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:

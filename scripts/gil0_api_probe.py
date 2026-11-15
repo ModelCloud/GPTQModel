@@ -585,6 +585,88 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     awq_fp32_lock = threading.Lock()
     awq_fp32_state = {}
 
+    macaq_thread = threading.local()
+    macaq_next_device = [0]
+    macaq_lock = threading.Lock()
+    macaq_state = {}
+
+    macaq_flip_thread = threading.local()
+    macaq_flip_next_device = [0]
+    macaq_flip_lock = threading.Lock()
+
+    def macaq_compiled_flips_rocm() -> bool:
+        """Check concurrent first-use and repeated compiled sweeps on RDNA4."""
+        from gptqmodel.quantization import macaq
+
+        with macaq_flip_lock:
+            if not hasattr(macaq_flip_thread, "device"):
+                macaq_flip_thread.device = macaq_flip_next_device[0] % 2
+                macaq_flip_next_device[0] += 1
+                macaq_flip_thread.stream = torch.cuda.Stream(device=macaq_flip_thread.device)
+            device = macaq_flip_thread.device
+        torch.cuda.set_device(device)
+        if not macaq._compiled_flip_supported(torch.device("cuda", device)):
+            raise AssertionError("selected ROCm GPU cannot compile MACaQ flips")
+
+        with torch.cuda.stream(macaq_flip_thread.stream), torch.no_grad():
+            generator = torch.Generator(device=device).manual_seed(20261115)
+            weight = torch.randn(16, 64, generator=generator, device="cuda")
+            x = torch.randn(64, 64, generator=generator, device="cuda")
+            hessian = x.T @ x
+            initial, _, scale = macaq.mxfp4_rtn_signed_index(weight, 32)
+            eager, compiled = initial.clone(), initial.clone()
+            macaq.flip_refine_levels(eager, scale, weight, hessian, 4,
+                                     compile_flip=False)
+            # The default must use the serialized compiled sweep on gfx1201.
+            macaq.flip_refine_levels(compiled, scale, weight, hessian, 4)
+        macaq_flip_thread.stream.synchronize()
+        if macaq._COMPILED_FLIP_SWEEP is None:
+            raise AssertionError("default MACaQ flip path stayed eager")
+        if not bool(torch.equal(eager, compiled)):
+            raise AssertionError("concurrent compiled MACaQ flips changed packed codes")
+        return True
+
+    def macaq_triton_w4a4() -> bool:
+        """Exercise prewarmed packed W4A4 inference on two worker devices."""
+        from gptqmodel.utils.macaq_triton import (
+            mxfp4_w4a4_linear,
+            quantize_mxfp4,
+            triton_mxfp4_available,
+        )
+
+        with macaq_lock:
+            if not hasattr(macaq_thread, "device"):
+                macaq_thread.device = macaq_next_device[0] % 2
+                macaq_next_device[0] += 1
+                macaq_thread.stream = torch.cuda.Stream(device=macaq_thread.device)
+            device = macaq_thread.device
+        torch.cuda.set_device(device)
+        if not triton_mxfp4_available(torch.device("cuda", device)):
+            raise AssertionError("selected GPU lacks the MACaQ Triton kernel")
+
+        with macaq_lock:
+            if device not in macaq_state:
+                generator = torch.Generator(device=device).manual_seed(20261115)
+                x = torch.randn(1, 128, generator=generator, device="cuda", dtype=torch.bfloat16)
+                weight = torch.randn(128, 128, generator=generator, device="cuda", dtype=torch.bfloat16)
+                packed, scales = quantize_mxfp4(weight)
+                pre_scale = torch.ones(128, device="cuda", dtype=torch.bfloat16)
+                bh = torch.eye(32, device="cuda", dtype=torch.bfloat16)
+                bias = torch.randn(128, generator=generator, device="cuda", dtype=torch.bfloat16)
+                kwargs = {"pre_scale": pre_scale, "bh": bh, "bias": bias}
+                # Compile both kernels serially before worker launches.
+                expected = mxfp4_w4a4_linear(x, packed, scales, **kwargs)
+                torch.cuda.current_stream().synchronize()
+                macaq_state[device] = (x, packed, scales, kwargs, expected)
+            x, packed, scales, kwargs, expected = macaq_state[device]
+
+        with torch.cuda.stream(macaq_thread.stream), torch.inference_mode():
+            output = mxfp4_w4a4_linear(x, packed, scales, **kwargs)
+        macaq_thread.stream.synchronize()
+        if not bool(torch.equal(output, expected)):
+            raise AssertionError("concurrent MACaQ W4A4 inference changed output")
+        return True
+
     def awq_fp32_dequantize() -> bool:
         """Exercise the shared AWQ FP32 dense fallback on two worker devices."""
         from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
@@ -779,6 +861,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_device": set_device_isolation,
         "gptqmodel_nf12.ops": nf12_ops,
         "gptqmodel_nf12_hip.embedding": nf12_hip_embedding,
+        "MACaQ Triton W4A4": macaq_triton_w4a4,
+        "MACaQ compiled flips ROCm": macaq_compiled_flips_rocm,
         "gptqmodel_nf12.gate": nf12_gate,
         "Tensor cache revision metadata": tensor_cache_revision,
         "Tensor.index_select row gather": embedding_row_gather,
@@ -878,6 +962,8 @@ def _requires_two_gpus(name: str) -> bool:
             or name.endswith("can_device_access_peer") or name.startswith("gptqmodel_nf12.")
             or name in (
                 "gptqmodel_nf12_hip.embedding",
+                "MACaQ Triton W4A4",
+                "MACaQ compiled flips ROCm",
                 "AWQ FP32 dequantize_gemm",
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
@@ -898,6 +984,9 @@ def run_child(name: str) -> int:
         return 0
     if name == "gptqmodel_nf12_hip.embedding" and torch.version.hip is None:
         print(json.dumps({"status": "SKIP", "detail": "native HIP NF12 embedding is AMD-only"}))
+        return 0
+    if name == "MACaQ compiled flips ROCm" and torch.version.hip is None:
+        print(json.dumps({"status": "SKIP", "detail": "ROCm compiled flip probe is AMD-only"}))
         return 0
     try:
         if name in SINGLE_SHOT:

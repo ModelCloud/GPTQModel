@@ -15,10 +15,11 @@ from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
 from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
+from gptqmodel.nn_modules.qlinear.macaq import MacaqTritonLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.ttnn_blockfloat import TTNNBlockFloat8Linear
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.utils import importer
+from gptqmodel.utils import importer, macaq_triton
 from gptqmodel.utils.backend import BACKEND
 
 
@@ -29,6 +30,7 @@ ROCM_KERNELS = set("""
     GGUFTritonKernel TorchFP8Linear BitsAndBytesLinear
     TorchLinear TorchQuantEmbeddings AwqTorchLinear QQQTorchLinear
     GGUFTorchLinear ParoLinear ParoQuantTritonLinear VPTQLinear NF12Linear
+    MacaqLinear MacaqTritonLinear
     TTBlockfloatLinear
 """.split())
 CUDA_ONLY_KERNELS = set("""
@@ -69,6 +71,26 @@ def hip_runtime(monkeypatch):
         module = sys.modules[cls.__module__]
         if hasattr(module, "IS_ROCM"):
             monkeypatch.setattr(module, "IS_ROCM", True)
+    monkeypatch.setattr(macaq_triton, "IS_ROCM", True)
+    macaq_triton._rdna4_macaq_supported.cache_clear()
+    yield
+    macaq_triton._rdna4_macaq_supported.cache_clear()
+
+
+def test_macaq_triton_rejects_mixed_rocm_architectures(hip_runtime, monkeypatch):
+    def properties(target=None):
+        index = target if isinstance(target, int) else (
+            0 if target is None else torch.device(target).index
+        )
+        return SimpleNamespace(gcnArchName="gfx942" if index == 1 else "gfx1201")
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+    macaq_triton._rdna4_macaq_supported.cache_clear()
+    MacaqTritonLinear.validate_device(torch.device("cuda:0"))
+    with pytest.raises(NotImplementedError, match="gfx1201"):
+        MacaqTritonLinear.validate_device(torch.device("cuda:1"))
+    with pytest.raises(NotImplementedError, match="gfx1201"):
+        MacaqTritonLinear.validate_device(model_const.DEVICE.ROCM)
 
 
 def test_audit_covers_every_registered_kernel():
