@@ -145,6 +145,52 @@ flowchart TD
 Both save paths apply the rule: `_save_model_configs_without_weights` (normal
 quantized save) and `save_quantized_embeddings` (module-replacement save).
 
+## 5. GPT-QModel-only `quant_method` refusal
+
+Transformers resolves a checkpoint's `quantization_config.quant_method`
+through `AUTO_QUANTIZATION_CONFIG_MAPPING` / `AUTO_QUANTIZER_MAPPING`. For an
+unknown name, `supports_quant_method` only warns
+`Unknown quantization type, got <name> ... skip the quantization` and
+`from_pretrained` then random-initializes every linear layer. GPT-QModel
+publishes several layouts transformers does not implement (`exl3`, `qqq`,
+`paroquant`, `macaq`, `nf12`, `tt-blockfloat`) plus the deliberate
+`gptqmodel_gguf` alias.
+
+`gptqmodel/__init__.py` registers a refusing quantizer for each name from the
+single table `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`, using
+the classes in `gptqmodel/utils/hf_refusing_quantizer.py`:
+
+```mermaid
+flowchart TD
+    A["import gptqmodel"] --> B["_patch_transformers_refusing_quantizers"]
+    B --> C["REFUSED_HF_QUANT_METHODS"]
+    C --> D["AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault<br/>GPTQModelRefusingQuantizationConfig"]
+    C --> E["AUTO_QUANTIZER_MAPPING.setdefault<br/>GPTQModelRefusingHfQuantizer"]
+    A --> F["_patch_transformers_gptqmodel_gguf_quantizer_compat"]
+    F --> F2["GGUF_EXPORT_QUANT_METHOD registered"]
+    G["AutoModelForCausalLM.from_pretrained"] --> H["AutoHfQuantizer.from_config"]
+    H --> I{"quant_method registered?"}
+    I -- no --> J["warn and skip quantization<br/>random Linear weights"]
+    I -- yes --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
+    style J fill:#f8d7da,stroke:#b02a37
+    style K fill:#d9f2d9,stroke:#2e7d32
+```
+
+`setdefault` keeps any quantizer transformers already owns (`gptq`, `awq`,
+`fp8`, `bitsandbytes`, and its own `vptq`), so this table only covers names
+transformers does not implement. The registration runs on package import, so
+a process that never imports `gptqmodel` still only sees transformers'
+warning. The writer emits `hf_compat_warnings` at save time for the same
+table, so a checkpoint is labelled before anyone tries to load it. The
+per-format table also appears in [the MACaQ page](macaq.md#transformers-interop).
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `gptqmodel` imported, checkpoint with `quant_method: exl3` | warning + random Linear weights | `ValueError` naming the method |
+| plain `transformers`, no `gptqmodel` import | warning + random Linear weights | unchanged: only a warning |
+| `quant_method` transformers already implements | its own quantizer | unchanged (`setdefault`) |
+| save of a GPT-QModel-only layout | silent | `hf_compat_warnings` entry naming the method |
+
 ## Failure contract
 
 | Condition | Before | After |
@@ -153,6 +199,7 @@ quantized save) and `save_quantized_embeddings` (module-replacement save).
 | Legacy-layout quantized VL checkpoint | `ValueError: Missing required quantized weights` | Keys remapped; checkpoint loads and runs |
 | AWQ module with non-divisible `in_features` | `ValueError` after calibration | Retuned group size before calibration |
 | Native save of a source with `auto_map` | Dangling `auto_map`, `OSError` on load | `auto_map` removed; config loads natively |
+| GPT-QModel-only `quant_method` in plain HF | warning + random weights | refusing quantizer raises when `gptqmodel` is imported |
 
 ## Tests
 
@@ -163,3 +210,6 @@ quantized save) and `save_quantized_embeddings` (module-replacement save).
 | `tests/test_checkpoint_compat.py::test_saved_config_drops_auto_map_when_remote_code_is_not_copied` | `auto_map` is dropped only when `.py` files are not copied |
 | `tests/test_legacy_vl_checkpoint_load.py` | Legacy keys convert both directions and a real legacy VL checkpoint loads |
 | `tests/test_awq_dynamic_group_size.py::test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features` | 448-wide AWQ module retunes to 64 before the weight-mean step |
+| `tests/test_checkpoint_interop_4053.py::test_hf_from_pretrained_refuses_every_gptqmodel_only_method` | Every table entry raises instead of loading random weights |
+| `tests/test_checkpoint_compat.py::test_every_gptqmodel_only_method_registers_a_refusing_quantizer` | The package-init guard covers the whole table |
+| `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_every_gptqmodel_only_method` | Save-time warnings name every table entry |

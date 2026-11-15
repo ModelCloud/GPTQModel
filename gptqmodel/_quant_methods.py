@@ -18,7 +18,9 @@ GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 # and returns a model whose packed weights were randomly initialized, so
 # `gptqmodel/__init__.py` registers a refusing quantizer for every entry here.
 # Keep this as one table: parallel fixes extend the same mapping.
+# Values are the human-readable format labels used in the refusal message.
 REFUSED_HF_QUANT_METHODS = {
+    "exl3": "EXL3",
     "macaq": "MACaQ MXFP4",
     "paroquant": "ParoQuant",
     "qqq": "QQQ",

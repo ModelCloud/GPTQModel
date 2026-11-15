@@ -1131,7 +1131,16 @@ class GPTQModel:
                     "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
             mlx_weights, mlx_config = convert_gptq_to_mlx_weights(gptq_model.model_local_path or model_id_or_path, gptq_model, gptq_config,
-                                                                  gptq_model.lm_head)
+                                                                  gptq_model.lm_head, stock_compatible=True)
+
+            if mlx_config.pop("_gptqmodel_group16_runtime", False) or mlx_config.pop(
+                "_gptqmodel_custom_mlx_runtime", False
+            ):
+                raise ValueError(
+                    "MLX export produced a GPT-QModel custom-runtime checkpoint "
+                    "that stock `mlx_lm.load` cannot read; export a supported "
+                    "format or load it through `GPTQModel.load(backend='mlx')`."
+                )
 
             save_model(target_path, mlx_weights, donate_model=True)
 

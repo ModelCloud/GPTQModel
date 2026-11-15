@@ -203,6 +203,7 @@ extends the same registration.
 | `quant_method` | Checkpoint | Transformers loader |
 |---|---|---|
 | `gptqmodel_gguf` | packed GGUF | `GPTQModelGGUFHfQuantizer` refuses |
+| `exl3` | EXL3 trellis | `GPTQModelRefusingHfQuantizer` refuses |
 | `macaq` | MACaQ MXFP4 | `GPTQModelRefusingHfQuantizer` refuses |
 | `paroquant` | ParoQuant | `GPTQModelRefusingHfQuantizer` refuses |
 | `qqq` | QQQ | `GPTQModelRefusingHfQuantizer` refuses |
