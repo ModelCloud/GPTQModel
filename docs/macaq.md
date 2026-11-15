@@ -161,8 +161,9 @@ bit width, and symmetric format remain fixed.
 ## Validation (Llama-3.2-1B-Instruct)
 
 Calibration: 128 Wikitext-2 training chunks (about 115k tokens), 128 flip
-sweeps, 32-wide blocks, `pre_alpha=0.5`, Triton W4A4 runtime. Perplexity on 16
-contiguous Wikitext-2 test chunks of 512 tokens:
+sweeps, 32-wide blocks, `pre_alpha=0.5`, Triton W4A4 runtime, and all 112
+Linear projections packed. Perplexity on 16 contiguous Wikitext-2 test
+chunks of 512 tokens:
 
 | Model | Perplexity | Delta |
 |---|---:|---:|
@@ -175,6 +176,12 @@ paper uses substantially more calibration data (millions of tokens) and reports
 W4A4 perplexity much closer to BF16 on larger models. W4A16 isolates the weight
 error from the activation error and is the better choice when activation
 accuracy matters more than the W4A4 speedup.
+
+The automated `tests/models/test_llama3_2_macaq.py` default fast mode
+quantizes the last two of 16 decoder layers and checks ARC-Challenge after a
+safetensors save/reload. It is a lifecycle smoke test; the full-model
+perplexity measurements above use all 112 packed projections. The full
+checkpoint also reloads with both Torch and Triton backends.
 
 ## Port scope
 
