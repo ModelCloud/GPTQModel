@@ -128,6 +128,35 @@ def _patch_transformers_gptq_device_map_compat():
         GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
 
 
+def _patch_transformers_gptqmodel_gguf_quantizer_compat():
+    """Make transformers refuse GPT-QModel packed GGUF checkpoints loudly.
+
+    `transformers` reserves `quant_method: "gguf"` for its own
+    `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
+    `gptqmodel_gguf`; registering a refusing quantizer for that name turns an
+    otherwise silent random-weight load into an actionable error.
+    """
+    try:
+        from transformers.quantizers import auto as hf_quant_auto
+    except ImportError:
+        log.debug("GPT-QModel GGUF quantizer guard inactive: transformers quantizer API changed", exc_info=True)
+        return
+
+    from ._quant_methods import GGUF_EXPORT_QUANT_METHOD
+    from .utils.hf_gguf_quantizer import (
+        GPTQModelGGUFHfQuantizer,
+        GPTQModelGGUFQuantizationConfig,
+    )
+
+    with _MONKEY_PATCH_LOCK:
+        hf_quant_auto.AUTO_QUANTIZATION_CONFIG_MAPPING.setdefault(
+            GGUF_EXPORT_QUANT_METHOD, GPTQModelGGUFQuantizationConfig
+        )
+        hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
+            GGUF_EXPORT_QUANT_METHOD, GPTQModelGGUFHfQuantizer
+        )
+
+
 def _patch_openvino_gptqmodel_compat():
     """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
     try:
@@ -418,6 +447,7 @@ class _LazyDeviceThreadPoolProxy:
 DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
+_patch_transformers_gptqmodel_gguf_quantizer_compat()
 _patch_openvino_gptqmodel_compat()
 _patch_transformers_causal_conv1d_hub_kernel_compat()
 
