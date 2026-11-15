@@ -510,13 +510,83 @@ class AWQProcessor(LoopProcessor):
             self._full_module_name(layer_module, module)
         )
 
+    def _kernel_supports_candidate_group_size(
+        self,
+        kernel: Any,
+        module_name: Optional[str],
+        in_features: int,
+        out_features: Optional[int],
+        group_size: int,
+        *,
+        resolved_cfg=None,
+    ) -> bool:
+        """Check whether ``kernel`` validates the candidate ``group_size`` for this module."""
+        validator = getattr(kernel, "_validate", None)
+        if not callable(validator):
+            validator = getattr(kernel, "validate", None)
+        if not callable(validator):
+            return True
+
+        pack_dtypes = getattr(kernel, "SUPPORTS_PACK_DTYPES", None) or [torch.int32]
+        pack_dtype = pack_dtypes[0] if pack_dtypes else torch.int32
+        bits = (
+            self._module_bits(module_name, resolved_cfg=resolved_cfg)
+            if hasattr(self, "_module_bits")
+            else int(getattr(getattr(self, "qcfg", None), "bits", 4) or 4)
+        )
+        sym = bool(getattr(getattr(self, "qcfg", None), "sym", True))
+        desc_act = bool(getattr(getattr(self, "qcfg", None), "desc_act", False))
+
+        try:
+            ok, _ = validator(
+                bits=bits,
+                group_size=group_size,
+                desc_act=desc_act,
+                sym=sym,
+                pack_dtype=pack_dtype,
+                in_features=in_features,
+                out_features=out_features,
+                check_platform=False,
+            )
+            return bool(ok)
+        except TypeError:
+            try:
+                ok, _ = validator(
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    pack_dtype=pack_dtype,
+                    in_features=in_features,
+                    out_features=out_features,
+                )
+                return bool(ok)
+            except TypeError:
+                try:
+                    ok, _ = validator(
+                        bits=bits,
+                        group_size=group_size,
+                        in_features=in_features,
+                        out_features=out_features,
+                    )
+                    return bool(ok)
+                except Exception:
+                    return True
+            except Exception:
+                return False
+        except Exception:
+            return False
+
     def _largest_supported_group_divisor(
         self,
         module_name: Optional[str],
         in_features: int,
         configured_group_size: int,
+        out_features: Optional[int] = None,
+        *,
+        resolved_cfg=None,
     ) -> int:
-        """Pick the largest supported group size that divides ``in_features``.
+        """Pick the largest supported group size that divides ``in_features`` and satisfies kernel validation.
 
         Returns ``-1`` (per-channel) when no supported group size divides the
         input axis. ``BaseQuantLinear`` normalizes ``-1`` to ``in_features``,
@@ -524,7 +594,7 @@ class AWQProcessor(LoopProcessor):
         """
 
         try:
-            kernel = self._resolve_qlinear_kernel(module_name)
+            kernel = self._resolve_qlinear_kernel(module_name, resolved_cfg=resolved_cfg)
         except Exception:
             kernel = self.qlinear_kernel
         supported = {
@@ -534,19 +604,29 @@ class AWQProcessor(LoopProcessor):
         }
         for size in sorted(supported, reverse=True):
             if size <= configured_group_size and in_features % size == 0:
-                return size
+                if self._kernel_supports_candidate_group_size(
+                    kernel,
+                    module_name,
+                    in_features,
+                    out_features,
+                    size,
+                    resolved_cfg=resolved_cfg,
+                ):
+                    return size
         return -1
 
     def _ensure_group_size_divisibility(self) -> None:
-        """Retune AWQ modules whose ``in_features`` is not a group multiple.
+        """Retune AWQ modules whose ``in_features`` or ``out_features`` violate group constraints.
 
         AWQ's weight-mean, clip search, pseudo-quantization and packing all
         reshape the input axis into fixed-size groups, so a module whose
         ``in_features`` is not a multiple of the configured ``group_size``
-        cannot be quantized as-is. The failure previously surfaced only after
-        the whole calibration pass. Resolve a supported divisor up front and
-        record it as a per-module ``dynamic`` override so staging, packing,
-        saving and reload all resolve the same value.
+        cannot be quantized as-is. Furthermore, kernels like AWQ GEMM require
+        ``out_features`` to be divisible by the effective group size. The failure
+        previously surfaced only after calibration or during module packing.
+        Resolve a supported divisor up front and record it as a per-module
+        ``dynamic`` override so staging, packing, saving and reload all resolve
+        the same value.
         """
 
         if self.model is None:
@@ -570,11 +650,39 @@ class AWQProcessor(LoopProcessor):
             in_features = int(getattr(module, "in_features", 0) or 0)
             if in_features <= 0:
                 continue
+            out_features = int(getattr(module, "out_features", 0) or 0)
             configured = self._module_group_size(name, resolved_cfg=resolved_cfg)
-            if configured <= 0 or in_features % configured == 0:
+            if configured <= 0:
                 continue
-            chosen = self._largest_supported_group_divisor(name, in_features, configured)
-            adjusted.append((name, configured, chosen, resolved_cfg.overrides))
+
+            try:
+                kernel = self._resolve_qlinear_kernel(name, resolved_cfg=resolved_cfg)
+            except Exception:
+                kernel = self.qlinear_kernel
+
+            is_valid = (
+                in_features % configured == 0
+                and self._kernel_supports_candidate_group_size(
+                    kernel,
+                    name,
+                    in_features,
+                    out_features if out_features > 0 else None,
+                    configured,
+                    resolved_cfg=resolved_cfg,
+                )
+            )
+            if is_valid:
+                continue
+
+            chosen = self._largest_supported_group_divisor(
+                name,
+                in_features,
+                configured,
+                out_features=out_features if out_features > 0 else None,
+                resolved_cfg=resolved_cfg,
+            )
+            if chosen != configured:
+                adjusted.append((name, configured, chosen, resolved_cfg.overrides))
 
         if not adjusted:
             return
@@ -595,7 +703,7 @@ class AWQProcessor(LoopProcessor):
         )
         suffix = "" if len(adjusted) <= 4 else f", ... ({len(adjusted)} modules)"
         log.warning(
-            "AWQ: in_features is not divisible by group_size for %s%s; using a "
+            "AWQ: in_features or out_features is not divisible by group_size for %s%s; using a "
             "supported per-module group size so calibration can proceed.",
             examples,
             suffix,

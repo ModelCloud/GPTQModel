@@ -59,6 +59,7 @@ def test_dynamic_group_size_selects_compatible_kernel_and_packs():
         gptq_model = SimpleNamespace(qlinear_kernel=AwqGEMMLinear)
         _module_bits = AWQProcessor._module_bits
         _module_group_size = AWQProcessor._module_group_size
+        _module_format = AWQProcessor._module_format
         _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
         _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
         _quant_device_is_npu = AWQProcessor._quant_device_is_npu
@@ -126,7 +127,7 @@ def test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features
 
         def __init__(self):
             self.model = torch.nn.Module()
-            self.model.proj = torch.nn.Linear(448, 8, bias=False)
+            self.model.proj = torch.nn.Linear(448, 512, bias=False)
 
         _module_group_size = AWQProcessor._module_group_size
         _module_format = AWQProcessor._module_format
@@ -135,6 +136,7 @@ def test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features
         _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
         _quant_device_is_npu = AWQProcessor._quant_device_is_npu
         _largest_supported_group_divisor = AWQProcessor._largest_supported_group_divisor
+        _kernel_supports_candidate_group_size = AWQProcessor._kernel_supports_candidate_group_size
         _ensure_group_size_divisibility = AWQProcessor._ensure_group_size_divisibility
         qlinear_kernel = AwqGEMMLinear
 
@@ -153,3 +155,65 @@ def test_awq_retunes_group_size_before_calibration_for_non_divisible_in_features
     w_sum, row_count = _accumulate_awq_weight_mean([stub.model.proj], [64])
     assert w_sum.shape == (448,)
     assert row_count == weight.shape[0]
+
+
+def test_awq_retunes_group_size_for_non_divisible_out_features():
+    """A projection with out_features=448 must retune group_size 128 to 64 for AwqGEMMLinear.
+
+    Phi-tiny-MoE expert gate_proj/up_proj have in_features=1024, out_features=448.
+    While in_features is divisible by 128, AwqGEMMLinear requires out_features
+    to be divisible by group_size (448 % 128 == 64 != 0), crashing during packing.
+    The processor now checks candidate group sizes against the kernel's shape/contract
+    constraints and retunes group_size to 64.
+    """
+
+    class Stub:
+        qcfg = AWQConfig(bits=4, group_size=128, sym=True)
+        format = FORMAT.GEMM
+        gptq_model = SimpleNamespace(qlinear_kernel=AwqGEMMLinear, lm_head="lm_head")
+
+        def __init__(self):
+            self.model = torch.nn.Module()
+            self.model.gate_proj = torch.nn.Linear(1024, 448, bias=False)
+
+        _module_group_size = AWQProcessor._module_group_size
+        _module_format = AWQProcessor._module_format
+        _module_bits = AWQProcessor._module_bits
+        _resolve_qlinear_kernel = AWQProcessor._resolve_qlinear_kernel
+        _select_qlinear_kernel_for_format = AWQProcessor._select_qlinear_kernel_for_format
+        _quant_device_is_npu = AWQProcessor._quant_device_is_npu
+        _largest_supported_group_divisor = AWQProcessor._largest_supported_group_divisor
+        _kernel_supports_candidate_group_size = AWQProcessor._kernel_supports_candidate_group_size
+        _ensure_group_size_divisibility = AWQProcessor._ensure_group_size_divisibility
+        qlinear_kernel = AwqGEMMLinear
+
+    stub = Stub()
+
+    # Before divisibility check, group_size is 128 which fails AwqGEMMLinear._validate
+    ok, err = AwqGEMMLinear._validate(
+        bits=4,
+        group_size=128,
+        in_features=1024,
+        out_features=448,
+        pack_dtype=torch.int32,
+        check_platform=False,
+    )
+    assert not ok
+    assert "out_features divisible by that group size" in str(err)
+
+    stub._ensure_group_size_divisibility()
+
+    assert stub._module_group_size("gate_proj") == 64
+    assert stub.qcfg.dynamic["+:^gate_proj$"] == {"group_size": 64}
+
+    # The retuned group size passes AwqGEMMLinear validation
+    ok, err = AwqGEMMLinear._validate(
+        bits=4,
+        group_size=stub._module_group_size("gate_proj"),
+        in_features=1024,
+        out_features=448,
+        pack_dtype=torch.int32,
+        check_platform=False,
+    )
+    assert ok
+    assert err is None
