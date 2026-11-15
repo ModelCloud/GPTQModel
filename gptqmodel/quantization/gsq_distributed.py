@@ -161,7 +161,9 @@ class GSQDistributed:
         dist.all_reduce(result, op=dist.ReduceOp.SUM, group=self.group)
         return result, fraction
 
-    def _check_finite(self, finite):
+    def check_finite(self, finite):
+        """Raise on every rank when any rank observed a nonfinite value."""
+
         invalid = (~finite).to(dtype=torch.int32, device=self._collective_device)
         dist.all_reduce(invalid, op=dist.ReduceOp.MAX, group=self.group)
         if invalid.item():
@@ -225,7 +227,7 @@ class GSQDistributed:
                 destination.copy_(rounded)
             if not gradient.is_contiguous():
                 gradient.copy_(flat.reshape(gradient.shape))
-        self._check_finite(finite)
+        self.check_finite(finite)
         return result.to(self.device)
 
     @torch.no_grad()
@@ -239,7 +241,7 @@ class GSQDistributed:
             error = f'{type(exc).__name__}: {exc}'
         self._agree('mean_loss', error=error)
         result, _ = self._weighted_loss(loss, count)
-        self._check_finite(torch.isfinite(loss) & torch.isfinite(result))
+        self.check_finite(torch.isfinite(loss) & torch.isfinite(result))
         return result.item()
 
     def seed(self, seed):

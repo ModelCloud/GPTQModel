@@ -28,6 +28,7 @@ from torch import nn
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel.adapter.adapter import Lora
 from gptqmodel.quantization.config import AWQConfig, NF12Config
 from gptqmodel.utils import auto_dtype_cast
 
@@ -210,6 +211,95 @@ def test_other_exclusions_never_serialize_nf12_buffers(tmp_path, native_llama, p
     # varies with the accelerator (an excluded attention sub-block measured
     # 0.57 on the R9700), so only reject a catastrophic difference.
     assert relative_error < 1.0, relative_error
+
+
+@pytest.mark.gpu
+def test_gptq_dynamic_exclusion_declares_optimum_inclusion_list(tmp_path, native_llama):
+    """A GPTQ `-:` checkpoint must tell optimum exactly which modules are packed.
+
+    Optimum builds an uninitialized quantized layer for every module it decides
+    to quantize and matches ``modules_in_block_to_quantize`` entries with
+    ``name.endswith``. Without the explicit list a plain HF load silently builds
+    Marlin layers for the excluded modules and returns garbage logits.
+    """
+
+    _require_nf12_gpu()
+    excluded = "model.layers.1.self_attn.q_proj"
+    checkpoint = _quantize_and_save(
+        native_llama,
+        tmp_path / "quantized",
+        r"-:.*layers\.1\.self_attn\.q_proj$",
+        "gptq",
+        "auto_nf12",
+    )
+
+    with open(checkpoint / "config.json", encoding="utf-8") as handle:
+        saved = json.load(handle)["quantization_config"]
+    inclusion = saved["modules_in_block_to_quantize"]
+    # Optimum flattens the field with `sum(..., [])`, which requires groups.
+    assert isinstance(inclusion, list) and inclusion
+    assert all(isinstance(group, list) for group in inclusion)
+    flat = [name for group in inclusion for name in group]
+
+    quantized = {
+        name[: -len(".qweight")]
+        for name in _saved_tensor_names(checkpoint)
+        if name.endswith(".qweight")
+    }
+    assert quantized, "fixture quantized no modules"
+    assert quantized <= set(flat), sorted(quantized - set(flat))[:8]
+    assert excluded not in flat
+
+    # Emulate optimum's per-layer decision: `name.endswith(entry)`.
+    def _optimum_quantizes(full_name: str) -> bool:
+        return any(full_name.endswith(entry) for entry in flat)
+
+    assert not _optimum_quantizes(excluded)
+    for name in quantized:
+        assert _optimum_quantizes(name), name
+
+    # Our own loader must still honor the same payload on reload.
+    logits, reference = _reload_logits(checkpoint, native_llama)
+    assert torch.isfinite(logits).all(), "reloaded logits are not finite"
+    relative_error = ((logits - reference).norm() / reference.norm()).item()
+    assert relative_error < 0.5, relative_error
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(
+    "pattern, cast",
+    [
+        (r"-:^$", "auto_nf12"),
+        (r"-:.*layers\.1\.self_attn\.q_proj$", "off"),
+    ],
+    ids=["auto-nf12-source", "dynamic-exclusion"],
+)
+def test_post_quant_eora_generation_survives_auto_nf12_and_dynamic(
+    tmp_path, native_llama, pattern, cast
+):
+    """EoRA generation must not forward or dequantize an AUTO_NF12 wrapper.
+
+    The generator needs a dense native weight for `w - wq` and rewrites it with
+    `wq + BA`; a packed wrapper has neither a `weight` attribute nor a slot for
+    that rewrite. A checkpoint whose `-:` rules exclude a module must also not
+    ask the quantized-weight map for that dense module.
+    """
+
+    _require_nf12_gpu()
+    checkpoint = _quantize_and_save(
+        native_llama, tmp_path / "quantized", pattern, "gptq", cast
+    )
+    adapter_dir = tmp_path / "adapter"
+    GPTQModel.adapter.generate(
+        adapter=Lora(path=str(adapter_dir), rank=4),
+        model_id_or_path=str(native_llama),
+        quantized_model_id_or_path=str(checkpoint),
+        calibration_dataset=_CALIBRATION_TEXTS,
+        calibration_dataset_concat_size=0,
+        batch_size=1,
+    )
+    assert (adapter_dir / "adapter_model.safetensors").is_file()
+    assert (adapter_dir / "adapter_config.json").is_file()
 
 
 def _packed_tree(module_path: str) -> nn.Module:

@@ -297,6 +297,29 @@ def _quantization_config_for_model_config(
     return payload
 
 
+def _gptq_explicit_quantized_modules(
+    quantize_config: Any,
+    model: torch.nn.Module,
+) -> Optional[List[List[str]]]:
+    """Return full module names Optimum must quantize for a GPTQ `-:` checkpoint.
+
+    Optimum builds an uninitialized quantized layer for every module it decides
+    to quantize and matches ``modules_in_block_to_quantize`` entries with
+    ``name.endswith``. A GPTQ checkpoint that relies on dynamic ``-:``
+    exclusions carries no exclusion list, so plain HF loads silently build
+    Marlin layers for the excluded modules. Declaring the exact quantized set
+    is the only lossless bridge. Optimum expects a list of groups and flattens
+    it with ``sum(..., [])``, so the names are wrapped in one group. ``None``
+    keeps the historical payload for checkpoints without exclusions.
+    """
+
+    if getattr(quantize_config, "method", None) != METHOD.GPTQ:
+        return None
+    if not quantize_config.has_dynamic_exclusions():
+        return None
+    return [sorted(find_modules(model, layers=[BaseQuantLinear]))]
+
+
 def _save_model_configs_without_weights(
         model: torch.nn.Module,
         save_dir: str,
@@ -2119,6 +2142,15 @@ def ModelWriter(cls):
             quantize_config,
             runtime_format,
         )
+        explicit_quantized_modules = _gptq_explicit_quantized_modules(
+            quantize_config, model_for_save
+        )
+        if explicit_quantized_modules is not None:
+            # Optimum quantizes exactly this set; without it, dynamic `-:`
+            # exclusions load as uninitialized Marlin layers in plain HF.
+            config.quantization_config["modules_in_block_to_quantize"] = (
+                explicit_quantized_modules
+            )
         model_for_save.config = config
 
         def strip_attention_impl_fields(target: Any) -> Dict[str, Any]:
@@ -2436,7 +2468,10 @@ def ModelWriter(cls):
                 inclusion_match = (
                     external_inclusions is None
                     or relative is None
-                    or any(relative.endswith(entry) for entry in external_inclusions)
+                    or any(
+                        relative.endswith(entry) or name.endswith(entry)
+                        for entry in external_inclusions
+                    )
                 )
                 if any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")

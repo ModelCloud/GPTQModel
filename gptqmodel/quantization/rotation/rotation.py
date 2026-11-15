@@ -13,10 +13,38 @@ from ...models.module_plan import ModulePlan
 from ...utils.logger import setup_logger
 from ...utils.model import get_module_by_name_prefix
 from ...utils.torch import torch_empty_cache
-from .hadamard_utils import apply_exact_had_to_linear, get_hadK, random_hadamard_matrix
+from .hadamard_utils import (
+    apply_exact_had_to_linear,
+    get_hadK,
+    hadamard_supported,
+    random_hadamard_matrix,
+)
 
 
 log = setup_logger()
+
+
+def validate_rotation_dimensions(config, rotation: str) -> None:
+    """Fail before any weight is modified when a rotated width has no exact Hadamard factor.
+
+    ``rotate_model`` rotates embeddings, head, norms and attention in place
+    before it reaches the MLP output, whose width is the only dimension that
+    may lack a Hadamard transform. Checking here keeps a failed rotation from
+    leaving a half-rotated model behind.
+    """
+
+    for dimension_name in ("hidden_size", "intermediate_size"):
+        dimension = getattr(config, dimension_name, None)
+        if not isinstance(dimension, int) or dimension <= 0:
+            continue
+        if not hadamard_supported(dimension):
+            raise ValueError(
+                f"rotation `{rotation}` is not supported for this model: "
+                f"`{dimension_name}`={dimension} has no exact Hadamard transform "
+                "(get_hadK requires a power-of-two width or a power-of-two multiple "
+                "of one of 172, 156, 140, 108, 60, 52, 36, 28, 40, 20, 12). "
+                "No weights were modified."
+            )
 
 
 def fuse_ln_linear(

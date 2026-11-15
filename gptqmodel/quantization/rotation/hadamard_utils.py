@@ -70,6 +70,21 @@ def get_hadK(n, transpose=False):
     return hadK, K
 
 
+def hadamard_supported(n: int) -> bool:
+    """Return True when ``get_hadK(n)`` can build an exact Hadamard matrix.
+
+    ``get_hadK`` reports an unsupported width with a bare ``AssertionError``
+    from deep inside a transform. Callers that must fail before mutating a
+    model use this predicate instead of discovering the width too late.
+    """
+
+    try:
+        get_hadK(n)
+    except AssertionError:
+        return False
+    return True
+
+
 def matmul_hadU(X, transpose=False):
     n = X.shape[-1]
     hadK, K = get_hadK(n, transpose)

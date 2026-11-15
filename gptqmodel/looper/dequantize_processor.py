@@ -32,12 +32,18 @@ class DequantizeProcessor(LoopProcessor):
         self,
         quantized_modules: Dict[str, TorchLinear],
         forward: Optional[ForwardConfig] = None,
+        qcfg=None,
     ):
-        """Initializes the processor with the quantized modules to dequantize."""
+        """Initializes the processor with the quantized modules to dequantize.
+
+        ``qcfg`` is the checkpoint's quantize config. Supplying it lets the
+        processor honor the checkpoint's dynamic ``-:`` exclusions instead of
+        asking the quantized-weight map for a module that was never packed.
+        """
 
         super().__init__(
             tokenizer=None,
-            qcfg=None,
+            qcfg=qcfg,
             calibration=CalibrationConfig(),
             forward=forward,
         )
@@ -49,6 +55,39 @@ class DequantizeProcessor(LoopProcessor):
 
         self.calibration_dataset = None
         self.num_batches = 0
+
+    def is_skipped(self, module: NamedModule) -> bool:
+        """Report modules the checkpoint's dynamic ``-:`` rules left dense."""
+
+        qcfg = getattr(self, "qcfg", None)
+        if qcfg is None:
+            return False
+        return qcfg.dynamic_get(module.full_name) is False
+
+    @staticmethod
+    def _dense_source_weight(module: NamedModule) -> torch.Tensor:
+        """Return the dense source weight, decoding a packed AUTO_NF12 module.
+
+        AUTO_NF12 replaces the native linear with a packed wrapper that has no
+        ``weight`` attribute. NF12 stores BF16 bit patterns exactly, so the
+        decoded matrix is the same source the quantizer saw.
+        """
+
+        inner = module.module if isinstance(module, NamedModule) else module
+        weight = getattr(inner, "weight", None)
+        if torch.is_tensor(weight):
+            return weight.data
+        dequantize = getattr(inner, "dequantize_weight", None)
+        if not callable(dequantize):
+            raise TypeError(
+                f"DequantizeProcessor: `{module.full_name}` exposes neither a dense "
+                "`weight` nor `dequantize_weight()`"
+            )
+        spec = module.state.get("auto_dtype_cast_source_spec")
+        dtype = getattr(spec, "dtype", None) or torch.bfloat16
+        runtime_device = getattr(inner, "runtime_device", None)
+        device = runtime_device() if callable(runtime_device) else None
+        return dequantize(device=device, dtype=dtype)
 
     # de-quantize weights
     def process(
@@ -62,7 +101,8 @@ class DequantizeProcessor(LoopProcessor):
     ):
         """Dequantizes a module, preserving tensor-parallel padding when needed."""
 
-        device = module.weight.device
+        module_weight = self._dense_source_weight(module)
+        device = module_weight.device
 
         # TODO fix num_itr param..need to calculate this before dequant
         with self.lock:
@@ -81,7 +121,6 @@ class DequantizeProcessor(LoopProcessor):
             pad = wq.new_zeros((wq.shape[0], pad_cols))
             wq = torch.cat((wq, pad), dim=1)
 
-        module_weight = module.weight.data
         if pad_cols:
             pad = module_weight.new_zeros((module_weight.shape[0], pad_cols))
             module_weight = torch.cat((module_weight, pad), dim=1)
