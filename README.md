@@ -276,7 +276,9 @@ evaluations, not a guarantee for every supported model or method.
 
 ## Organizations and projects using GPT-QModel 🌐
 
-Selected public references include Hugging Face, Intel, NVIDIA, and Alibaba Cloud.
+Selected public references include Hugging Face, Intel, NVIDIA, Alibaba Cloud,
+[Fujitsu](https://github.com/FujitsuResearch/OneCompression/blob/main/envs/openvino/pyproject.toml),
+and [IBM Research](https://github.com/foundation-model-stack/fms-model-optimizer/blob/main/pyproject.toml).
 This is not an exhaustive customer list.
 
 ## Contributors and sponsors 🤝
