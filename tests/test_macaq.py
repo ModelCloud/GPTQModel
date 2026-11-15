@@ -26,7 +26,7 @@ from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.macaq_triton import TRITON_AVAILABLE
+from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 
 
 def _device():
@@ -285,7 +285,7 @@ def test_macaq_triton_dequant_accepts_padded_e8m0_grid():
 
 
 @pytest.mark.skipif(
-    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require CUDA and Triton",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -312,7 +312,7 @@ def test_triton_w4a16_matches_torch_with_bias(dtype):
 
 
 @pytest.mark.skipif(
-    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require CUDA and Triton",
 )
 def test_triton_fp16_activation_quantizes_before_bf16_cast():
@@ -340,7 +340,7 @@ def test_triton_fp16_activation_quantizes_before_bf16_cast():
 
 
 @pytest.mark.skipif(
-    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require CUDA and Triton",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -427,7 +427,7 @@ def test_macaq_linear_torch_matches_reference():
 
 
 @pytest.mark.skipif(
-    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require CUDA and Triton",
 )
 def test_triton_kernels_match_torch():
@@ -472,7 +472,7 @@ def test_triton_kernels_match_torch():
 
 
 @pytest.mark.skipif(
-    not (TRITON_AVAILABLE and torch.cuda.is_available()),
+    not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require CUDA and Triton",
 )
 @pytest.mark.parametrize("k", [896, 1152, 2176])

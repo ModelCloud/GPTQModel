@@ -84,7 +84,7 @@ flowchart TD
 | Method recognition | `config.py:161-175` had no `METHOD.MACAQ` | `config.py:6079` validates `MacaqConfig` and its method fields |
 | Automatic backend | `models/base.py:1940-1955` had no MACaQ case | `models/base.py:1944-1952` uses the configured device and Triton availability |
 | Calibrated processor | `models/quantization_run_plan.py:36-43` had no MACaQ step | `models/quantization_run_plan.py:41` selects `MacaqProcessor` |
-| Per-module storage | No MACaQ packed payload | `looper/macaq_processor.py:216-258` installs `MacaqLinear` and packs MXFP4 bytes |
+| Per-module storage | No MACaQ packed payload | `looper/macaq_processor.py:217-258` installs `MacaqLinear` and packs MXFP4 bytes |
 
 The diagram and table describe the flow introduced in
 [PR #4066](https://github.com/ModelCloud/GPTQModel/pull/4066).

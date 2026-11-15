@@ -5,13 +5,13 @@
 import os
 
 import pytest
-import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.macaq import MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import MacaqConfig
+from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 
 
 # MACaQ MXFP4 W4A4 on Llama-3.2-1B-Instruct.
@@ -98,6 +98,6 @@ class TestLlama3_2_MACaQ(ModelTest):
     }
 
     def test_llama3_2_macaq(self):
-        if not torch.cuda.is_available():
+        if not triton_mxfp4_available():
             pytest.skip("MACaQ Triton inference requires a CUDA device")
         self.quantize_and_evaluate()
