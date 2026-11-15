@@ -11,6 +11,13 @@ module-plan unit test under `tests/module_tree/`. Changes to a definition's
 paths, tags, variants, or method overrides must update its tests in the same PR.
 The always-run registry contract fails for an unlisted model or method case.
 
+Also follow `gptqmodel-awq-model-onboarding` in
+`.agents/skills/gptqmodel-awq-model-onboarding/SKILL.md` for every new model/alias
+and definition or AWQ-consumer change. A correct weight inventory does not prove
+valid scale sources, complete consumers, or a correct search objective. Require
+native fold/search/replay evidence or a tested conservative AWQ policy; do not
+infer AWQ qualification from registry, shape, or generation tests alone.
+
 Use `tests/module_tree/test_registered_module_plans.py` for the fast compiler
 and consumer contract. Its inventory pins decoder prefixes and ordered blocks
 from the independent quantization subset planner. Review expectation changes
