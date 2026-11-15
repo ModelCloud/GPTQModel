@@ -99,7 +99,7 @@ the GPTQ thread exited: 319/627 tensors differed from a serial AWQ run (issue
 #4123). With the wait, both interleavings measured 0/627.
 
 The refcount is #4094's `_QUANT_BLAS_GUARD_LOCK` / `_QUANT_BLAS_GUARD_DEPTH` /
-`_QUANT_BLAS_GUARD_PREVIOUS` primitive (`gptqmodel/utils/rocm.py:290-292`),
+`_QUANT_BLAS_GUARD_PREVIOUS` primitive (`gptqmodel/utils/rocm.py:290-293`),
 which is reentrant (`threading.RLock`). #4123 added `_QUANT_BLAS_GUARD_TARGET`
 (`gptqmodel/utils/rocm.py:296`) and a condition variable on the same lock, so
 same-target runs share the refcount and different-target runs serialize.
