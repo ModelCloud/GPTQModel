@@ -626,6 +626,94 @@ def test_awq_token_row_budget_tracks_largest_batch_and_preserves_batch_coverage(
     assert AWQProcessor._token_row_budget([torch.zeros(1, 0, 4)]) == 0
 
 
+def test_awq_token_rows_replay_mask_stays_inside_each_document():
+    """Packed token rows must not attend across calibration documents (#4091/#4095).
+
+    ``token_rows`` concatenates rows sampled from several documents into one
+    ``[1, tokens, hidden]`` replay tensor. Replaying that with
+    ``attention_mask=None`` let document A attend to document B and dropped the
+    mask argument entirely for models that require it. The rebuilt mask must be
+    block-diagonal per document, keep every row's original position, and match
+    the model's own causal relation inside a document.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+
+    seq_len = 4
+    masked = torch.finfo(torch.float16).min
+    # One calibration batch with two right-padded documents: 3 and 2 real tokens.
+    batch_mask = torch.full((2, 1, seq_len, seq_len), masked, dtype=torch.float16)
+    for row, length in enumerate((3, 2)):
+        for position in range(length):
+            batch_mask[row, 0, position, : position + 1] = 0.0
+    position_ids = torch.arange(seq_len).unsqueeze(0).expand(2, -1)
+
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[batch_mask],
+        position_ids=[position_ids],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.arange(5 * 4, dtype=torch.float32).reshape(1, 5, 4)],
+        "batch_indices": [0],
+    }
+
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, 5, 4)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.shape == (1, 1, 5, 5)
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 0, 1]]))
+
+    grid = ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1))
+    expected = torch.zeros(5, 5, dtype=torch.bool)
+    for query, (document, position) in enumerate(grid):
+        for key, (key_document, key_position) in enumerate(grid):
+            expected[query, key] = document == key_document and key_position <= position
+    allowed = attention_mask[0, 0] >= 0
+    assert torch.equal(allowed, expected)
+    # Document A may not read document B and vice versa.
+    assert not allowed[:3, 3:].any()
+    assert not allowed[3:, :3].any()
+
+
+def test_awq_token_rows_replay_keeps_a_2d_mask_two_dimensional():
+    """A 2-D captured mask (FlashAttention) must not be replaced by a 4-D mask."""
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[torch.ones(1, 5, dtype=torch.bool)],
+        position_ids=[torch.arange(5).unsqueeze(0)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.arange(5 * 4, dtype=torch.float32).reshape(1, 5, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    assert replay["attention_mask"].shape == (1, 5)
+    assert replay["attention_mask"].dtype == torch.bool
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 3, 4]]))
+
+
 def test_awq_quant_log_nsamples_changes_only_for_token_row_aggregation():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor._nsamples_total = 459

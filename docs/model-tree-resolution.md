@@ -513,7 +513,7 @@ flowchart TD
 
 | Situation | Behavior |
 | --- | --- |
-| Unknown `model_type`, no definition | `ValueError`; never auto-guesses a tree |
+| Unknown `model_type`, no definition | `ValueError`; never auto-guesses a tree unless the caller passes `module_tree="auto"` |
 | Multiple projections for a role in a single-role consumer | That consumer raises `ValueError`; the plan itself can represent multiple projections |
 | Ambiguous prefix or suffix lookup | `ValueError` naming the candidates |
 | Path not declared in the tree | treated as undeclared: not quantized, no role |
@@ -528,8 +528,11 @@ flowchart TD
   method instead of branching on names inside shared code.
 - **Custom/injected models:** attach `gptqmodel_effective_module_tree` to the
   model object before loading.
-- **Diagnostics only:** `_auto_detect_module_tree()` still exists to inspect an
-  unknown model, but it is deliberately not on the loading path.
+- **Unknown architectures with an explicit opt-in:** `module_tree="auto"` runs
+  the structural detector before this resolution step. It discovers every
+  concurrent decoder stack and returns one complete variant per stack. It is
+  not a default fallback: omitting the argument still fails closed. See
+  [parallel module trees](parallel-module-trees.md).
 
 ## Known limitation
 
@@ -546,6 +549,6 @@ tagging every definition would allow the map to be deleted.
 | --- | --- |
 | `tests/module_tree/test_explicit_module_plan.py` | roles, shared containers, renamed leaves, sibling rejection, fail-closed |
 | `tests/module_tree/test_module_tree_variants.py` | tree variants produce identical declared paths |
-| `tests/module_tree/test_auto_detect.py` | auto-detection stays diagnostic-only |
+| `tests/module_tree/test_auto_detect.py` | auto-detection discovers every concurrent branch and stays opt-in |
 | `tests/test_afmoe_support.py`, `tests/test_k2_horizon_support.py` | real MoE definitions resolve without name overrides |
 | `tests/module_tree/test_flash_model_tree_consumption.py` | real Flash-family meta models: quantizable specs, every checkpoint weight owner, roles, MoE hooks, looper helpers, Ripple custom code |

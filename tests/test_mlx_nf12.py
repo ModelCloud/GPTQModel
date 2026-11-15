@@ -7,9 +7,17 @@ import numpy as np
 import pytest
 import torch
 
+from tests import accelerator_gates
+
 
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
+
+_METAL_SKIP_REASON = accelerator_gates.mlx_metal_skip_reason()
+requires_metal = pytest.mark.skipif(
+    _METAL_SKIP_REASON is not None,
+    reason=_METAL_SKIP_REASON or "MLX Metal backend is unavailable",
+)
 
 
 def _source(in_features=256, out_features=48, *, escapes=False):
@@ -52,6 +60,7 @@ def _transfer(monkeypatch, source):
     return mlx_utils._packed_mlx_weights(holder, {}, "lm_head")
 
 
+@requires_metal
 def test_nf12_holder_validates_shape_and_bits():
     from gptqmodel.models._const import DEVICE
     from gptqmodel.nn_modules.qlinear.mlx import NF12MlxQuantLinear
@@ -67,6 +76,7 @@ def test_nf12_holder_validates_shape_and_bits():
 
 
 @pytest.mark.parametrize("escapes", [False, True])
+@requires_metal
 def test_nf12_mlx_decode_is_bit_exact(monkeypatch, escapes):
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear
     from gptqmodel.utils import nf12_codec
@@ -89,6 +99,7 @@ def test_nf12_mlx_decode_is_bit_exact(monkeypatch, escapes):
 
 @pytest.mark.parametrize("escapes", [False, True])
 @pytest.mark.parametrize("rows", [1, 2, 4, 8, 16, 33])
+@requires_metal
 def test_nf12_mlx_forward_matches_torch(monkeypatch, escapes, rows):
     source = _source(escapes=escapes)
     model, _ = _transfer(monkeypatch, source)
@@ -107,6 +118,7 @@ def test_nf12_mlx_forward_matches_torch(monkeypatch, escapes, rows):
 
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@requires_metal
 def test_nf12_mlx_preserves_activation_dtype(monkeypatch, dtype):
     source = _source()
     model, _ = _transfer(monkeypatch, source)
@@ -129,6 +141,7 @@ def test_nf12_mlx_rejects_a_foreign_packed_layout(monkeypatch):
         NF12MlxQuantLinear.native_payload(source)
 
 
+@requires_metal
 def test_nf12_mlx_converts_a_llama_layer_end_to_end(tmp_path):
     """A 12-bit checkpoint must pass the conversion's width gate and load."""
     import json
@@ -163,6 +176,7 @@ def test_nf12_mlx_converts_a_llama_layer_end_to_end(tmp_path):
 
 
 @pytest.mark.parametrize("in_features,out_features", [(64, 16), (192, 48), (512, 128)])
+@requires_metal
 def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, out_features):
     """The 2..16 token tile must equal the exact decode followed by a matmul."""
     source = _source(in_features=in_features, out_features=out_features, escapes=True)
@@ -181,6 +195,7 @@ def test_nf12_mlx_fused_tile_matches_the_codec_oracle(monkeypatch, in_features, 
         )
 
 
+@requires_metal
 def test_nf12_mlx_row_count_dispatch(monkeypatch):
     """1 row fuses the dot, 2..16 fuse the tile, and 17+ decode once."""
     from gptqmodel.nn_modules.qlinear.mlx_nf12 import MlxNF12Linear

@@ -5,7 +5,10 @@
 # GPU=-1
 """Coverage for the ROCm quantize-phase BLAS backend override."""
 
+from contextlib import contextmanager
+
 import pytest
+import torch
 
 from gptqmodel.utils import rocm
 
@@ -140,3 +143,89 @@ def test_missing_torch_api_is_tolerated(monkeypatch):
 
     with rocm.quant_blas_backend():
         pass
+
+
+def _gptq_hessian_recorder(monkeypatch):
+    """Patch GPTQ's Hessian path to record every BLAS-override entry."""
+
+    from gptqmodel.quantization import gptq
+
+    entered: list[object] = []
+
+    @contextmanager
+    def recorder(device=None):
+        entered.append(device)
+        yield
+
+    monkeypatch.setattr(gptq, "quant_blas_backend", recorder)
+    return gptq, entered
+
+
+def test_gptq_hessian_accumulation_enters_the_override(monkeypatch):
+    """Determinism comes from the fp32 X^T X GEMM, so pin only that phase."""
+
+    gptq, entered = _gptq_hessian_recorder(monkeypatch)
+    accumulator = gptq.GPTQ.__new__(gptq.GPTQ)
+    accumulator.columns = 4
+    accumulator.preferred_staging_dtype = lambda dtype, device: dtype
+    accumulator.resolve_hessian_chunk_size = lambda rows, stage: None
+
+    out = accumulator.compute_hessian_xtx(torch.randn(3, 4, dtype=torch.float32))
+
+    assert out.shape == (4, 4)
+    assert entered, "the Hessian X^T X GEMM must run on the deterministic rocBLAS path"
+
+
+def test_chunked_hessian_accumulation_enters_the_override_per_chunk(monkeypatch):
+    gptq, entered = _gptq_hessian_recorder(monkeypatch)
+    accumulator = gptq.GPTQ.__new__(gptq.GPTQ)
+    accumulator.columns = 4
+    accumulator.preferred_staging_dtype = lambda dtype, device: dtype
+    accumulator.resolve_hessian_chunk_size = lambda rows, stage: 2
+
+    @contextmanager
+    def borrow(source, rows):
+        yield source
+
+    accumulator.borrow_materialized_chunk_fp32 = borrow
+
+    out = accumulator.compute_hessian_xtx(torch.randn(5, 4, dtype=torch.float32))
+
+    assert out.shape == (4, 4)
+    assert len(entered) == 3
+
+
+def test_only_hessian_methods_enter_the_override():
+    """AWQ/RTN/QQQ have no Hessian, so they must keep hipBLASLt."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.models.base import _needs_deterministic_hessian
+    from gptqmodel.models.quantization_run_plan import ProcessorStep
+
+    assert _needs_deterministic_hessian(
+        SimpleNamespace(processors=(ProcessorStep.GPTQ,))
+    )
+    assert not _needs_deterministic_hessian(
+        SimpleNamespace(processors=(ProcessorStep.AWQ,))
+    )
+    assert not _needs_deterministic_hessian(
+        SimpleNamespace(processors=(ProcessorStep.WEIGHT_ONLY,))
+    )
+
+
+def test_nested_scopes_switch_once_and_restore_once(monkeypatch):
+    """Concurrent Hessian workers share one process-wide switch."""
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+
+    with rocm.quant_blas_backend():
+        with rocm.quant_blas_backend():
+            assert fake.current.name == "Cublas"
+        assert fake.current.name == "Cublas", "the outer scope still holds rocBLAS"
+
+    assert fake.current.name == "Cublaslt"
+    assert fake.calls == ["hipblas", "cublaslt"]

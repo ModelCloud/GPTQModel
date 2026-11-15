@@ -659,6 +659,16 @@ def build_layer_subset_plans(
 ) -> List[SubsetPlan]:
     """Build every subset plan for one processor before layer execution starts."""
 
+    # Concurrent tree branches may declare different quantizable leaves.  Use
+    # the branch that owns this layer instead of the flat union so a text layer
+    # is never asked to resolve a vision-only leaf (and vice versa).
+    branch_layer_modules = looper.layer_modules_for_prefix(layers_prefix, planning=False)
+    if branch_layer_modules is not None:
+        layer_modules = branch_layer_modules
+    branch_planning_modules = looper.layer_modules_for_prefix(layers_prefix, planning=True)
+    if branch_planning_modules is not None:
+        planning_layer_modules = branch_planning_modules
+
     forward = processor.forward
     if embedding_module_name is not None:
         module_name_groups = [[embedding_module_name]]

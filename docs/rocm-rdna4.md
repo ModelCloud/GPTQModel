@@ -90,9 +90,30 @@ the same shape (`MT64x64x16` vs `MT256x128x8`, or a split-K variant). Two
 identical GPTQ runs then save different checkpoints — measured on Qwen2.5-0.5B,
 334/795 tensors differed, starting at layer 0's `cholesky_inverse`. GPT-QModel
 therefore exports `ROCBLAS_USE_HIPBLASLT=0` at import unless the caller already
-set it, so rocBLAS runs its own deterministic kernels and "quantization selects
-rocBLAS by default" is now literally true. An explicit
-`ROCBLAS_USE_HIPBLASLT=1` opts back into hipBLASLt.
+set it, so rocBLAS runs its own deterministic kernels.
+
+That pin is scoped to methods that build a Hessian. #4079 forced rocBLAS for
+every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16 kernels, so AWQ
+and RTN paid 8-14x on their GEMMs with no determinism gain. Now only a run plan
+containing `ProcessorStep.GPTQ` enters the override (`_needs_deterministic_hessian`
+in `gptqmodel/models/base.py`). The GPTQ family keeps it for the calibration
+forward and replay as well as the fp32 `X^T X` GEMM, because those forward
+activations feed the Hessian: pinning only the Hessian regressed
+Qwen2.5-0.5B-Instruct to 332/795 differing tensors across processes. AWQ, RTN
+and QQQ never enter the override. Measured `F.linear` throughput, bf16
+4096x4096x14336: 9.5 TFLOPS on rocBLAS vs 139.0 TFLOPS on hipBLASLt, which the
+no-Hessian methods now keep. Cross-process determinism stayed at 0 differing
+tensors for both GPTQ and AWQ. See
+[ROCm default process environment](rocm-default-environment.md#quantization-blas-scope)
+for the flow and the full table.
+
+An explicit `ROCBLAS_USE_HIPBLASLT=1` (or
+`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`) opts back into hipBLASLt. It is faster
+but not reproducible across processes: `ROCBLAS_USE_HIPBLASLT=1` gave 224/483
+differing tensors across two GPTQ runs, and four
+`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` runs split into two kernel-selection
+groups differing in 222/483 (the issue measured 224/482). GPT-QModel warns once
+when either opt-in is active.
 
 Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
 hipBLASLt remains available as an explicit experiment:
@@ -497,6 +518,19 @@ tile. Independently checked against an FP64 Torch oracle that unpacks the packed
 output dtype preserved, repeated forwards bit-identical, and no dense
 dequantized weight is materialized.
 
+Shapes outside the eight exact rules (most real shapes) used to fall through to
+the generic `32/32/32, split_k_iters=8` tile. That reduction is
+`tl.atomic_add` over fp32 partials, so its summation order changes between
+launches even with `torch.use_deterministic_algorithms(True)`: measured 19/20
+distinct results over 20 repeats at each of `(N,K,M)` =
+`(2048,2048,64)`, `(4096,4096,32)` and `(8192,2048,16)`. The generic fallback
+now uses `split_k_iters=1` on RDNA4 (`_single_split_required`, matched from
+`gcnArchName`) and whenever deterministic algorithms are enabled
+(`_generic_fused_plan`). That is both reproducible (0/20 distinct) and faster
+at those shapes: 229.6 → 106.6 us, 249.3 → 152.4 us, 224.6 → 104.7 us
+(1.6-2.2x, median of 20 repeats, FP16). `mode="legacy"` and training keep the
+historical split-K=8 contract.
+
 `tests/kernels/test_awq_rdna4_plan.py` pins the guard without a GPU: the exact
 profile matches, a wrong arch/name/CU/memory does not, non-FP16 returns `None`,
 the CUDA 4090 profile still matches only a CUDA-shaped identity, and a
@@ -663,6 +697,54 @@ runs in `_spec_supported` (line 198) and `_resolve_requested_extensions`
 | `load("all")` on ROCm | AWQ/QQQ/Marlin specs had no `supported` predicate, so `all` selected them and started hipcc (`gptqmodel/extension.py` lines 63, 68, 106, 111) | `supported=_native_cuda_extension_supported`; `all` drops them (`gptqmodel/extension.py` lines 78-96, 132-147, 198, 207) |
 | Explicit CUDA-only load on ROCm | resolved the extension and hit a raw hipcc failure (`gptqmodel/extension.py` line 216) | raises `_spec_unsupported_error` before resolving (`gptqmodel/extension.py` line 250) |
 | Marlin/Machete nvcc flag | added whenever `is_nvcc_compatible()` was true (`gptqmodel/utils/marlin.py` line 239, `gptqmodel/utils/machete.py` line 626) | added only when `not IS_ROCM` (`gptqmodel/utils/marlin.py` line 240, `gptqmodel/utils/machete.py` line 627) |
+
+### HIP JIT source staging
+
+torch's ROCm loader hipifies out-of-tree sources *next to the original* and
+rewrites `cuda` to `hip` in the output path. Loading the CUDA-only
+`tt_blockfloat_cuda` kernel on ROCm therefore wrote the hipified CUDA kernel
+over the tracked `tt_blockfloat_hip/tt_blockfloat_hip.hip` and
+`tt_blockfloat_hip_torch.cpp` (the issue measured 3 files changed, 1223
+insertions / 1618 deletions including the header; a direct `prewarm()` repro
+measured 2 files, 1185 insertions / 1580 deletions), and the next native HIP
+build then failed with `tt_blockfloat_cuda.h: file not found`. Machete
+additionally hipified every header under its include roots (102 files).
+
+Source staging is now the default for every HIP build
+(`TorchOpsJitExtension(..., stage_hip_sources=True)`), not an opt-in used by
+five loaders. Tracked sources are copied into the writable build cache, and
+include roots that live inside the checkout but outside the staged source root
+are staged too. A caller that explicitly opts out is refused when any source or
+include root is inside the checkout, instead of mutating it.
+
+```mermaid
+flowchart TD
+    A["TorchOpsJitExtension.load()"] --> B{"IS_ROCM and sources"}
+    B -- "no" --> C["pass the original paths"]
+    B -- "yes" --> D{"stage_hip_sources"}
+    D -- "false" --> E{"source or include root inside the checkout"}
+    E -- "yes" --> F["RuntimeError: refusing to hipify in place"]
+    E -- "no" --> C
+    D -- "true" --> G{"sources already under build_root/_src"}
+    G -- "yes" --> H["use the pre-staged copies"]
+    G -- "no" --> I["copytree the tracked source tree into build_root/_src"]
+    I --> J["stage checkout include roots under _src/_checkout"]
+    J --> K["hipify writes only under build_root"]
+    style F fill:#ffebee,stroke:#c62828
+```
+
+| Mechanism | Before (#4072) | After |
+|---|---|---|
+| Default | `stage_hip_sources=False`; only 5 loaders opted in (`gptqmodel/utils/cpp.py:1152`) | `stage_hip_sources=True` (`gptqmodel/utils/cpp.py:1166`) |
+| Include roots inside the checkout | left in place; Machete hipified 102 tracked headers | staged under `build_root/_src/_checkout` (`gptqmodel/utils/cpp.py:1236`) |
+| Explicit opt-out with a checkout source | wrote into the checkout | `RuntimeError: refusing to hipify ...` before any write |
+| `tt_blockfloat_cuda.prewarm()` / `_ops()` on ROCm | hipified the CUDA kernel into the checkout | `supported()` gate returns `False` / raises (`gptqmodel/utils/tt_blockfloat_cuda.py:134,170`) |
+
+Measured on gfx1201: a direct `tt_blockfloat_cuda._EXTENSION.load()` on ROCm
+generated `tt_blockfloat_hip.hip` and `tt_blockfloat_hip_torch.cpp` under
+`~/.cache/gptqmodel/torch_extensions/tt_blockfloat_cuda/_src/`, and
+`git status --porcelain gptqmodel_ext` was empty. Before the change the same
+call reported two modified tracked files (1185 insertions, 1580 deletions).
 
 ### NF12 fused dot on gfx1250
 

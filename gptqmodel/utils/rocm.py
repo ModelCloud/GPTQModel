@@ -123,6 +123,12 @@ _QUANT_BLAS_BACKEND_CHOICES = frozenset({"rocblas", "hipblaslt", "cublaslt"})
 # torch names rocBLAS "hipblas" on ROCm and rejects "rocblas" outright.
 _QUANT_BLAS_BACKEND_ALIASES = {"rocblas": "hipblas"}
 
+# rocBLAS forwards its GEMMs to hipBLASLt when this is truthy. That is the
+# documented opt-in, and it is not reproducible across processes.
+_HIPBLASLT_ENV = "ROCBLAS_USE_HIPBLASLT"
+_HIPBLASLT_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_REPRODUCIBILITY_WARNED = False
+
 # Quantize-phase kernel prewarm groups.  ``None`` means the historical full
 # payload.  RDNA4 drops the "shape" group (cat/stack/roll/pad/repeat_interleave).
 # Measured on an AMD Radeon AI PRO R9700 (``gfx1201``, HIP 7.16.26385), cold
@@ -141,17 +147,45 @@ def _requested_quant_blas_backend() -> str:
     return os.getenv(QUANT_BLAS_BACKEND_ENV, QUANT_BLAS_BACKEND_DEFAULT).strip().lower()
 
 
+def _warn_if_blas_is_not_reproducible(blas_backend: str) -> None:
+    """Warn once when the opt-in gives up cross-process reproducibility.
+
+    The opt-in exists for speed, so it is not silently made deterministic.
+    hipBLASLt selects a different GEMM kernel per process for the same shape,
+    so two identical runs in separate processes can save different
+    checkpoints. Both opt-in spellings are covered: the GPT-QModel variable and
+    rocBLAS's own forwarding switch.
+    """
+
+    global _REPRODUCIBILITY_WARNED
+    if _REPRODUCIBILITY_WARNED:
+        return
+    forwarded = os.getenv(_HIPBLASLT_ENV, "").strip().lower()
+    if blas_backend not in ("hipblaslt", "cublaslt") and forwarded not in _HIPBLASLT_ENV_TRUTHY:
+        return
+    _REPRODUCIBILITY_WARNED = True
+    log.warning(
+        "ROCm hipBLASLt is selected for quantization (%s). hipBLASLt chooses a "
+        "different GEMM kernel per process for the same shape, so identical runs in "
+        "separate processes can save different checkpoints. The reproducible default "
+        "keeps rocBLAS (ROCBLAS_USE_HIPBLASLT=0); see docs/rocm-default-environment.md.",
+        f"{QUANT_BLAS_BACKEND_ENV}={blas_backend}, {_HIPBLASLT_ENV}={forwarded or 'unset'}",
+    )
+
+
 def quantize_tuning(device=None) -> dict:
     """Return the quantization-phase tuning for ``device``.
 
     The mapping has three keys:
 
     ``blas_backend``
-        Nominal BLAS selection for the quantize phase: ``"rocblas"`` (default),
-        ``"hipblaslt"``/``"cublaslt"`` (experimental), a disabled opt-out token
+        Nominal BLAS selection for the Hessian/linalg phase: ``"rocblas"``
+        (default), ``"hipblaslt"``/``"cublaslt"`` (experimental), a disabled
+        opt-out token
         (``""``/``"0"``/``"off"``/``"default"``/``"hipblaslt"``/``"cublaslt"``)
         preserved verbatim so ``quant_blas_backend`` leaves torch's backend
-        unchanged, or ``"default"`` on non-ROCm hosts.
+        unchanged, or ``"default"`` on non-ROCm hosts. The override is not
+        applied to the fp16/bf16 forward and replay GEMMs.
 
         hipBLASLt does ship Tensile libraries for ``gfx1200``/``gfx1201``/
         ``gfx1250`` (the ``hipblaslt/library/`` directories exist), so this is
@@ -160,7 +194,8 @@ def quantize_tuning(device=None) -> dict:
         is the dominant cost of a quantization pass.  rocBLAS is therefore the
         default for both ``cdna4`` and ``rdna4``; setting
         ``GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`` keeps torch's hipBLASLt default
-        as an opt-in experiment.
+        as an opt-in experiment. That opt-in is faster for the forward/replay
+        path but not reproducible across processes, so it logs a warning once.
 
     ``amp``
         Whether the ParoQuant stage optimizer may use AMP.  ROCm keeps AMP off
@@ -174,7 +209,9 @@ def quantize_tuning(device=None) -> dict:
 
     if not IS_ROCM:
         return {"blas_backend": "default", "amp": True, "prewarm_ops": None}
-    return _rocm_quantize_tuning(device)
+    tuning = _rocm_quantize_tuning(device)
+    _warn_if_blas_is_not_reproducible(tuning["blas_backend"])
+    return tuning
 
 
 def _rocm_quantize_tuning(device=None) -> dict:
@@ -244,22 +281,24 @@ _QUANT_BLAS_GUARD_PREVIOUS = None
 
 @contextmanager
 def quant_blas_backend(device=None):
-    """Route BLAS work to rocBLAS for the duration of a quantization run.
+    """Route one deterministic BLAS phase to rocBLAS.
 
-    The override is scoped to the quantization phase: the previous backend is
-    restored afterwards, so inference and every later call keep the user's
-    selection. The requested backend comes from ``quantize_tuning(device)``, so
-    CDNA and RDNA4 both default to rocBLAS. It is skipped on non-ROCm hosts,
-    when the platform lacks ``torch.backends.cuda.preferred_blas_library``, when
-    the user already selected a non-hipBLASLt backend, and when
-    ``GPTQMODEL_ROCM_QUANT_BLAS`` asks to keep torch's default (``hipblaslt``).
+    The override is entered only for a run plan that builds a Hessian (the GPTQ
+    family), not the whole quantization run: AWQ/RTN/QQQ must keep torch's
+    faster hipBLASLt backend for their fp16/bf16 GEMMs. The requested backend
+    comes from ``quantize_tuning(device)``, so CDNA and RDNA4 both default to
+    rocBLAS. It is skipped on non-ROCm hosts, when the platform lacks
+    ``torch.backends.cuda.preferred_blas_library``, when the user already
+    selected a non-hipBLASLt backend, and when ``GPTQMODEL_ROCM_QUANT_BLAS``
+    asks to keep torch's default (``hipblaslt``).
 
     ``torch.backends.cuda.preferred_blas_library`` is process-global. Two
     concurrent ``quantize()`` calls therefore share one override: the guard is
-    reference-counted under a lock so only the first entry captures the user's
-    setting and only the last exit restores it. Without the count, the first
-    run to finish restored hipBLASLt while the other run was still quantizing
-    (issue #4094).
+    reference-counted under a reentrant lock so only the first entry captures
+    the user's setting and only the last exit restores it. Without the count,
+    the first run to finish restored hipBLASLt while the other run was still
+    quantizing (issue #4094). The count also makes the nested per-call contexts
+    in ``quantization/gptq.py`` free while the method-scoped override is active.
     """
 
     global _QUANT_BLAS_GUARD_DEPTH, _QUANT_BLAS_GUARD_PREVIOUS

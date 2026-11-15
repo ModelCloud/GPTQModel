@@ -16,7 +16,7 @@ CUDA keeps the historical allocator default
 (`expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7`)
 and never has `ROCBLAS_USE_HIPBLASLT` set by GPT-QModel.
 
-## The flow
+## The import-time flow
 
 ```mermaid
 flowchart TD
@@ -47,32 +47,136 @@ importing that module directly still gets the default. The ROCm BLAS default is
 applied once, from `gptqmodel/__init__.py`, before `gptqmodel.utils` is
 imported.
 
-## Before and after
+## Quantization BLAS scope
 
-| Mechanism | Before | After |
+`ROCBLAS_USE_HIPBLASLT=0` only keeps GEMMs deterministic when the GEMM actually
+runs on rocBLAS. #4079 made that true for the whole quantization phase by
+wrapping `_quantize_with_calibration` in `quant_blas_backend()`. On gfx1201
+rocBLAS has no fast fp16/bf16 kernels, so that also routed AWQ's and RTN's
+fp16/bf16 GEMMs through rocBLAS: 8-14x slower than hipBLASLt, with no
+determinism gain for methods that never build a Hessian.
+
+The override is now scoped to methods whose run plan contains
+`ProcessorStep.GPTQ` (`_needs_deterministic_hessian` in
+`gptqmodel/models/base.py`). That covers the GPTQ family, including GPTAQ and
+FOEM variants, and nothing else. AWQ, RTN and QQQ never enter the override.
+
+The GPTQ family keeps the override for its calibration forward and replay, not
+only for the fp32 `X^T X` GEMM: those forward GEMMs produce the activations that
+are accumulated into the Hessian. Pinning only `compute_hessian_xtx` regressed
+Qwen2.5-0.5B-Instruct to **332/795** differing tensors across processes (the
+#4075 no-pin baseline), because the captured inputs themselves differed. The
+per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:971,983`)
+and `hessian_inverse` (`gptqmodel/quantization/gptq.py:1802`) remain as
+defense-in-depth for direct Hessian calls; the outer method-scoped context is
+what keeps the forward reproducible.
+
+The refcount itself is #4094's `_QUANT_BLAS_GUARD_LOCK` / `_QUANT_BLAS_GUARD_DEPTH`
+/ `_QUANT_BLAS_GUARD_PREVIOUS` primitive (`gptqmodel/utils/rocm.py:277-279`),
+which is reentrant (`threading.RLock`) and therefore already covers the nested
+per-call contexts described above. This change only moves *where* the guard is
+entered.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian: ProcessorStep.GPTQ in run_plan.processors"}
+    B -- "yes" --> C["quant_blas_backend: rocBLAS for the run"]
+    C --> D["calibration forward and replay GEMMs: rocBLAS"]
+    C --> E["Hessian X^T X and rocSOLVER inversion: rocBLAS"]
+    C --> F["compute_hessian_xtx nested override: refcounted no-op"]
+    B -- "no" --> G["nullcontext: torch default hipBLASLt"]
+    G --> H["AWQ / RTN / QQQ fp16/bf16 GEMMs: hipBLASLt"]
+
+    classDef pin fill:#e3f2fd,stroke:#1565c0,color:#000
+    classDef fast fill:#e8f5e9,stroke:#2e7d32,color:#000
+    class C,D,E,F pin
+    class G,H fast
+```
+
+| Mechanism | Before (#4079) | After |
 |---|---|---|
-| Allocator default | `DEFAULT_ALLOC_CONF` installed unconditionally (`gptqmodel/_alloc_conf.py:26-30`, applied at `gptqmodel/__init__.py:29`) | `default_alloc_conf()` picks `ROCM_DEFAULT_ALLOC_CONF` when `torch.version.hip` is set (`gptqmodel/_alloc_conf.py`) |
-| ROCm allocator detection | Only `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` counted as caller configuration | ROCm also honours `PYTORCH_HIP_ALLOC_CONF`, which Torch reads before `PYTORCH_ALLOC_CONF` |
-| rocBLAS selection | rocBLAS forwarded its GEMMs to hipBLASLt with no GPT-QModel default | `_rocm_env.apply_default_rocm_blas_env()` exports `ROCBLAS_USE_HIPBLASLT=0` unless the caller set it |
-| CUDA behaviour | `expandable_segments:True` default | unchanged; no ROCm-only variable is written |
+| Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py`) |
+| AWQ / RTN / QQQ | forced rocBLAS for the whole run | torch default, hipBLASLt on this stack |
+| GPTQ calibration forward and replay | forced rocBLAS | forced rocBLAS (their activations feed the Hessian) |
+| Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |
+| Nested / concurrent scopes | not reference counted | #4094's reentrant refcount (`_QUANT_BLAS_GUARD_*`, `gptqmodel/utils/rocm.py:277-279`) restores only after the last worker exits |
 
-## Measured on gfx1201 (R9700)
+### Measured on gfx1201 (R9700)
 
-Hardware: AMD Radeon AI PRO R9700, `gfx1201`, torch 2.16.0.dev+rocm10.1
-(HIP 7.16.26385).
+`F.linear` throughput in TFLOPS, median of 50 iterations after 10 warm-ups,
+`torch.cuda.Event` timing. "rocBLAS" is the old whole-phase override; "default"
+is torch's hipBLASLt backend, which methods without a Hessian now keep:
 
-| Check | Before | After |
+| Shape | dtype | rocBLAS (before) | hipBLASLt (after, no-Hessian methods) | speedup |
+|---|---|---|---|---|
+| 4096x4096x14336 | bf16 | 9.5 | 139.0 | 14.6x |
+| 512x2048x8192 | fp16 | 10.2 | 119.8 | 11.7x |
+| 16x896x4864 | bf16 | 0.5 | 7.3 | 13.4x |
+| 8192x4096 `X^T X` | fp32 | 20.5 | 16.3 | 0.8x (rocBLAS wins) |
+
+The fp32 Hessian GEMM is faster on rocBLAS, which is why the GPTQ family keeps
+the pin there. The fp16/bf16 rows are the AWQ/RTN/QQQ paths that no longer pay
+it. GPTQ's end-to-end time is unchanged by design (it keeps the old whole-run
+pin): 58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the issue's
+61 s / 56 s. AWQ's 128-sample run measured 50.7 s / 45.5 s, against the issue's
+128 s / 124 s with the whole-run pin.
+
+### Cross-process determinism is unchanged
+
+Two separate processes quantized the same model, hashed every saved tensor, and
+compared the hashes:
+
+| Model | Method | Differing tensors (after) |
 |---|---|---|
-| 2097152x16 matmul with `empty_cache()` between 3 reps (issue #4072) | 0 / 196608 / 294912 bad rows across runs | 0 bad rows |
-| Qwen2.5-0.5B-Instruct GPTQ 4-bit g128, 32 samples, two processes (issue #4075) | 334/795 saved tensors differ | 0/795 differ |
+| Llama-3.2-1B-Instruct | GPTQ | 0 / 483 |
+| Llama-3.2-1B-Instruct | AWQ | 0 / 371 |
+| Qwen2.5-0.5B-Instruct | GPTQ | 0 / 795 (`tests/test_rocm_default_env.py`) |
+
+#4075 measured 332/794 differing without the pin and 0/794 with it; the scoped
+pin keeps the 0.
+
+## The opt-in gives up reproducibility
+
+Two opt-ins are honoured, and neither is silently made deterministic because
+the speed is why they exist:
+
+- `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` keeps torch's hipBLASLt backend instead
+  of switching to rocBLAS for the GPTQ-family run.
+- `ROCBLAS_USE_HIPBLASLT=1` lets rocBLAS forward its GEMMs to hipBLASLt.
+
+hipBLASLt selects its kernel per process from the process history, so identical
+GPTQ runs in separate processes can diverge from layer 0. Measured on
+Llama-3.2-1B (128 samples, every saved tensor hashed):
+
+| Opt-in | Runs | Differing tensors |
+|---|---|---|
+| none (default) | 2 | 0 / 483 |
+| `ROCBLAS_USE_HIPBLASLT=1` | 2 | **224 / 483** (`qweight` and `scales`, from layer 0) |
+| `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` | 4 | **222 / 483** between the two kernel-selection groups; 0 within a group |
+
+The issue measured 224/482 for both opt-ins. The 4-run result is the useful
+shape of the failure: runs 1, 2 and 4 matched and run 3 differed in 222/483
+tensors, so a single matching pair does not make the opt-in reproducible — the
+choice depends on process history. GPT-QModel logs a warning once when either
+opt-in is active (`gptqmodel/utils/rocm.py:150`, called from
+`quantize_tuning`).
+
+```bash
+# Reproducible (default)
+python quantize.py
+
+# Faster, not reproducible across processes: the warning is intentional
+GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
+```
 
 ## Failure and ambiguity paths
 
 | Situation | Behaviour |
 |---|---|
 | Caller sets any allocator variable, including `PYTORCH_HIP_ALLOC_CONF` | GPT-QModel writes nothing; the caller's value is used verbatim |
-| Caller sets `ROCBLAS_USE_HIPBLASLT` (including `1` or an empty string) | GPT-QModel writes nothing; rocBLAS sees the caller's value |
-| Non-ROCm host | CUDA allocator default is installed; `ROCBLAS_USE_HIPBLASLT` is never written |
+| Caller sets `ROCBLAS_USE_HIPBLASLT` (including `1` or an empty string) | GPT-QModel writes nothing; rocBLAS sees the caller's value, and `1` warns that checkpoints may differ across processes |
+| Caller sets `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` | the GPTQ-family run keeps hipBLASLt; `quantize_tuning` warns once that checkpoints may differ across processes |
+| Non-ROCm host | CUDA allocator default is installed; `ROCBLAS_USE_HIPBLASLT` is never written; the override is a no-op |
 | BLAS call before `import gptqmodel` | rocBLAS has already fixed its kernel choice; the variable cannot change that process. Import GPT-QModel before the first BLAS call. |
 
 ## See also

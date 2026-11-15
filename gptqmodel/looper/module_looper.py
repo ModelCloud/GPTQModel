@@ -201,6 +201,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        # Concurrent module-tree branches can declare different quantizable
+        # leaves.  Cache each branch's leaf blocks so a layer is never asked to
+        # resolve a sibling branch's modules.
+        self._layer_modules_by_prefix: Dict[tuple[str, bool], Optional[List[List[str]]]] = {}
         self.layer_module_coverage = LayerModuleCoverageTracker()
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -2125,6 +2129,77 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         return total_log
+
+    def layer_modules_for_prefix(self, prefix: Optional[str], *, planning: bool = False):
+        """Return the leaf blocks declared by the tree branch that owns ``prefix``.
+
+        A module tree may contain several complete variants for concurrent
+        decoder stacks (text, vision, audio, ...).  Their quantizable leaves can
+        differ, so the flat union returned by ``simple_layer_modules()`` must not
+        be applied to every layer.  Resolve the variant whose decoder prefix
+        contains the layer instead.  ``None`` means the layer is outside every
+        declared branch (for example an embedding endpoint or ``lm_head``) and
+        the caller keeps its existing global declaration.
+        """
+
+        if not prefix:
+            return None
+
+        cache_key = (prefix, planning)
+        if cache_key in self._layer_modules_by_prefix:
+            return self._layer_modules_by_prefix[cache_key]
+
+        tree = getattr(self.gptq_model, "effective_module_tree", None)
+        if tree is None:
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+
+        definition = type(self.gptq_model)
+        matches = []
+        for variant in definition._iter_module_tree_variants(tree):
+            for variant_prefix in definition._expand_module_tree_prefixes(variant):
+                if prefix == variant_prefix or prefix.startswith(f"{variant_prefix}."):
+                    matches.append((len(variant_prefix), variant_prefix, variant))
+
+        if not matches:
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+
+        longest = max(match[0] for match in matches)
+        best = [match for match in matches if match[0] == longest]
+        if len(best) > 1:
+            # Several variants declare the same decoder prefix (alternative
+            # layer types).  Keep the historical merged declaration instead of
+            # silently selecting one alternative.
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+        best_variant = best[0][2]
+
+        is_awq_quantize = any(
+            isinstance(proc, (AWQProcessor, ParoQuantProcessor))
+            for proc in self.processors
+        )
+        include_capture_only = any(
+            getattr(getattr(proc, "forward", None), "activation_capture", False)
+            for proc in self.processors
+        )
+        with definition._module_tree_context(best_variant):
+            if planning:
+                modules = definition.full_layer_modules(
+                    self.gptq_model.model.config,
+                    is_awq_quantize=is_awq_quantize,
+                    include_capture_only=include_capture_only,
+                )
+            else:
+                modules = definition.simple_layer_modules(
+                    self.gptq_model.model.config,
+                    self.gptq_model.quantize_config,
+                    is_awq_quantize=is_awq_quantize,
+                    include_capture_only=include_capture_only,
+                )
+
+        self._layer_modules_by_prefix[cache_key] = modules
+        return modules
 
     def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
         """Build the named-module subset a processor will quantize for one layer."""
