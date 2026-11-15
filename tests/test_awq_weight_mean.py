@@ -683,6 +683,122 @@ def test_awq_token_rows_replay_mask_stays_inside_each_document():
     # Document A may not read document B and vice versa.
     assert not allowed[:3, 3:].any()
     assert not allowed[3:, :3].any()
+    # The captured mask was additive, so the replay stays additive (a float
+    # grid in the activation dtype, not a bool keep mask).
+    assert attention_mask.dtype.is_floating_point
+    assert attention_mask.dtype == features[module_name].dtype
+
+
+def test_awq_token_rows_replay_preserves_a_masked_fill_bool_mask():
+    """A bool mask whose True marks *masked* keys must stay bool (#4121 item 1).
+
+    TeleChat2's attention calls ``masked_fill(attn, attention_mask, min)`` with
+    a ``torch.ones(S, S).triu(1)`` bool mask, and its AWQ hook only supplies
+    that mask when ``attention_mask is None``. Turning the captured grid into an
+    additive float mask therefore crashed with
+    ``masked_fill_ only supports boolean masks``.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.query"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 6} if name == module_name else None
+    )
+    seq_len = 6
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[
+            torch.ones(seq_len, seq_len, dtype=torch.bool).triu(1).reshape(1, 1, seq_len, seq_len)
+        ],
+        position_ids=[torch.arange(seq_len).unsqueeze(0)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.arange(seq_len * 4, dtype=torch.float32).reshape(1, seq_len, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.dtype == torch.bool
+    assert attention_mask.shape == (1, 1, seq_len, seq_len)
+    # Same polarity as the captured mask: True marks a masked key.
+    assert torch.equal(
+        attention_mask[0, 0],
+        torch.ones(seq_len, seq_len, dtype=torch.bool).triu(1),
+    )
+    assert torch.equal(replay["position_ids"], torch.arange(seq_len).unsqueeze(0))
+
+
+def test_awq_token_rows_replay_recovers_real_padded_hf_masks():
+    """Real right-padded HF bool masks must still recover the document grid.
+
+    Issue #4125 item 4: a real Hugging Face bool mask keeps padding *keys*
+    masked, but a padding *query* row still sees the real keys. Deriving the
+    keep mask with ``any(dim=-1)`` therefore counted every padding row as a
+    real token, the ``!= row_count`` check failed, and the replay fell back to
+    one causal sequence across the whole batch. The diagonal is the fix: a real
+    token always attends to itself.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 8} if name == module_name else None
+    )
+
+    padded_len = 8
+    real_lengths = (5, 3)
+
+    # One calibration batch with two right-padded documents. Unlike the
+    # hand-built mask above, a padding *query* row still sees the real keys,
+    # which is what Hugging Face actually produces.
+    mask = torch.zeros(2, padded_len, padded_len, dtype=torch.bool)
+    for row, real_len in enumerate(real_lengths):
+        for query in range(padded_len):
+            for key in range(padded_len):
+                mask[row, query, key] = key <= query and key < real_len
+
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[mask.reshape(2, 1, padded_len, padded_len)],
+        position_ids=[torch.arange(padded_len).unsqueeze(0).expand(2, -1)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.zeros(1, sum(real_lengths), 4)],
+        "batch_indices": [0],
+    }
+
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, 8, 4)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    # Original per-document offsets, not one synthetic range. This is the
+    # structure the `any(dim=-1)` keep mask lost on a real padded batch.
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 3, 4, 0, 1, 2]]))
+
+    allowed = attention_mask[0, 0]
+    if allowed.dtype != torch.bool:
+        allowed = allowed >= 0
+    expected = torch.zeros(8, 8, dtype=torch.bool)
+    expected[:5, :5] = torch.tril(torch.ones(5, 5, dtype=torch.bool))
+    expected[5:, 5:] = torch.tril(torch.ones(3, 3, dtype=torch.bool))
+    assert torch.equal(allowed, expected)
+    # The second document may not read the first; the old fallback did, and it
+    # also reported synthetic positions 0..7 instead of the per-document ones.
+    assert not allowed[5:, :5].any()
+    assert not allowed[:5, 5:].any()
+    # The captured mask was a bool keep grid, so the replay stays bool.
+    assert attention_mask.dtype == torch.bool
+    assert attention_mask.shape == (1, 1, 8, 8)
 
 
 def test_awq_token_rows_replay_keeps_a_2d_mask_two_dimensional():

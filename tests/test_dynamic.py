@@ -26,7 +26,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
-from gptqmodel.quantization import QuantizeConfig  # noqa: E402
+from gptqmodel.quantization import Fallback, QuantizeConfig  # noqa: E402
 from gptqmodel.utils import safetensor  # noqa: E402
 
 
@@ -178,7 +178,12 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
         layer_index=0,
     )
     module.state[NATIVE_INPUTS_STATE_KEY] = []
-    processor.preprocess(module)
+    # The real looper always passes a processor-level fallback
+    # (`stage_subset` -> `preprocess(..., fallback=...)`). Calling
+    # `preprocess(module)` without it is how the override was silently
+    # overwritten in every real run (issue #4121 item 4).
+    processor_fallback = Fallback(strategy="rtn", threshold="5%")
+    processor.preprocess(module, fallback=processor_fallback)
 
     dynamic_cfg = processor.qcfg_dynamic
     assert dynamic_cfg is not None
@@ -198,13 +203,14 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
         full_name="model.other",
         layer_index=0,
     )
-    processor.preprocess(module_other)
+    processor.preprocess(module_other, fallback=processor_fallback)
 
     other_cfg = processor.qcfg_dynamic
     assert other_cfg is not None
     assert other_cfg.gptaq is None
-    assert other_cfg.fallback.strategy == qcfg.fallback.strategy
-    assert other_cfg.fallback.threshold == qcfg.fallback.threshold
+    # No per-module override: the processor-level fallback applies.
+    assert other_cfg.fallback.strategy == "rtn"
+    assert other_cfg.fallback.threshold == "5%"
     assert other_cfg.hessian.chunk_size == qcfg.hessian.chunk_size
     assert other_cfg.hessian.chunk_bytes == qcfg.hessian.chunk_bytes
     assert other_cfg.hessian.staging_dtype == qcfg.hessian.staging_dtype

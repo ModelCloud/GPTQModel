@@ -1341,36 +1341,76 @@ class AWQProcessor(LoopProcessor):
 
         return AWQProcessor._pack_kept_token_rows(position_ids, keep_mask)
 
+    # Forms a captured attention mask can take. The packed replay must
+    # reproduce the form the model's own attention consumes: an additive float
+    # mask is summed into the logits, a `bool_keep` mask marks attended keys
+    # (Hugging Face SDPA), and a `bool_masked` mask marks masked keys
+    # (TeleChat2's `torch.ones(S, S).triu(1)` fed to `masked_fill`).
+    _MASK_FORM_ADDITIVE = "additive"
+    _MASK_FORM_BOOL_KEEP = "bool_keep"
+    _MASK_FORM_BOOL_MASKED = "bool_masked"
+
+    @staticmethod
+    def _captured_mask_form(mask: Optional[torch.Tensor]) -> Optional[str]:
+        """Classify a captured mask's form without materializing a new grid.
+
+        Bool masks appear in both polarities. A real token always attends to
+        itself, so the diagonal is True for Hugging Face's keep masks and False
+        for a `masked_fill` mask such as TeleChat2's `triu(1)`.
+        """
+
+        if not torch.is_tensor(mask) or mask.dim() < 2:
+            return None
+        if mask.dtype != torch.bool:
+            return AWQProcessor._MASK_FORM_ADDITIVE
+        m = mask
+        if m.dim() == 4:
+            m = m[:, 0]
+        if m.dim() == 3 and m.shape[-1] == m.shape[-2] and m.shape[0] > 0:
+            if bool(m.diagonal(dim1=-2, dim2=-1).any()):
+                return AWQProcessor._MASK_FORM_BOOL_KEEP
+            return AWQProcessor._MASK_FORM_BOOL_MASKED
+        # A planar [batch, seq] mask is a keep mask by construction.
+        return AWQProcessor._MASK_FORM_BOOL_KEEP
+
     @staticmethod
     def _token_row_source_structure(
         mask: Optional[torch.Tensor],
         row_count: int,
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]]:
         """Map one capture batch's kept rows back onto its document grid.
 
         ``row_count`` is the number of kept rows the capture hook stored for
         this batch (padding already removed). Returns ``(documents, positions,
-        allowed)`` where ``documents``/``positions`` index the original
-        ``[batch, seq]`` grid for every kept row and ``allowed`` is the
-        ``[row_count, row_count]`` attention relation among those rows.
-        ``None`` means the cached mask does not describe exactly these rows.
+        allowed, form)`` where ``documents``/``positions`` index the original
+        ``[batch, seq]`` grid for every kept row, ``allowed`` is the
+        ``[row_count, row_count]`` attention relation among those rows (True =
+        attended), and ``form`` is the captured mask's form. ``None`` means the
+        cached mask does not describe exactly these rows.
         """
 
         if mask is None or row_count <= 0 or not torch.is_tensor(mask):
             return None
 
+        form = AWQProcessor._captured_mask_form(mask)
         m = mask.detach().to(device="cpu")
         if m.dim() == 4:
             # [B, heads, S, S]; every head sees the same keep pattern.
             m = m[:, 0]
 
         allowed_grid = None
-        if m.dim() == 3 and m.shape[-1] == m.shape[-2]:
-            # [B, S, S] additive or boolean attention. A query row keeps every
-            # key the model itself attends to, so the retained rows match the
-            # ones the capture hook filtered with.
-            allowed_grid = (m >= 0) if m.dtype != torch.bool else m
-            keep = allowed_grid.any(dim=-1)
+        if m.dim() == 3 and m.shape[-1] == m.shape[-2] and m.shape[0] > 0:
+            # [B, S, S] attention grid. Normalize it to "True = attended" using
+            # the captured form, then take the diagonal as the keep mask: a
+            # real token always attends to itself, while a padding query row
+            # of a real HF mask still sees the real keys (only padding *keys*
+            # are masked), so `any(dim=-1)` would count pad rows as real
+            # tokens and the structure would never be recovered.
+            if m.dtype == torch.bool:
+                allowed_grid = m if form == AWQProcessor._MASK_FORM_BOOL_KEEP else ~m
+            else:
+                allowed_grid = (m >= 0) if bool((m < 0).any()) else (m > 0)
+            keep = allowed_grid.diagonal(dim1=-2, dim2=-1)
         else:
             try:
                 keep = normalize_seq_mask(m)
@@ -1394,7 +1434,7 @@ class AWQProcessor(LoopProcessor):
             allowed = allowed_grid[documents, positions][:, positions]
         else:
             allowed = positions.unsqueeze(1) >= positions.unsqueeze(0)
-        return documents, positions, allowed
+        return documents, positions, allowed, form
 
     def _token_row_replay_kwargs(
         self,
@@ -1413,6 +1453,12 @@ class AWQProcessor(LoopProcessor):
         (issue #4091). Keeping every retained row on its original document and
         position makes the replay attention block-diagonal per document, and
         rotary sees the original offsets instead of synthetic ones.
+
+        The rebuilt mask keeps the captured mask's form and polarity
+        (`_captured_mask_form`): an additive float grid stays additive, a bool
+        keep grid stays bool with True = attended, and a `masked_fill` bool grid
+        (TeleChat2) stays bool with True = masked. Converting a bool grid to an
+        additive float one breaks consumers that call `masked_fill`.
         """
 
         cache = getattr(self, "inputs_cache", None)
@@ -1427,8 +1473,10 @@ class AWQProcessor(LoopProcessor):
         packed_count = len(provenance)
         allowed = torch.zeros((packed_count, packed_count), dtype=torch.bool)
         positions = torch.zeros((packed_count,), dtype=torch.long)
-        extended_mask = False
-        observed_2d_mask = False
+        # A captured mask that described an [S, S] attention grid, as opposed
+        # to a planar [batch, seq] keep mask.
+        grid_mask = False
+        form = None
 
         grouped: Dict[int, List[Tuple[int, int]]] = {}
         for packed_index, (source_index, row_index) in enumerate(provenance):
@@ -1446,10 +1494,9 @@ class AWQProcessor(LoopProcessor):
                 mask = masks[int(batch_index)]
             if torch.is_tensor(mask):
                 if mask.dim() >= 3:
-                    # The model consumes an additive [B, 1, S, S] style mask.
-                    extended_mask = True
-                else:
-                    observed_2d_mask = True
+                    grid_mask = True
+                if form is None:
+                    form = self._captured_mask_form(mask)
 
             packed_indices = torch.tensor([item[0] for item in entries], dtype=torch.long)
             local_rows = torch.tensor([item[1] for item in entries], dtype=torch.long)
@@ -1461,10 +1508,12 @@ class AWQProcessor(LoopProcessor):
                     source_positions.unsqueeze(1) >= source_positions.unsqueeze(0)
                 )
             else:
-                source_documents, kept_positions, kept_allowed = structure
+                source_documents, kept_positions, kept_allowed, structure_form = structure
                 documents = source_documents[local_rows]
                 source_positions = kept_positions[local_rows]
                 source_allowed = kept_allowed[local_rows][:, local_rows]
+                if form is None:
+                    form = structure_form
 
             same_document = documents.unsqueeze(1) == documents.unsqueeze(0)
             allowed[
@@ -1487,20 +1536,28 @@ class AWQProcessor(LoopProcessor):
 
             positions[packed_indices] = row_positions.to(dtype=torch.long)
 
-        if not dtype.is_floating_point:
-            dtype = torch.float32
-        if extended_mask or not observed_2d_mask:
+        if not grid_mask and form is not None:
+            # A captured planar [batch, seq] mask means the attention
+            # implementation (for example FlashAttention) expects a keep mask
+            # of that rank. Keep that form; every packed row is a kept token,
+            # so cross-document separation is not expressible here and causal
+            # masking stays inside the implementation.
+            attention_mask = torch.ones((1, packed_count), dtype=torch.bool)
+        elif form == self._MASK_FORM_BOOL_MASKED:
+            # Preserve the captured polarity: True marks a masked key.
+            attention_mask = (~allowed).unsqueeze(0).unsqueeze(0)
+        elif form == self._MASK_FORM_BOOL_KEEP:
+            # Preserve the captured polarity: True marks an attended key.
+            attention_mask = allowed.unsqueeze(0).unsqueeze(0)
+        else:
             # Additive block-diagonal form. This is also the fallback when no
             # mask was captured: the module then relied on its internal causal
             # path, and an explicit causal mask is the equivalent replay.
+            if not dtype.is_floating_point:
+                dtype = torch.float32
             additive = torch.zeros((packed_count, packed_count), dtype=dtype)
             additive.masked_fill_(~allowed, torch.finfo(dtype).min)
             attention_mask = additive.unsqueeze(0).unsqueeze(0)
-        else:
-            # A captured 2-D mask means the attention implementation (for
-            # example FlashAttention) expects a [batch, seq] keep mask. Keep
-            # that form; every packed row is a kept token.
-            attention_mask = torch.ones((1, packed_count), dtype=torch.bool)
         return {
             "attention_mask": attention_mask,
             "position_ids": positions.unsqueeze(0),
@@ -1539,6 +1596,17 @@ class AWQProcessor(LoopProcessor):
         input_batch = int(inp.shape[0]) if inp.dim() >= 3 else 1
         input_seq = int(inp.shape[1]) if inp.dim() >= 3 else int(inp.shape[0])
         if input_batch != 1 or attention_mask.ndim < 2:
+            return aligned_kwargs
+
+        # A mask that already matches the packed replay length needs no
+        # repacking. Repacking re-derives a keep mask with Hugging Face's bool
+        # convention, which misreads a `masked_fill` mask (True = masked) and
+        # would drop the mask entirely.
+        if (
+            attention_mask.shape[0] == 1
+            and attention_mask.shape[-1] == input_seq
+            and (attention_mask.ndim < 3 or attention_mask.shape[-2] in (1, input_seq))
+        ):
             return aligned_kwargs
 
         try:
