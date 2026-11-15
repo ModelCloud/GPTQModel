@@ -132,6 +132,51 @@ The after column is an exact packed transfer: the exported affine words are the
 source layer's own codes, with the source scales cast to float16 as MLX
 requires.
 
+## MACaQ and NF12 Metal kernels
+
+Two additional formats transfer their packed checkpoint state unchanged and run
+on dedicated Metal kernels.
+
+MACaQ's MXFP4 storage is already OCP MXFP4: one E2M1 nibble per value with the
+low nibble holding the even column, plus one E8M0 scale byte per 32 values. That
+is byte-identical to MLX's `mxfp4` quantization mode, so the transfer is a
+`uint8 -> uint32` reinterpretation with no repack and no requantization. The
+module keeps MACaQ's 32-wide block Hadamard matrix and diagonal pre-scale and
+applies them to the activations, then calls MLX's MXFP4 matmul. `w4a16` uses
+`quantized_matmul`; `w4a4` uses the fused `qqmm` through 16 rows and an explicit
+quantize/dequantize pair above it, because MLX's fused activation quantization
+stops winning on wide token blocks (measured on this host: equal at 16 rows,
+5x slower at 512). MLX chooses its own E8M0 exponent and tie handling for that
+activation rounding, so W4A4 output tracks the Torch MACaQ kernel within the
+4-bit activation grid rather than bit-for-bit; W4A16 is unaffected.
+
+NF12 stays in its 12-byte tiled group stream. `MlxNF12Linear` decodes it on
+Metal: a single-row forward fuses the decode into the dot product, and a wider
+forward decodes once into BF16 and multiplies. Both paths are exact for the
+checkpoint's BF16 weights, so a decoded layer is bit-identical to the Torch
+codec's `decode()`; only the accumulation order differs from the Torch
+`linear()` oracle.
+
+### Measured Metal result
+
+One 4096x4096 BF16 layer on an M5 Ultra (36-core CPU, 256 GiB unified memory),
+median of 20 timed repetitions after three warmups, against the portable Torch
+MPS path for the same packed checkpoint:
+
+| Format | Rows | Torch MPS | MLX Metal | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| MACaQ W4A16 | 1 | 4.46 ms | 0.26 ms | 17x |
+| MACaQ W4A16 | 512 | 3.67 ms | 0.46 ms | 8x |
+| MACaQ W4A4 | 1 | 4.46 ms | 0.24 ms | 19x |
+| MACaQ W4A4 | 512 | 5.45 ms | 0.47 ms | 12x |
+| NF12 | 1 | 5.10 ms | 0.26 ms | 20x |
+| NF12 | 512 | 5.17 ms | 0.50 ms | 10x |
+
+The NF12 prefill number is dominated by the decode pass: at this layer size a
+32 MB elementwise pass already takes 0.27 ms on this GPU, so the fused
+single-row kernel and the decode both sit at the small-workload floor rather
+than at the 650 GB/s the device reaches on 512 MB working sets.
+
 ## Not in scope
 
 The custom-runtime checkpoint emitted when the packed transfer succeeds keeps
