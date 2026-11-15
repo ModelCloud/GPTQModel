@@ -167,6 +167,9 @@ matched module or leaves a partly folded model.
 - The numeric bound scales with the storage dtype. In bf16 the fold itself moves
   the logits by about 3% of their magnitude, so the gate is proportionally wider;
   it is still an order of magnitude below a missed-consumer error.
+- Verification replays the captured calibration call, so the model must run
+  deterministically: put it in `eval()` mode. A training-mode model with dropout
+  fails the determinism precondition and the fold is refused.
 - `awq_balance` and `calibrate_router` are deliberately out of scope. They keep
   raising `NotImplementedError` with the known-method list.
 - Aliases and `stop` remain unsupported by config compilation.
