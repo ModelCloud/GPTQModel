@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import statistics
 import sys
 import time
@@ -110,6 +111,8 @@ def _run(method: str, calibration, args: argparse.Namespace, round_index: int) -
         "method": method,
         "backend": backend.value,
         "gpu": torch.cuda.get_device_name(args.device),
+        "allocator_backend": torch.cuda.get_allocator_backend(),
+        "allocator_config": os.environ.get("PYTORCH_ALLOC_CONF") or os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
         "torch": torch.__version__,
         "rows": args.rows,
         "concat_size": args.concat_size,

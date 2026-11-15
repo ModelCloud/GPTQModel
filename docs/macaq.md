@@ -177,6 +177,23 @@ exploratory, compare different activation precisions, and do not reproduce
 the paper's matched-quality MR-GPTQ/DuQuant++ benchmark. Use `--rounds 4`
 or more for a stronger local comparison.
 
+A spot check after rebasing onto upstream `main` at `323673e` kept the same
+order of magnitude. An explicit async allocator avoided the native allocator's
+mapping retries and substantially lowered reserved memory, but MACaQ remained
+slower than plain GPTQ on this 1B workload:
+
+| Rebased allocator | GPTQ | MACaQ | MACaQ / GPTQ | MACaQ peak reserved |
+|---|---:|---:|---:|---:|
+| Native, one round | 23.20 s | 98.03 s | 4.23x | 46.90 GiB |
+| `cudaMallocAsync`, one round | 13.82 s | 87.44 s | 6.33x | 7.31 GiB |
+
+Both spot checks used the same 64 messages and model settings as the table
+above. The async run had zero allocation retries. The benchmark script records
+its allocator backend and config in every `BENCH_RESULT` line; set
+`PYTORCH_ALLOC_CONF=backend:cudaMallocAsync` before launching it to reproduce
+the second allocator condition. Single rounds are exploratory, and the ratio
+changes with allocator choice.
+
 The unmodified Huawei reference was also timed on the same 1B checkpoint and
 RTX 4090 model, using FP16 weights, 25,532 raw-text calibration tokens, 128
 flips, and its active-set refinement. Its own timing splits show the cost of
