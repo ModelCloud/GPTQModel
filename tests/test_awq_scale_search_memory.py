@@ -49,6 +49,58 @@ def _processor():
     return processor
 
 
+def _replay_processor(max_chunk_memory, quant_batch_size=1):
+    """A processor with only the state the replay-sizing helper touches."""
+
+    processor = AWQProcessor.__new__(AWQProcessor)
+    processor.max_chunk_memory = max_chunk_memory
+    processor._quant_batch_size = quant_batch_size
+    return processor
+
+
+def test_scale_search_replay_batch_size_accounts_for_the_sequence_dimension():
+    """A 3-D capture is [batches, seq, hidden], not [batches, hidden].
+
+    Equal-length calibration windows are concatenated to ``[128, 2048, 4096]``,
+    so one leading-dimension row costs ``2048 * 4096`` elements. Sizing a row as
+    ``hidden`` alone undercounts by ``seq`` and returned ``0`` ("one forward over
+    everything"), which is a 6.4 GiB chunk for Llama-3.1-8B.
+    """
+
+    budget = 1024 * 1024 * 1024
+    x = torch.empty(128, 2048, 4096, dtype=torch.float16)
+    batch_size = _replay_processor(budget)._scale_search_replay_batch_size(x)
+
+    assert batch_size is not None and batch_size > 0
+    per_row_bytes = (x.numel() // x.shape[0]) * x.element_size() * 3
+    # Independent arithmetic: the budget bounds the replayed chunk.
+    assert batch_size * per_row_bytes <= budget
+    assert batch_size < x.shape[0]
+
+
+def test_scale_search_replay_batch_size_keeps_the_2d_row_size():
+    """A 2-D ``[rows, hidden]`` capture has one hidden vector per row."""
+
+    budget = 1024 * 1024 * 1024
+    x = torch.empty(262144, 4096, dtype=torch.float16)
+    batch_size = _replay_processor(budget)._scale_search_replay_batch_size(x)
+    per_row_bytes = (x.numel() // x.shape[0]) * x.element_size() * 3
+
+    assert batch_size == budget // per_row_bytes
+    assert batch_size * per_row_bytes <= budget
+
+
+def test_scale_search_replay_batch_size_handles_empty_and_1d_inputs():
+    processor = _replay_processor(1024 * 1024 * 1024)
+
+    # No leading-dimension rows, and no elements at all: one forward over nothing
+    # rather than a division by an empty row.
+    assert processor._scale_search_replay_batch_size(torch.empty(0)) is None
+    assert processor._scale_search_replay_batch_size(torch.empty(4, 0, 8)) is None
+    # A 1-D capture has one element per leading-dimension row, so it always fits.
+    assert processor._scale_search_replay_batch_size(torch.empty(1024, dtype=torch.float16)) == 0
+
+
 def _record(processor, name, tensor):
     processor._record_input_feature(name, tensor)
 

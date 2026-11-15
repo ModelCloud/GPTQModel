@@ -3544,7 +3544,10 @@ def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, 
         return None
     if isinstance(fallback, dict):
         strategy = fallback.get("strategy", FallbackStrategy.RTN)
-        threshold = fallback.get("threshold", "1.0%")
+        # The dataclass default is the single source of truth.  A dict that only
+        # sets `strategy` or `smooth` must not silently double the threshold from
+        # 0.5% to 1.0%, which moves experts from GPTQ to RTN.
+        threshold = fallback.get("threshold", Fallback.threshold)
         smooth = fallback.get("smooth")
         if smooth is None:
             smooth = fallback.get("smooth_method")

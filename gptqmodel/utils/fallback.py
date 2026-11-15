@@ -4,22 +4,30 @@
 
 from typing import Any, Optional, Tuple
 
-from gptqmodel.quantization.config import Fallback, FallbackStrategy
+from gptqmodel.quantization.config import Fallback, FallbackStrategy, _normalize_fallback
 
 
 def normalize_fallback(
     value: Any,
     default: Optional[Fallback] = None,
 ) -> Optional[Fallback]:
+    """Merge a per-module fallback override onto ``default``.
+
+    Dict construction is delegated to the one config normalizer so the
+    threshold default cannot drift from ``Fallback``.
+    """
+
     if value is None:
         return default
     if isinstance(value, Fallback):
         return value
     if isinstance(value, dict):
         fallback = default if isinstance(default, Fallback) else Fallback()
-        return Fallback(
-            strategy=value.get("strategy", fallback.strategy),
-            threshold=value.get("threshold", fallback.threshold),
+        return _normalize_fallback(
+            {
+                "strategy": value.get("strategy", fallback.strategy),
+                "threshold": value.get("threshold", fallback.threshold),
+            }
         )
     raise ValueError(
         "normalize_fallback: expected Fallback, dict, or None. "

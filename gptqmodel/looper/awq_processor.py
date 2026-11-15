@@ -2997,6 +2997,14 @@ class AWQProcessor(LoopProcessor):
         series of tiny GEMMs.  Coalesce the captured batches up to the activation
         budget already used by the chunked loss so peak memory stays bounded.
         Returns ``0`` when the whole replay fits in one forward.
+
+        A "row" is one slice of the leading dimension, so the per-row element
+        count is ``x.numel() // x.shape[0]``, not ``x.shape[-1]``.  Equal-length
+        captures are concatenated to ``[batches, seq, hidden]``; sizing such a
+        capture by ``hidden`` alone undercounts it by ``seq`` and lets the whole
+        calibration set run as one forward.  A 1-D input therefore has one
+        element per row, and a 0-element input returns ``None`` (one forward over
+        nothing) instead of dividing by an empty row.
         """
 
         if x.dim() == 0:
@@ -3004,10 +3012,13 @@ class AWQProcessor(LoopProcessor):
         rows = int(x.shape[0])
         if rows <= 1:
             return None
-        hidden = int(x.shape[-1]) if x.dim() > 1 else 1
+        numel = int(x.numel())
+        if numel == 0:
+            return None
         element_size = max(int(x.element_size()), 2)
+        elements_per_row = numel // rows
         # Input, forward output, and the CPU reference copy are resident together.
-        bytes_per_row = max(1, hidden) * element_size * 3
+        bytes_per_row = max(1, elements_per_row) * element_size * 3
         budget_rows = max(1, int(self.max_chunk_memory) // bytes_per_row)
         if budget_rows >= rows:
             return 0

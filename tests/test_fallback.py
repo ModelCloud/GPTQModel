@@ -14,8 +14,10 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
+    AWQConfig,
     Fallback,
     FallbackStrategy,
+    GPTQConfig,
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
@@ -24,7 +26,33 @@ from gptqmodel.quantization.config import (
 )
 from gptqmodel.quantization.fallback_smooth import smooth_block
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.utils.fallback import should_use_fallback
+from gptqmodel.utils.fallback import normalize_fallback, should_use_fallback
+
+
+def test_dict_fallback_keeps_the_dataclass_threshold_default():
+    """A dict that omits ``threshold`` must not double the default to 1.0%.
+
+    The ``Fallback`` dataclass default is 0.5%. ``fallback={"strategy": ...}``
+    and ``fallback={"smooth": ...}`` used to take a separate hard-coded 1.0%
+    default, silently moving experts from GPTQ to RTN.
+    """
+
+    default = Fallback().threshold
+    assert default == "0.5%"
+
+    for config_cls in (GPTQConfig, AWQConfig):
+        plain = config_cls(bits=4, group_size=128)
+        assert plain.fallback.threshold == default
+        for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+            config = config_cls(bits=4, group_size=128, fallback=override)
+            assert config.fallback.threshold == default, (config_cls.__name__, override)
+
+    # An explicit threshold still wins.
+    explicit = GPTQConfig(bits=4, group_size=128, fallback={"threshold": "2.0%"})
+    assert explicit.fallback.threshold == "2.0%"
+
+    # The per-module override path shares the same normalizer and default.
+    assert normalize_fallback({"strategy": "rtn"}, Fallback()).threshold == default
 
 
 def test_smooth_mad_uses_sigma_normalized_window():
