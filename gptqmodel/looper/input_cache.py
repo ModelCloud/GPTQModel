@@ -26,6 +26,11 @@ class InputCache:
     position_ids: List[torch.Tensor]
     attention_masks: List[torch.Tensor]
     src_inputs: Optional[List[List[torch.Tensor]]] = None
+    # Concurrent module-tree branches are replayed independently.  The first
+    # layer of each branch maps to the cache captured by that branch's own
+    # calibration forward, so a vision stack never consumes the text decoder's
+    # last hidden state.  None keeps the historical single-stack behavior.
+    branch_first_layer_inputs: Optional[Dict[int, "InputCache"]] = None
 
     def __post_init__(self):
         if self.src_inputs is None:
@@ -56,6 +61,10 @@ class InputCache:
         self.position_ids = []
         self.attention_masks = []
         self.src_inputs = []
+        if self.branch_first_layer_inputs:
+            for branch_cache in self.branch_first_layer_inputs.values():
+                branch_cache.cleanup()
+            self.branch_first_layer_inputs = None
 
 
 class TensorLifetimeDiagnostic:
