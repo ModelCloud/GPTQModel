@@ -76,6 +76,36 @@ def _step_progress_index(
     return step.index + layer_index_offset
 
 
+def _branch_replay_cache(
+    branch_caches: Optional[Dict[int, object]],
+    layer_index: int,
+) -> tuple[Optional[object], bool]:
+    """Resolve the concurrent-branch cache that owns ``layer_index``.
+
+    ``InputCache.branch_first_layer_inputs`` maps each branch's first flat
+    decoder-layer index to the cache captured by that branch's own calibration
+    forward.  A layer belongs to the branch with the largest first index that is
+    still ``<= layer_index``; that branch's replay kwargs, masks and positions
+    are valid for every one of its layers.  Only the branch's first layer also
+    restarts from the captured ``layer_inputs`` -- later layers consume the
+    previous layer's output.
+
+    Returns ``(cache, starts_branch)``.  ``(None, False)`` is the historical
+    single-stack path, where the top-level cache already is the only branch.
+    """
+
+    if not branch_caches:
+        return None, False
+    owner: Optional[int] = None
+    for first_index in sorted(branch_caches):
+        if first_index > layer_index:
+            break
+        owner = first_index
+    if owner is None:
+        return None, False
+    return branch_caches[owner], owner == layer_index
+
+
 def _log_cuda_memory_diagnostics(log, layer_index) -> None:
     """One line per visible CUDA device: allocator-active vs allocator-reserved bytes.
 
@@ -775,9 +805,17 @@ def run_layer_stage(
             processor.collect_memory_info(layer_index)
             cache = processor.inputs_cache
             branch_caches = getattr(cache, "branch_first_layer_inputs", None)
-            branch_cache = branch_caches.get(layer_index) if branch_caches else None
+            branch_cache, starts_branch = _branch_replay_cache(
+                branch_caches, model_layer_index
+            )
             if branch_cache is not None:
-                layer_inputs = branch_cache.layer_inputs
+                # A catch-up replay of a later branch layer continues from the
+                # restored boundary; only the branch's first layer restarts
+                # from the captured inputs.  Every layer still takes its own
+                # branch's masks, positions and replay kwargs.
+                layer_inputs = (
+                    branch_cache.layer_inputs if starts_branch else cache.layer_inputs
+                )
                 layer_input_kwargs = branch_cache.layer_input_kwargs
                 position_ids = branch_cache.position_ids
                 attention_masks = branch_cache.attention_masks
@@ -916,16 +954,22 @@ def run_layer_stage(
             branch_caches = getattr(
                 processor.inputs_cache, "branch_first_layer_inputs", None
             )
-            branch_cache = (
-                branch_caches.get(layer_index)
-                if branch_caches and not is_embeddings_module and not is_lm_head_module
-                else None
+            branch_cache, starts_branch = (
+                _branch_replay_cache(branch_caches, model_layer_index)
+                if not is_embeddings_module and not is_lm_head_module
+                else (None, False)
             )
             if branch_cache is not None:
-                # Concurrent module-tree branches restart from their own
-                # captured first-layer inputs instead of the previous branch's
-                # final hidden state.
-                layer_inputs = branch_cache.layer_inputs
+                # A concurrent module-tree branch owns every one of its layers.
+                # Only its first layer restarts from the captured inputs
+                # instead of the previous branch's final hidden state; later
+                # layers consume the previous layer's output but must keep
+                # replaying with this branch's masks, positions and kwargs.
+                layer_inputs = (
+                    branch_cache.layer_inputs
+                    if starts_branch
+                    else processor.inputs_cache.layer_inputs
+                )
                 layer_input_kwargs = branch_cache.layer_input_kwargs
                 position_ids = branch_cache.position_ids
                 attention_masks = branch_cache.attention_masks

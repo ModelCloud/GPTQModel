@@ -803,6 +803,47 @@ needs the staging/multicast redesign, not more call-overhead work.
 `nn.Linear` accumulate `X^T X` over calibration text, then each weight is solved
 onto the block-float grid with GPTQ error feedback.
 
+### Sequential calibration replays each block with its own context
+
+`sequential=True` calibrates one decoder block at a time, so each block's
+Hessian comes from the activations produced by its already-quantized
+predecessors. The side inputs that do not depend on weights -- the attention
+mask, rotary embeddings, position ids and cache positions -- must still be the
+ones that block saw in the dense model. Hybrid-attention models such as
+Gemma2/3 build a different causal mask per `attention_type`, so reusing block
+0's kwargs for every block calibrates a full-attention layer on the
+sliding-window mask with no error (#4009, #4150).
+
+`_quantize_sequential` therefore pre-hooks **every** decoder block during one
+dense calibration forward and stops at the last block. Replay keeps propagating
+hidden states through the quantized blocks, but each block gets its own
+captured kwargs. For a pure full-attention model every block shares the same
+mask, so the captured context and the resulting report are unchanged.
+
+```mermaid
+flowchart TD
+    W["calibration window"] --> F["dense backbone forward"]
+    F --> H["pre-hook on every decoder block"]
+    H --> C["captured[i] = args + kwargs<br/>mask / rotary / position ids"]
+    C --> L{"last block reached?"}
+    L -->|no| F
+    L -->|yes| STOP["raise _StopForward"]
+    STOP --> Q["quantize block i"]
+    Q --> R["replay block i with captured[i]<br/>hidden = previous quantized output"]
+    R --> N{"more blocks?"}
+    N -->|yes| Q
+    N -->|no| DONE["report"]
+    style STOP fill:#fff1b8,stroke:#ad8b00
+    style R fill:#d9f7be,stroke:#237804
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Capture hook (`gptqmodel/utils/tt_blockfloat_quant.py:938`) | `blocks[0]` only; stop before block 0 executes. | Every block; stop before the last block executes. |
+| Replay kwargs | Block 0's mask / rotary / positions for every block. | Each block's own captured kwargs. |
+| Hidden states | Propagated through the quantized block. | Unchanged. |
+| Pure full-attention model | One mask object reused for every block. | Every block captures the same shared mask; the quantization report is bit-identical. |
+
 Measured on **facebook/opt-125m**, 72 layers, 4 bits, 8 calibration samples:
 
 | | |

@@ -37,7 +37,7 @@ per-branch calibration added for
 | Subset planning (`gptqmodel/looper/stage_subset.py`) | Sibling-only leaves were requested from the wrong branch. | Branch-local `simple_layer_modules` / `full_layer_modules`. |
 | Hook skipping (`gptqmodel/looper/stage_layer.py`) | One global `:!` set. | Per-branch `:!` set for decoder layers. |
 | Calibration capture (`gptqmodel/looper/stage_inputs_capture.py:136`) | One pre-hook on `layers[0]`; `StopForward` after the first text layer. | One pre-hook per branch first layer; full forward; per-branch caches. |
-| Replay boundary (`gptqmodel/looper/stage_layer.py:908`) | Every layer replayed on the previous layer's output. | A branch's first layer restarts from that branch's captured inputs. |
+| Replay boundary (`gptqmodel/looper/stage_layer.py:908`) | Every layer replayed on the previous layer's output. | Every layer replays with the context of the branch that owns it; only a branch's first layer restarts from that branch's captured inputs. |
 | Unreachable branch | Silently calibrated on another branch's activations. | `ValueError` naming the branch and calibration batch. |
 
 ## Discovery flow
@@ -160,21 +160,63 @@ flowchart TD
     C -->|no| ERR["ValueError:<br/>branch never reached<br/>name branch + batch"]
     C -->|yes| CACHE["InputCache.branch_first_layer_inputs"]
     CACHE --> REPLAY["run_layer_stage()"]
-    REPLAY --> R{"layer is a branch first layer?"}
-    R -->|yes| RESET["restore branch layer_inputs / kwargs / masks"]
-    R -->|no| PREV["use previous layer output"]
+    REPLAY --> R{"which branch owns layer_index?"}
+    R -->|branch first layer| RESET["branch layer_inputs +<br/>branch kwargs / masks"]
+    R -->|later branch layer| PREV["previous layer output +<br/>branch kwargs / masks"]
     RESET --> Q["quantize branch layers"]
     PREV --> Q
     style ERR fill:#ffa39e,stroke:#a8071a
     style CACHE fill:#d9f7be,stroke:#237804
 ```
 
-The replay stage checks the flat `layer_index` against
-`InputCache.branch_first_layer_inputs`. A branch boundary replaces
-`layer_inputs`, `layer_input_kwargs`, `position_ids` and `attention_masks` with
-that branch's captured values; the next layer in the branch continues from the
-branch's own output chain. The old behavior fed `vision_tower.layers.0` the
-text decoder's last hidden state and the text attention mask.
+The replay stage resolves the branch that **owns** the flat `layer_index` from
+`InputCache.branch_first_layer_inputs`; see
+[per-layer branch replay context](#per-layer-branch-replay-context). The
+branch's first layer restarts from that branch's captured `layer_inputs`, and
+every layer in the branch replays with that branch's `layer_input_kwargs`,
+`position_ids` and `attention_masks`. The old behavior fed
+`vision_tower.layers.0` the text decoder's last hidden state and the text
+attention mask.
+
+## Per-layer branch replay context
+
+`_branch_replay_cache()` (`gptqmodel/looper/stage_layer.py:79`) is the single
+owner-resolution rule. A layer belongs to the branch with the largest captured
+first-layer index that is still at or before it. That branch supplies the
+layer's replay kwargs, attention masks and position ids. Only the branch's
+first layer also restarts from the branch's captured `layer_inputs`; later
+layers consume the previous layer's output, which is what carries the
+quantized activations forward.
+
+```mermaid
+flowchart TD
+    L["run_layer_stage<br/>flat layer_index"] --> OWN["_branch_replay_cache()<br/>largest branch-first index at or before layer_index"]
+    OWN --> HAS{"branch cache?"}
+    HAS -->|no| TOP["historical single-stack cache<br/>layer_inputs / kwargs / masks"]
+    HAS -->|yes| FIRST{"layer_index equals<br/>the branch-first index?"}
+    FIRST -->|yes| RESET["layer_inputs = branch captured inputs<br/>kwargs / masks / positions = branch cache"]
+    FIRST -->|no| CONT["layer_inputs = previous layer output<br/>kwargs / masks / positions = branch cache"]
+    TOP --> Q["replay the layer and collect Hessians"]
+    RESET --> Q
+    CONT --> Q
+    style HAS fill:#fff1b8,stroke:#ad8b00
+    style RESET fill:#d9f7be,stroke:#237804
+    style CONT fill:#d9f7be,stroke:#237804
+```
+
+Before #4150, only a branch's first layer was looked up in
+`branch_first_layer_inputs`. `receive_layer_inputs()` refreshes only the
+top-level `layer_inputs`, so the top-level `layer_input_kwargs`,
+`position_ids` and `attention_masks` kept the **first** branch's values for
+every later layer. A vision tower's layer 1 therefore replayed with the text
+decoder's `attention_mask` instead of its own `cu_seqlens`.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Branch lookup (`stage_layer.py:917`) | `branch_caches.get(layer_index)`; hit only at a branch's first layer. | `_branch_replay_cache(branch_caches, model_layer_index)`; hit for every layer in the branch. |
+| `layer_inputs` | Branch inputs at a boundary, otherwise top-level previous output. | Unchanged: branch inputs at a boundary, otherwise previous output. |
+| `layer_input_kwargs` / `position_ids` / `attention_masks` | Top-level cache (first branch) for every layer after a boundary. | Owning branch's cache for every layer in that branch. |
+| Single-stack model | Top-level cache. | Unchanged: `branch_first_layer_inputs` is `None`, so the helper returns no branch and the top-level cache is used. |
 
 ### Cost and scope
 
