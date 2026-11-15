@@ -24,18 +24,24 @@
     </a>
 </p>
 
-[Documentation](https://github.com/ModelCloud/GPTQModel/wiki) · [Quantization guide](docs/quantization-guide.md) · [Reference index](docs/README.md) · [Releases](https://github.com/ModelCloud/GPTQModel/releases)
+<p align="center">
+    <a href="https://github.com/ModelCloud/GPTQModel/wiki">Documentation</a> ·
+    <a href="docs/quantization-guide.md">Quantization guide</a> ·
+    <a href="docs/README.md">Reference index</a> ·
+    <a href="https://github.com/ModelCloud/GPTQModel/releases">Releases</a>
+</p>
 
 ## Latest News 🗞️🚀
 
 **7.11.0**
 
-- **MACaQ:** Native MXFP4 W4A4 quantization with CUDA, ROCm, and Apple silicon inference. [Guide](docs/macaq.md)
-- **NF12:** Lossless BF16 weight compression and native Metal inference. [NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12) · [MLX](docs/mlx-runtime.md)
-- **Tenstorrent:** Expanded hardware inference, block-float quantization, and long-context Llama serving. [Guide](docs/tenstorrent.md)
-- **Quantization:** Resumable distributed EXL3, broader mixed-bit allocation, and SmoothQuant preprocessing. [EXL3](docs/exl3-durable-execution.md) · [SmoothQuant](docs/protocol-actions.md)
-- **Inference:** Opt-in projection fusion and faster quantized inference. [Fusion guide](docs/fusion-planner.md)
-- **Compat:** Major calibration, checkpoint, model-loading, multi-GPU, ROCm, and security fixes. [Full notes](docs/changelog/recent.md#7110)
+- **MACaQ:** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback. [Guide](docs/macaq.md)
+- **NF12:** Lossless 12-bit compression of BF16 weights reduces source-weight storage during calibration without changing the restored values. Packed inference now includes native Metal support alongside CUDA, HIP, and Torch paths. [NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12) · [MLX](docs/mlx-runtime.md)
+- **Tenstorrent:** Packed GPTQ inference through Torch/XLA and TTNN, multi-card execution, and block-float quantization. Long-context Llama serving adds paged caching and chunked prefill; compatible block-float checkpoints also run on CUDA, ROCm, and CPU. [Guide](docs/tenstorrent.md) · [Serving](docs/tt-llama-paged-serving.md)
+- **Quantization:** Resumable distributed EXL3 jobs, broader mixed-bit allocation across AWQ/EXL3/GGUF, and SmoothQuant preprocessing improve large-model workflows and quality control. [EXL3](docs/exl3-durable-execution.md) · [SmoothQuant](docs/protocol-actions.md)
+- **Inference:** Opt-in attention and MLP projection fusion, faster quantized embedding lookups, and improved small-batch inference. Native backend selection and packed-weight storage are preserved. [Fusion guide](docs/fusion-planner.md)
+- **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](docs/changelog/recent.md#7110)
+- **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](docs/torch-runtime-safety-gate.md) · [Serving security](docs/openai-server-exposure.md)
 
 | Recent release | Highlights |
 | --- | --- |
@@ -45,16 +51,54 @@
 
 [Detailed release notes](docs/changelog/recent.md) · [Older changelog](docs/changelog/archive.md)
 
-## A unified quantization platform
+## A unified quantization platform 🧩
 
-GPT-QModel provides one workflow for calibration, quantization, evaluation,
-conversion, and accelerated inference.
+GPT-QModel brings calibration, quantization, evaluation, conversion, and accelerated
+inference into one workflow. Start from a pretrained model, choose a compression
+recipe, validate its quality, and save a checkpoint for native inference or a
+compatible deployment engine.
 
-- **Methods:** GPTQ, AWQ, RTN, ParoQuant, MACaQ, QQQ, GGUF, FP8, EXL3, VPTQ, NF12, and BitsAndBytes.
-- **Control:** Mixed precision, per-module exclusions, activation quantization, and staged quantization protocols.
-- **Scale:** Multi-GPU calibration, memory offload, and resumable quantization.
-- **Quality:** GSQ refinement, EoRA recovery, LoRA training, and post-quantization evaluation.
-- **Deployment:** Native inference plus compatible Transformers, vLLM, SGLang, and MLX integrations.
+### Methods and compression 🎛️
+
+| Method | What it provides |
+| --- | --- |
+| **GPTQ** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
+| **AWQ** | Activation-aware weight quantization, including dense and MoE workflows. |
+| **RTN** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
+| **ParoQuant** | Low-bit weight quantization with learned rotations for accuracy recovery. |
+| **MACaQ** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
+| **QQQ** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
+| **GGUF** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. |
+| **FP8** | Floating-point weight quantization with scaled E4M3/E5M2 formats. |
+| **EXL3** | Variable-rate compression with target average bits per weight and mixed-tier allocation. |
+| **VPTQ** | Vector-codebook quantization for low-bit model compression. |
+| **BitsAndBytes** | NF4/FP4 and INT8 quantization options. |
+| **NF12** | Lossless BF16 weight compression, distinct from lossy low-bit quantization. |
+
+### Control, scale, and quality ⚙️
+
+- **Choose where to spend precision.** Mix bit widths, keep sensitive modules
+  unquantized, and use activation-quantization or preprocessing policies where
+  supported. Quantization protocols let you organize multi-stage recipes.
+- **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
+  execution help manage memory and recover interrupted jobs. Distributed EXL3
+  workflows support durable replay and resume.
+- **Recover accuracy.** Use GSQ refinement, EoRA low-rank compensation, rotation,
+  smoothing, and norm tuning for supported recipes. LoRA training and adapter
+  loading support further task adaptation.
+- **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
+  against a non-quantized baseline, and test prompts representative of your users.
+  Compression settings trade model size, calibration cost, speed, and quality.
+
+### Inference and deployment 🚢
+
+Run compatible checkpoints directly with GPT-QModel, integrate with Transformers,
+or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
+native MLX quantization and packed inference. Optional projection fusion can
+combine supported attention and MLP operations without changing the saved format.
+
+EoRA/LoRA adapters, mixed-precision checkpoints, and external engines have their
+own compatibility limits; support for a method does not imply support in every engine.
 
 Start with the [quantization guide](docs/quantization-guide.md).
 External runtimes support only specific method/format combinations; check the
@@ -83,9 +127,36 @@ hardware. See the [CPU block-float guide](docs/tt-blockfloat-cpu.md).
 
 ## Model Support 🤖
 
-Dense, MoE, and multimodal families include Llama, Qwen, DeepSeek, Gemma,
-GLM, Mistral, and many more. See the [complete model registry](docs/supported-models.md)
-for registered model types and model-specific limitations.
+Support spans dense, mixture-of-experts (MoE), vision-language, and audio-language
+families. The compact list below keeps model coverage visible; the
+[complete registry](docs/supported-models.md) lists exact model-type aliases and
+model-specific limitations.
+
+| Families | Supported models and variants |
+| --- | --- |
+| A | A.X-K2; AfMoE / Trinity; Agnes 3.0 Flash; Apertus 1 / 1.5 |
+| B–C | Baichuan; Bailing MoE / Hybrid (LING / RING); Bloom; Brumby; ChatGLM; CodeGen; Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) |
+| D | DBRX / DBRX Converted; DeciLM; DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2; DiffusionGemma; Dots1 / Dots3 Note; Dream |
+| E–F | ERNIE 4.5 / MoE / VL MoE; EXAONE 3 / 4 / 4.5; Falcon / Falcon H1 / Falcon Mamba; FastVLM / LLaVA-Qwen2 |
+| G | Gemma 1–4 / 3n / Unified; GLM / GLM4 / GLM4V / GLM5 / OCR / ASR; GPT-2; GPT BigCode; GPT-Neo / GPT-NeoX; GPT-OSS; GPT-J; Granite / Granite SWA / MoE / MoE SWA / MoE Hybrid; GRIN-MoE |
+| H | Helium; HRM; Hunyuan V1 / VL / OCR; HY-V3; Hymba |
+| I–J | Inkling; Instella; Intern S1 / S2 Preview; InternLM 1 / 2 / 2.5; InternVL 3 / InternVL Chat; Jamba / Jamba2 |
+| K | K2-Horizon (Dense / MoVA); Kimi K2 / K2.5 / K3 / Linear; Klear; KRAFTON Raon-1 mini |
+| L | Laguna; LFM2 / LFM2 MoE / LFM2-VL; LFM3 / LFM3 Omni / LFM3-VL; LLaDA2 MoE; Llama 1–4 / TinyLlama / Nemotron Ultra; Llama 3.2 VL; LLaVA-1.5; LocateAnything; LongCat Flash; LongLLaMA |
+| M | Mage-VL; Marin; MiMo / MiMo V2 / MiMo V2 Flash; MiniCPM / MiniCPM3 / MiniCPM-O / MiniCPM-V; MiniMax M2 / M3-VL; Mistral / Mistral3 / Ministral3; Mixtral; MobileLLM; MOSS; MPT; Muse Glimmer |
+| N | Nanbeige 4.2; Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion |
+| O | OLMo / OLMo 2 / 3 / Hybrid / OLMoE; OpenVLA; OPT; Ouro; Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next |
+| P | PanGu-α; Phi 1–4 / Phi MoE |
+| Q | Qwen 1–4 / 3.5 / 3.6 / 3.8 / MoE / Next; Qwen 2 / 2.5 / 3 VL / 3 VL MoE; Qwen 2.5 / 3 Omni; Qwen2-Audio; Qwen-Drive 1.0 |
+| R | RecursiveSI Flint; RefinedWeb; Ricursive Ripple |
+| S | Seed-OSS; SmolLM3; SmolVLM; Solar Open / Open 2; Spark 2.5; StableLM; StarCoder2 |
+| T–V | TeleChat2; Unlimited-OCR; Voxtral |
+| X–Z | Xing4.0 (29B-A4B); XVERSE; Yi; Zamba / Zamba2; ZDTaichu 5.0 |
+
+For multimodal checkpoints, support may target the language decoder rather than
+every vision/audio component. Kimi K3 / Linear requires the dedicated native-source
+calibration workflow; Qwen 3.5 requires Transformers 5.2.0 or newer. Check the
+[model notes](docs/supported-models.md) before starting a large run.
 
 [Browse quantized models on Hugging Face](https://huggingface.co/modelcloud/)
 
@@ -107,9 +178,13 @@ See [installation and optional extras](https://github.com/ModelCloud/GPTQModel/w
 for source installs and platform setup. Install vLLM or SGLang in a separate
 environment aligned with that engine's dependency pins.
 
-## Quick start
+## Quick start 🚀
 
-### Inference
+### Inference 💬
+
+Load an existing quantized checkpoint and generate text. GPT-QModel selects a
+compatible installed backend for the checkpoint and your device; you can choose
+an explicit backend when tuning a deployment.
 
 ```python
 from gptqmodel import GPTQModel
@@ -123,9 +198,11 @@ print(model.tokenizer.decode(tokens))
 covers backend selection, generation, and adapters. Only enable
 `trust_remote_code=True` for checkpoint code you trust.
 
-### Quantization
+### Quantization 🗜️
 
-A minimal GPTQ example; use representative calibration data for your workload:
+This example creates a 4-bit GPTQ checkpoint using 256 streamed C4 samples.
+Use calibration text representative of your workload; the dataset and precision
+settings affect the quality of the resulting model.
 
 ```python
 from datasets import load_dataset
@@ -150,7 +227,23 @@ The [end-to-end guide](docs/quantization-guide.md) covers other methods,
 calibration, saving, reloading, and validation.
 For Apple silicon, use the [native MLX workflow](docs/mlx-runtime.md).
 
-## Guides and reference
+### What to tune next 🔧
+
+- **Quality versus size:** Start from a supported recipe, then compare bit widths
+  and group sizes. Use mixed precision or exclusions for sensitive layers rather
+  than assuming one configuration suits the whole model.
+- **Calibration:** Choose representative text and enough examples to cover your
+  use case. MoE and multimodal models may need specialized data preparation.
+- **Memory and recovery:** Configure multi-GPU placement and offload before a
+  large run, and use checkpoint/resume where supported.
+- **Deployment:** Reload the saved checkpoint, evaluate it, and verify its format
+  in the intended engine. A successful native load is not an external-engine
+  compatibility guarantee.
+
+See the [configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference)
+and [quantization recipes](docs/quantization-guide.md) for the available controls.
+
+## Guides and reference 🧭
 
 | Task | Documentation |
 | --- | --- |
@@ -169,6 +262,10 @@ Kernel contracts, implementation flows, and focused technical notes are in the
 
 ## Quality: GPTQ 4-bit evaluation 🏆
 
+Quantization quality depends on the source model, recipe, and calibration data.
+The Vortex collection provides GPTQ examples; the charts below illustrate selected
+evaluations, not a guarantee for every supported model or method.
+
 [ModelCloud quantized Vortex models](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
@@ -178,12 +275,52 @@ Kernel contracts, implementation flows, and focused technical notes are in the
 Selected public references include Hugging Face, Intel, NVIDIA, and Alibaba Cloud.
 This is not an exhaustive customer list.
 
-## Attributions and citations
-
-See [attributions and BibTeX citations](docs/citations.md) for the algorithms,
-kernels, and projects used by GPT-QModel.
-
 ## License 📜
 
 GPT-QModel is licensed under [Apache-2.0](LICENSE). The optional, JIT-loaded
 Swordfish kernel is [AGPL-3.0-or-later](licenses/SWORDFISH).
+
+## Attributions and citations 📚
+
+GPT-QModel builds on the research and open-source projects below. Please cite
+GPT-QModel and the methods you use; full author lists, BibTeX, and attribution
+details are available in the [citation reference](docs/citations.md).
+
+<details>
+<summary>Cite GPT-QModel (BibTeX)</summary>
+
+```bibtex
+@misc{qubitium2024gptqmodel,
+  author = {ModelCloud.ai and qubitium@modelcloud.ai},
+  title = {GPT-QModel},
+  year = {2024},
+  howpublished = {\url{https://github.com/ModelCloud/GPTQModel}}
+}
+```
+
+</details>
+
+| Work | Authors / project | Paper or reference |
+| --- | --- | --- |
+| GPT-QModel | ModelCloud.ai and contributors | [Project](https://github.com/ModelCloud/GPTQModel) |
+| GPTQ | Elias Frantar et al., IST-DASLab | [Paper](https://arxiv.org/abs/2210.17323) |
+| AWQ | Ji Lin et al. | [Paper](https://arxiv.org/abs/2306.00978) |
+| ParoQuant | Yesheng Liang et al., Z-Lab | [Paper](https://openreview.net/forum?id=1USeVjsKau) · [Code](https://github.com/z-lab/paroquant) |
+| MACaQ | Lorenz K. Muller et al., Huawei CSL | [Paper](https://arxiv.org/abs/2611.10649) · [Code](https://github.com/huawei-csl/MACaQ) |
+| QQQ | Ying Zhang et al., Meituan | [Paper](https://arxiv.org/abs/2406.09904) |
+| VPTQ | Yifei Liu et al., Microsoft | [Paper](https://arxiv.org/abs/2409.17066) · [Code](https://github.com/microsoft/VPTQ) |
+| GGUF / llama.cpp | Georgi Gerganov and ggml-org contributors | [Project](https://github.com/ggml-org/llama.cpp) |
+| ExLlama V3 / EXL3 | turboderp and contributors | [Project](https://github.com/turboderp-org/exllamav3) |
+| NF12 / NyoomFloat12 | Liberman et al., Together AI | [Research and codec](https://github.com/dphnAI/nf12) |
+| NF12 inference kernels | AlpinDale | [Code](https://github.com/dphnAI/nf12) |
+| EoRA | Shih-Yang Liu et al., NVIDIA | [Paper](https://arxiv.org/abs/2410.21271) |
+| GSQ | Alireza Dadgarnia et al., IST-DASLab | [Paper](https://arxiv.org/abs/2604.18556) · [Code](https://github.com/IST-DASLab/GSQ) |
+| RCO | Michael Helcig and Dan Alistarh, IST-DASLab | [Paper](https://arxiv.org/abs/2605.00649) · [Code](https://github.com/IST-DASLab/RCO) |
+| GPTAQ | Yuhang Li et al., Yale Intelligent Computing Lab | [Paper](https://arxiv.org/abs/2504.02692) |
+| GAR | T. Gafni, A. Karnieli, and Y. Hanani, Intel | [Paper](https://arxiv.org/abs/2505.14638) |
+| FOEM | Xingyu Zheng et al. | [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123) |
+| Norm Tweaking | Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu | [Paper](https://arxiv.org/abs/2309.02784) |
+| Fast Hadamard Transform | Tri Dao, Dao-AILab | [Code](https://github.com/Dao-AILab/fast-hadamard-transform) |
+| Marlin | Elias Frantar et al. | [Paper](https://arxiv.org/abs/2408.11743) |
+| Machete | vLLM contributors | [Code](https://github.com/vllm-project/vllm/tree/main/csrc/quantization/machete) |
+| Swordfish | AlpinDale | [Article](https://blog.alpindale.net/posts/swordfish/) |
