@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import os
 from pathlib import Path
 
@@ -23,6 +24,7 @@ import torch
 from transformers import AutoTokenizer
 
 from gptqmodel import GPTQModel
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig, RTNConfig
 
@@ -80,7 +82,7 @@ def _wikitext_text() -> str:
     return "\n\n".join(split["text"])
 
 
-def _ppl_chunks(tokenizer) -> torch.Tensor:
+def _ppl_chunks(tokenizer, count: int = PPL_CHUNKS) -> torch.Tensor:
     ids = tokenizer(
         _wikitext_text(),
         return_tensors="pt",
@@ -88,9 +90,9 @@ def _ppl_chunks(tokenizer) -> torch.Tensor:
     )["input_ids"][0]
     usable = (ids.numel() // SEQ_LEN) * SEQ_LEN
     chunks = ids[:usable].view(-1, SEQ_LEN)
-    if chunks.shape[0] < PPL_CHUNKS:
+    if chunks.shape[0] < count:
         pytest.skip(f"wikitext fixture only produced {chunks.shape[0]} chunks")
-    return chunks[:PPL_CHUNKS]
+    return chunks[:count]
 
 
 @torch.inference_mode()
@@ -162,3 +164,57 @@ def test_awq_beats_rtn_with_variable_length_calibration(tmp_path):
         f"{rtn_ppl:.4f}; variable-length calibration is still collapsing to "
         "one sample"
     )
+
+
+def test_awq_quantize_with_batch_size_greater_than_one(tmp_path):
+    """Issue #4091 item 1: a batched calibration replay must carry its mask.
+
+    ``token_rows`` packs rows sampled from several documents into one
+    ``[1, tokens, hidden]`` replay tensor. Before the fix that replay ran with
+    ``attention_mask=None`` and ``Qwen2Attention.forward`` raised
+    ``TypeError: ... missing 1 required positional argument: 'attention_mask'``.
+    Quantization must now complete, reload and produce a usable perplexity.
+    """
+
+    if not MODEL_PATH.is_dir():
+        pytest.skip(f"local model fixture is unavailable: {MODEL_PATH}")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the AWQ batched replay test")
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    calibration = _calibration_texts(32)
+    chunks = _ppl_chunks(tokenizer, count=8)
+
+    common = {
+        "bits": 4,
+        "group_size": 128,
+        "sym": True,
+        "format": FORMAT.GEMM,
+        "device": "cuda:0",
+        "calibration_data_device": "cuda:0",
+    }
+    model = GPTQModel.load(
+        str(MODEL_PATH),
+        quantize_config=QuantizeConfig(method=METHOD.AWQ, **common),
+        dtype=torch.float16,
+    )
+    save_path = tmp_path / "awq-batch-size-4"
+    try:
+        model.quantize(calibration, batch_size=4)
+        quantized = model.model.model.layers[0].self_attn.q_proj
+        assert isinstance(quantized, BaseQuantLinear), type(quantized)
+        model.save(str(save_path))
+    finally:
+        del model
+        torch.cuda.empty_cache()
+
+    reloaded = GPTQModel.load(str(save_path), device="cuda:0", dtype=torch.float16)
+    try:
+        ppl = _perplexity(reloaded.model, chunks, device=torch.device("cuda:0"))
+    finally:
+        del reloaded
+        torch.cuda.empty_cache()
+
+    print({"batch_size_4_ppl": ppl})
+    assert math.isfinite(ppl)
+    assert ppl < 100.0, ppl
