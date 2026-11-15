@@ -1250,10 +1250,10 @@
     "InstellaQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
-        ["input_layernorm:!"],
+        ["pre_attention_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
-        ["post_attention_layernorm:!"],
+        ["pre_feedforward_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
       ]
@@ -1352,13 +1352,10 @@
         ["input_layernorm:!"],
         ["self_attn.q_norm:!"],
         ["self_attn.k_norm:!"],
-        ["self_attn.q_proj"],
-        ["self_attn.k_proj"],
-        ["self_attn.v_proj"],
-        ["self_attn.gate_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj"],
+        ["self_attn.o_proj"],
         ["self_attn.v_router:!"],
         ["self_attn.v_experts.{expert_index}"],
-        ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
@@ -2478,6 +2475,7 @@
       "layers": ["transformer.h"],
       "blocks": [
         ["input_layernorm:!"],
+        ["self_attention.query", "self_attention.key_value"],
         ["self_attention.dense"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],

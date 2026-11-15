@@ -4,9 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..looped_capture import LoopedLayerCaptureMixin
 
 
-class OuroQModel(BaseQModel):
+class OuroQModel(LoopedLayerCaptureMixin, BaseQModel):
     """GPTQ definition for ByteDance's looped Ouro decoder."""
 
     require_trust_remote_code = True

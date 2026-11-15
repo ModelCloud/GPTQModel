@@ -267,6 +267,21 @@ class AutoNF12Embedding(nn.Module):
         return output.to(self.output_dtype)
 
 
+def _source_weight_contract(weight: torch.Tensor) -> torch.Tensor:
+    """Zero-storage tensor exposing the packed layer's source weight contract.
+
+    Remote modeling code reads a projection's ``weight.dtype`` (Spark-X2.5 also
+    relies on the shape) inside its forward. An NF12 layer stores
+    ``nf12_packed``/``nf12_escapes`` instead of a dense weight, so expose the
+    source dtype, shape and device through a one-element, all-zero view: zero
+    strides give the real shape without allocating or retaining the matrix.
+    """
+
+    return torch.zeros(1, dtype=weight.dtype, device=weight.device).as_strided(
+        tuple(weight.shape), (0,) * weight.ndim
+    )
+
+
 class AutoNF12HookedLinear(NF12Linear):
     """Packed linear replacement that keeps calibration-hook behavior."""
 
@@ -275,6 +290,7 @@ class AutoNF12HookedLinear(NF12Linear):
     @classmethod
     def from_linear(cls, source: HookedLinear) -> "AutoNF12HookedLinear":
         n, k = source.weight.shape
+        source_weight_contract = _source_weight_contract(source.weight.detach())
         layer = cls(
             bits=12,
             in_features=k,
@@ -288,6 +304,11 @@ class AutoNF12HookedLinear(NF12Linear):
             layer,
             copy_registered_hooks=True,
         )
+        # Remote forwards read `.weight.dtype`/`.shape` on projections that are
+        # packed during the calibration pass (Spark-X2.5 modeling_spark.py:244,
+        # and the legacy Llama-shaped `q_proj.weight.dtype` casts). A plain
+        # attribute keeps the view out of `state_dict()` and out of `.to()`.
+        layer.weight = source_weight_contract
         return layer.eval()
 
     @torch.inference_mode()

@@ -13,6 +13,7 @@ still reproduces its own consumer.
 
 import dataclasses
 import importlib
+from pathlib import Path
 
 import pytest
 import torch
@@ -62,6 +63,11 @@ FAMILY_MODEL_TYPES = [
     "falcon_mamba",
     "gemma4_text",
     "hrm_text",
+    # Remote-code families from issue #4093 items 1-2. Their definitions live in
+    # the checkpoint's own code, so the tiny config is derived from the local
+    # checkpoint config.json instead of `AutoConfig.for_model`.
+    "instella",
+    "k2_horizon",
     # MoE families.
     "cohere2_moe",
     "gpt_oss",
@@ -97,6 +103,14 @@ _BASE_CONFIG = {
     "bos_token_id": 0,
 }
 
+# Architectures that only exist in a checkpoint's remote code. The values are
+# the fixtures used to build the tiny model; the invariant is skipped with a
+# precise reason when a fixture is absent.
+REMOTE_CODE_MODEL_PATHS = {
+    "instella": "/monster/data/model/Instella-3B-Instruct",
+    "k2_horizon": "/monster/data/model/K2-Horizon-0.9B",
+}
+
 
 def _field_names(config):
     if dataclasses.is_dataclass(config):
@@ -105,6 +119,8 @@ def _field_names(config):
 
 
 def _tiny_config(model_type):
+    if model_type in REMOTE_CODE_MODEL_PATHS:
+        return _tiny_remote_config(model_type)
     base = AutoConfig.for_model(model_type)
     fields = _field_names(base)
     kwargs = dict(_BASE_CONFIG)
@@ -162,6 +178,42 @@ def _tiny_config(model_type):
                 raise
 
 
+def _tiny_remote_config(model_type):
+    """Build a tiny config from a checkpoint whose architecture is remote code."""
+
+    model_path = Path(REMOTE_CODE_MODEL_PATHS[model_type])
+    if not model_path.is_dir():
+        pytest.skip(f"local {model_type} fixture is unavailable: {model_path}")
+
+    config = AutoConfig.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+    for key, value in _BASE_CONFIG.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+    # K2's attention width is `num_attention_heads * head_dim`, which is wider
+    # than `hidden_size` (2048 vs 1536 on the 0.9B checkpoint). Mirror that so
+    # `o_proj` does not accidentally match the norm width and merge with it.
+    tiny_head_dim = 16 if model_type == "k2_horizon" else 8
+    for key in ("head_dim", "rotary_dim", "rope_head_dim"):
+        if hasattr(config, key):
+            setattr(config, key, tiny_head_dim)
+    # Per-layer lists must describe the tiny layer count, not the checkpoint's.
+    if hasattr(config, "num_key_value_heads_per_layer"):
+        config.num_key_value_heads_per_layer = [4] * config.num_hidden_layers
+    if hasattr(config, "mlp_only_layers"):
+        config.mlp_only_layers = list(range(config.num_hidden_layers))
+    config._attn_implementation = "eager"
+    # The invariant compares logits before/after a fold; a bf16 tiny model
+    # would report the dtype's own rounding (~8e-3) instead of fold error.
+    for dtype_attr in ("dtype", "torch_dtype"):
+        if hasattr(config, dtype_attr):
+            setattr(config, dtype_attr, torch.float32)
+    return config
+
+
 def _in_features(module):
     weight = getattr(module, "weight", None)
     if weight is None or weight.ndim != 2:
@@ -209,7 +261,9 @@ def _features(layer, plan):
 def _tiny_model(model_type):
     qmodel_cls = MODEL_MAP[model_type]
     torch.manual_seed(0)
-    hf_model = AutoModelForCausalLM.from_config(_tiny_config(model_type)).eval()
+    hf_model = AutoModelForCausalLM.from_config(
+        _tiny_config(model_type), trust_remote_code=True
+    ).eval()
     try:
         from gptqmodel.models.loader import _convert_model_with_defuser
 

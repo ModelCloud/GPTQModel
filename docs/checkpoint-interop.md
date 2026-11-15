@@ -296,6 +296,16 @@ back to GPTQ.
 Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
 `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
 `gptqmodel_gguf` instead and registers a refusing quantizer for that name.
+Every other GPT-QModel-only layout (`exl3`, `qqq`, `paroquant`, `macaq`,
+`nf12`, `tt-blockfloat`) is registered from
+`REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`.
+
+The registration only exists after `import gptqmodel`. Plain `transformers`
+without that import does **not** raise for these names; `5.22` logs
+`Unknown quantization type, got <name> ... skip the quantization` and then
+random-initializes every linear layer. Importing `gptqmodel` (or loading
+through `GPTQModel.load`) installs the refusing quantizer, which turns the
+same checkpoint into an actionable `ValueError`.
 
 ```mermaid
 flowchart TD
@@ -304,11 +314,15 @@ flowchart TD
     C -- "METHOD.GGUF" --> D["quant_method: gptqmodel_gguf"]
     C -- "METHOD.AWQ" --> E["quant_method: awq"]
     C -- "METHOD.GPTQ" --> F["quant_method: gptq"]
+    C -- "METHOD.EXL3 / QQQ / PARO / MACAQ / NF12 / TT_BLOCKFLOAT" --> L["quant_method: exl3, qqq, ..."]
     D --> G["transformers get_hf_quantizer"]
-    G --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
+    L --> G
+    G -- "gptqmodel_gguf" --> H["GPTQModelGGUFHfQuantizer.__init__<br/>raise ValueError"]
+    G -- "REFUSED_HF_QUANT_METHODS entry" --> K["GPTQModelRefusingHfQuantizer.__init__<br/>raise ValueError"]
     E --> I["AwqHfQuantizer"]
     F --> J["GptqHfQuantizer"]
     style H fill:#f8d7da,stroke:#b02a37
+    style K fill:#f8d7da,stroke:#b02a37
     style I fill:#d9f2d9,stroke:#2e7d32
     style J fill:#d9f2d9,stroke:#2e7d32
 ```
@@ -317,24 +331,29 @@ Already-published GGUF checkpoints keep `quant_method: "gguf"` (plus
 `method: "gguf"`) and still load through `GPTQModel.load`; `gguf` remains
 accepted by `_normalize_quant_method`. Only new checkpoints publish the
 non-colliding name. `hf_compat_warnings` also warns at save time that a packed
-GGUF checkpoint is not loadable by plain Transformers.
+GGUF checkpoint is not loadable by plain Transformers, and emits the same
+save-time warning for every method in `REFUSED_HF_QUANT_METHODS`.
 
 ## 11. `torch.save(model)` after `optimize()`
 
-`TorchLinear.optimize()` replaces the bound `dequantize_weight` method with a
-`torch.compile` wrapper, which pickle cannot serialize. `TorchLinear.__getstate__`
-drops that instance attribute; the class method is the eager fallback, so the
-unpickled module keeps working without the compiled callable.
+`optimize()` may replace an eager callable with a `torch.compile` wrapper,
+which pickle cannot serialize: `TorchLinear` shadows `dequantize_weight`,
+VPTQ shadows `dequantize`, and the FP8/EXL3 Torch kernels store
+`_compiled_forward`. `BaseQuantLinear.__getstate__` (via
+`gptqmodel/nn_modules/compiled_state.py`) and
+`ExllamaV3TorchLinear.__getstate__` drop those wrappers and reset `optimized`.
+The eager class method is the fallback, so the unpickled module keeps working
+without the compiled callable.
 
 ```mermaid
 flowchart TD
-    A["TorchLinear.optimize()"] --> B["self.dequantize_weight =<br/>torch_compile(bound method)"]
+    A["optimize()"] --> B["instance callable =<br/>torch_compile(bound method)"]
     B --> C["torch.save(model)"]
-    C --> D["TorchLinear.__getstate__"]
-    D --> E["pop dequantize_weight"]
+    C --> D["BaseQuantLinear.__getstate__<br/>or ExllamaV3TorchLinear.__getstate__"]
+    D --> E["drop _compiled_forward, dequantize,<br/>dequantize_weight; optimized = False"]
     E --> F["pickle succeeds"]
-    F --> G["torch.load restores the class method"]
-    G --> H["eager dequantize_weight fallback"]
+    F --> G["torch.load restores the eager class method"]
+    G --> H["eager forward fallback"]
     style H fill:#d9f2d9,stroke:#2e7d32
 ```
 
@@ -358,8 +377,9 @@ flowchart TD
 | `load_state_dict(model.state_dict())` on a v1 model | v1 words copied into a v2 kernel, logits drift | exact v1 to v2 conversion, bit-identical |
 | Partial `load_state_dict` without `qzeros` | `_qzeros_format` flipped to 1, next save garbage | runtime layout kept |
 | RTN `format="gemm"` config | `quant_method: gptq` with `format: gemm` | `quant_method: awq` |
-| New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` raises an actionable `ValueError` |
-| `torch.save(model)` after `optimize()` | `PicklingError` on the compiled bound method | round-trips; unpickled module runs eager |
+| New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` raises an actionable `ValueError` once `gptqmodel` is imported; otherwise HF only warns |
+| `exl3` / `qqq` / `paroquant` / `macaq` / `nf12` / `tt-blockfloat` checkpoint in plain HF | `Unknown quantization type ... skip the quantization`, random weights | refusing quantizer raises once `gptqmodel` is imported; save-time warning otherwise |
+| `torch.save(model)` after `optimize()` | `PicklingError` on the compiled bound method (FP8, EXL3 Torch, VPTQ) | round-trips; unpickled module runs eager |
 
 ### Save, Marlin, export, and mixed-bit dequantization (items 4-8)
 

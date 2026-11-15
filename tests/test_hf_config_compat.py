@@ -23,6 +23,59 @@ from gptqmodel.utils.hf import (
 )
 
 
+class _LegacyRemoteRopeConfig:
+    """Pre-5.x trust_remote_code config: declares ``rope_scaling``, not ``rope_parameters``."""
+
+    def __init__(
+        self,
+        *,
+        model_type="nanbeige",
+        rope_scaling=None,
+        rope_theta=70_000_000.0,
+        **kwargs,
+    ):
+        self.model_type = model_type
+        self.rope_scaling = rope_scaling
+        # transformers 5 exposes `rope_parameters` as a property aliasing
+        # `rope_scaling`; mirror the shared value on the stand-in.
+        self.rope_parameters = kwargs.pop("rope_parameters", rope_scaling)
+        self.rope_theta = rope_theta
+
+
+class _ModernRemoteRopeConfig:
+    """Transformers-5 trust_remote_code config: declares ``rope_parameters``."""
+
+    def __init__(self, *, model_type="modern_remote", rope_parameters=None, rope_theta=10_000.0):
+        self.model_type = model_type
+        self.rope_parameters = rope_parameters
+        self.rope_theta = rope_theta
+
+
+class _LegacyChatGLMConfig:
+    """Pre-5.x ChatGLM config: ``seq_length``/``num_layers`` + ``attribute_map``."""
+
+    model_type = "chatglm"
+
+    def __init__(self):
+        self.seq_length = 8192
+        self.num_layers = 28
+        self.use_cache = True
+        self.attribute_map = {}
+
+    def __getattr__(self, name):
+        attribute_map = self.__dict__.get("attribute_map") or {}
+        if name in attribute_map:
+            return getattr(self, attribute_map[name])
+        raise AttributeError(name)
+
+    def _get_generation_parameters(self):
+        parameters = {}
+        for key in ("max_length", "min_length"):
+            if hasattr(self, key) and getattr(self, key) is not None:
+                parameters[key] = getattr(self, key)
+        return parameters
+
+
 def test_get_hf_config_dtype_avoids_modern_deprecated_alias():
     class ModernConfig:
         dtype = None
@@ -208,9 +261,8 @@ def test_normalize_hf_config_compat_preserves_rope_parameters_after_remote_clean
     assert config.rope_parameters["rope_theta"] == 10000.0
 
 
-def test_normalize_hf_config_compat_keeps_nanbeige_default_rope_unscaled():
-    config = SimpleNamespace(
-        model_type="nanbeige",
+def test_normalize_hf_config_compat_keeps_legacy_default_rope_unscaled():
+    config = _LegacyRemoteRopeConfig(
         rope_scaling={"rope_type": "default", "rope_theta": 70000000.0},
         rope_parameters={"rope_type": "default", "rope_theta": 70000000.0},
     )
@@ -221,9 +273,23 @@ def test_normalize_hf_config_compat_keeps_nanbeige_default_rope_unscaled():
     assert config.rope_parameters is None
 
 
-def test_normalize_hf_config_compat_preserves_nanbeige_scaled_rope():
-    config = SimpleNamespace(
-        model_type="nanbeige",
+@pytest.mark.parametrize("model_type", ["nanbeige", "minicpm", "mobilellm"])
+def test_normalize_hf_config_compat_clears_unscaled_legacy_rope(model_type):
+    """Legacy remote code indexes ``rope_scaling["type"]`` for any non-None dict."""
+
+    config = _LegacyRemoteRopeConfig(
+        model_type=model_type,
+        rope_scaling={"rope_type": "default", "rope_theta": 10000.0},
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_scaling is None
+    assert config.rope_parameters is None
+
+
+def test_normalize_hf_config_compat_preserves_legacy_scaled_rope():
+    config = _LegacyRemoteRopeConfig(
         rope_scaling={"type": "linear", "factor": 2.0},
         rope_parameters=None,
         rope_theta=70000000.0,
@@ -233,6 +299,19 @@ def test_normalize_hf_config_compat_preserves_nanbeige_scaled_rope():
 
     assert config.rope_scaling["type"] == "linear"
     assert config.rope_scaling["factor"] == 2.0
+
+
+def test_normalize_hf_config_compat_keeps_modern_remote_rope_parameters():
+    """A config class declaring ``rope_parameters`` keeps the transformers-5 dict."""
+
+    config = _ModernRemoteRopeConfig(
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_parameters["rope_type"] == "default"
+    assert config.rope_parameters["rope_theta"] == 10000.0
 
 
 def test_normalize_hf_config_compat_restores_sliding_window_cache_alias(monkeypatch):
@@ -849,3 +928,37 @@ def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch
 
     assert resolved is True
     assert caplog.text == ""
+
+
+def test_patch_transformers_remote_code_compat_shims_output_recorder():
+    """Issue #4093 item 12: `modeling_klear.py` imports both legacy symbols."""
+
+    hf_utils._patch_transformers_remote_code_compat()
+
+    import transformers.utils.generic as generic
+    from transformers.utils.output_capturing import OutputRecorder
+
+    assert generic.OutputRecorder is OutputRecorder
+
+
+def test_normalize_chatglm_config_exposes_aliases_without_generation_leak():
+    """Issue #4093 item 11: remote code needs the aliases, `generate()` must not see them."""
+
+    config = _LegacyChatGLMConfig()
+
+    hf_utils._normalize_chatglm_remote_code_config_compat(config)
+
+    assert config.max_length == 8192
+    assert config.num_hidden_layers == 28
+    assert config._get_generation_parameters() == {}
+
+
+def test_normalize_chatglm_config_keeps_alias_out_of_serialized_fields():
+    """The compatibility view must not become a serialized config field."""
+
+    config = _LegacyChatGLMConfig()
+
+    hf_utils._normalize_chatglm_remote_code_config_compat(config)
+
+    assert "max_length" not in config.__dict__
+    assert "num_hidden_layers" not in config.__dict__

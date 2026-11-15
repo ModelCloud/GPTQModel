@@ -776,6 +776,35 @@ def _normalize_explicit_placement(device, device_map, max_memory):
     return requested_device_map, explicit_device_map
 
 
+def _resolve_max_memory_device(max_memory, device) -> Optional[DEVICE]:
+    """Validate ``device`` against the devices a ``max_memory`` budget names.
+
+    ``max_memory`` is the authoritative list of devices that may hold weights
+    (#4082). When every entry is ``cpu`` the budget can only place layers on
+    CPU, so kernel selection must use CPU too; otherwise a CUDA kernel is
+    selected for a CPU-resident model and the first forward raises
+    ``Expected a cuda device, but got: cpu`` (#4091 item 7).
+
+    Returns ``DEVICE.CPU`` for a CPU-only budget and ``None`` when the budget
+    admits an accelerator. An explicit accelerator ``device`` that contradicts
+    a CPU-only budget is rejected rather than silently ignored.
+    """
+
+    if max_memory is None:
+        return None
+    if any(name != "cpu" for name, _ in _normalize_max_memory(max_memory, device)):
+        return None
+    requested_family = selector_device_family(device) if device is not None else None
+    if requested_family is not None and requested_family != DEVICE.CPU:
+        raise ValueError(
+            "`max_memory` has no accelerator entry, so it can only place layers "
+            f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
+            "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
+            "CPU-only placement."
+        )
+    return DEVICE.CPU
+
+
 def _external_runtime_device_kwargs(
     device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
@@ -1985,6 +2014,15 @@ def ModelLoader(cls):
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
+
+        # A budget that names only CPU can only place weights on CPU, so the
+        # kernel must be a CPU kernel. The placement builder already honours the
+        # budget; without this the selected CUDA kernel crashes on the first
+        # CPU-resident layer's forward.
+        max_memory_device = _resolve_max_memory_device(max_memory, device)
+        if max_memory_device is not None:
+            device = max_memory_device
+            requested_device_map = None
 
         # A CPU-resident layer runs `post_init` on CPU. AUTO must therefore not
         # select a CUDA-only kernel for a map that offloads some layers.

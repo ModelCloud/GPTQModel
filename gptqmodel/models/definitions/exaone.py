@@ -12,6 +12,12 @@ class ExaOneQModel(BaseQModel):
 
     pre_lm_head_norm_module = "transformer.ln_f"
 
+    # Exaone keeps one rotary module on the model (`ExaoneModel.rotary`), not
+    # per attention layer. Declaring it lets AWQ rebuild `position_ids` /
+    # `position_embeddings` for the sample being replayed instead of reusing
+    # another sample's sequence length (EXAONE-3.0 AWQ crashed at 522 vs 430).
+    rotary_embedding = "transformer.rotary"
+
     module_tree= [
         "transformer",
         "h",

@@ -29,6 +29,7 @@ from ...utils.planar_packing import (
     planar_unpack_rows,
 )
 from ...utils.safe import THREADPOOLCTL
+from ..compiled_state import compiled_module_getstate
 from ._runtime_cache import tensor_cache_key
 
 
@@ -805,6 +806,17 @@ class BaseQuantLinear(nn.Module):
         self.optimized = True
         log.info.once(f"Optimize: `{self.__class__.__name__}` compilation triggered.")
         pass
+
+    def __getstate__(self):
+        """Drop compiled callables so a model stays picklable after `optimize()`.
+
+        Kernels that compile a bound method store the `torch.compile` wrapper
+        on the instance, and pickle cannot serialize it. The shared helper
+        restores the eager class method on unpickle and resets `optimized` so a
+        caller can compile again.
+        """
+
+        return compiled_module_getstate(self)
 
     # overrides nn.module.train()
     def train(self, mode=True):
