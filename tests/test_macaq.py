@@ -392,12 +392,13 @@ def test_triton_w4a16_matches_torch_with_bias(dtype):
     not triton_mxfp4_available(),
     reason="MACaQ Triton kernels require CUDA and Triton",
 )
-def test_triton_fp16_activation_quantizes_before_bf16_cast():
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_triton_activation_packs_exact_e2m1_bytes(dtype):
     from gptqmodel.utils.macaq_triton import rot_scale_quantize_mxfp4
 
     torch.manual_seed(101)
-    x = torch.randn(7, 64, device="cuda", dtype=torch.float16)
-    pre_scale = (torch.rand(64, device="cuda") + 0.5).to(torch.float16)
+    x = torch.randn(7, 64, device="cuda", dtype=dtype)
+    pre_scale = (torch.rand(64, device="cuda") + 0.5).to(dtype)
     bh = macaq.make_hadamard(32, device=x.device, dtype=torch.bfloat16)
     packed, scales = rot_scale_quantize_mxfp4(x, pre_scale, bh)
 

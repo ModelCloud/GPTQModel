@@ -288,9 +288,13 @@ accuracy matters more than the W4A4 speedup.
 
 The automated `tests/models/test_llama3_2_macaq.py` default fast mode
 quantizes the last two of 16 decoder layers and checks ARC-Challenge after a
-safetensors save/reload. It is a lifecycle smoke test; the full-model
-perplexity measurements above use all 112 packed projections. The full
-checkpoint also reloads with both Torch and Triton backends.
+safetensors save/reload. During the reloaded evaluation it also asserts that
+the native Triton W4A4 GEMM and 4-bit activation packer run, every packed
+projection is exercised, and no projection falls back to Torch. The independent
+activation test checks exact E2M1 packed bytes for FP16 and BF16 inputs. The
+fast run is a lifecycle smoke test; the full-model perplexity measurements
+above use all 112 packed projections. The full checkpoint also reloads with
+both Torch and Triton backends.
 
 ## Port scope
 

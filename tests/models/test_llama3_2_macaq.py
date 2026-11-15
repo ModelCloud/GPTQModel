@@ -3,14 +3,18 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+from unittest.mock import patch
 
 import pytest
+import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+from gptqmodel.nn_modules.qlinear import macaq as macaq_linear_module
 from gptqmodel.nn_modules.qlinear.macaq import MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import MacaqConfig
+from gptqmodel.utils import macaq_triton
 from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 
 
@@ -64,6 +68,58 @@ class TestLlama3_2_MACaQ(ModelTest):
             pre_alpha=self.MACAQ_PRE_ALPHA,
             offload_to_disk=self.OFFLOAD_TO_DISK,
         )
+
+    def run_eval_tasks(self, model, backend, trust_remote_code=False):
+        """Require the reloaded ARC model to execute native W4A4 activations."""
+
+        assert backend == BACKEND.MACAQ_TRITON
+        linears = [module for module in model.model.modules() if isinstance(module, MacaqTritonLinear)]
+        assert linears, "The reloaded checkpoint has no MACaQ Triton projections."
+        for module in linears:
+            assert module.backend == BACKEND.MACAQ_TRITON
+            assert module.activation_precision == "w4a4"
+            assert module.W_packed.dtype == module.W_scales.dtype == torch.uint8
+            assert module.W_packed.is_cuda and module.W_scales.is_cuda
+            assert module.W_packed.shape == (module.out_features, module.in_features // 2)
+            assert module.W_scales.shape == (module.out_features, module.in_features // 32)
+
+        original_encoder = macaq_triton.rot_scale_quantize_mxfp4
+
+        def checked_encoder(x, pre_scale, bh):
+            packed, scales = original_encoder(x, pre_scale, bh)
+            assert packed.dtype == scales.dtype == torch.uint8
+            assert packed.shape == (x.shape[0], x.shape[1] // 2)
+            assert scales.shape == (x.shape[0], x.shape[1] // 32)
+            return packed, scales
+
+        seen = set()
+        hooks = [
+            module.register_forward_hook(lambda current, _inputs, _output: seen.add(current))
+            for module in linears
+        ]
+        try:
+            with (
+                patch.object(
+                    macaq_linear_module,
+                    "mxfp4_w4a4_linear",
+                    wraps=macaq_linear_module.mxfp4_w4a4_linear,
+                ) as w4a4_gemm,
+                patch.object(
+                    macaq_triton,
+                    "rot_scale_quantize_mxfp4",
+                    side_effect=checked_encoder,
+                ) as activation_encoder,
+            ):
+                result = super().run_eval_tasks(model, backend, trust_remote_code=trust_remote_code)
+        finally:
+            for hook in hooks:
+                hook.remove()
+
+        assert w4a4_gemm.call_count > 0, "ARC evaluation did not run the W4A4 GEMM."
+        assert activation_encoder.call_count > 0, "ARC evaluation did not pack 4-bit activations."
+        assert seen == set(linears), "ARC evaluation did not exercise every MACaQ projection."
+        assert all(not module._triton_disabled for module in linears), "A MACaQ projection fell back to Torch."
+        return result
 
     EVAL_TASKS_FAST = {
         "arc_challenge": {
