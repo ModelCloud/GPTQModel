@@ -140,9 +140,13 @@ size 128, and the 3-D batch capture pinned through
 | Model | Budget | Before | After |
 | --- | --- | --- | --- |
 | Llama-3.1-8B-Instruct | 32 GiB | OOM: tried to allocate 7.00 GiB; `inp=(128, 2048, 4096)`, `replay_batch_size=0`; peak 27.87 GiB | `replay_batch_size=21` for hidden 4096, `6` for hidden 14336; no OOM |
-| Llama-3.2-1B-Instruct | 12 GiB | OOM: tried to allocate 4.00 GiB; `inp=(128, 2048, 2048)`, `replay_batch_size=0`; peak 10.82 GiB | `replay_batch_size=42` for hidden 2048, `10` for hidden 8192; no OOM |
+| Llama-3.2-1B-Instruct | 12 GiB | OOM: tried to allocate 4.00 GiB; `inp=(128, 2048, 2048)`, `replay_batch_size=0`; peak 10.82 GiB | `replay_batch_size=42` for hidden 2048, `10` for hidden 8192; peak 8.70 GiB; no OOM |
 
 On current `main` the default AWQ token-row aggregation caps a dense capture at
 one largest-batch equivalent, so the 3-D `[batches, seq, hidden]` path is
 reached when a model selects `mode=batch`; the harness pins that mode to
 exercise the sizing helper with the issue's capture shape.
+
+Perplexity on the same 1B model (wikitext-2 test, 8 x 2048 chunks) keeps the
+expected ordering after the fix: FP 12.575, RTN 15.891, GPTQ 14.036, AWQ
+13.752. AWQ is 13.5% below RTN and 2.0% below GPTQ.
