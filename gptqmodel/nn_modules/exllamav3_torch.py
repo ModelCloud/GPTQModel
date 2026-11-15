@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 import struct
-from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
@@ -16,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from ..models._const import DEVICE
-from ..utils.cpu_features import has_avx512_bf16
+from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
@@ -46,16 +45,9 @@ def _cpu_bf16x3_support() -> bool:
 
     if not env_flag(_CPU_BF16X3_ENV, default=True):
         return False
-    if not has_avx512_bf16() or not torch.backends.mkldnn.is_available():
+    if not has_avx512_bf16():
         return False
-
-    try:
-        previous = torch.backends.mkldnn.matmul.fp32_precision
-        torch.backends.mkldnn.matmul.fp32_precision = "bf16"
-        torch.backends.mkldnn.matmul.fp32_precision = previous
-    except (AttributeError, RuntimeError, ValueError):
-        return False
-    return True
+    return has_cpu_bf16x3_precision()
 
 
 def _cpu_bf16x3_should_use(rows: int, in_features: int, out_features: int) -> bool:
@@ -68,26 +60,6 @@ def _cpu_bf16x3_should_use(rows: int, in_features: int, out_features: int) -> bo
         weight_elements >= _CPU_BF16X3_MIN_WEIGHT_ELEMENTS
         or rows * weight_elements >= _CPU_BF16X3_MIN_MACS
     )
-
-
-@contextmanager
-def _cpu_bf16x3_matmul():
-    """Use oneDNN's BF16x3 FP32 matmul while preserving caller precision."""
-
-    if not _cpu_bf16x3_support():
-        yield
-        return
-
-    previous = torch.backends.mkldnn.matmul.fp32_precision
-    if previous == "bf16":
-        yield
-        return
-
-    torch.backends.mkldnn.matmul.fp32_precision = "bf16"
-    try:
-        yield
-    finally:
-        torch.backends.mkldnn.matmul.fp32_precision = previous
 
 
 def _tensor_core_perm_values() -> list[int]:
@@ -547,12 +519,16 @@ class ExllamaV3TorchLinear(nn.Module):
         input_dtype = x.dtype
         compute_dtype = torch.float32
         x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
-        if x.device.type == "cpu" and _cpu_bf16x3_should_use(
-            x_2d.shape[0],
-            self.in_features,
-            self.out_features,
+        if (
+            x.device.type == "cpu"
+            and _cpu_bf16x3_support()
+            and _cpu_bf16x3_should_use(
+                x_2d.shape[0],
+                self.in_features,
+                self.out_features,
+            )
         ):
-            with _cpu_bf16x3_matmul():
+            with cpu_bf16x3_scope():
                 y = self._forward_chunked(x_2d, compute_dtype)
         else:
             y = self._forward_chunked(x_2d, compute_dtype)
