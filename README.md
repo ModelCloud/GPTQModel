@@ -238,6 +238,9 @@ Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
+Quantized modules load their scales and other quantization buffers at the dtype
+the checkpoint stores, whatever model dtype you request; see
+[checkpoint buffer dtype](docs/checkpoint-and-runtime-contracts.md#4-checkpoint-buffer-dtype).
 
 ### Quantization 🗜️
 

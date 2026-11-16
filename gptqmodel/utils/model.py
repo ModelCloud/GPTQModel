@@ -3229,6 +3229,23 @@ def _restore_checkpoint_buffers(
         )
 
 
+def _load_narrowed(checkpoint_dtype: torch.dtype, loaded_dtype: torch.dtype) -> bool:
+    """Whether loading ``checkpoint_dtype`` values as ``loaded_dtype`` can round them.
+
+    A load that widens (for example ``keep_in_fp32_modules`` placing a BF16
+    tensor in FP32) keeps every value; only a narrowing or cross-format cast
+    needs the checkpoint tensor restored.
+    """
+
+    if checkpoint_dtype == loaded_dtype:
+        return False
+    try:
+        return torch.promote_types(checkpoint_dtype, loaded_dtype) != loaded_dtype
+    except RuntimeError:
+        # PyTorch does not promote float8 types; treat the cast as lossy.
+        return True
+
+
 def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None:
     """Restore FP32 buffers narrowed by Accelerate's BF16 load path."""
     _restore_checkpoint_buffers(model, checkpoint, dict.fromkeys(names, torch.float32))
@@ -3258,26 +3275,39 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         restore_dtypes = dict(packed_fp8_buffer_dtypes)
         if str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
-        # Accelerate casts floating buffers to the requested model dtype even
-        # when the quantized module's forward needs the checkpoint precision.
-        # The scale buffer is part of the checkpoint contract, not an activation
-        # operand: narrowing an FP16 scale to BF16 changes the dequantized
-        # weight and makes a later `save_pretrained()` republish the narrowed
-        # value. Restore every quantized module's scales from the checkpoint.
-        # Torch AWQ additionally keeps its bias at the checkpoint dtype because
-        # its forward makes temporary activation-dtype copies.
+        # Accelerate casts every floating buffer to the requested model dtype.
+        # A quantized module's buffers (scales, QQQ `s_group`/`s_channel`,
+        # EXL3 sign vectors, ...) are quantization state, not activation
+        # operands: narrowing them changes the dequantized weight (#4458).
+        # Restore each one the load narrowed, except the activation-side
+        # buffers the module declares in `MODEL_DTYPE_BUFFERS`. The re-save
+        # shell (`restore_checkpoint_buffer_dtypes`) republishes every
+        # floating buffer at exactly its stored dtype instead (#4379).
+        checkpoint_dtypes = _checkpoint_tensor_dtypes(kwargs.get("checkpoint", checkpoint))
         for name, module in model.named_modules():
+            model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
+            if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
+                continue
             prefix = f"{name}." if name else ""
-            if (
-                isinstance(module, BaseQuantLinear)
-                and isinstance(module._buffers.get("scales"), torch.Tensor)
-                and "scales" not in module._non_persistent_buffers_set
-            ):
-                restore_dtypes[f"{prefix}scales"] = None
-            if getattr(module, "QUANT_TYPE", None) == "awq_torch":
-                for buffer_name in ("scales", "bias"):
-                    if isinstance(module._buffers.get(buffer_name), torch.Tensor):
-                        restore_dtypes[f"{prefix}{buffer_name}"] = None
+            for buffer_name, current in module._buffers.items():
+                full_name = f"{prefix}{buffer_name}"
+                checkpoint_dtype = checkpoint_dtypes.get(full_name)
+                if (
+                    checkpoint_dtype is None
+                    or full_name in restore_dtypes
+                    or not isinstance(current, torch.Tensor)
+                    or not current.is_floating_point()
+                    or buffer_name in module._non_persistent_buffers_set
+                ):
+                    continue
+                if restore_checkpoint_buffer_dtypes:
+                    restore = current.dtype != checkpoint_dtype
+                else:
+                    restore = buffer_name not in model_dtype_buffers and _load_narrowed(
+                        checkpoint_dtype, current.dtype
+                    )
+                if restore:
+                    restore_dtypes[full_name] = None
         # BitsAndBytes keeps its 4-bit quant metadata in state buffers whose
         # dtype is part of the kernel contract: the floating state tables must
         # stay FP32 and the packed map/QuantState bytes must stay byte-exact.
@@ -3302,28 +3332,6 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 for buffer_name in _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES:
                     if isinstance(module._buffers.get(buffer_name), torch.Tensor):
                         restore_dtypes[f"{prefix}{buffer_name}"] = None
-        if restore_checkpoint_buffer_dtypes:
-            # The export shell allocates its buffers in the model dtype. A
-            # legacy checkpoint may store some of them (biases, EXL3 sign
-            # vectors, ...) at a different dtype, and accelerate's dtype=None
-            # copy narrows them to the shell slot. Restore every such buffer
-            # from the checkpoint at its stored dtype so a re-save publishes
-            # exactly what it read.
-            checkpoint_dtypes = _checkpoint_tensor_dtypes(
-                kwargs.get("checkpoint", checkpoint)
-            )
-            for name, checkpoint_dtype in checkpoint_dtypes.items():
-                if name in restore_dtypes:
-                    continue
-                module_name, _, buffer_name = name.rpartition(".")
-                module = model.get_submodule(module_name) if module_name else model
-                current = module._buffers.get(buffer_name)
-                if (
-                    isinstance(current, torch.Tensor)
-                    and current.is_floating_point()
-                    and current.dtype != checkpoint_dtype
-                ):
-                    restore_dtypes[name] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
                 model, kwargs.get("checkpoint", checkpoint), restore_dtypes,

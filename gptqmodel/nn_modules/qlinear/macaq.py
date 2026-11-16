@@ -79,6 +79,9 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "macaq"
+    # The Hadamard block and the smoothing pre-scale are built in
+    # `compute_dtype` and multiply the activations at the activation dtype.
+    MODEL_DTYPE_BUFFERS = ("bias", "BH", "pre_scale")
 
     def __init__(
         self,
