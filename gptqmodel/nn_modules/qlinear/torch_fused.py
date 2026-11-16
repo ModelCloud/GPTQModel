@@ -35,6 +35,30 @@ log = setup_logger()
 # supported without this check let AUTO select this kernel on CPU for a
 # checkpoint whose first forward then raised inside the aten op.
 CPU_INT4PACK_GROUP_SIZES = (32, 64, 128, 256)
+# ``aten::_convert_weight_to_int4pack_for_cpu`` requires the packed row width
+# to be a multiple of 16.  The XPU path packs the same logical layout with a
+# nibble pack factor of 8, so it keeps the smaller declaration and the CPU
+# contract is checked separately.
+CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY = 16
+
+
+def _validate_cpu_int4pack_out_features(
+    cls,
+    *,
+    out_features: Optional[int],
+    device: Optional[DEVICE | torch.device],
+):
+    """Reject a CPU output width the packed int4 kernel cannot consume."""
+    if device is None or normalize_device(device) != DEVICE.CPU:
+        return True, None
+    if out_features is None or out_features % CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY == 0:
+        return True, None
+    return False, NotImplementedError(
+        f"{cls}: CPU int4pack requires out_features to be divisible by "
+        f"{CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY}: actual out_features = "
+        f"`{out_features}`. Select `backend=\"gptq_torch\"` for this "
+        "checkpoint on CPU."
+    )
 
 
 def _validate_cpu_int4pack_group_size(
@@ -144,7 +168,7 @@ class TorchFusedLinear(PackableQuantLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
@@ -221,8 +245,13 @@ class TorchFusedLinear(PackableQuantLinear):
         )
         if not ok:
             return ok, err
-        return _validate_cpu_int4pack_group_size(
+        ok, err = _validate_cpu_int4pack_group_size(
             cls, group_size=group_size, in_features=in_features, device=device
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls, out_features=out_features, device=device
         )
 
     def post_init(self):
@@ -537,6 +566,9 @@ class TorchFusedLinear(PackableQuantLinear):
         self.scales = None
 
 def dequantize_model(model: PreTrainedModel):
+    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
+    # bf16 checkpoints and their exported config.
+    target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedLinear):
             raise ValueError(
@@ -545,10 +577,29 @@ def dequantize_model(model: PreTrainedModel):
             )
 
         if isinstance(module, TorchFusedLinear):
+            if target_dtype is None:
+                scales = getattr(module, "scales", None)
+                target_dtype = (
+                    scales.dtype
+                    if scales is not None and scales.is_floating_point()
+                    else torch.float16
+                )
             # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = torch.nn.Parameter(module.bias)
+            new_module = nn.Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+            )
+            new_module.weight = nn.Parameter(
+                module.dequantize_weight().T.detach().to("cpu", target_dtype)
+            )
+            # ``nn.Parameter(None)`` is a shape-[0] tensor, not an absent
+            # bias. Every bias-less layer then failed in forward.
+            new_module.bias = (
+                nn.Parameter(module.bias.detach().to("cpu", target_dtype))
+                if module.bias is not None
+                else None
+            )
 
             # Replace the module in the model
             parent = model

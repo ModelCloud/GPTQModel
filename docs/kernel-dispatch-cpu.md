@@ -9,7 +9,7 @@ may be selected when a `device_map` offloads layers to CPU, and how
 Introduced by the fix for issue #4054 (items 3-7). The AWQ CUDA kernels are
 covered by the other half of that issue.
 
-## 1. CPU int4pack group sizes
+## 1. CPU int4pack kernel contracts
 
 `TorchFusedLinear` and `TorchFusedAwqLinear` execute on CPU through
 `aten::_weight_int4pack_mm_for_cpu`, which accepts only group sizes 32, 64, 128
@@ -44,6 +44,70 @@ flowchart TD
 (`TorchCpuAvx512Linear` for g16, `TorchLinear` for a per-channel group). An
 explicit `backend="gptq_torch_fused"` now fails at selection with the resolved
 size instead of failing on the first forward.
+
+### Output width
+
+The same CPU op also requires the packed row width to be a multiple of 16
+(`aten::_convert_weight_to_int4pack_for_cpu` rejects any other `N`).
+`TorchAtenLinear` and `TorchAtenAwqLinear` are CPU-only, so they declare
+`SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]`
+(`torch_aten_kernel.py:101`). `TorchFusedLinear` and `TorchFusedAwqLinear`
+also serve XPU, whose packer only needs the nibble pack factor of 8; they keep
+the `[8]` declaration and apply the CPU-only 16-wide check in
+`_validate_cpu_int4pack_out_features` (`torch_fused.py:45`).
+
+### `group_size == in_features`
+
+`GroupedQuantLinear._validate` allows `group_size == in_features` so a
+per-channel checkpoint can express its resolved group without listing every
+input width (`qlinear/__init__.py:1023`). That escape also let a checkpoint
+with `group_size = 512` and `in_features = 512` reach the aten op, whose
+contract is still only 32/64/128/256. `TorchAtenLinear._validate`
+(`torch_aten_kernel.py:117`) now re-applies
+`_validate_cpu_int4pack_group_size` to the resolved size, so the selector
+falls through instead of loading a layer that fails on its first forward.
+
+```mermaid
+flowchart TD
+    A["create_quant_layer(AUTO, CPU)"] --> B["validate_quant_linear(candidate)"]
+    B --> C["_validate_shape_constraints"]
+    C --> D{"out_features divisible by<br/>declared divisor?"}
+    D -- "no" --> E["NotImplementedError<br/>try the next AUTO candidate"]
+    D -- "yes" --> F["kernel _validate"]
+    F --> G{"class uses the<br/>aten int4pack op?"}
+    G -- "no, AVX512 subclass" --> H["keep its wider<br/>group-size contract"]
+    G -- "yes" --> I["_validate_cpu_int4pack_group_size"]
+    I --> J{"resolved group size<br/>in 32, 64, 128, 256?"}
+    J -- "no" --> E
+    J -- "yes" --> K["_validate_cpu_int4pack_out_features"]
+    K --> L{"device is CPU and<br/>out_features % 16 == 0?"}
+    L -- "no" --> E
+    L -- "yes" --> M["candidate accepted"]
+    E --> N["next candidate"]
+    N --> B
+    style E fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style M fill:#d1e7dd,stroke:#146c43,stroke-width:2px
+```
+
+The same contracts are copied to the AWQ kernels because they execute the
+same packed op (`torch_aten_kernel_awq.py`, `torch_fused_awq.py`).
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Aten output width | `SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]` (`torch_aten_kernel.py:82` at 6c3421c) | `[16]`, enforced before construction |
+| Fused output width | `[1]` for CPU and XPU | `[8]` plus a CPU-only 16-wide check |
+| `group_size == in_features` | accepted by the base escape, rejected later by ATen | rejected during selection |
+| AVX512 group size | inherited from `TorchAtenLinear` | still owns `[16, 32, 64, 128, 256, 512]` |
+
+### `dequantize_model` contract
+
+`TorchAtenLinear.dequantize_model` and `TorchFusedLinear.dequantize_model`
+used to build `nn.Parameter(module.bias)` even when the quantized layer had no
+bias. `nn.Parameter(None)` is a shape-`[0]` tensor, so every bias-less layer
+(all of Llama, for example) failed in forward. Both functions now pass
+`bias=module.bias is not None` to `nn.Linear` and only wrap a real tensor.
+They also keep the checkpoint scale dtype instead of forcing FP16, matching
+`TorchLinear.dequantize_model`.
 
 ### Kernel `optimize` signature
 
