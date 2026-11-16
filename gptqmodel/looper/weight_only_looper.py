@@ -63,7 +63,11 @@ from ..utils.model import (
     get_module,
     get_module_by_name_prefix,
 )
-from ..utils.offload import offload_to_disk
+from ..utils.offload import (
+    capture_offloaded_base_modules,
+    offload_to_disk,
+    restore_offloaded_modules,
+)
 from ..utils.p2p import configure_p2p, enable_for_devices
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
@@ -87,6 +91,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.gptq_model = model
         self.layer_module_coverage = LayerModuleCoverageTracker()
         self.processor = processor
+        # Base modules offloaded at the start of the run are restored when the
+        # loop exits so the model stays usable in-session.
+        self._offloaded_base_modules: List[Tuple[str, torch.nn.Module, torch.device]] = []
         self.extensions = LoopExtensions(extensions)
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -857,8 +864,27 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self.processor.layer_count = layer_count
         return quantized_names
 
+    def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
+        entries = getattr(self, "_offloaded_base_modules", None)
+        if not entries:
+            return
+        self._offloaded_base_modules = []
+        restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
+
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
+
+        try:
+            result = self._loop_impl(**kwargs)
+        except BaseException:
+            # A failed run must not leave the base modules stranded on meta.
+            self._restore_offloaded_base_modules(strict=False)
+            raise
+        self._restore_offloaded_base_modules(strict=True)
+        return result
+
+    def _loop_impl(self, **kwargs):
+        """Run the weight-only quantization workflow."""
         quant_config = self.gptq_model.quantize_config
         if not isinstance(
             quant_config,
@@ -929,9 +955,13 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         if quant_config.offload_to_disk:
             log.info("Offloading base modules to disk...")
+            base_modules = self.gptq_model.get_base_modules(model=self.gptq_model.model)
+            self._offloaded_base_modules = capture_offloaded_base_modules(
+                self.gptq_model.model, base_modules
+            )
             offload_to_disk(
                 model=self.gptq_model.model,
-                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                module=base_modules,
                 disk_path=quant_config.offload_to_disk_path,
             )
 
