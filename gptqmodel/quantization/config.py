@@ -4564,6 +4564,15 @@ class QuantizeConfigMeta(type):
             target_cls = _resolve_quantize_config_class(kwargs)
             target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
+        # A concrete class rebuilt from its own `to_dict()` payload must keep
+        # the same meta-held settings as the `QuantizeConfig` factory. Lift
+        # only the fields this class declares.
+        init_fields = {field.name for field in fields(cls) if field.init}
+        kwargs = {
+            key: value
+            for key, value in _lift_serialized_meta_fields(kwargs).items()
+            if key in kwargs or key in init_fields
+        }
         return super().__call__(*args, **kwargs)
 
 
@@ -6330,7 +6339,7 @@ class ParoConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
-            "kernel": self.kernel,
+            "kernel": resolve_kernel_config(self),
             "krot": self.krot,
         }
 
@@ -6565,7 +6574,7 @@ class VPTQConfig(GPTQConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
-            "kernel": self.kernel,
+            "kernel": resolve_kernel_config(self),
             "vector_lens": list(self.vector_lens),
             "num_centroids": list(self.num_centroids),
             "num_res_centroids": list(self.num_res_centroids),
@@ -6752,7 +6761,7 @@ class MacaqConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
-            "kernel": self.kernel,
+            "kernel": resolve_kernel_config(self),
             "block_size": self.block_size,
             "had_block": self.had_block,
             "activation_precision": self.activation_precision,
@@ -7004,7 +7013,7 @@ class FP8Config(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
-            "kernel": self.kernel,
+            "kernel": resolve_kernel_config(self),
             "format": self.format,
             "weight_scale_method": self.weight_scale_method,
             "weight_block_size": self.weight_block_size,
@@ -7087,7 +7096,7 @@ class NF12Config(PreProcessorConfig):
             )
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"exp_base": self.exp_base, "kernel": self.kernel}
+        return {"exp_base": self.exp_base, "kernel": resolve_kernel_config(self)}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["exp_base"] = self.exp_base
@@ -7158,7 +7167,7 @@ class TTBlockfloatConfig(PreProcessorConfig):
         return False
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"block": self.block, "kernel": self.kernel}
+        return {"block": self.block, "kernel": resolve_kernel_config(self)}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["block"] = self.block
@@ -7311,7 +7320,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
-            "kernel": self.kernel,
+            "kernel": resolve_kernel_config(self),
             "format": self.format,
             "block_size": self.block_size,
             "compress_statistics": self.compress_statistics,

@@ -239,3 +239,78 @@ flowchart LR
 The regression coverage is
 `tests/test_hessian_fallback_contracts.py`; every case fails on the parent
 commit and passes after this change.
+
+## 5. Uncovered-module prune with `fallback=None`
+
+With `fallback=None`, a module that never received calibration input (usually
+an MoE expert no token was routed to) is pruned instead of quantized: the
+subset executor (`stage_subset.py:1445-1476`) removes it from the subset,
+restores its dense source (#4349) and records `-:<full_name>` in
+`qcfg.dynamic`. Every per-module record the processor created in `preprocess`
+must leave with it. The executor used to pop only `processor.tasks[name]`
+(`stage_subset.py:1450` on the parent commit), which is all GPTQ tracks. AWQ
+also registers each module in `_AWQLayerState.modules` and `pending_modules`
+(`awq_processor.py:4329` and `:4339` on the parent commit) and quantizes the
+layer only when nothing in scope is pending, so one uncovered expert blocked
+the whole layer (#4456):
+
+```mermaid
+flowchart TD
+    A["AWQProcessor.preprocess: state.modules[name], pending_modules += all layer linears"] --> B["forward: expert N gets no tokens"]
+    B --> C["stage_subset prune: subset.pop(name); processor.tasks.pop(name)"]
+    C --> D["expert N still in state.modules and pending_modules"]
+    D --> E["AWQProcessor.process: pending_in_scope never empties"]
+    E --> F["_quantize_layer never runs; no q_zeros on any module"]
+    F --> G["pack_module: RuntimeError reached packing without quantized zero points"]
+    style G fill:#f8d7da,stroke:#b02a37,color:#842029
+```
+
+The executor now hands the pruned module to the processor through
+`LoopProcessor.prune_uncovered_module(module)` (`loop_processor.py:1329`,
+called at `stage_subset.py:1451`). The base implementation pops
+`tasks[name]`; `AWQProcessor.prune_uncovered_module` (`awq_processor.py:4355`)
+also removes the module from its layer's `modules` and `pending_modules`.
+
+```mermaid
+flowchart TD
+    A["has_captured_input_ids(name) is False"] --> B{"calibration_coverage_policy.prune_uncovered_modules"}
+    B -- "no (fallback configured)" --> X["module stays; quantizer fallback handles it"]
+    B -- yes --> C["subset.pop(name)"]
+    C --> D["processor.prune_uncovered_module(module)"]
+    D --> E["LoopProcessor: tasks.pop(name)"]
+    D --> F["AWQProcessor: + state.modules.pop(name), pending_modules.discard(name)"]
+    C --> G["restore dense source if AUTO_NF12 packed"]
+    C --> H["_record_dynamic_exclusion: -:full_name"]
+    F --> I["process(): pending_in_scope empties after the covered modules"]
+    I --> J["_quantize_layer: _layer_input_features covers only tracked modules"]
+    J --> K{"scaling group contains a pruned layer?"}
+    K -- yes --> L["missing_layers: group skipped, no fold; its covered members are quantized without an AWQ scale"]
+    K -- no --> M["normal AWQ scale + clip"]
+    L --> N["apply_quant on every covered module"]
+    M --> N
+    style N fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+A pruned module never enters a fold, so its dense weight is bit-identical to the
+source. The shared gate/up group of a layer's routed experts (prev_op
+`post_attention_layernorm`, `module2inspect=mlp`) contains every expert, so one
+pruned expert removes the AWQ scale search for all routed gate/up projections
+of that layer; they are still clip-searched and quantized. This matches the
+configured-fallback path, where `_should_fallback_group` sends the same group to
+plain quantization when any member is starved. Per-expert `down_proj` groups of
+covered experts keep their scales.
+
+| Situation | Before | After |
+| --- | --- | --- |
+| AWQ, `fallback=None`, uncovered expert | every module of the layer reached `pack_module` without `q_zeros`; quantize aborted | uncovered expert dense and in `dynamic`; the rest of the layer quantized |
+| GPTQ, `fallback=None`, uncovered expert | dense + `dynamic` (#4349) | unchanged (same `tasks` pop, now through `prune_uncovered_module`) |
+| Uncovered expert weight | n/a (crash) | bit-identical to the source checkpoint |
+
+Measured on Qwen3-30B-A3B truncated to one decoder layer, AWQ 4-bit `g128`,
+`fallback=None`, 4 C4 rows × 8 tokens, `batch_size=4`,
+`calibration_data_min_length=1`, RTX 5090: 41 of 128 experts received no
+tokens. Before: `RuntimeError: AWQProcessor: module model.layers.0.self_attn.q_proj
+reached packing without quantized zero points`. After: 265 quantized modules,
+123 dense expert projections, all 123 bit-identical to the source and exactly
+the 123 `-:` entries in `dynamic`; the checkpoint saves, reloads and produces
+finite logits. Coverage: `tests/test_awq_moe_prune_uncovered_4456.py`.

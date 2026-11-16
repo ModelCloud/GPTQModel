@@ -1076,12 +1076,10 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
                 # The rotation set is fixed for the whole backward pass, so derive every
                 # per-rotation constant once instead of rebuilding it inside the loop:
-                # the negated thetas, their sin/cos, and the gather index pairs. This
-                # removes krot sin/cos/neg launches and krot strided-slice+add passes.
+                # the negated thetas and the gather index pairs. This removes krot neg
+                # launches and krot strided-slice+add passes.
                 krot = pairs.shape[0]
                 neg_theta_all = theta.neg()
-                sin_all = theta.reshape(krot, num_groups, half_group).sin()
-                cos_all = theta.reshape(krot, num_groups, half_group).cos()
                 pair_view_all = pairs.reshape(krot, num_groups, group_size)
                 idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
                 idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
@@ -1121,14 +1119,7 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                     idx_j = idx_j_all[rot_idx]
 
                     if fused_grad_theta is not None:
-                        fused_parts[rot_idx] = fused_grad_theta(
-                            rotated,
-                            grad,
-                            idx_i,
-                            idx_j,
-                            sin_all[rot_idx].reshape(-1),
-                            cos_all[rot_idx].reshape(-1),
-                        )
+                        fused_parts[rot_idx] = fused_grad_theta(rotated, grad, idx_i, idx_j)
                         continue
 
                     xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
@@ -1136,15 +1127,12 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                     grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
                     grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
 
-                    sin_t = sin_all[rot_idx]
-                    cos_t = cos_all[rot_idx]
+                    # ``rotated`` is this rotation's input and ``grad`` the gradient
+                    # with respect to that input (both already swept back), so
+                    # dL/dtheta = sum(grad_i * x_j - grad_j * x_i): dR/dtheta = R J
+                    # and R^T g_out is exactly ``grad``. No sin/cos factor remains.
                     grad_theta[rot_idx] = (
-                        (
-                            (grad_i * xj - grad_j * xi).sum(0) * cos_t
-                            - (grad_i * xi + grad_j * xj).sum(0) * sin_t
-                        )
-                        .reshape(-1)
-                        .to(theta.dtype)
+                        (grad_i * xj - grad_j * xi).sum(0).reshape(-1).to(theta.dtype)
                     )
 
                 if fused_parts is not None:

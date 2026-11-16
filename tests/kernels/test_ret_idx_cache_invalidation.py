@@ -334,6 +334,12 @@ def _fused_module(cls, checkpoint):
     )
     for name, value in checkpoint.items():
         setattr(module, name, value.clone())
+    # Raw buffer writes bypass the load hook, so declare the layout of the
+    # words just written, as every product writer does (the v1->v2 loader
+    # conversion, packing, the offload restore). These checkpoints store the
+    # logical zero codes the fused kernels decode, i.e. the v2 layout.
+    # Unresolved words are raw v1 checkpoint words to the load hook (#4377).
+    module.qzero_format(format=2)
     module.eval()
     module._init_wf_unsqueeze_buffers()
     return module

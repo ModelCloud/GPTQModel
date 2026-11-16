@@ -131,6 +131,9 @@ class _Processor:
     def has_captured_input_ids(self, name):
         return name not in self._uncovered
 
+    def prune_uncovered_module(self, module):
+        self.tasks.pop(module.name, None)
+
     def process(self, **_kwargs):
         return None
 

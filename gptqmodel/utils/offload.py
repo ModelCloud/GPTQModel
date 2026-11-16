@@ -22,7 +22,6 @@ import torch
 from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 from accelerate.utils import align_module_device, has_offloaded_params
-from safetensors import safe_open
 from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
@@ -36,6 +35,8 @@ from .torch import CPU, META
 
 
 _SMALL_MODULE_OFFLOAD_BYTES = 4 * 1024  # Skip disk writes for <4KB payloads
+# Bound on host bytes held while proving a live tensor equals its source payload.
+_SOURCE_COMPARE_CHUNK_BYTES = 16 * 1024 * 1024
 
 log = setup_logger()
 
@@ -248,6 +249,144 @@ def restore_offloaded_modules(
     log.error(message)
     return unresolved
 
+def _owns_offload_hook(module: nn.Module) -> bool:
+    """Whether ``module`` itself carries an accelerate disk-offload hook."""
+
+    pending = [getattr(module, "_hf_hook", None)]
+    while pending:
+        hook = pending.pop()
+        if hook is None:
+            continue
+        nested = getattr(hook, "hooks", None)
+        if isinstance(nested, (tuple, list)):
+            pending.extend(nested)
+        elif getattr(hook, "offload", False):
+            return True
+    return False
+
+
+def restore_disk_offloaded_modules(
+    model: nn.Module,
+    *,
+    device: torch.device = CPU,
+    strict: bool = False,
+) -> List[str]:
+    """Materialize every module still served by a disk-offload hook.
+
+    During quantization each finalized (packed) module is written to the run's
+    offload directory and replaced by meta tensors behind an accelerate hook,
+    which keeps peak host memory at one layer. Left in place after the loop,
+    those hooks re-read the bundles on every forward, make ``model.to()`` fail
+    on the meta tensors, and break once the run directory is removed at
+    teardown (issue #4450). Restore the modules into ordinary tensors on
+    ``device`` and drop the hooks, so the in-session model is the same model
+    ``offload_to_disk=False`` produces. The bundle's weights map hands GPTQ
+    modules their live qzero layout (issue #4380).
+
+    ``strict=True`` raises the reload-the-checkpoint error when a module keeps
+    meta tensors; otherwise the failure is only logged. Returns the names of
+    modules that could not be restored.
+    """
+
+    targets = [
+        (name, module)
+        for name, module in model.named_modules()
+        if _owns_offload_hook(module)
+    ]
+    unresolved: List[str] = []
+    for name, module in targets:
+        try:
+            undo_offload_to_disk(module, device=device)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn("Offload: failed to restore `%s`: %s", name, exc)
+            unresolved.append(name)
+            continue
+        if is_meta_module(module) or _owns_offload_hook(module):
+            unresolved.append(name)
+
+    if not unresolved:
+        return []
+
+    message = (
+        "Offload: quantized modules remain disk-offloaded after quantization "
+        f"({', '.join(unresolved[:8])}{', ...' if len(unresolved) > 8 else ''}). "
+        "The in-session model cannot run inference; reload the saved checkpoint "
+        "before using it."
+    )
+    if strict:
+        raise RuntimeError(message)
+    log.error(message)
+    return unresolved
+
+
+def _owns_meta_tensor(module: nn.Module) -> bool:
+    tensors = list(module.parameters(recurse=False)) + list(module.buffers(recurse=False))
+    return any(tensor.is_meta for tensor in tensors)
+
+
+@torch.inference_mode(False)
+def replace_inference_parameters(module: nn.Module) -> None:
+    """Rebind ``module``'s inference-mode parameters as ordinary parameters.
+
+    The lazy checkpoint source materializes under ``torch.inference_mode``.
+    ``nn.Module.to()`` updates parameters in place, which an inference tensor
+    refuses outside that mode ("Inference tensors do not track version
+    counter"), so a later ``model.to(device)`` on the in-session model failed.
+    Buffers are reassigned by ``to()`` and need no rebinding.
+    """
+
+    for submodule in module.modules():
+        for name, param in list(submodule.named_parameters(recurse=False)):
+            if param.is_inference():
+                setattr(submodule, name, nn.Parameter(param.clone(), requires_grad=param.requires_grad))
+
+
+def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:
+    """Fill non-quantized modules that the lazy shell never materialized.
+
+    With ``offload_to_disk=True`` the model is loaded as a checkpoint-backed
+    meta shell, and modules outside the layer loop and the base-module list
+    (an untied ``lm_head``, for example) stay on meta until ``save()`` reads
+    them. ``offload_to_disk=False`` loads them into memory up front, so copy
+    them from the source checkpoint here to give the in-session model the same
+    end state (issue #4450). Packed quantized modules are skipped: their
+    payload never comes from the dense checkpoint.
+
+    Returns the names of modules that still own meta tensors; they are logged,
+    not raised, because the saved checkpoint stays correct either way.
+    """
+
+    model = qmodel.model
+    materialize = getattr(qmodel, "shell_direct_meta_materialize", None)
+    quantized_prefixes: List[str] = []
+    unresolved: List[str] = []
+    for name, module in model.named_modules():
+        if any(name.startswith(prefix) for prefix in quantized_prefixes):
+            continue
+        if getattr(module, "QUANT_TYPE", None) is not None:
+            quantized_prefixes.append(f"{name}.")
+            continue
+        if not _owns_meta_tensor(module):
+            continue
+        if callable(materialize):
+            try:
+                materialize(target_submodule=module, device=device)
+                replace_inference_parameters(module)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warn("Offload: failed to materialize `%s` from the source checkpoint: %s", name, exc)
+        if _owns_meta_tensor(module):
+            unresolved.append(name)
+
+    if unresolved:
+        log.error(
+            "Offload: modules remain on the meta device after quantization (%s). "
+            "The in-session model cannot run inference; reload the saved checkpoint "
+            "before using it.",
+            ", ".join(unresolved[:8]) + (", ..." if len(unresolved) > 8 else ""),
+        )
+    return unresolved
+
+
 # Serialize access to module.state_dict(), which is not thread-safe under
 # concurrent calls that mutate the same parent module.
 def _prepare_offload_directory(target_dir: str) -> None:
@@ -432,6 +571,57 @@ def _source_shard_tensor_map(root: str, index_path: str) -> Optional[dict[str, t
     return tensor_map
 
 
+def _source_payload_sha256_if_equal(
+    tensor: torch.Tensor,
+    path: str,
+    offset: int,
+    nbytes: int,
+) -> Optional[str]:
+    """Return the payload's sha256 when ``tensor`` holds exactly those bytes.
+
+    The source range is streamed through one reusable buffer of at most
+    ``_SOURCE_COMPARE_CHUNK_BYTES``, and the live tensor is compared through a
+    byte view of its own storage. Neither side is materialized as a second
+    full-size host tensor, and the source is read with ``readinto`` rather than
+    mapped, so the check adds at most one chunk to the process RSS. The digest
+    is computed over the bytes just compared, which are the live tensor's
+    bytes. Returns ``None`` on any byte difference or a short source.
+    """
+
+    live = tensor.detach()
+    if live.is_conj() or live.is_neg():
+        live = live.resolve_conj().resolve_neg()
+    live = live.reshape(-1).view(torch.uint8)
+    if live.numel() != nbytes:
+        return None
+    digest = hashlib.sha256()
+    if nbytes == 0:
+        return digest.hexdigest()
+
+    scratch = bytearray(min(nbytes, _SOURCE_COMPARE_CHUNK_BYTES))
+    scratch_view = memoryview(scratch)
+    scratch_tensor = torch.frombuffer(scratch, dtype=torch.uint8)
+    with open(path, "rb", buffering=0) as handle:
+        handle.seek(offset)
+        position = 0
+        while position < nbytes:
+            length = min(len(scratch), nbytes - position)
+            filled = 0
+            while filled < length:
+                read = handle.readinto(scratch_view[filled:length])
+                if not read:
+                    return None
+                filled += read
+            live_chunk = live[position:position + length]
+            if live_chunk.device.type != "cpu":
+                live_chunk = live_chunk.to("cpu")
+            if not torch.equal(scratch_tensor[:length], live_chunk):
+                return None
+            digest.update(scratch_view[:length])
+            position += length
+    return digest.hexdigest()
+
+
 def _module_source_reference_index(
     module: nn.Module,
     *,
@@ -444,7 +634,9 @@ def _module_source_reference_index(
 
     Returns ``None`` when any module tensor is absent from the source, has a
     different dtype/shape, differs in content, or lives inside the offload
-    directory. The caller then falls back to serializing a bundle.
+    directory. The caller then falls back to serializing a bundle. Content is
+    proven byte for byte against the source payload in bounded chunks
+    (`_source_payload_sha256_if_equal`), never by loading the source tensor.
     """
 
     try:
@@ -494,25 +686,19 @@ def _module_source_reference_index(
             return None
 
         try:
-            with safe_open(path, framework="pt", device="cpu") as handle:
-                source = handle.get_tensor(source_key)
-        except (KeyError, OSError, RuntimeError):
+            sha256 = _source_payload_sha256_if_equal(tensor, path, data_base + start, end - start)
+        except OSError:
             return None
-        if (
-            source.dtype != tensor.dtype
-            or tuple(source.shape) != tuple(tensor.shape)
-            or not torch.equal(source, tensor)
-        ):
+        if sha256 is None:
             return None
 
-        _owner, buffer = tensor_buffer(tensor)
         index[key] = {
             "dtype": str(tensor.dtype).removeprefix("torch."),
             "shape": list(tensor.shape),
             "safetensors_file": path,
             "weight_name": source_key,
             "data_offsets": [data_base + start, data_base + end],
-            "sha256": hashlib.sha256(buffer).hexdigest(),
+            "sha256": sha256,
         }
     return index
 
@@ -1161,6 +1347,26 @@ def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype
     return True
 
 
+def _drop_restored_class_forward(module: nn.Module) -> None:
+    """Return ``forward`` dispatch to the module's class after hook removal.
+
+    ``remove_hook_from_module`` restores the pre-hook forward by assigning the
+    bound method to the instance (``module.forward = module._old_forward``).
+    That pins the class the module had when it was offloaded: a later
+    in-place kernel switch (``rehome_quantized_kernel`` swapping AWQ GEMM for
+    the portable Torch kernel) would keep running the old class's forward.
+    Drop the instance attribute when it is just the class's own forward.
+    """
+
+    bound = module.__dict__.get("forward")
+    if (
+        bound is not None
+        and getattr(bound, "__self__", None) is module
+        and getattr(bound, "__func__", None) is getattr(type(module), "forward", None)
+    ):
+        del module.__dict__["forward"]
+
+
 def undo_offload_to_disk(
     module: nn.Module,
     device: torch.device = CPU,
@@ -1240,6 +1446,8 @@ def undo_offload_to_disk(
         with torch.inference_mode(False), torch.no_grad():
             remove_hook_from_submodules(module)      # public API
             remove_hook_from_module(module, recurse=False)  # ensure root is also clean
+            for sub in module.modules():
+                _drop_restored_class_forward(sub)
 
             for sub, name, is_param, requires_grad in offloaded_leaves:
                 tensor = getattr(sub, name)

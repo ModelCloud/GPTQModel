@@ -197,6 +197,29 @@ def test_qqq_torch_forward_is_bitwise_unchanged(group_size):
     assert "reduce_buffer" not in module._buffers
 
 
+def _gemm_library_transient_bytes(rows: int, in_features: int, out_features: int) -> int:
+    """Per-call transient of a bare FP32 GEMM with the forward's shape.
+
+    The bound below covers QQQ's own temporaries. The BLAS library's per-call
+    workspace is outside the kernel's control and differs by platform: about
+    8 MiB with cuBLAS, but about 80 MiB with hipBLASLt on ROCm for this
+    M=1 shape (#4462), which alone exceeds the bound.
+    """
+
+    a = torch.randn(rows, in_features, dtype=torch.float32, device="cuda")
+    b = torch.randn(in_features, out_features, dtype=torch.float32, device="cuda")
+    with torch.inference_mode():
+        torch.matmul(a, b)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    with torch.inference_mode():
+        out = torch.matmul(a, b)
+    torch.cuda.synchronize()
+    transient = torch.cuda.max_memory_allocated() - base
+    return max(0, transient - out.numel() * out.element_size())
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_qqq_torch_cuda_forward_peak_transient_is_bounded():
@@ -206,6 +229,7 @@ def test_qqq_torch_cuda_forward_peak_transient_is_bounded():
         in_features=896, out_features=4864, group_size=128, dtype=torch.bfloat16
     ).to("cuda")
     x = torch.randn(1, 896, dtype=torch.bfloat16, device="cuda")
+    gemm_workspace = _gemm_library_transient_bytes(1, module.in_features, module.out_features)
 
     with torch.inference_mode():
         module(x)
@@ -215,11 +239,15 @@ def test_qqq_torch_cuda_forward_peak_transient_is_bounded():
     with torch.inference_mode():
         output = module(x)
     torch.cuda.synchronize()
-    transient = torch.cuda.max_memory_allocated() - base
+    transient = torch.cuda.max_memory_allocated() - base - gemm_workspace
 
     weight_bytes = module.in_features * module.out_features
-    # Pre-fix measured 108.06 MiB; the INT32/INT8 unpack measured 52.82 MiB.
-    assert transient < 70 * 2**20, f"transient peak {transient / 2**20:.2f} MiB"
+    # Pre-fix measured 108.06 MiB; the INT32/INT8 unpack measured 52.82 MiB
+    # (both on CUDA, including the ~8 MiB cuBLAS workspace now excluded).
+    assert transient < 70 * 2**20, (
+        f"transient peak {transient / 2**20:.2f} MiB "
+        f"(excluding {gemm_workspace / 2**20:.2f} MiB GEMM workspace)"
+    )
     assert transient < 16 * weight_bytes
     assert output.dtype == torch.bfloat16
     assert torch.isfinite(output).all()

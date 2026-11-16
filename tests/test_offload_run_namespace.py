@@ -196,7 +196,11 @@ def test_rebinding_private_offload_root_releases_the_previous_run_dir(tmp_path):
 def test_module_looper_failure_releases_private_run_dir(tmp_path, monkeypatch):
     shared = _shared_config(tmp_path)
     model = _dummy_qmodel(shared)
-    looper = ModuleLooper(model, processors=[SimpleNamespace(qcfg=shared)])
+    released = []
+    # ``loop()`` releases every processor's run workspace on failure too
+    # (``LoopProcessor.release_run_workspace``), so the stub needs the hook.
+    processor = SimpleNamespace(qcfg=shared, release_run_workspace=lambda: released.append(True))
+    looper = ModuleLooper(model, processors=[processor])
     run_root = Path(model.quantize_config.offload_to_disk_path)
     assert run_root.is_dir()
 
@@ -209,6 +213,7 @@ def test_module_looper_failure_releases_private_run_dir(tmp_path, monkeypatch):
         looper.loop()
 
     assert not run_root.exists()
+    assert released == [True]
 
 
 def test_base_model_save_keeps_private_run_dir_for_in_session_use(tmp_path):

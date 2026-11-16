@@ -230,12 +230,12 @@ pin is skipped — either opt-in, or any opt-out spelling of
 `KernelConfig.rocm_quant_blas` (`gptqmodel/utils/rocm.py:151`, called from
 `quantize_tuning`).
 
-```bash
+```python
 # Reproducible (default)
-python quantize.py
+qcfg = QuantizeConfig(bits=4)
 
 # Faster, not reproducible across processes: the warning is intentional
-KernelConfig(rocm_quant_blas="hipblaslt") python quantize.py
+qcfg = QuantizeConfig(bits=4, runtime=RuntimeConfig(rocm_quant_blas="hipblaslt"))
 ```
 
 ## Failure and ambiguity paths
@@ -246,7 +246,7 @@ KernelConfig(rocm_quant_blas="hipblaslt") python quantize.py
 | Caller sets `ROCBLAS_USE_HIPBLASLT` (including `1` or an empty string) | GPT-QModel writes nothing; rocBLAS sees the caller's value, and `1` warns that checkpoints may differ across processes |
 | Caller sets `KernelConfig(rocm_quant_blas="hipblaslt")` | the run keeps hipBLASLt; `quantize_tuning` warns once that checkpoints may differ across processes |
 | Caller sets `KernelConfig.rocm_quant_blas` to `""`, `0`, `off` or `default` | the pin is skipped, so the run stays on hipBLASLt; `quantize_tuning` warns once, the same as for the explicit opt-in |
-| Caller sets an unrecognised `KernelConfig.rocm_quant_blas` value | it is ignored: the reproducible rocBLAS default is used and nothing is logged |
+| Caller sets an unrecognised `KernelConfig.rocm_quant_blas` value (for example `"hipblas_lt"`) | `KernelConfig` raises `ValueError` at construction; a typo never silently selects rocBLAS |
 | Non-ROCm host | CUDA allocator default is installed; `ROCBLAS_USE_HIPBLASLT` is never written; the override is a no-op |
 | BLAS call before `import gptqmodel` | rocBLAS has already fixed its kernel choice; the variable cannot change that process. Import GPT-QModel before the first BLAS call. |
 

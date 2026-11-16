@@ -128,7 +128,9 @@ class GGUFCPPConfig(GGUFTorchConfig):
 
 
 @dataclass(frozen=True)
-class GGUFCUDAConfig(GGUFTorchConfig):
+class GGUFCUDAConfig(BackendConfig):
+    """ggml-cuda runs every GGUF matmul; the Torch fused-forward gates do not apply."""
+
     backend: ClassVar[BACKEND] = BACKEND.GGUF_CPP_CUDA
 
 
@@ -174,9 +176,11 @@ class BitsAndBytesConfig(BackendConfig):
     backend: ClassVar[BACKEND] = BACKEND.BITSANDBYTES
     _kernel_fields: ClassVar[dict[str, str]] = {
         "cpu_packed": "bitsandbytes_cpu_packed", "cpu_int8_dense": "bitsandbytes_cpu_int8_dense",
+        "triton": "bitsandbytes_triton",
     }
     cpu_packed: bool = False
     cpu_int8_dense: bool = True
+    triton: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,7 @@ class RuntimeConfig(_KernelSettings):
     cpu_workers: Optional[int] = None
     cuda_workers: Optional[int] = None
     max_packers: Optional[int] = None
+    pool_intraop_threads: Optional[int] = None
     gptq_fused_block_update: bool = True
     npu_cholesky_block_size: int = 64
     floatx_cpu_threads: Optional[int] = None
@@ -251,31 +256,51 @@ def resolve_backend_config(
 
 
 def resolve_quantize_backend(backend, qcfg, kernel=None, runtime=None, *, inherit=False):
-    """Retain a dense model's typed choice and distinguish its generated policy.
+    """Resolve a quantization config's backend and policy at an API boundary.
 
-    A generated adapter is not a second caller-supplied legacy policy. Identity
-    tracking lets quantize() reuse/replace a typed choice while still rejecting
-    an independently supplied kernel= policy.
+    ``qcfg.kernel`` and ``qcfg.runtime`` hold only caller-supplied settings:
+    those given on the config itself and the loader's ``kernel=`` /
+    ``runtime=`` arguments, which replace the field of the same kind. The
+    policy derived from them and a typed backend is kept in
+    ``qcfg._resolved_kernel``, never written back to ``qcfg.kernel``, so a
+    later call cannot mistake it for a caller-supplied legacy policy.
+
+    A legacy kernel conflicts with a typed backend or a runtime wherever each
+    was supplied (argument or config field). ``inherit=True`` lets
+    ``quantize(backend=AUTO)`` keep the dense load's typed selection; every
+    other call replaces it.
     """
     if qcfg is None:
         return resolve_backend_config(backend, kernel, runtime)
     if inherit and not isinstance(backend, BackendConfig) and normalize_backend(backend) == BACKEND.AUTO:
-        backend = getattr(qcfg, "_backend_config", backend)
-    typed_backend = backend if isinstance(backend, BackendConfig) else None
-    if kernel is None:
-        kernel = qcfg.kernel
-    if typed_backend is not None and kernel is not None and kernel is getattr(qcfg, "_backend_kernel", None):
-        kernel = None
-    if runtime is None and kernel is None:
-        runtime = qcfg.runtime
-    selected, policy = resolve_backend_config(backend, kernel, runtime)
-    if typed_backend is not None:
-        qcfg._backend_config = typed_backend
-        qcfg._backend_kernel = policy
+        backend = getattr(qcfg, "_backend_config", None) or backend
+    if kernel is not None:
+        kernel = _coerce_kernel_config(kernel)
+    if runtime is not None and not isinstance(runtime, RuntimeConfig):
+        raise TypeError("runtime must be a RuntimeConfig or None")
+    effective_kernel = kernel if kernel is not None else qcfg.kernel
+    effective_runtime = runtime if runtime is not None else qcfg.runtime
+    if effective_kernel is not None:
+        kernel_source = "kernel=" if kernel is not None else "QuantizeConfig.kernel"
+        if isinstance(backend, BackendConfig):
+            raise ValueError(
+                f"backend=BackendConfig(...) and legacy {kernel_source} cannot be supplied together; "
+                "move shared settings to RuntimeConfig"
+            )
+        if effective_runtime is not None:
+            runtime_source = "runtime=" if runtime is not None else "QuantizeConfig.runtime"
+            raise ValueError(
+                f"{runtime_source} and legacy {kernel_source} cannot be supplied together; "
+                "use one policy source"
+            )
+    selected, policy = resolve_backend_config(backend, effective_kernel, effective_runtime)
+    # Record caller settings only once they validated together.
+    if kernel is not None:
+        qcfg.kernel = kernel
     if runtime is not None:
         qcfg.runtime = runtime
-    if policy is not None:
-        qcfg.kernel = policy
+    qcfg._backend_config = backend if isinstance(backend, BackendConfig) else None
+    qcfg._resolved_kernel = policy
     return selected, policy
 
 

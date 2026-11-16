@@ -7,7 +7,7 @@ import copy
 import math
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch as t  # conflict with torch.py
@@ -38,6 +38,52 @@ from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+def new_validation_error(error_type, message):
+    """Rebuild a validation error from cached ``(type, message)`` metadata.
+
+    Validation caches must not hold exception objects: a raised exception's
+    ``__traceback__``, ``__cause__`` and ``__context__`` keep the frames that
+    were live at the failure, and through ``f_back`` every caller frame,
+    including a model being loaded. Each caller gets a fresh exception instead.
+    """
+
+    if error_type is None:
+        return None
+    try:
+        return error_type(message)
+    except Exception:
+        return ValueError(message)
+
+
+def _cache_validation_status(validate_once):
+    """``lru_cache`` a ``validate_once`` result as immutable status metadata.
+
+    The cache stores ``(ok, error_type, message)`` and each call returns a new
+    exception, so a failed probe never pins the frames it failed in and a
+    caller that raises the returned error cannot attach a traceback to the
+    cached entry. ``cache_clear`` and ``cache_info`` stay on the wrapper.
+    """
+
+    @lru_cache(maxsize=1024)
+    def status(cls):
+        ok, error = validate_once(cls)
+        if not ok and error is not None:
+            message = str(error)
+            error_type = type(error) if isinstance(error, BaseException) else ValueError
+            return False, error_type, message
+        return True, None, None
+
+    @wraps(validate_once)
+    def cached(cls):
+        ok, error_type, message = status(cls)
+        return ok, new_validation_error(error_type, message)
+
+    cached.cache_clear = status.cache_clear
+    cached.cache_info = status.cache_info
+    return cached
+
 
 #: Element budget for one ``pack_gpu`` input block. The packer keeps several
 #: ``[out_features, block_in]`` tensors live (fp32 rounding, int32 transpose,
@@ -288,6 +334,14 @@ class BaseQuantLinear(nn.Module):
 
     REQUIRES_FORMAT_V2: bool = False
     AUTOTUNE: bool = False
+
+    # Floating buffers whose dtype follows the model dtype at load time:
+    # activation-side operands the forward consumes at the activation dtype.
+    # Every other persistent floating buffer is quantization state (scales,
+    # zero points, codebook scales, sign vectors, ...) and loads at the dtype
+    # the checkpoint stores, because the kernel computes with that precision.
+    # See docs/checkpoint-and-runtime-contracts.md section 4.
+    MODEL_DTYPE_BUFFERS: Tuple[str, ...] = ("bias",)
 
     def __init__(self,
                  bits: int,
@@ -590,15 +644,9 @@ class BaseQuantLinear(nn.Module):
         return self._autotune_result
 
     @classmethod
-    @lru_cache(maxsize=1024)
+    @_cache_validation_status
     def cached_validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        ok, exp = cls.validate_once()
-
-        if not ok and exp is not None:
-            exp.with_traceback(None)
-            return False, exp
-
-        return True, None
+        return cls.validate_once()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

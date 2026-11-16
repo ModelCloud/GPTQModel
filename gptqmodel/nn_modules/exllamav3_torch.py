@@ -277,6 +277,9 @@ def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
 
 class ExllamaV3TorchLinear(nn.Module):
     QUANT_TYPE = "exl3"
+    # Every floating EXL3 buffer (the fp16 `suh`/`svh` sign vectors and the
+    # bias) loads at its checkpoint dtype; the Hadamard kernels require fp16.
+    MODEL_DTYPE_BUFFERS = ()
     SUPPORTS_SHARDS = True
     SUPPORTS_DEVICES = [DEVICE.ALL]
 

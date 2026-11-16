@@ -760,9 +760,21 @@ def _indexed_device_request(device) -> Optional[str]:
     """
 
     if isinstance(device, int) and not isinstance(device, bool):
+        if device < 0:
+            raise ValueError(f"device={device} is not an accelerator ordinal; ordinals start at 0.")
         targets = _selector_devices(device)
         assert targets is not None
-        return str(targets[0])
+        target = targets[0]
+        # Fail here with the visible range rather than later with the
+        # runtime's "invalid device ordinal".
+        runtime = getattr(torch, target.type, None)
+        count = runtime.device_count() if hasattr(runtime, "device_count") else None
+        if count is not None and device >= count:
+            raise ValueError(
+                f"device={device} is not a visible {target.type} ordinal; this process sees "
+                f"{count} {target.type} device(s)."
+            )
+        return str(target)
 
     if isinstance(device, str) and ":" in device:
         return device
@@ -1842,11 +1854,6 @@ def ModelLoader(cls):
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
-        if kernel is not None and quantize_config is not None:
-            # The loopers read this field and install it before kernel selection.
-            quantize_config.kernel = (
-                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
-            )
 
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
@@ -2479,8 +2486,9 @@ def ModelLoader(cls):
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
 
         # Runtime policy belongs to this checkpoint's modules, not whichever
-        # model most recently installed a process policy.
-        qcfg.kernel = kernel
+        # model most recently installed a process policy. It is a resolved
+        # policy, not a caller-supplied `kernel=`, so keep it out of qcfg.kernel.
+        qcfg._resolved_kernel = kernel
 
         if adapter is None:
             if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
@@ -3358,11 +3366,6 @@ def ModelLoader(cls):
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
-                # EXL3 stores ``suh``/``svh`` as fp16 because its Hadamard
-                # kernels require that dtype. ``from_config(dtype=...)`` and
-                # accelerate's cast would otherwise rewrite them in the model
-                # dtype (issue #4379).
-                restore_checkpoint_buffer_dtypes=(format_code == FORMAT.EXL3),
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,

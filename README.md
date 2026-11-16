@@ -65,7 +65,7 @@ compatible deployment engine.
 | **[GPTQ](https://github.com/ModelCloud/GPTQModel/wiki/GPTQ)** | Calibration-driven, low-bit weight quantization with mixed precision and broad checkpoint/runtime support. |
 | **[AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)** | Activation-aware weight quantization, including dense and MoE workflows. |
 | **[RTN](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#rtn-w4a16-without-calibration)** | Round-to-nearest weight quantization when a calibration-free baseline is useful. |
-| **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paroquant-optimization.md). |
+| **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paroquant-optimization.md). [Fused rotation backward](docs/paroquant.md#fused-rotation-backward). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
 | **[QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ)** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
 | **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). |
@@ -89,7 +89,9 @@ Quantized kernels keep only packed weights resident; shared per-device scratch a
 - **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
   execution help manage memory and recover interrupted jobs. [Disk-offload run
   directories](https://github.com/ModelCloud/GPTQModel/blob/main/docs/offload-run-directories.md)
-  are per-run scratch space and are removed at teardown or failure;
+  are per-run scratch space and are removed at teardown or failure, and the
+  [in-session model](https://github.com/ModelCloud/GPTQModel/blob/main/docs/in-session-model-after-offload.md)
+  is fully materialized when `quantize()` returns;
   [reference offload](https://github.com/ModelCloud/GPTQModel/blob/main/docs/safetensors-reference-offload.md)
   keeps untouched base modules as source-checkpoint references instead of
   second copies, and releases pinned staging memory. Quantized MoE reloads park
@@ -238,6 +240,9 @@ Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
+Quantized modules load their scales and other quantization buffers at the dtype
+the checkpoint stores, whatever model dtype you request; see
+[checkpoint buffer dtype](docs/checkpoint-and-runtime-contracts.md#4-checkpoint-buffer-dtype).
 
 ### Quantization 🗜️
 

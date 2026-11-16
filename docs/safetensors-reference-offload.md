@@ -91,17 +91,18 @@ normal Accelerate disk-offload hook, so `undo_offload_to_disk()` still
 materializes the module in-session.
 
 The reference is fail-closed. Every module tensor must be present in the
-source, with the same dtype and shape, and its bytes must compare equal with
-`torch.equal`; otherwise the looper writes the old `module.safetensors`
-bundle. A source inside the target offload directory is also rejected. This
-covers fusion and rotation, which can rewrite a base module before the offload.
+source, with the same dtype and shape, and its bytes must equal the source
+payload; otherwise the looper writes the old `module.safetensors` bundle. A
+source inside the target offload directory is also rejected. This covers
+fusion and rotation, which can rewrite a base module before the offload.
 
 ```mermaid
 flowchart TD
     A["offload_to_disk(base_modules, source_root, source_checkpoint)"] --> B["_source_checkpoint_tensor_map<br/>model.safetensors or index.json"]
     B -- "not safetensors" --> E["_bundle_module_state_dict<br/>write module.safetensors"]
     B -- "mapped" --> C["_module_source_reference_index"]
-    C --> D{"every tensor present,<br/>same dtype/shape,<br/>torch.equal bytes,<br/>outside offload dir?"}
+    C --> P["_source_payload_sha256_if_equal<br/>readinto one 16 MiB chunk,<br/>torch.equal vs live uint8 view,<br/>sha256 the compared bytes"]
+    P --> D{"every tensor present,<br/>same dtype/shape,<br/>equal bytes,<br/>outside offload dir?"}
     D -- "no" --> E
     D -- "yes" --> F["write index.json only"]
     F --> G["disk_offload installs Accelerate hook"]
@@ -113,6 +114,33 @@ flowchart TD
 
 The offload directory for the Llama-3.2-1B `embed_tokens` tensor drops from
 525,336,576 B to a 367 B index; the restored tensor is bitwise identical.
+
+### Bounded host memory for the content check
+
+The first version proved content by loading each source tensor
+(`safe_open(...).get_tensor()`, `gptqmodel/utils/offload.py:498` before #4463)
+and comparing it with `torch.equal`. That is a full owned copy plus the
+mapped file pages, so the check cost about twice the embedding size in peak
+RSS, more than the disk it saved. `_source_payload_sha256_if_equal` now reads
+the payload range with `readinto` into one reusable buffer of
+`_SOURCE_COMPARE_CHUNK_BYTES` (16 MiB) and compares it with the matching
+slice of a `uint8` view of the live tensor. The index `sha256` is computed
+over the same bytes, so export still verifies the source against the live
+tensor's digest. The comparison is now bytewise: `-0.0` against `0.0` falls
+back to a bundle, and identical NaN payloads still qualify for a reference.
+
+| Measurement (CUDA 4090, GPTQ 4-bit, 128 samples, `offload_to_disk=True`) | Before (`4bc0413`) | After |
+| --- | --- | --- |
+| Llama-3.2-1B, RSS added inside the base-module `offload_to_disk` (RssAnon / RssFile) | +502 / +502 MiB | +1 / +0 MiB |
+| Qwen2.5-0.5B, the same | +261 / +261 MiB | +1 / +0 MiB |
+| Llama-3.2-1B, quantize peak RSS / offload temp disk peak | 3954 MiB / 484 MiB | 3327 MiB / 475 MiB |
+| Qwen2.5-0.5B, quantize peak RSS / offload temp disk peak | 3098 MiB / 179 MiB | 2842 MiB / 179 MiB |
+
+Saved checkpoints are byte-identical before and after.
+`tests/test_offload_reference_rss_4463.py` checks chunk boundaries, a one-bit
+difference in the first and last chunk, and that the check raises the peak RSS
+(`VmHWM`) by less than one chunk plus slack for a 128 MiB tensor (the old
+check added about 90 MiB there).
 `tests/test_offload_reference_4395.py` covers single-file and sharded sources,
 the content-mismatch fallback, and an end-to-end quantize/save round trip.
 

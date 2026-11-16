@@ -166,12 +166,20 @@ def test_public_entry_points_forward_typed_selection(monkeypatch, tmp_path, entr
     if entry == "from_pretrained":
         kwargs["quantize_config"] = QuantizeConfig(runtime=RuntimeConfig(max_packers=2))
     assert getattr(GPTQModel, entry)(str(tmp_path), **kwargs) is result
-    assert captured["backend"] is BACKEND.MARLIN
-    policy = captured.get("kernel") or captured["quantize_config"].kernel
-    assert policy.marlin_fp32 is False
     if entry == "from_pretrained":
+        # The model definition re-resolves the caller's own arguments against
+        # the same config, so it receives them unchanged.
+        qcfg = captured["quantize_config"]
+        assert captured["backend"] is kwargs["backend"]
+        assert captured["kernel"] is None
+        assert qcfg.kernel is None
+        assert qcfg._backend_config == kwargs["backend"]
+        policy = resolve_kernel_config(qcfg)
         assert policy.max_packers == 2
-        assert captured["quantize_config"]._backend_config == kwargs["backend"]
+    else:
+        assert captured["backend"] is BACKEND.MARLIN
+        policy = captured["kernel"]
+    assert policy.marlin_fp32 is False
 
 
 def _torch_layer(config):
