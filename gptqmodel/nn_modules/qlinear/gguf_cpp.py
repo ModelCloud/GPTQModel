@@ -843,7 +843,17 @@ def _get_ggml_bridge() -> _GGMLBridge:
 def _finish_ggml_output(
     module: GGUFTorchLinear, x_flat: torch.Tensor, output: torch.Tensor
 ) -> torch.Tensor:
-    """Add the stored bias before rounding a ggml result to the input dtype."""
+    """Add the stored bias before rounding a ggml result to the input dtype.
+
+    Tolerance: the native ggml kernel quantizes activations to Q8_1/Q8_K before
+    the K-quant dot product, so an unbiased result differs from an FP32
+    dequantized-weight oracle by roughly 1e-2 relative error (see #4219). That
+    loss is inherent to ``GGUF_CPP``; ``GGUF_TORCH`` is the exact path. The
+    biased case below is recomputed in FP32 instead, because a low-precision
+    ggml output may already have rounded or overflowed the dot product (for
+    example ``inf`` for a finite sum) before the bias can cancel it, so adding
+    the bias to the ggml result would not be reproducible either.
+    """
 
     bias = module.bias
     if bias is not None and (
@@ -946,34 +956,28 @@ class GGUFCppKernel(GGUFTorchLinear):
             return self._forward_fused_k(x_flat, bias=bias)
         return self._forward_dequant_matmul(x_flat, bias=bias)
 
+    def _ggml_cpu_matmul_key(self, x_flat: torch.Tensor) -> tuple:
+        return (x_flat.shape[0], x_flat.dtype, self.gguf_tensor_qtype)
+
     def _use_ggml_cpu_matmul(self, x_flat: torch.Tensor) -> bool:
+        """Whether this forward should use the native ggml CPU matmul.
+
+        The choice is capability-based and therefore stable for a given config:
+        the native kernel is used whenever the CPU backend has a vec_dot for
+        the weight layout. It used to be decided by timing the two paths,
+        which made the numerics (ggml quantizes activations, the torch path
+        does not) depend on the machine and on the run (#4219). An explicit
+        ``GPTQMODEL_GGUF_CPP_NATIVE_MATMUL`` still overrides the choice, and a
+        layout that fails at compute time is recorded as unusable so the
+        following calls take the exact torch path.
+        """
+
         if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
             return False
         override = os.environ.get("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL")
         if override is not None:
             return override.strip().lower() not in {"0", "false", "off"}
-
-        key = (x_flat.shape[0], x_flat.dtype, self.gguf_tensor_qtype)
-        cached = self._gguf_cpu_autotune_cache.get(key)
-        if cached is None:
-            try:
-                ggml_time = self._benchmark_forward_runner(
-                    lambda: _finish_ggml_output(
-                        self, x_flat, self._forward_ggml_cpu(x_flat)
-                    ),
-                    device=x_flat.device,
-                )
-                torch_time = self._benchmark_forward_runner(
-                    lambda: self._forward_torch_cpu(x_flat, bias=self.bias),
-                    device=x_flat.device,
-                )
-                cached = ggml_time <= torch_time
-            except Exception:
-                # Any benchmark failure (including qtypes ggml cannot matmul)
-                # falls back to the always-correct torch path.
-                cached = False
-            self._gguf_cpu_autotune_cache[key] = cached
-        return cached
+        return self._gguf_cpu_autotune_cache.get(self._ggml_cpu_matmul_key(x_flat), True)
 
     def clear_autotune(self):
         super().clear_autotune()
@@ -991,7 +995,14 @@ class GGUFCppKernel(GGUFTorchLinear):
             )
 
         if self._use_ggml_cpu_matmul(x_flat):
-            output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
+            try:
+                output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
+            except Exception:
+                # A layout the backend cannot actually run must not make the
+                # path depend on timing or on call order: remember it and take
+                # the exact torch path from here on.
+                self._gguf_cpu_autotune_cache[self._ggml_cpu_matmul_key(x_flat)] = False
+                output = self._forward_torch_cpu(x_flat, bias=self.bias).to(x_flat.dtype)
         else:
             output = self._forward_torch_cpu(x_flat, bias=self.bias).to(x_flat.dtype)
 
