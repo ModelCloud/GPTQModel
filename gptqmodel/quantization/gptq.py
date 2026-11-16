@@ -1440,6 +1440,18 @@ class GPTQ:
             self._record_hessian_ready(copy.device)
             self._defer_hessian_sources([source], self._hessian_ready_event)
 
+        # Adoption is the last consumer of the leader's reduction partials and
+        # of the follower's reference to ``leader.H``.  Release both now rather
+        # than at each task's own ``quantize()``: otherwise every leader/
+        # follower pair keeps leader H + leader partial + follower copy alive
+        # simultaneously until quantization begins.  Both registries only hold
+        # sources that a consuming stream may still be reading, so the
+        # synchronizing release is safe here and drops no live Hessian.
+        with leader.lock:
+            leader._release_deferred_hessian_sources()
+        with self.lock:
+            self._release_deferred_hessian_sources()
+
     def attach_shared_hessian_cache(self, cache: Optional[SharedHessianFactorCache]) -> None:
         """Attach the current layer/group cache to this task."""
 
