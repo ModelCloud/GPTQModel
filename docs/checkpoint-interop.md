@@ -271,6 +271,16 @@ flowchart TD
     style G fill:#fff4cc,stroke:#b8860b
 ```
 
+The guard reads `g_idx` before any checkpoint is loaded, so the constructor
+placeholder is part of the contract. `MarlinLinear.__init__` seeds `g_idx` with
+the canonical `arange(K) // group_size` mapping instead of `torch.empty()`. The
+canonical mapping is the identity ordering: a checkpoint that omits `g_idx`
+for a `desc_act=False` layer stays on the contiguous path (and no longer fails
+tile-alignment validation for shapes such as K=288/N=200), while a
+`desc_act=True` module built without a checkpoint starts from the identity
+ordering rather than from uninitialised memory. A checkpoint that does store a
+real permutation still takes the activation-order path above.
+
 The motivating checkpoint, `Qwen2-1.5B-Instruct-GPTQ-4bits-gp32`, declares
 `desc_act: false` and stores a block-permuted `g_idx`. Layer-0 `q_proj`
 relative error against the Torch decode was 0.13885 before the change and
