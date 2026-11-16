@@ -140,17 +140,22 @@ _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 def _is_batched_column(value: Any) -> bool:
     """Return True when ``value`` holds one entry per calibration row."""
 
+    if isinstance(value, (str, bytes, bytearray)):
+        return False
     ndim = getattr(value, "ndim", None)
     if ndim is not None:
         return ndim >= 2
-    if isinstance(value, (list, tuple)):
-        if not value:
+    if isinstance(value, Sequence):
+        if len(value) == 0:
             return False
         first = value[0]
         first_ndim = getattr(first, "ndim", None)
         if first_ndim is not None:
             return first_ndim >= 1
-        return isinstance(first, (list, tuple))
+        # A nested sequence is a column of rows; a sequence of scalars is one
+        # token row. This also covers ``datasets.arrow_dataset.Column``, which
+        # is a ``Sequence`` but exposes neither ``ndim`` nor a ``list`` type.
+        return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
     return False
 
 
@@ -174,6 +179,33 @@ def _is_columnar_mapping(mapping: Mapping) -> bool:
             return False
         return len(value) > 0 and isinstance(value[0], (list, tuple))
     return False
+
+
+def calibration_input_row_count(dataset: Any) -> Optional[int]:
+    """Return the number of calibration rows, or ``None`` when unknown.
+
+    A columnar mapping stores one entry per *column*, so ``len(mapping)`` is the
+    number of columns (2 for ``input_ids``/``attention_mask``), not the number
+    of calibration rows. Report the primary column's length instead so callers
+    such as the size warning count rows.
+    """
+
+    if isinstance(dataset, Mapping):
+        if _is_columnar_mapping(dataset):
+            for name in _CALIBRATION_COLUMNS:
+                if name in dataset and dataset[name] is not None:
+                    try:
+                        return len(dataset[name])
+                    except TypeError:
+                        return None
+            return None
+        if any(name in dataset for name in _CALIBRATION_COLUMNS):
+            # A mapping that is not columnar describes one calibration row.
+            return 1
+    try:
+        return len(dataset)
+    except TypeError:
+        return None
 
 
 def _is_dataset_split_mapping(mapping: Mapping) -> bool:
@@ -398,6 +430,20 @@ def prepare_calibration_dataset(
             )
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
+
+        # An additive/extended mask encodes "attend" as 0 (or a positive bias)
+        # and "masked" as a negative bias. When such a mask is all zeros there
+        # is no padding at all, but ``normalize_seq_mask`` reads 0 as "drop" for
+        # a 0/1 mask and would erase every token. Resolve it here first so only
+        # genuinely masked positions are dropped. A 2-D integer 0/1 mask keeps
+        # the usual meaning: an all-zero row is all padding.
+        if (
+            mask_tensor.dtype != torch.bool
+            and mask_tensor.numel() > 0
+            and torch.count_nonzero(mask_tensor).item() == 0
+            and (mask_tensor.is_floating_point() or mask_tensor.ndim >= 3)
+        ):
+            mask_tensor = torch.ones_like(mask_tensor)
 
         try:
             keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
@@ -729,7 +775,8 @@ def prepare_calibration_dataset(
 
     if too_short_calibration_data_count > 0:
         log.warn(
-            f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+            f"Quantize: {too_short_calibration_data_count} calibration items were removed because every row was "
+            f"empty, all-padding, or <= {calibration_data_min_length} non-padding tokens. "
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
         )
 
@@ -806,6 +853,14 @@ def prepare_calibration_dataset(
             current_length = 0
 
         for row_ids, row_mask in _iter_calibration_rows(new_calibration_dataset):
+            # Strip pad positions before packing. Rows that needed trimming were
+            # already stripped above, but a padded row below the position budget
+            # (e.g. from `tokenizer(texts, padding=True)`) still carries pad ids
+            # that must never enter a concatenated window.
+            if not all(row_mask):
+                row_ids = [token for token, keep in zip(row_ids, row_mask) if keep]
+                row_mask = [keep for keep in row_mask if keep]
+
             position = 0
             row_length = len(row_ids)
 
@@ -841,7 +896,15 @@ def prepare_calibration_dataset(
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
-                pad_id = getattr(tokenizer, "pad_token_id", 0)
+                pad_id = getattr(tokenizer, "pad_token_id", None)
+                if pad_id is None:
+                    # A tokenizer without a pad token still needs a value for
+                    # the final window's tail. EOS is the conventional safe
+                    # fallback, then 0; the zero mask keeps these slots out of
+                    # the Hessian.
+                    pad_id = getattr(tokenizer, "eos_token_id", None)
+                if pad_id is None:
+                    pad_id = 0
                 if padding_side == "left":
                     input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
                     attention_mask_buff = ([0] * padding_length) + attention_mask_buff
