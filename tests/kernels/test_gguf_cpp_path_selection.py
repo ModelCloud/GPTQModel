@@ -43,11 +43,15 @@ def test_cpu_path_choice_is_capability_based_not_timed(monkeypatch):
     assert module._use_ggml_cpu_matmul(x) is True
     assert module._use_ggml_cpu_matmul(x) is True
 
-    # The explicit override still applies in both directions.
+    # New modules take the explicit override; existing modules keep their snapshot.
     configure_kernel(KernelConfig(gguf_cpp_native_matmul=False))
-    assert module._use_ggml_cpu_matmul(x) is False
+    assert module._use_ggml_cpu_matmul(x) is True
+    disabled = _kernel()
+    assert disabled._use_ggml_cpu_matmul(x) is False
     configure_kernel(KernelConfig(gguf_cpp_native_matmul=True))
     assert module._use_ggml_cpu_matmul(x) is True
+    assert disabled._use_ggml_cpu_matmul(x) is False
+    assert _kernel()._use_ggml_cpu_matmul(x) is True
 
 
 def test_cpu_path_choice_is_stable_across_repeated_calls(monkeypatch):

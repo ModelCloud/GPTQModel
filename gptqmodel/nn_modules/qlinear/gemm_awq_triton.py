@@ -228,7 +228,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
-        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
         requested_fp32_accum = kwargs.pop("fp32_accum", None)
         fp32_accum = bool(
             kernel.fp32_accum if requested_fp32_accum is None else requested_fp32_accum

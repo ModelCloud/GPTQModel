@@ -242,7 +242,7 @@ class TorchLinear(PackableQuantLinear):
             **kwargs)
 
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
-        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        kernel = resolve_kernel_config(self)
         self._streaming_enabled = kernel.torch_streaming
         self._stream_tile_cols = kernel.torch_stream_tile
         self._stream_double_buffers = 2
