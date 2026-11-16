@@ -32,6 +32,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [AWQ scaling groups](awq-scaling-groups.md)
 - [Calibration Hessian materialization](calibration-hessian-materialization.md)
 - [Calibration layer replay](calibration-replay.md)
+- [Calibration row trimming](calibration-row-trimming.md)
 - [Changelog archive](changelog/archive.md)
 - [Convolution capture padding](conv-capture-padding.md)
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)

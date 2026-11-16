@@ -108,6 +108,10 @@ compatible deployment engine.
   a block-diagonal per-document mask and keeps each row's original position;
   additive masks treat `0` as attended. See
   [AWQ calibration aggregation](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md).
+- **Trim padding before the position budget.** Over-long calibration rows are
+  measured on their real tokens, not their padded width, so a left-padded row
+  cannot lose real tokens to its own padding. See
+  [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
 
 ### Inference and deployment 🚢
 

@@ -103,3 +103,112 @@ def test_short_rows_are_not_trimmed():
 def test_invalid_truncation_side_is_rejected():
     with pytest.raises(ValueError, match="truncation_side"):
         _prepare(padding_side="left", truncation_side="middle")
+
+
+def _prepare_rows(rows, *, padding_side="left", truncation_side="right", max_positions=MAX_POSITIONS, batch=False, min_length=0):
+    tokenizer = _Tokenizer(padding_side, truncation_side)
+    qmodel = SimpleNamespace(
+        tokenizer=tokenizer,
+        support_batch_quantize=batch,
+        model=SimpleNamespace(
+            config=SimpleNamespace(max_position_embeddings=max_positions)
+        ),
+    )
+    dataset = [
+        {
+            "input_ids": [ids for ids, _ in rows],
+            "attention_mask": [mask for _, mask in rows],
+        }
+    ]
+    return prepare_calibration_dataset(
+        qmodel, dataset, batch_size=1, calibration_data_min_length=min_length
+    )
+
+
+def test_left_padded_overlong_row_strips_padding_before_the_budget():
+    """Issue #4238: the leading pads must not consume the position budget."""
+    ids = [0, 0, 11, 12, 13, 14]
+    mask = [0, 0, 1, 1, 1, 1]
+
+    prepared = _prepare_rows([(ids, mask)], max_positions=4, batch=True)
+
+    assert prepared[0]["input_ids"].tolist() == [[11, 12, 13, 14]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1, 1]]
+
+
+def test_padding_at_least_as_long_as_the_budget_keeps_real_tokens():
+    """The row used to survive as pure padding with an all-zero mask."""
+    ids = [0, 0, 0, 0, 0, 0, 11, 12]
+    mask = [0, 0, 0, 0, 0, 0, 1, 1]
+
+    prepared = _prepare_rows([(ids, mask)], max_positions=4, batch=True)
+
+    assert prepared[0]["input_ids"].tolist() == [[11, 12]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1]]
+
+
+def test_all_padding_row_is_dropped_instead_of_kept_empty():
+    ids = [0] * 8
+    mask = [0] * 8
+
+    # Same contract as the over-short filter: the row is dropped and counted,
+    # so no empty row ever reaches the Hessian.
+    prepared = _prepare_rows([(ids, mask)], max_positions=4, batch=True)
+
+    assert prepared == []
+
+
+def test_right_padding_is_stripped_too():
+    ids = [11, 12, 13, 14, 15, 0, 0]
+    mask = [1, 1, 1, 1, 1, 0, 0]
+
+    prepared = _prepare_rows([(ids, mask)], padding_side="right", max_positions=3, batch=True)
+
+    assert prepared[0]["input_ids"].tolist() == [[11, 12, 13]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1]]
+
+
+def test_truncation_side_left_keeps_the_real_tail():
+    ids = [0, 0, 11, 12, 13, 14]
+    mask = [0, 0, 1, 1, 1, 1]
+
+    prepared = _prepare_rows(
+        [(ids, mask)], truncation_side="left", max_positions=2, batch=True
+    )
+
+    assert prepared[0]["input_ids"].tolist() == [[13, 14]]
+
+
+def test_ragged_rows_after_stripping_are_re_padded_for_the_unbatched_path():
+    """`support_batch_quantize=False` stacks an item, so rows must line up."""
+    rows = [
+        ([0, 0, 11, 12, 13, 14], [0, 0, 1, 1, 1, 1]),
+        ([7, 8, 9, 10, 11, 12], [1, 1, 1, 1, 1, 1]),
+    ]
+
+    prepared = _prepare_rows(rows, max_positions=4, batch=False)
+
+    assert prepared[0]["input_ids"].tolist() == [[11, 12, 13, 14], [7, 8, 9, 10]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1, 1], [1, 1, 1, 1]]
+
+
+def test_all_padding_row_below_the_budget_is_dropped_too():
+    """The contract is "never emit an all-pad row", not "only when trimming"."""
+    ids = [0, 0, 0]
+    mask = [0, 0, 0]
+
+    prepared = _prepare_rows([(ids, mask)], max_positions=MAX_POSITIONS, batch=True)
+
+    assert prepared == []
+
+
+def test_padded_and_real_rows_in_one_item_keep_only_the_real_row():
+    rows = [
+        ([0, 0, 0, 0, 0], [0, 0, 0, 0, 0]),
+        ([5, 6, 7, 8, 9], [1, 1, 1, 1, 1]),
+    ]
+
+    prepared = _prepare_rows(rows, max_positions=3, batch=True)
+
+    assert prepared[0]["input_ids"].tolist() == [[5, 6, 7]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1]]

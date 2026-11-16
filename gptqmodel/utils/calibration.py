@@ -466,34 +466,78 @@ def prepare_calibration_dataset(
             f"Unsupported tokenizer.truncation_side `{truncation_side}`. Expected `left` or `right`."
         )
 
+    dropped_padded_row_count = 0
+
     for example in calibration_dataset:
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
-        if max_positions is not None:
-            trimmed = False
-            trimmed_input_ids = []
-            trimmed_attention_mask = []
+        rows_changed = False
+        prepared_rows = []
 
-            for row_ids, row_mask in zip(input_ids, attention_mask):
-                row_len = len(row_ids)
-                if row_len > max_positions:
-                    trimmed = True
-                    trimmed_row_count += 1
-                    longest_trimmed_row = max(longest_trimmed_row, row_len)
-                    if truncation_side == "left":
-                        trimmed_input_ids.append(row_ids[-max_positions:])
-                        trimmed_attention_mask.append(row_mask[-max_positions:])
-                    else:
-                        trimmed_input_ids.append(row_ids[:max_positions])
-                        trimmed_attention_mask.append(row_mask[:max_positions])
+        for row_ids, row_mask in zip(input_ids, attention_mask):
+            row_len = len(row_ids)
+            if max_positions is not None and row_len > max_positions:
+                trimmed_row_count += 1
+                longest_trimmed_row = max(longest_trimmed_row, row_len)
+                rows_changed = True
+
+                # Padding is not part of the sample. Strip it before spending the
+                # position budget: slicing a left-padded row by width keeps the
+                # leading pads and drops real tokens, and a row whose padding
+                # alone fills the budget would come out as pure padding with an
+                # all-zero mask.
+                real_positions = [pos for pos, keep in enumerate(row_mask) if keep]
+                row_ids = [row_ids[pos] for pos in real_positions]
+                row_mask = [row_mask[pos] for pos in real_positions]
+
+                if truncation_side == "left":
+                    row_ids = row_ids[-max_positions:]
+                    row_mask = row_mask[-max_positions:]
                 else:
-                    trimmed_input_ids.append(row_ids)
-                    trimmed_attention_mask.append(row_mask)
+                    row_ids = row_ids[:max_positions]
+                    row_mask = row_mask[:max_positions]
 
-            if trimmed:
-                input_ids = trimmed_input_ids
-                attention_mask = trimmed_attention_mask
+            # An all-padding row carries no activation statistics: keeping it
+            # would only feed the Hessian zeros, so drop it whether or not the
+            # row needed trimming.
+            if not any(row_mask):
+                dropped_padded_row_count += 1
+                rows_changed = True
+                continue
+
+            prepared_rows.append((row_ids, row_mask))
+
+        if rows_changed:
+            if not prepared_rows:
+                too_short_calibration_data_count += 1
+                continue
+
+            # Stripping or dropping rows can leave an item ragged. The batched
+            # path and the concatenation path consume rows one at a time, but
+            # the non-batched path stacks an item into a single tensor, so only
+            # that path needs the item made rectangular again.
+            widths = {len(row_ids) for row_ids, _ in prepared_rows}
+            if not support_batch_quantize and len(widths) > 1:
+                row_width = max(widths)
+                pad_token_id = getattr(tokenizer, "pad_token_id", 0) or 0
+                padded_rows = []
+                for row_ids, row_mask in prepared_rows:
+                    pad_len = row_width - len(row_ids)
+                    if pad_len <= 0:
+                        padded_rows.append((row_ids, row_mask))
+                    elif padding_side == "left":
+                        padded_rows.append(
+                            ([pad_token_id] * pad_len + row_ids, [0] * pad_len + row_mask)
+                        )
+                    else:
+                        padded_rows.append(
+                            (row_ids + [pad_token_id] * pad_len, row_mask + [0] * pad_len)
+                        )
+                prepared_rows = padded_rows
+
+            input_ids = [row_ids for row_ids, _ in prepared_rows]
+            attention_mask = [row_mask for _, row_mask in prepared_rows]
 
         if len(input_ids[0]) <= calibration_data_min_length:
             too_short_calibration_data_count += 1
@@ -533,6 +577,12 @@ def prepare_calibration_dataset(
             max_positions,
             longest_trimmed_row,
             truncation_side,
+        )
+
+    if dropped_padded_row_count > 0:
+        log.warn(
+            "Quantize: dropped %s calibration rows that had no non-padding token.",
+            dropped_padded_row_count,
         )
 
     if calibration_dataset_concat_size:
