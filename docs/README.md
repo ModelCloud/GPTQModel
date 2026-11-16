@@ -37,6 +37,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)
 - [Packed payloads and save-time source materialization](fp8-save-offload.md)
 - [FP8 checkpoint scale semantics](fp8-scale-semantics.md)
+- [FP8 weight-only dispatch: W8A16 vs W8A8](fp8-weight-only-dispatch.md)
 - [Native fusion inference on CPU, CUDA and ROCm](fusion-device-validation.md)
 - [Fusion model qualification](fusion-model-coverage.md)
 - [Post-quantization fusion planner](fusion-planner.md)
