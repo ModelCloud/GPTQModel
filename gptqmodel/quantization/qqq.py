@@ -593,7 +593,9 @@ class QQQ:
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
         elif isinstance(self.layer, nn.Conv2d):
-            (left, right), (top, bottom) = conv_padding_pairs(self.layer)
+            # `conv_padding_pairs` reports pairs in the module's spatial order
+            # (height, width); `F.pad` wants the last dimension first.
+            (top, bottom), (left, right) = conv_padding_pairs(self.layer)
             inp = F.pad(
                 inp,
                 (left, right, top, bottom),

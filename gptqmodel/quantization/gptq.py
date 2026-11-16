@@ -1166,7 +1166,9 @@ class GPTQ:
                     inp.shape[2],
                     inp.shape[3],
                 )
-                (left, right), (top, bottom) = conv_padding_pairs(self.module)
+                # `conv_padding_pairs` reports pairs in the module's spatial
+                # order (height, width); `F.pad` wants the last dimension first.
+                (top, bottom), (left, right) = conv_padding_pairs(self.module)
                 reshaped_inp = F.pad(
                     reshaped_inp,
                     (left, right, top, bottom),

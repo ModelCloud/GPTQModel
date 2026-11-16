@@ -20,7 +20,13 @@ SUPPORTED_PADDING_MODES = ("zeros", "reflect", "replicate", "circular")
 
 
 def conv_padding_pairs(module: nn.Module) -> Tuple[Tuple[int, int], ...]:
-    """Return the effective ``(left, right)`` padding per spatial dimension.
+    """Return the effective ``(before, after)`` padding per spatial dimension.
+
+    Pairs follow the module's own spatial order, so ``nn.Conv1d`` returns one
+    ``(width_before, width_after)`` pair and ``nn.Conv2d`` returns
+    ``((height_before, height_after), (width_before, width_after))``. Callers
+    that hand the result to ``torch.nn.functional.pad`` must reverse it,
+    because ``F.pad`` takes the last dimension first.
 
     ``padding="same"`` is resolved to the split PyTorch uses: the left side
     takes ``total // 2`` and the right side takes the remainder, where
