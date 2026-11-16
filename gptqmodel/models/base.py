@@ -90,6 +90,7 @@ from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
+from ..utils.kv_cache import estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.model import (
@@ -366,6 +367,29 @@ def _log_quantize_summary(
             peak_vram_gib=_peak_vram_gib(devices=vram_devices),
         )
     )
+
+
+def _log_kv_cache_estimate(model: object) -> None:
+    """State what context costs, since weight quantization does not change it.
+
+    The dtype comes from the weights that were just quantized, not from the
+    config: ``torch_dtype`` is often unset and a cache is only as small as the
+    activations that fill it.
+    """
+
+    inner = getattr(model, "model", None)
+    config = getattr(inner, "config", None)
+    dtype = None
+    try:
+        for parameter in inner.parameters():
+            if parameter.is_floating_point():
+                dtype = parameter.dtype
+                break
+    except Exception:  # pragma: no cover - exotic module trees
+        dtype = None
+    estimate = estimate_kv_cache(config, dtype=dtype)
+    if estimate is not None:
+        log.info(estimate.format())
 
 
 class _QuantizedCheckpointSource:
@@ -2498,6 +2522,7 @@ class BaseQModel(nn.Module):
         # copies are gone once the loop returns, but PyTorch keeps the pinned
         # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
         release_pinned_host_cache()
+        _log_kv_cache_estimate(self)
         return result
 
     @staticmethod
