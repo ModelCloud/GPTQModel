@@ -9,7 +9,8 @@ E8M0 scale byte per 32 values. The checkpoint bytes therefore load straight
 into MLX's native MXFP4 matmul, so no repack and no dense expansion happens at
 runtime; only the 32-wide block Hadamard rotation and the MACaQ diagonal
 pre-scale run in the forward, on the rotated-frame activations the quantizer
-already assumed.
+already assumed. A layer quantized without the rotation and without the
+pre-scale skips that pass and runs MLX's MXFP4 matmul directly.
 """
 
 from functools import lru_cache
@@ -79,6 +80,8 @@ class MlxMACaQLinear(nn.Module):
         activation_precision="w4a4",
         compute_dtype=mx.bfloat16,
         bias=False,
+        apply_rotation=True,
+        apply_pre_scale=True,
     ):
         super().__init__()
         in_features = int(in_features)
@@ -93,6 +96,10 @@ class MlxMACaQLinear(nn.Module):
         self.had_block = had_block
         self.activation_precision = activation_precision
         self.compute_dtype = compute_dtype
+        # The loaded BH / pre_scale are identities when these are False, so
+        # skipping them is exact.
+        self.apply_rotation = bool(apply_rotation)
+        self.apply_pre_scale = bool(apply_pre_scale)
         # Checkpoint bytes: [out, in / 8] uint32 nibbles and one E8M0 per group.
         self.weight = mx.zeros((out_features, in_features // 8), dtype=mx.uint32)
         self.scales = mx.zeros((out_features, in_features // _MXFP4_GROUP), dtype=mx.uint8)
@@ -104,6 +111,8 @@ class MlxMACaQLinear(nn.Module):
 
     def _rotate(self, work):
         """Pre-scale and rotate a ``[rows, in_features]`` activation block."""
+        if not self.apply_rotation:
+            return work * self.pre_scale if self.apply_pre_scale else work
         return _pre_rotate_kernel(self.compute_dtype)(
             inputs=[work, self.pre_scale, self.BH],
             template=[("K", self.in_features), ("BLOCK", self.had_block)],

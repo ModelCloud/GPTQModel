@@ -195,7 +195,7 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
         elif isinstance(module, BitsAndBytesLinear):
             bitsandbytes_native[name] = BitsAndBytesMlxQuantLinear.native_payload(module)
             continue
-        elif isinstance(module, MacaqLinear):
+        elif isinstance(module, MacaqLinear) and not MacaqMlxQuantLinear.stock_compatible(module):
             macaq_native[name] = MacaqMlxQuantLinear.native_payload(module)
             continue
         elif isinstance(module, NF12Linear):
@@ -207,7 +207,7 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
         if isinstance(module, QQQTorchLinear):
             qqq[name] = module
         if (isinstance(module, GGUFTorchLinear) and module.gguf_tensor_qtype == "Q6_K") or (
-                not isinstance(module, (QQQTorchLinear, GGUFTorchLinear, TorchFP8Linear))
+                not isinstance(module, (QQQTorchLinear, GGUFTorchLinear, TorchFP8Linear, MacaqLinear))
                 and module.group_size == 16):
             group16.add(name)
             if isinstance(module, GGUFTorchLinear) and module.gguf_tensor_qtype == "Q6_K":
@@ -412,6 +412,8 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
                     had_block=payload["had_block"],
                     activation_precision=payload["activation_precision"],
                     compute_dtype=compute_dtype,
+                    apply_rotation=payload.get("apply_rotation", True),
+                    apply_pre_scale=payload.get("apply_pre_scale", True),
                 )
             if path in nf12_native:
                 payload = nf12_native[path]

@@ -31,6 +31,8 @@ The per-Linear recipe is:
 2. **Block-Hadamard rotation.** Right-multiply the scaled weight by a
    block-diagonal Hadamard matrix whose block is the MXFP4 group (32 by
    default). Rotating `H` by the same transform gives the metric used below.
+   `block_hadamard=False` skips this step (see
+   [Rotation-free weight-only MXFP4](#rotation-free-weight-only-mxfp4)).
 3. **OCP MXFP4 round-to-nearest.** Per 32-value block, set the E8M0 exponent to
    `floor(log2(amax)) - 2 + offset` and round each value to the nearest E2M1
    level.
@@ -92,7 +94,7 @@ flowchart TD
     FB -->|no| F3["ValueError"]
     E -->|usable Hessian| FB2{"below fallback<br/>threshold?"}
     FB2 -->|no| Q["Macaq.quantize<br/>macaq_quantize_weight"]
-    FB -->|yes| RTN["MXFP4 RTN<br/>identity H, no D1"]
+    FB -->|yes| RTN["MXFP4 RTN + exponent screen<br/>identity H, no D1"]
     FB2 -->|yes| RTN
     RTN --> R
     Q --> CF{"compile_flip on<br/>NVIDIA CUDA with GIL<br/>or ROCm gfx1201?"}
@@ -182,6 +184,26 @@ RTN at `0.5%` — MACaQ runs data-independent MXFP4 RTN with an identity
 metric and no D1 pre-scale instead of raising. Without a fallback threshold
 the module still raises the actionable error. `Macaq.quantize` records
 `fallback=True` in the result stats.
+
+The exponent screen (when `exp_screen=True`) still runs on this path, under
+the identity metric, so each block keeps the exponent with the lowest plain
+squared error. The OCP exponent `floor(log2(amax)) - 2` maps a block's amax to
+`[4, 8)` and clips it to 6 whenever the amax mantissa exceeds 1.5; the
+non-clipping exponent `ceil(log2(amax / 6))` is always offset `0` or `+1`, so
+the default `(1, 0, -1)` screen covers both rules and never does worse than
+either. Flip refinement stays off: under the identity metric RTN is already
+the per-element optimum for frozen exponents.
+
+### Activation exponent rule on MLX
+
+Torch and Triton quantize activations with the OCP exponent, matching
+calibration replay. MLX's `mx.quantize(mode="mxfp4")` and `mx.qqmm` pick the
+non-clipping exponent `ceil(log2(amax / 6))` instead, so MLX W4A4 activations
+can land one exponent above the other backends on blocks whose amax mantissa
+exceeds 1.5. The weight bytes are unaffected. On synthetic block-rotated
+activations the two rules are within 2% relative MSE for Gaussian and
+heavy-tailed rows, and the non-clipping rule is lower when outlier channels
+are present, so the MLX difference does not cost activation accuracy.
 
 ### Single exponent offsets and `dynamic` exclusions
 
@@ -405,10 +427,55 @@ E2M1 GEMM on NVIDIA CUDA and ROCm `gfx1201` for W4A4. Other ROCm
 architectures use Torch until their numerical behavior and launch plan are
 validated.
 
-`dynamic` may exclude modules with `False` or override `had_block`, `do_flip`,
+`dynamic` may exclude modules with `False` or override `had_block`, `block_hadamard`, `do_flip`,
 `n_flip_iters`, `fast_flip`, `compile_flip`, `ridge`, `pre_mode`, `pre_alpha`, `exp_screen`,
 `exp_offsets`, and `activation_precision` per module. The MXFP4 block size,
 bit width, and symmetric format remain fixed.
+
+### Rotation-free weight-only MXFP4
+
+```python
+MacaqConfig(block_hadamard=False, pre_mode="none", activation_precision="w4a16")
+```
+
+This keeps the calibrated parts of the recipe — the Hessian-weighted exponent
+screen and flip refinement — and drops both online activation transforms. The
+quantizer works in the original weight frame and stores an identity `BH` and a
+unit `pre_scale`, so the checkpoint layout is unchanged and older loaders
+still run it correctly. `MacaqLinear` (Torch and Triton W4A16) detects the
+identity transforms at load and skips them, which is exact, so the forward is
+a plain MXFP4 dequantize-matmul with no extra activation pass. Torch W4A4
+skips them too; Triton W4A4 keeps its fused rotate+quantize kernel, which is
+cheaper than the unfused path even with an identity `BH`.
+
+On MLX such a W4A16 layer is exactly a stock
+`mlx.nn.QuantizedLinear(mode="mxfp4", group_size=32, bits=4)`: the packed
+words and E8M0 bytes transfer unchanged, without requantization by MLX's own
+RTN. `GPTQModel.load(..., backend="mlx")` builds that stock layer, and
+`GPTQModel.export(..., format="mlx")` writes a checkpoint that stock
+`mlx_lm.load` reads, which rotated MACaQ checkpoints cannot do. Layers that
+keep the D1 pre-scale or use W4A4 stay on the custom `MlxMACaQLinear`, which
+skips the pre-rotate dispatch when `BH` is the identity.
+
+Llama-3.2-1B-Instruct, W4A16, 128 Wikitext-2 training chunks of 1,024
+tokens for calibration, 256 flip sweeps, perplexity over 64 contiguous
+Wikitext-2 test chunks of 512 tokens (32,704 predicted tokens):
+
+| Model | Perplexity | Delta |
+|---|---:|---:|
+| BF16 | 19.39 | — |
+| MXFP4 RTN, no rotation (`exp_screen=False`, `do_flip=False`) | 23.68 | +22.1% |
+| MACaQ, rotation-free (`block_hadamard=False`, `pre_mode="none"`) | 21.27 | +9.7% |
+| MACaQ, default (D1 + block Hadamard) | 20.46 | +5.5% |
+
+The calibrated screen and flips alone close 56% of the RTN-to-BF16 gap with
+no runtime transform; the rotation and D1 close 75%.
+
+Use it when the runtime cost of the rotation matters more than the accuracy
+the rotation buys, or when the checkpoint must load in a stock MXFP4 runtime. For W4A4 the rotation is what tames activation outliers, so
+`block_hadamard=False` is mainly useful with `w4a16`. `pre_mode="balance"`
+can be kept with `block_hadamard=False`; the forward then applies only the
+diagonal pre-scale.
 
 ### Configuration
 
@@ -417,6 +484,7 @@ bit width, and symmetric format remain fixed.
 | `bits` | 4 | MXFP4 only |
 | `block_size` / `group_size` | 32 | OCP MXFP4 scale group |
 | `had_block` | 32 | block-Hadamard width (power of two, >= 32) |
+| `block_hadamard` | `True` | rotate by the block Hadamard; `False` stores an identity `BH` |
 | `do_flip` | `True` | enable greedy level refinement |
 | `n_flip_iters` | 256 | maximum flip sweeps |
 | `fast_flip` | `True` | active-set sweep (bit-identical to the dense sweep) |

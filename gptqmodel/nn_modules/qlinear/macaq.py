@@ -131,6 +131,10 @@ class MacaqLinear(WeightOnlyQuantLinear):
             dtype if dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.bfloat16
         )
         self._triton_disabled = False
+        # Set from the loaded state by `_refresh_transform_flags`; until then
+        # the forward applies both transforms, which is always correct.
+        self._identity_bh = False
+        self._unit_pre_scale = False
 
         # `BH`/`pre_scale` are small and always materialized so the module has
         # a real device to allocate the packed storage on later (the looper
@@ -197,7 +201,35 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     def post_init(self):
         self._validate_loaded_state()
+        self._refresh_transform_flags()
         super().post_init()
+
+    @torch.no_grad()
+    def _refresh_transform_flags(self) -> None:
+        """Record whether the stored activation transforms are identities.
+
+        ``block_hadamard=False`` stores an identity ``BH`` and ``pre_mode="none"``
+        stores a unit ``pre_scale``. Multiplying by either is exact in every
+        compute dtype, so skipping them changes no output bit; with both
+        skipped the W4A16 forward is a plain MXFP4 matmul.
+        """
+
+        bh = self.BH
+        if bh.is_meta or self.pre_scale.is_meta:
+            self._identity_bh = False
+            self._unit_pre_scale = False
+            return
+        eye = torch.eye(bh.shape[0], dtype=bh.dtype, device=bh.device)
+        self._identity_bh = bool(torch.equal(bh, eye))
+        self._unit_pre_scale = bool((self.pre_scale == 1).all())
+
+    def _activation_transforms(self):
+        """``(pre_scale, BH)`` for the forward, with identities dropped."""
+
+        return (
+            None if self._unit_pre_scale else self.pre_scale,
+            None if self._identity_bh else self.BH,
+        )
 
     # ------------------------------------------------------------------
     # packing
@@ -227,6 +259,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
         self.BH.data.copy_(result.BH.to(device=device, dtype=self.compute_dtype))
         if bias is not None and self.bias is not None:
             self.bias.data.copy_(bias.to(device=device, dtype=self.compute_dtype))
+        self._refresh_transform_flags()
 
     # ------------------------------------------------------------------
     # forward
@@ -243,20 +276,23 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     def _forward_torch(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize()
+        pre_scale, bh = self._activation_transforms()
         if self.activation_precision == "w4a4":
             xb = macaq_core.macaq_quantize_activations(
-                x_flat, self.pre_scale, self.BH, self.block_size
+                x_flat, pre_scale, bh, self.block_size
             ).to(self.compute_dtype)
         else:
             xb = x_flat.to(self.compute_dtype)
-            if self.pre_scale is not None:
-                xb = xb * self.pre_scale.to(xb.dtype)
-            if self.BH is not None:
-                xb = macaq_core.rotate_blocks(xb, self.BH)
+            if pre_scale is not None:
+                xb = xb * pre_scale.to(xb.dtype)
+            if bh is not None:
+                xb = macaq_core.rotate_blocks(xb, bh)
         return torch.nn.functional.linear(xb, weight, self.bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         if self.activation_precision == "w4a4":
+            # Always hand the fused rotate+quantize kernel both transforms:
+            # its unfused `bh=None` fallback costs more than an identity BH.
             return mxfp4_w4a4_linear(
                 x_flat,
                 self.W_packed,
@@ -265,12 +301,13 @@ class MacaqLinear(WeightOnlyQuantLinear):
                 bh=self.BH,
                 bias=self.bias,
             )
+        pre_scale, bh = self._activation_transforms()
         return mxfp4_w4a16_linear(
             x_flat,
             self.W_packed,
             self.W_scales,
-            pre_scale=self.pre_scale,
-            bh=self.BH,
+            pre_scale=pre_scale,
+            bh=bh,
             bias=self.bias,
             compute_dtype=self.compute_dtype,
         )

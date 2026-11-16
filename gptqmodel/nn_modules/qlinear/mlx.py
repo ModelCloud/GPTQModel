@@ -1099,17 +1099,59 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
             and tuple(module.BH.shape) == (module.had_block, module.had_block)
         )
 
+    @staticmethod
+    def _identity_transforms(module):
+        """``(identity BH, unit pre_scale)`` for a MACaQ layer."""
+        bh = module.BH.detach().to("cpu", torch.float32)
+        pre_scale = module.pre_scale.detach().to("cpu", torch.float32)
+        return torch.equal(bh, torch.eye(bh.shape[0])), bool((pre_scale == 1).all())
+
+    @classmethod
+    def stock_compatible(cls, module):
+        """Whether the layer is exactly a stock MLX ``QuantizedLinear(mode="mxfp4")``.
+
+        A W4A16 layer quantized with ``block_hadamard=False`` and
+        ``pre_mode="none"`` has no activation transform, so its packed words
+        and E8M0 bytes are a plain MXFP4 linear that stock ``mlx_lm.load``
+        reconstructs. W4A4 layers keep the custom runtime: stock MLX-LM only
+        builds weight-only ``QuantizedLinear``.
+        """
+        if not cls.source_compatible(module) or module.activation_precision != "w4a16":
+            return False
+        identity_bh, unit_pre_scale = cls._identity_transforms(module)
+        return identity_bh and unit_pre_scale
+
+    @classmethod
+    def mlx_params(cls, module):
+        del module
+        return {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+
+    @classmethod
+    def pack_source(cls, module):
+        """Stock MXFP4 arrays for a :meth:`stock_compatible` layer, unchanged."""
+        if not cls.stock_compatible(module):
+            raise ValueError(f"MACaQ layer {module.name} needs the custom MLX runtime")
+        payload = cls.native_payload(module)
+        return payload["weight"], payload["scales"], None, cls.mlx_params(module)
+
     @classmethod
     def native_payload(cls, module):
         """Return MLX MXFP4 words, E8M0 scales, and the rotation state."""
         if not cls.source_compatible(module):
             raise ValueError(f"MACaQ layer {module.name} cannot be transferred to MLX")
         words = np.ascontiguousarray(module.W_packed.detach().to("cpu").numpy())
+        bh = module.BH.detach().to("cpu", torch.float32)
+        pre_scale = module.pre_scale.detach().to("cpu", torch.float32)
+        identity_bh, unit_pre_scale = cls._identity_transforms(module)
         return {
             "weight": words.view(np.uint32).reshape(module.out_features, module.in_features // 8),
             "scales": module.W_scales.detach().view(torch.uint8).to("cpu").numpy(),
-            "pre_scale": module.pre_scale.detach().to("cpu", torch.float32).numpy(),
-            "BH": module.BH.detach().to("cpu", torch.float32).numpy(),
+            "pre_scale": pre_scale.numpy(),
+            "BH": bh.numpy(),
+            # Identity transforms (`block_hadamard=False`, `pre_mode="none"`)
+            # let the MLX layer skip its pre-rotate dispatch.
+            "apply_rotation": not identity_bh,
+            "apply_pre_scale": not unit_pre_scale,
             "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
             "had_block": module.had_block,
             "activation_precision": module.activation_precision,
