@@ -74,7 +74,7 @@ def test_from_pretrained_installs_runtime_cpu_workers_before_the_pool(isolated_p
     # The pool already had the requested size when the model definition ran:
     # the policy was installed before the prebuild.
     assert pool_sizes == [2]
-    assert captured[0]["kernel"].cpu_workers == 2
+    assert captured[0]["runtime"].cpu_workers == 2
 
 
 def test_second_load_resizes_the_existing_singleton_pool(isolated_pool, monkeypatch):

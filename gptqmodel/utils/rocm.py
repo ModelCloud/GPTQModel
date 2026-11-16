@@ -233,16 +233,10 @@ def quantize_tuning(device=None) -> dict:
 def _rocm_quantize_tuning(device=None) -> dict:
     """ROCm quantize tuning without re-checking ``IS_ROCM`` (callers assert it)."""
 
-    requested = _requested_quant_blas_backend()
-    # Disabled tokens (``""``/``0``/``off``/``default``) must survive resolution so
-    # ``quant_blas_backend`` can treat them as "keep torch's backend". Only an
-    # unrecognised *name* falls back to the rocBLAS default.
-    if requested in QUANT_BLAS_BACKEND_DISABLED:
-        blas_backend = requested
-    elif requested in _QUANT_BLAS_BACKEND_CHOICES:
-        blas_backend = requested
-    else:
-        blas_backend = QUANT_BLAS_BACKEND_DEFAULT
+    # Disabled tokens (``""``/``0``/``off``/``default``) survive resolution so
+    # ``quant_blas_backend`` can treat them as "keep torch's backend".
+    # ``KernelConfig`` rejects every other unknown spelling at construction.
+    blas_backend = _requested_quant_blas_backend()
     cls = arch_class(device)
     prewarm_ops = _RDNA4_PREWARM_GROUPS if cls == "rdna4" else None
     return {"blas_backend": blas_backend, "amp": False, "prewarm_ops": prewarm_ops}

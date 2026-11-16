@@ -120,6 +120,9 @@ class AwqMarlinLinear(AWQuantLinear):
             register_buffers=False,
             **kwargs)
 
+        # Same reduction policy as GPTQ Marlin (`MarlinConfig(fp32=...)`).
+        self.fp32 = self.kernel.marlin_fp32
+
         if register_buffers:
             self.register_parameter(
                 "qweight",
@@ -399,6 +402,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
                 bias=self.bias,
+                use_fp32_reduce=self.fp32,
             )
         else:
             out = apply_awq_marlin_linear_padded(
@@ -414,6 +418,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
                 bias=self.bias,
+                use_fp32_reduce=self.fp32,
             )
 
         if self.adapter:

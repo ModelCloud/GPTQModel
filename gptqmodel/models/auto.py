@@ -796,6 +796,14 @@ def _prebuild_device_thread_pool(device=None) -> None:
     resize_device_thread_pool(warmup_devices=explicit_devices)
 
 
+def _install_kernel_policy(kernel) -> None:
+    """Install a load's process policy and report retired env vars set since import."""
+    from .. import warn_retired_kernel_env_vars
+
+    configure_kernel(kernel)
+    warn_retired_kernel_env_vars()
+
+
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
@@ -840,8 +848,12 @@ class GPTQModel:
         kwargs["fuse"] = fuse
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)
+        # from_pretrained resolves the caller's own arguments against the same
+        # config again; only the already-quantized redirect forwards the
+        # resolved enum/policy pair, because it does not receive the config.
+        requested_backend, requested_kernel = backend, kernel
         backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
-        configure_kernel(kernel)
+        _install_kernel_policy(kernel)
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
             _prebuild_device_thread_pool(device)
@@ -866,13 +878,6 @@ class GPTQModel:
                 quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
         elif quantize_config is not None:
             p2p = quantize_config.p2p
-        if kernel is not None:
-            if quantize_config is not None:
-                quantize_config.kernel = (
-                    KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
-                )
-        elif quantize_config is not None:
-            kernel = quantize_config.kernel
 
         backend = normalize_backend(backend)
         profile = normalize_profile(profile)
@@ -952,11 +957,12 @@ class GPTQModel:
                 quantize_config=quantize_config,
                 device_map=device_map,
                 device=device,
-                backend=backend,
+                backend=requested_backend,
                 profile=profile,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
-                kernel=kernel,
+                kernel=requested_kernel,
+                runtime=runtime,
                 p2p=p2p,
                 module_tree=module_tree,
                 **kwargs,
@@ -985,20 +991,18 @@ class GPTQModel:
     ) -> BaseQModel:
         if isinstance(quantize_config, dict):
             quantize_config = QuantizeConfig(**quantize_config)
+        # The model definition re-resolves the caller's arguments against the
+        # same config; the already-quantized redirect gets the resolved pair.
+        requested_backend, requested_kernel = backend, kernel
         backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The looper installs this policy before it enables peer access.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
-        if kernel is not None and quantize_config is not None:
-            # The looper installs this policy before it selects a kernel.
-            quantize_config.kernel = (
-                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
-            )
 
         # Install the policy before the thread-pool prebuild reads it. The pool
         # is a per-process singleton, so a policy installed after the prebuild
         # would only affect the next process (issue #4396).
-        configure_kernel(kernel)
+        _install_kernel_policy(kernel)
         if quantize_config is None:
             # Dense inference loads do not prebuild the pool, but an earlier
             # load may have left one at a different worker count.
@@ -1100,13 +1104,14 @@ class GPTQModel:
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
-            backend=backend,
+            backend=requested_backend,
             profile=profile,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             module_tree=module_tree,
             p2p=p2p,
-            kernel=kernel,
+            kernel=requested_kernel,
+            runtime=runtime,
             **model_init_kwargs,
         )
 
@@ -1129,7 +1134,7 @@ class GPTQModel:
             **kwargs,
     ) -> BaseQModel:
         backend, kernel = resolve_backend_config(backend, kernel, runtime)
-        configure_kernel(kernel)
+        _install_kernel_policy(kernel)
         # Retune an existing singleton pool before any module is built. A
         # post-quantized load may be the second load in the process and must
         # honour its own ``cpu_workers`` (issue #4396).

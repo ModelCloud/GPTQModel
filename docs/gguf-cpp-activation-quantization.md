@@ -145,8 +145,8 @@ config, and it would pay the outlier-detection cost on every forward.
 
 | Configuration | Product | Bias epilogue |
 | --- | --- | --- |
-| CPU, default (`exact_matmul=None`, no env override) | native ggml matmul | FP32 bias added to the native result, rounded once |
-| CPU, `exact_matmul=True` or `GPTQMODEL_GGUF_CPP_NATIVE_MATMUL=0` | exact torch matmul | FP32 bias added to the exact product |
+| CPU, default (`exact_matmul=None`, `GGUFCPPConfig(native_matmul=None)`) | native ggml matmul | FP32 bias added to the native result, rounded once |
+| CPU, `exact_matmul=True` or `GGUFCPPConfig(native_matmul=False)` | exact torch matmul | FP32 bias added to the exact product |
 | CPU, `exact_matmul=False` | native ggml matmul | FP32 bias added to the native result, rounded once |
 | CUDA | native ggml matmul | biased layers are recomputed exactly in FP32 (#3789) |
 | CPU/CUDA, FP16/BF16 native output | native ggml matmul | biased layers are recomputed exactly in FP32 |
@@ -173,11 +173,14 @@ decreasing scope:
 
 1. **Per layer (API):** construct the CPU kernel with
    `GGUFCppKernel(..., exact_matmul=True)`. The keyword is accepted by
-   `GGUFCppKernel.__init__` and wins over the environment variable; the default
+   `GGUFCppKernel.__init__` and wins over the backend setting; the default
    `exact_matmul=None` keeps the existing native choice, so callers that pass
    nothing see no behaviour change.
-2. **Process-wide (env):** set `GPTQMODEL_GGUF_CPP_NATIVE_MATMUL=0` before the
-   forward (also tracked in #4180).
+2. **Per load (typed backend):** load with
+   `backend=GGUFCPPConfig(native_matmul=False)`. Each `GGUFCppKernel` built by
+   that load snapshots the setting (`KernelConfig.gguf_cpp_native_matmul`). The
+   retired `GPTQMODEL_GGUF_CPP_NATIVE_MATMUL` environment variable is not read;
+   setting it only logs a warning.
 3. **Engine (config):** load with `BACKEND.GGUF_TORCH`, which never uses the
    native kernel at all.
 
