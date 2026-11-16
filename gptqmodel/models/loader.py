@@ -748,7 +748,21 @@ def _normalize_requested_device_map(device, device_map):
 
 
 def _indexed_device_request(device) -> Optional[str]:
-    """Return an indexed ``device`` request as a placement string, if any."""
+    """Return an indexed ``device`` request as a placement string, if any.
+
+    A bare integer is an accelerator ordinal, matching the documented
+    ``device=(0, 1)`` sequence and ``device_map={"": N}`` semantics. Resolve
+    it to the active accelerator's concrete ``<family>:N`` target here so it
+    becomes a full-model map instead of a family selector that the layer-wise
+    resolver would spread across every visible GPU (#4384). A host without an
+    active accelerator cannot interpret the ordinal, so the selector
+    conversion raises rather than silently treating it as CPU.
+    """
+
+    if isinstance(device, int) and not isinstance(device, bool):
+        targets = _selector_devices(device)
+        assert targets is not None
+        return str(targets[0])
 
     if isinstance(device, str) and ":" in device:
         return device
