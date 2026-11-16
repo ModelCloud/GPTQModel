@@ -98,6 +98,17 @@ def _finalize_kernel(output_dtype):
     )
 
 
+def _quantization_dtype(dtype):
+    """Operand dtype for the dynamic quantizer.
+
+    The Metal quantizer reads each element as FP32, so it does not need an FP16
+    operand.  Narrowing BF16 to FP16 first turns any ``|x| > 65504`` into inf,
+    which then makes the row scale inf and the output NaN.  Keep BF16 wide and
+    preserve the historical FP16 operand for every other input dtype.
+    """
+    return dtype if dtype == mx.bfloat16 else mx.float16
+
+
 class MlxQQQLinear(nn.Module):
     """Preserve QQQ's per-token input scale and per-channel output scale."""
 
@@ -115,7 +126,7 @@ class MlxQQQLinear(nn.Module):
         original_dtype = x.dtype
         if x.size == 0:
             return mx.zeros((*x.shape[:-1], self.linear.weight.shape[0]), dtype=original_dtype)
-        x = x.astype(mx.float16)
+        x = x.astype(_quantization_dtype(x.dtype))
         quantized, input_scale = _dynamic_quant(x)
         raw = self.linear(quantized)
         rows = x.size // x.shape[-1]

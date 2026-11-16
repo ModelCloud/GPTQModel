@@ -42,6 +42,7 @@ from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureFrontierStore,
     EXL3CaptureState,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def _tiny_v4_config() -> DeepseekV4Config:
@@ -1529,7 +1530,7 @@ def test_deepseek_v4_mtp_output_boundary_prunes_superseded_capture(
         )
     layer_zero = next(capture_root.glob("layer-000000-*"))
     layer_one = next(capture_root.glob("layer-000001-*"))
-    monkeypatch.setenv("GPTQMODEL_EXL3_CAPTURE_FRONTIER", str(capture_root))
+    configure_kernel(KernelConfig(exl3_capture_frontier=str(capture_root)))
 
     harness = object.__new__(DeepSeekV4MTPQuantizationModel)
     harness.configure_mtp_activation_store(

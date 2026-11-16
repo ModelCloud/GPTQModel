@@ -27,12 +27,18 @@ _LAYER_MODULES = {
         "g_b_proj:1:in=g_a",
         "forget_gate.f_a_proj:0:in=x",
         "forget_gate.f_b_proj:1:in=f_a",
+        # Linear-attention short convolution (checkpoint-owned, not a
+        # quantizable projection).
+        "conv1d:!",
         # Full-attention (MLA) projections.
         "q_a_proj:0:in=x",
         "q_b_proj:1:in=q_a",
         "kv_a_proj_with_mqa:0:in=x",
         "kv_b_proj:1:in=kv_a",
-        "o_proj:1",
+        # `o_proj` consumes the gated KDA/MLA output built from `g_b_proj`
+        # (linear attention) or `kv_b_proj` (full attention), so it cannot share
+        # their subset.
+        "o_proj:2",
     ),
     "post_attention_layernorm": ("post_attention_layernorm:!",),
     "mlp:moe:?": {
@@ -58,7 +64,6 @@ class KimiLinearNativeQModel(BaseQModel):
     layer_modules_strict = False  # first decoder layer is dense
 
     pre_lm_head_norm_module = "model.norm"
-    rotary_embedding = "model.rotary_emb"
 
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 

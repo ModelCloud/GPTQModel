@@ -45,6 +45,15 @@ class _DummyQuantizeConfig:
         clone._meta = copy.deepcopy(self._meta, memo)
         return clone
 
+    def has_dynamic_exclusions(self):
+        # ``writer._gptq_explicit_quantized_modules`` asks the config whether a
+        # ``-:`` rule leaves modules unquantized; a GPTQ config with no dynamic
+        # patterns answers False.
+        return any(
+            isinstance(pattern, str) and pattern.startswith("-:")
+            for pattern in (self.dynamic or ())
+        )
+
     def meta_set_versionable(self, key, value):
         self._meta[key] = value
 

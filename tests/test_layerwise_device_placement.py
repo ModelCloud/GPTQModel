@@ -165,6 +165,46 @@ def test_indexed_device_is_a_full_model_map_without_a_memory_budget(device):
     assert explicit == {"": "cuda:0"}
 
 
+@pytest.mark.parametrize("ordinal", [0, 1])
+def test_bare_integer_device_is_a_full_model_map_pinned_to_that_ordinal(
+    monkeypatch, ordinal
+):
+    """#4384: `device=N` is the active accelerator's ordinal, not its family."""
+
+    _fake_visible(monkeypatch, 4)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+
+    assert _indexed_device_request(ordinal) == f"cuda:{ordinal}"
+    requested, explicit = _normalize_explicit_placement(ordinal, None, None)
+
+    assert requested == {"": f"cuda:{ordinal}"}
+    assert explicit == {"": f"cuda:{ordinal}"}
+
+
+def test_bare_integer_device_without_an_accelerator_is_rejected(monkeypatch):
+    """A CPU-only host must not turn an integer ordinal into a CPU request."""
+
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: None)
+
+    with pytest.raises(ValueError, match="require an active accelerator"):
+        _indexed_device_request(1)
+    with pytest.raises(ValueError, match="require an active accelerator"):
+        _normalize_explicit_placement(1, None, None)
+
+
+def test_unset_device_still_expands_to_the_layerwise_map(monkeypatch):
+    """`device=None` keeps the family-wide layer-wise placement."""
+
+    _fake_visible(monkeypatch, 4)
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
+    assert _normalize_explicit_placement(None, None, None) == (None, None)
+    assert _resolve_default_layerwise_device(None, BACKEND.AUTO) == tuple(
+        torch.device(f"cuda:{index}") for index in range(4)
+    )
+
+
 @pytest.mark.parametrize("device", ["cuda:0", torch.device("cuda:0")])
 def test_max_memory_keeps_the_indexed_device_for_the_budgeted_map(device):
     """#4068: the cap must survive when the caller also passes device="cuda:0"."""

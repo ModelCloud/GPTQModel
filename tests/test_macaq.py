@@ -17,10 +17,14 @@ calling the production helpers, so a packer/rotation regression cannot hide
 behind the implementation it is checking.
 """
 
+import base64
 import copy
+import gc
 import math
 import sys
+import weakref
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +33,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
+from gptqmodel.quantization.config import GGUFConfig, resolve_model_rotation, resolve_quant_format
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 
@@ -100,6 +105,81 @@ def test_macaq_weight_quantizer_requests_compiled_flips_by_default():
     with patch.object(macaq, "flip_refine_levels", wraps=macaq.flip_refine_levels) as sweep:
         macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=1)
     assert sweep.call_args.kwargs["compile_flip"] is True
+
+
+# Packed codes and E8M0 exponents for the seed-0 8x64 matrix below, captured
+# from the implementation before the dead-reference release.  The lifetime fix
+# only drops locals, so every code and exponent must stay bit-identical.
+_MACAQ_PRE_FIX_GOLDEN_PACKED_B64 = (
+    "QAudLq4toeobwwBKGsaqTLPa1BowKh2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1BKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNphIGHtTqcyxJH+/p8TSs5CDg2joqMwrdygOlW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtySliwh29yzsxbCxH4TSyUC8knBVREzuq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
+)
+_MACAQ_PRE_FIX_GOLDEN_SCALES_B64 = "fn5+fn1+fX59fn5+fn5+fg=="
+
+
+def test_macaq_weight_quantizer_lifetime_fix_preserves_packed_bytes():
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64)
+    activations = torch.randn(64, 64)
+    hessian = activations.T @ activations
+
+    result = macaq.macaq_quantize_weight(
+        weight, hessian, activations.shape[0], n_flip_iters=8, compile_flip=False
+    )
+
+    assert result.W_packed.shape == (8, 32)
+    assert result.W_scales.shape == (8, 2)
+    assert result.W_packed.contiguous().numpy().tobytes() == base64.b64decode(
+        _MACAQ_PRE_FIX_GOLDEN_PACKED_B64
+    )
+    assert result.W_scales.view(torch.uint8).contiguous().numpy().tobytes() == base64.b64decode(
+        _MACAQ_PRE_FIX_GOLDEN_SCALES_B64
+    )
+
+
+def test_macaq_weight_quantizer_releases_rotation_scratch_before_flip():
+    """Pre-scaled weight/Hessian and rotated Hessian are dead by the sweep.
+
+    Without the explicit releases all three stay referenced for the whole flip
+    sweep: two extra C^2 fp32 Hessian copies and a C^2 weight copy per module,
+    while every module of a layer runs concurrently.
+    """
+
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64)
+    activations = torch.randn(64, 64)
+    hessian = activations.T @ activations
+
+    real_rotate = macaq.rotate_blocks
+    rotations = []
+
+    def tracked_rotate(x, bh):
+        # Detach from rotate_blocks' internal reshape view chain so the weakref
+        # to the returned tensor follows the object `rotated_hessian` views.
+        out = real_rotate(x, bh).clone()
+        rotations.append((weakref.ref(x), weakref.ref(out)))
+        return out
+
+    real_flip = macaq.flip_refine_levels
+    alive_at_flip = {}
+
+    def probe_flip(*args, **kwargs):
+        gc.collect()
+        alive_at_flip["pre_scaled_weight"] = rotations[0][0]() is not None
+        alive_at_flip["pre_scaled_hessian"] = rotations[1][0]() is not None
+        alive_at_flip["rotated_hessian"] = rotations[2][1]() is not None
+        return real_flip(*args, **kwargs)
+
+    with patch.object(macaq, "rotate_blocks", tracked_rotate), patch.object(
+        macaq, "flip_refine_levels", probe_flip
+    ):
+        macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=4, compile_flip=False)
+
+    assert len(rotations) == 3
+    assert alive_at_flip == {
+        "pre_scaled_weight": False,
+        "pre_scaled_hessian": False,
+        "rotated_hessian": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +459,9 @@ def test_macaq_processor_keeps_resolved_pack_backend_and_dynamic_config():
         MacaqProcessor(tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.AUTO)
 
 
+@pytest.mark.parametrize("plain", [False, True], ids=["mxfp4_macaq", "mxfp4"])
 @pytest.mark.parametrize("activation_precision", ["w4a4", "w4a16"])
-def test_macaq_processor_replays_through_packed_runtime(activation_precision):
+def test_macaq_processor_replays_through_packed_runtime(activation_precision, plain):
     from gptqmodel.looper.macaq_processor import MacaqProcessor
     from gptqmodel.looper.named_module import NamedModule
 
@@ -389,22 +470,30 @@ def test_macaq_processor_replays_through_packed_runtime(activation_precision):
         torch.nn.Linear(64, 32, bias=True),
         name="proj", full_name="model.proj", layer_index=0,
     )
+    transforms = {"rotation": "none", "pre_mode": "none"} if plain else {}
     config = MacaqConfig(
         activation_precision=activation_precision, n_flip_iters=4,
-        offload_to_disk=False,
+        offload_to_disk=False, **transforms,
     )
+    assert config.format == (FORMAT.MXFP4 if plain else FORMAT.MXFP4_MACAQ)
     processor = MacaqProcessor(
         tokenizer=None, qcfg=config, calibration=None, backend=BACKEND.MACAQ_TORCH,
     )
     processor.preprocess(wrapped)
     processor.tasks[wrapped.name].add_batch(torch.randn(128, 64))
     processor.process(wrapped)
+    assert wrapped.module._macaq_replay.plain_mxfp4 is plain
 
     x = torch.randn(12, 64) * 3
     packed_output = wrapped.module._macaq_replay(x)
     torch.testing.assert_close(wrapped.module(x), packed_output, rtol=0, atol=0)
     dense_output = torch.nn.functional.linear(x, wrapped.module.weight, wrapped.module.bias)
-    assert not torch.equal(packed_output, dense_output)
+    if plain and activation_precision == "w4a16":
+        # No activation transform: the replay is exactly a matmul against the
+        # dequantized weight the processor wrote back.
+        assert torch.equal(packed_output, dense_output)
+    else:
+        assert not torch.equal(packed_output, dense_output)
 
     processor.prepare_layer_post_quantize(
         model=None, layer_module=wrapped.module, layer_index=0,
@@ -827,6 +916,35 @@ def _reference_weight_mxfp4(weight, bh, offset=0):
     return packed.contiguous(), scales, values
 
 
+def _reference_min_mse_mxfp4(weight, bh, offsets):
+    """Per-block exponent with the lowest plain squared error (first wins ties)."""
+
+    out_features, in_features = weight.shape
+    groups = in_features // 32
+    rotated = _reference_rotate(weight.to(torch.float32), bh.float()).reshape(out_features, groups, 32)
+    best = None
+    for offset in offsets:
+        packed, scales, values = _reference_weight_mxfp4(weight, bh, offset=offset)
+        error = (rotated - values.reshape(out_features, groups, 32)).pow(2).sum(-1)
+        candidate = (error, packed.reshape(out_features, groups, 16), scales, values.reshape(out_features, groups, 32))
+        if best is None:
+            best = candidate
+            continue
+        better = candidate[0] < best[0]
+        best = (
+            torch.where(better, candidate[0], best[0]),
+            torch.where(better.unsqueeze(-1), candidate[1], best[1]),
+            torch.where(better, candidate[2], best[2]),
+            torch.where(better.unsqueeze(-1), candidate[3], best[3]),
+        )
+    _, packed, scales, values = best
+    return (
+        packed.reshape(out_features, in_features // 2).contiguous(),
+        scales.contiguous(),
+        values.reshape(out_features, in_features).contiguous(),
+    )
+
+
 def _reference_activation_mxfp4(values):
     """Independent MXFP4 packer for the activation kernel (>= tie rule)."""
 
@@ -1046,15 +1164,24 @@ def test_macaq_zero_sample_expert_uses_configured_fallback():
 
     assert result.stats["fallback"] is True
     assert math.isfinite(loss)
-    # Fallback is data-independent MXFP4 RTN: no D1, no exponent screen, no flip.
+    # Fallback is data-independent: no D1 and no flip, but the per-block
+    # exponent is still screened under the identity (plain squared-error)
+    # metric instead of taking the clipping OCP exponent unconditionally.
     assert result.pre_scale is None
     bh = _reference_hadamard(32, device=layer.weight.device)
-    expected_packed, expected_scales, expected_values = _reference_weight_mxfp4(
-        layer.weight.detach(), bh, offset=0
+    expected_packed, expected_scales, expected_values = _reference_min_mse_mxfp4(
+        layer.weight.detach(), bh, offsets=(1, 0, -1)
     )
     assert torch.equal(result.W_packed, expected_packed)
     assert torch.equal(result.W_scales.view(torch.uint8), expected_scales)
     assert torch.equal(result.dequantized_weight, expected_values)
+
+    # Never worse than the fixed OCP exponent, and strictly better here.
+    rotated = _reference_rotate(layer.weight.detach().float(), bh.float())
+    _, _, rtn_values = _reference_weight_mxfp4(layer.weight.detach(), bh, offset=0)
+    screened_error = (rotated - expected_values).pow(2).sum()
+    rtn_error = (rotated - rtn_values).pow(2).sum()
+    assert screened_error < rtn_error
 
 
 def test_macaq_low_sample_expert_uses_configured_fallback():
@@ -1168,3 +1295,274 @@ def test_hf_from_pretrained_refuses_macaq_checkpoint(tmp_path):
 
     with pytest.raises(ValueError, match="MACaQ MXFP4 checkpoints cannot be loaded"):
         AutoModelForCausalLM.from_pretrained(str(tmp_path), local_files_only=True)
+
+
+# ---------------------------------------------------------------------------
+# rotation-free (rotation="none") weight-only MXFP4
+# ---------------------------------------------------------------------------
+def _identity_bh(device="cpu"):
+    return torch.eye(32, dtype=torch.bfloat16, device=device)
+
+
+def test_rotation_none_quantizes_in_the_original_frame():
+    torch.manual_seed(41)
+    weight = torch.randn(16, 128)
+    hessian = torch.eye(128)
+
+    result = macaq.macaq_quantize_weight(
+        weight, hessian, 128, rotation="none", pre_mode="none",
+        do_flip=False, exp_offsets=(0,), return_dequantized=True,
+    )
+
+    assert torch.equal(result.BH, _identity_bh())
+    expected_packed, expected_scales, expected_values = _reference_weight_mxfp4(
+        weight, _identity_bh(), offset=0
+    )
+    assert torch.equal(result.W_packed, expected_packed)
+    assert torch.equal(result.W_scales.view(torch.uint8), expected_scales)
+    assert torch.equal(result.dequantized_weight, expected_values)
+
+
+def test_rotation_none_flip_refinement_reduces_hessian_error():
+    torch.manual_seed(43)
+    weight = torch.randn(32, 128)
+    calibration = torch.randn(512, 128) * torch.linspace(0.1, 3.0, 128)
+    hessian = calibration.T @ calibration
+
+    common = {"rotation": "none", "pre_mode": "none", "return_dequantized": True}
+    rtn = macaq.macaq_quantize_weight(weight, hessian, 512, do_flip=False, exp_screen=False, **common)
+    refined = macaq.macaq_quantize_weight(weight, hessian, 512, n_flip_iters=64, **common)
+
+    # No rotation: the stored frame is the original frame.
+    assert _hessian_weighted_error(weight, refined.dequantized_weight, hessian) < (
+        _hessian_weighted_error(weight, rtn.dequantized_weight, hessian)
+    )
+
+
+def test_macaq_quantizer_honors_rotation_none():
+    torch.manual_seed(47)
+    layer = torch.nn.Linear(128, 16, bias=False)
+    config = MacaqConfig(
+        rotation="none", pre_mode="none", activation_precision="w4a16",
+        n_flip_iters=16, offload_to_disk=False,
+    )
+    quantizer = macaq.Macaq(layer, config)
+    quantizer.add_batch(torch.randn(256, 128))
+
+    result, _, loss = quantizer.quantize()
+
+    assert math.isfinite(loss)
+    assert result.pre_scale is None
+    assert torch.equal(result.BH, _identity_bh())
+    restored = macaq.dequantize_mxfp4(result.W_packed, result.W_scales, 128)
+    relative = (restored - layer.weight.detach()).norm() / layer.weight.detach().norm()
+    assert relative < 0.2
+
+
+def test_macaq_config_rotation_roundtrip_and_legacy_default():
+    assert MacaqConfig(offload_to_disk=False).rotation == "hadamard"
+
+    config = MacaqConfig(rotation="none", activation_precision="w4a16", offload_to_disk=False)
+    payload = config.to_dict()
+    # MACaQ's per-layer transform has its own key; the shared model-wide
+    # `rotation` key stays empty so earlier releases keep loading (#4225).
+    assert payload.get("rotation") is None
+    assert payload["macaq_rotation"] == "none"
+    assert QuantizeConfig.from_quant_config(payload).rotation == "none"
+
+    # Checkpoints written before the field was configurable store the
+    # inherited `null` and were always rotated.
+    legacy = dict(payload)
+    legacy.pop("macaq_rotation")
+    legacy["rotation"] = None
+    assert QuantizeConfig.from_quant_config(legacy).rotation == "hadamard"
+    legacy.pop("rotation")
+    assert QuantizeConfig.from_quant_config(legacy).rotation == "hadamard"
+
+    assert MacaqConfig(rotation=" None ", offload_to_disk=False).rotation == "none"
+    with pytest.raises(ValueError, match="rotation"):
+        MacaqConfig(rotation="random", offload_to_disk=False)
+
+    # Accepted as a per-module `dynamic` override.
+    MacaqConfig(dynamic={"mlp": {"rotation": "none"}}, offload_to_disk=False)
+
+
+@pytest.mark.parametrize("rotation", ["hadamard", "none"])
+def test_macaq_rotation_is_not_a_model_wide_rotation(rotation):
+    # The inherited `rotation` drives model-wide rotation (fused norms, online
+    # Hadamard at load, no disk offload). MACaQ's per-layer value must not.
+    config = MacaqConfig(rotation=rotation)
+    assert config.model_rotation is None
+    assert resolve_model_rotation(config) is None
+    assert config.offload_to_disk is True
+
+    assert resolve_model_rotation(QuantizeConfig(rotation="hadamard", offload_to_disk=False)) == "hadamard"
+    assert resolve_model_rotation(SimpleNamespace(rotation="random")) == "random"
+    assert resolve_model_rotation(None) is None
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        ({}, FORMAT.MXFP4_MACAQ),
+        ({"rotation": "none"}, FORMAT.MXFP4_MACAQ),
+        ({"pre_mode": "none"}, FORMAT.MXFP4_MACAQ),
+        ({"rotation": "none", "pre_mode": "none"}, FORMAT.MXFP4),
+        # An explicit format never overrides what the settings store.
+        ({"format": FORMAT.MXFP4}, FORMAT.MXFP4_MACAQ),
+        ({"rotation": "none", "pre_mode": "none", "format": FORMAT.MXFP4_MACAQ}, FORMAT.MXFP4),
+        # Any module that keeps a transform makes the checkpoint MACaQ-specific.
+        ({"rotation": "none", "pre_mode": "none", "dynamic": {"mlp": {"rotation": "hadamard"}}},
+         FORMAT.MXFP4_MACAQ),
+        ({"rotation": "none", "pre_mode": "none", "dynamic": {"mlp": {"pre_mode": "balance"}}},
+         FORMAT.MXFP4_MACAQ),
+        ({"rotation": "none", "pre_mode": "none", "dynamic": {"mlp": {"n_flip_iters": 4}, "attn": False}},
+         FORMAT.MXFP4),
+        ({"dynamic": {"mlp": {"rotation": "none", "pre_mode": "none"}}}, FORMAT.MXFP4_MACAQ),
+    ],
+)
+def test_macaq_format_follows_rotation_and_pre_mode(settings, expected):
+    assert MacaqConfig(offload_to_disk=False, **settings).format == expected
+
+
+def test_plain_mxfp4_config_round_trips_as_macaq():
+    assert FORMAT.MXFP4.value == "mxfp4"
+    config = MacaqConfig(rotation="none", pre_mode="none", activation_precision="w4a16",
+                         offload_to_disk=False)
+    payload = config.to_dict()
+    assert payload["format"] == "mxfp4"
+    assert payload["method"] == "macaq"
+    assert config.export_quant_method() == METHOD.MACAQ
+    assert resolve_quant_format(config.format, config.method) == FORMAT.MXFP4
+    assert config.quant_linear_init_kwargs()["rotation"] == "none"
+
+    restored = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(restored, MacaqConfig)
+    assert restored.format == FORMAT.MXFP4
+    assert (restored.rotation, restored.pre_mode) == ("none", "none")
+
+
+def test_gguf_mxfp4_subtype_is_not_claimed_by_macaq():
+    # GGUF also names a subtype `mxfp4`; only an explicit MACaQ method maps
+    # the plain `mxfp4` format to MACaQ.
+    for payload in (
+        {"method": "gguf", "format": "mxfp4", "bits": 4},
+        {"format": "mxfp4", "bits": 4},
+        {"method": "gguf", "bits": "mxfp4"},
+    ):
+        config = QuantizeConfig.from_quant_config(payload)
+        assert isinstance(config, GGUFConfig)
+        assert config.format == "mxfp4"
+        assert resolve_quant_format(config.format, config.method) == FORMAT.GGUF
+    assert GGUFConfig(format="mxfp4").format == "mxfp4"
+
+
+def _packed_module(result, *, activation_precision, rotation="hadamard", pre_mode="balance",
+                   backend=BACKEND.MACAQ_TORCH, cls=MacaqLinear,
+                   in_features=128, out_features=16, bias=None, device="cpu"):
+    module = cls(
+        bits=4, group_size=32, in_features=in_features, out_features=out_features,
+        bias=bias is not None, pack_dtype=torch.int32, block_size=32, had_block=32,
+        activation_precision=activation_precision, rotation=rotation, pre_mode=pre_mode,
+        dtype=torch.bfloat16, backend=backend,
+    ).to(device)
+    holder = torch.nn.Linear(in_features, out_features, bias=bias is not None).to(device)
+    if bias is not None:
+        holder.bias.data.copy_(bias)
+    module.pack(holder, macaq_result=result)
+    return module
+
+
+def _rotation_free_result(device="cpu", in_features=128, out_features=16):
+    torch.manual_seed(53)
+    weight = torch.randn(out_features, in_features, device=device)
+    calibration = torch.randn(256, in_features, device=device)
+    return macaq.macaq_quantize_weight(
+        weight, calibration.T @ calibration, 256, rotation="none", pre_mode="none",
+        n_flip_iters=8,
+    )
+
+
+def _plain_and_forced_modules(result, **kwargs):
+    """The plain layer and the same result loaded with explicit identity transforms."""
+    plain = _packed_module(result, rotation="none", pre_mode="none", **kwargs)
+    forced = _packed_module(result, rotation="hadamard", pre_mode="balance", **kwargs)
+    assert torch.equal(forced.BH, _identity_bh(forced.BH.device))
+    assert bool((forced.pre_scale == 1).all())
+    return plain, forced
+
+
+@pytest.mark.parametrize("activation_precision", ["w4a16", "w4a4"])
+def test_plain_mxfp4_layer_stores_only_mxfp4_tensors(activation_precision):
+    result = _rotation_free_result()
+    bias = torch.randn(16)
+    plain, forced = _plain_and_forced_modules(result, activation_precision=activation_precision, bias=bias)
+
+    assert plain.plain_mxfp4 and not forced.plain_mxfp4
+    assert plain.BH is None and plain.pre_scale is None
+    assert set(plain.state_dict()) == {"W_packed", "W_scales", "bias"}
+
+    # Dropping the identity transforms changes no output bit.
+    x = torch.randn(3, 7, 128, dtype=torch.bfloat16)
+    fast = plain(x)
+    assert torch.equal(forced(x), fast)
+
+    if activation_precision == "w4a16":
+        weight = macaq.dequantize_mxfp4(result.W_packed, result.W_scales, 128, dtype=torch.bfloat16)
+        expected = torch.nn.functional.linear(x, weight, bias.to(torch.bfloat16))
+        assert torch.equal(fast, expected)
+
+
+def test_plain_mxfp4_state_dict_round_trips_strictly():
+    source = _packed_module(_rotation_free_result(), activation_precision="w4a16",
+                            rotation="none", pre_mode="none")
+    target = MacaqLinear(
+        bits=4, group_size=32, in_features=128, out_features=16, bias=False,
+        pack_dtype=torch.int32, activation_precision="w4a16", rotation="none", pre_mode="none",
+        dtype=torch.bfloat16,
+    )
+    target.load_state_dict(source.state_dict(), strict=True)
+    target.post_init()
+    x = torch.randn(5, 128, dtype=torch.bfloat16)
+    assert torch.equal(target(x), source(x))
+
+
+def test_rotated_layer_keeps_its_transforms():
+    _, result, module, _ = _quantized_module_pair()
+    assert not module.plain_mxfp4
+    assert {"BH", "pre_scale"} <= set(module.state_dict())
+
+
+def test_plain_layer_rejects_transformed_results():
+    rotated = macaq.macaq_quantize_weight(torch.randn(16, 128), torch.eye(128), 128, n_flip_iters=0)
+    with pytest.raises(ValueError, match="rotated result"):
+        _packed_module(rotated, activation_precision="w4a16", rotation="none", pre_mode="none")
+
+    torch.manual_seed(59)
+    calibration = torch.randn(256, 128)
+    scaled = macaq.macaq_quantize_weight(
+        torch.randn(16, 128), calibration.T @ calibration, 256, rotation="none", n_flip_iters=0,
+    )
+    with pytest.raises(ValueError, match="pre-scale"):
+        _packed_module(scaled, activation_precision="w4a16", rotation="none", pre_mode="none")
+    # The same result fits a rotation-free layer that keeps D1.
+    module = _packed_module(scaled, activation_precision="w4a16", rotation="none", pre_mode="balance")
+    assert module.BH is None and module.pre_scale is not None
+
+
+@pytest.mark.skipif(
+    not triton_mxfp4_available(),
+    reason="MACaQ Triton kernels require NVIDIA CUDA or ROCm gfx1201",
+)
+@pytest.mark.parametrize("activation_precision", ["w4a16", "w4a4"])
+def test_triton_plain_mxfp4_matches_forced_transforms(activation_precision):
+    device = torch.device("cuda:0")
+    result = _rotation_free_result(device=device, in_features=256, out_features=128)
+    plain, forced = _plain_and_forced_modules(
+        result, activation_precision=activation_precision, backend=BACKEND.MACAQ_TRITON,
+        cls=MacaqTritonLinear, in_features=256, out_features=128, device=device,
+    )
+    x = torch.randn(9, 256, device=device, dtype=torch.bfloat16)
+    fast = plain(x)
+    assert not plain._triton_disabled
+    assert torch.equal(forced(x), fast)

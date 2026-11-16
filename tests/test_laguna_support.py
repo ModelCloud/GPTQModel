@@ -29,7 +29,9 @@ def test_laguna_module_tree_expands_dense_attention_and_sparse_moe_paths():
     assert "self_attn.q_proj" in flat_modules
     assert "self_attn.k_proj" in flat_modules
     assert "self_attn.v_proj" in flat_modules
-    assert "self_attn.g_proj" in flat_modules
+    # g_proj has a kernel-incompatible width and is excluded from
+    # quantization by design (#2983).
+    assert "self_attn.g_proj" not in flat_modules
     assert "self_attn.o_proj" in flat_modules
     assert "mlp.gate_proj" in flat_modules
     assert "mlp.up_proj" in flat_modules

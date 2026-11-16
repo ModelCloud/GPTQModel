@@ -15,6 +15,11 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 
 
 def _allow_minicpmv_remote_tokenizer() -> None:
@@ -39,9 +44,18 @@ class MiniCPMVQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "o_proj:3"),
+            # Q/K/V are parallel consumers of `input_layernorm`, and `o_proj`
+            # consumes the attention output. Sequential stages made the norm
+            # fold into q only and then q into k. The MLP stages were also
+            # merged, so `down_proj` shared the gate/up GPTQ subset.
+            "self_attn": (
+                "q_proj:0:in=x",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
+                "o_proj:1",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj", "up_proj", "down_proj"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         }
     ]
 
@@ -158,9 +172,15 @@ class MiniCPMVQModel(BaseQModel):
         return inputs
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(
                 self.prepare_inputs_for_conversations(
                     processor,
@@ -168,7 +188,9 @@ class MiniCPMVQModel(BaseQModel):
                 )
             )
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )
 
     def move_input_capture_example(self, example, data_device):
         for key, value in example.items():

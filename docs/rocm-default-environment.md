@@ -12,9 +12,13 @@ call and both defer to a value the caller already set:
 | `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:256,garbage_collection_threshold:0.7` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
 | `ROCBLAS_USE_HIPBLASLT` | `0` | rocBLAS forwards GEMMs to hipBLASLt, which selects a different kernel per process for the same shape; identical quantization runs then save different checkpoints |
 
-CUDA keeps the historical allocator default
-(`expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7`)
-and never has `ROCBLAS_USE_HIPBLASLT` set by GPT-QModel.
+CUDA installs `expandable_segments:True` only, and never has
+`ROCBLAS_USE_HIPBLASLT` set by GPT-QModel. `max_split_size_mb` is deliberately
+left unset on CUDA: pinning it to 256 MiB stops the allocator from splitting and
+reusing 256 MiB blocks, so GPTQ's per-layer churn grows reserved VRAM while
+active memory stays flat (#4389). `garbage_collection_threshold` is omitted too:
+without a memory fraction it only fires above a fraction of the whole device,
+which a quantization run never reaches.
 
 ## The import-time flow
 
@@ -198,11 +202,11 @@ comparison still covers the whole checkpoint.
 Two opt-ins are honoured, and neither is silently made deterministic because
 the speed is why they exist:
 
-- `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` keeps torch's hipBLASLt backend instead
+- `KernelConfig(rocm_quant_blas="hipblaslt")` keeps torch's hipBLASLt backend instead
   of pinning rocBLAS for the run.
 - `ROCBLAS_USE_HIPBLASLT=1` lets rocBLAS forward its GEMMs to hipBLASLt.
 
-The opt-out spellings of `GPTQMODEL_ROCM_QUANT_BLAS` (`""`, `0`, `off`,
+The opt-out spellings of `KernelConfig.rocm_quant_blas` (`""`, `0`, `off`,
 `default`) skip the pin as well, so they also leave torch on hipBLASLt. They
 are not silently treated as reproducible: `quantize_tuning` logs the same
 warning for them, because the checkpoint reproducibility is what is given up
@@ -216,14 +220,14 @@ Llama-3.2-1B (128 samples, every saved tensor hashed):
 |---|---|---|
 | none (default) | 2 | 0 / 483 |
 | `ROCBLAS_USE_HIPBLASLT=1` | 2 | **224 / 483** (`qweight` and `scales`, from layer 0) |
-| `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` | 4 | **222 / 483** between the two kernel-selection groups; 0 within a group |
+| `KernelConfig(rocm_quant_blas="hipblaslt")` | 4 | **222 / 483** between the two kernel-selection groups; 0 within a group |
 
 The issue measured 224/482 for both opt-ins. The 4-run result is the useful
 shape of the failure: runs 1, 2 and 4 matched and run 3 differed in 222/483
 tensors, so a single matching pair does not make the opt-in reproducible — the
 choice depends on process history. GPT-QModel logs a warning once whenever the
 pin is skipped — either opt-in, or any opt-out spelling of
-`GPTQMODEL_ROCM_QUANT_BLAS` (`gptqmodel/utils/rocm.py:151`, called from
+`KernelConfig.rocm_quant_blas` (`gptqmodel/utils/rocm.py:151`, called from
 `quantize_tuning`).
 
 ```bash
@@ -231,7 +235,7 @@ pin is skipped — either opt-in, or any opt-out spelling of
 python quantize.py
 
 # Faster, not reproducible across processes: the warning is intentional
-GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
+KernelConfig(rocm_quant_blas="hipblaslt") python quantize.py
 ```
 
 ## Failure and ambiguity paths
@@ -240,9 +244,9 @@ GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
 |---|---|
 | Caller sets any allocator variable, including `PYTORCH_HIP_ALLOC_CONF` | GPT-QModel writes nothing; the caller's value is used verbatim |
 | Caller sets `ROCBLAS_USE_HIPBLASLT` (including `1` or an empty string) | GPT-QModel writes nothing; rocBLAS sees the caller's value, and `1` warns that checkpoints may differ across processes |
-| Caller sets `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` | the run keeps hipBLASLt; `quantize_tuning` warns once that checkpoints may differ across processes |
-| Caller sets `GPTQMODEL_ROCM_QUANT_BLAS` to `""`, `0`, `off` or `default` | the pin is skipped, so the run stays on hipBLASLt; `quantize_tuning` warns once, the same as for the explicit opt-in |
-| Caller sets an unrecognised `GPTQMODEL_ROCM_QUANT_BLAS` value | it is ignored: the reproducible rocBLAS default is used and nothing is logged |
+| Caller sets `KernelConfig(rocm_quant_blas="hipblaslt")` | the run keeps hipBLASLt; `quantize_tuning` warns once that checkpoints may differ across processes |
+| Caller sets `KernelConfig.rocm_quant_blas` to `""`, `0`, `off` or `default` | the pin is skipped, so the run stays on hipBLASLt; `quantize_tuning` warns once, the same as for the explicit opt-in |
+| Caller sets an unrecognised `KernelConfig.rocm_quant_blas` value | it is ignored: the reproducible rocBLAS default is used and nothing is logged |
 | Non-ROCm host | CUDA allocator default is installed; `ROCBLAS_USE_HIPBLASLT` is never written; the override is a no-op |
 | BLAS call before `import gptqmodel` | rocBLAS has already fixed its kernel choice; the variable cannot change that process. Import GPT-QModel before the first BLAS call. |
 

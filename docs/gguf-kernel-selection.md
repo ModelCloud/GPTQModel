@@ -11,6 +11,15 @@ GGUF quantization and loading share one kernel selector,
 | 25 | `GGUFCppKernel` | CPU ggml bridge formats |
 | 15 | `GGUFTorchLinear` | every `GGUFBits` layout |
 
+The native C++ engines are the fast path but not the exact one: `ggml_mul_mat`
+quantizes activations to Q8_0/Q8_1/Q8_K, so `GGUF_CPP` carries a
+5e-3..1.5e-2 relative error against an FP64 dequantized-weight oracle even for
+FP32 activations. That loss, its bound, and the static native-vs-exact path rule
+are documented in
+[GGUF C++ activation quantization](gguf-cpp-activation-quantization.md);
+`GGUF_TORCH` is the exact engine. The C++ engines stay ahead of `GGUF_TORCH` in
+AUTO because they are 40-97x faster per layer on CPU.
+
 A GGUF **bit width is not a layout**. Width 4 is Q4_0 by default, but Q4_K and
 IQ4_NL are also 4-bit; width 5 is Q5_K_M by default but Q5_0 is also 5-bit.
 Selection therefore resolves the concrete `GGUFBits` spec to a ggml tensor type
@@ -73,6 +82,49 @@ The fallback is only active for an AUTO request
 (`model.quantize_backend in {AUTO, AUTO_TRAINABLE}`). An explicit
 `BACKEND.GGUF_TRITON` with a non-fused layout keeps failing loudly, matching the
 load path.
+
+## CPU zero-copy packed weight
+
+`GGUFCppKernel` used to allocate a ggml backend buffer for the whole packed
+weight and copy it with `ggml_backend_tensor_set` on every forward. The CPU
+backend can read the caller's storage directly, so the forward now wraps the
+existing `qweight` with `ggml_backend_cpu_buffer_from_ptr` and binds it to the
+graph tensor with `ggml_backend_tensor_alloc`. `post_init()` first copies an
+unaligned packed buffer (a safetensors mmap view, for example) into a padded
+allocation so `qweight.data_ptr()` is 32-byte aligned.
+
+The copy path stays as the fallback: an unaligned, non-contiguous, or
+backend-rejected weight never reaches `ggml_backend_cpu_buffer_from_ptr` (its
+`GGML_ASSERT` would abort the process) and produces the same bytes through the
+old buffer.
+
+```mermaid
+flowchart TD
+    A["GGUFCppKernel.forward"] --> B["_use_ggml_cpu_matmul"]
+    B -- "no" --> T["_forward_torch_cpu"]
+    B -- "yes" --> C["quantized_matmul_cpu"]
+    C --> D["_can_wrap_cpu_weight<br/>cpu, uint8, contiguous, 32-byte aligned"]
+    D -- "no" --> E["_run_quantized_matmul<br/>zero_copy_weight=False<br/>allocate + ggml_backend_tensor_set"]
+    D -- "yes" --> F["_run_quantized_matmul<br/>zero_copy_weight=True"]
+    F --> G["ggml_backend_cpu_buffer_from_ptr + ggml_backend_tensor_alloc"]
+    G --> H{"backend accepts?"}
+    H -- "yes" --> I["graph compute; no weight copy"]
+    H -- "no" --> E
+    E --> J["graph compute; identical bytes"]
+    classDef fallback fill:#fff4e5,stroke:#b36b00,color:#111;
+    class E,H fallback;
+```
+
+| Case | Before | After |
+| --- | --- | --- |
+| 2048x8192 Q4_K layer, M=1 | backend buffer allocated, 9,437,184 B copied per forward | storage bound in place; 2.49x faster on this host, bitwise equal |
+| 2048x8192 Q4_K layer, M=128 | same copy | 1.04x faster; the copy was already small against the compute |
+| Unaligned mmap `qweight` | copy path | `post_init()` aligns once; if alignment is lost the copy path is used |
+| Backend rejects the wrapped buffer | not applicable | caught, logged at debug, retried through the copy path |
+
+`tests/kernels/test_gguf_cpp_zero_copy_4395.py` pins the selected path, the
+bitwise equality with the copy path, the unaligned fallback, and the
+`post_init()` alignment of a safetensors mmap tensor.
 
 ## Failure contract
 

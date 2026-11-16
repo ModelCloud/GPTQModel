@@ -26,7 +26,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
-from .env import env_flag
+from .kernel import get_kernel_config
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -61,7 +61,6 @@ _ROTATION_EXTENSION_READY = False
 # persisted per device/torch/HIP fingerprint. Bump the format whenever the
 # native candidate set or its scoring changes so stale picks are discarded.
 _ROTATION_AUTOTUNE_CACHE_FORMAT = 1
-_ROTATION_AUTOTUNE_CACHE_ENV = "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE"
 _ROTATION_AUTOTUNE_DISK_LOCK = threading.Lock()
 # device index -> loaded flag, so the on-disk cache is read at most once.
 _ROTATION_AUTOTUNE_DISK_LOADED: set[int] = set()
@@ -196,11 +195,20 @@ def apply_paroquant_rotation_reference(
     hidden = x2d.shape[-1]
     group_size = _normalize_group_size(group_size, hidden)
 
+    # A bf16 rotation cannot absorb a rounding after every Givens stage: the
+    # krot stages each round the activation and cos/sin, which is about three
+    # times the error of rounding the fp32 result once. Accumulate in fp32 for
+    # bf16 and round once at the end; fp16 keeps the historical per-stage
+    # arithmetic (its 11-bit significand is already fine).
+    input_dtype = x2d.dtype
+    accumulate_fp32 = input_dtype == torch.bfloat16
+    work_dtype = torch.float32 if accumulate_fp32 else input_dtype
+
     if scales is not None:
-        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=x2d.dtype)
-        out = x2d * scale_tensor
+        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=work_dtype)
+        out = x2d.to(dtype=work_dtype) * scale_tensor
     else:
-        out = x2d.clone()
+        out = x2d.to(dtype=work_dtype).clone()
 
     num_groups = hidden // group_size
     half_group = group_size // 2
@@ -215,15 +223,15 @@ def apply_paroquant_rotation_reference(
             group_offset = group_idx * group_size
             idx_i = group_offset + pair_row[group_idx, :, 0]
             idx_j = group_offset + pair_row[group_idx, :, 1]
-            cos_t = torch.cos(theta_row[group_idx]).to(dtype=out.dtype)
-            sin_t = torch.sin(theta_row[group_idx]).to(dtype=out.dtype)
+            cos_t = torch.cos(theta_row[group_idx]).to(dtype=work_dtype)
+            sin_t = torch.sin(theta_row[group_idx]).to(dtype=work_dtype)
             xi = out[:, idx_i]
             xj = out[:, idx_j]
             next_out[:, idx_i] = xi * cos_t + xj * sin_t
             next_out[:, idx_j] = -xi * sin_t + xj * cos_t
         out = next_out
 
-    return out.reshape(orig_shape)
+    return out.to(dtype=input_dtype).reshape(orig_shape)
 
 
 def apply_paroquant_rotation_vectorized(
@@ -253,11 +261,17 @@ def apply_paroquant_rotation_vectorized(
     num_groups = hidden // group_size
     half_group = group_size // 2
 
+    # Same single-rounding contract as the reference path: bf16 accumulates in
+    # fp32 and is narrowed once below, while fp16 keeps its per-stage rounding.
+    input_dtype = x2d.dtype
+    accumulate_fp32 = input_dtype == torch.bfloat16
+    work_dtype = torch.float32 if accumulate_fp32 else input_dtype
+
     if scales is not None:
-        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=x2d.dtype)
-        out = x2d * scale_tensor
+        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=work_dtype)
+        out = x2d.to(dtype=work_dtype) * scale_tensor
     else:
-        out = x2d.clone()
+        out = x2d.to(dtype=work_dtype).clone()
 
     pairs = pairs.to(device=x2d.device, dtype=torch.int64)
     theta = theta.to(device=x2d.device, dtype=torch.float32)
@@ -287,8 +301,8 @@ def apply_paroquant_rotation_vectorized(
         xi = out.gather(2, gather_i)
         xj = out.gather(2, gather_j)
         angles = theta[rotation_index].reshape(num_groups, half_group)
-        cos_t = angles.cos().to(dtype=out.dtype).view(1, num_groups, half_group)
-        sin_t = angles.sin().to(dtype=out.dtype).view(1, num_groups, half_group)
+        cos_t = angles.cos().to(dtype=work_dtype).view(1, num_groups, half_group)
+        sin_t = angles.sin().to(dtype=work_dtype).view(1, num_groups, half_group)
         valid_mask = valid.view(1, num_groups, half_group)
 
         next_out = out.clone()
@@ -304,7 +318,7 @@ def apply_paroquant_rotation_vectorized(
         )
         out = next_out
 
-    return out.reshape(orig_shape)
+    return out.to(dtype=input_dtype).reshape(orig_shape)
 
 
 def _rotation_sources() -> list[str]:
@@ -429,29 +443,9 @@ def _load_rotation_extension() -> bool:
     return loaded
 
 
-def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
-    """Parse a bounded integer environment override."""
-    raw = os.getenv(name)
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    return value if value in allowed else None
-
-
-def _rotation_env_flag(name: str, default: bool) -> bool:
-    """Parse a boolean environment flag used by rotation autotune."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
 def _rotation_autotune_enabled() -> bool:
     """Report whether fused rotation launch autotune is enabled for this process."""
-    return _rotation_env_flag("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE", True)
+    return get_kernel_config().paroquant_rotate_autotune
 
 
 def _rotation_native_op_if_loaded(op_name: str):
@@ -468,15 +462,21 @@ def _rotation_native_op_if_loaded(op_name: str):
 
 
 def _rotation_requested_launch() -> tuple[int, int]:
-    """Resolve the requested fused launch policy from env overrides or autotune."""
+    """Resolve the requested fused launch policy from config overrides or autotune."""
     global _ROTATION_LAUNCH_POLICY_CACHE
 
+    kernel = get_kernel_config()
+    config_key = (
+        kernel.paroquant_rotate_autotune,
+        kernel.paroquant_rotate_cta_m,
+        kernel.paroquant_rotate_row_pad,
+    )
     cached = _ROTATION_LAUNCH_POLICY_CACHE
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == config_key:
+        return cached[1]
 
-    cta_m_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", {4, 8, 16})
-    row_pad_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", {0, 2})
+    cta_m_override = kernel.paroquant_rotate_cta_m
+    row_pad_override = kernel.paroquant_rotate_row_pad
     if cta_m_override is not None or row_pad_override is not None:
         resolved = (
             -1 if cta_m_override is None else int(cta_m_override),
@@ -486,7 +486,7 @@ def _rotation_requested_launch() -> tuple[int, int]:
         resolved = (-2, -2)
     else:
         resolved = (-1, -1)
-    _ROTATION_LAUNCH_POLICY_CACHE = resolved
+    _ROTATION_LAUNCH_POLICY_CACHE = (config_key, resolved)
     return resolved
 
 
@@ -681,7 +681,7 @@ def _apply_fused_rotation_pair_grad(
 
 
 def _rotation_autotune_cache_enabled() -> bool:
-    return env_flag(_ROTATION_AUTOTUNE_CACHE_ENV, default=True)
+    return get_kernel_config().paroquant_autotune_cache
 
 
 def _rotation_autotune_cache_dir() -> Path:

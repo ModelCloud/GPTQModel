@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import numbers
 import os
 import random
 from collections.abc import Mapping
@@ -62,6 +63,7 @@ CalibrationInputType = Union[
     List[Dict[str, Union[List[int], torch.LongTensor]]],
     List[str],
     List[List[int]],
+    Mapping[str, Any],
     "HFDataset",  # type: ignore[type-arg]  # noqa: F821
     "HFIterableDataset",  # type: ignore[type-arg]  # noqa: F821
 ]
@@ -132,6 +134,147 @@ def _iter_calibration_rows(dataset):
         yield from zip(example["input_ids"], example["attention_mask"])
 
 
+_CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
+
+
+def _is_batched_column(value: Any) -> bool:
+    """Return True when ``value`` holds one entry per calibration row."""
+
+    if isinstance(value, (str, bytes, bytearray)):
+        return False
+    ndim = getattr(value, "ndim", None)
+    if ndim is not None:
+        return ndim >= 2
+    if isinstance(value, Sequence):
+        if len(value) == 0:
+            return False
+        first = value[0]
+        first_ndim = getattr(first, "ndim", None)
+        if first_ndim is not None:
+            return first_ndim >= 1
+        # A nested sequence is a column of rows; a sequence of scalars is one
+        # token row. This also covers ``datasets.arrow_dataset.Column``, which
+        # is a ``Sequence`` but exposes neither ``ndim`` nor a ``list`` type.
+        return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
+    return False
+
+
+def _is_columnar_mapping(mapping: Mapping) -> bool:
+    """Return True when a top-level mapping stores columns instead of one row.
+
+    ``tokenizer(texts)`` returns a ``BatchEncoding`` whose ``input_ids`` is 2-D;
+    a dict of columns behaves the same way. A mapping describing a single
+    example instead carries a 1-D ``input_ids``, one ``text`` string, or one
+    ``messages`` conversation.
+    """
+
+    if "input_ids" in mapping:
+        return _is_batched_column(mapping["input_ids"])
+    if "text" in mapping:
+        value = mapping["text"]
+        return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    if "messages" in mapping:
+        value = mapping["messages"]
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return False
+        return len(value) > 0 and isinstance(value[0], (list, tuple))
+    return False
+
+
+def calibration_input_row_count(dataset: Any) -> Optional[int]:
+    """Return the number of calibration rows, or ``None`` when unknown.
+
+    A columnar mapping stores one entry per *column*, so ``len(mapping)`` is the
+    number of columns (2 for ``input_ids``/``attention_mask``), not the number
+    of calibration rows. Report the primary column's length instead so callers
+    such as the size warning count rows.
+    """
+
+    if isinstance(dataset, Mapping):
+        if _is_columnar_mapping(dataset):
+            for name in _CALIBRATION_COLUMNS:
+                if name in dataset and dataset[name] is not None:
+                    try:
+                        return len(dataset[name])
+                    except TypeError:
+                        return None
+            return None
+        if any(name in dataset for name in _CALIBRATION_COLUMNS):
+            # A mapping that is not columnar describes one calibration row.
+            return 1
+    try:
+        return len(dataset)
+    except TypeError:
+        return None
+
+
+def _is_dataset_split_mapping(mapping: Mapping) -> bool:
+    """Return True for a ``DatasetDict``-style mapping of splits to datasets."""
+
+    hf_dataset_types = _hf_dataset_types()
+    if not hf_dataset_types or not mapping:
+        return False
+    return all(isinstance(value, hf_dataset_types) for value in mapping.values())
+
+
+def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
+    """Split a columnar calibration mapping into one mapping per row."""
+
+    primary = next(name for name in _CALIBRATION_COLUMNS if name in mapping)
+    row_count = len(mapping[primary])
+
+    for name in _CALIBRATION_COLUMNS:
+        if name not in mapping or mapping[name] is None:
+            continue
+        try:
+            column_length = len(mapping[name])
+        except TypeError:
+            continue
+        if column_length != row_count:
+            raise ValueError(
+                f"Quantize: calibration mapping column `{name}` has {column_length} rows, "
+                f"expected {row_count} (same as `{primary}`)."
+            )
+
+    examples: List[Dict[str, Any]] = []
+    for row_index in range(row_count):
+        examples.append(
+            {
+                name: (None if mapping[name] is None else mapping[name][row_index])
+                for name in _CALIBRATION_COLUMNS
+                if name in mapping
+            }
+        )
+    return examples
+
+
+def _is_integer_scalar(value: Any) -> bool:
+    """Return True for a scalar token id (Python, NumPy, or 0-D torch)."""
+
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, numbers.Integral):
+        return True
+    if torch.is_tensor(value):
+        return (
+            value.numel() == 1
+            and value.dtype != torch.bool
+            and not value.is_floating_point()
+            and not value.is_complex()
+        )
+    return False
+
+
+def _is_integer_sequence(value: Any) -> bool:
+    """Return True when a nested list/tuple holds only scalar token ids."""
+
+    if isinstance(value, (list, tuple)):
+        return all(_is_integer_sequence(item) for item in value)
+    if torch.is_tensor(value):
+        return value.dtype != torch.bool and not value.is_floating_point() and not value.is_complex()
+    return _is_integer_scalar(value)
+
+
 def prepare_calibration_dataset(
     qmodel,
     calibration_dataset: CalibrationInputType,
@@ -158,7 +301,25 @@ def prepare_calibration_dataset(
     if isinstance(calibration_dataset, str):
         raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")
 
-    if hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
+    if isinstance(calibration_dataset, Mapping):
+        if len(calibration_dataset) == 0:
+            raw_examples = []
+        elif _is_columnar_mapping(calibration_dataset):
+            raw_examples = _columnar_mapping_examples(calibration_dataset)
+        elif _is_dataset_split_mapping(calibration_dataset):
+            splits = ", ".join(repr(key) for key in calibration_dataset.keys())
+            raise ValueError(
+                "Quantize: calibration dataset is a mapping of dataset splits "
+                f"({splits}); select one split, e.g. `calibration_dataset['train']`."
+            )
+        elif any(name in calibration_dataset for name in ("input_ids", "text", "messages")):
+            raw_examples = [calibration_dataset]
+        else:
+            raise ValueError(
+                "Quantize: calibration dataset mapping must provide `input_ids`, `text`, "
+                f"or `messages` columns, got keys={list(calibration_dataset.keys())}."
+            )
+    elif hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
         raw_examples = list(calibration_dataset)
     elif isinstance(calibration_dataset, list):
         raw_examples = calibration_dataset
@@ -169,6 +330,12 @@ def prepare_calibration_dataset(
 
     if len(raw_examples) == 0:
         raise ValueError("Quantize: calibration dataset is empty.")
+
+    if calibration_dataset_sort not in (None, "asc", "desc", "shuffle"):
+        raise ValueError(
+            f"Quantize: unsupported `calibration_dataset_sort` {calibration_dataset_sort!r}. "
+            "Expected `asc`, `desc`, `shuffle`, or None."
+        )
 
     message_examples = 0
     message_template_name = None
@@ -222,21 +389,27 @@ def prepare_calibration_dataset(
 
     def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
         try:
-            tensor = torch.as_tensor(value, dtype=torch.long)
+            tensor = torch.as_tensor(value)
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
+
+        # `torch.as_tensor([])` / `torch.as_tensor([[]])` infers float32 from the
+        # empty Python container. That is an absent value, not a float token id,
+        # so normalize empty containers to long before the integer check instead
+        # of reporting a misleading dtype error.
+        if tensor.numel() == 0 and not torch.is_tensor(value):
+            tensor = tensor.to(dtype=torch.long)
+
+        if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
+            raise ValueError(
+                f"Quantize: `{name}` for calibration item {idx} must contain integers, got dtype {tensor.dtype}."
+            )
+        tensor = tensor.to(dtype=torch.long)
 
         if tensor.ndim == 0:
             raise ValueError(f"Quantize: `{name}` for calibration item {idx} must be 1D or 2D, got scalar.")
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
-        elif tensor.ndim > 2 and name == "attention_mask":
-            # Some tokenizers emit causal masks shaped like [B, 1, T, T] or [B, T, T].
-            # Collapse those higher-rank masks back to the token presence mask expected here.
-            tensor = tensor.ne(0)
-            for dim in range(tensor.ndim - 2, 0, -1):
-                tensor = tensor.any(dim=dim)
-            tensor = tensor.to(torch.long)
         elif tensor.ndim != 2:
             raise ValueError(
                 f"Quantize: `{name}` for calibration item {idx} must be rank 1 or 2, got rank {tensor.ndim}."
@@ -257,6 +430,20 @@ def prepare_calibration_dataset(
             )
         if mask_tensor.ndim == 1:
             mask_tensor = mask_tensor.unsqueeze(0)
+
+        # An additive/extended mask encodes "attend" as 0 (or a positive bias)
+        # and "masked" as a negative bias. When such a mask is all zeros there
+        # is no padding at all, but ``normalize_seq_mask`` reads 0 as "drop" for
+        # a 0/1 mask and would erase every token. Resolve it here first so only
+        # genuinely masked positions are dropped. A 2-D integer 0/1 mask keeps
+        # the usual meaning: an all-zero row is all padding.
+        if (
+            mask_tensor.dtype != torch.bool
+            and mask_tensor.numel() > 0
+            and torch.count_nonzero(mask_tensor).item() == 0
+            and (mask_tensor.is_floating_point() or mask_tensor.ndim >= 3)
+        ):
+            mask_tensor = torch.ones_like(mask_tensor)
 
         try:
             keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
@@ -279,6 +466,16 @@ def prepare_calibration_dataset(
     def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
 
+        # A zero-ROW item (`torch.empty(0, N)`) carries no sample at all and is a
+        # structural error. A zero-COLUMN row (`(1, 0)`, e.g. tokenizing `""`
+        # with a tokenizer that adds no BOS) is merely too short: it is dropped
+        # by the minimum-length filter below, exactly as before #4194.
+        if ids_tensor.shape[0] == 0:
+            raise ValueError(
+                f"Quantize: calibration item {idx} has empty `input_ids` with shape "
+                f"{tuple(ids_tensor.shape)}; every item needs at least one row of tokens."
+            )
+
         if mask_value is None:
             mask_tensor = torch.ones_like(ids_tensor, dtype=torch.long)
         else:
@@ -289,11 +486,13 @@ def prepare_calibration_dataset(
             "attention_mask": mask_tensor.detach(),
         }
 
-    def _tokenize_text_value(text_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+    def _tokenize_text_value(
+        text_value: Any, idx: int, *, add_special_tokens: bool = True
+    ) -> Dict[str, torch.Tensor]:
         _require_tokenizer("calibration data contains raw text")
         tokenized = tokenizer(  # type: ignore[call-arg]
             text_value,
-            add_special_tokens=True,
+            add_special_tokens=add_special_tokens,
             return_tensors="pt",
         )
         input_ids = tokenized["input_ids"]
@@ -329,7 +528,10 @@ def prepare_calibration_dataset(
             if ids_value is not None:
                 return _pack_ids(ids_value, mask_value, idx)
             if text_value is not None:
-                return _tokenize_text_value(text_value, idx)
+                # A rendered chat template already contains the template's own
+                # special tokens (e.g. a leading BOS on Llama/Gemma). Letting the
+                # tokenizer add them again prepends a duplicate BOS to every row.
+                return _tokenize_text_value(text_value, idx, add_special_tokens=False)
 
         if isinstance(templated, (list, tuple)):
             if len(templated) > 0 and isinstance(templated[0], int):
@@ -342,7 +544,7 @@ def prepare_calibration_dataset(
             return _pack_ids(templated, None, idx)
 
         if isinstance(templated, str):
-            return _tokenize_text_value(templated, idx)
+            return _tokenize_text_value(templated, idx, add_special_tokens=False)
 
         raise ValueError(
             f"tokenizer.apply_template returned unsupported type {type(templated)} for calibration item {idx}."
@@ -382,12 +584,10 @@ def prepare_calibration_dataset(
             continue
 
         if isinstance(example, (list, tuple)):
-            if all(isinstance(x, int) for x in example):
+            if _is_integer_sequence(example):
                 processed_examples.append(_pack_ids(list(example), None, idx))
                 continue
-            raise ValueError(
-                f"Quantize: list-based calibration example at index {idx} must contain only integers."
-            )
+            raise ValueError(f"Quantize: list-based calibration example at index {idx} must contain only integers.")
 
         if torch.is_tensor(example):
             processed_examples.append(_pack_ids(example, None, idx))
@@ -466,38 +666,105 @@ def prepare_calibration_dataset(
             f"Unsupported tokenizer.truncation_side `{truncation_side}`. Expected `left` or `right`."
         )
 
-    for example in calibration_dataset:
+    dropped_padded_row_count = 0
+    too_short_row_count = 0
+
+    for example_index, example in enumerate(calibration_dataset):
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
-        if max_positions is not None:
-            trimmed = False
-            trimmed_input_ids = []
-            trimmed_attention_mask = []
+        if len(input_ids) == 0:
+            raise ValueError(f"Quantize: calibration item {example_index} has no token rows.")
+        if len(input_ids) != len(attention_mask):
+            raise ValueError(
+                f"Quantize: calibration item {example_index} has {len(input_ids)} input_ids "
+                f"rows but {len(attention_mask)} attention_mask rows."
+            )
 
-            for row_ids, row_mask in zip(input_ids, attention_mask):
-                row_len = len(row_ids)
-                if row_len > max_positions:
-                    trimmed = True
-                    trimmed_row_count += 1
-                    longest_trimmed_row = max(longest_trimmed_row, row_len)
-                    if truncation_side == "left":
-                        trimmed_input_ids.append(row_ids[-max_positions:])
-                        trimmed_attention_mask.append(row_mask[-max_positions:])
-                    else:
-                        trimmed_input_ids.append(row_ids[:max_positions])
-                        trimmed_attention_mask.append(row_mask[:max_positions])
+        rows_changed = False
+        prepared_rows = []
+
+        for row_index, (row_ids, row_mask) in enumerate(zip(input_ids, attention_mask)):
+            if len(row_ids) == 0:
+                # An empty token row is a too-short sample, not a malformed one:
+                # tokenizers without a BOS encode `""` as `(1, 0)`. Drop it
+                # through the minimum-length filter below so one blank line in
+                # the calibration data cannot abort the whole run.
+                too_short_row_count += 1
+                rows_changed = True
+                continue
+            if len(row_ids) != len(row_mask):
+                raise ValueError(
+                    f"Quantize: calibration item {example_index} row {row_index} has "
+                    f"{len(row_ids)} tokens but an attention_mask of length {len(row_mask)}."
+                )
+
+            row_len = len(row_ids)
+            if max_positions is not None and row_len > max_positions:
+                trimmed_row_count += 1
+                longest_trimmed_row = max(longest_trimmed_row, row_len)
+                rows_changed = True
+
+                # Padding is not part of the sample. Strip it before spending the
+                # position budget: slicing a left-padded row by width keeps the
+                # leading pads and drops real tokens, and a row whose padding
+                # alone fills the budget would come out as pure padding with an
+                # all-zero mask.
+                real_positions = [pos for pos, keep in enumerate(row_mask) if keep]
+                row_ids = [row_ids[pos] for pos in real_positions]
+                row_mask = [row_mask[pos] for pos in real_positions]
+
+                if truncation_side == "left":
+                    row_ids = row_ids[-max_positions:]
+                    row_mask = row_mask[-max_positions:]
                 else:
-                    trimmed_input_ids.append(row_ids)
-                    trimmed_attention_mask.append(row_mask)
+                    row_ids = row_ids[:max_positions]
+                    row_mask = row_mask[:max_positions]
 
-            if trimmed:
-                input_ids = trimmed_input_ids
-                attention_mask = trimmed_attention_mask
+            # An all-padding row carries no activation statistics: keeping it
+            # would only feed the Hessian zeros, so drop it whether or not the
+            # row needed trimming.
+            if not any(row_mask):
+                dropped_padded_row_count += 1
+                rows_changed = True
+                continue
 
-        if len(input_ids[0]) <= calibration_data_min_length:
-            too_short_calibration_data_count += 1
-            continue
+            # The minimum-length filter is per row and measures real tokens from
+            # the attention mask, not the padded width. Otherwise a long first
+            # row hides later rows that are mostly padding.
+            if sum(1 for keep in row_mask if keep) <= calibration_data_min_length:
+                too_short_row_count += 1
+                rows_changed = True
+                continue
+
+            prepared_rows.append((row_ids, row_mask))
+
+        if rows_changed:
+            if not prepared_rows:
+                too_short_calibration_data_count += 1
+                continue
+
+            # Stripping or dropping rows can leave an item ragged. The batched
+            # path and the concatenation path consume rows one at a time, but
+            # the non-batched path stacks an item into a single tensor, so only
+            # that path needs the item made rectangular again.
+            widths = {len(row_ids) for row_ids, _ in prepared_rows}
+            if not support_batch_quantize and len(widths) > 1:
+                row_width = max(widths)
+                pad_token_id = getattr(tokenizer, "pad_token_id", 0) or 0
+                padded_rows = []
+                for row_ids, row_mask in prepared_rows:
+                    pad_len = row_width - len(row_ids)
+                    if pad_len <= 0:
+                        padded_rows.append((row_ids, row_mask))
+                    elif padding_side == "left":
+                        padded_rows.append(([pad_token_id] * pad_len + row_ids, [0] * pad_len + row_mask))
+                    else:
+                        padded_rows.append((row_ids + [pad_token_id] * pad_len, row_mask + [0] * pad_len))
+                prepared_rows = padded_rows
+
+            input_ids = [row_ids for row_ids, _ in prepared_rows]
+            attention_mask = [row_mask for _, row_mask in prepared_rows]
 
         new_calibration_dataset.append(
             {
@@ -508,7 +775,15 @@ def prepare_calibration_dataset(
 
     if too_short_calibration_data_count > 0:
         log.warn(
-            f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+            f"Quantize: {too_short_calibration_data_count} calibration items were removed because every row was "
+            f"empty, all-padding, or <= {calibration_data_min_length} non-padding tokens. "
+            f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
+        )
+
+    if too_short_row_count > 0:
+        log.warn(
+            f"Quantize: {too_short_row_count} calibration rows with <= {calibration_data_min_length} "
+            "non-padding tokens were removed. "
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
         )
 
@@ -535,6 +810,12 @@ def prepare_calibration_dataset(
             truncation_side,
         )
 
+    if dropped_padded_row_count > 0:
+        log.warn(
+            "Quantize: dropped %s calibration rows that had no non-padding token.",
+            dropped_padded_row_count,
+        )
+
     if calibration_dataset_concat_size:
         _require_tokenizer("`calibration_dataset_concat_size` is specified")
         concatenated_data = []
@@ -544,7 +825,14 @@ def prepare_calibration_dataset(
 
         separator = calibration_concat_separator if calibration_concat_separator is not None else ""
         if separator:
-            new_line = tokenizer(separator, return_tensors="pt")  # type: ignore[call-arg]
+            # The separator is inserted between already-tokenized documents, so
+            # it must not contribute special tokens (a BOS here lands at every
+            # document boundary).
+            new_line = tokenizer(  # type: ignore[call-arg]
+                separator,
+                add_special_tokens=False,
+                return_tensors="pt",
+            )
             new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
             new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
         else:
@@ -565,6 +853,14 @@ def prepare_calibration_dataset(
             current_length = 0
 
         for row_ids, row_mask in _iter_calibration_rows(new_calibration_dataset):
+            # Strip pad positions before packing. Rows that needed trimming were
+            # already stripped above, but a padded row below the position budget
+            # (e.g. from `tokenizer(texts, padding=True)`) still carries pad ids
+            # that must never enter a concatenated window.
+            if not all(row_mask):
+                row_ids = [token for token, keep in zip(row_ids, row_mask) if keep]
+                row_mask = [keep for keep in row_mask if keep]
+
             position = 0
             row_length = len(row_ids)
 
@@ -600,7 +896,15 @@ def prepare_calibration_dataset(
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
-                pad_id = getattr(tokenizer, "pad_token_id", 0)
+                pad_id = getattr(tokenizer, "pad_token_id", None)
+                if pad_id is None:
+                    # A tokenizer without a pad token still needs a value for
+                    # the final window's tail. EOS is the conventional safe
+                    # fallback, then 0; the zero mask keeps these slots out of
+                    # the Hessian.
+                    pad_id = getattr(tokenizer, "eos_token_id", None)
+                if pad_id is None:
+                    pad_id = 0
                 if padding_side == "left":
                     input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
                     attention_mask_buff = ([0] * padding_length) + attention_mask_buff

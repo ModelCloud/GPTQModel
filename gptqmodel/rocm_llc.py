@@ -58,7 +58,6 @@ from __future__ import annotations
 import ctypes
 import inspect
 import logging
-import os
 import re
 import textwrap
 import threading
@@ -411,8 +410,10 @@ def apply(*, benchmarker: bool = True, cudagraph: bool = True) -> dict[str, str]
         return dict(_STATE["status"])
 
     status: dict[str, str] = {}
-    if os.environ.get("GPTQMODEL_NO_ROCM_LLC", "").strip().lower() in {"1", "true", "yes", "on"}:
-        status["props"] = "skipped: GPTQMODEL_NO_ROCM_LLC"
+    from .utils.kernel import get_kernel_config
+
+    if not get_kernel_config().rocm_llc:
+        status["props"] = "skipped: KernelConfig.rocm_llc=False"
         _STATE.update(applied=True, status=status)
         return status
     if not torch.version.hip:

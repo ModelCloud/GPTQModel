@@ -60,6 +60,103 @@ from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 log = setup_logger()
 
+
+# ``#4364`` replaced every path-selecting environment variable with a typed
+# policy field. The old variables are intentionally not read anymore, but
+# silently ignoring one changes numerics or thread counts without telling the
+# caller. Warn once per retired variable and name its replacement.
+_RETIRED_KERNEL_ENV_VARS = {
+    "APHRODITE_SWORDFISH_DENSE_M": "KernelConfig.swordfish_dense_m",
+    "APHRODITE_SWORDFISH_DETERMINISTIC": "KernelConfig.swordfish_deterministic",
+    "GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE": "KernelConfig.awq_fused_splitk_reduce",
+    "GPTQMODEL_AWQ_TRITON_SCHEDULE": "KernelConfig.awq_triton_schedule",
+    "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE": "KernelConfig.bitsandbytes_cpu_int8_dense",
+    "GPTQMODEL_BITSANDBYTES_CPU_PACKED": "KernelConfig.bitsandbytes_cpu_packed",
+    "GPTQMODEL_BLOCKFLOAT_NO_CUBLAS": "KernelConfig.blockfloat_cublas",
+    "GPTQMODEL_BNB_TRITON": "KernelConfig.bitsandbytes_triton",
+    "GPTQMODEL_CPU_BF16X3": "KernelConfig.cpu_bf16x3_matmul",
+    "GPTQMODEL_CPU_WORKERS": "RuntimeConfig.cpu_workers",
+    "GPTQMODEL_CUDA_WORKERS": "RuntimeConfig.cuda_workers",
+    "GPTQMODEL_DISABLE_BITBLAS": "KernelConfig.disable_bitblas",
+    "GPTQMODEL_DISABLE_GPTQ_CUDA": "KernelConfig.gptq_fused_block_update (set it to False)",
+    "GPTQMODEL_EXL3_CAPTURE_BATCH_CHECKPOINT_INTERVAL": "KernelConfig.exl3_capture_batch_checkpoint_interval",
+    "GPTQMODEL_EXL3_CAPTURE_BATCH_SPOOL": "KernelConfig.exl3_capture_batch_spool",
+    "GPTQMODEL_EXL3_CAPTURE_FRONTIER": "KernelConfig.exl3_capture_frontier",
+    "GPTQMODEL_EXL3_CPU_BF16X3": "KernelConfig.cpu_bf16x3_matmul",
+    "GPTQMODEL_EXL3_CUDA_ALLOCATION_LIMIT_BYTES": "KernelConfig.exl3_cuda_allocation_limit_bytes",
+    "GPTQMODEL_EXL3_HOST_RSS_LIMIT_BYTES": "KernelConfig.exl3_host_rss_limit_bytes",
+    "GPTQMODEL_EXL3_MEMORY_TELEMETRY_INTERVAL_BATCHES": "KernelConfig.exl3_memory_telemetry_interval_batches",
+    "GPTQMODEL_EXL3_TILE_BATCH": "KernelConfig.exl3_tile_batch",
+    "GPTQMODEL_FLOATX_CPU_DISABLE_AVX2": "KernelConfig.floatx_cpu_simd_level",
+    "GPTQMODEL_FLOATX_CPU_DISABLE_AVX512": "KernelConfig.floatx_cpu_simd_level",
+    "GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8": "KernelConfig.floatx_cpu_native_fp8",
+    "GPTQMODEL_FLOATX_CPU_THREADS": "KernelConfig.floatx_cpu_threads",
+    "GPTQMODEL_FP32_ACCUM": "KernelConfig.fp32_accum",
+    "GPTQMODEL_GGUF_CPP_NATIVE_MATMUL": "KernelConfig.gguf_cpp_native_matmul",
+    "GPTQMODEL_GGUF_CPP_THREADS": "KernelConfig.gguf_cpp_threads",
+    "GPTQMODEL_GGUF_FUSED_AUTOTUNE_ITERS": "KernelConfig.gguf_fused_autotune_iters",
+    "GPTQMODEL_GGUF_FUSED_AUTOTUNE_MARGIN": "KernelConfig.gguf_fused_autotune_margin",
+    "GPTQMODEL_GGUF_FUSED_AUTOTUNE_WARMUP": "KernelConfig.gguf_fused_autotune_warmup",
+    "GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS": "KernelConfig.gguf_fused_chunk_blocks",
+    "GPTQMODEL_GGUF_FUSED_CHUNK_BYTES": "KernelConfig.gguf_fused_chunk_bytes",
+    "GPTQMODEL_GGUF_FUSED_CPU_MAX_ROWS": "KernelConfig.gguf_fused_cpu_max_rows",
+    "GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS": "KernelConfig.gguf_fused_cpu_min_matrix_elements",
+    "GPTQMODEL_GGUF_FUSED_CUDA_MAX_ROWS": "KernelConfig.gguf_fused_cuda_max_rows",
+    "GPTQMODEL_GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS": "KernelConfig.gguf_fused_cuda_min_matrix_elements",
+    "GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION": "KernelConfig.gsq_disable_cuda_relaxation",
+    "GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION": "KernelConfig.gsq_disable_hip_relaxation",
+    "GPTQMODEL_MARLIN_USE_FP32": "KernelConfig.marlin_fp32",
+    "GPTQMODEL_MAX_PACKERS": "RuntimeConfig.max_packers",
+    "GPTQMODEL_NO_ROCM_LLC": "KernelConfig.rocm_llc",
+    "GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE": "KernelConfig.npu_cholesky_block_size",
+    "GPTQMODEL_PAROQUANT_AFFINE_STE_TRITON": "KernelConfig.paroquant_affine_ste_triton",
+    "GPTQMODEL_PAROQUANT_AFFINE_STE_TRITON_BACKWARD": "KernelConfig.paroquant_affine_ste_triton_backward",
+    "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE": "KernelConfig.paroquant_autotune_cache",
+    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE": "KernelConfig.paroquant_auto_cache_bf16_rotation_dtype",
+    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE": "KernelConfig.paroquant_auto_cache_bf16_runtime_dtype",
+    "GPTQMODEL_PAROQUANT_CACHE_ROTATION_DTYPE": "KernelConfig.paroquant_cache_rotation_dtype",
+    "GPTQMODEL_PAROQUANT_CACHE_RUNTIME_DTYPE": "KernelConfig.paroquant_cache_runtime_dtype",
+    "GPTQMODEL_PAROQUANT_CPU_AVX512": "KernelConfig.paroquant_cpu_avx512",
+    "GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION": "QuantizeConfig.opt_fused_rotation",
+    "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE": "KernelConfig.paroquant_rotate_autotune",
+    "GPTQMODEL_PAROQUANT_ROTATE_CTA_M": "KernelConfig.paroquant_rotate_cta_m",
+    "GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD": "KernelConfig.paroquant_rotate_row_pad",
+    "GPTQMODEL_PAROQUANT_SYM_STE_TRITON": "KernelConfig.paroquant_sym_ste_triton",
+    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE": "KernelConfig.paroquant_triton_autotune",
+    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_ITERS": "KernelConfig.paroquant_triton_autotune_iters",
+    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_MARGIN": "KernelConfig.paroquant_triton_autotune_margin",
+    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_WARMUP": "KernelConfig.paroquant_triton_autotune_warmup",
+    "GPTQMODEL_PAROQUANT_TRITON_DECODE_MAX_ROWS": "KernelConfig.paroquant_triton_decode_max_rows",
+    "GPTQMODEL_RESUME": "CheckpointConfig(path=...)",
+    "GPTQMODEL_ROCM_QUANT_BLAS": "KernelConfig.rocm_quant_blas",
+    "GPTQ_TORCH_CACHE_WEIGHTS": "KernelConfig.torch_cache_weights",
+    "GPTQ_TORCH_LOOKAHEAD": "KernelConfig.torch_lookahead",
+    "GPTQ_TORCH_ROCM_GEMM": "KernelConfig.torch_rocm_gemm",
+    "GPTQ_TORCH_ROCM_GEMV": "KernelConfig.torch_rocm_gemv",
+    "GPTQ_TORCH_STREAMING": "KernelConfig.torch_streaming",
+    "GPTQ_TORCH_STREAM_TILE": "KernelConfig.torch_stream_tile",
+    "GPTQ_TORCH_TRITON_DEQUANT": "KernelConfig.torch_triton_dequant",
+}
+_WARNED_RETIRED_KERNEL_ENV_VARS: set[str] = set()
+
+
+def warn_retired_kernel_env_vars() -> list[str]:
+    """Warn once for every retired kernel/thread env var that is still set."""
+
+    warned = []
+    for name, replacement in _RETIRED_KERNEL_ENV_VARS.items():
+        if name not in os.environ or name in _WARNED_RETIRED_KERNEL_ENV_VARS:
+            continue
+        _WARNED_RETIRED_KERNEL_ENV_VARS.add(name)
+        log.warn(
+            f"ENV: {name} is retired and has no effect; use {replacement} instead."
+        )
+        warned.append(name)
+    return warned
+
+
+warn_retired_kernel_env_vars()
+
 if any(result.startswith("applied") for result in _rocm_llc_status.values()):
     log.debug("rocm_llc: %s", _rocm_llc_status)
 
@@ -375,6 +472,7 @@ def _patch_optimum_gptqmodel_load_bridge():
 
 from .utils import has_gil_disabled
 from .utils.env import env_flag
+from .utils.kernel import get_kernel_config
 from .utils.modelscope import ensure_modelscope_available
 
 
@@ -389,14 +487,11 @@ _DEVICE_THREAD_POOL_LOCK = threading.Lock()
 
 
 def _default_cpu_workers() -> int:
-    """Return the default CPU worker count, respecting an explicit env override."""
+    """Return the CPU worker count selected by the kernel policy."""
 
-    env_workers = os.getenv("GPTQMODEL_CPU_WORKERS")
-    if env_workers is not None:
-        try:
-            return max(1, int(env_workers))
-        except ValueError:
-            pass
+    configured = get_kernel_config().cpu_workers
+    if configured is not None:
+        return configured
 
     # Cap CPU workers to avoid OpenMP team explosion under free-threading.
     # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
@@ -406,20 +501,21 @@ def _default_cpu_workers() -> int:
 
 
 def _default_cuda_workers() -> int:
-    """Return the per-CUDA worker count, respecting an explicit env override."""
+    """Return the per-CUDA worker count selected by the kernel policy."""
 
-    env_workers = os.getenv("GPTQMODEL_CUDA_WORKERS")
-    if env_workers is not None:
-        try:
-            return max(1, int(env_workers))
-        except ValueError:
-            pass
+    configured = get_kernel_config().cuda_workers
+    if configured is not None:
+        return configured
     return 4
 
 
-def _build_device_thread_pool():
+def _build_device_thread_pool(warmup_devices=None, cpu_workers=None):
+    if cpu_workers is None:
+        cpu_workers = _default_cpu_workers()
     return DeviceThreadPool(
         inference_mode=True,
+        warmup_devices=warmup_devices,
+        intraop_threads_per_worker=get_kernel_config().pool_intraop_threads,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
@@ -431,25 +527,70 @@ def _build_device_thread_pool():
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
-            "cpu": _default_cpu_workers(),
+            "cpu": cpu_workers,
             "model_loader:cpu": 2,
         },
         empty_cache_every_n=512,
     )
 
 
-def get_device_thread_pool():
+def _device_thread_pool_cpu_workers(pool: DeviceThreadPool) -> int:
+    return len(pool._worker_groups.get("cpu", ()))
+
+
+def get_device_thread_pool(warmup_devices=None):
     global _DEVICE_THREAD_POOL
     if _DEVICE_THREAD_POOL is None:
         with _DEVICE_THREAD_POOL_LOCK:
             if _DEVICE_THREAD_POOL is None:
-                pool = _build_device_thread_pool()
+                pool = _build_device_thread_pool(warmup_devices=warmup_devices)
                 # Register before publishing the pool so every caller that
                 # receives it has a matching exit cleanup. Capture this pool:
                 # a later replacement must not leave its workers unjoined.
                 atexit.register(_shutdown_device_thread_pool, pool)
                 _DEVICE_THREAD_POOL = pool
     return _DEVICE_THREAD_POOL
+
+
+def resize_device_thread_pool(warmup_devices=None, cpu_workers=None, *, create: bool = True):
+    """Match the singleton pool's CPU group to the current kernel policy.
+
+    Worker threads cannot be resized in place, so a later load that asks for a
+    different ``RuntimeConfig.cpu_workers`` replaces the pool at the load
+    boundary. Before this, the per-process singleton kept the first load's
+    worker count and silently ignored every later request (issue #4396).
+
+    ``create=False`` only retunes an existing pool; callers that must not build
+    one eagerly (post-quantized loads) leave the lazy build to the first use,
+    which reads the already-installed policy.
+    """
+
+    global _DEVICE_THREAD_POOL
+    target = _default_cpu_workers() if cpu_workers is None else int(cpu_workers)
+    pool = _DEVICE_THREAD_POOL
+    if pool is not None and _device_thread_pool_cpu_workers(pool) == target:
+        return pool
+    if pool is None and not create:
+        return None
+
+    with _DEVICE_THREAD_POOL_LOCK:
+        pool = _DEVICE_THREAD_POOL
+        if pool is not None and _device_thread_pool_cpu_workers(pool) == target:
+            return pool
+        if pool is not None:
+            log.info(
+                "ENV: resizing device thread pool CPU workers from %s to %s for the new kernel policy.",
+                _device_thread_pool_cpu_workers(pool),
+                target,
+            )
+            # Detach before shutting down so no concurrent caller can submit to
+            # a pool whose workers are stopping.
+            _DEVICE_THREAD_POOL = None
+            pool.shutdown(wait=True)
+        pool = _build_device_thread_pool(warmup_devices=warmup_devices, cpu_workers=target)
+        atexit.register(_shutdown_device_thread_pool, pool)
+        _DEVICE_THREAD_POOL = pool
+        return pool
 
 
 def _shutdown_device_thread_pool(pool: DeviceThreadPool) -> None:
@@ -543,6 +684,23 @@ def exllama_set_max_input_length(model, max_input_length: int):
 import torch
 
 from . import extension
+from .backend import (  # noqa: F401
+    AwqGemmConfig,
+    AwqTorchConfig,
+    AwqTritonConfig,
+    BackendConfig,
+    BitsAndBytesConfig,
+    GGUFCPPConfig,
+    GGUFCUDAConfig,
+    GGUFTorchConfig,
+    MarlinConfig,
+    ParoQuantConfig,
+    ParoQuantTritonConfig,
+    RuntimeConfig,
+    SwordfishConfig,
+    TorchConfig,
+    TTBlockFloatConfig,
+)
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
 from .models import (

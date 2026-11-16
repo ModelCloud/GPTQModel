@@ -7,7 +7,7 @@ import pcre
 import pytest
 import torch
 import torch.nn as nn
-from model_test import ModelTest
+from model_test import ModelTest, resolve_attn_implementation
 from safetensors import safe_open
 
 from gptqmodel import BACKEND
@@ -69,7 +69,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             "evalution_batch_size": "auto",
             "evalution_model_args": {
                 "dtype": "bfloat16",
-                "attn_implementation": "paged|flash_attention_2",
+                "attn_implementation": resolve_attn_implementation(),
                 "device": "cuda",
             },
             "evalution_suite_kwargs": {

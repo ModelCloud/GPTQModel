@@ -281,8 +281,14 @@ def pack_mxfp4_from_signed_index(
     sign = _device_const(E2M1_SIGN_BIT, device)[signed_index]
     nibbles = (sign.to(torch.uint8) << 3) | magnitude.to(torch.uint8)
     packed = (nibbles[:, 1::2] << 4) | nibbles[:, 0::2]
-    biased = (log2_scale + 127).clamp(0, 254).to(torch.int32)
-    scales = biased.to(torch.uint8).contiguous().view(torch.float8_e8m0fnu)
+    biased = (log2_scale + 127).clamp(0, 254)
+    # A block holding a NaN/Inf value has no finite E8M0 exponent. Casting the
+    # non-finite exponent to int folds it into a plausible one (0 on CUDA), so
+    # write the format's NaN code (0xFF) instead and let it reach the output.
+    biased = torch.where(
+        torch.isfinite(log2_scale), biased, torch.full_like(biased, 255.0)
+    )
+    scales = biased.to(torch.int32).to(torch.uint8).contiguous().view(torch.float8_e8m0fnu)
     if scales.shape != (out_features, groups):
         raise AssertionError("MACaQ: packed scale shape mismatch")
     return packed.contiguous(), scales
@@ -309,7 +315,13 @@ def dequantize_mxfp4(
     if packed.shape[1] * 2 < in_features:
         raise ValueError("MACaQ: `packed` holds fewer than `in_features` values.")
     scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
-    scale = torch.exp2(scale_bytes - 127.0)
+    # E8M0 0xFF is the format's NaN, not 2**128; `pack_mxfp4_from_signed_index`
+    # writes it for a block that held a NaN/Inf value.
+    scale = torch.where(
+        scale_bytes == 255.0,
+        torch.full_like(scale_bytes, float("nan")),
+        torch.exp2(scale_bytes - 127.0),
+    )
     lo = (packed & 0x0F).to(torch.int64)
     hi = ((packed >> 4) & 0x0F).to(torch.int64)
     code = torch.stack([lo, hi], dim=-1).reshape(out_features, packed.shape[1] * 2)[:, :in_features]
@@ -490,6 +502,7 @@ def macaq_quantize_weight(
     *,
     block_size: int = MXFP4_BLOCK,
     had_block: int = MXFP4_BLOCK,
+    rotation: str = "hadamard",
     n_flip_iters: int = 256,
     ridge: float = 1.0,
     do_flip: bool = True,
@@ -501,7 +514,15 @@ def macaq_quantize_weight(
     compile_flip: bool = True,
     return_dequantized: bool = False,
 ) -> MacaqQuantResult:
-    """Quantize one ``[out, in]`` weight matrix with the MACaQ recipe."""
+    """Quantize one ``[out, in]`` weight matrix with the MACaQ recipe.
+
+    ``rotation="none"`` skips the block Hadamard and quantizes in the
+    original (optionally D1-scaled) frame and returns an identity ``BH``; a
+    layer built with the same ``rotation`` stores no ``BH`` at all. This
+    trades accuracy for faster inference: no online activation rotation is
+    needed, but quantization error is higher than with ``rotation="hadamard"``
+    (the default).
+    """
 
     device = weight.device
     weight = weight.float()
@@ -513,22 +534,38 @@ def macaq_quantize_weight(
             f"and had_block={had_block}."
         )
 
+    if rotation not in ("hadamard", "none"):
+        raise ValueError(f"MACaQ: `rotation` must be `hadamard` or `none`, got `{rotation}`.")
+
     pre_scale = None
     if pre_mode != "none":
         pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha)
         weight = weight / pre_scale.unsqueeze(0)
         hessian = hessian * pre_scale.unsqueeze(0) * pre_scale.unsqueeze(1)
 
-    bh = make_hadamard(had_block, device=device, dtype=torch.float32)
-    bh_bf16 = bh.to(torch.bfloat16)
-    rotated_weight = rotate_blocks(weight, bh_bf16)
-    rotated_hessian = rotate_blocks(rotate_blocks(hessian, bh_bf16).T, bh_bf16).T
+    if rotation == "hadamard":
+        bh_bf16 = make_hadamard(had_block, device=device, dtype=torch.float32).to(torch.bfloat16)
+        rotated_weight = rotate_blocks(weight, bh_bf16)
+        rotated_hessian = rotate_blocks(rotate_blocks(hessian, bh_bf16).T, bh_bf16).T
+    else:
+        bh_bf16 = torch.eye(had_block, device=device, dtype=torch.bfloat16)
+        rotated_weight = weight
+        rotated_hessian = hessian
+
+    # `weight` and `hessian` are only read above: the rotated copies are what
+    # the rest of the recipe consumes. Drop the pre-scaled temporaries now so
+    # they do not overlap the flip sweep (one C^2 fp32 Hessian copy per module,
+    # with every module of a layer running concurrently).
+    del hessian, weight
 
     flip_hessian = None
     if do_flip or exp_screen:
         flip_hessian = rotated_hessian.clone()
         if ridge > 0:
             flip_hessian.diagonal().add_(ridge * flip_hessian.diagonal().mean())
+    # `rotated_hessian` only seeds the flip metric; release it after the clone
+    # so the sweep holds a single C^2 Hessian copy.
+    del rotated_hessian
 
     if exp_screen and flip_hessian is not None and len(exp_offsets) > 1:
         signed_index, log2_scale, scale_element = screen_block_exponents(
@@ -728,6 +765,10 @@ class Macaq:
             # An expert that received no calibration tokens has no Hessian to
             # invert or screen. Mirror GPTQ/GPTAQ: fall back to data-independent
             # MXFP4 RTN (identity metric, no D1) instead of failing the run.
+            # The exponent screen still runs under the identity metric: the
+            # OCP exponent `floor(log2(amax)) - 2` clips blocks whose amax
+            # mantissa exceeds 1.5, and picking the per-block exponent with the
+            # lower plain squared error never does worse than that rule.
             strategy = resolve_fallback_strategy(self.fallback)
             log.warn(
                 f"MACaQ: Module `{self.name}` -> using `{strategy.value}` fallback "
@@ -742,12 +783,13 @@ class Macaq:
             n_tokens=max(self.nsamples, 1),
             block_size=int(self.qcfg.block_size),
             had_block=int(self.qcfg.had_block),
+            rotation=str(self.qcfg.rotation),
             n_flip_iters=int(self.qcfg.n_flip_iters),
             ridge=float(self.qcfg.ridge),
             do_flip=False if fallback_used else bool(self.qcfg.do_flip),
             pre_mode="none" if fallback_used else str(self.qcfg.pre_mode),
             pre_alpha=float(self.qcfg.pre_alpha),
-            exp_screen=False if fallback_used else bool(self.qcfg.exp_screen),
+            exp_screen=bool(self.qcfg.exp_screen),
             exp_offsets=tuple(self.qcfg.exp_offsets),
             fast_flip=bool(self.qcfg.fast_flip),
             compile_flip=bool(self.qcfg.compile_flip),

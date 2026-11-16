@@ -16,7 +16,6 @@ import torch.nn as nn
 
 from ..models._const import DEVICE
 from ..utils.cpu_features import cpu_bf16x3_scope, has_avx512_bf16, has_cpu_bf16x3_precision
-from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .compiled_state import compiled_module_getstate
@@ -32,7 +31,6 @@ _EXL3_MUL1_MULT = 0x83DCD12D
 _EXL3_MUL1_ACC = 0x6400
 _EXL3_LOP3_MASK = 0x8FFF8FFF
 _EXL3_LOP3_BIAS = 0x3B603B60
-_CPU_BF16X3_ENV = "GPTQMODEL_EXL3_CPU_BF16X3"
 _CPU_BF16X3_MIN_WEIGHT_ELEMENTS = 1 << 19
 _CPU_BF16X3_MIN_MACS = 1 << 23
 # Bound each transient decode to 512 output columns without serializing many small GEMMs.
@@ -40,14 +38,31 @@ _EXL3_OUTPUT_TILES_PER_CHUNK = 32
 
 
 @lru_cache(maxsize=1)
-def _cpu_bf16x3_support() -> bool:
-    """Return whether oneDNN BF16x3 FP32 matmul is usable on this host."""
+def _cpu_bf16x3_capable() -> bool:
+    """Return whether the host itself can run oneDNN BF16x3 FP32 matmul."""
 
-    if not env_flag(_CPU_BF16X3_ENV, default=True):
+    return has_avx512_bf16() and has_cpu_bf16x3_precision()
+
+
+def _cpu_bf16x3_support() -> bool:
+    """Return whether the active kernel policy enables BF16x3 on this host.
+
+    The policy read stays outside the cache so toggling
+    ``KernelConfig.cpu_bf16x3_matmul`` between runs is observed by the next
+    forward. Only the hardware capability probe is cached.
+    """
+
+    from ..utils.kernel import get_kernel_config
+
+    if not get_kernel_config().cpu_bf16x3_matmul:
         return False
-    if not has_avx512_bf16():
-        return False
-    return has_cpu_bf16x3_precision()
+    return _cpu_bf16x3_capable()
+
+
+# Keep the documented re-arm knob on the capability probe. Callers (and tests)
+# that used to clear the old cached predicate now clear only the hardware
+# capability, which is exactly what the name promises.
+_cpu_bf16x3_support.cache_clear = _cpu_bf16x3_capable.cache_clear
 
 
 def _cpu_bf16x3_should_use(rows: int, in_features: int, out_features: int) -> bool:

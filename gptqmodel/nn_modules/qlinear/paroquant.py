@@ -18,7 +18,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.paroquant import (
     apply_paroquant_rotation,
@@ -31,7 +31,6 @@ from ...utils.rocm import IS_ROCM
 from ._numerics import linear_wide_bias
 from ._runtime_cache import tensor_cache_key
 from .gemm_awq import (
-    FP32_ACCUM,
     _awq_cuda_gemm_forward,
     _awq_cuda_gemm_forward_fp32_reduce,
 )
@@ -50,20 +49,6 @@ PAROQUANT_OUT_FEATURES_ALIGN = 8
 
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PAROQUANT_AWQ_SPLIT_K = 4
-_PAROQUANT_CACHE_RUNTIME_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_RUNTIME_DTYPE", default=False)
-_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE = env_flag(
-    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE", default=True
-)
-# Cache typed rotation metadata so BF16 runs do not re-cast theta/scales every call.
-_PAROQUANT_CACHE_ROTATION_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_ROTATION_DTYPE", default=False)
-_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
-    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE", default=True
-)
-# CPU inference applies the same per-row rotation contract as the reference
-# implementation, but vectorizes the group loop.  The shared AWQ-layout AVX512
-# int4 GEMM then consumes the rotated BF16 activations; FP16 uses ATen's native
-# int4pack kernel because dense FP16 matmul is substantially slower on CPU.
-_PAROQUANT_CPU_AVX512 = env_flag("GPTQMODEL_PAROQUANT_CPU_AVX512", default=True)
 
 
 def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
@@ -139,11 +124,11 @@ class ParoLinear(AwqTorchLinear):
         adapter: Adapter = None,
         register_buffers: bool = False,
         krot: int = 8,
-        fp32_accum: bool = FP32_ACCUM,
-        cache_runtime_dtype: bool = _PAROQUANT_CACHE_RUNTIME_DTYPE,
-        auto_cache_bf16_runtime_dtype: bool = _PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE,
-        cache_rotation_dtype: bool = _PAROQUANT_CACHE_ROTATION_DTYPE,
-        auto_cache_bf16_rotation_dtype: bool = _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE,
+        fp32_accum: bool = None,
+        cache_runtime_dtype: bool = None,
+        auto_cache_bf16_runtime_dtype: bool = None,
+        cache_rotation_dtype: bool = None,
+        auto_cache_bf16_rotation_dtype: bool = None,
         **kwargs,
     ):
         """Initialize AWQ buffers plus the extra ParoQuant rotation state."""
@@ -160,11 +145,25 @@ class ParoLinear(AwqTorchLinear):
                 "eight codes per int32, and ParoQuant reuses that layout for every "
                 "inference path, so a narrower output cannot be packed."
             )
-        self.fp32_accum = bool(fp32_accum)
-        self.cache_runtime_dtype = bool(cache_runtime_dtype)
-        self.auto_cache_bf16_runtime_dtype = bool(auto_cache_bf16_runtime_dtype)
-        self.cache_rotation_dtype = bool(cache_rotation_dtype)
-        self.auto_cache_bf16_rotation_dtype = bool(auto_cache_bf16_rotation_dtype)
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        self._paroquant_cpu_avx512 = kernel.paroquant_cpu_avx512
+        self.fp32_accum = bool(kernel.fp32_accum if fp32_accum is None else fp32_accum)
+        self.cache_runtime_dtype = bool(
+            kernel.paroquant_cache_runtime_dtype if cache_runtime_dtype is None else cache_runtime_dtype
+        )
+        self.auto_cache_bf16_runtime_dtype = bool(
+            kernel.paroquant_auto_cache_bf16_runtime_dtype
+            if auto_cache_bf16_runtime_dtype is None
+            else auto_cache_bf16_runtime_dtype
+        )
+        self.cache_rotation_dtype = bool(
+            kernel.paroquant_cache_rotation_dtype if cache_rotation_dtype is None else cache_rotation_dtype
+        )
+        self.auto_cache_bf16_rotation_dtype = bool(
+            kernel.paroquant_auto_cache_bf16_rotation_dtype
+            if auto_cache_bf16_rotation_dtype is None
+            else auto_cache_bf16_rotation_dtype
+        )
         self._rotation_runtime_dtype: Optional[torch.dtype] = None
         self._rotation_runtime_device: Optional[torch.device] = None
         self._runtime_theta: Optional[torch.Tensor] = None
@@ -464,6 +463,7 @@ class ParoLinear(AwqTorchLinear):
                 kernel_scales,
                 self.qzeros,
                 _PAROQUANT_AWQ_SPLIT_K,
+                kernel=self.kernel,
             )
             bias = self._bias_for_compute(device=x_flat.device).float()
             return (out + bias).to(dtype=x_flat.dtype)
@@ -475,6 +475,7 @@ class ParoLinear(AwqTorchLinear):
             self.qzeros,
             _PAROQUANT_AWQ_SPLIT_K,
             fp32_accum=self.fp32_accum,
+            kernel=self.kernel,
         )
         if kernel_bias is not None:
             out = out + kernel_bias
@@ -599,7 +600,7 @@ class ParoLinear(AwqTorchLinear):
         if out is None:
             out = self._forward_cpu_avx512(
                 rotated,
-                enabled=_PAROQUANT_CPU_AVX512 and rotated.dtype == torch.bfloat16,
+                enabled=self._paroquant_cpu_avx512 and rotated.dtype == torch.bfloat16,
             )
         if out is None:
             out = self._forward_cpu_aten(rotated)

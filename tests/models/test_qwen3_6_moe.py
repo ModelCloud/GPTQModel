@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 
-from model_test import ModelTest
+from model_test import ModelTest, resolve_attn_implementation
 
 from gptqmodel.quantization.config import ExpertsRoutingOverride, Fallback, MoEConfig, VramStrategy
 
@@ -60,7 +60,7 @@ class TestQwen3_6Moe(ModelTest):
             "evalution_batch_size": 4,
             "evalution_model_args": {
                 "dtype": "bfloat16",
-                "attn_implementation": "paged|flash_attention_2",
+                "attn_implementation": resolve_attn_implementation(),
                 "device_map": "auto",
             },
             "evalution_suite_kwargs": {

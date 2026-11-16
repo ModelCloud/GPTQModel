@@ -17,6 +17,8 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
       - [B, S] with 1/0
       - [B, 1, 1, S] 'extended' masks with {0 or positive} keep and {negative large} masked
       - [B, 1, S] (rare)
+      - [B, T, T] and [B, 1, T, T] causal masks; the query axis is collapsed
+        with `any` so a token is kept when at least one query may attend to it.
     """
     if mask is None:
         return None
@@ -44,8 +46,16 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
         else:
             # Fallback: collapse singleton dim, leave seq axis for later handling
             m = m[:, 0, 0, :]
-    elif m.dim() == 3 and m.size(1) == 1:
-        m = m[:, 0, :]  # [B, S]
+    elif m.dim() == 3:
+        if m.size(1) == 1:
+            m = m[:, 0, :]  # [B, S]
+        elif m.size(1) == m.size(2):
+            # [B, T, T] causal mask without a singleton query dim. Collapse the
+            # query axis the same way the [B, 1, T, T] branch does; flattening
+            # would otherwise keep only the first query row.
+            m = m.any(dim=1)
+        else:
+            raise ValueError(f"Unsupported attention_mask shape: {tuple(mask.shape)}")
     elif m.dim() == 2:
         pass  # already [B, S]
     else:

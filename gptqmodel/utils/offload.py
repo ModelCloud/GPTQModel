@@ -4,11 +4,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
 import shutil
 import struct
+import uuid
+import weakref
+from collections.abc import Mapping
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -18,17 +22,22 @@ import torch
 from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 from accelerate.utils import align_module_device, has_offloaded_params
+from safetensors import safe_open
 from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
 from ..looper.named_module import NamedModule
+from .checkpoint_paths import resolve_checkpoint_path
 from .device import get_device
+from .logger import setup_logger
 from .module_locks import parent_module_lock
 from .tensor import tensor_buffer
 from .torch import CPU, META
 
 
 _SMALL_MODULE_OFFLOAD_BYTES = 4 * 1024  # Skip disk writes for <4KB payloads
+
+log = setup_logger()
 
 
 # Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
@@ -70,6 +79,175 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
+
+def bind_private_offload_root(model: nn.Module) -> Optional[str]:
+    """Bind a private offload namespace to one quantization run.
+
+    A ``QuantizeConfig`` (and therefore its automatic temporary directory or
+    explicit ``offload_to_disk_path``) is commonly shared by several models:
+    ``copy.copy``/``copy.deepcopy`` deliberately keep the same temporary
+    directory. Bundle directory names are derived from the module path alone,
+    so without a per-run namespace a later run overwrites the earlier model's
+    finalized bundles in place and its ``save()`` silently writes the other
+    model's weights.
+
+    Give the run its own subdirectory under the configured root and keep a
+    private config copy on the model, so a later run on another model cannot
+    move this model's save-time bundle lookup. The directory is registered on
+    the model so :func:`release_private_offload_root` can remove it after save,
+    after a failed run, or when the model is garbage collected (issue #4368).
+    """
+    config = getattr(model, "quantize_config", None)
+    if config is None or not getattr(config, "offload_to_disk", False):
+        return None
+
+    base = getattr(model, "_private_offload_base_root", None)
+    if not base:
+        configured = getattr(config, "offload_to_disk_path", None)
+        if not configured:
+            return None
+        base = os.path.abspath(os.path.expanduser(os.fspath(configured)))
+
+    # Re-quantizing the same model replaces its run state; release the previous
+    # run directory instead of overwriting the only handle to it.
+    if getattr(model, "_private_offload_run_root", None):
+        release_private_offload_root(model)
+
+    run_root = os.path.join(base, f"run-{uuid.uuid4().hex[:16]}")
+    os.makedirs(run_root, exist_ok=True)
+
+    private_config = copy.copy(config)
+    private_config.offload_to_disk_path = run_root
+    model.quantize_config = private_config
+    model._private_offload_base_root = base
+    model._private_offload_run_root = run_root
+    try:
+        model._private_offload_run_finalizer = weakref.finalize(
+            model, _remove_private_offload_root, run_root
+        )
+    except TypeError:
+        # Lightweight test doubles (for example ``SimpleNamespace``) are not
+        # weak-referenceable; they can still call the explicit release helper.
+        model._private_offload_run_finalizer = None
+    log.debug("Offload: bound private run directory `%s`.", run_root)
+    return run_root
+
+
+def _remove_private_offload_root(run_root: str) -> None:
+    """Remove one per-run offload directory without touching its siblings."""
+
+    try:
+        shutil.rmtree(run_root, ignore_errors=True)
+    except Exception:  # pragma: no cover - defensive
+        log.debug("Offload: failed to remove run directory `%s`.", run_root, exc_info=True)
+
+
+def release_private_offload_root(model: nn.Module) -> Optional[str]:
+    """Remove the private offload directory bound to ``model``, if any.
+
+    The directory is only deleted after the caller has finished reading its
+    bundles (save) or after the run failed. Keeping the explicit path's parent
+    intact means other runs and the caller's own files are untouched.
+    """
+
+    finalizer = getattr(model, "_private_offload_run_finalizer", None)
+    if finalizer is not None:
+        try:
+            finalizer.detach()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        try:
+            model._private_offload_run_finalizer = None
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    run_root = getattr(model, "_private_offload_run_root", None)
+    if not run_root:
+        return None
+    try:
+        model._private_offload_run_root = None
+    except Exception:  # pragma: no cover - defensive
+        pass
+    _remove_private_offload_root(run_root)
+    log.debug("Offload: released private run directory `%s`.", run_root)
+    return run_root
+
+
+def capture_offloaded_base_modules(
+    model: nn.Module,
+    module_names: Iterable[str],
+) -> List[Tuple[str, nn.Module, torch.device]]:
+    """Snapshot base modules before they are offloaded.
+
+    Only modules that still hold real tensors are recorded: a module that is
+    already on meta was not offloaded by this run and has no bundle to restore
+    from.
+    """
+    entries: List[Tuple[str, nn.Module, torch.device]] = []
+    for name in module_names:
+        try:
+            module = get_submodule(model, name)
+        except AttributeError:
+            continue
+        if isinstance(module, NamedModule):
+            module = module.module
+        device = get_device(module)
+        if device.type == "meta":
+            continue
+        entries.append((name, module, device))
+    return entries
+
+
+def restore_offloaded_modules(
+    model: nn.Module,
+    entries: Iterable[Tuple[str, nn.Module, torch.device]],
+    *,
+    strict: bool = False,
+) -> List[str]:
+    """Materialize modules offloaded during quantization back into memory.
+
+    Quantization offloads the embedding/lm_head base modules so the layer loop
+    has more host memory. They are never needed on disk afterwards, and leaving
+    them on meta makes the in-session model unusable: ``tie_weights()`` points
+    ``lm_head.weight`` at the meta embedding parameter, which has no offload
+    hook. Restore the recorded modules and re-tie shared weights.
+
+    ``strict=True`` raises a clear reload-the-checkpoint error when a module
+    cannot be restored; otherwise the failure is only logged.
+    """
+    unresolved: List[str] = []
+    for name, module, device in entries:
+        try:
+            undo_offload_to_disk(module, device=device)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn("Offload: failed to restore `%s`: %s", name, exc)
+            unresolved.append(name)
+            continue
+        if is_meta_module(module):
+            unresolved.append(name)
+
+    config = getattr(model, "config", None)
+    tie_weights = getattr(model, "tie_weights", None)
+    if callable(tie_weights) and getattr(config, "tie_word_embeddings", False):
+        try:
+            tie_weights()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn("Offload: tie_weights() after restore failed: %s", exc)
+            unresolved.append("<tie_weights>")
+
+    if not unresolved:
+        return []
+
+    message = (
+        "Offload: base modules remain on the meta device after quantization "
+        f"({', '.join(unresolved)}). The in-session model cannot run inference; "
+        "reload the saved checkpoint before using it."
+    )
+    if strict:
+        raise RuntimeError(message)
+    log.error(message)
+    return unresolved
+
 # Serialize access to module.state_dict(), which is not thread-safe under
 # concurrent calls that mutate the same parent module.
 def _prepare_offload_directory(target_dir: str) -> None:
@@ -86,10 +264,32 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * itemsize
 
 
-def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Optional[str] = None) -> dict:
+def _write_offload_index(index: dict, offload_dir: str) -> None:
+    """Write an Accelerate-compatible ``index.json`` into ``offload_dir``."""
+
+    index_path = os.path.join(offload_dir, "index.json")
+    with open(index_path, "w", encoding="utf-8") as fp:
+        json.dump(index, fp, indent=2)
+
+
+def _bundle_module_state_dict(
+    module: nn.Module,
+    offload_dir: str,
+    index_dir: Optional[str] = None,
+    *,
+    reference_index: Optional[dict] = None,
+) -> dict:
     """Serialize module state into offload_dir. index_dir is the directory
     the index.json should reference -- pass the final destination when writing
-    into a temporary directory that will be atomically renamed into place."""
+    into a temporary directory that will be atomically renamed into place.
+
+    ``reference_index`` publishes a pre-validated index that points at the
+    source checkpoint instead of writing ``module.safetensors``.
+    """
+    if reference_index is not None:
+        _write_offload_index(reference_index, offload_dir)
+        return reference_index
+
     bundle_path = os.path.join(offload_dir, "module.safetensors")
     index_bundle_path = os.path.join(index_dir, "module.safetensors") if index_dir else bundle_path
     index: dict[str, dict] = {}
@@ -127,11 +327,346 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Op
             start, end = (int(offsets[0]), int(offsets[1]))
             entry["data_offsets"] = [data_offset_base + start, data_offset_base + end]
 
-    index_path = os.path.join(offload_dir, "index.json")
-    with open(index_path, "w", encoding="utf-8") as fp:
-        json.dump(index, fp, indent=2)
-
+    _write_offload_index(index, offload_dir)
     return index
+
+
+def _read_safetensors_header(path: str) -> tuple[int, dict]:
+    """Return ``(data_base, header)`` for one safetensors file."""
+
+    size = os.path.getsize(path)
+    if size < 8:
+        raise ValueError(f"safetensors file is too short: {path}")
+    with open(path, "rb") as handle:
+        prefix = handle.read(8)
+        if len(prefix) != 8:
+            raise ValueError(f"safetensors file has no complete header: {path}")
+        header_size = struct.unpack("<Q", prefix)[0]
+        if header_size <= 0 or header_size > size - 8:
+            raise ValueError(f"safetensors file has an invalid header size: {path}")
+        try:
+            header = json.loads(handle.read(header_size).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"safetensors file has invalid JSON: {path}") from error
+    if not isinstance(header, dict):
+        raise ValueError(f"safetensors header is not an object: {path}")
+    return 8 + header_size, header
+
+
+def _source_checkpoint_tensor_map(
+    source_root: Optional[str],
+    source_checkpoint: Optional[str],
+) -> Optional[dict[str, tuple[str, int, dict]]]:
+    """Map checkpoint tensor names to their source safetensors payload.
+
+    Only safetensors checkpoints qualify. The returned entry is
+    ``(absolute_file, data_base, header_entry)``; the caller still validates
+    dtype, shape and content against the live module before publishing a
+    reference.
+    """
+
+    if source_checkpoint:
+        checkpoint = os.path.abspath(os.fspath(source_checkpoint))
+        root = (
+            os.path.abspath(os.fspath(source_root))
+            if source_root
+            else os.path.dirname(checkpoint)
+        )
+        if checkpoint.endswith(".safetensors.index.json"):
+            return _source_shard_tensor_map(root, checkpoint)
+        if checkpoint.endswith(".safetensors"):
+            data_base, header = _read_safetensors_header(checkpoint)
+            return {
+                name: (checkpoint, data_base, entry)
+                for name, entry in header.items()
+                if name != "__metadata__" and isinstance(entry, dict)
+            }
+        return None
+
+    if not source_root:
+        return None
+    root = os.path.abspath(os.fspath(source_root))
+    index_path = os.path.join(root, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        return _source_shard_tensor_map(root, index_path)
+    single_path = os.path.join(root, "model.safetensors")
+    if os.path.isfile(single_path):
+        data_base, header = _read_safetensors_header(single_path)
+        return {
+            name: (single_path, data_base, entry)
+            for name, entry in header.items()
+            if name != "__metadata__" and isinstance(entry, dict)
+        }
+    return None
+
+
+def _source_shard_tensor_map(root: str, index_path: str) -> Optional[dict[str, tuple[str, int, dict]]]:
+    with open(index_path, encoding="utf-8") as handle:
+        index = json.load(handle)
+    weight_map = index.get("weight_map") if isinstance(index, dict) else None
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+
+    headers: dict[str, tuple[int, dict]] = {}
+    tensor_map: dict[str, tuple[str, int, dict]] = {}
+    for name, shard in weight_map.items():
+        try:
+            shard_path = resolve_checkpoint_path(
+                root,
+                shard,
+                kind="checkpoint weight_map shard",
+                follow_symlinks=False,
+            )
+        except Exception:
+            return None
+        if shard_path not in headers:
+            try:
+                headers[shard_path] = _read_safetensors_header(shard_path)
+            except (OSError, ValueError):
+                return None
+        data_base, header = headers[shard_path]
+        entry = header.get(name)
+        if not isinstance(entry, dict):
+            return None
+        tensor_map[str(name)] = (shard_path, data_base, entry)
+    return tensor_map
+
+
+def _module_source_reference_index(
+    module: nn.Module,
+    *,
+    module_name: str,
+    source_root: Optional[str],
+    source_checkpoint: Optional[str],
+    offload_dir: str,
+) -> Optional[dict]:
+    """Build an Accelerate index that points at untouched checkpoint tensors.
+
+    Returns ``None`` when any module tensor is absent from the source, has a
+    different dtype/shape, differs in content, or lives inside the offload
+    directory. The caller then falls back to serializing a bundle.
+    """
+
+    try:
+        tensor_map = _source_checkpoint_tensor_map(source_root, source_checkpoint)
+    except (OSError, ValueError):
+        return None
+    if not tensor_map:
+        return None
+
+    state = module.state_dict()
+    if not state:
+        return None
+    full_name = module_name
+    offload_real = os.path.realpath(offload_dir)
+    index: dict[str, dict] = {}
+
+    for key, tensor in state.items():
+        if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
+            return None
+        source_key = f"{full_name}.{key}" if full_name else key
+        found = tensor_map.get(source_key)
+        if found is None:
+            return None
+        path, data_base, entry = found
+        try:
+            if os.path.commonpath((os.path.realpath(path), offload_real)) == offload_real:
+                return None
+        except ValueError:
+            # Paths on different drives (Windows) have no common prefix, so the
+            # source cannot be inside the offload dir; keep the reference.
+            pass
+
+        try:
+            expected_dtype = _safetensors_dtype(tensor.dtype)
+        except ValueError:
+            return None
+        offsets = entry.get("data_offsets")
+        if (
+            entry.get("dtype") != expected_dtype
+            or entry.get("shape") != list(tensor.shape)
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+        ):
+            return None
+        start, end = int(offsets[0]), int(offsets[1])
+        if end - start != tensor.numel() * tensor.element_size():
+            return None
+
+        try:
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                source = handle.get_tensor(source_key)
+        except (KeyError, OSError, RuntimeError):
+            return None
+        if (
+            source.dtype != tensor.dtype
+            or tuple(source.shape) != tuple(tensor.shape)
+            or not torch.equal(source, tensor)
+        ):
+            return None
+
+        _owner, buffer = tensor_buffer(tensor)
+        index[key] = {
+            "dtype": str(tensor.dtype).removeprefix("torch."),
+            "shape": list(tensor.shape),
+            "safetensors_file": path,
+            "weight_name": source_key,
+            "data_offsets": [data_base + start, data_base + end],
+            "sha256": hashlib.sha256(buffer).hexdigest(),
+        }
+    return index
+
+
+def _qzero_layout_for_module(module: nn.Module) -> Optional[int]:
+    """Runtime qzero layout the restored module decodes, or ``None``.
+
+    Only GPTQ-style modules expose the layout contract; AWQ words have no
+    v1/v2 convention, so they are left untouched.
+    """
+
+    target = getattr(module, "_load_target_qzeros_format", None)
+    if not callable(target):
+        return None
+    return int(target())
+
+
+def _bundle_qzero_layout(module: nn.Module, weights_map: Mapping) -> Optional[int]:
+    """Layout of the ``qzeros`` words stored in an offload bundle.
+
+    The bundle is written from ``module.state_dict()``, so it holds the
+    checkpoint layout and its ``qzeros_format`` marker. A bundle written before
+    the marker existed falls back to the module's recorded checkpoint format,
+    which is the same fallback the checkpoint load hook uses.
+    """
+
+    try:
+        marker = weights_map[_qzeros_format_buffer()]
+    except (KeyError, TypeError, IndexError):
+        marker = None
+    if isinstance(marker, torch.Tensor) and marker.numel() == 1:
+        code = int(marker.reshape(-1)[0].item())
+        return code if code in (1, 2) else None
+
+    incoming = getattr(module, "_incoming_qzeros_format", None)
+    if callable(incoming):
+        code = incoming({})
+        if code in (1, 2):
+            return code
+    return None
+
+
+def _qzeros_format_buffer() -> str:
+    from ..nn_modules.qlinear._fused_train_state import QZEROS_FORMAT_BUFFER
+
+    return QZEROS_FORMAT_BUFFER
+
+
+def _convert_bundle_qzeros(
+    module: nn.Module,
+    qzeros: torch.Tensor,
+    source: int,
+    target: int,
+) -> torch.Tensor:
+    """Return ``qzeros`` converted from the bundle layout to the live layout."""
+
+    if not isinstance(qzeros, torch.Tensor) or qzeros.numel() == 0:
+        return qzeros
+    bits = getattr(module, "bits", None)
+    if bits is None:
+        return qzeros
+    planar = bool(getattr(module, "planar", False))
+    if source == 1 and target == 2:
+        from .model_dequant import _correct_gptq_v1_qzeros
+
+        return _correct_gptq_v1_qzeros(qzeros, bits, planar=planar)
+    if source == 2 and target == 1:
+        from .model_dequant import _revert_gptq_v1_qzeros_correction
+
+        return _revert_gptq_v1_qzeros_correction(qzeros, bits, planar=planar)
+    return qzeros
+
+
+class _LiveQzeroWeightsMap(Mapping):
+    """Restore ``qzeros`` in the live runtime layout from a disk bundle.
+
+    ``accelerate.disk_offload`` copies the bundle tensors straight into the
+    module; it never runs ``_load_from_state_dict``. A bundle written from
+    ``state_dict()`` therefore restores checkpoint-layout (v1) words into a
+    kernel that decodes v2, shifting every zero point by one (issue #4380).
+    Converting at the weights-map boundary fixes every restore consumer -- the
+    forward pre-hook, hook detach, and ``undo_offload_to_disk`` -- while the
+    on-disk bundle stays in checkpoint layout for saving.
+    """
+
+    def __init__(self, base: Mapping, module: nn.Module):
+        self._base = base
+        self._module = module
+        self._source = _bundle_qzero_layout(module, base)
+        self._target = _qzero_layout_for_module(module)
+
+    def __getitem__(self, key):
+        value = self._base[key]
+        if (
+            self._source is None
+            or self._target is None
+            or self._source == self._target
+        ):
+            return value
+        if key == "qzeros" or key.endswith(".qzeros"):
+            return _convert_bundle_qzeros(
+                self._module, value, self._source, self._target,
+            )
+        if key == _qzeros_format_buffer() or key.endswith(
+            f".{_qzeros_format_buffer()}"
+        ):
+            # Keep the restored marker consistent with the converted words so a
+            # later clone/load of the live buffers does not relabel them as v1.
+            if isinstance(value, torch.Tensor) and value.numel() == 1:
+                return value.clone().fill_(self._target)
+        return value
+
+    def __iter__(self):
+        return iter(self._base)
+
+    def __len__(self):
+        return len(self._base)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+def _iter_offload_hooks(module: nn.Module):
+    """Yield ``(owning_module, AlignDevicesHook)`` for installed offload hooks."""
+
+    for submodule in module.modules():
+        pending = [getattr(submodule, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if hook is None:
+                continue
+            nested = getattr(hook, "hooks", None)
+            if isinstance(nested, (tuple, list)):
+                pending.extend(nested)
+                continue
+            if getattr(hook, "offload", False):
+                yield submodule, hook
+
+
+def _install_live_qzero_restore(module: nn.Module) -> None:
+    """Make the accelerate restore path hand the module live-layout qzeros."""
+
+    target = _qzero_layout_for_module(module)
+    if target is not None and hasattr(module, "_qzeros_format"):
+        # A restore now materializes the runtime words, so the module's label
+        # must describe what will be put in its buffers.
+        module._qzeros_format = target
+        module._qzeros_format_established = True
+
+    for owner, hook in _iter_offload_hooks(module):
+        weights_map = getattr(hook, "weights_map", None)
+        if weights_map is None or isinstance(weights_map, _LiveQzeroWeightsMap):
+            continue
+        hook.weights_map = _LiveQzeroWeightsMap(weights_map, owner)
 
 
 def _safetensors_dtype(dtype: torch.dtype) -> str:
@@ -315,14 +850,43 @@ def offload_to_safetensors_reference(
     return index
 
 
-def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = ".", force: bool = False):
+def offload_to_disk(
+    module: List[str] | nn.Module,
+    model: nn.Module,
+    disk_path: str = ".",
+    force: bool = False,
+    *,
+    source_root: Optional[str] = None,
+    source_checkpoint: Optional[str] = None,
+):
     """Offload module state to disk. force=True also writes modules below the
     small-module threshold -- required when the on-disk bundle is the only
-    durable record (e.g. quantized modules that a resumed run must restore)."""
-    _offload_to_disk_impl(module=module, model=model, disk_path=disk_path, force=force)
+    durable record (e.g. quantized modules that a resumed run must restore).
+
+    ``source_root``/``source_checkpoint`` name the checkpoint the model was
+    loaded from. When a module's tensors are still byte-identical to that
+    checkpoint, the offload index references the source bytes instead of
+    writing a second copy.
+    """
+    _offload_to_disk_impl(
+        module=module,
+        model=model,
+        disk_path=disk_path,
+        force=force,
+        source_root=source_root,
+        source_checkpoint=source_checkpoint,
+    )
 
 
-def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = ".", force: bool = False):
+def _offload_to_disk_impl(
+    module: List[str] | nn.Module,
+    model: nn.Module,
+    disk_path: str = ".",
+    force: bool = False,
+    *,
+    source_root: Optional[str] = None,
+    source_checkpoint: Optional[str] = None,
+):
     assert module is not None
     assert model is not None
 
@@ -336,7 +900,14 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
                 m = m.module
 
             full_name = get_module_fullname(model=model, module=m)
-            _offload_disk(module=m, name=full_name, disk_path=disk_path, force=force)
+            _offload_disk(
+                module=m,
+                name=full_name,
+                disk_path=disk_path,
+                force=force,
+                source_root=source_root,
+                source_checkpoint=source_checkpoint,
+            )
     else:
         # unwrap named module
         if isinstance(module, NamedModule):
@@ -345,7 +916,14 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
 
         full_name = get_module_fullname(model=model, module=module)
 
-        _offload_disk(module=module, name=full_name, disk_path=disk_path, force=force)
+        _offload_disk(
+            module=module,
+            name=full_name,
+            disk_path=disk_path,
+            force=force,
+            source_root=source_root,
+            source_checkpoint=source_checkpoint,
+        )
 
     if hasattr(module, "config") and hasattr(module, "tie_weights") and getattr(module.config,
                                              "tie_word_embeddings", False):
@@ -359,12 +937,35 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
 #_OFFLOAD_SAFE = ThreadSafe(sys.modules[__name__])
 #offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
-def _offload_disk(module: nn.Module, name: str, disk_path: str = ".", force: bool = False):
+def _offload_disk(
+    module: nn.Module,
+    name: str,
+    disk_path: str = ".",
+    force: bool = False,
+    *,
+    source_root: Optional[str] = None,
+    source_checkpoint: Optional[str] = None,
+):
     with parent_module_lock(name):
-        _offload_disk_locked(module=module, name=name, disk_path=disk_path, force=force)
+        _offload_disk_locked(
+            module=module,
+            name=name,
+            disk_path=disk_path,
+            force=force,
+            source_root=source_root,
+            source_checkpoint=source_checkpoint,
+        )
 
 
-def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = ".", force: bool = False):
+def _offload_disk_locked(
+    module: nn.Module,
+    name: str,
+    disk_path: str = ".",
+    force: bool = False,
+    *,
+    source_root: Optional[str] = None,
+    source_checkpoint: Optional[str] = None,
+):
     # Finalizers are threads, protected by the parent-module lock above.
     # Checkpoint runs additionally hold a run lease and use private attempt
     # directories; unrelated modules do not need a global offload lock.
@@ -407,7 +1008,24 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = ".", for
     _prepare_offload_directory(tmp_dir)
     if os.path.isdir(old_dir):
         shutil.rmtree(old_dir)
-    _bundle_module_state_dict(module, tmp_dir, index_dir=module_offload_dir)
+    reference_index = None
+    if source_root or source_checkpoint:
+        try:
+            reference_index = _module_source_reference_index(
+                module,
+                module_name=name,
+                source_root=source_root,
+                source_checkpoint=source_checkpoint,
+                offload_dir=module_offload_dir,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("Offload: source reference unavailable for `%s`: %s", name, exc)
+    _bundle_module_state_dict(
+        module,
+        tmp_dir,
+        index_dir=module_offload_dir,
+        reference_index=reference_index,
+    )
 
     if os.path.isdir(module_offload_dir):
         os.rename(module_offload_dir, old_dir)
@@ -421,6 +1039,11 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = ".", for
         offload_buffers=True,
         execution_device=m_device,
     )
+    # The bundle is checkpoint layout (v1 words for a GPTQ checkpoint), but the
+    # accelerate hook loads it without the module's load hook. Hand the hook
+    # live-layout qzeros so a v2 kernel does not decode every zero point off by
+    # one in-session (issue #4380).
+    _install_live_qzero_restore(module)
 
     # print("offload_disk: list item tree")
     # print_module_tree(module)
@@ -631,8 +1254,15 @@ def undo_offload_to_disk(
                 setattr(sub, name, restored)
 
             # 3) Tie embedding if module is model and enabled/tied
-            if hasattr(module, "config") and getattr(module.config, "tie_word_embeddings", False):
-                module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
+            tie_weights = getattr(module, "tie_weights", None)
+            if (
+                callable(tie_weights)
+                and hasattr(module, "config")
+                and getattr(module.config, "tie_word_embeddings", False)
+            ):
+                # Submodules such as rotary embeddings expose `config` but are
+                # not models; calling tie_weights() on them raises.
+                tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
 
         # 4) Optionally delete offload folders.
         if delete_offload_folders:

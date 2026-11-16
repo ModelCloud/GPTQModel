@@ -5,6 +5,7 @@
 
 """Looper-side Hessian dedup for explicit `:in=<tag>` shared-input groups (CPU only)."""
 
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Dict, List, Optional
@@ -26,6 +27,19 @@ _IN = 8
 _OUT = 6
 _QKV_TREE = ["model", "layers", "#", {"self_attn": ("q:0:in=x", "k:0:in=x", "v:0:in=x", "o:1"), "mlp": ("g:0:in=x", "u:0:in=x", "d:1")}]
 _LAYER_MODULES = [["self_attn.q", "self_attn.k", "self_attn.v"], ["self_attn.o"], ["mlp.g", "mlp.u"], ["mlp.d"]]
+
+
+class _PendingCudaEvent:
+    """CPU stand-in for a CUDA event whose stream work has not finished yet."""
+
+    def __init__(self) -> None:
+        self.completed = False
+
+    def query(self) -> bool:
+        return self.completed
+
+    def synchronize(self) -> None:
+        self.completed = True
 
 
 def _named_linear(name: str, in_features: int = _IN, out_features: int = _OUT, seed: int = 0) -> NamedModule:
@@ -510,6 +524,70 @@ class TestProcessorCaptureAndAdopt:
         for name in names:
             assert torch.allclose(dedup.tasks[name].H, base.tasks[name].H, atol=1e-6), name
             assert dedup.tasks[name].nsamples == base.tasks[name].nsamples
+
+    def test_adoption_releases_deferred_sources_and_preserves_quantized_weights(self):
+        batches = _batches(n=4, tokens=16)
+        names = ["self_attn.q", "self_attn.k"]
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+
+        def run(dedup: bool):
+            qcfg = QuantizeConfig(
+                method=METHOD.GPTQ,
+                bits=4,
+                group_size=4,
+                desc_act=False,
+                hessian=HessianConfig(dedup_shared_inputs=dedup),
+            )
+            proc = _processor(qcfg)
+            modules = _setup(proc, names)
+            proc.begin_shared_input_capture(_fake_model(plan, proc.qcfg), names)
+            _feed(proc, modules, names, batches)
+            return proc
+
+        proc = run(dedup=True)
+        leader = proc.tasks["self_attn.q"]
+        follower = proc.tasks["self_attn.k"]
+
+        # Recompute the value the old (zero-initialised accumulation) path
+        # produced for the leader's single fp32 partial.
+        partial = next(iter(leader._device_hessian_partials.values()))
+        total_samples = sum(leader._device_sample_counts.values())
+        old_path_hessian = torch.zeros_like(partial).add_(
+            partial, alpha=2.0 / float(total_samples)
+        )
+
+        # CPU builds have no CUDA events, so the deferred-source registry stays
+        # empty. Park the same sources a CUDA build keeps alive behind a
+        # not-yet-complete event to exercise the release lifecycle.
+        partial_ref = weakref.ref(partial)
+        follower_source = torch.empty_like(partial)
+        follower_source_ref = weakref.ref(follower_source)
+        leader._deferred_hessian_sources = [(partial, _PendingCudaEvent())]
+        follower._deferred_hessian_sources = [(follower_source, _PendingCudaEvent())]
+        del partial, follower_source
+
+        proc.end_shared_input_capture(names)
+
+        assert torch.equal(leader.H, old_path_hessian)
+        assert torch.equal(follower.H, old_path_hessian)
+        assert follower.H.data_ptr() != leader.H.data_ptr()
+
+        # Adoption is the last consumer of the leader's reduction partial and
+        # of the follower's source reference.
+        assert leader._deferred_hessian_sources == []
+        assert follower._deferred_hessian_sources == []
+        assert partial_ref() is None
+        assert follower_source_ref() is None
+
+        wq_leader, *_ = leader.quantize()
+        wq_follower, *_ = follower.quantize()
+
+        base = run(dedup=False)
+        wq_leader_base, *_ = base.tasks["self_attn.q"].quantize()
+        wq_follower_base, *_ = base.tasks["self_attn.k"].quantize()
+
+        assert torch.equal(wq_leader, wq_leader_base)
+        assert torch.equal(wq_follower, wq_follower_base)
 
     def test_low_precision_staging_override_matches_independent_collection(self):
         # fp16 activations whose values are not bf16-representable: bf16 staging on the

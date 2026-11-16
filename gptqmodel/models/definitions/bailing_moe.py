@@ -26,25 +26,59 @@ class BailingMoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             # bailing_hybrid mixes delta/linear-attention, full-attention MoE and
             # MLA layers, but every variant keeps its attention projections under
-            # `self_attn`. The legacy bailing_moe layout (attention.query_key_value)
-            # no longer exists in transformers 5.20.2, so it is intentionally not
-            # kept: with layer_modules_strict=False a stale entry would just be
-            # silently skipped.
+            # `self_attn`. The remote-code `bailing_moe` layout (Ling 2.0) still
+            # exposes `attention.query_key_value`/`attention.dense`, so both
+            # branches are declared. `layer_modules_strict=False` lets each
+            # checkpoint resolve only the branch it owns.
             "self_attn": (
                 "q_proj:0",
                 "k_proj:0",
                 "v_proj:0",
-                "o_proj:1",
+                # `o_proj` consumes the gated attention output built from
+                # `kv_b_proj` (MLA) or q/k/v (linear attention), so it must be
+                # a later subset.
+                "o_proj:2",
                 "g_proj:0",
                 "kv_a_proj_with_mqa:0",
                 "kv_b_proj:1",
                 "forget_gate.f_proj:0",
                 "b_proj:0",
+                # Linear-attention short convolution (checkpoint-owned, not a
+                # quantizable projection).
+                "conv1d:!",
+            ),
+            "attention": (
+                # Remote-code Ling-2.6-flash (`bailing_hybrid` + `auto_map`)
+                # owns the same `attention.*` namespace as the Ling 2.0
+                # `bailing_moe` layout, but adds MLA projections when
+                # `q_lora_rank` is set. `query_key_value`/`g_proj` belong to
+                # linear-attention layers; the MLA q/kv low-rank pairs belong
+                # to the full-attention layers. Both are declared here because
+                # `layer_modules_strict=False` resolves only the branch a
+                # layer owns. Keep `dense` after the MLA `q_b`/`kv_b` stages
+                # so it is calibrated against their quantized outputs.
+                "query_key_value:0",
+                "q_a_proj:0",
+                "kv_a_proj_with_mqa:0",
+                "g_proj:0",
+                "q_b_proj:1",
+                "kv_b_proj:1",
+                "dense:2",
+                # Remote-code attention norms are checkpoint-owned but never
+                # quantized. Linear-attention layers own the q/k/g norms;
+                # MLA layers own the q_a/kv_a norms.
+                "query_layernorm:!",
+                "key_layernorm:!",
+                "g_norm:!",
+                "q_a_layernorm:!",
+                "kv_a_layernorm:!",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
-                "shared_experts": ("gate_proj", "up_proj", "down_proj"),
+                # `down_proj` consumes the gate/up product, so it must be
+                # calibrated (and AWQ-scaled) after gate/up are quantized.
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },

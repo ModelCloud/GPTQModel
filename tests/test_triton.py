@@ -23,9 +23,15 @@ from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402  # ensures monkey patches run before Triton import
+from tests.accelerator_gates import cuda_only_skip_reason  # noqa: E402
 
 
 log = LogBar.shared()
+
+# BACKEND.TRITON selects TritonV2Linear, which declares DEVICE.CUDA only. On a
+# HIP host the load correctly refuses it, so skip instead of asserting a CUDA
+# kernel runs there.
+_TRITON_CUDA_ONLY_SKIP_REASON = cuda_only_skip_reason("TritonV2Linear")
 
 MODEL_ID = "/monster/data/model/Llama-7B-GPTQ"
 DATASET_ID = "timdettmers/openassistant-guanaco"
@@ -84,6 +90,10 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
+@pytest.mark.skipif(
+    _TRITON_CUDA_ONLY_SKIP_REASON is not None,
+    reason=_TRITON_CUDA_ONLY_SKIP_REASON or "",
+)
 class TestTriton(unittest.TestCase):
     @parameterized.expand(
         [

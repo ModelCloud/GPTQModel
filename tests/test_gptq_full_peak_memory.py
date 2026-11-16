@@ -3,8 +3,10 @@
 import pytest
 import torch
 
+from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.mark.parametrize("device_type", ["cpu", "cuda"])
@@ -13,7 +15,7 @@ def test_nan_retry_uses_original_hessian_diagonal(device_type, ordering, monkeyp
     if device_type == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
-    monkeypatch.setenv("GPTQMODEL_DISABLE_GPTQ_CUDA", "1")
+    configure_kernel(KernelConfig(gptq_fused_block_update=False))
     device = torch.device(device_type)
     torch.manual_seed(821)
     weight = torch.randn(4, 16, device=device)
@@ -36,6 +38,19 @@ def test_nan_retry_uses_original_hessian_diagonal(device_type, ordering, monkeyp
     task = make_task(mock_quantization=False)
     task.add_batch(inputs, None)
     captured_hessian = None
+    natural_diag = None
+    original_neutralize = gptq_mod._neutralize_dead_columns
+
+    def recording_neutralize(hessian, weight, *extra):
+        # This runs before desc_act / act_group_aware permutes H, so it is the
+        # natural-order diagonal the retry must restore. Keep the first call:
+        # the retry also neutralizes, but by then H is already permuted.
+        nonlocal natural_diag
+        if natural_diag is None:
+            natural_diag = hessian.diagonal().clone()
+        return original_neutralize(hessian, weight, *extra)
+
+    monkeypatch.setattr(gptq_mod, "_neutralize_dead_columns", recording_neutralize)
 
     def nan_inverse(hessian):
         nonlocal captured_hessian
@@ -48,9 +63,10 @@ def test_nan_retry_uses_original_hessian_diagonal(device_type, ordering, monkeyp
     retried = task.quantize(blocksize=8)
     assert task.qcfg.mock_quantization
     assert captured_hessian is not None
+    assert natural_diag is not None
 
     reference = make_task(mock_quantization=True)
-    reference.H = captured_hessian
+    reference.H = torch.diag(natural_diag)
     reference.nsamples = task.nsamples
     expected = reference.quantize(blocksize=8)
 
@@ -64,7 +80,7 @@ def test_hessian_is_released_before_block_updates(device_type, monkeypatch):
     if device_type == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
-    monkeypatch.setenv("GPTQMODEL_DISABLE_GPTQ_CUDA", "1")
+    configure_kernel(KernelConfig(gptq_fused_block_update=False))
     device = torch.device(device_type)
     task = GPTQ(
         torch.nn.Linear(16, 4, bias=False, device=device),

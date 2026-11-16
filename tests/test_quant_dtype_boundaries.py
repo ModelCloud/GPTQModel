@@ -102,6 +102,57 @@ def test_fp8_activation_quantizer_stays_finite(value):
     assert torch.isfinite(out.float()).all()
 
 
+# Rows whose dynamic scale `amax / 448` rounds to zero in FP32 even though
+# `amax` is positive. With no representable scale left, the only correct
+# rounding is zero.
+FP8_UNDERFLOWING_SCALE_ROWS = (
+    ("all_zero", (0.0, 0.0, 0.0)),
+    ("min_subnormal", (2.0**-149, 2.0**-149, -(2.0**-149))),
+    ("min_subnormal_mixed_zero", (0.0, 2.0**-149, -(2.0**-149))),
+    ("scale_underflows_mixed_zero", (0.0, 2.0**-142, -(2.0**-142))),
+)
+
+
+@pytest.mark.parametrize("label,values", FP8_UNDERFLOWING_SCALE_ROWS)
+def test_fp8_activation_quantizer_does_not_create_nan_when_scale_underflows(label, values):
+    """`amax > 0` does not imply `amax / 448 > 0`.
+
+    The reported case is `[0, 2**-149, -2**-149]`: the scale rounds to zero and
+    the row's zero element becomes `0 / 0` NaN. Finite input must stay finite.
+    """
+    x = torch.tensor([values], dtype=torch.float32)
+    out = fp8_token_qdq(x)
+    assert torch.isfinite(out).all(), f"{label}: {out.tolist()}"
+    assert torch.equal(out, torch.zeros_like(out)), f"{label}: {out.tolist()}"
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        # `amax / 448` is still a positive FP32 subnormal in both rows.
+        (0.0, 2.0**-126, -(2.0**-126)),
+        (0.0, 2.0**-141, -(2.0**-141)),
+    ),
+)
+def test_fp8_activation_quantizer_keeps_a_representable_scale(values):
+    """The fallback must not fire while `amax / 448` is a positive subnormal."""
+    x = torch.tensor([values], dtype=torch.float32)
+    scale = x.abs().amax() / 448.0
+    assert scale > 0
+    expected = (x / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale
+    out = fp8_token_qdq(x)
+    assert torch.isfinite(out).all()
+    assert torch.equal(out, expected)
+    assert out[0, 1] != 0
+
+
+def test_fp8_activation_quantizer_keeps_the_normal_range_path():
+    x = torch.tensor([[-1.0, 0.0, 0.5, 2.0, 448.0, -300.0]], dtype=torch.float32)
+    scale = x.abs().amax() / 448.0
+    expected = (x / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale
+    assert torch.equal(fp8_token_qdq(x), expected)
+
+
 @pytest.mark.parametrize("value", (float("inf"), float("nan")))
 def test_fp8_activation_quantizer_rejects_non_finite_input(value):
     x = torch.zeros(1, 32, dtype=torch.float32)

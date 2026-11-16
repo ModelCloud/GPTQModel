@@ -5,7 +5,6 @@
 
 
 import math
-import os
 import warnings
 from collections.abc import Iterable
 from typing import Optional
@@ -17,7 +16,12 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear, _device_family
+from ...nn_modules.qlinear import (
+    BaseQuantLinear,
+    PackableQuantLinear,
+    _device_family,
+    resolve_dequantize_dtype,
+)
 from ...quantization import FORMAT, METHOD
 from ...utils.arch import cuda_arch as _arch_cuda_arch
 from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
@@ -25,6 +29,7 @@ from ...utils.arch import gemm_fused_max_out_features as _arch_gemm_max_out_feat
 from ...utils.arch import is_cuda_fused as _arch_is_cuda_fused
 from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
@@ -242,8 +247,9 @@ class TorchLinear(PackableQuantLinear):
             **kwargs)
 
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
-        self._streaming_enabled = bool(int(os.environ.get("GPTQ_TORCH_STREAMING", "0")))
-        self._stream_tile_cols = int(os.environ.get("GPTQ_TORCH_STREAM_TILE", "512"))
+        kernel = resolve_kernel_config(self)
+        self._streaming_enabled = kernel.torch_streaming
+        self._stream_tile_cols = kernel.torch_stream_tile
         self._stream_double_buffers = 2
         self._g_idx_long_cache = None
         self._g_idx_long_cache_state = None
@@ -254,16 +260,14 @@ class TorchLinear(PackableQuantLinear):
         self._embedding_row_state = None
         self._stream_dequant_streams = {}
         self._cache_enabled = False
-        triton_flag = os.environ.get("GPTQ_TORCH_TRITON_DEQUANT")
+        triton_flag = kernel.torch_triton_dequant
         if triton_flag is None:
             self._triton_dequant_enabled = _TRITON_DEQUANT_AVAILABLE
         else:
-            self._triton_dequant_enabled = (
-                triton_flag not in {"0", "false", "False"}
-            ) and _TRITON_DEQUANT_AVAILABLE
+            self._triton_dequant_enabled = triton_flag and _TRITON_DEQUANT_AVAILABLE
         self._lookahead_enabled = False
-        self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
-        self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
+        self._rocm_gemv_enabled = kernel.torch_rocm_gemv
+        self._rocm_gemm_enabled = kernel.torch_rocm_gemm
         # Keyed by g_idx identity and version so a checkpoint load, move,
         # deepcopy, or in-place write cannot leave a stale dispatch choice.
         self._gptq_gemm_uniform_value = False
@@ -271,9 +275,9 @@ class TorchLinear(PackableQuantLinear):
         self._gptq_gemm_uniform_version = None
         self._lookahead_next = None
         self._weight_metadata = _LinearWeightMetadata(self)
-        if bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0"))):
+        if kernel.torch_cache_weights:
             self.enable_weight_cache(True)
-        if bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0"))):
+        if kernel.torch_lookahead:
             self.enable_lookahead(True)
 
         # if self.group_size != self.in_features:
@@ -1071,9 +1075,10 @@ class TorchLinear(PackableQuantLinear):
 
         return torch.cat(weights, dim=1)
 
-def dequantize_model(model: PreTrainedModel):
-    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
-    # bf16 checkpoints and their exported config.
+def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None):
+    # Use the model's compute dtype, not the checkpoint storage dtype: GPTQ
+    # restores fp16 scales even for a bf16 model, so ``scales.dtype`` would
+    # turn a bf16 model into fp16 dense layers that fail in forward.
     target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchLinear):
@@ -1084,12 +1089,7 @@ def dequantize_model(model: PreTrainedModel):
 
         if isinstance(module, TorchLinear):
             if target_dtype is None:
-                scales_dtype = getattr(module, "scales", None)
-                target_dtype = (
-                    scales_dtype.dtype
-                    if scales_dtype is not None and scales_dtype.is_floating_point()
-                    else torch.float16
-                )
+                target_dtype = resolve_dequantize_dtype(model, module, dtype)
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(
                 module.in_features, module.out_features,

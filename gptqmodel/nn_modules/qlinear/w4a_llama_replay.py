@@ -288,7 +288,9 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
     else:
         attention_recipe = None
     mlp_fp8_layers = tuple(getattr(qcfg, "activation_mlp_fp8_layers", None) or ())
-    fused_norms = bool(getattr(qcfg, "rotation", None))
+    from ...quantization.config import resolve_model_rotation
+
+    fused_norms = bool(resolve_model_rotation(qcfg))
     if getattr(model, "_w4a_replay_mode", None) == mode:
         if (getattr(model, "_w4a_replay_recipe", None) != recipe
                 or getattr(model, "_w4a_replay_global_scales", None) != global_scales

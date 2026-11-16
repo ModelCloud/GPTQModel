@@ -48,6 +48,9 @@ class _FakeEngine:
     def __init__(self, config):
         self.config = config
 
+    def modules(self):
+        return iter(())
+
 
 class _FakeVLLM:
     """Imports nothing from the real vLLM package."""
@@ -87,7 +90,7 @@ def test_quantized_sglang_engine_still_admitted(monkeypatch):
     monkeypatch.setattr(sglang_utils, "SGLANG_AVAILABLE", True)
     monkeypatch.setattr(sglang_utils, "sgl", SimpleNamespace(Runtime=type("_FakeRuntime", (), {})))
 
-    engine = SimpleNamespace(config=_gemma2_config(43))
+    engine = SimpleNamespace(config=_gemma2_config(43), modules=lambda: iter(()))
     # The loader marks engine-API runtimes with this attribute.
     setattr(engine, sglang_utils._ENGINE_MARKER, True)
     wrapper = Gemma2QModel(engine, quantized=True, quantize_config=_quantize_config())

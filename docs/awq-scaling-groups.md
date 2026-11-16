@@ -208,6 +208,25 @@ group under `fallback=None`. The safety checks are not expanded to infer an
 arbitrary graph. Raw replay exceptions (for example a native Bloom forward
 missing its residual argument) remain errors, not configured fallback.
 
+## Issue #4175: gated, lerped and hyper-connection consumers
+
+These definitions emitted groups that passed `_validate_scale_group` but
+changed the full-precision layer output when the fold was applied without
+quantization:
+
+| Definition | Incorrect relationship | Existing-format repair |
+| --- | --- | --- |
+| `intern_s2_preview`, `minicpmv4_6` | DeltaNet `in_proj_qkv`/`in_proj_z` read the same layer input norm, but the missing `:in=x` tags folded only `in_proj_qkv` and then folded the second branch into `in_proj_qkv`. | Restore Qwen3.5's `:in=x` tags: one group per input norm, with `in_proj_b`/`in_proj_a` compensated. |
+| `minicpmv`, `minicpmo` | Sequential `q:0,k:1,v:2,o:3` folded the norm into `q`, then `q` into `k`; the ungrouped MLP put `down_proj` in the gate/up subset. | Q/K/V share stage 0 with `:in=x`, `o_proj:1`, gate/up `:in=x`, `down_proj:1`. |
+| `diffusion_gemma` | The scale-free `v_norm` hides `v_proj` from `o_proj`, and the router was compensated as a consumer of `pre_feedforward_layernorm_2` although it reads the raw residual through its own scale-free norm. | `v_proj:...:nosrc`; declare the router after the expert block so it is not collected as a scale consumer. |
+| `ricursive` | `g_proj` is a sigmoid gate on the attention output but was `o_proj`'s source; `v_proj` reads `lerp(value_residual, normed)` and was folded with the input norm. | `g_proj:nosrc`, `v_proj` in its own stage, and `input_layernorm:nosrc` because no single `v_proj` scale can undo a fold through the lerp. |
+| `qwen4_exp`, `qwen4_exp_text` | No norms are declared, so attention `o_proj`/`out_proj` became the MLP input source across the gated hyper-connection mix. | Mark `o_proj`, `in_proj_a` and `out_proj` `:nosrc`; shared and routed experts fall back to plain quantization together. |
+
+`tests/module_tree/test_awq_fold_safety_4175.py` applies every emitted fold
+without quantization to a real tiny CPU layer and compares the full output
+(~1e-7). That is the regression guard the width/binding validation could not
+provide.
+
 `tests/module_tree/test_awq_relationships.py` uses real tiny CPU model modules,
 their `state_dict()` owners, nontrivial synthetic folds and full text outputs.
 It covers shared/no-shared Granite, nested Hunyuan routing, a Falcon Mamba width
@@ -319,7 +338,7 @@ graph. All of them are now in `FAMILY_MODEL_TYPES`:
 | `gpt_pangu` | `mlp: ("c_fc:0", "c_proj:1")`; the last block's `ln_1` group contained `attn.q_proj` | `c_fc:0:nosrc`; `awq_get_modules_for_scaling` drops the top-query block's `q_proj` | GELU fold 4.5e-2 -> dropped; `ln_1 -> q_proj` 3.4e-3 -> `q_proj` excluded, remaining k/v group 1.2e-8 |
 | `olmo_hybrid` | one static tree; `post_attention_layernorm` was a gain source on every layer | `awq_post_norm_modules(layer)` adds it on the full-attention layer only | 3.6e-1 -> group dropped on attention layers; linear-attention fold stays exact (1.6e-8) |
 | `gemma4`, `gemma4_unified` | composite/unified trees kept `v_proj:0` and `post_feedforward_layernorm:!` | copied `v_proj:0:in=x:nosrc` and `:postnorm` from the text tree; `post_per_layer_input_norm` is `:postnorm` too | `v_proj -> o_proj` 1.9e-1 -> dropped; `post_feedforward_layernorm -> per_layer_input_gate` 2.4e-1 -> dropped; `post_per_layer_input_norm -> per_layer_projection` 2.2e-1 -> dropped |
-| `nemotron_h` | `mixer.up_proj` fed `down_proj` | `up_proj:3:nosrc` | `relu(x)^2` fold 2.2e-2 -> dropped |
+| `nemotron_h`, `nemotronh_nano_omni_reasoning_v3` | `mixer.up_proj` fed `down_proj`; the routed and shared expert MLPs repeated the same fold | `up_proj:3:nosrc`, plus `mixer.shared_experts.up_proj:nosrc` and `mixer.experts.#.up_proj:nosrc` | `relu(x)^2` folds measured up to 8.7e-3 per expert -> dropped; the block input norm remains the only source, and only one gain norm feeds routed + shared experts |
 
 Every family listed in `FAMILY_MODEL_TYPES` is covered by the
 output-preservation invariant: folding a random scale into each group must
@@ -556,6 +575,7 @@ Issue #4121 item coverage:
 | Test | Invariant |
 | --- | --- |
 | `tests/test_awq_scaling_groups.py` (`gpt_pangu`, `olmo_hybrid`, `gemma4`, `gemma4_unified`, `nemotron_h`) | fold preserves the decoder layer's logits to `1e-5` relative |
+| `tests/module_tree/test_nemotron_h_model_tree.py` | the Omni definition shares the Nemotron-H declaration, and its fold preserves the real remote decoder layer to `1e-5` relative |
 | `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
 
 ### Real-checkpoint CPU CI

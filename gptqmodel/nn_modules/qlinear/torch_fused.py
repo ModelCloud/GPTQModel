@@ -13,7 +13,11 @@ from transformers import PreTrainedModel
 from ...adapter.adapter import Adapter, Lora
 from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM, normalize_device
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import (
+    BaseQuantLinear,
+    PackableQuantLinear,
+    resolve_dequantize_dtype,
+)
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -35,6 +39,30 @@ log = setup_logger()
 # supported without this check let AUTO select this kernel on CPU for a
 # checkpoint whose first forward then raised inside the aten op.
 CPU_INT4PACK_GROUP_SIZES = (32, 64, 128, 256)
+# ``aten::_convert_weight_to_int4pack_for_cpu`` requires the packed row width
+# to be a multiple of 16.  The XPU path packs the same logical layout with a
+# nibble pack factor of 8, so it keeps the smaller declaration and the CPU
+# contract is checked separately.
+CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY = 16
+
+
+def _validate_cpu_int4pack_out_features(
+    cls,
+    *,
+    out_features: Optional[int],
+    device: Optional[DEVICE | torch.device],
+):
+    """Reject a CPU output width the packed int4 kernel cannot consume."""
+    if device is None or normalize_device(device) != DEVICE.CPU:
+        return True, None
+    if out_features is None or out_features % CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY == 0:
+        return True, None
+    return False, NotImplementedError(
+        f"{cls}: CPU int4pack requires out_features to be divisible by "
+        f"{CPU_INT4PACK_OUT_FEATURES_DIVISIBLE_BY}: actual out_features = "
+        f"`{out_features}`. Select `backend=\"gptq_torch\"` for this "
+        "checkpoint on CPU."
+    )
 
 
 def _validate_cpu_int4pack_group_size(
@@ -144,7 +172,7 @@ class TorchFusedLinear(PackableQuantLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
@@ -221,8 +249,13 @@ class TorchFusedLinear(PackableQuantLinear):
         )
         if not ok:
             return ok, err
-        return _validate_cpu_int4pack_group_size(
+        ok, err = _validate_cpu_int4pack_group_size(
             cls, group_size=group_size, in_features=in_features, device=device
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls, out_features=out_features, device=device
         )
 
     def post_init(self):
@@ -301,10 +334,15 @@ class TorchFusedLinear(PackableQuantLinear):
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
-        scale_dtype = scales.dtype if transformed else None
+        # The packed layout is keyed by the activation dtype it was built for,
+        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
+        # loaded dtype while the affine metadata follows the activation dtype.
+        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
+        if runtime_dtype is None and transformed:
+            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        refinalize_fused_state_after_apply(self, scale_dtype, device)
+        refinalize_fused_state_after_apply(self, runtime_dtype, device)
         return result
 
     def _build_ret_idx(self) -> torch.Tensor:
@@ -405,7 +443,10 @@ class TorchFusedLinear(PackableQuantLinear):
             compute_dtype = _cpu_int4pack_scale_dtype(self.scales, zero_codes, self.bits, dtype)
         else:
             compute_dtype = dtype
-        self.scales = self.scales.to(compute_dtype).contiguous()
+        # ``compute_scales`` is the packed runtime metadata; ``self.scales``
+        # keeps the checkpoint dtype so a later forward or save cannot persist
+        # a narrowed scale (issue #4178).
+        compute_scales = self.scales.to(compute_dtype).contiguous()
         # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -419,8 +460,9 @@ class TorchFusedLinear(PackableQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
         if do_scales_and_zeros:
-            self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, self.scales, self.bits).to(compute_dtype).contiguous()
-            self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+            self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, compute_scales, self.bits).to(compute_dtype).contiguous()
+            self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        self._cpu_transform_dtype = dtype
 
     def transform(self, dtype, device):
         if device == "xpu":
@@ -511,7 +553,7 @@ class TorchFusedLinear(PackableQuantLinear):
             # added, then casts once; BF16 already has FP32's range.
             self.torch_fused_op.out_dtype = (
                 torch.float32
-                if self.bias is not None and x.dtype == torch.float16
+                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
                 else None
             )
             out = self.torch_fused_op(x)
@@ -527,7 +569,11 @@ class TorchFusedLinear(PackableQuantLinear):
         self.g_idx = None
         self.scales = None
 
-def dequantize_model(model: PreTrainedModel):
+def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None):
+    # Use the model's compute dtype, not the checkpoint storage dtype: GPTQ
+    # restores fp16 scales even for a bf16 model, so ``scales.dtype`` would
+    # turn a bf16 model into fp16 dense layers that fail in forward.
+    target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedLinear):
             raise ValueError(
@@ -536,10 +582,24 @@ def dequantize_model(model: PreTrainedModel):
             )
 
         if isinstance(module, TorchFusedLinear):
+            if target_dtype is None:
+                target_dtype = resolve_dequantize_dtype(model, module, dtype)
             # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = torch.nn.Parameter(module.bias)
+            new_module = nn.Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+            )
+            new_module.weight = nn.Parameter(
+                module.dequantize_weight().T.detach().to("cpu", target_dtype)
+            )
+            # ``nn.Parameter(None)`` is a shape-[0] tensor, not an absent
+            # bias. Every bias-less layer then failed in forward.
+            new_module.bias = (
+                nn.Parameter(module.bias.detach().to("cpu", target_dtype))
+                if module.bias is not None
+                else None
+            )
 
             # Replace the module in the model
             parent = model

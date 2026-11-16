@@ -31,9 +31,12 @@ def test_hessian_reduction_uses_device_order_not_arrival(arrival):
     task._device_sample_counts = {torch.device(f"cuda:{index}"): 1 for index in arrival}
     task._hessian_dirty = True
     task.materialize_global_hessian(torch.device("cpu"))
+    # Mirror ``materialize_global_hessian``: it reduces in device order and
+    # applies the per-partial weight inside ``add_`` (``alpha=2/n``).  On CPU
+    # torch fuses that into an FMA, so summing first and scaling afterwards
+    # gives a different bit pattern for these cancelling payloads.
     expected = torch.zeros(2, 2)
-    for partial in partials:
-        expected.add_(partial)
-    expected.mul_(2.0 / 3.0)
+    for index in sorted(arrival):
+        expected.add_(partials[index], alpha=2.0 / 3.0)
     assert task.nsamples == 3
     assert torch.equal(task.H.view(torch.uint8), expected.view(torch.uint8))

@@ -22,18 +22,20 @@ flowchart TD
     F --> G{"keep_mask shape matches [B, S]"}
     G -- "yes" --> H["one entry per sample: inp[b][mask[b]], empty samples skipped"]
     G -- "no" --> I["one entry per batch: inp.to(target_device)"]
-    H --> J["native_inp_caches[name]"]
+    H --> J["native_inp_caches[name] += (batch_index, entry)"]
     I --> J
     J --> K["NativeProcessor.process -> module.state[NATIVE_INPUTS_STATE_KEY]"]
     K --> L["GPTAQ.__init__ / FOEM.__init__ pops the list"]
-    L --> M["GPTQProcessor hook calls add_batch once per kept sample"]
-    M --> N["GPTAQ.process_batch / FOEM.process_batch pop one entry per add_batch"]
+    L --> M["GPTQProcessor hook calls add_batch once per kept sample with batch_index"]
+    M --> N["GPTAQ._take_native_input / FOEM._take_native_input scans for the matching batch_index"]
     E --> O["single [N_kept, H] entry per batch (unchanged for other quantizers)"]
 ```
 
 The split mirrors `GPTQProcessor`'s own per-sample contract: samples whose keep
 mask is empty are skipped in both places, so the entry order stays aligned even
-with padded calibration rows.
+with padded calibration rows. Each entry is stored as `(batch_index, tensor)`
+because the data-parallel forward does not replay batches in capture order; see
+[Multi-GPU quantization](multi_gpu_quantization.md#gptaqfoem-per-device-hessian-reduction).
 
 ## Before / after
 
@@ -41,7 +43,7 @@ with padded calibration rows.
 | --- | --- | --- |
 | Capture unit | One entry per forward batch, `native_processor.py:101` (main) | One entry per kept sample when GPTAQ/FOEM is configured, `native_processor.py` `_split_batch_samples` |
 | Mask ownership | The hook wrapper masked the batch to `[N_kept, H]`; the native entry had no per-sample boundary | `NativeProcessor.preserve_batch_keep_mask` is enabled for GPTAQ/FOEM, so the hook sees `[B, S, H]` and applies the same `[B, S]` mask per sample |
-| Consumer | `gptaq.py:79` / `foem.py:160` did `native_inps.pop(0)` per `add_batch`, but the list held one batch entry | One pop per `add_batch` matches one captured sample |
+| Consumer | `gptaq.py:79` / `foem.py:160` did `native_inps.pop(0)` per `add_batch`, but the list held one batch entry | One keyed lookup per `add_batch` matches one captured sample; the entry also carries the calibration batch index used for multi-GPU pairing |
 | Other quantizers | One entry per batch | Unchanged: `_native_per_sample` is false, so the single-entry layout is kept |
 
 ## Failure contract

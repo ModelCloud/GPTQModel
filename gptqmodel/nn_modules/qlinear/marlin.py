@@ -25,7 +25,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     _marlin_all_visible_devices_supported,
@@ -155,7 +155,6 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
-        self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
 
         super().__init__(
             bits=bits,
@@ -171,9 +170,10 @@ class MarlinLinear(GPTQQuantLinear):
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
+        self.fp32 = resolve_kernel_config(self).marlin_fp32
         if not self.fp32:
             log.warn.once(
-                "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
+                "Kernel: KernelConfig.marlin_fp32 is disabled. Marlin will use reduced-precision reduction.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -200,13 +200,22 @@ class MarlinLinear(GPTQQuantLinear):
             ),
         )
 
-        # Activation order
+        # Activation order. ``post_init()`` inspects ``g_idx`` to tell a real
+        # activation-order checkpoint from a plain ``desc_act=False`` layer, so
+        # the placeholder must never be uninitialised memory. Seed it with the
+        # canonical contiguous mapping (``arange(K) // group_size``) that the
+        # base class stores for ``desc_act=False``: it is the identity ordering,
+        # a valid shape for ``load_state_dict()``, and it keeps a checkpoint
+        # that omits ``g_idx`` on the contiguous fast path.
         self.register_parameter(
             "g_idx",
-            torch.nn.Parameter(data=torch.empty(
-                self.in_features,
-                dtype=torch.int32,
-            ), requires_grad=False),
+            torch.nn.Parameter(
+                data=torch.arange(
+                    self.in_features,
+                    dtype=torch.int32,
+                ) // self.group_size,
+                requires_grad=False,
+            ),
         )
 
         # Scales

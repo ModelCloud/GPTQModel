@@ -43,7 +43,7 @@ def _tokenizer_source() -> str:
     raise RuntimeError("unreachable after pytest.skip")
 
 
-def _build_tiny_qwen2(target_dir: str, *, tied: bool) -> str:
+def _build_tiny_qwen2(target_dir: str, *, tied: bool, store_lm_head: bool = False) -> str:
     """Write a 2-layer Qwen2 with a real tokenizer, tied or untied."""
 
     from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
@@ -67,7 +67,18 @@ def _build_tiny_qwen2(target_dir: str, *, tied: bool) -> str:
         tie_word_embeddings=tied,
     )
     torch.manual_seed(0)
-    Qwen2ForCausalLM(config).save_pretrained(target_dir, safe_serialization=True)
+    model = Qwen2ForCausalLM(config)
+    model.save_pretrained(target_dir, safe_serialization=True)
+    if tied and store_lm_head:
+        # Some tied checkpoints (Qwen3, for example) still contain
+        # `lm_head.weight`. The loader ties it afterwards, so the stored tensor
+        # is not evidence of an independent head.
+        from safetensors.torch import load_file, save_file
+
+        checkpoint = os.path.join(target_dir, "model.safetensors")
+        state = load_file(checkpoint)
+        state["lm_head.weight"] = model.lm_head.weight.detach().clone()
+        save_file(state, checkpoint, metadata={"format": "pt"})
     return target_dir
 
 
@@ -346,6 +357,17 @@ def test_untied_lm_head_quantizes_and_reloads(tmp_path):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="lm_head quantization needs an accelerator")
 def test_tied_lm_head_is_rejected_with_the_explicit_error(tmp_path):
     model_dir = _build_tiny_qwen2(str(tmp_path / "tied"), tied=True)
+    model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
+
+    with pytest.raises(NotImplementedError, match="tied weights"):
+        model.quantize(CALIBRATION_TEXT, batch_size=2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="lm_head quantization needs an accelerator")
+def test_tied_lm_head_with_stored_head_is_still_rejected(tmp_path):
+    model_dir = _build_tiny_qwen2(
+        str(tmp_path / "tied_stored"), tied=True, store_lm_head=True
+    )
     model = GPTQModel.load(model_dir, QuantizeConfig(bits=4, group_size=32, lm_head=True))
 
     with pytest.raises(NotImplementedError, match="tied weights"):

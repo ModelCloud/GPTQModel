@@ -51,6 +51,8 @@ flowchart TD
     F --> G["_pack_token_rows with_provenance<br/>deterministic bounded sample<br/>every non-empty batch contributes<br/>returns source batch and row per retained row"]
     G --> H["_token_row_replay_kwargs"]
     H --> H1["_token_row_source_structure<br/>kept row maps to document and position"]
+    H --> H0["_token_row_layer_type_masks<br/>mask of this layer's attention type"]
+    H0 --> H1
     H1 --> H2["block-diagonal attention_mask<br/>causal inside one document only"]
     H1 --> H3["position_ids<br/>original per-document offsets"]
     H2 --> I["feature_stats<br/>mode token_rows, raw_tokens, retained_tokens, batches"]
@@ -89,6 +91,33 @@ module, and the raw per-batch captures are dropped by
 `AWQProcessor._finalize_quantized_layer` after the layer is quantized. The bound
 does not grow with the number of calibration documents.
 
+### Why the default budget was not raised (#4176 item 1)
+
+Even spacing takes row 0 and the last row of every document, so BOS is
+over-represented in the packed sample (12.5% of retained rows against 0.28% of
+the corpus on 128 C4 documents). The issue proposed raising the default budget
+to >=8k rows, or computing `x_mean` over every row and subsampling only the
+replay loss. Both were implemented and measured; **both regress wikitext-2 PPL
+on Llama-3.2-1B-Instruct**, so neither is shipped as the default:
+
+| Run (W4 g128 asym GEMM, 128 C4 docs) | PPL |
+| --- | --- |
+| FP16 | 12.6343 |
+| RTN | 15.8825 |
+| HEAD default (1024-row budget) | 13.8790 |
+| HEAD + budget 8192 | 13.9253 |
+| HEAD + full-corpus `x_mean` | 13.9321 |
+| HEAD + full-corpus `x_mean` + budget 8192 | 13.9076 |
+| HEAD + full-corpus `x_mean` + bin-centre sampling | 14.0543 |
+
+The repeats are deterministic (13.87899 vs 13.87911 and 13.93213 vs 13.93213),
+so the deltas are not run-to-run noise. The corpus mean changes the scale grid
+away from the distribution the reconstruction loss is scored on, and the
+larger replay tensor costs more without recovering PPL. The default budget and
+the packed-sample `x_mean` are therefore retained. The sampling bias remains a
+known property of the bounded sample; a future change must move both the grid
+and the loss sample together, and must beat the default on this table.
+
 The replay mask adds `retained * retained` boolean entries plus one additive
 copy in the activation dtype (8 MiB for 2048 retained rows in fp16). It is
 built once per unique capture list per layer, shared by sibling projections,
@@ -119,9 +148,41 @@ needs:
   semantic defect behind #4095.
 - `position_ids` keep each row's original offset (taken from the cached
   `position_ids` when available), so rotary embeddings are evaluated at the
-  real positions instead of a synthetic `0..retained-1` range.
+  real positions instead of a synthetic `0..retained-1` range. Attention
+  modules that take `position_embeddings` but not `position_ids` (HF Llama,
+  Qwen3, Gemma) would lose that tensor in `AWQProcessor._sanitize_kwargs`, so
+  `_token_row_replay_kwargs` also returns it under the private
+  `_awq_rotary_position_ids` key. `_prepare_module_forward` pops that key and
+  rebuilds rotary from it before falling back to `torch.arange`.
+- The replay mask follows the **layer's own attention type**, not layer 0's.
+  `transformers` 5 builds one mask per declared `config.layer_types` entry, and
+  the capture stage stores every type under
+  `_gptqmodel_layer_type_replay_kwargs`. `AWQProcessor._token_row_layer_type_masks`
+  resolves the type of the layer being quantized with
+  `BaseQModel._resolve_layer_replay_type` and passes that type's mask to
+  `_token_row_replay_kwargs` as an override. Without it a full-attention layer
+  of a mixed model (gemma-3, OLMo 3) was replayed with the sliding window.
 - Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
   the quadratic mask is built once per unique capture list per layer.
+
+### Bloom ALiBi
+
+`BloomQModel.awq_module_replay_inputs` requires a captured `alibi` of shape
+`(batch * heads, 1, seq)`. `build_alibi_tensor` is
+`slope * position` per key, so a packed replay needs the retained rows' real
+positions, not the captured sample's `0..N-1` range. A shape-compatible
+captured alibi is therefore stale: the old shape check accepted it and the
+replay scored Bloom attention with the wrong relative bias, while a
+variable-length batch missed the shape check and fell back.
+
+The definition now rebuilds ALiBi from `_awq_rotary_position_ids` (or
+`position_ids`) whenever they describe the replay sequence:
+`BloomQModel._awq_rebuild_alibi` multiplies the model's own slopes
+(`_get_alibi_slopes`) by the retained positions in float32 and casts to the
+activation dtype, which reproduces `build_alibi_tensor` bit-for-bit for
+contiguous positions. When no positions are available and the captured alibi
+does not match the replay shape, the replay raises with the expected and actual
+shapes instead of accepting a stale tensor.
 
 ### Mask form and polarity
 
@@ -134,14 +195,21 @@ attention implementation consumes the tensor.
 | `additive` | `[B, 1, S, S]` float with `finfo.min` | float block grid, `min` for masked cells | Hugging Face eager attention sums the mask into the logits |
 | `bool_keep` | `[B, 1, S, S]` bool, `True` = attended (SDPA) | bool block grid, `True` = attended | SDPA takes a keep mask |
 | `bool_masked` | `[B, 1, S, S]` bool, `True` = masked (TeleChat2 `triu(1)`) | bool block grid, `True` = masked | the consumer calls `masked_fill`, which rejects a float mask |
+| `positive_keep` | `[B, 1, S, S]` integer 0/1, `1` = attended (LLaDA2 `tril * padding`) | integer block grid, `1` = attended | the consumer multiplies or masks with the 0/1 grid |
 | planar | `[B, S]` keep mask | `[1, retained]` keep mask | FlashAttention takes a rank-2 keep mask; cross-document separation is not expressible |
 
 A bool mask's polarity is read from its diagonal: `True` on the diagonal means
 the keep convention, an all-`False` diagonal means `masked_fill`. An additive
-mask's polarity is read from whether it contains negative values. When the
-capture stored no mask at all (`batch_size=1` on a model that builds its own
-causal mask), the additive block-diagonal fallback is used; it is the explicit
-form of the causal path the module already took.
+**float** mask is normalized as `m >= 0` unconditionally: it is summed into the
+logits, so `0` is attended and only negatives suppress a key. An all-zero float
+grid (an unpadded `batch_size>1` batch) therefore keeps every diagonal entry. A
+square **integer** grid is not additive: it is a multiplicative 0/1 keep mask
+(LLaDA2 expands the tokenizer mask with `tril * padding`) and is normalized as
+`m > 0`, so `0` means masked. A planar `[B, S]` numeric mask is a keep
+indicator, not an additive grid, and keeps the Hugging Face `1`/`0` convention.
+When the capture stored no mask at all (`batch_size=1` on a model that builds
+its own causal mask), the additive block-diagonal fallback is used; it is the
+explicit form of the causal path the module already took.
 
 ```mermaid
 flowchart TD
@@ -150,6 +218,7 @@ flowchart TD
     C -- additive --> D["float block grid, finfo.min masked"]
     C -- bool_keep --> E["bool block grid, True attended"]
     C -- bool_masked --> F["bool block grid, True masked"]
+    C -- positive_keep --> P["0/1 block grid, 1 attended"]
     C -- planar --> G["1, retained keep mask"]
     C -- none --> D
     B --> H["AWQProcessor._token_row_source_structure"]
@@ -158,6 +227,7 @@ flowchart TD
     J --> D
     J --> E
     J --> F
+    J --> P
     style G fill:#ffe9b3,stroke:#b38600
 ```
 
@@ -199,10 +269,16 @@ to the memory bound.
 | `batch_size>1`, batched capture | replay ran with `attention_mask=None`; `Qwen2Attention.forward` raised `TypeError` and the synthetic sequence attended across documents | replay carries a per-document block mask and original positions |
 | Captured `masked_fill` bool grid (TeleChat2) | converted to an additive float mask; `masked_fill` raised `RuntimeError: only supports boolean masks` | rebuilt as a bool grid with `True` = masked |
 | Real padded `batch_size>1` bool grid | keep came from `any(dim=-1)`, so padding rows counted and the structure was never recovered | keep comes from the diagonal; the document grid and positions are recovered |
+| Unpadded `batch_size>1` additive grid (all zeros) | `(m > 0)` marked every position masked, so `_token_row_source_structure` returned `None` and the replay fell back to one causal sequence across the whole batch | `m >= 0` keeps every diagonal entry; the replay is block-diagonal per document |
 | Cached mask does not match the captured rows | mask dropped, cross-document attention | each capture batch replayed as one contiguous document |
 | No cached mask entries at all | `attention_mask=None` | kwargs left unchanged |
 | Captured masks are all `None` (`batch_size=1`) | `attention_mask=None`, synthetic positions | additive block-diagonal fallback with original positions |
 | Planar `[B, S]` captured mask (FlashAttention) | mask dropped | planar packed keep mask and original positions; causal masking stays inside the attention implementation |
+| Scale grid from the packed sample only | BOS/document ends over-represented in `x_mean`; searched scales follow them | `x_mean` reduces every captured row; the replay loss still uses the bounded sample |
+| Mixed sliding/full `layer_types` model | every layer replayed with layer 0's mask; a full-attention layer allowed no pair at distance >= the window | the layer's own type mask is selected from the captured per-type kwargs |
+| Bloom with variable-length calibration | packed `(batch*heads, 1, N)` replay matched a captured alibi by coincidence and accepted a stale one; otherwise the group fell back | ALiBi rebuilt from the retained rows' positions, or refused with both shapes |
+| Attention module takes `position_embeddings`, not `position_ids` | rotary rebuilt from `arange(N)`, contradicting the real-position contract | retained rows' positions carried under `_awq_rotary_position_ids` into the rotary rebuild |
+| All candidates produce a non-finite loss | bare `Exception()` aborted the run and bypassed the fallback | `_AWQScaleGroupError` names the module and takes the configured fallback |
 | One starved member in a group | hidden by sibling sum | group falls back to RTN |
 | Empty capture for a module | group falls back | group falls back |
 | Token-row budget below batch count | n/a for dense | one row from evenly spaced batches |
@@ -226,7 +302,10 @@ policy itself came from #3036.
 Wikitext-2 perplexity, 4-bit, `group_size=128`, `batch_size=1`, the first 128
 C4 documents as calibration, 80 x 512-token evaluation chunks, and a
 save-then-reload before evaluation. RTX 4090 (CUDA) measurements; the fp16
-column uses the same harness.
+column uses the same harness. The #4176 item-1 table above uses 40 x 2048-token
+chunks instead, which is the harness that reproduces the issue's FP16 12.634;
+the same 512-token harness gives FP16 19.13, so the two tables are not
+comparable across rows.
 
 | Model | fp16 | RTN | AWQ before | AWQ after |
 | --- | --- | --- | --- | --- |

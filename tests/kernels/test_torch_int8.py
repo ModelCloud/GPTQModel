@@ -438,7 +438,11 @@ def test_native_int8_checkpoint_save_strict_reload_and_oracle(tmp_path, group_si
     owner = torch.nn.Module()
     owner.add_module("projection", candidate)
     writer_sources = get_state_dict_for_save(owner)
-    assert set(writer_sources) == {f"projection.{name}" for name in checkpoint}
+    # `qzeros_format` is a runtime marker (#4125/#4134): `state_dict()` carries
+    # it, the writer deliberately does not emit it.
+    assert set(writer_sources) == {
+        f"projection.{name}" for name in checkpoint if name != "qzeros_format"
+    }
     path = tmp_path / "model.safetensors"
     save_file({name: entry.source.contiguous() for name, entry in writer_sources.items()}, str(path))
     restored = TorchInt8Linear(**constructor)

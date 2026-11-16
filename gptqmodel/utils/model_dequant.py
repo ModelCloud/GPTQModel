@@ -43,6 +43,12 @@ from ..utils.planar_packing import (
 
 LOG = logging.getLogger(__name__)
 
+# Quantization-only metadata must not survive into a dense export: leaving it
+# behind makes loaders route the dense checkpoint back through from_quantized.
+_DENSE_OUTPUT_EXCLUDED_FILES = frozenset(
+    {"quantize_config.json", "quant_config.json", "quant_log.csv"}
+)
+
 # Reuse the shared dtype registries so checkpoint detection stays aligned with
 # the CPU dequant kernels and config normalization paths.
 _FLOAT8_DTYPES = available_float8_dtypes()
@@ -342,6 +348,10 @@ def _discover_compressed_tensors_module_schemes(
     )
     normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
+    # ``from_config`` mutates process-global torch state (default dtype,
+    # init hooks); serialize it against loads/saves with the shared lock.
+    from ..models.loader import model_load_lock
+
     loader_candidates = (
         deps["AutoModelForCausalLM"],
         deps["AutoModelForSeq2SeqLM"],
@@ -356,11 +366,12 @@ def _discover_compressed_tensors_module_schemes(
 
         with init_empty_weights(include_buffers=True):
             try:
-                model = loader.from_config(
-                    config,
-                    trust_remote_code=trust_remote_code,
-                    dtype=torch.float32,
-                )
+                with model_load_lock():
+                    model = loader.from_config(
+                        config,
+                        trust_remote_code=trust_remote_code,
+                        dtype=torch.float32,
+                    )
             except Exception as exc:  # pragma: no cover - depends on available loaders
                 loader_errors.append((loader.__name__, exc))
                 continue
@@ -2161,5 +2172,9 @@ def dequantize_model(
     new_config["dtype"] = str(target_dtype).split(".")[-1]
     write_json(output_path / "config.json", new_config)
 
-    skip_files = set(files) | {"config.json", "model.safetensors.index.json"}
+    skip_files = (
+        set(files)
+        | {"config.json", "model.safetensors.index.json"}
+        | _DENSE_OUTPUT_EXCLUDED_FILES
+    )
     copy_aux_files(model_path, output_path, skip_files, dirs_exist_ok=resume)

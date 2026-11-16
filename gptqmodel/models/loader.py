@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 import torch
 import transformers
 
+from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
@@ -58,10 +59,12 @@ from ..quantization.config import (
     configure_dynamic_override_cache_for_model,
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
 from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -202,7 +205,7 @@ _EXTERNAL_BACKEND_FORMATS = {
 
 def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format_code, adapter):
     """Select MLX when its Metal runtime can use the checkpoint directly."""
-    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
+    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or resolve_model_rotation(qcfg):
         return backend
     if quant_method == METHOD.GGUF and getattr(getattr(qcfg, "runtime_bits", None), "name", None) not in {
             "q1_0", "q1_0_g128", "q2_0", "q4_0", "q8_0", "q4_k", "q4_k_s", "q4_k_m",
@@ -745,7 +748,21 @@ def _normalize_requested_device_map(device, device_map):
 
 
 def _indexed_device_request(device) -> Optional[str]:
-    """Return an indexed ``device`` request as a placement string, if any."""
+    """Return an indexed ``device`` request as a placement string, if any.
+
+    A bare integer is an accelerator ordinal, matching the documented
+    ``device=(0, 1)`` sequence and ``device_map={"": N}`` semantics. Resolve
+    it to the active accelerator's concrete ``<family>:N`` target here so it
+    becomes a full-model map instead of a family selector that the layer-wise
+    resolver would spread across every visible GPU (#4384). A host without an
+    active accelerator cannot interpret the ordinal, so the selector
+    conversion raises rather than silently treating it as CPU.
+    """
+
+    if isinstance(device, int) and not isinstance(device, bool):
+        targets = _selector_devices(device)
+        assert targets is not None
+        return str(targets[0])
 
     if isinstance(device, str) and ":" in device:
         return device
@@ -987,6 +1004,87 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
         after_conversion(model)
 
     return converted
+
+
+# Fused expert projections that Defuser splits from one 3-D tensor into a
+# per-expert ``nn.Linear``. These names match
+# ``defuser.modeling.moe_experts_interface.KNOWN_PROJECTION_PATTERNS``.
+_FUSED_EXPERT_PROJECTION_NAMES = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
+
+
+def _meta_fused_expert_params(model) -> int:
+    """Park fused 3-D expert projections on meta before Defuser splits them.
+
+    Defuser's tensor defusion copies the whole fused projection to the host and
+    materializes one dense bf16 ``nn.Linear`` per expert. On the quantized-load
+    path those linears are replaced by quantized kernels and filled from the
+    checkpoint right afterwards, so the copies only inflate host memory: an
+    OLMoE-1B-7B 4-bit reload peaked at 12.17 GiB RssAnon for a 3.66 GiB
+    checkpoint (issue #4400).
+
+    Defuser skips tensors that already live on meta, so move the fused
+    projections (and their fused biases) there first; the checkpoint loader
+    then materializes the packed weights straight from disk. Only call this
+    from the quantized-load path: quantization needs the fused values in host
+    memory so Defuser can produce real per-expert linears to quantize.
+
+    Returns the number of parameters/buffers moved.
+    """
+
+    moved = 0
+    for module in model.modules():
+        for projection in _FUSED_EXPERT_PROJECTION_NAMES:
+            weight = module._parameters.get(projection)
+            if weight is None:
+                weight = module._buffers.get(projection)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 3:
+                continue
+            # The fused bias is a 2-D (num_experts, out_features) sibling.
+            for attr in (projection, f"{projection}_bias"):
+                parameter = module._parameters.get(attr)
+                buffer = module._buffers.get(attr)
+                tensor = parameter if parameter is not None else buffer
+                if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
+                    continue
+                empty = torch.empty_like(tensor, device="meta")
+                if parameter is not None:
+                    module._parameters[attr] = torch.nn.Parameter(
+                        empty, requires_grad=parameter.requires_grad
+                    )
+                else:
+                    module._buffers[attr] = empty
+                moved += 1
+    return moved
+
+
+def _materialize_meta_expert_linears(model) -> int:
+    """Restore real CPU storage for the linears Defuser built on meta.
+
+    Defuser materializes meta expert projections as meta ``nn.Linear`` shells
+    (see :func:`_meta_fused_expert_params`). ``to_empty`` allocates their
+    uninitialized storage without touching pages, so the host RSS stays flat;
+    ``make_quant`` then replaces them with kernels whose own buffers are
+    created on a real device. Without this step those kernels would inherit a
+    meta shell, leaving non-checkpoint buffers (``qzeros_format``, ``input_perm``,
+    ...) on meta and breaking the later ``model.to(device)`` dispatch.
+
+    Only fully-meta modules are touched, so the real CPU weights built by
+    ``from_config`` are never discarded.
+
+    Returns the number of modules materialized.
+    """
+
+    moved = 0
+    for module in model.modules():
+        tensors = [*module._parameters.values(), *module._buffers.values()]
+        tensors = [tensor for tensor in tensors if isinstance(tensor, torch.Tensor)]
+        if not tensors or not any(tensor.device.type == "meta" for tensor in tensors):
+            continue
+        if any(tensor.device.type != "meta" for tensor in tensors):
+            continue
+        module.to_empty(device="cpu")
+        moved += 1
+    return moved
 
 
 def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
@@ -1232,12 +1330,25 @@ def compare_versions(installed_version, required_version, operator):
 _MODEL_LOAD_LOCK = threading.RLock()
 
 
+def model_load_lock():
+    """Return the process-wide, re-entrant lock guarding model construction.
+
+    Every site that builds a model through transformers -- ``from_pretrained``,
+    ``from_quantized``, the save-side shell rebuild, the dequant path and the
+    TT block-float path -- must enter this same lock. Look the lock up through
+    this accessor (not a module-level import of ``_MODEL_LOAD_LOCK``) so the
+    single lock object is shared and can be spied on in tests.
+    """
+
+    return _MODEL_LOAD_LOCK
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
     @wraps(method)
     def wrapper(*args, **kwargs):
-        with _MODEL_LOAD_LOCK:
+        with model_load_lock():
             return method(*args, **kwargs)
 
     return wrapper
@@ -1365,24 +1476,56 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=No
     raise NotImplementedError(AWQ_GEMV_ROCM_UNSUPPORTED)
 
 
-def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
+# The GEMV/GEMV_FAST/LLM_AWQ layouts are read by kernels that declare
+# ``SUPPORTS_DTYPES = [torch.float16]``. AUTO has not resolved a concrete kernel
+# at load time, but every kernel AUTO can select for these layouts is fp16-only,
+# so the format alone decides the dtype.
+_AWQ_FP16_ONLY_FORMATS = (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ)
+
+
+def _coerce_quantized_awq_dtype(
+    *, backend: BACKEND, qcfg: QuantizeConfig, dtype, explicit_dtype: bool = False
+):
+    """Return a dtype the selected AWQ kernel can actually execute.
+
+    An unsupported explicit ``dtype=`` is a configuration conflict, so raise
+    here instead of letting layer-0 finalize fail after calibration has already
+    run. An auto-selected dtype is fixed to fp16 and logged, and the loader then
+    materializes the whole model in that dtype so the forward cannot mix dtypes.
+    """
     if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
-        return dtype
-    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
     if not isinstance(dtype, torch.dtype):
         return dtype
 
-    try:
-        qlinear = get_kernel_for_backend(backend, qcfg.quant_method, qcfg.format)
-    except ValueError:
-        return dtype
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        if format_code not in _AWQ_FP16_ONLY_FORMATS:
+            return dtype
+        supported_dtypes = [torch.float16]
+        kernel_name = f"FORMAT.{format_code.name} AWQ GEMV"
+    else:
+        try:
+            qlinear = get_kernel_for_backend(backend, qcfg.quant_method, format_code)
+        except ValueError:
+            return dtype
+        supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
+        kernel_name = qlinear.__name__
 
-    supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
     if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
         return dtype
 
-    log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
+    if explicit_dtype:
+        raise ValueError(
+            f"`dtype={dtype}` is not supported by {kernel_name}: it only supports "
+            f"{supported_dtypes}. Pass `dtype=torch.float16`, or use a GEMM format "
+            "(for example `FORMAT.GEMM`) that supports bfloat16."
+        )
+
+    log.info(
+        f"Loader: Auto fix `dtype` from `{dtype}` to `torch.float16` for "
+        f"`{kernel_name}`"
+    )
     return torch.float16
 
 
@@ -1682,7 +1825,7 @@ def ModelLoader(cls):
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
@@ -1690,12 +1833,20 @@ def ModelLoader(cls):
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ):
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+        if kernel is not None and quantize_config is not None:
+            # The loopers read this field and install it before kernel selection.
+            quantize_config.kernel = (
+                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+            )
 
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
@@ -1758,6 +1909,18 @@ def ModelLoader(cls):
                 config=config,
                 device=dtype_device,
                 quant_inference=False,
+            )
+
+        # Resolve fp16-only AWQ kernels (the GEMV layouts) before the shell
+        # model is materialized, so every module -- including the non-quantized
+        # ones -- loads in one dtype and the failure cannot surface in layer-0
+        # finalize after calibration.
+        if isinstance(quantize_config, BaseQuantizeConfig):
+            dtype = _coerce_quantized_awq_dtype(
+                backend=backend,
+                qcfg=quantize_config,
+                dtype=dtype,
+                explicit_dtype=requested_dtype is not None,
             )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
@@ -1823,6 +1986,7 @@ def ModelLoader(cls):
                         device_map=device_map,
                         device=device,
                         backend=backend,
+                        kernel=kernel,
                         dtype=dtype,
                         trust_remote_code=trust_remote_code,
                         tokenizer_trust_remote_code=tokenizer_trust_remote_code,
@@ -2007,6 +2171,11 @@ def ModelLoader(cls):
                             cls.resolve_hf_conversion_map_reversed(target_model=model)
                         ),
                         target_model=model,
+                        # A `.bin`/`.pt` source is converted to a full safetensors
+                        # copy.  Put that copy under the configured offload root
+                        # instead of the system TMPDIR; the turtle only falls back
+                        # to `tempfile.gettempdir()` when no path is configured.
+                        offload_path=getattr(quantize_config, "offload_to_disk_path", None),
                     )
 
                     if turtle_model is None:
@@ -2100,7 +2269,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
@@ -2109,9 +2278,12 @@ def ModelLoader(cls):
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
         warn_unsupported_rocm()
 
         # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
@@ -2126,6 +2298,8 @@ def ModelLoader(cls):
         # Install the peer-to-peer policy before any multi-device load so the
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
+        # Install the kernel policy before any quantized module is built.
+        configure_kernel(kernel)
 
         # post-quant is safe with GIL=0 and torch.compile/graphs
 
@@ -2142,6 +2316,7 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_quantized",
             explicit_dtype=dtype,
         )
+        requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
@@ -2303,6 +2478,10 @@ def ModelLoader(cls):
         else:
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
 
+        # Runtime policy belongs to this checkpoint's modules, not whichever
+        # model most recently installed a process policy.
+        qcfg.kernel = kernel
+
         if adapter is None:
             if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
                 raise ValueError(
@@ -2376,14 +2555,14 @@ def ModelLoader(cls):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.BITSANDBYTES
 
-        if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-            # GEMV_FAST and LLM_AWQ only supports torch.float16
-            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
-            dtype = torch.float16
-
         _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
 
-        dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        dtype = _coerce_quantized_awq_dtype(
+            backend=backend,
+            qcfg=qcfg,
+            dtype=dtype,
+            explicit_dtype=requested_dtype is not None,
+        )
 
         qcfg.calculate_bits_per_weight()
 
@@ -2615,7 +2794,15 @@ def ModelLoader(cls):
                     )
                 else:
                     raise
+            # This path replaces the fused experts with quantized kernels and
+            # fills them from the checkpoint, so keep Defuser's per-expert
+            # copies off the host (issue #4400).
+            _meta_fused_expert_params(model)
             _convert_model_with_defuser(cls, model, cleanup_original=True)
+            # Defuser built the split experts on meta; give them real (but
+            # uninitialized) host storage so the quantized kernels start on a
+            # materialized device.
+            _materialize_meta_expert_linears(model)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
@@ -2716,7 +2903,7 @@ def ModelLoader(cls):
                     log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
-            if qcfg.rotation:
+            if resolve_model_rotation(qcfg):
                 if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
                     raise NotImplementedError(
                         f"`rotation` is only supported for GPTQ/GPTQ_V2 checkpoints, got `{format_code}`."
@@ -3044,6 +3231,21 @@ def ModelLoader(cls):
             enable_for_devices(map_devices)
 
         load_checkpoint_in_model = native_gguf_qspec is None
+        load_extra_kwargs = {}
+        if "offload_folder" in kwargs:
+            load_extra_kwargs["offload_folder"] = kwargs["offload_folder"]
+        elif (
+            getattr(qcfg, "offload_to_disk_path", None) is not None
+            and isinstance(device_map, dict)
+            and "disk" in device_map.values()
+        ):
+            load_extra_kwargs["offload_folder"] = qcfg.offload_to_disk_path
+
+        if "offload_state_dict" in kwargs:
+            load_extra_kwargs["offload_state_dict"] = kwargs["offload_state_dict"]
+        if "offload_buffers" in kwargs:
+            load_extra_kwargs["offload_buffers"] = kwargs["offload_buffers"]
+
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
             load_checkpoint_in_model_then_tie_weights(
@@ -3052,9 +3254,8 @@ def ModelLoader(cls):
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
                 key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             load_checkpoint_in_model = False
@@ -3157,12 +3358,16 @@ def ModelLoader(cls):
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
+                # EXL3 stores ``suh``/``svh`` as fp16 because its Hadamard
+                # kernels require that dtype. ``from_config(dtype=...)`` and
+                # accelerate's cast would otherwise rewrite them in the model
+                # dtype (issue #4379).
+                restore_checkpoint_buffer_dtypes=(format_code == FORMAT.EXL3),
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                # offload_state_dict=True,
-                # offload_buffers=True,
                 key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             if format_code == FORMAT.GPTQ_V2:
@@ -3269,7 +3474,7 @@ def ModelLoader(cls):
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(
             instance.model,
-            qcfg.rotation,
+            resolve_model_rotation(qcfg),
             module_plan=instance.module_plan(),
             layer_prefixes=instance.extract_layers_node(),
         )

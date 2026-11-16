@@ -58,8 +58,18 @@ _FOEM_CFG = QuantizeConfig(
 )
 
 
-@pytest.mark.parametrize(("cls", "qcfg"), [(GPTAQ, _GPTAQ_CFG), (FOEM, _FOEM_CFG)])
-def test_routed_expert_ignores_mismatched_native_inputs(cls, qcfg):
+@pytest.mark.parametrize(
+    ("cls", "qcfg", "token_normalized"),
+    [
+        # GPTAQ keeps its upstream request-count Hessian recurrence and only
+        # reports a token-normalized loss.
+        (GPTAQ, _GPTAQ_CFG, False),
+        # FOEM normalizes its Hessian by calibration token count since 60b420d
+        # (the #4179 loss-denominator fix), matching GPTQ.
+        (FOEM, _FOEM_CFG, True),
+    ],
+)
+def test_routed_expert_ignores_mismatched_native_inputs(cls, qcfg, token_normalized):
     """A routed expert must build its Hessian from the quantized-path rows only."""
 
     torch.manual_seed(0)
@@ -72,7 +82,14 @@ def test_routed_expert_ignores_mismatched_native_inputs(cls, qcfg):
     assert task.dXXT is None
     hessian = task.H.to(torch.float64)
     samples = torch.cat(rows).to(torch.float64)
-    oracle = (2.0 / len(rows)) * (samples.T @ samples)
+    # The oracle must follow the quantizer's internal normalization: FOEM scales
+    # by the number of calibration tokens (2 / total tokens), GPTAQ by requests.
+    # FOEM's token normalization is the documented contract (docs/quantizer-moe.md)
+    # and is what makes its Hessian, `nsamples` and reported loss match GPTQ for
+    # the same rows; `2 / len(rows)` would scale with the number of calibration
+    # sequences instead. `dXXT` stays on the same scale as `H`.
+    denominator = sum(row.shape[0] for row in rows) if token_normalized else len(rows)
+    oracle = (2.0 / denominator) * (samples.T @ samples)
     relative_error = torch.linalg.vector_norm(hessian - oracle) / torch.linalg.vector_norm(oracle)
     assert float(relative_error) <= 1e-6
 

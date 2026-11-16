@@ -298,7 +298,10 @@ def _prepare_bias(a: torch.Tensor, bias: torch.Tensor | None, n: int) -> torch.T
 
     The kernel reads either the activation dtype or FP32 (``bias32``). A
     mismatched 16-bit bias is widened to FP32, which is lossless and keeps the
-    addition in the FP32 epilogue.
+    addition in the FP32 epilogue. A caller that wants the half-precision
+    prefill branch (``torch.addmm``) passes the bias in the activation dtype;
+    :func:`gptqmodel.utils.allspark_bias.narrow_bias_for_kernel` decides
+    whether that narrowing is lossless.
     """
     if bias is None:
         return None

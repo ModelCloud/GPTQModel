@@ -280,6 +280,23 @@ class FusionKernelSpec:
                    (module.qweight, module.qzeros, module.scales))
         module._q_handle_key = tuple(tensor_cache_key(tensor) for tensor in tensors)
 
+    def release_operand_snapshots(self, modules):
+        """Drop pre-fusion operand snapshots that alias the replaced storage.
+
+        ``ExllamaV2Linear`` keeps ``_q_fast`` as the per-call change detector for
+        the tensors it bound into its native descriptor. Rebinding a source to
+        fused views and copying the first source into the fused executor leave
+        those snapshots pointing at the standalone allocations, which would
+        otherwise survive every fused inference step. Sources keep their
+        descriptors and ``q_perm``/``q_invperm`` metadata for direct calls; only
+        the operand snapshot is released, and the cold path rebuilds it.
+        """
+        if self.layout != "exllamav2":
+            return
+        for module in modules:
+            if "_q_fast" in vars(module):
+                module._q_fast = None
+
     def rebind(self, module):
         if self.layout == "gptq_fp8":
             module.post_init()

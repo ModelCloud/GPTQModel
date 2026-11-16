@@ -84,7 +84,12 @@ class AwqMacheteLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 100, FORMAT.MARLIN: 100}
     SUPPORTS_BITS = [4, 8]
-    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    # The native Machete mainloop requires ``group_size % TileShapeK(64) == 0``
+    # (``machete_mainloop.cuh`` ``can_implement``, enforced by a TORCH_CHECK in
+    # the launcher). Declaring 32 made AUTO rank this kernel above AwqMarlin for
+    # AWQ gs=32 models, which then failed at the first forward. Keep the list in
+    # step with ``query_machete_supported_group_sizes()``, as MacheteLinear does.
+    SUPPORTS_GROUP_SIZE = [-1, 64, 128]
     SUPPORTS_DESC_ACT = [False]  # AWQ kernels do not reorder activations
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True

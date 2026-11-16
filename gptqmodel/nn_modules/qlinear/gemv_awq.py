@@ -17,6 +17,7 @@ from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
+from ...utils.packing_math import scale_to_storage_dtype
 
 
 log = setup_logger()
@@ -253,7 +254,8 @@ class AwqGEMVLinear(AWQuantLinear):
             dtype=torch.float16,
             device=scales.device,
         )
-        qscales[:, : scales.shape[1]] = scales
+        # Reject an unrepresentable FP16 scale before replacing module state.
+        qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
         self.register_buffer("scales", qscales)
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.clone().half())

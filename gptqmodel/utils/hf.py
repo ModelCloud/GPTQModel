@@ -7,6 +7,7 @@ import inspect
 import json
 import ntpath
 import os
+import re
 import shutil
 import sys
 import threading
@@ -26,6 +27,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+from transformers.utils import cached_file
 
 from ..utils import _MONKEY_PATCH_LOCK
 
@@ -97,6 +99,7 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+_TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
@@ -383,6 +386,56 @@ def suspend_hf_weight_init():
                 _restore_init_suspension(originals)
 
 
+_KEEP_IN_FP32_ATTRS = ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
+
+
+def _iter_keep_in_fp32_declarations(model):
+    """Yield the keep-in-fp32 patterns a model declares on itself or a child.
+
+    ``PreTrainedModel.post_init`` already unions child declarations onto the
+    top-level model, but walking submodules keeps the guard correct for models
+    built without that step.
+    """
+
+    seen = set()
+    modules = getattr(model, "modules", None)
+    for module in (modules() if callable(modules) else (model,)):
+        for attr in _KEEP_IN_FP32_ATTRS:
+            declared = getattr(module, attr, None)
+            if not declared:
+                continue
+            if isinstance(declared, str):
+                declared = (declared,)
+            for name in declared:
+                if isinstance(name, str) and name not in seen:
+                    seen.add(name)
+                    yield name
+
+
+def _compile_keep_in_fp32_matcher(model):
+    """Compile the model's fp32-pinned parameter patterns, transformers-style.
+
+    transformers 5.22 matches every ``_keep_in_fp32_modules`` and
+    ``_keep_in_fp32_modules_strict`` entry with ``re.search`` against the full
+    parameter key, expanding ``*`` to ``.*``
+    (``core_model_loading.build_glob_alternation``). In practice those entries
+    are module substrings such as ``gate.weight`` or ``wo``; the regex/glob
+    behaviour is preserved for wildcard declarations.
+    """
+
+    patterns = [
+        re.compile(name.replace("*", ".*"))
+        for name in _iter_keep_in_fp32_declarations(model)
+    ]
+    if not patterns:
+        return None
+
+    def matches(name: str) -> bool:
+        return any(pattern.search(name) is not None for pattern in patterns)
+
+    return matches
+
+
 def assert_loaded_model_state(
     model,
     *,
@@ -407,6 +460,14 @@ def assert_loaded_model_state(
     ``LazyTurtle`` materializes each layer. Objects without
     ``named_parameters`` (the MLX runtime model) only get the default-dtype
     check.
+
+    transformers deliberately keeps the modules listed in
+    ``_keep_in_fp32_modules`` / ``_keep_in_fp32_modules_strict`` in float32
+    inside a half-precision model, so parameters matched by those declarations
+    are excluded from both dtype checks *while they are float32*: that is the
+    dtype transformers' ``_get_dtype_plan`` pins them to. A declared module left
+    in any other dtype is still reported. Pinned parameters are still checked
+    for materialization, and undeclared mixed dtypes still fail (issue #4170).
     """
 
     problems = []
@@ -423,6 +484,7 @@ def assert_loaded_model_state(
     if named_parameters is not None and (
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
+        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
@@ -430,6 +492,12 @@ def assert_loaded_model_state(
                 continue
             if parameter.is_meta:
                 meta.append(name)
+                continue
+            if (
+                parameter.dtype is torch.float32
+                and keep_in_fp32 is not None
+                and keep_in_fp32(name)
+            ):
                 continue
             dtypes[parameter.dtype] += 1
 
@@ -869,6 +937,74 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
     return True, model_type, getattr(model_cls, "__name__", str(model_cls))
 
 
+@lru_cache(maxsize=None)
+def _checkpoint_config_payload(model_id_or_path: str) -> Optional[dict]:
+    """Read the checkpoint's raw ``config.json`` without executing its code.
+
+    ``resolve_trust_remote_code`` already loaded this file through
+    ``AutoConfig``, so the read is served from the same cache. Reading the raw
+    payload keeps the layout probe independent of the installed native config
+    class and never imports a snapshot module.
+    """
+
+    try:
+        config_path = cached_file(model_id_or_path, "config.json")
+    except Exception:
+        return None
+
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+@lru_cache(maxsize=None)
+def _checkpoint_remote_layout_overrides_native(
+    model_id_or_path: str,
+    native_model_cls_name: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    """Whether a checkpoint's own model code declares a non-native layout.
+
+    ``model_type`` alone cannot distinguish two checkpoints that share a
+    native config type. Ling-2.6-flash declares ``bailing_hybrid`` but ships
+    its own ``BailingMoeV2_5ForCausalLM`` (``attention.query_key_value`` /
+    ``attention.g_proj`` and, when ``q_lora_rank`` is set, MLA projections),
+    while the installed transformers ``BailingHybridForCausalLM`` keeps
+    ``self_attn`` and has no ``q_lora_rank``. Honour the caller's explicit
+    trust only when the checkpoint's ``auto_map`` names a different model class
+    (or carries the remote-only MLA marker); a checkpoint whose ``auto_map``
+    points at the installed native class still loads natively.
+    """
+
+    payload = _checkpoint_config_payload(model_id_or_path)
+    if payload is None:
+        return False, None
+
+    auto_map = payload.get("auto_map")
+    if not isinstance(auto_map, dict):
+        return False, None
+
+    remote_class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(remote_class_ref, str) or not remote_class_ref:
+        return False, None
+
+    remote_class_name = remote_class_ref.rsplit(".", 1)[-1]
+    if native_model_cls_name is not None and remote_class_name != native_model_cls_name:
+        return True, remote_class_name
+
+    # A same-named remote class can still own a different layout. The remote
+    # `bailing_hybrid` MLA branch is the case this guard exists for; the native
+    # config has no `q_lora_rank` field at all.
+    model_type = str(payload.get("model_type") or "").lower()
+    if model_type == "bailing_hybrid" and payload.get("q_lora_rank"):
+        return True, remote_class_name
+
+    return False, remote_class_name
+
+
 def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
     # Keep registration ahead of the trust-remote-code probe as well as the
     # main loader's AutoConfig call.  The probe runs very early in every public
@@ -879,6 +1015,21 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
 
     native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
     if not native_supported:
+        return True
+
+    remote_layout, remote_model_cls_name = _checkpoint_remote_layout_overrides_native(
+        str(model_id_or_path), model_cls_name
+    )
+    if remote_layout:
+        log_key = (str(model_id_or_path), remote_model_cls_name or "unknown", model_cls_name or "unknown")
+        if log_key not in _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED:
+            log.info(
+                "HF: keeping trust_remote_code=True for `%s` because the checkpoint ships remote model code `%s` whose layout differs from native `%s`.",
+                model_id_or_path,
+                remote_model_cls_name or "unknown",
+                model_cls_name or "unknown",
+            )
+            _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED.add(log_key)
         return True
 
     warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
@@ -1139,7 +1290,11 @@ def _patch_transformers_remote_code_compat() -> None:
             cache_utils.HybridCache = cache_utils.StaticCache
 
         cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
-        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
+        # transformers 5.22 moved the length query down to the cache *layers*
+        # and no longer exposes a cache-level `get_max_cache_shape`, so the
+        # shim must not require that method to exist. It reads the layer API
+        # first and only falls back to a cache-level shape query when present.
+        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length"):
             # Older remote decoders expect `get_max_length()`, while newer
             # transformers renamed that API to `get_max_cache_shape()`. In
             # transformers 5.14, the deprecated cache-level method delegates
@@ -1162,7 +1317,11 @@ def _patch_transformers_remote_code_compat() -> None:
                         max_length = -1
 
                 if max_length is missing:
-                    max_length = self.get_max_cache_shape(layer_idx)
+                    shape_getter = getattr(self, "get_max_cache_shape", None)
+                    if callable(shape_getter):
+                        max_length = shape_getter(layer_idx)
+                if max_length is missing:
+                    return None
                 return None if max_length is None or max_length < 0 else max_length
 
             cache_base_cls.get_max_length = get_max_length
@@ -2760,30 +2919,82 @@ def load_hf_tokenizer(
 
 _patch_transformers_remote_code_compat()
 
+def _sampling_fields_request_sampling(cfg: GenerationConfig) -> bool:
+    """Whether sampling-only fields contradict an explicitly greedy config.
+
+    Transformers refuses to save a config that sets these fields while
+    ``do_sample`` is ``False``. The checkpoint's fields are authoritative, so
+    this is used only to repair that specific contradiction.
+    """
+    if getattr(cfg, "temperature", None) is not None and cfg.temperature != 1.0:
+        return True
+    if getattr(cfg, "top_p", None) is not None and cfg.top_p != 1.0:
+        return True
+    if getattr(cfg, "min_p", None) is not None:
+        return True
+    if getattr(cfg, "typical_p", None) is not None and cfg.typical_p != 1.0:
+        return True
+    # contrastive search uses top_k
+    if (
+        getattr(cfg, "top_k", None) is not None
+        and cfg.top_k != 50
+        and getattr(cfg, "penalty_alpha", None) is None
+    ):
+        return True
+    if getattr(cfg, "epsilon_cutoff", None) is not None and cfg.epsilon_cutoff != 0.0:
+        return True
+    if getattr(cfg, "eta_cutoff", None) is not None and cfg.eta_cutoff != 0.0:
+        return True
+    return False
+
+
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
     if cfg is None:
         return changed
 
-    if getattr(cfg, "do_sample", None) is not True:
+    # `do_sample` is owned by the checkpoint: never force sampling on. An
+    # absent value means the transformers default (greedy), and an explicit
+    # value must survive load/save unchanged. The only repair is an explicitly
+    # greedy config whose own sampling fields contradict it, which transformers
+    # rejects when saving.
+    if getattr(cfg, "do_sample", None) is False and _sampling_fields_request_sampling(cfg):
         cfg.do_sample = True
         changed = True
+        log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
     return changed
 
 
-def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+def _read_generation_config_payload(path: str) -> Optional[dict]:
+    """Read the raw ``generation_config.json`` without normalizing its values."""
     try:
-        # transformers >= 5 exposes generation configs through from_pretrained
-        # only; the old `get_config_dict` helper no longer exists. Calling it
-        # raised AttributeError on every model, so this branch was dead and the
-        # caller always fell back to a defaults-only config.
-        #
-        # `do_sample=True` is passed here rather than forced afterwards: the
-        # loader validates sampling fields (temperature/top_p/top_k) against the
-        # file's own `do_sample`, so a `do_sample: false` config would warn that
-        # those flags "are not valid and may be ignored" before we flip the bit.
-        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+        config_path = cached_file(path, "generation_config.json")
+    except Exception:
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+    declared = _read_generation_config_payload(path)
+    try:
+        if declared is None:
+            # No readable payload, so there is no declared `do_sample` to
+            # preserve. Let transformers resolve the defaults.
+            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
+        else:
+            # Load with `do_sample=True` so transformers does not warn that the
+            # file's sampling fields are invalid, then restore the declared
+            # value. The file remains authoritative.
+            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+            cfg.do_sample = declared.get("do_sample") if "do_sample" in declared else None
     except Exception:
         log.debug("generation config %s could not be loaded; falling back to defaults", path, exc_info=True)
         return None
@@ -2813,7 +3024,7 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
             try:
                 cfg = _load_sanitized_generation_config(path)
                 if cfg is None:
-                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
                     _sanitize_generation_config(cfg, drop_sampling_fields=False)
                 if cfg != model.generation_config:
                     # migrated pad_token_id to config
@@ -2837,30 +3048,6 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
 
 def autofix_hf_generation_config(cfg: GenerationConfig):
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
-    # HF has recently started to perform very strict validation model save which results in warnings on load()
-    # to become exceptions on save().
-    if cfg.do_sample is False:
-        errors = 0
-        if hasattr(cfg, "temperature") and cfg.temperature is not None and cfg.temperature != 1.0:
-            errors += 1
-        if hasattr(cfg, "top_p") and cfg.top_p is not None and cfg.top_p != 1.0:
-            errors += 1
-        if hasattr(cfg, "min_p") and cfg.min_p is not None:
-            errors += 1
-        if hasattr(cfg, "typical_p") and cfg.typical_p is not None and cfg.typical_p != 1.0:
-            errors += 1
-        # contrastive search uses top_k
-        if (hasattr(cfg, "top_k") and cfg.top_k is not None and cfg.top_k != 50) and (hasattr(cfg, "penalty_alpha") and cfg.penalty_alpha is None):
-            errors += 1
-        if hasattr(cfg, "epsilon_cutoff") and cfg.epsilon_cutoff is not None and cfg.epsilon_cutoff != 0.0:
-            errors += 1
-        if hasattr(cfg, "eta_cutoff") and cfg.eta_cutoff is not None and cfg.eta_cutoff != 0.0:
-            errors += 1
-
-        # fix wrong do_sample
-        if errors > 0:
-            cfg.do_sample = True
-            log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
 
 def sanitize_model_config(config):
@@ -2870,24 +3057,56 @@ def sanitize_model_config(config):
         del config.attribute_map["max_length"]
 
 
+def _generation_config_payload_contradicts_greedy(data: dict) -> bool:
+    """JSON-payload counterpart of ``_sampling_fields_request_sampling``."""
+    if data.get("do_sample") is not False:
+        return False
+
+    temperature = data.get("temperature")
+    if temperature is not None and temperature != 1.0:
+        return True
+    top_p = data.get("top_p")
+    if top_p is not None and top_p != 1.0:
+        return True
+    if data.get("min_p") is not None:
+        return True
+    typical_p = data.get("typical_p")
+    if typical_p is not None and typical_p != 1.0:
+        return True
+    top_k = data.get("top_k")
+    if top_k is not None and top_k != 50 and data.get("penalty_alpha") is None:
+        return True
+    epsilon_cutoff = data.get("epsilon_cutoff")
+    if epsilon_cutoff is not None and epsilon_cutoff != 0.0:
+        return True
+    eta_cutoff = data.get("eta_cutoff")
+    if eta_cutoff is not None and eta_cutoff != 0.0:
+        return True
+    return False
+
+
 def sanitize_generation_config_file(path: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as fp:
             data = json.load(fp)
     except FileNotFoundError:
         return False
+    except (OSError, TypeError, ValueError):
+        return False
 
-    changed = False
+    if not isinstance(data, dict):
+        return False
 
-    if data.get("do_sample") is not True:
-        data["do_sample"] = True
-        changed = True
+    # Preserve the checkpoint's declared `do_sample`; never add or force it.
+    # Only an explicit greedy declaration contradicted by its own sampling
+    # fields is repaired, because transformers rejects that payload on save.
+    if not _generation_config_payload_contradicts_greedy(data):
+        return False
 
-    if changed:
-        with open(path, "w", encoding="utf-8") as fp:
-            json.dump(data, fp, indent=2)
-
-    return changed
+    data["do_sample"] = True
+    with open(path, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2)
+    return True
 
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(

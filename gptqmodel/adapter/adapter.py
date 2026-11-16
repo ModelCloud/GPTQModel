@@ -15,6 +15,7 @@ import torch
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
 from .remote import resolve_checkpoint_adapter_path, resolve_path, validate_remote_pin
+from .targeting import module_matches_targets
 
 
 log = setup_logger()
@@ -42,6 +43,33 @@ def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = 
 
     flags = pcre.IGNORECASE if ignore_case else 0
     return pcre.compile(rf"(.*\.)?({pattern})$", flags).match(weight_key) is not None
+
+
+def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
+    """Fail closed on adapter tensors this runtime cannot apply.
+
+    The LoRA path consumes only `lora_A` / `lora_B`. A checkpoint that also
+    carries DoRA magnitude vectors, `trainable_token_indices` deltas, trained
+    biases, or `modules_to_save` parameters would have those tensors dropped, so
+    the adapter would load and run as a different (plain LoRA) model. Rejecting
+    them keeps the load honest instead of silently wrong.
+    """
+
+    for key in weights:
+        if ".lora_magnitude_vector" in key:
+            raise ValueError(
+                f"Adapter: DoRA is not supported (`lora_magnitude_vector` tensor found: `{key}`)"
+            )
+        if ".modules_to_save." in key:
+            raise ValueError(f"Adapter: `modules_to_save` is not supported (`{key}`)")
+        if ".trainable_tokens_delta" in key:
+            raise ValueError(
+                "Adapter: `trainable_token_indices` is not supported "
+                f"(`trainable_tokens_delta` tensor found: `{key}`); "
+                "load a plain LoRA adapter or fold the trained token deltas into the base model"
+            )
+        if key.endswith(".bias"):
+            raise ValueError(f"Adapter: adapter bias tensors are not supported (`{key}`)")
 
 
 class AdapterCache():
@@ -143,6 +171,26 @@ class Adapter():
 
         pass
 
+    def targets_module(self, module_name: str) -> bool:
+        """Whether this adapter applies to ``module_name``.
+
+        The base adapter has no target metadata, so it keeps the historical
+        attach-to-every-module behavior. Subclasses with a PEFT config override
+        this to honour ``target_modules`` / ``exclude_modules``.
+        """
+
+        return True
+
+    def has_weights(self, module_name: str) -> bool:
+        """Whether the adapter source carries A and B tensors for ``module_name``.
+
+        The base adapter has no tensor metadata; subclasses that can inspect
+        their source override this. Target matching alone is not enough when a
+        PEFT export only contains the layers it transformed.
+        """
+
+        return True
+
     # override me
     def optimize(self):
         """Applies optional backend-specific optimizations after loading."""
@@ -176,6 +224,7 @@ class Lora(Adapter):
         self.lora_A = lora_A
         self.lora_B = lora_B
         self.lora_scale = 1.0
+        self._lora_config: Optional[LoraConfig] = None
 
     @classmethod
     def name(cls) -> str:
@@ -222,17 +271,8 @@ class Lora(Adapter):
         result = out + update
         return result.view(original_shape) if original_shape is not None else result
 
-    def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
-        """Loads, caches, and materializes LoRA tensors for the target module."""
-
-        # self.register_buffer("lora_A", lora_A)
-        # self.register_buffer("lora_B", lora_B)
-
-        # we need since lora A/B weights may be merged into model tensors and not separate
-        if lora_A is not None and lora_B is not None:
-            # print(f"Adapter has preloaded lora_A and lora_B")
-            self.lora_A, self.lora_B = lora_A, lora_B
-            return
+    def _resolve_source(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve the adapter source path and its explicit remote pin."""
 
         if self._gptqmodel_checkpoint_source is not None:
             checkpoint_path, manifest_path = self._gptqmodel_checkpoint_source
@@ -243,23 +283,29 @@ class Lora(Adapter):
         validate_remote_pin(remote_revision, remote_sha256)
         if remote_revision is None and isinstance(self.path, str) and os.path.isdir(self.path):
             self.path = os.path.abspath(self.path)
-        cache_key = (self.path, remote_revision, remote_sha256)
+        return self.path, remote_revision, remote_sha256
+
+    def _load_adapter(self) -> Tuple[LoraConfig, Dict[str, torch.Tensor]]:
+        """Load and cache the adapter config and weights for this source."""
+
+        path, remote_revision, remote_sha256 = self._resolve_source()
+        cache_key = (path, remote_revision, remote_sha256)
         lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
             # get lora config
             lora_cfg = LoraConfig.from_pretrained(
-                path=self.path,
+                path=path,
                 filename=HF_ADAPTER_CONFIG_FILE_NAME,
                 allow_remote=remote_revision is not None,
                 revision=remote_revision,
             )
-            lora_cfg.gptqmodel_path = self.path  # hack: save this
+            lora_cfg.gptqmodel_path = path  # hack: save this
 
             if not isinstance(lora_cfg, LoraConfig):
-                raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
+                raise ValueError(f"Adapter: Expected `LoraConfig` in `{path}`, actual = `{lora_cfg}`")
 
             lora_path = resolve_path(
-                self.path,
+                path,
                 HF_ADAPTER_FILE_NAME,
                 allow_remote=remote_revision is not None,
                 revision=remote_revision,
@@ -272,8 +318,89 @@ class Lora(Adapter):
             lora_cache = AdapterCache.get(cache_key)
             assert lora_cache is not None
 
-        # lora_cache result is a tuple
         lora_cfg, lora_weights = lora_cache
+        _reject_unsupported_adapter_tensors(lora_weights)
+        self._lora_config = lora_cfg
+        return lora_cfg, lora_weights
+
+    def adapter_config(self) -> Optional[LoraConfig]:
+        """Return the PEFT config for this adapter, if it has one on disk.
+
+        ``None`` covers adapters whose weights are merged into the model
+        (EoRA) and output directories that have not been saved yet. Those keep
+        the historical attach-to-every-module behavior.
+        """
+
+        if self._lora_config is not None:
+            return self._lora_config
+        if self.path in LORA_MERGED_WEIGHT_PATHS:
+            return None
+        path, remote_revision, _ = self._resolve_source()
+        if not path or path in LORA_MERGED_WEIGHT_PATHS:
+            return None
+        if remote_revision is None:
+            # A local EoRA output directory (or any adapter that has not been
+            # saved yet) has no target list. Do not turn that into a hard error
+            # while merely deciding which modules may attach the adapter.
+            if not os.path.isdir(path):
+                return None
+            if not os.path.isfile(os.path.join(path, HF_ADAPTER_CONFIG_FILE_NAME)):
+                return None
+        lora_cfg, _ = self._load_adapter()
+        return lora_cfg
+
+    def targets_module(self, module_name: str) -> bool:
+        """Whether this adapter's ``target_modules`` selects ``module_name``."""
+
+        if self.lora_A is not None and self.lora_B is not None:
+            # Preloaded merged A/B tensors carry no target list.
+            return True
+        lora_cfg = self.adapter_config()
+        if lora_cfg is None:
+            return True
+        return module_matches_targets(
+            module_name,
+            lora_cfg.target_modules,
+            lora_cfg.exclude_modules,
+        )
+
+    def has_weights(self, module_name: str) -> bool:
+        """Whether the adapter source has both A and B tensors for a module."""
+
+        if self.lora_A is not None and self.lora_B is not None:
+            return True
+        if self.adapter_config() is None:
+            return True
+        _, lora_weights = self._load_adapter()
+        for key in (module_name, module_name.lower()):
+            found_a = any(
+                name.endswith(f"{key}.lora_A.weight") for name in lora_weights
+            )
+            found_b = any(
+                name.endswith(f"{key}.lora_B.weight") for name in lora_weights
+            )
+            if found_a and found_b:
+                return True
+        return False
+
+    def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
+        """Loads, caches, and materializes LoRA tensors for the target module."""
+
+        # self.register_buffer("lora_A", lora_A)
+        # self.register_buffer("lora_B", lora_B)
+
+        # we need since lora A/B weights may be merged into model tensors and not separate
+        if lora_A is not None and lora_B is not None:
+            # print(f"Adapter has preloaded lora_A and lora_B")
+            self.lora_A, self.lora_B = lora_A, lora_B
+            return
+
+        lora_cfg, lora_weights = self._load_adapter()
+        cache_key = (
+            self.path,
+            getattr(self, "_gptqmodel_remote_revision", None),
+            getattr(self, "_gptqmodel_remote_sha256", None),
+        )
         if self.rank is None:
             self.rank = lora_cfg.r
         elif self.rank != lora_cfg.r:

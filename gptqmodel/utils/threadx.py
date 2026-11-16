@@ -395,6 +395,25 @@ class _WorkerWarmupState:
 # executed under the device’s read lock; GC acquires the writer lock to keep
 # memory management steps from interleaving with tasks.
 
+def split_intraop_threads(worker_count: int, total: Optional[int] = None) -> int:
+    """Return the Torch intra-op pool size for one pool worker.
+
+    ``worker_count`` is the number of pool threads that can run parallel
+    regions concurrently; ``total`` is the process-wide intra-op budget
+    (defaults to ``torch.get_num_threads()``). Splitting the budget keeps the
+    sum of the workers' OpenMP teams within the process pool instead of
+    multiplying it by the worker count (issue #4356).
+
+    A minimum of one thread is always returned: when the pool has more workers
+    than the budget, each worker still needs a valid team.
+    """
+
+    if total is None:
+        total = torch.get_num_threads()
+    count = max(1, int(worker_count))
+    return max(1, int(total) // count)
+
+
 class _DeviceWorker:
     """
     Single worker thread bound to one device.
@@ -414,6 +433,7 @@ class _DeviceWorker:
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
         warmup_plan: Optional[Tuple[_WorkerWarmupState, ...]] = None,
+        intraop_threads: Optional[int] = None,
         *,
         key_override: Optional[str] = None,
     ):
@@ -422,6 +442,14 @@ class _DeviceWorker:
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
         self._pending_warmups = warmup_plan or ()
+        # Torch/OpenMP intra-op budget for work executed on this thread.
+        # ``None`` leaves the spawning thread's pool untouched.
+        self._intraop_threads = intraop_threads
+        # A worker thread exists as soon as the pool is built, but the CUDA
+        # context is created only when the worker first activates its device.
+        # Keeping activation lazy lets the pool skip devices whose warmup was
+        # not requested (see `DeviceThreadPool(warmup_devices=...)`).
+        self._device_activated = False
 
         if key_override is not None:
             self.key = key_override
@@ -463,6 +491,38 @@ class _DeviceWorker:
         if DEBUG_ON: log.debug(f"{self.name}: joining thread")
         self._thread.join()
 
+    def _apply_intraop_threads(self) -> None:
+        """Give this worker thread its own Torch intra-op pool size.
+
+        libgomp creates one OpenMP team per pthread that enters a parallel
+        region, sized from that thread's intra-op count. Without a per-worker
+        value every pool worker duplicates the spawning thread's full team:
+        the default pool on a 320-CPU host held 2622 OS threads (issue #4356).
+
+        ``torch.set_num_threads`` is thread-local for the intra-op pool, so the
+        caller's pool is unchanged (see ``pytorch_gil_0_compat.md``). This runs
+        before the worker's first Torch call, including its warmup, because the
+        team is materialized on that first parallel region.
+        """
+
+        target = self._intraop_threads
+        if target is None or target <= 0:
+            return
+        try:
+            if torch.get_num_threads() == int(target):
+                return
+            torch.set_num_threads(int(target))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn.once(
+                "Could not set intra-op threads to %s for %s (%s); the worker keeps the inherited pool.",
+                target,
+                self.name,
+                exc,
+            )
+            return
+        if DEBUG_ON:
+            log.debug(f"{self.name}: intra-op threads set to {target}")
+
     def _apply_cpu_affinity(self) -> None:
         if self._affinity_applied or self._target_cpu_core is None:
             return
@@ -503,6 +563,14 @@ class _DeviceWorker:
             warmup_state.run(device=self.device, rwlock=self.rwlock)
         self._pending_warmups = ()
 
+    def _ensure_device_activated(self) -> None:
+        """Activate this worker's device once, on first real work."""
+
+        if self._device_activated:
+            return
+        _activate_thread_device(self.device)
+        self._device_activated = True
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -513,7 +581,7 @@ class _DeviceWorker:
         may override via `inference_mode`.
         """
         self._apply_cpu_affinity()
-        _activate_thread_device(self.device)
+        self._apply_intraop_threads()
         # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
         # after every task the pool already accepted, so reaching the sentinel
         # means the queue is drained and every accepted future is resolved.
@@ -528,6 +596,7 @@ class _DeviceWorker:
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
                 try:
+                    self._ensure_device_activated()
                     self._run_warmup()
                 except BaseException as exc:
                     # Warmup runs on the worker thread before the task. Report
@@ -664,8 +733,10 @@ class DeviceThreadPool:
         include_cpu: bool = True,
         inference_mode: bool = False,
         warmups: Optional[Dict[str, WarmupTask]] = None,
+        warmup_devices: Optional[Iterable[DeviceLike]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
+        intraop_threads_per_worker: Optional[int] = None,
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
         gc_min_interval_seconds: float = 0.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
@@ -686,6 +757,13 @@ class DeviceThreadPool:
                 - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
                   (CUDA/NPU parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
+            intraop_threads_per_worker: Torch intra-op pool size applied to
+                every worker thread before it runs its first task or warmup.
+                ``None`` splits ``torch.get_num_threads()`` across this pool's
+                workers, so each worker owns a bounded OpenMP team instead of
+                duplicating the process-wide team; ``0`` keeps the pool
+                inherited from the spawning thread. See
+                `docs/device-thread-pool-intraop-budget.md`.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
             warmups: optional mapping from device family (e.g. 'cuda') to a
                 `WarmupTask`. Each warmup callable receives `(device, ctx)`,
@@ -694,6 +772,11 @@ class DeviceThreadPool:
                 physical device with `ctx=DEVICE`, then once per worker thread
                 with `ctx=THREAD`. A special key 'default' applies when no
                 family-specific warmup is found.
+            warmup_devices: optional device allow-list for the eager warmup
+                kicked at construction. Devices not listed still get worker
+                threads and can receive work, but their CUDA/XPU/NPU context is
+                not created and their warmup is deferred until the first task.
+                None warms every discovered accelerator (historical behavior).
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -770,7 +853,19 @@ class DeviceThreadPool:
         self._device_smi_failures: Set[str] = set()
 
         self._inference_mode = bool(inference_mode)
+        # ``None`` asks for the process intra-op budget to be split across this
+        # pool's workers (resolved once the worker table is known); ``0`` keeps
+        # the spawning thread's pool on every worker.
+        self._intraop_threads_request = (
+            None if intraop_threads_per_worker is None else int(intraop_threads_per_worker)
+        )
+        self._intraop_threads_per_worker: Optional[int] = (
+            self._intraop_threads_request if (self._intraop_threads_request or 0) > 0 else None
+        )
         self._worker_warmups = self._normalize_worker_warmups(warmups)
+        self._warmup_device_keys: Optional[Set[str]] = None
+        if warmup_devices is not None:
+            self._warmup_device_keys = {self._key(_coerce_device(device)) for device in warmup_devices}
         self._device_warmup_lock = threading.Lock()
         self._device_warmup_states: Dict[str, _WorkerWarmupState] = {}
 
@@ -808,6 +903,21 @@ class DeviceThreadPool:
             pin_cpu_workers=pin_cpu_workers,
             pin_accelerator_workers=pin_accelerator_workers,
         )
+
+        if self._intraop_threads_request is None:
+            pool_workers = 0
+            seen_devices: Set[str] = set()
+            for raw_dev in devices:
+                dev = _coerce_device(raw_dev)
+                if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
+                    continue
+                key = self._key(dev)
+                if key in seen_devices:
+                    continue
+                seen_devices.add(key)
+                pool_workers += int(max(1, self._resolve_workers_for_device(dev, base_workers)))
+            pool_workers += sum(int(max(1, count)) for _, count in virtual_workers.values())
+            self._intraop_threads_per_worker = split_intraop_threads(max(1, pool_workers))
 
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
@@ -947,6 +1057,8 @@ class DeviceThreadPool:
             return
         for key in self._ordered_keys:
             if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
+                continue
+            if self._warmup_device_keys is not None and key not in self._warmup_device_keys:
                 continue
             for worker in self._worker_groups.get(key, ()):
                 # The no-op runs through the worker's normal completion path,
@@ -1128,6 +1240,7 @@ class DeviceThreadPool:
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
             warmup_plan=warmup_plan,
+            intraop_threads=self._intraop_threads_per_worker,
             key_override=key,
         )
         return w

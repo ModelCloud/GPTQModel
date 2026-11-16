@@ -72,6 +72,7 @@ results below for that build.
 | Result | Meaning |
 |---|---|
 | SAFE (concurrent) | 8 threads x 4 iterations completed with correct results |
+| SAFE (serialized) | correct because concurrent callers wait on, or share, a process-wide lock or reference-counted guard |
 | SAFE (single-thread only) | correct as a one-off / main-thread call; do not parallelize |
 | UNSAFE (hangs) | a concurrent call never returned and had to be killed |
 | UNSAFE (crash) | the process died (SIGSEGV) |
@@ -109,7 +110,9 @@ results below for that build.
 | `torch.cuda.is_initialized` | SAFE (concurrent) | startup checks | Avoid calling before you want CUDA initialized. |
 | `torch.cuda.is_current_stream_capturing` | SAFE (concurrent) | graph guards | Thread-local. |
 | `torch.cuda.get_arch_list` | SAFE (concurrent) | diagnostics | Pure metadata query. |
-| `torch.cuda.CUDAGraph` + `torch.cuda.graph` | SAFE (single-thread only) | not used yet | Graph capture is process-global. Capture on the main thread, then replay from one stream per worker. |
+| `Tensor.record_stream` | UNVERIFIED under GIL=0 | Torch streaming dequant `gptqmodel/nn_modules/qlinear/torch.py:706`; P2P raw copy `gptqmodel/utils/p2p.py:1841-1842`; activation staging `gptqmodel/utils/cuda_activation_buffer.py:119`; host streaming `gptqmodel/utils/stream.py:277`; marlin scratch `gptqmodel/utils/marlin_scratch.py:317`, `:443`, `:458`; GPTQ workspace `gptqmodel/quantization/gptq.py:274`, `:280` | Not probed on a free-threaded build, and the ledger has no evidence it is safe when two threads record the same tensor. It only extends allocator lifetime; it is not an ordering primitive. The Torch streaming path is opt-in (`KernelConfig.torch_streaming`, read at `qlinear/torch.py:245`) and caches one dequant stream per device in a plain dict with an unlocked check-then-set (`qlinear/torch.py:856-862`), so concurrent first use of one module can race the cache (last stream wins). Use per-thread streams and do not share one tensor across concurrent streaming forwards. |
+| `Stream.wait_stream` | UNVERIFIED under GIL=0 | Torch streaming dequant `gptqmodel/nn_modules/qlinear/torch.py:704`, `:728`; host streaming `gptqmodel/utils/stream.py:268`; activation staging `gptqmodel/utils/cuda_activation_buffer.py:113`; ParoQuant stage capture `gptqmodel/quantization/paroquant/optimization.py:1942`, `:1957`; EXL3 quantize `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:521`, `:606`, `:643`, `:707`, `:1012`, `:1056`, `:1389`, `:1403` | Not probed on a free-threaded build. It inserts an event dependency between two streams and changes stream ordering, not tensor data; the risk is sharing one stream object across threads. `gptqmodel/utils/stream.py` caches its copy stream under `_STREAM_CACHE_LOCK` (`stream.py:74`, `:103-114`), while the TorchLinear dequant-stream cache (`qlinear/torch.py:856-862`) is unlocked. Use one stream per worker. |
+| `torch.cuda.CUDAGraph` + `torch.cuda.graph` | SAFE (single-thread only); UNVERIFIED under GIL=0 | ParoQuant stage optimizer: `gptqmodel/quantization/paroquant/optimization.py:1960-1962` (`_run_stage_gptqmodel_cudagraph`) | Graph capture is process-global. Capture is reached only on a CUDA tensor stage with `fused_rotation` set, `inputs_train.shape[0] >= batch_size`, and `stage_cudagraph` not False (`optimization.py:1877-1889`); ROCm is excluded (`optimization.py:1881`). The looper disables it for the default `opt_scope="module"` (`gptqmodel/looper/paroquant_processor.py:673-683`, `gptqmodel/quantization/config.py:5764`), but `opt_scope` of `compute_block`/`layer` and the public `optimize_paroquant_linear(..., stage_cudagraph=None)` default (`optimization.py:1877-1878`) reach the capture. Capture on the thread that owns the model and replay from that thread's stream; do not capture or replay concurrently. The probe is single-shot (`scripts/gil0_api_probe.py:45`, `:123-124`) and was not run in this change. |
 
 ## Cross-device collective copies
 
@@ -175,6 +178,7 @@ results below for that build.
 | `torch.rsqrt` | SAFE (concurrent) | normalization | - |
 | `torch.topk` | SAFE (concurrent) | act-order selection | - |
 | `torch.argsort` | SAFE (concurrent) | act-order selection | - |
+| `_deterministic_segment_sum` (VPTQ k-means) | SAFE (concurrent), CUDA and ROCm | VPTQ weighted k-means codebook reduction | `scripts/gil0_api_probe.py --only 'VPTQ deterministic segment sum'` passed three independent processes per backend with the GIL disabled, each 8 threads x 4 iterations on assigned devices with per-thread streams. The probe covers `torch.bincount`, `torch.cumsum` (float64 prefix), `Tensor.movedim` / `contiguous` / `double`, `Tensor.clamp_min`, and boolean-mask assignment, and compares every result with an independent float64 `index_add_` oracle (relative error < 1e-6). Empty buckets must be exactly zero and repeat calls must be bitwise identical. |
 | `torch.sum` | SAFE (concurrent) | reductions | Reduction kernels use the current stream. |
 | `torch.mean` | SAFE (concurrent) | reductions | - |
 | `torch.all` | SAFE (concurrent) | validation | - |
@@ -186,6 +190,7 @@ results below for that build.
 | `dequantize_gemm` tiled AWQ path | SAFE (concurrent), CUDA and ROCm | Torch AWQ and ParoQuant dense fallback | On 2026-11-13, `AWQ tiled dequantize_gemm` passed three independent subprocesses per backend with the GIL disabled, each running 8 threads x 4 iterations on assigned devices and per-thread streams. The independent FP64 oracle checks every output of 1100x2048 layers, group sizes 128 and -1, FP16/BF16/FP32 scales, signed packed words, and FP32 scales `1e-40` and `65536`. The composed probe covers bounded row tiles, complete/partial-group broadcasts, `torch.is_grad_enabled`, in-place integer subtraction, `torch.mul(..., out=...)`, and release of tile references. Each worker synchronizes its own stream before exact comparison. |
 | `_scales_for_storage` FP16 GPTQ guard | SAFE (concurrent), NVIDIA CUDA | GPTQ pack workers | `GPTQ FP16 scale storage guard` passed three separate processes on 2026-11-12 with Python 3.14.7 GIL disabled, Torch 2.15.0.dev20260928+cu130, and two NVIDIA PG506 GPUs. Each process ran 8 threads x 4 iterations across both devices, checked exact finite FP16 cast results, and verified that mixed nonfinite, overflow, and underflow inputs were classified correctly. This probes the composed validation path, including its reductions and error formatting; ROCm concurrency was not measured in this run. |
 | `_floor_scale_for_storage` and bounded GPTQ MSE search | SAFE (concurrent), CUDA and ROCm | GPTQ weight scale selection, including normalized smoothing domains | `scripts/gil0_api_probe.py --only 'GPTQ weight scale floor'` passed three separate processes per backend on 2026-11-13, each 8 threads × 4 iterations with the GIL disabled and explicit per-worker device selection. CUDA: Python 3.14.7 / Torch 2.15.0+cu132; ROCm: Python 3.14.10 / Torch 2.16.0.dev20261029+rocm10.1. Checks zero/arithmetic-underflow floors, symmetric/asymmetric MSE selection, tensor-valued normalized-domain bounds and exact reconstructed values. Independent quantization/packed-byte boundary tests cover FP16/BF16/FP32 inputs. |
+| `_calc_affine_qparams` and `pseudo_quantize_dequant` affine fit | SAFE (concurrent), CUDA and ROCm | ParoQuant initialization and no-calibration fallback | `scripts/gil0_api_probe.py --only 'ParoQuant affine fit'` passed three independent processes per backend on 2026-11-16 with the GIL disabled. Each process ran 8 threads × 4 calls with explicit worker device selection and separate streams, covering FP16/BF16/FP32 extrema, `amin`/`amax`, FP32 promotion, `minimum`/`maximum`, normalized zero-point selection, scale fitting and output rounding. Every integer zero point and code matched an independent FP64 reference; outputs matched the independently rounded storage-precision oracle exactly. |
 | `torch.floor_divide` | SAFE (concurrent) | packing | - |
 | `torch.abs` / `exp` / `log` / `pow` | SAFE (concurrent) | math kernels | - |
 | `torch.save` + `torch.load` | SAFE (concurrent), process-wide | checkpoints | File I/O; safe but serializes on the filesystem. Write distinct paths per worker. |
@@ -193,11 +198,27 @@ results below for that build.
 | `torch.Generator(device="cuda")` | SAFE (concurrent), per-thread | deterministic sampling | One generator per worker. Never share a generator across threads. |
 | `Tensor.to` (cuda:0 -> cuda:1) | SAFE (concurrent) (needs 2 GPUs) | fallback for every P2P fast path | Goes through the PyTorch copy machinery. Correct, but per-tensor and slower than `peer_copy_batch`; use it only as the fallback. |
 | `Tensor.copy_` (non_blocking, cross-device) | SAFE (concurrent) (needs 2 GPUs) | P2P verify, Hessian adopt | Must synchronize the destination stream before reading the result. |
+| `torch.set_num_threads` / `torch.get_num_threads` (per worker) | SAFE (concurrent), thread-local for the intra-op pool | `DeviceThreadPool` worker entry (`gptqmodel/utils/threadx.py`, `_DeviceWorker._apply_intraop_threads`), reached through `split_intraop_threads` | Each pool worker reduces its own intra-op pool before its first parallel region, so the pool does not multiply the process-wide OpenMP team (issue #4356: the isolated 12-worker repro on a 320-CPU host held 2622 OS threads before the fix and 308 after). `scripts/gil0_api_probe.py --only 'torch.set_num_threads (per worker)'` passed three separate subprocesses per backend on 2026-11-16 with `PYTHON_GIL=0` (`sys._is_gil_enabled() is False`): Python 3.14.7 with Torch 2.15.0+cu132, and Python 3.14.10 with Torch 2.16.0.dev20261029+rocm10.1; 8 threads x 1 call; each worker set its own value, the nested thread it spawned observed the same value, both matmuls stayed finite, and the caller's count was unchanged afterwards. The value is inherited by threads the worker spawns; it is not a cross-thread broadcast. Working threads therefore cannot use it to change another worker's pool, and a worker that is restarted must set it again. |
 | `torch.inference_mode` | SAFE (concurrent), thread-local | inference paths | Thread-local grad mode; no shared state. |
 | `torch.no_grad` | SAFE (concurrent), thread-local | calibration | Same as above. |
 | `torch.is_autocast_enabled("cpu")` + `torch.autocast("cpu", enabled=False)` | SAFE (concurrent CPU) | GGUF Torch CPU FP32 reduction | On Python 3.14.10t / Torch 2.16.0.dev20261102+cu130 with `PYTHON_GIL=0`, the probe ran 8 threads x 4 iterations in three subprocesses. The active flag remained thread-local; the nested disabled context returned the exact FP32 dot `100000`, while surrounding BF16 dots stayed `99840`. |
 | `torch.is_autocast_enabled("cuda")` + `torch.autocast("cuda", enabled=False)` | SAFE (concurrent CUDA) | NF12 wide fallback GEMM, Torch FP8 wide fallback | Probed 2026-11-10 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 2x RTX 4090: 8 threads x 4 iterations, 3 subprocesses, all PASS. The CUDA autocast flag stayed thread-local and the nested disabled context produced the FP32 dot `100000` while the surrounding BF16 dots stayed `99840`. An 8-thread x 3-process stress of `NF12Linear`'s FP16 wide branch returned no hangs and no torn data; the bitwise differences observed were FP32-vs-FP64 rounding ties that also appear single-threaded. |
 | `torch.get_autocast_dtype("cuda")` | SAFE (concurrent CUDA) | NF12 fallback predicate choosing FP16 vs wide | Probed 2026-11-10 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 2x RTX 4090: 8 threads x 4 iterations in 3 subprocesses, three repeated runs, all PASS (probe `torch.get_autocast_dtype + torch.autocast (CUDA)`). The value stayed thread-local: `float16` outside a context, `bfloat16` inside one, unchanged across a nested `enabled=False` context. |
+
+## Linear algebra and BLAS backend selection
+
+| API | Result | Where we use it | Notes / workaround |
+|---|---|---|---|
+| `torch.linalg.cholesky` | SAFE (concurrent), ROCm R9700; UNVERIFIED on CUDA | GPTQ Hessian inverse `gptqmodel/quantization/gptq.py:1866`, `:1867`; QQQ `gptqmodel/quantization/qqq.py:822`, `:824`; VPTQ `gptqmodel/quantization/vptq.py:652`, `:659`; EXL3 `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:438`; TT block-float `gptqmodel/utils/tt_blockfloat_quant.py:511`; GSQ `gptqmodel/quantization/gsq_training.py:1318`; background linalg warmup `gptqmodel/utils/linalg_warmup.py:88` | Issue #4207 reports a probe on 4x Radeon AI PRO R9700, Python 3.14t `PYTHON_GIL=0`: 8 threads x 6 iterations with per-thread streams, 1024x1024 fp32, bitwise equal to a single-thread run, 4/4 processes (2 cold, 2 warm). CUDA was not probed, so CUDA is UNVERIFIED. The GPTQ/QQQ/VPTQ calls run on looper device workers (`gptqmodel/looper/module_looper.py:183-187`, `gptqmodel/looper/weight_only_processor.py:145`); the background warmup is a separate thread and serializes under `_GLOBAL_WARMUP_LOCK` (`gptqmodel/utils/linalg_warmup.py:25`, `:119`). `scripts/gil0_api_probe.py` has no cholesky probe yet; add one and run it on the target build before relying on CUDA. |
+| `torch.linalg.cholesky_ex` | SAFE (concurrent), ROCm R9700; UNVERIFIED on CUDA | GPTQ damp probe `gptqmodel/quantization/gptq.py:1844`; GSQ scalar `gptqmodel/quantization/gsq_scalar.py:79`; EXL3 diagnostics `gptqmodel/utils/exl3_remote.py:135`; ROCm quantize prewarm `gptqmodel/utils/linalg_warmup.py:204` | Same #4207 probe as `torch.linalg.cholesky`. `check_errors=False` makes a non-positive-definite input report through `info` instead of raising. CUDA UNVERIFIED. |
+| `torch.cholesky_inverse` | SAFE (concurrent), ROCm R9700; UNVERIFIED on CUDA | GPTQ `gptqmodel/quantization/gptq.py:1865` (`out=` form), `:1868`; QQQ `gptqmodel/quantization/qqq.py:823`; VPTQ `gptqmodel/quantization/vptq.py:658`; TT block-float `gptqmodel/utils/tt_blockfloat_quant.py:618` | Same #4207 probe. The `out=` form reuses the factor buffer, so do not read the factor afterwards. CUDA UNVERIFIED. |
+| `torch.backends.cuda.preferred_blas_library` (process-global getter/setter) | SAFE (serialized) through `quant_blas_backend`; UNVERIFIED if the setter is called outside it | Guard `gptqmodel/utils/rocm.py:267-277` (getter) and `:309-431` (`quant_blas_backend`); callers `gptqmodel/quantization/gptq.py:971`, `:983`, `:1821`, `gptqmodel/models/base.py:1966`, `:2260` | The setter is process-global, so `quant_blas_backend` holds `_QUANT_BLAS_GUARD_COND` (an `RLock`, `rocm.py:290-291`) and reference-counts `_QUANT_BLAS_GUARD_DEPTH`: same-target scopes share the pin and only the last exit restores it (`rocm.py:374-431`); scopes that need different targets wait instead of flipping the backend under a running GEMM (`rocm.py:354-372`). `tests/test_concurrency_guards.py:57` runs two threads and asserts the first exit does not restore. This is serialization, not a thread-safe setter: never call `torch.backends.cuda.preferred_blas_library(...)` directly from a worker; enter `quant_blas_backend`. The guard is a no-op on non-ROCm hosts or when the API is absent (`rocm.py:340-348`). No GIL=0 probe was run for this row; the status is by construction plus the CPU unit test. |
+
+## Host thread-pool control (threadpoolctl)
+
+| API | Result | Where we use it | Notes / workaround |
+|---|---|---|---|
+| `threadpoolctl.threadpool_limits` | UNVERIFIED under GIL=0; CAUTION (not reference-counted) | `gptqmodel/nn_modules/qlinear/__init__.py:2391` (`pack_original`); `gptqmodel/utils/bitblas.py:115` (`convert_to_bitblas`); `gptqmodel/quantization/rco.py:295`, `:300` (`_budget_dp`, raw `threadpoolctl` import) | `_ThreadpoolLimiter.__init__` snapshots the current limit and applies the new one; `__exit__` restores that snapshot, so overlapping scopes on different threads can restore each other's limit (issue #4207). `gptqmodel.utils.safe.THREADPOOLCTL` wraps the callable in a shared `threading.Lock` (`gptqmodel/utils/safe.py:49-52`), which serializes construction but not the `with` body or `__exit__`; `rco.py:295` imports the raw module. `tests/test_threadpoolctl.py:50` checks the effective count inside eight device-pool workers but does not overlap two live scopes. Worker-thread uses were removed and left commented at `gptqmodel/utils/threadx.py:613` and `gptqmodel/utils/model.py:1029`, `:1122`, `:1265`. This audit found no `threadpool_limits` call in a finaliser (`__del__`/`atexit`/`weakref.finalize`); the issue's finaliser-thread claim is UNVERIFIED. Do not overlap scopes from workers; if a scope is needed, hold an external process-wide lock around the whole `with` block. |
 
 ## Manual findings
 
@@ -445,6 +466,27 @@ rejects a mixed-dtype, meta or stuck-default-dtype result. Do not call
 
 Regression: `tests/test_concurrent_load.py` (two threads, six rounds, both GIL
 modes) and `tests/test_load_state_assertions.py`.
+
+### 12. ggml-cuda entry is serialized process-wide (#4378)
+
+`_GGMLBridge.cuda_backend_lock` handed out one `RLock` per CUDA device, and
+`GGUFCudaKernel.forward` held it across the ggml-cuda graph compute. ggml-cuda
+keeps cuBLAS handles and memory pools in process-global state, so forwards on
+cuda:0 and cuda:1 could be inside it together. On 2x RTX 4090 at `def6e61`
+with `PYTHON_GIL=0`, 4 threads x 200 forwards aborted 5 of 20 runs with
+`CUDA error: an internal operation failed ... cublasGemmEx` on device 1.
+Monkeypatching the lock to a single process-wide `RLock` gave 0 of 20 aborts.
+
+`cuda_backend_lock` now returns one re-entrant process-wide lock; the
+per-device backend-handle map (`_cuda_backends`) is unchanged. Single-thread
+latency is unchanged (~57 µs/call) because a forward already took one lock.
+
+Regression: `tests/test_gguf_cuda_process_lock_4378.py` drives the real lock
+through a mocked bridge, since CPU CI has no ggml CUDA extension. It asserts
+that cuda:0 and cuda:1 share one lock object and that concurrent forwards and
+lock entries on two devices never overlap inside the backend critical section.
+All three tests fail on the pre-fix code (`max_active == 2`) and pass after the
+fix.
 
 ## Adding a probe
 

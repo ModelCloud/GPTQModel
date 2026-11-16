@@ -1,10 +1,11 @@
 # AWQ runtime dtype precision
 
-`AwqTorchLinear` stores `scales` and `bias` at the precision they were loaded
-with. The activation dtype is a *compute* dtype: `forward` converts temporary
-operands for the current call and never writes the converted values back into
-the module buffers. This keeps repeated forwards with different activation
-dtypes, and a re-saved checkpoint, at the original precision.
+`AwqTorchLinear` and `AwqGEMMLinear` store `scales` and `bias` at the precision
+they were loaded with. The activation dtype is a *compute* dtype: `forward`
+converts temporary operands for the current call and never writes the converted
+values back into the module buffers. This keeps repeated forwards with
+different activation dtypes, and a re-saved checkpoint, at the original
+precision.
 
 The model loader restores Torch AWQ scales and bias from the checkpoint after
 Accelerate's model-dtype cast. When packing a dense layer, `pack()` keeps the
@@ -70,6 +71,8 @@ intermediate. The dequantized weight is temporary in both paths.
 | Runtime dtype | `_ensure_runtime_dtype` replaced `scales`/`bias` in place at `torch_awq.py:145-150` | `_scales_for_compute`/`_bias_for_compute` return temporary operands |
 | Dequantize | `dequantize_gemm` read the mutated `self.scales` | Reads temporary compute-dtype scales; `self.scales` is unchanged |
 | Bias | `matmul_fp32_reduce(..., bias=self.bias)` received the already-narrowed bias | Receives the stored bias, so the wide-bias path can select |
+| `AwqGEMMLinear` runtime dtype | `_ensure_runtime_dtype` replaced `scales`/`bias` in place at `gemm_awq.py:262-266` | `_scales_for_compute`/`_bias_for_compute` return temporary operands; `post_init` keeps the loaded dtype |
+| CPU int4pack metadata | `transform_cpu` replaced `self.scales` with the activation dtype | Builds `scales_and_zeros` in a temporary dtype; `self.scales` is unchanged |
 
 ## Failure and ambiguity contract
 
@@ -84,10 +87,31 @@ intermediate. The dequantized weight is temporary in both paths.
 | FP32 source bias passed to `pack` | Stored as FP16 `-inf` | Stored as FP32 `-65535` |
 | FP32 source scale near `1e-40` passed to `pack` | Stored as FP16 `0` | Stored at its original FP32 value |
 
-The native `AwqGEMMLinear` CUDA kernel has its own activation-dtype operand
-contract and is not covered by this page.
+`AwqGEMMLinear` follows the same storage contract. Its native CUDA kernel needs
+half-precision operands matching the activation, so `forward` calls
+`_scales_for_compute`/`_bias_for_compute` and passes those temporaries to
+`AwqGemmFn`; `post_init` no longer narrows the loaded buffers either. One BF16
+forward on an FP16 checkpoint used to rewrite 87.5% of the scales and the bias
+to BF16, after which an FP16 forward drifted from `3.0e-4` to `1.7e-3` relative
+error against an independent FP64 oracle. The checkpoint buffers now stay
+bit-identical, so `state_dict()` still matches the checkpoint after forwards in
+either dtype.
+
+The CPU int4pack transforms (`TorchAtenLinear`, `TorchFusedLinear`, and their
+AWQ variants) build their packed `scales_and_zeros` metadata in a temporary
+compute dtype and keep the registered `scales` buffer at the checkpoint dtype.
+For BF16 activations the fused op widens that metadata to FP32, so a
+non-BF16-representable FP16 scale stays at FP16 precision instead of being
+rounded to BF16 and permanently stored. FP16 activations keep their historical
+FP16 compute dtype.
 
 ## Validation
+
+`tests/kernels/test_awq_runtime_dtype_storage.py` pins the storage contract: an
+FP16 checkpoint stays bit-identical through one BF16 and a later FP16 forward
+for both `AwqGEMMLinear` and `AwqTorchLinear`, and a symmetric BF16 CPU
+int4pack forward keeps its FP16 scales while staying within `2e-3` of the FP64
+oracle.
 
 `tests/kernels/test_awq_torch.py` builds a packed layer whose dequantized
 weight equals the scale, then compares against an independent FP64 Torch

@@ -318,6 +318,9 @@ class SwordfishLinear(GPTQQuantLinear):
             self.bias = self.bias.to(device=device, dtype=self.compute_dtype)
 
         super().post_init()
+        # ``qweight`` is Swordfish-prepacked and ``qzeros`` is a float offset
+        # table (or empty); the checkpoint words cannot be reconstructed.
+        self._native_shuffled = True
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -364,6 +367,8 @@ class SwordfishLinear(GPTQQuantLinear):
             size_n=self.out_features,
             group_zps=group_zeros,
             num_bits=self.bits,
+            dense_m_override=self.kernel.swordfish_dense_m,
+            deterministic=self.kernel.swordfish_deterministic,
         )
 
         if self.bias is not None:
@@ -702,6 +707,7 @@ class AwqSwordfishLinear(AWQuantLinear):
             self.bias = self.bias.to(device=device, dtype=self.compute_dtype)
 
         super().post_init()
+        self._native_shuffled = True
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -734,6 +740,8 @@ class AwqSwordfishLinear(AWQuantLinear):
             size_n=self.out_features,
             group_zps=group_zeros,
             num_bits=self.bits,
+            dense_m_override=self.kernel.swordfish_dense_m,
+            deterministic=self.kernel.swordfish_deterministic,
         )
 
         if self.bias is not None:

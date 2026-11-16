@@ -167,6 +167,22 @@ asymmetric weights where the chosen kernel supports them. `desc_act=True`
 enables GPTQ activation ordering and disables the default group-aware ordering;
 do not explicitly enable both `desc_act` and `act_group_aware`.
 
+Tokenizers that prepend a BOS token make that position an attention sink: its
+activation norm can exceed the rest of the sequence by hundreds of times, so a
+single calibration row dominates the input Hessian and GPTQ stops optimizing
+for text tokens (issue #4393). Set `exclude_attention_sinks=True` to drop the
+first token of every calibration sequence before the Hessian is accumulated:
+
+```python
+qcfg = GPTQConfig(bits=4, group_size=128, exclude_attention_sinks=True)
+```
+
+The default is `False`, which keeps the historical Hessian. Enable it only when
+calibration rows start with a special/BOS token; a flattened routed-expert batch
+has no sequence axis and is never masked. On Llama-3.2-1B this option lowered
+wikitext-2 perplexity from 23.21 to 19.51 at the same 4-bit/group-128 GPTQ
+settings.
+
 ### AWQ W4A16
 
 ```python
@@ -217,6 +233,15 @@ backend = BACKEND.FP8_TORCH
 
 Use `format="float8_e5m2"` for E5M2. This recipe quantizes weights without
 calibration; it does not enable the experimental GPTQ FP8 activation stream.
+
+`TorchFP8Linear` is **weight-only (W8A16)**: the packed FP8 weight tile is
+dequantized for the current matmul and activations keep their FP16/BF16 input
+dtype. The GPU `torch._scaled_mm` path is not used by this recipe. It is
+reachable only through the explicit
+`TorchFP8Linear.set_activation_quant_method("per_token")` opt-in, which makes
+the layer **W8A8** with one activation scale per token. There is no per-tensor
+activation mode, because it would make a row's output depend on its batch
+neighbours. See [FP8 weight-only dispatch](fp8-weight-only-dispatch.md).
 
 #### FP8 source weight validation
 

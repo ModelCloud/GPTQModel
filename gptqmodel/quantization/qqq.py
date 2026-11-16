@@ -22,11 +22,15 @@ from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
-from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
 from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
-from .gptq import _uniform_column_group, get_number_of_rows_and_cols
+from .gptq import (
+    _is_memory_allocation_failure,
+    _uniform_column_group,
+    get_number_of_rows_and_cols,
+)
 from .npu_linalg import npu_inverse_cholesky_factor
 
 
@@ -181,8 +185,13 @@ class Quantizer(nn.Module):
         xmax = torch.maximum(x.max(1)[0], tmp)
 
         if self.sym:
+            # The symmetric zero point below is fixed at ``(maxq + 1) // 2``,
+            # so the range must be zero-centered for every group.  Mirroring
+            # only ``xmin < 0`` left all-positive groups fitted as ``[0, max]``
+            # and saturated the positive half of the grid at 7/15 of the
+            # maximum for INT4.
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            xmin = torch.where(xmin < 0, -xmax, xmin)
+            xmin = -xmax
         both_zero = (xmin == 0) & (xmax == 0)
         xmin = torch.where(both_zero, xmin - 1, xmin)
         xmax = torch.where(both_zero, xmax + 1, xmax)
@@ -810,36 +819,60 @@ class QQQ:
         threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
         fallback_configured = threshold_raw is not None
 
+        def _inverse_hessian(hessian):
+            if hessian.device.type == "npu":
+                return npu_inverse_cholesky_factor(
+                    hessian,
+                    block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
+                )
+            factor = torch.linalg.cholesky(hessian)
+            factor = torch.cholesky_inverse(factor)
+            return torch.linalg.cholesky(factor, upper=True)
+
         try:
-            if H.device.type == "npu":
-                H = npu_inverse_cholesky_factor(H)
-            else:
-                H = torch.linalg.cholesky(H)
-                H = torch.cholesky_inverse(H)
-                H = torch.linalg.cholesky(H, upper=True)
-            Hinv = H
-        except Exception:
-            fallback_requested = should_use_fallback(
-                self.fallback,
-                float(self.nsamples),
-                self.expected_nsamples,
-            )
-            if fallback_requested:
-                extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+            Hinv = _inverse_hessian(H)
+        except Exception as exc:
+            # Reuse GPTQ's allocation classifier and CPU retry: cuSOLVER /
+            # hipSOLVER report a failed workspace allocation as
+            # ``*SOLVER_STATUS_ALLOC_FAILED``, which the old bare ``raise``
+            # turned into an aborted run. A non-positive-definite factorization
+            # is still a numerical failure and keeps the sample-count fallback
+            # below (issue #4400).
+            if H.device.type == "cuda" and _is_memory_allocation_failure(exc):
                 log.warn(
-                    "Quantization: Module `%s` -> Using `%s` fallback quantization (observed %s samples, threshold=%s%s, max_total=%s).",
+                    "Quantization: Module `%s` -> CUDA OOM during Hessian inverse on %s; "
+                    "falling back to CPU. Due to this fallback, the calculation may take "
+                    "much longer than normal.",
                     self.name,
-                    resolved_strategy.value,
-                    self.nsamples,
+                    H.device,
+                )
+                cpu_device = torch.device("cpu")
+                H = H.to(device=cpu_device)
+                W = W.to(device=cpu_device)
+                self.quantizer.find_params(W, weight=True)
+                Hinv = _inverse_hessian(H)
+            else:
+                fallback_requested = should_use_fallback(
                     self.fallback,
-                    extra,
+                    float(self.nsamples),
                     self.expected_nsamples,
                 )
-                if resolved_strategy != FallbackStrategy.RTN:
-                    return self._fallback_quantize(resolved_strategy)
-                Hinv = None
-            else:
-                raise
+                if fallback_requested:
+                    extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+                    log.warn(
+                        "Quantization: Module `%s` -> Using `%s` fallback quantization (observed %s samples, threshold=%s%s, max_total=%s).",
+                        self.name,
+                        resolved_strategy.value,
+                        self.nsamples,
+                        self.fallback,
+                        extra,
+                        self.expected_nsamples,
+                    )
+                    if resolved_strategy != FallbackStrategy.RTN:
+                        return self._fallback_quantize(resolved_strategy)
+                    Hinv = None
+                else:
+                    raise
 
         use_mlx = _should_use_mlx_qqq_quantization(
             W,
@@ -877,7 +910,7 @@ class QQQ:
                 and groupsize != -1
                 and type(self.quantizer) is Quantizer
                 and not self.qcfg.mock_quantization
-                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+                and resolve_kernel_config(self.qcfg).gptq_fused_block_update
             ):
                 from .gptq_cuda import block_update_available, gptq_block_update
 

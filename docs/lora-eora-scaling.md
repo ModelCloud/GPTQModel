@@ -43,8 +43,8 @@ therefore retains its original `lora_A` and `lora_B` values.
 
 ```mermaid
 flowchart TD
-    A["_eora_save"] --> B["extract_adapter_rank_patterns()"]
-    B --> C["rank_pattern"]
+    A["_eora_save"] --> B["extract_adapter_rank_patterns(module_ranks)"]
+    B --> C["rank_pattern: one exact key per trained rank"]
     C --> D["alpha_pattern = dict(rank_pattern)"]
     D --> E["LoraConfig.save_pretrained"]
     E --> F["PEFT resolves alpha_module / rank_module"]
@@ -58,7 +58,10 @@ flowchart TD
 
 EoRA's low-rank factorization already targets the quantized residual at scale
 one. Mirroring each dynamic rank into `alpha_pattern` preserves that target
-when the same directory is loaded by GPT-QModel, PEFT, or vLLM.
+when the same directory is loaded by GPT-QModel, PEFT, or vLLM. `module_ranks`
+comes from each `Lora.rank`, so the exported keys describe the ranks that were
+actually built rather than the text of the `dynamic` rules; see
+[adapter rank-pattern matching](adapter-rank-pattern-matching.md).
 
 ## EoRA covariance accumulation
 

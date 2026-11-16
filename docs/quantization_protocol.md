@@ -702,6 +702,15 @@ Recommended threshold semantics:
 - `true`: enable quantizer default threshold
 - `false` or `null`: disable fallback
 
+Disabling the threshold fallback does not disable the GPTQ-family safety
+guards. A module that received zero calibration rows is always quantized with
+the data-independent RTN grid (`GPTQ._quantize_impl` zero-sample guard), and a
+non-invertible Hessian always uses the shared
+`GPTQ._rtn_fallback_after_hessian_failure` path. Those are structural
+conditions, not threshold decisions: without the guard a zero Hessian makes
+`_neutralize_dead_columns` zero the entire weight. Both paths log a WARN that
+names the module. See [Quantizer calibration flows](quantizer-moe.md#4-hessian-failure-and-zero-sample-fallback-chain).
+
 Initial runtime contract:
 
 - GPTQ: evaluate fallback per matched module

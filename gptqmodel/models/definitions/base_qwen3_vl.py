@@ -17,6 +17,10 @@ from ...utils.model import MODALITY, get_module, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+)
 
 
 QWEN_VL_UTILS_INSTALL_HINT = (
@@ -573,6 +577,7 @@ class BaseQwen3VLGPTQ(DeepStackReplayMixin, BaseQModel):
         if all_pretokenized:
             return super().prepare_dataset(prefix, batch_size=batch_size, **kwargs)
         calibration_dataset = itertools.chain(prefix, remainder)
+        sort, min_length = pop_conversation_calibration_options(kwargs, label="Qwen3-VL")
 
         try:
             # Some adapter contract tests construct an uninitialized wrapper
@@ -623,4 +628,6 @@ class BaseQwen3VLGPTQ(DeepStackReplayMixin, BaseQModel):
                     ) from exc
         finally:
             del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label="Qwen3-VL"
+        )

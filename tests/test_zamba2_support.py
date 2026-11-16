@@ -56,9 +56,12 @@ def test_zamba2_module_tree_expands_mamba_and_hybrid_paths():
     full_flat_modules = {name for block in full_layer_modules for name in block}
 
     assert Zamba2QModel.layer_modules_strict is False
-    assert Zamba2QModel.pre_lm_head_norm_module == "lm_head"
+    assert Zamba2QModel.pre_lm_head_norm_module == "model.final_layernorm"
     assert Zamba2QModel.extract_layers_node() == ["model.layers"]
     assert "input_layernorm:!" in full_flat_modules
+    assert "mamba.conv1d:!" in full_flat_modules
+    assert "mamba_decoder.mamba.conv1d:!" in full_flat_modules
+    assert "shared_transformer:!" in full_flat_modules
     assert "mamba.in_proj" in flat_modules
     assert "mamba.out_proj" in flat_modules
     assert "linear" in flat_modules

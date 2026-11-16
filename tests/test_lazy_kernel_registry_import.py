@@ -36,7 +36,6 @@ _OPTIONAL_MODULES = ("bitsandbytes", "bitblas", "llama_cpp")
 _SCRUBBED_ENV = (
     "DEBUG",
     "GPTQMODEL_DEBUG_KERNEL_MAPS",
-    "GPTQMODEL_DISABLE_BITBLAS",
     "PYTHONPATH",
     "PYTHONSTARTUP",
 )
@@ -74,6 +73,9 @@ def test_import_gptqmodel_skips_optional_backend_modules():
                 name for name in sys.modules
                 if name.startswith("gptqmodel.nn_modules.qlinear.")
                 and name.count(".") == 3
+                # Private modules such as ``_numerics``/``_runtime_cache`` are
+                # core package helpers, not optional kernel backends.
+                and not name.rsplit(".", 1)[-1].startswith("_")
             ]
             assert len(kernel_modules) <= 12, (
                 f"kernel discovery ran eagerly at import time: {{sorted(kernel_modules)}}"
@@ -720,7 +722,6 @@ def test_legacy_map_names_accept_module_attribute_overrides(monkeypatch):
     monkeypatch.setattr(importer, "AUTO_BACKEND_KERNEL_MAPPING", sentinel)
     assert importer.get_auto_backend_kernel_mapping() is sentinel
 
-    monkeypatch.delenv("GPTQMODEL_DISABLE_BITBLAS", raising=False)
     monkeypatch.undo()
     assert importer.get_auto_backend_kernel_mapping() is not sentinel
     assert importer.get_auto_backend_kernel_mapping()

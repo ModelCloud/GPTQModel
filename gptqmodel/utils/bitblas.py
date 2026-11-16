@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
-from contextlib import nullcontext
 
 import torch
 
@@ -14,7 +13,7 @@ from ..quantization import FORMAT, METHOD, QuantizeConfig
 from ..quantization.config import resolve_quant_format
 from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights
-from .safe import THREADPOOLCTL
+from .safe import threadpool_limits
 from .torch import torch_empty_cache
 
 
@@ -56,8 +55,6 @@ def prepare_model_for_bitblas_load(
             dtype=dtype,
             checkpoint=model_save_name,
             device_map=device_map,
-            offload_state_dict=True,
-            offload_buffers=True,
         )
     else:
         # Loading the GPTQ checkpoint to do the conversion.
@@ -70,8 +67,6 @@ def prepare_model_for_bitblas_load(
                 dtype=dtype,
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
             )
         # Convert model to bitblas, repacking weights into BitBLAS format.
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=True, dtype=dtype)
@@ -102,13 +97,6 @@ def convert_to_bitblas(
         message = "Overriding QuantLinear layers to use BitBLAS's QuantLinear..."
 
     bitblas_quantlinear = _select_bitblas_kernel_class(qcfg)
-
-    # TODO: need to benchmark to see multiple threads help with bitblas/tvm compilation and runtime
-    threadpool_limits = (
-        THREADPOOLCTL.threadpool_limits
-        if THREADPOOLCTL is not None
-        else (lambda *args, **kwargs: nullcontext())
-    )
 
     enable_tuning = _should_enable_bitblas_tuning(repack)
 

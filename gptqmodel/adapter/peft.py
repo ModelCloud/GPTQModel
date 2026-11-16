@@ -14,6 +14,28 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+# PEFT config keys that this runtime does not implement and whose values change the
+# adapter math. `from_pretrained` must reject these instead of dropping them: a
+# DoRA/aLoRA/QALoRA/CORDA/trainable-token checkpoint loaded as plain LoRA still runs, but produces
+# silently wrong outputs. Keys that only carry metadata (for example `peft_version`
+# or `inference_mode`) are warned about instead, because rejecting them would make
+# standard PEFT exports unloadable.
+UNSUPPORTED_PEFT_CONFIG_KEYS = {
+    "use_qalora": "QALoRA",
+    "alora_invocation_tokens": "aLoRA",
+    "target_parameters": "`target_parameters`",
+    "corda_config": "CORDA",
+    "use_corda": "CORDA",
+    "trainable_token_indices": "`trainable_token_indices`",
+}
+
+
+def _is_enabled(value) -> bool:
+    """Return whether a PEFT option carries a non-default (enabled) value."""
+
+    return value not in (None, False, "", [], {}, ())
+
+
 @dataclass
 class LoraConfig():
     """
@@ -363,8 +385,22 @@ class LoraConfig():
         if self.layers_pattern and not self.layers_to_transform:
             raise ValueError("Adapter: When `layers_pattern` is specified, `layers_to_transform` must also be specified. ")
 
-        if self.use_dora and self.megatron_config:
+        # DoRA needs `lora_magnitude_vector` tensors and a magnitude-normalized
+        # forward; this runtime applies plain LoRA only. Reject it regardless of
+        # Megatron so the adapter cannot silently run as unnormalized LoRA.
+        if self.use_dora:
             raise ValueError("Adapter: DoRA is not supported")
+
+        if self.bias != "none":
+            raise ValueError(
+                f"Adapter: `bias` = `{self.bias}` is not supported; only `bias = \"none\"` is supported"
+            )
+
+        if self.modules_to_save:
+            raise ValueError("Adapter: `modules_to_save` is not supported")
+
+        if self.layer_replication:
+            raise ValueError("Adapter: `layer_replication` is not supported")
 
         # handle init_lora_weights and loftq_config
         if self.init_lora_weights == "loftq":
@@ -413,8 +449,34 @@ class LoraConfig():
         with open(resolved_path, "r") as file:
             config_dict = json.load(file)
 
-        # Remove any keys that are not part of the LoraConfig dataclass fields or empty
         valid_fields = {field.name for field in fields(cls)}
+        unknown_keys = sorted(k for k in config_dict if k not in valid_fields)
+
+        # Fail closed on PEFT features that would change the adapter math but that
+        # this runtime does not implement. Silently dropping them makes the adapter
+        # load and run with different semantics than the checkpoint describes.
+        unsupported_keys = [
+            key
+            for key in unknown_keys
+            if key in UNSUPPORTED_PEFT_CONFIG_KEYS and _is_enabled(config_dict[key])
+        ]
+        if unsupported_keys:
+            features = sorted({UNSUPPORTED_PEFT_CONFIG_KEYS[key] for key in unsupported_keys})
+            raise ValueError(
+                "Adapter: unsupported PEFT config option(s) "
+                f"{', '.join(f'`{key}`' for key in unsupported_keys)} "
+                f"({', '.join(features)} is not supported)"
+            )
+
+        # Metadata-only keys from newer PEFT versions are not consumed here, but
+        # they must not disappear silently either.
+        if unknown_keys:
+            log.warn.once(
+                "Adapter: ignoring unsupported PEFT config key(s) "
+                f"{', '.join(f'`{key}`' for key in unknown_keys)} in `{resolved_path}`"
+            )
+
+        # Remove any keys that are not part of the LoraConfig dataclass fields or empty
         config_dict = {k: v for k, v in config_dict.items() if k in valid_fields and v not in [None, "", [], {}, ()]}
 
         return cls(**config_dict)

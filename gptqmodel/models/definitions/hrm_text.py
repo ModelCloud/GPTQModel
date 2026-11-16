@@ -18,6 +18,10 @@ class HrmTextQModel(LoopedLayerCaptureMixin, BaseQModel):
 
     modules_with_direct_meta_tensors = ["model"]
 
+    # The H stack runs last, so its final norm owns the hidden state that
+    # `lm_head` consumes.
+    pre_lm_head_norm_module = "model.H_module.final_norm"
+
     _child_module_tree = {
         "input_layernorm": ("input_layernorm:!",),
         # o_proj reads `attn * sigmoid(gate_proj(x))`; the gate makes gate_proj's

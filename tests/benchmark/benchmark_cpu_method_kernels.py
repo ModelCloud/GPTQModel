@@ -45,6 +45,7 @@ from gptqmodel.quantization.awq.utils.packing_utils import (
 )
 from gptqmodel.quantization.config import VPTQConfig
 from gptqmodel.quantization.vptq import VPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.logger import render_table
 from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_reference,
@@ -561,7 +562,7 @@ def main() -> int:
     tokens_list = _parse_ints(args.tokens)
     group_size = 128
     if args.include_bnb_packed:
-        os.environ["GPTQMODEL_BITSANDBYTES_CPU_PACKED"] = "1"
+        configure_kernel(KernelConfig(bitsandbytes_cpu_packed=True))
     torch.set_num_threads(args.threads)
     try:
         torch.set_num_interop_threads(1)

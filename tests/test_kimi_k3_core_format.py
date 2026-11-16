@@ -118,9 +118,15 @@ def test_generic_wrapper_crops_padded_output_and_preserves_input_dtype(monkeypat
     module = ExllamaV3Linear.from_tensors(in_features=128, out_features=576, name='kv_a', tensors=packed())
     assert module._stored_features() == (128,640)
     class Inner:
-        def forward(self, actual, params):
+        def forward(self, actual, params, **kwargs):
             return actual @ weight.T
+
+    class TorchInner:
+        def forward(self, actual):
+            return torch.nn.functional.linear(actual.half(), weight[:576]).to(actual.dtype)
+
     monkeypatch.setattr(module, '_ensure_inner', lambda: Inner())
+    monkeypatch.setattr(module, '_ensure_torch_inner', lambda: TorchInner())
     actual = module(x)
     expected = torch.nn.functional.linear(x.half(),weight[:576]).to(dtype)
     assert actual.dtype == dtype and actual.shape == (3,576)

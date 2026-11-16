@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-
 import torch
 
 
-_DEFAULT_CHOLESKY_BLOCK_SIZE = int(os.getenv("GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE", "64"))
+_DEFAULT_CHOLESKY_BLOCK_SIZE = 64
 
 
 def _raise_linalg_error(message: str) -> None:

@@ -11,10 +11,17 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.trainers import WordLevelTrainer
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 import gptqmodel.utils.model as model_utils
+from gptqmodel import GPTQModel
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+    _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES,
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
     _cpu_int8_dense_should_use,
@@ -26,6 +33,7 @@ from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.model_dequant import dequantize_model, detect_format
 
 
@@ -101,7 +109,7 @@ def _relative_l2(output: torch.Tensor, reference: torch.Tensor) -> float:
 
 def _enable_packed_candidate(monkeypatch, *, accuracy_tol: float = 1.0) -> None:
     bnb_module = sys.modules[BitsAndBytesLinear.__module__]
-    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", "1")
+    configure_kernel(KernelConfig(bitsandbytes_cpu_packed=True))
     monkeypatch.setattr(bnb_module, "_CPU_PACKED_REL_TOL", accuracy_tol)
 
 
@@ -288,7 +296,7 @@ def test_bitsandbytes_int8_dense_dispatch_gate(monkeypatch):
         compute_dtype=torch.bfloat16,
     )
 
-    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE", "0")
+    configure_kernel(KernelConfig(bitsandbytes_cpu_int8_dense=False))
     assert not _cpu_int8_dense_should_use(
         rows=64,
         in_features=512,
@@ -562,7 +570,7 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     assert not kernel._cpu_packing_active
 
     _, kernel = _build_cpu_packed_kernel()
-    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", "0")
+    configure_kernel(KernelConfig(bitsandbytes_cpu_packed=False))
     with torch.inference_mode():
         kernel(x)
     assert not kernel._cpu_packing_active
@@ -573,7 +581,7 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     reason="bitsandbytes CPU packed kernel unavailable",
 )
 def test_bitsandbytes_cpu_packed_defaults_to_opt_in(monkeypatch):
-    monkeypatch.delenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", raising=False)
+    configure_kernel(KernelConfig())
     linear, kernel = _build_cpu_packed_kernel()
     x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
 
@@ -698,3 +706,142 @@ def test_detect_and_dequantize_bitsandbytes_checkpoint(tmp_path, bits: int):
         rtol=1e-5,
         atol=1e-5,
     )
+
+
+def _save_tiny_tokenizer(directory) -> None:
+    tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.train_from_iterator(
+        ["the quick brown fox", "a tiny llama checkpoint"],
+        WordLevelTrainer(special_tokens=["[PAD]", "[UNK]", "[BOS]", "[EOS]"]),
+    )
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+    ).save_pretrained(directory)
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+def test_gptqmodel_load_reloads_bitsandbytes_4bit_checkpoint(tmp_path):
+    """A GPTQModel-saved BnB checkpoint must reload through ``GPTQModel.load``.
+
+    The state buffers are checkpoint data, not activations: ``weight_quant_state``
+    is variable-length JSON bytes and the float state tables must stay FP32.
+    Accelerate sizes/casts them during the real load path, which is why the
+    module-level ``load_state_dict`` round trip never exercised this.
+    """
+
+    torch.manual_seed(0)
+    vocab_size = 32
+    hidden_size = 32
+    intermediate_size = 64
+    block_size = 64
+    config = LlamaConfig(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    source = LlamaForCausalLM(config).eval().half()
+
+    quantized_names = []
+    for name, linear in list(source.named_modules()):
+        if not isinstance(linear, nn.Linear) or name == "lm_head":
+            continue
+        quant = BitsAndBytesLinear(
+            bits=4,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=linear.bias is not None,
+            register_buffers=True,
+            format="nf4",
+            block_size=block_size,
+            compress_statistics=True,
+            dtype=torch.float16,
+        )
+        quant.pack_original(linear=linear, scales=None, zeros=None)
+        quant.post_init()
+        source.set_submodule(name, quant)
+        quantized_names.append(name)
+
+    state = source.state_dict()
+    model_dir = tmp_path / "bnb4"
+    model_dir.mkdir()
+    save_file(
+        {name: value.contiguous() for name, value in state.items()},
+        str(model_dir / "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+
+    # The module's template-sized slot must be smaller than the stored JSON,
+    # otherwise the shape-mismatch regression is not exercised.
+    probe_name = quantized_names[0]
+    probe = source.get_submodule(probe_name)
+    template = BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=probe.in_features,
+        out_features=probe.out_features,
+        bias=probe.bias is not None,
+        register_buffers=True,
+        format="nf4",
+        block_size=block_size,
+        compress_statistics=True,
+        dtype=torch.float16,
+    )
+    assert tuple(state[f"{probe_name}.weight_quant_state"].shape) != tuple(
+        template.state_dict()["weight_quant_state"].shape
+    )
+
+    quant_config = BitsAndBytesConfig(
+        bits=4,
+        format="nf4",
+        block_size=block_size,
+        compress_statistics=True,
+    )
+    quant_config.save_pretrained(str(model_dir))
+    config.architectures = ["LlamaForCausalLM"]
+    config.quantization_config = quant_config.to_dict()
+    config.save_pretrained(str(model_dir))
+    _save_tiny_tokenizer(str(model_dir))
+
+    loaded = GPTQModel.load(
+        str(model_dir),
+        backend=BACKEND.BITSANDBYTES,
+        device="cpu",
+        dtype=torch.float16,
+        local_files_only=True,
+    )
+
+    for name in quantized_names:
+        module = loaded.model.get_submodule(name)
+        assert isinstance(module, BitsAndBytesLinear)
+        for buffer_name in _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES:
+            expected = state[f"{name}.{buffer_name}"]
+            actual = getattr(module, buffer_name)
+            assert tuple(actual.shape) == tuple(expected.shape), (
+                f"{name}.{buffer_name} shape changed across GPTQModel.load"
+            )
+            assert actual.dtype == expected.dtype, (
+                f"{name}.{buffer_name} dtype changed across GPTQModel.load"
+            )
+
+    # First decode step (M=1) is the path that rejects a narrowed absmax.
+    with torch.inference_mode():
+        logits = loaded.model(torch.tensor([[1]], dtype=torch.long)).logits
+    assert logits.shape == (1, 1, vocab_size)
+    assert torch.isfinite(logits).all()

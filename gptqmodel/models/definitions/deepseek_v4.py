@@ -3190,11 +3190,11 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             raise RuntimeError("MTP activation store was not configured")
         from ...looper.input_cache import DiskBackedLayerOutputWriter
         from ...utils.exl3_capture_frontier import (
-            CAPTURE_FRONTIER_ENV,
             EXL3CaptureFrontierStore,
         )
+        from ...utils.kernel import get_kernel_config
 
-        capture_root = os.getenv(CAPTURE_FRONTIER_ENV)
+        capture_root = get_kernel_config().exl3_capture_frontier
 
         def discard_superseded_capture(_outputs) -> None:
             if capture_root is None:

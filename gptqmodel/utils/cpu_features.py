@@ -11,10 +11,7 @@ from pathlib import Path
 
 import torch
 
-from .env import env_flag
-
-
-_CPU_BF16X3_ENV = "GPTQMODEL_CPU_BF16X3"
+from .kernel import get_kernel_config
 
 
 _REQUIRED_AVX512_BF16_FLAGS = frozenset(
@@ -96,11 +93,16 @@ def has_cpu_bf16x3_precision() -> bool:
     return True
 
 
-@lru_cache(maxsize=1)
 def has_cpu_bf16x3_matmul() -> bool:
-    """Return whether this process may run FP32 matmul as BF16x3."""
+    """Return whether this process may run FP32 matmul as BF16x3.
 
-    if not env_flag(_CPU_BF16X3_ENV, default=True):
+    The policy is deliberately *not* cached: callers may install a different
+    ``KernelConfig`` between runs and expect the next matmul to observe it.
+    Only the host capability probes (``has_avx512_bf16`` and
+    ``has_cpu_bf16x3_precision``) are process constants and stay cached.
+    """
+
+    if not get_kernel_config().cpu_bf16x3_matmul:
         return False
     if not has_avx512_bf16():
         return False

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import collections
+import copy
 import functools
 import hashlib
 import json
@@ -37,7 +38,7 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from ..adapter.adapter import Adapter
+from ..adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (
     CPU,
@@ -64,6 +65,7 @@ from ..quantization.config import (
     dynamic_get,
     dynamic_matching_pattern,
     quant_bits_width,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.module_config import resolve_module_constructor_config
@@ -75,12 +77,13 @@ from .device import get_device
 from .hf import get_hf_config_dtype, resolve_checkpoint_subfolder
 from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
+from .kernel import resolve_kernel_config, snapshot_kernel_config
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .tensor import tensor_buffer
-from .torch import HAS_CUDA, as_torch_device, torch_empty_cache
+from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
 
 
 log = setup_logger()
@@ -618,6 +621,7 @@ def make_quant(
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
     init_kwargs = qcfg.quant_linear_init_kwargs()
+    init_kwargs["kernel"] = snapshot_kernel_config(qcfg)
 
     export_quant_method = qcfg.export_quant_method()
     backend = normalize_backend(backend, quant_method=export_quant_method)
@@ -698,6 +702,19 @@ def create_quant_module(
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
 
 ):
+    # An adapter only covers the modules named by its PEFT target list and
+    # actually present in its tensor file. Passing it to every quantized module
+    # made a standard partial LoRA (q_proj/v_proj only) assert on the modules it
+    # does not cover (issue #4210).
+    if adapter is not None:
+        if not adapter.targets_module(name):
+            adapter = None
+        elif not adapter.has_weights(name):
+            log.warn(
+                f"Adapter: no LoRA tensors for targeted module `{name}`; skipping."
+            )
+            adapter = None
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -1383,11 +1400,15 @@ def pack_module(
             else:
                 module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
+        target_format = (
+            resolve_quant_format(quantize_config.format, quantize_config.method)
+            if quantize_config is not None
+            else None
+        )
         if (
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
-            and resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ
-            and getattr(module_cls, "REQUIRES_FORMAT_V2", False)
+            and target_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
         ):
             with log_time_block(
                 "mark_checkpoint_qzero_format",
@@ -1401,7 +1422,8 @@ def pack_module(
                 # step low (issue #4063). ``checkpoint_layout_qzeros`` and the
                 # writer emit the converted copy from this marker.
                 module.qzero_format(format=2)
-                module._checkpoint_format_on_disk = FORMAT.GPTQ
+                if getattr(module_cls, "REQUIRES_FORMAT_V2", False):
+                    module._checkpoint_format_on_disk = target_format
 
         # TODO: why move it back to gpu?
         # start = time.time()
@@ -1470,14 +1492,12 @@ def pack_model(
     else:
         default_max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
-    env_max_packers = os.getenv("GPTQMODEL_MAX_PACKERS")
-    if env_max_packers is not None:
-        try:
-            max_packers = max(1, int(env_max_packers))
-        except ValueError:
-            max_packers = default_max_packers
-    else:
-        max_packers = default_max_packers
+    configured_max_packers = resolve_kernel_config(qcfg).max_packers
+    max_packers = (
+        configured_max_packers
+        if configured_max_packers is not None
+        else default_max_packers
+    )
 
     with ctx(ThreadPoolExecutor(max_workers=max_packers), log.pb(names).manual()) as (executor, pb):
         def wrapper(name):
@@ -1737,6 +1757,64 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     storage.update(updated)
 
 
+def _dense_adapter_forward_hook(adapter: Adapter):
+    """Return a forward hook that adds the adapter update to a dense module."""
+
+    def hook(module, args, output):
+        if not args or not isinstance(output, torch.Tensor):
+            return output
+        return adapter.apply(x=args[0], out=output)
+
+    return hook
+
+
+def apply_dense_module_adapters(model, adapter: Optional[Adapter]) -> int:
+    """Attach a LoRA adapter to targeted modules that stayed dense.
+
+    Quantized modules carry their adapter inside the kernel, but a module the
+    checkpoint does not quantize (an unquantized ``lm_head``, a dynamic
+    exclusion) stayed a plain ``nn.Linear`` and its adapter weights were
+    silently dropped (issue #4210). Attach one forward hook per targeted dense
+    module so the adapter contribution is added to the base output.
+
+    Returns the number of modules that received an adapter.
+    """
+
+    if adapter is None:
+        return 0
+    if not getattr(adapter, "path", None) or adapter.path in LORA_MERGED_WEIGHT_PATHS:
+        # Merged/EoRA adapters have no separate weights to apply here.
+        return 0
+
+    applied = 0
+    for name, module in model.named_modules():
+        if isinstance(module, BaseQuantLinear):
+            continue
+        if not isinstance(module, (nn.Linear, transformers.Conv1D)):
+            continue
+        if getattr(module, "_gptqmodel_dense_adapter", None) is not None:
+            continue
+        if not adapter.targets_module(name):
+            continue
+        if not adapter.has_weights(name):
+            log.warn(
+                f"Adapter: no LoRA tensors for targeted dense module `{name}`; skipping."
+            )
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.device.type == "meta":
+            continue
+        dense_adapter = copy.deepcopy(adapter)
+        dense_adapter.post_init(weight_key=name, device=weight.device)
+        module._gptqmodel_dense_adapter = dense_adapter
+        module.register_forward_hook(_dense_adapter_forward_hook(dense_adapter))
+        applied += 1
+
+    if applied:
+        log.info(f"Adapter: applied to `{applied}` dense module(s).")
+    return applied
+
+
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None,
                         awq_batch_size: Optional[int] = None):
@@ -1815,8 +1893,11 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             attention_mode=quantize_config.activation_attention_mode,
             attention_recipe=quantize_config.activation_attention_recipe,
             mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
-            fused_norms=bool(quantize_config.rotation),
+            fused_norms=bool(resolve_model_rotation(quantize_config)),
         )
+
+    if quantize_config is not None:
+        apply_dense_module_adapters(model, getattr(quantize_config, "adapter", None))
 
     torch_empty_cache()
 
@@ -1927,7 +2008,7 @@ def auto_dtype(config: PretrainedConfig,
     # Update: latest kernel accuracies have shown, with multiple ranges of shapes
     # There are no accuracy issues with bf16 vs fp16. The Marlin reduce-accumulation
     # path can use fp16, but it is disabled by default via
-    # GPTQMODEL_MARLIN_USE_FP32=True.
+    # KernelConfig.marlin_fp32=True.
     # # for inference, always use FP16 for max accuracy
     # # check test_kernel_outputs for validation between fp16 and b16 in terms of kernel accuracy
     # if quant_inference:
@@ -2987,17 +3068,75 @@ def _checkpoint_tensor_shapes(checkpoint) -> Dict[str, Tuple[int, ...]]:
     return shapes
 
 
+def _checkpoint_tensor_dtypes(checkpoint) -> Dict[str, torch.dtype]:
+    """Read each safetensors tensor's stored dtype without loading its data.
+
+    A re-save must publish the dtype the checkpoint actually stores, not the
+    dtype the export shell happened to allocate. Header reads are cheap and do
+    not materialize any payload.
+    """
+
+    if checkpoint is None:
+        return {}
+    path = os.fspath(checkpoint)
+    if isinstance(path, bytes):
+        path = path.decode()
+    files: List[str] = []
+    if os.path.isdir(path):
+        files = [
+            os.path.join(path, name)
+            for name in os.listdir(path)
+            if name.endswith(".safetensors")
+        ]
+    elif path.endswith(".index.json"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map", {})
+        except (OSError, ValueError):
+            return {}
+        base = os.path.dirname(path)
+        files = sorted({os.path.join(base, name) for name in weight_map.values()})
+    elif path.endswith(".safetensors"):
+        files = [path]
+
+    safe_name_to_dtype = {
+        safe_name: dtype for dtype, (safe_name, _size) in _DTYPE_SAFE_MAP.items()
+    }
+    dtypes: Dict[str, torch.dtype] = {}
+    for file in files:
+        try:
+            with safe_open(file, framework="pt", device="cpu") as handle:
+                for key in handle.keys():
+                    dtype = safe_name_to_dtype.get(handle.get_slice(key).get_dtype())
+                    if dtype is not None:
+                        dtypes[key] = dtype
+        except Exception:
+            # A malformed or non-safetensors shard is accelerate's problem to
+            # report; dtype discovery is best effort.
+            continue
+    return dtypes
+
+
 def _prepare_variable_quant_buffers(model, checkpoint) -> None:
     """Resize data-dependent quant buffers to the checkpoint's stored shapes."""
 
     shapes = _checkpoint_tensor_shapes(checkpoint)
     if not shapes:
         return
-    # Only the escape table is data-dependent. `nf12_packed`,
-    # `nf12_exp_base`, and `bias` shapes follow from the module geometry.
-    suffixes = (".nf12_escapes", ".nf12_exp_base")
+    # Only data-dependent buffers are listed here. `nf12_packed`, `nf12_exp_base`,
+    # and `bias` shapes follow from the module geometry. BitsAndBytes stores its
+    # 4-bit QuantState as JSON bytes whose length depends on the serialized
+    # `nested_offset` float, so the module's template-sized buffer can be a few
+    # bytes short. Accelerate assigns these tensors directly (it does not call
+    # `_load_from_state_dict`), so they must be sized before the load.
+    nf12_suffixes = (".nf12_escapes", ".nf12_exp_base")
     for key, shape in shapes.items():
-        suffix = next((item for item in suffixes if key.endswith(item)), None)
+        if key.endswith(".weight_quant_state"):
+            suffix = ".weight_quant_state"
+            expected_quant_type = "bitsandbytes"
+        else:
+            suffix = next((item for item in nf12_suffixes if key.endswith(item)), None)
+            expected_quant_type = "nf12"
         if suffix is None:
             continue
         module_name = key[: -len(suffix)]
@@ -3005,7 +3144,7 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
             module = model.get_submodule(module_name)
         except AttributeError:
             continue
-        if getattr(module, "QUANT_TYPE", None) != "nf12":
+        if getattr(module, "QUANT_TYPE", None) != expected_quant_type:
             continue
         buffer_name = suffix[1:]
         current = getattr(module, buffer_name, None)
@@ -3102,6 +3241,9 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
     packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
+    restore_checkpoint_buffer_dtypes = bool(
+        kwargs.pop("restore_checkpoint_buffer_dtypes", False)
+    )
     converted_checkpoint = None
     if callable(key_converter) and checkpoint is not None:
         converted_checkpoint = _remap_safetensors_checkpoint_keys(checkpoint, key_converter)
@@ -3118,15 +3260,70 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
         # Accelerate casts floating buffers to the requested model dtype even
         # when the quantized module's forward needs the checkpoint precision.
-        # Restore only Torch AWQ's stored operands; its forward makes temporary
-        # activation-dtype copies without rewriting these buffers.
+        # The scale buffer is part of the checkpoint contract, not an activation
+        # operand: narrowing an FP16 scale to BF16 changes the dequantized
+        # weight and makes a later `save_pretrained()` republish the narrowed
+        # value. Restore every quantized module's scales from the checkpoint.
+        # Torch AWQ additionally keeps its bias at the checkpoint dtype because
+        # its forward makes temporary activation-dtype copies.
         for name, module in model.named_modules():
-            if getattr(module, "QUANT_TYPE", None) != "awq_torch":
-                continue
             prefix = f"{name}." if name else ""
-            for buffer_name in ("scales", "bias"):
-                if isinstance(module._buffers.get(buffer_name), torch.Tensor):
-                    restore_dtypes[f"{prefix}{buffer_name}"] = None
+            if (
+                isinstance(module, BaseQuantLinear)
+                and isinstance(module._buffers.get("scales"), torch.Tensor)
+                and "scales" not in module._non_persistent_buffers_set
+            ):
+                restore_dtypes[f"{prefix}scales"] = None
+            if getattr(module, "QUANT_TYPE", None) == "awq_torch":
+                for buffer_name in ("scales", "bias"):
+                    if isinstance(module._buffers.get(buffer_name), torch.Tensor):
+                        restore_dtypes[f"{prefix}{buffer_name}"] = None
+        # BitsAndBytes keeps its 4-bit quant metadata in state buffers whose
+        # dtype is part of the kernel contract: the floating state tables must
+        # stay FP32 and the packed map/QuantState bytes must stay byte-exact.
+        # Accelerate casts floating buffers to the model dtype for every load
+        # dtype (fp16 included), which makes the first M=1 `gemm_4bit` call
+        # reject a non-FP32 absmax. Restore them from the checkpoint instead.
+        if any(
+            getattr(module, "QUANT_TYPE", None) == "bitsandbytes"
+            and getattr(module, "is_4bit", False)
+            for module in model.modules()
+        ):
+            from ..nn_modules.qlinear.bitsandbytes import (
+                _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES,
+            )
+
+            for name, module in model.named_modules():
+                if getattr(module, "QUANT_TYPE", None) != "bitsandbytes":
+                    continue
+                if not getattr(module, "is_4bit", False):
+                    continue
+                prefix = f"{name}." if name else ""
+                for buffer_name in _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES:
+                    if isinstance(module._buffers.get(buffer_name), torch.Tensor):
+                        restore_dtypes[f"{prefix}{buffer_name}"] = None
+        if restore_checkpoint_buffer_dtypes:
+            # The export shell allocates its buffers in the model dtype. A
+            # legacy checkpoint may store some of them (biases, EXL3 sign
+            # vectors, ...) at a different dtype, and accelerate's dtype=None
+            # copy narrows them to the shell slot. Restore every such buffer
+            # from the checkpoint at its stored dtype so a re-save publishes
+            # exactly what it read.
+            checkpoint_dtypes = _checkpoint_tensor_dtypes(
+                kwargs.get("checkpoint", checkpoint)
+            )
+            for name, checkpoint_dtype in checkpoint_dtypes.items():
+                if name in restore_dtypes:
+                    continue
+                module_name, _, buffer_name = name.rpartition(".")
+                module = model.get_submodule(module_name) if module_name else model
+                current = module._buffers.get(buffer_name)
+                if (
+                    isinstance(current, torch.Tensor)
+                    and current.is_floating_point()
+                    and current.dtype != checkpoint_dtype
+                ):
+                    restore_dtypes[name] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
                 model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
@@ -3135,6 +3332,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)
+        # Accelerate stages offloaded checkpoint tensors through pinned host
+        # memory. The staging copies are dead by now, but PyTorch keeps their
+        # blocks cached for the life of the process.
+        release_pinned_host_cache()
 
 
 # 32MB read/write i/o buffer
@@ -3470,11 +3671,13 @@ def streaming_state_dict_to_shards(
 
         path = os.path.join(save_dir, filename)
         if _existing_shard_matches(path, shard_entries, metadata):
-            size = os.path.getsize(path)
             log.info(f"Reusing authenticated safetensors shard: {filename}")
         else:
-            size = _write_shard_file(path, shard_entries, metadata)
-        total_size += size
+            _write_shard_file(path, shard_entries, metadata)
+        # Hugging Face's index describes the tensor payload, not the on-disk
+        # file size. The latter includes the safetensors header and padding and
+        # made `metadata.total_size` disagree with every other writer.
+        total_size += sum(entry.num_bytes for entry in shard_entries)
         filenames.append(filename)
         for entry in shard_entries:
             tensor_to_filename[entry.name] = filename

@@ -178,12 +178,12 @@ def materialize_fused_runtime_state(module: nn.Module, state_dict, prefix: str =
     checkpoint operands, including ``g_idx``, can be inference tensors.
     ``load_state_dict(assign=False)`` copies into them outside
     inference mode, which Torch rejects. Cloning them into normal tensors keeps
-    the runtime layout while allowing that copy; ``assign=True`` does not need
-    it because the load replaces the tensors outright.
+    the current layout while allowing that copy; ``assign=True`` does not need
+    it because the load replaces the tensors outright. ``g_idx`` is shared by
+    the checkpoint and runtime layouts and is never part of the snapshot, so
+    this applies to checkpoint loads as well.
     """
 
-    if not getattr(module, "_fused_train_state", None):
-        return False
     materialized = False
     with torch.inference_mode(False):
         for name in (*module._parameters, *module._buffers):

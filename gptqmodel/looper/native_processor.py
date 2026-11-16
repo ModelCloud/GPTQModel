@@ -160,9 +160,14 @@ class NativeProcessor(LoopProcessor):
             if self._native_per_sample:
                 keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
                 entries = self._split_batch_samples(inp, keep_mask, target_device)
+                # Tag each per-sample entry with the calibration batch it came
+                # from. GPTAQ/FOEM replay batches can complete out of order
+                # across devices, so the consumer must pair by this key rather
+                # than by list position.
+                batch_index = self.current_batch_index()
+                self.native_inp_caches[name] += [(batch_index, entry) for entry in entries]
             else:
-                entries = [inp.to(device=target_device)]
-            self.native_inp_caches[name] += entries
+                self.native_inp_caches[name] += [inp.to(device=target_device)]
             del inp, out
 
         return tmp

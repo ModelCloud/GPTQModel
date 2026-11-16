@@ -142,6 +142,170 @@ The failure path is an empty filtered list, which `_filter_forward_devices`
 already resolves by keeping the unfiltered pool; `run` then falls back to
 `cur_layer_device`.
 
+## Data-parallel forward copies
+
+With `auto_forward_data_parallel=True` (the default), `ForwardExecutor.run_parallel`
+fans each subset forward across every visible device of the layer's family, and
+the same fan-out runs again for the post-quant replay. Every one of those rounds
+materializes a forwardable module per device before the batches are dispatched.
+For a decoder layer that is one round per quantization subset (four for Qwen3)
+plus one per replay.
+
+`clone_module_for_devices()` used to deep-copy the layer for **every** target,
+including the device it was already staged on. The base device's replica was a
+full copy of a module already resident there, so a two-GPU round paid two
+device-local layer deep copies plus one cross-device transfer, and a second
+layer's worth of VRAM for a replica the forward never used. Since #4183 the
+module itself is the replica for the device it already lives on; only the other
+devices get a detached deep copy. `forward_batch_worker()` also skips its
+per-batch `rehome_module_to_device()` scan when the replica is fully resident.
+That scan took a process-wide lock and walked every parameter and buffer on
+every batch, so it also serialized the device workers.
+
+Measured on 2x RTX 4090 (PCIe, no NVLink), Qwen3-0.6B, 64 wikitext-2
+calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`, CUDA 13, Python 3.14t
+with the GIL disabled. One run makes 139 clone rounds:
+
+| Per run | Before | After |
+| --- | --- | --- |
+| layer copies | 278 (2 per round) | 139 (1 per round) |
+| bytes copied | 7.64 GB | 3.82 GB |
+| copies on the module's own device | 139 | 0 |
+| deep-copy time | 0.48 s | 0.25 s |
+
+Median of three runs each (wall clock / pre-quant forward / replay):
+
+| Config | Before | After |
+| --- | --- | --- |
+| 1 GPU | 11.30 s / 4.65 s / 0.94 s | 11.45 s / 4.70 s / 0.96 s |
+| 2 GPU, `auto_forward_data_parallel=True` | 11.65 s / 4.43 s / 0.94 s | 11.16 s / 3.93 s / 0.82 s |
+| 2 GPU, `auto_forward_data_parallel=False` | 11.93 s / 4.69 s / 0.96 s | 11.95 s / 4.84 s / 0.99 s |
+
+The 1-GPU and serial rows are the untouched paths, so their before/after
+difference is run-to-run noise. Before the change the data-parallel default was
+0.35 s slower than 1 GPU; after it is 0.14 s faster and the fastest
+configuration measured.
+
+With the GIL enabled (median of two runs) the data-parallel default measured
+13.49 s / 5.51 s / 1.14 s before and 13.04 s / 5.22 s / 1.11 s after, against
+12.42 s / 4.73 s / 0.96 s and 12.21 s / 4.69 s / 0.97 s for the serial
+two-GPU forward. Device workers are Python threads, so with the GIL enabled the
+forward gains no parallelism and only pays the copies. On a GIL-enabled build
+prefer `auto_forward_data_parallel=False`.
+
+The copy is charged per subset round, not per layer, and it scales with the
+layer size while the compute it saves scales with the calibration tokens in the
+round. A model-size threshold is therefore not the right gate: a larger model
+has both a larger layer and proportionally more compute per token. The lever is
+the number of tokens per round. On the hardware above, a 24 MB layer copy costs
+about 2.5 ms per round after this change, and the second device's share of the
+round's compute is smaller than that for short calibration samples. If a run
+spends most of its time in data-parallel forward copies, set
+`auto_forward_data_parallel=False`; the serial forward then makes no layer
+copies at all.
+
+Reusing one resident replica across the subsets of a layer is not possible
+without reworking module replacement. GPTQ replaces each quantized projection
+with a new module instance, so the layer's module topology changes at every
+subset boundary (measured: 0 of 138 consecutive same-layer clone rounds kept
+the topology). A cached replica would have to rebuild its module tree, tensors
+and forward hooks for every subset, which is the deep copy it was meant to
+avoid.
+
+Data-parallel forward is also not bit-identical to the serial path: on the run
+above the two-GPU data-parallel checkpoint was deterministic run to run but
+differed from the 1-GPU checkpoint in 392 of 898 tensors, while the two-GPU
+serial forward was bit-identical to 1 GPU (0 of 898). The difference therefore
+comes from the data-parallel forward (per-device batch assignment and Hessian
+accumulation), not from using two GPUs. Use
+`auto_forward_data_parallel=False` when a checkpoint must be bit-identical to
+the single-GPU result.
+
+## GPTAQ/FOEM per-device Hessian reduction
+
+`GPTAQ` and `FOEM` (with `alpha > 0`) accumulate a Hessian `H` and a native
+delta matrix `dXXT` during the pre-quant forward. `run_parallel` fans the same
+module's batches across every forward device, so the accumulators see batches
+from more than one device. They are therefore kept per input device: each
+partial uses that device's own request count (GPTAQ) or token count (FOEM), and
+`quantize()` reduces the partials in device order with weight
+`count_device / count_total`.
+
+The reduction is exact, not an approximation. For `R` requests and tokens `x`:
+
+```text
+H_device = (2 / count_device) * sum over that device's batches of X X^T
+H        = sum over devices of (count_device / count_total) * H_device
+         = (2 / count_total) * sum over every batch of X X^T
+```
+
+`dXXT` uses the same weight, so the reduced matrices equal the single-device
+recurrence over all batches in capture order, independent of the order in which
+the device workers finish. The split was introduced in PR #4284 (issue #4237);
+plain GPTQ reduces its own per-device partials in the same key order.
+
+Native calibration inputs are captured per sample and tagged with the
+calibration batch they came from. The quantizer consumes the entry whose key
+matches the batch being replayed, so a data-parallel completion order cannot
+pair a sample with another batch's native activation. The tag is the pairing
+key because a routed expert or a different batch length makes position-based
+pairing ambiguous.
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run_parallel<br/>one batch_idx per worker"] --> B["NativeProcessor.pre_process_fwd_hook<br/>batch_index = current_batch_index()"]
+    B --> C["native_inp_caches[name] += (batch_index, sample)"]
+    C --> D["module.state[NATIVE_INPUTS_STATE_KEY]"]
+    D --> E["_take_native_input(batch_index)<br/>scan by key, not pop 0"]
+    F["GPTQProcessor hook<br/>add_batch(inp, batch_index)"] --> G["process_batch(inp, batch_index)"]
+    E --> G
+    G --> H["_accumulate_device_batch<br/>one partial per inp.device"]
+    H --> I["quantize() -> _finalize_gptaq_hessian<br/>or _finalize_foem_hessian"]
+    I --> J["sorted(partials, key=_device_reduction_key)<br/>H = sum weight * H_device"]
+    J --> K["self.H / self.dXXT on module.target_device"]
+    E -. "no entry for batch_index" .-> X["RuntimeError: no native<br/>calibration input for batch N"]
+    style X fill:#f8d7da,stroke:#c82333
+```
+
+### Before / after
+
+The pre-fix flow, with `file:line` evidence from the `main` branch at the time
+of the fix:
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Accumulator allocation | `self.H`/`self.dXXT` allocated once on the first batch's device (`gptqmodel/quantization/gptaq.py:131`, `gptqmodel/quantization/foem.py:213`) | One partial per input device, `GPTAQ._accumulate_device_batch` / `FOEM._accumulate_device_batch` |
+| Second device | `self.H += inp.matmul(inp.t())` raised a device mismatch (`gptaq.py:148`, `foem.py:226`) | Batches on the second device accumulate their own partial; the live buffers are demoted into the partial map on the first device switch |
+| Normalization | Global request/token count (`gptaq.py:140`, `foem.py:219`) | Each device's own count, then a `count_device / count_total` weighted reduction |
+| Reduction order | None: one live accumulator | `sorted(partials, key=_device_reduction_key)`, the same key plain GPTQ uses (`gptq.py:190`, `gptq.py:1288`) |
+| Native pairing | `self.native_inps.pop(0)` by arrival order (`gptaq.py:99`, `foem.py:178`) | `(batch_index, tensor)` entries, consumed by key |
+| Missing native entry | `IndexError: pop from empty list`, or a silently mismatched pair | `RuntimeError` naming the module and the batch |
+
+### Failure and ambiguity contract
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Batch arrives on a second device | `RuntimeError: Expected all tensors to be on the same device` | Accumulated in that device's partial |
+| Batches complete out of capture order | Native input from the wrong batch: shape error, or a silently corrupted `dXXT` when shapes match | Keyed lookup pairs the right sample |
+| Batch index has no captured entry | Wrong sample or `IndexError` | Fail closed with the module and batch in the message |
+| Single device | One live accumulator | Unchanged: the first device keeps the live `self.H`/`self.dXXT`, and `_finalize_*` is a no-op when no partial was split off |
+| Routed expert | Native capture skipped (`dXXT = 0`) | Unchanged |
+
+### Measured
+
+On 2x RTX 4090 (PCIe, no NVLink, CUDA 13), Qwen2.5-0.5B-Instruct, 16
+variable-length calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`:
+
+| Run | Before | After |
+| --- | --- | --- |
+| GPTAQ, 2 GPUs | `RuntimeError` at `gptaq.py:148`, two devices `cuda:0` and `cuda:1` | `quantize()` completes, `qweight` shape `[112, 896]` |
+| FOEM, 2 GPUs | `RuntimeError` at `foem.py:226`, two devices `cuda:0` and `cuda:1` | `quantize()` completes, `qweight` shape `[112, 896]` |
+| `test_tiny_qwen2_moe_gptaq_and_foem_quantize` | `RuntimeError` at `gptaq.py:148` with the loader's `cuda:0`/`cuda:1` layer split | `1 passed` in 20.7 s |
+
+`tests/test_gptaq_foem_multigpu.py` pins the float64 oracle for both the CPU
+out-of-order case and the two-device case; the two-device tests skip when fewer
+than two CUDA devices are visible.
+
 ## GPU peer access (P2P)
 
 PyTorch already enables peer access lazily inside its own copy path

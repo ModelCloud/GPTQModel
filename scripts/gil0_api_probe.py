@@ -143,6 +143,59 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         generator.manual_seed(1234)
         return bool(torch.randn(64, generator=generator, device="cuda").abs().sum().item() > 0)
 
+    def set_num_threads_thread_local() -> bool:
+        """Split the intra-op budget across workers and re-enter it twice.
+
+        ``DeviceThreadPool`` calls ``torch.set_num_threads`` once per worker
+        thread so each OpenMP team is bounded (issue #4356). The probe checks
+        the two properties the fix relies on: the new value is visible to
+        threads the worker spawns (an OpenMP team is per pthread that enters
+        the region, and nested helper threads inherit the worker's value) and
+        it never leaks back to the caller.
+        """
+
+        from gptqmodel.utils.threadx import split_intraop_threads
+
+        caller_before = torch.get_num_threads()
+        target = split_intraop_threads(8, 8)
+        if target != 1:
+            raise AssertionError(f"split_intraop_threads(8, 8) returned {target}")
+        if split_intraop_threads(4, 8) != 2:
+            raise AssertionError("split_intraop_threads(4, 8) did not return 2")
+
+        state: Dict[str, int] = {}
+
+        def worker() -> None:
+            torch.set_num_threads(target)
+            state["worker"] = torch.get_num_threads()
+            matrix = torch.randn(256, 256)
+            state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+
+            child: Dict[str, int] = {}
+
+            def nested() -> None:
+                child["value"] = torch.get_num_threads()
+                child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+
+            thread = threading.Thread(target=nested)
+            thread.start()
+            thread.join()
+            state["child"] = child["value"]
+            state["child_finite"] = child["sum_finite"]
+
+        with ThreadPoolExecutor(max_workers=THREADS) as pool:
+            list(pool.map(lambda _: worker(), range(THREADS)))
+
+        if state["worker"] != target or state["child"] != target:
+            raise AssertionError(f"worker saw {state['worker']}, nested thread saw {state['child']}")
+        if not (state["sum_finite"] and state["child_finite"]):
+            raise AssertionError("matmul produced non-finite values under a split intra-op pool")
+        if torch.get_num_threads() != caller_before:
+            raise AssertionError(
+                f"worker set_num_threads leaked into the caller: {caller_before} -> {torch.get_num_threads()}"
+            )
+        return True
+
     def cpu_autocast_override() -> bool:
         x = torch.full((1, 32), 1000.0)
         weight = torch.full((32, 1), 3.125)
@@ -820,6 +873,107 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                     raise AssertionError("concurrent bounded MSE quantization changed codes")
         return True
 
+    affine_fit_thread = threading.local()
+    affine_fit_lock = threading.Lock()
+    affine_fit_next_device = [0]
+
+    def paroquant_affine_fit() -> bool:
+        """Qualify reduced-precision extrema, grid fitting and pseudo quantization."""
+        from gptqmodel.quantization.paroquant.optimization import _calc_affine_qparams, pseudo_quantize_dequant
+
+        with affine_fit_lock:
+            if not hasattr(affine_fit_thread, "device"):
+                affine_fit_thread.device = affine_fit_next_device[0] % 2
+                affine_fit_next_device[0] += 1
+        torch.cuda.set_device(affine_fit_thread.device)
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            # These exact source values give unambiguous integer zero points.
+            expected_zero = torch.tensor([[8], [9], [8], [0], [15], [0]], device="cuda")
+            oracle_scale = torch.tensor(
+                [[2.0], [0.1982421875 / 6], [32768.0 / 7], [1.0 / 15], [1.0 / 15], [1e-5]],
+                dtype=torch.float64, device="cuda",
+            )
+            for dtype in (torch.float16, torch.bfloat16, torch.float32):
+                weight = torch.tensor(
+                    [[-16.0, 14.0], [-0.26171875, 0.1982421875], [-32768.0, 32768.0],
+                     [1.0, 1.0], [-1.0, -1.0], [0.0, 0.0]],
+                    dtype=dtype, device="cuda",
+                ).repeat(1, 64)
+                scale, negative_zero = _calc_affine_qparams(weight, bits=4, group_size=128)
+                expected_codes = (weight.double() / oracle_scale).round().add(expected_zero).clamp(0, 15)
+                codes = (weight.float() / scale).round().sub(negative_zero).clamp(0, 15)
+                expected = ((expected_codes.float() - expected_zero) * oracle_scale.float()).to(dtype)
+                actual = pseudo_quantize_dequant(weight, bits=4, group_size=128, sym=False, use_ste=False)
+                stream.synchronize()
+                if scale.dtype != torch.float32 or not torch.equal(-negative_zero, expected_zero):
+                    raise AssertionError("concurrent affine fit changed qparam precision or integer zero points")
+                torch.testing.assert_close(scale.double(), oracle_scale, rtol=1e-6, atol=1e-6)
+                if not torch.equal(codes, expected_codes) or not torch.equal(actual, expected):
+                    raise AssertionError("concurrent affine fit changed codes or rounded outputs")
+        return True
+
+    vptq_segment_thread = threading.local()
+    vptq_segment_lock = threading.Lock()
+    vptq_segment_next_device = [0]
+    vptq_segment_state = {}
+
+    def vptq_segment_sum() -> bool:
+        """Qualify the local VPTQ k-means segment reduction under concurrency."""
+        from gptqmodel.quantization.vptq import _deterministic_segment_sum
+
+        with vptq_segment_lock:
+            if not vptq_segment_state:
+                generator = torch.Generator().manual_seed(4172)
+                num_buckets, num_rows, vector_len = 64, 4096, 8
+                # Leave the last 16 buckets empty so the probe also covers the
+                # ``result[nonzero] = totals`` path.
+                index = torch.randint(0, num_buckets - 16, (num_rows,), generator=generator)
+                source = torch.randn((num_rows, vector_len), generator=generator)
+                weights = torch.randn((num_rows,), generator=generator)
+                vptq_segment_state.update(
+                    index=index,
+                    source=source,
+                    weights=weights,
+                    reference_sums=torch.zeros(
+                        (num_buckets, vector_len), dtype=torch.float64
+                    ).index_add_(0, index, source.double()),
+                    reference_counts=torch.zeros(
+                        num_buckets, dtype=torch.float64
+                    ).index_add_(0, index, weights.double()),
+                    used=torch.bincount(index, minlength=num_buckets) > 0,
+                )
+            if not hasattr(vptq_segment_thread, 'device'):
+                vptq_segment_thread.device = vptq_segment_next_device[0] % 2
+                vptq_segment_next_device[0] += 1
+        device = vptq_segment_thread.device
+        torch.cuda.set_device(device)
+        if not hasattr(vptq_segment_thread, 'stream'):
+            vptq_segment_thread.stream = torch.cuda.Stream(device=device)
+        stream = vptq_segment_thread.stream
+        with torch.cuda.stream(stream):
+            index = vptq_segment_state['index'].to(device)
+            source = vptq_segment_state['source'].to(device)
+            weights = vptq_segment_state['weights'].to(device)
+            sums = _deterministic_segment_sum(64, index, source)
+            counts = _deterministic_segment_sum(64, index, weights)
+            repeated = _deterministic_segment_sum(64, index, source)
+            stream.synchronize()
+        reference_sums = vptq_segment_state['reference_sums'].to(device)
+        reference_counts = vptq_segment_state['reference_counts'].to(device)
+        used = vptq_segment_state['used'].to(device)
+        if not torch.equal(sums, repeated):
+            raise AssertionError('concurrent VPTQ segment sum is not repeatable')
+        if torch.are_deterministic_algorithms_enabled():
+            raise AssertionError('VPTQ segment sum enabled global deterministic algorithms')
+        for actual, reference in ((sums, reference_sums), (counts, reference_counts)):
+            relative = (actual.double() - reference).norm() / reference.norm()
+            if relative.item() >= 1e-6:
+                raise AssertionError('concurrent VPTQ segment sum changed its reduction')
+            if not torch.equal(actual[~used], torch.zeros_like(actual[~used])):
+                raise AssertionError('concurrent VPTQ segment sum filled an empty bucket')
+        return True
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -870,6 +1024,8 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "AWQ tiled dequantize_gemm": awq_tiled_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "GPTQ weight scale floor": gptq_weight_scale_floor,
+        "ParoQuant affine fit": paroquant_affine_fit,
+        "VPTQ deterministic segment sum": vptq_segment_sum,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
@@ -947,6 +1103,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.is_autocast_enabled + torch.autocast (CPU)": cpu_autocast_override,
         "torch.is_autocast_enabled + torch.autocast (CUDA)": cuda_autocast_disable,
         "torch.get_autocast_dtype + torch.autocast (CUDA)": cuda_autocast_dtype,
+        "torch.set_num_threads (per worker)": set_num_threads_thread_local,
     }
     return probes
 
@@ -968,6 +1125,8 @@ def _requires_two_gpus(name: str) -> bool:
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
                 "GPTQ weight scale floor",
+                "ParoQuant affine fit",
+                "VPTQ deterministic segment sum",
             ))
 
 
@@ -987,6 +1146,9 @@ def run_child(name: str) -> int:
         return 0
     if name == "MACaQ compiled flips ROCm" and torch.version.hip is None:
         print(json.dumps({"status": "SKIP", "detail": "ROCm compiled flip probe is AMD-only"}))
+        return 0
+    if name == "VPTQ deterministic segment sum" and getattr(sys, "_is_gil_enabled", lambda: True)():
+        print(json.dumps({"status": "SKIP", "detail": "needs PYTHON_GIL=0"}))
         return 0
     try:
         if name in SINGLE_SHOT:

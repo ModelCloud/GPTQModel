@@ -88,6 +88,29 @@ def _hf_blob_root(source_root: str) -> Optional[str]:
         current = parent
 
 
+def _assert_real_target_allowed(source_root: str, source_path: str, *, kind: str) -> None:
+    real_target = os.path.realpath(source_path)
+    if _is_under(os.path.realpath(source_root), real_target):
+        return
+    blob_root = _hf_blob_root(source_root)
+    if blob_root is not None and _is_under(os.path.realpath(blob_root), real_target):
+        return
+    raise CheckpointPathError(
+        f"Unsafe {kind}: {source_path!r} resolves outside the checkpoint tree: {real_target!r}"
+    )
+
+
+def assert_source_read_allowed(source_root: str, source_path: str, *, kind: str = "source file") -> None:
+    """Reject a source path whose real target is outside the source tree.
+
+    Hugging Face cache snapshots point their files at the sibling ``blobs``
+    store, so that one layout is allowed. Intermediate symlinks are checked
+    too, not only the final component.
+    """
+
+    _assert_real_target_allowed(source_root, source_path, kind=kind)
+
+
 def assert_auxiliary_copy_allowed(source_root: str, source_path: str, *, kind: str = "checkpoint file") -> None:
     """Reject a symlink that copies content from outside the checkpoint tree.
 
@@ -100,20 +123,13 @@ def assert_auxiliary_copy_allowed(source_root: str, source_path: str, *, kind: s
 
     if not os.path.islink(source_path):
         return
-    real_target = os.path.realpath(source_path)
-    if _is_under(os.path.realpath(source_root), real_target):
-        return
-    blob_root = _hf_blob_root(source_root)
-    if blob_root is not None and _is_under(os.path.realpath(blob_root), real_target):
-        return
-    raise CheckpointPathError(
-        f"Unsafe {kind}: symlink {source_path!r} resolves outside the checkpoint tree: {real_target!r}"
-    )
+    _assert_real_target_allowed(source_root, source_path, kind=kind)
 
 
 __all__ = [
     "CheckpointPathError",
     "assert_auxiliary_copy_allowed",
+    "assert_source_read_allowed",
     "resolve_checkpoint_path",
     "validate_relative_checkpoint_path",
 ]

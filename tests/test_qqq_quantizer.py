@@ -22,7 +22,7 @@ def _legacy_qqq_quantize(x, scale, zero, maxq, sym, groupsize):
     return scale * q
 
 
-def _legacy_qqq_find_params(
+def _reference_qqq_find_params(
     x,
     *,
     bits,
@@ -35,15 +35,19 @@ def _legacy_qqq_find_params(
 ):
     x = x.flatten(1)
     maxq = 2**bits - 1 if groupsize != -1 or not sym else 2 ** (bits - 1) - 1
+    # Tensor division has different rounding from scalar reciprocal-multiply
+    # on accelerators. Keep the reference's FP32 division in the same domain
+    # as the stored maxq buffer, without calling the production fitter.
+    maxq_tensor = torch.tensor(maxq, dtype=torch.int64, device=x.device)
     tmp = torch.zeros(x.shape[0], device=x.device)
     xmin = torch.minimum(x.min(1)[0], tmp)
     xmax = torch.maximum(x.max(1)[0], tmp)
 
     if sym:
         xmax = torch.maximum(torch.abs(xmin), xmax)
-        tmp = xmin < 0
-        if torch.any(tmp):
-            xmin[tmp] = -xmax[tmp]
+        # The stored zero point is fixed at ``(maxq + 1) // 2``, so the range
+        # must be zero-centered for non-negative groups too.
+        xmin = -xmax
     tmp = (xmin == 0) & (xmax == 0)
     xmin[tmp] = -1
     xmax[tmp] = +1
@@ -52,10 +56,10 @@ def _legacy_qqq_find_params(
         scale = xmax
         zero = xmin
     elif groupsize != -1 or not sym:
-        scale = (xmax - xmin) / maxq
+        scale = (xmax - xmin) / maxq_tensor
         zero = torch.full_like(scale, (maxq + 1) / 2) if sym else torch.round(-xmin / scale)
     else:
-        scale = xmax / maxq
+        scale = xmax / maxq_tensor
         zero = torch.zeros_like(scale)
 
     if mse:
@@ -64,7 +68,7 @@ def _legacy_qqq_find_params(
             p = 1 - index / grid
             xmin1 = p * xmin
             xmax1 = p * xmax
-            scale1 = (xmax1 - xmin1) / maxq if groupsize != -1 or not sym else xmax1 / maxq
+            scale1 = (xmax1 - xmin1) / maxq_tensor if groupsize != -1 or not sym else xmax1 / maxq_tensor
             zero1 = torch.round(-xmin1 / scale1) if not sym else zero
             q = _legacy_qqq_quantize(
                 x,
@@ -91,6 +95,10 @@ def _cases(dtype):
     generator = torch.Generator().manual_seed(0)
     cases = {"randn": torch.randn(16, 64, generator=generator)}
     cases["all_zero"] = torch.zeros(16, 64)
+    # Non-negative groups are the regression case for zero-centered fitting.
+    cases["all_positive"] = torch.rand(16, 64, generator=generator) + 0.25
+    cases["all_negative"] = -(torch.rand(16, 64, generator=generator) + 0.25)
+    cases["constant_positive"] = torch.full((16, 64), 2.5)
 
     mixed = torch.randn(16, 64, generator=generator)
     mixed[::3] = 0.0
@@ -151,7 +159,7 @@ def test_qqq_find_params_stays_bit_exact_and_sync_free(dtype, bits, sym, groupsi
         with recorder:
             quantizer.find_params(weights, weight=True)
 
-        expected_scale, expected_zero = _legacy_qqq_find_params(
+        expected_scale, expected_zero = _reference_qqq_find_params(
             weights.clone(),
             bits=bits,
             sym=sym,
@@ -300,9 +308,12 @@ def test_qqq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
     (2, False, 32), (3, True, -1), (4, True, 32), (8, False, -1),
 ])
 @pytest.mark.parametrize("budget", [0, 1])
-def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget):
+@pytest.mark.parametrize("non_negative", [False, True])
+def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget, non_negative):
     weights = torch.randn(128, 32, generator=torch.Generator().manual_seed(7))
     weights = weights.to(device=device, dtype=dtype)[::2, ::2].t()
+    if non_negative:
+        weights = weights.abs()
     quantizer = Quantizer(
         qcfg=QuantizeConfig(mse=MSEConfig(norm=2.4, grid_budget=budget)),
     )
@@ -310,7 +321,7 @@ def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget):
         bits=bits, perchannel=True, sym=sym, groupsize=groupsize, mse=True,
     )
     quantizer.find_params(weights, weight=True)
-    scale, zero = _legacy_qqq_find_params(
+    scale, zero = _reference_qqq_find_params(
         weights, bits=bits, sym=sym, groupsize=groupsize, mse=True,
     )
     torch.testing.assert_close(quantizer.scale.flatten(), scale, rtol=0, atol=0)

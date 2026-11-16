@@ -10,11 +10,11 @@ import gptqmodel.nn_modules.qlinear.gemv_fast_awq as gemv_fast_awq
 def _build_module() -> gemv_fast_awq.AwqGEMVFastLinear:
     return gemv_fast_awq.AwqGEMVFastLinear(
         bits=4,
-        group_size=32,
+        group_size=128,
         sym=True,
         desc_act=False,
-        in_features=32,
-        out_features=8,
+        in_features=256,
+        out_features=128,
         bias=False,
         register_buffers=True,
     )
@@ -23,11 +23,11 @@ def _build_module() -> gemv_fast_awq.AwqGEMVFastLinear:
 def _build_llm_awq_module() -> gemv_fast_awq.LLMAwqLinear:
     return gemv_fast_awq.LLMAwqLinear(
         bits=4,
-        group_size=32,
+        group_size=128,
         sym=True,
         desc_act=False,
-        in_features=32,
-        out_features=8,
+        in_features=256,
+        out_features=128,
         bias=False,
         register_buffers=True,
     )
@@ -165,7 +165,10 @@ def test_llm_awq_decode_normalizes_scaled_zeros_without_dynamic_attr_access(monk
     def fake_decode(inputs, qweight, scales, zeros, m, n, k, group_size):
         assert zeros.is_contiguous()
         assert zeros.dtype == torch.float16
-        assert zeros.data_ptr() == module.scaled_zeros.data_ptr()
+        # The kernel must receive a normalized copy of the transposed buffer;
+        # ``.contiguous()`` copies here because the valid fixture shape is not
+        # square, so compare values rather than storage identity.
+        assert torch.equal(zeros, module.scaled_zeros.contiguous())
         return torch.ones((inputs.shape[0], inputs.shape[1], module.out_features), dtype=torch.float16)
 
     monkeypatch.setattr(gemv_fast_awq, "awq_fast_gemv_forward_decode", fake_decode)

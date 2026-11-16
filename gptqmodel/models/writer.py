@@ -27,6 +27,7 @@ from .._quant_methods import REFUSED_HF_QUANT_METHODS
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear._fused_train_state import QZEROS_FORMAT_BUFFER
 from ..quantization.config import (
     FORMAT,
     GGUF_EXPORT_QUANT_METHOD,
@@ -119,7 +120,7 @@ def _convert_checkpoint_state_dict_keys(state_dict: Dict[str, Any], key_converte
 # SUPPORTED_SPLIT_BY = {None, "layer"}
 SUPPORTED_SPLIT_BY = {None}
 _MAX_SHARD_SIZE_RE = pcre.compile(
-    r"\s*(\d+)([KMGTP]?B?)\s*",
+    r"\s*(\d+)\s*([KMGTP]?i?B?)\s*",
     flags=pcre.Flag.CASELESS,
 )
 
@@ -142,7 +143,10 @@ def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
     """Resolve a ``max_shard_size`` argument to bytes.
 
     Module level so every export path -- including formats that publish their
-    own packed state -- honours the same shard limit.
+    own packed state -- honours the same shard limit. Units follow Hugging
+    Face's convention: ``KB``/``MB``/``GB`` are decimal and
+    ``KiB``/``MiB``/``GiB`` are binary. A bare ``K``/``M``/``G`` keeps the
+    historical binary meaning so existing callers do not change size.
     """
 
     if value is None:
@@ -154,17 +158,13 @@ def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
         raise ValueError(f"Invalid max_shard_size value: {value}")
     base = int(match.group(1))
     suffix = match.group(2).upper()
-    multiplier = 1
-    if suffix.startswith("K"):
-        multiplier = 1024
-    elif suffix.startswith("M"):
-        multiplier = 1024 ** 2
-    elif suffix.startswith("G"):
-        multiplier = 1024 ** 3
-    elif suffix.startswith("T"):
-        multiplier = 1024 ** 4
-    elif suffix.startswith("P"):
-        multiplier = 1024 ** 5
+    if suffix.startswith("I"):
+        raise ValueError(f"Invalid max_shard_size value: {value}")
+    exponent = {"K": 1, "M": 2, "G": 3, "T": 4, "P": 5}.get(suffix[:1], 0)
+    if exponent == 0:
+        return base
+    binary = suffix.endswith("IB") or not suffix.endswith("B")
+    multiplier = (1024 if binary else 1000) ** exponent
     return base * multiplier
 
 
@@ -409,7 +409,32 @@ def _save_model_configs_without_weights(
     can_generate = getattr(model, "can_generate", None)
     generation_config = getattr(model, "generation_config", None)
     if callable(can_generate) and can_generate() and generation_config is not None:
+        _save_generation_config(generation_config, save_dir)
+
+
+def _save_generation_config(generation_config, save_dir: str) -> None:
+    """Save a generation config without rewriting its declared ``do_sample``.
+
+    Transformers >= 5 refuses to save a config whose sampling-only fields
+    contradict a non-sampling ``do_sample``. GPT-QModel preserves the
+    checkpoint's declared value, so fall back to the same serializer without
+    that strict check instead of flipping ``do_sample`` on.
+    """
+    try:
         generation_config.save_pretrained(save_dir)
+        return
+    except ValueError as exc:
+        if "Fix these issues to save the configuration." not in str(exc):
+            raise
+
+    to_json_file = getattr(generation_config, "to_json_file", None)
+    if not callable(to_json_file):
+        raise
+    to_json_file(
+        os.path.join(save_dir, "generation_config.json"),
+        use_diff=True,
+        keys_to_pop=["compile_config"],
+    )
 
 
 def _quantized_module_types(model: torch.nn.Module) -> tuple[type, ...]:
@@ -894,7 +919,16 @@ def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activa
         files = [checkpoint]
     else:
         raise ValueError("W4A export requires a safetensors file or shard index")
-    expected, seen = set(model.state_dict()), set()
+    # The qzeros layout marker is a persistent buffer so in-process state-dict
+    # transports keep it, but a checkpoint write deliberately omits it. It is
+    # therefore never present in a native W4A checkpoint and must not be part of
+    # the completeness check (issue #4171 item 2).
+    expected = {
+        name for name in model.state_dict()
+        if name != QZEROS_FORMAT_BUFFER
+        and not name.endswith("." + QZEROS_FORMAT_BUFFER)
+    }
+    seen = set()
     for path in files:
         with safe_open(path, framework="pt", device="cpu") as handle:
             values = {name: handle.get_tensor(name) for name in handle.keys()}
@@ -1764,6 +1798,34 @@ def _stream_state_dict_to_layer_dirs(
 
     return expected_files, tensor_to_filename, total_size
 
+def _export_shell_device(qcfg) -> Optional[DEVICE]:
+    """Device constraint the re-save export shell asks the kernel selector for.
+
+    The shell only materializes the checkpoint's packed buffer layout and then
+    loads the checkpoint into it; it never runs a forward pass. Some formats
+    (AWQ GEMV / GEMV_FAST) only have accelerator kernels, so pinning AUTO to
+    CPU rejects every candidate and fails the whole re-save with "No valid
+    quant linear" (issue #4305). For those formats the shell drops the device
+    constraint so the selector can still return the layout class.
+
+    Formats that do have a CPU kernel keep asking for CPU: on an accelerator
+    host, an unconstrained AUTO could otherwise pick a faster accelerator
+    kernel whose in-memory buffer layout differs from the checkpoint's.
+    """
+
+    from ..utils.importer import get_auto_backend_kernel_mapping
+
+    fmt = resolve_quant_format(qcfg.format, qcfg.method)
+    method = qcfg.export_quant_method()
+    candidates = get_auto_backend_kernel_mapping().get(method, {}).get(fmt, {})
+    if any(
+        DEVICE.ALL in cls.SUPPORTS_DEVICES or DEVICE.CPU in cls.SUPPORTS_DEVICES
+        for cls in candidates.values()
+    ):
+        return DEVICE.CPU
+    return None
+
+
 def ModelWriter(cls):
     def save_pretrained(
             self,
@@ -1805,10 +1867,18 @@ def ModelWriter(cls):
 
             weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
 
-            # dynamic rank
+            # Dynamic rank: export the ranks the adapters were actually built
+            # with, one exact key per module. `dynamic` is first-match while
+            # PEFT applies every `rank_pattern` key on its own, so copying the
+            # rules verbatim would export ranks that were never trained. See
+            # docs/adapter-rank-pattern-matching.md.
             rank_pattern = {}
-            if self.quantize_config.dynamic:
-                rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
+            if getattr(self.quantize_config, "dynamic", None):
+                rank_pattern = self.quantize_config.extract_adapter_rank_patterns(
+                    module_ranks={
+                        key: adapter.rank for key, adapter in self.lora_results.items()
+                    },
+                )
 
             # EoRA's residual targets a unit-scale correction. PEFT resolves
             # alpha per module, so mirroring dynamic ranks keeps every module's
@@ -1971,7 +2041,7 @@ def ModelWriter(cls):
             if generation_config is not None and (
                 not callable(can_generate) or can_generate()
             ):
-                generation_config.save_pretrained(save_dir)
+                _save_generation_config(generation_config, save_dir)
             log.info(
                 f"Saved tt-blockfloat checkpoint to {save_dir}: "
                 f"{info['layers']} packed modules, {info['payload_bytes'] / (1 << 20):.2f} MiB "
@@ -2445,6 +2515,12 @@ def ModelWriter(cls):
 
     def get_model_with_quantize(self, qcfg, model_id_or_path):
 
+        # Re-saving a loaded quantized model rebuilds the shell here. transformers'
+        # ``from_config`` wraps construction in ``local_torch_dtype``, a
+        # process-global ``torch.set_default_dtype``; without the shared lock this
+        # save-side build races concurrent loads (issue #4204, regression of #4129).
+        from .loader import model_load_lock
+
         ensure_qwen_drive_registered(model_id_or_path)
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -2453,7 +2529,7 @@ def ModelWriter(cls):
         normalize_hf_config_compat(config, trust_remote_code=self.trust_remote_code)
         model_dtype = get_hf_config_dtype(config)
 
-        with suspend_hf_weight_init():
+        with model_load_lock(), suspend_hf_weight_init():
             model = self.loader.from_config(
                 config, dtype=model_dtype
             )
@@ -2513,7 +2589,8 @@ def ModelWriter(cls):
                 backend=BACKEND.AUTO,
                 lm_head_name=self.lm_head,
                 pack=True,
-                device=DEVICE.CPU,
+                # Layout-only selection: see ``_export_shell_device``.
+                device=_export_shell_device(qcfg),
                 # Register quantized-module biases at the checkpoint/model width
                 # so a bf16/fp32 bias cannot overflow an fp16 placeholder
                 # before ``load_checkpoint_in_model`` copies it in.
@@ -2521,14 +2598,73 @@ def ModelWriter(cls):
             )
 
         if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+            # The native W4A load assigns the raw checkpoint words directly.
+            # Declare the source layout first, exactly as the non-W4A branch
+            # does: otherwise the export shell labels the source words with its
+            # own (target) format and a re-save shifts every zero point by one
+            # (issue #4323).
+            source_format = getattr(qcfg, "_checkpoint_format_on_disk", None)
+            if source_format is None:
+                source_format = resolve_quant_format(qcfg.format, qcfg.method)
+            if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+                for module in model.modules():
+                    if isinstance(module, GPTQQuantLinear):
+                        module._checkpoint_format_on_disk = source_format
+                        module.qzero_format(
+                            format=1 if source_format == FORMAT.GPTQ else 2
+                        )
             _load_native_w4a_for_save(model, self.checkpoint_file_name, activation_mode=qcfg.activation_mode)
+            # Validate a requested layout change, but do not apply the v1/v2
+            # shift here: ``_load_from_state_dict`` already normalized the live
+            # words to this kernel's runtime layout, and ``_save_to_state_dict``
+            # converts that layout to the target checkpoint format. Applying
+            # ``convert_loaded_qzeros_for_format_change`` would shift a second
+            # time.
+            resolve_resave_format_conversion(qcfg)
+            target_format = resolve_quant_format(qcfg.format, qcfg.method)
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = target_format
         else:
+            # The export shell starts with zero-filled buffers, so its live
+            # qzeros layout must be declared before the checkpoint words land.
+            # accelerate refills every key a shard omits from these buffers;
+            # without the declaration a stale v1 placeholder would relabel the
+            # shard's v2 words and convert them again (issue #4166).
+            source_format = getattr(qcfg, "_checkpoint_format_on_disk", None)
+            if source_format is None:
+                source_format = resolve_quant_format(qcfg.format, qcfg.method)
+            if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+                for module in model.modules():
+                    if isinstance(module, GPTQQuantLinear):
+                        module._checkpoint_format_on_disk = source_format
+                        module.qzero_format(
+                            format=1 if source_format == FORMAT.GPTQ else 2
+                        )
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=model_dtype,
-                # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                # Do not cast the export shell. Each quantized module
+                # allocates its buffers in the checkpoint's storage dtype
+                # (packed FP8 weight, FP16 GPTQ scales, FP32 QQQ
+                # ``s_channel``), and accelerate's ``dtype=None`` path copies a
+                # checkpoint tensor into that existing dtype. Passing the model
+                # dtype narrowed every packed/scale buffer to bf16/fp16, so an
+                # FP8 re-save was no longer loadable and GPTQ/QQQ re-saves were
+                # lossy (issue #4303).
+                dtype=None,
                 checkpoint=self.checkpoint_file_name,
-                # device_map=device_map,
+                # The shell allocates non-quantized buffers (for example a
+                # quantized module's bias) in the model dtype. When a legacy
+                # checkpoint stores one at another dtype, restore the
+                # checkpoint value instead of republishing the narrowed shell
+                # slot (issue #4379).
+                restore_checkpoint_buffer_dtypes=True,
+                # Load each tensor exactly once. With ``device_map=None``
+                # accelerate 1.15 calls ``set_model_state_dict`` once per
+                # checkpoint file, so the whole module ``load_state_dict``
+                # runs for every shard and a partial shard is completed from
+                # the module's own buffers.
+                device_map={"": "cpu"},
                 # offload_state_dict=True,
                 # offload_buffers=True,
             )

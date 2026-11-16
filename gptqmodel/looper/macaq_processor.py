@@ -47,7 +47,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from ..quantization import macaq as macaq_core
-from ..quantization.config import FORMAT, METHOD
+from ..quantization.config import METHOD
 from ..quantization.macaq import Macaq
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
@@ -186,6 +186,7 @@ class MacaqProcessor(LoopProcessor):
             activation_precision=qcfg.activation_precision,
             pre_mode=qcfg.pre_mode,
             pre_alpha=qcfg.pre_alpha,
+            rotation=qcfg.rotation,
             dtype=module.module_dtype,
         ).to(module.weight.device)
         replay.load_quant_result(result, bias=linear.bias)
@@ -321,7 +322,7 @@ class MacaqProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
-                format=FORMAT.MXFP4_MACAQ,
+                format=self.qcfg.format,
                 backend=backend,
                 register_buffers=False,
                 init_kwargs=self.qcfg.quant_linear_init_kwargs(),
@@ -341,7 +342,7 @@ class MacaqProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         model.quantized = True
         model.quantize_config.method = METHOD.MACAQ
-        model.quantize_config.format = FORMAT.MXFP4_MACAQ
+        model.quantize_config.format = model.quantize_config.checkpoint_format_for_settings()
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:

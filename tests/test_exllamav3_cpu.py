@@ -577,8 +577,10 @@ def test_exllamav3_torch_cpu_bf16x3_falls_back_without_avx512_bf16(monkeypatch):
     assert _relative_l2(actual, oracle.to(torch.bfloat16)) <= 2e-3
 
 
-def test_exllamav3_torch_cpu_bf16x3_env_disable(monkeypatch):
-    monkeypatch.setenv(exllamav3_torch._CPU_BF16X3_ENV, "0")
+def test_exllamav3_torch_cpu_bf16x3_config_disable():
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    configure_kernel(KernelConfig(cpu_bf16x3_matmul=False))
     exllamav3_torch._cpu_bf16x3_support.cache_clear()
 
     assert not exllamav3_torch._cpu_bf16x3_support()

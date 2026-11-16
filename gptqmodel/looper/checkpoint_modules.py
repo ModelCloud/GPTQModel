@@ -84,16 +84,22 @@ def packed_module_config(module, config, *, module_name=None):
             },
         }
     constructor = module_constructor_config(module, config, module_name=module_name)
+    bias = getattr(module, "bias", None)
     module_config = {
         **dimensions,
         "bits": serialize_quant_bits(constructor.bits),
         "group_size": constructor.group_size,
         "desc_act": constructor.desc_act,
         "sym": constructor.sym,
-        "bias": getattr(module, "bias", None) is not None,
+        "bias": bias is not None,
         "pack_dtype": _serialize_value(constructor.pack_dtype),
         "format": _serialize_value(constructor.format),
     }
+    # Biases are stored at the source model dtype (fp16/bf16/fp32), not the
+    # kernel's default fp16 placeholder. Record the real width so the restore
+    # rebuild matches the bundle instead of tripping the schema comparison.
+    if isinstance(bias, torch.Tensor):
+        module_config["bias_dtype"] = str(bias.dtype)
     if constructor.kind is not None:
         module_config["kind"] = constructor.kind
     if constructor.options:
@@ -141,6 +147,7 @@ def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
         checkpoint_format = module_config.pop("format", None)
         has_compute_dtype = "compute_dtype" in module_config
         dtype_name = module_config.pop("compute_dtype", None)
+        checkpoint_bias_dtype = module_config.pop("bias_dtype", None)
         quant_state_shape = module_config.pop("quant_state_shape", None)
         if kind == "paro":
             kernel = ParoLinear
@@ -187,6 +194,21 @@ def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
                 raise CheckpointError("invalid packed compute dtype")
             kwargs["dtype"] = dtype
         module = kernel(**module_config, **kwargs)
+        if checkpoint_bias_dtype is not None:
+            # The kernel allocates its bias placeholder at its default width.
+            # Restore the bundle's width so the tensor schema matches.
+            bias = getattr(module, "bias", None)
+            if isinstance(bias, torch.Tensor):
+                bias_dtype = {
+                    "torch.float16": torch.float16,
+                    "torch.bfloat16": torch.bfloat16,
+                    "torch.float32": torch.float32,
+                }.get(checkpoint_bias_dtype)
+                if bias_dtype is None:
+                    raise CheckpointError("invalid packed bias dtype")
+                if bias.dtype != bias_dtype:
+                    module.bias = bias.to(bias_dtype)
+                    module.bias_dtype = bias_dtype
         if quant_state_shape is not None:
             if (
                 len(quant_state_shape) != 1
