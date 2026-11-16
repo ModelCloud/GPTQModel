@@ -87,6 +87,29 @@ def _sized_calibration_dataset(dataset):
     return dataset
 
 
+def _reusable_calibration_dataset(dataset):
+    """Return a calibration input that more than one processor can prepare.
+
+    ``quantize()`` builds separate calibration configs for the native and EoRA
+    steps, and every ``LoopProcessor`` prepares its dataset again. A plain
+    iterator (for example a generator expression) is exhausted by the first
+    preparation, so the second processor would receive an empty dataset and
+    fail with "calibration dataset is empty". Materialise such an input once,
+    before it is shared. Sized containers are returned unchanged, and
+    ``datasets.IterableDataset`` stays lazy because it yields a fresh iterator.
+    """
+
+    if dataset is None:
+        return None
+    try:
+        iterator = iter(dataset)
+    except TypeError:
+        return dataset
+    if iterator is dataset:
+        return list(dataset)
+    return dataset
+
+
 _PROJECT_LOG_DIR = Path("logs")
 
 # Device-SMI handles are process-scoped diagnostic helpers. Once the vendor tool
