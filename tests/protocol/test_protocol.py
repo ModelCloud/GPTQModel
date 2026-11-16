@@ -272,7 +272,7 @@ def test_negative_match_gguf_protocol_compiles_to_dynamic_skip_config():
     assert python_cfg.quant_method == METHOD.GGUF
     assert python_cfg.runtime_bits == "q4_k_m"
     assert python_cfg.format == "q_k_m"
-    assert python_cfg.dynamic == {r"-:.*layers\.2.*": {}}
+    assert python_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}
 
 
 def test_negative_match_gptq_protocol_compiles_to_dynamic_skip_config():
@@ -294,8 +294,8 @@ def test_negative_match_gptq_protocol_compiles_to_dynamic_skip_config():
     assert yaml_cfg.sym is True
     assert python_cfg.desc_act is False
     assert yaml_cfg.desc_act is False
-    assert python_cfg.dynamic == {r"-:.*layers\.2.*": {}}
-    assert yaml_cfg.dynamic == {r"-:.*layers\.2.*": {}}
+    assert python_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}
+    assert yaml_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}
 
 
 def test_negative_match_awq_protocol_compiles_to_dynamic_skip_config():
@@ -315,5 +315,5 @@ def test_negative_match_awq_protocol_compiles_to_dynamic_skip_config():
     assert yaml_cfg.group_size == 128
     assert python_cfg.sym is True
     assert yaml_cfg.sym is True
-    assert python_cfg.dynamic == {r"-:.*layers\.2.*": {}}
-    assert yaml_cfg.dynamic == {r"-:.*layers\.2.*": {}}
+    assert python_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}
+    assert yaml_cfg.dynamic == {r"-:.*(?:.*layers\.2.*)": {}}

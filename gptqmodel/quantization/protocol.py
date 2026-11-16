@@ -1210,7 +1210,15 @@ def _compile_negative_match_dynamic(matchers: tuple[MatchSpec, ...]) -> Optional
     excludes = tuple(selector for selector in matchers if not selector.include)
     if not excludes:
         return None
-    return {f"-:{selector.pattern}": {} for selector in excludes}
+    dynamic: dict[str, dict[str, Any]] = {}
+    for selector in excludes:
+        # Protocol selectors are evaluated with `pcre.search` (see
+        # `_pattern_matches`), while `dynamic` rules are start-anchored
+        # (`pcre.match`). Prefix `.*` so a selector such as `down_proj` excludes
+        # the same modules in the compiled config as it does in the protocol.
+        pattern = ".*" if selector.pattern == "*" else f".*(?:{selector.pattern})"
+        dynamic[f"-:{pattern}"] = {}
+    return dynamic
 
 
 def _resolve_export_format(method: METHOD, export: Optional[ExportSpec]) -> FORMAT:
