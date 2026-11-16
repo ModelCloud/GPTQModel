@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from model_test import _env_choice, _env_flag, _env_int
+from model_test import _env_choice, _env_flag, _env_int, resolve_attn_implementation
 
 from gptqmodel.utils.paroquant_benchmark import run_paroquant_first_layer_case
 
@@ -33,8 +33,7 @@ def resolve_paroquant_first_layer_case_env(
             "dtype": os.environ.get(f"{env_prefix}_EVAL_DTYPE", "bfloat16"),
             "attn_implementation": os.environ.get(
                 f"{env_prefix}_ATTN_IMPL",
-                "paged|flash_attention_2",
-            ),
+            ) or resolve_attn_implementation(),
             "device": os.environ.get(f"{env_prefix}_EVAL_DEVICE", "cuda:0"),
         },
         "eval_suite_kwargs": {

@@ -506,3 +506,18 @@ def test_perform_post_quant_validation_retries_without_forced_cuda_map_after_oom
     ]
     assert reuse_candidates == {}
     assert eval_records == {BACKEND.AUTO: {"ok": 1.0}}
+
+
+def test_resolve_attn_implementation_prefers_flash_attention_2_when_available(monkeypatch):
+    monkeypatch.setattr(model_test_module, "is_flash_attn_2_available", lambda: True)
+
+    assert model_test_module.resolve_attn_implementation() == "paged|flash_attention_2"
+    assert model_test_module.resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
+
+
+def test_resolve_attn_implementation_falls_back_to_sdpa_when_flash_attn_missing(monkeypatch):
+    monkeypatch.setattr(model_test_module, "is_flash_attn_2_available", lambda: False)
+
+    assert model_test_module.resolve_attn_implementation() == "paged|sdpa"
+    assert model_test_module.resolve_attn_implementation("flash_attention_2") == "sdpa"
+    assert model_test_module.resolve_attn_implementation("eager") == "eager"

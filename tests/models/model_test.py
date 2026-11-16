@@ -186,6 +186,29 @@ def is_eval_task_metadata_key(metric_name) -> bool:
     return metric_name in EVAL_TASK_METADATA_KEYS or str(metric_name).startswith("evalution_")
 
 
+def resolve_attn_implementation(
+    preferred: str = "paged|flash_attention_2",
+    fallback: Optional[str] = None,
+) -> str:
+    """Resolve an attention implementation against the optional flash-attn package.
+
+    Per-task ``evalution_model_args`` are passed straight to Evalution and
+    therefore bypass the ``USE_FLASH_ATTN`` gate in :meth:`quantModel` and
+    :meth:`loadQuantModel`. Call sites that want FlashAttention must resolve the
+    implementation here instead of hard-coding it: keep the flash-attn variant
+    as first choice when the package is importable, and fall back to the
+    portable SDPA variant when it is not. ``fallback`` overrides the default
+    ``flash_attention_2`` -> ``sdpa`` substitution.
+    """
+    if "flash_attention_2" not in preferred:
+        return preferred
+    if is_flash_attn_2_available():
+        return preferred
+    if fallback is not None:
+        return fallback
+    return preferred.replace("flash_attention_2", "sdpa")
+
+
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
 
