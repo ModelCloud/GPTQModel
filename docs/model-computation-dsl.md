@@ -25,6 +25,8 @@ can lower the same operations to native kernels without changing model semantics
 | Quantization subsets describe actual computation | Subsets refer to operation/value IDs and executable replay regions with complete interfaces. |
 | Correlated computations are named | `ATTN_QKV` and `GATE_UP` are semantic regions with defined bodies, shared inputs, and named result ports. |
 | Inputs and outputs are typed | Every block port and intermediate value has a dtype, shape, axis meaning, and layout; state and effects are also explicit. |
+| Every block declares external resources | A typed resource interface names request-global memory/state, access rights and when it is needed. Blocks with no dependencies declare an empty interface. |
+| Request memory outlives subsets | Dtype, shape, ownership, lifetime and exact block/port mappings describe who needs what and when. Computation bodies define how. |
 | Both consumers agree | Quantization and inference derive plans from the same immutable semantic graph and parameter identities. |
 | Execution can become independent of HF modeling | The compiled program invokes registered operations, never HF `forward`, Python source rewriting, or undeclared callbacks. |
 
@@ -103,12 +105,14 @@ already selected floating-point or quantized program's numerical contract.
 
 | Object | Required contents |
 | --- | --- |
-| `ModelProgram` | Versioned operation set, symbolic dimensions and constraints, entry points, block definitions, parameter/state schemas, concrete layer manifest. |
+| `ModelProgram` | Versioned operation set, symbolic dimensions and constraints, entry points, block definitions, parameter/resource schemas, concrete layer manifest and resource binding map. |
 | `LayerInstance` | Stable ID, exact block revision, subsection instances, resolved constants, parameter bindings and state bindings. No implicit layer-zero template. |
 | `Block` | Typed input/output ports, explicit parameter/resource arguments, operation body, nested blocks, effects and numerical contract. No hidden tensor capture. |
 | `Operation` | Opcode and semantic version, typed operands/results, attributes, shape/precision rules, effects, portable reference implementation and permitted lowerings. |
 | `Value` | Stable producer/result ID, complete type, and all uses. SSA: each value is defined once; a value is distinct from its storage allocation. |
 | `Parameter` | Semantic ID, logical shape, storage format, checkpoint keys/conversions, alias group, ownership, and quantization policy eligibility. |
+| `Resource` | Stable logical ID, scope, typed contents, capacity/valid extent, ownership, initialization, placement, aliases and lifetime; includes external buffers and request state. |
+| `ResourceUse` | Exact block instance/port, resource/view/version binding, access rights, entry-point/branch guard, use points and completion dependency. |
 | `ReplayRegion` | Exact executable operation slice, complete live-in/live-out ports, parameter versions, state snapshot policy and scoring outputs. |
 | `ExecutionPlan` | Scheduled operations, physical tensor/storage descriptors, kernel bindings, buffer lifetimes, state dependencies, guards and source map. |
 
@@ -185,7 +189,7 @@ block ATTN_QKV(
     q: Tensor<A,[B,T,Nq*D]>,
     k: Tensor<A,[B,T,Nkv*D]>,
     v: Tensor<A,[B,T,Nkv*D]>
-) pure {
+) resources {} pure {
     q = linear(x, Wq, precision=projection_precision)
     k = linear(x, Wk, precision=projection_precision)
     v = linear(x, Wv, precision=projection_precision)
@@ -223,7 +227,7 @@ block ATTENTION(
     x: A[B,T,H], pos: i64[B,T], valid: bool[B,T],
     allow: bool[B,T,S], past: KV<A,B,Nkv,P,D>;
     w: AttentionWeights, inv_freq: fp32[D/2]
-) -> (out: A[B,T,H], next: KV<A,B,Nkv,S,D>) pure {
+) -> (out: A[B,T,H], next: KV<A,B,Nkv,S,D>) resources {} pure {
     q0, k0, v0 = ATTN_QKV(x; w.q, w.k, w.v)
     q1 = transpose(reshape(q0, [B,T,Nq,D]), [0,2,1,3])
     k1 = transpose(reshape(k0, [B,T,Nkv,D]), [0,2,1,3])
@@ -302,13 +306,13 @@ declares where and in which dtype the addition of one occurs.
 
 ```text
 block GATE_UP(x: A[B,T,H]; Wg: Weight<[I,H]>, Wu: Weight<[I,H]>)
-    -> (gate: A[B,T,I], up: A[B,T,I]) pure {
+    -> (gate: A[B,T,I], up: A[B,T,I]) resources {} pure {
     gate = linear(x, Wg, precision=projection_precision)
     up = linear(x, Wu, precision=projection_precision)
     return (gate, up)
 }
 
-block MLP(x: A[B,T,H]; w: MLPWeights) -> (out: A[B,T,H]) pure {
+block MLP(x: A[B,T,H]; w: MLPWeights) -> (out: A[B,T,H]) resources {} pure {
     gate, up = GATE_UP(x; w.gate, w.up)
     activated = silu(gate, precision=activation_precision)
     product = multiply(activated, up, precision=activation_precision)
@@ -319,7 +323,7 @@ block MLP(x: A[B,T,H]; w: MLPWeights) -> (out: A[B,T,H]) pure {
 block SEQUENTIAL_DECODER(
     x: A[B,T,H], ctx: AttentionContext, past: KV<A,B,Nkv,P,D>;
     w: SequentialWeights
-) -> (y: A[B,T,H], next: KV<A,B,Nkv,S,D>) pure {
+) -> (y: A[B,T,H], next: KV<A,B,Nkv,S,D>) resources {} pure {
     a_in = RMS_NORM(x; w.input_norm, norm_attributes)
     a, next = ATTENTION(a_in, ctx.pos, ctx.valid, ctx.allow, past; w.attn, ctx.inv_freq)
     residual = add(x, a, precision=residual_precision)
@@ -332,7 +336,7 @@ block SEQUENTIAL_DECODER(
 block PARALLEL_DECODER(
     x: A[B,T,H], ctx: AttentionContext, past: KV<A,B,Nkv,P,D>;
     w: ParallelWeights
-) -> (y: A[B,T,H], next: KV<A,B,Nkv,S,D>) pure {
+) -> (y: A[B,T,H], next: KV<A,B,Nkv,S,D>) resources {} pure {
     shared = RMS_NORM(x; w.shared_norm, norm_attributes)
     a, next = ATTENTION(shared, ctx.pos, ctx.valid, ctx.allow, past; w.attn, ctx.inv_freq)
     m = MLP(shared; w.mlp)
@@ -411,7 +415,8 @@ layer decoder.0 uses SEQUENTIAL_DECODER {
         mlp.up:         checkpoint("model.layers.0.mlp.up_proj.weight"),
         mlp.down:       checkpoint("model.layers.0.mlp.down_proj.weight")
     }
-    state = cache_slot("decoder.0.kv")
+    resources = {}
+    state_values = {past:model.past.0, next:model.next.0}
     attributes = resolved_attributes("decoder.0")
 }
 ```
@@ -441,6 +446,14 @@ the declared mask/RoPE operations. Prefill and decode use this same semantic
 body; lowering can specialize on `T` and cache layout. Logit dtype and optional
 last-token selection must be explicit in the entry point, not runtime guesses.
 
+These pure reference cores receive and return state **values** and therefore
+declare an empty external-resource interface. The operational request entry
+point explicitly binds cache resources, reads the required versions and
+publishes the returned versions; it owns neither an implicit per-layer cache
+nor a second state authority. The resource-backed form below makes these
+external interfaces and mappings explicit. Reading a resource version does not
+require copying its full storage; a checked immutable view is sufficient.
+
 A hybrid attention/recurrent model selects distinct blocks from an explicit
 per-layer config list and binds distinct state types to them. It must supply
 the actual recurrent convolution/scan/gating body and its state transition;
@@ -461,6 +474,180 @@ combine, and shared experts/gates. Router weights can remain unquantized and
 still be consumers of a scaled value. Ragged expert batches and coverage counters
 are explicit. An expert with no calibration traffic remains an observed
 coverage gap; static graph completeness does not prove runtime coverage.
+
+## Request-global memory and every block's resource interface
+
+Tensor inputs/outputs describe value flow. Every computation block must **also
+declare the resources or state it needs that live outside the block and belong
+to the request**. This includes nested subsections, replay regions and fused
+replacements. No block receives an ambient request object, discovers state in
+a module field, or inherits all resources accessible to its parent. Blocks
+without external dependencies declare `resources {}` explicitly; `pure`
+additionally states that the body has no effects.
+
+The **request manifest** describes what exists. Each **block resource
+interface** describes what that block needs and when. An **instance binding
+map** connects its local ports to exact request resource IDs/views. Instructions
+in the computation body describe how contents are used; the map does not
+repeat the cache, attention or routing algorithm. The compiler checks declared
+accesses against the body and emits a resolved who/what/when table.
+
+### Typed resources and ownership
+
+| Field | Required declaration |
+| --- | --- |
+| Contents | Dtype and logical shape of every tensor/scalar field, axes, layout, storage format and alignment. A bare `buffer` or opaque untyped `cache` is insufficient. |
+| Scope | `request`, `model`, `service`, `invocation` or `dispatch`. KV/recurrent state persists across one request's prefill/decode calls; ending a subset does not end that lifetime. |
+| Extent | Capacity bounds, valid ranges/lengths and indexing units; invalid/uninitialized slots cannot be read. Ragged lengths are typed metadata. |
+| Ownership | Owner/allocator, owned or borrowed handle, initialization/reset, growth policy, release condition and external completion lease. |
+| Placement | Memory class, device/host placement, sharding, transfers and coherence. Request-shared storage differs from a kernel's dispatch-local shared-memory scratch. |
+| Aliasing | Base resource ID, typed view, offset/strides/range, overlap and allowed mutation. Two names cannot conceal one allocation from hazard analysis. |
+| Identity | Request/sequence/branch identity, generation and version. An artifact contains descriptors, never a live pointer or an old request's handle. |
+
+This illustrative manifest has heterogeneous cache types. Fix `A=bf16` here;
+positions/lengths have their own integer dtype independently of K/V dtype.
+
+```text
+resource_schema KV0 = {
+    k: A[B,8,C,64], v: A[B,8,C,64],
+    positions: i64[B,C], valid: bool[B,C], lengths: i64[B]
+}
+resource_schema KV2 = {
+    k: A[B,4,C,128], v: A[B,4,C,128],
+    positions: i64[B,C], valid: bool[B,C], lengths: i64[B]
+}
+request_resources ExampleRequest(B, C <= context_limit) {
+    kv0: Resource<KV0> {
+        owner=request, lifetime=request, init=empty_valid_extent,
+        memory=device_global, placement=decoder_device,
+        growth=checked_paged, aliases=none
+    }
+    kv2: Resource<KV2> {
+        owner=request, lifetime=request, init=empty_valid_extent,
+        memory=device_global, placement=decoder_device,
+        growth=checked_paged, aliases=none
+    }
+    encoder_tokens: Resource<A[B,Nimage,2048]> {
+        owner=request, lifetime=until_last_cross_attention,
+        init=produced_by(vision.encode), memory=device_global,
+        placement=decoder_device, growth=forbidden, aliases=none
+    }
+    logits_out: ExternalResource<fp32[B,Tout,Vocab]> {
+        owner=caller, lifetime=caller_lease_until(request.completed),
+        init=uninitialized, memory=device_global, placement=output_device,
+        growth=forbidden, aliases=declared_at_bind
+    }
+}
+```
+
+Cross-attention is independent illustrative syntax here, not a Llama feature.
+Every retained request buffer needs such a descriptor: token/position history,
+compressed KV, sparse indexes, convolution/recurrent state, AttnRes banks,
+vision/audio features and speculative branches. Immutable weights and shared
+Engram tables have model scope. A service page pool may back many requests,
+but each request holds a bounded lease. Cross-request prefix sharing requires
+explicit immutable borrowing, reference counts and copy-on-write before mutation.
+
+### Block requirements and exact instance mappings
+
+```text
+block SELF_ATTENTION_0(
+    x: A[B,T,2048], positions: i64[B,T], valid: bool[B,T]; parameters: Attn0
+) -> (y: A[B,T,2048])
+resources {
+    cache: read_append<KV0> {
+        when=entry(prefill|decode|verify),
+        read_at=[cache.read_prefix], write_at=[cache.append],
+        read_extent=cache.valid_prefix,
+        write_extent=token_interval(positions,valid), completion=attention.done
+    }
+} {
+    q,k,v = ATTN_QKV(x; parameters.q,parameters.k,parameters.v)
+    q,k = ROPE_LLAMA3(q,k,positions; rope_attributes)
+    past = resource_read(cache) at cache.read_prefix
+    next = KV_APPEND(past,k,v,positions,valid)
+    resource_write(cache,next) at cache.append
+    y = ATTEND_AND_PROJECT(q,next,valid; parameters.o)
+    return y at attention.done
+}
+
+block DENSE_MLP(x: A[B,T,H]; parameters: MLPWeights) -> (y: A[B,T,H])
+resources {} pure {
+    gate,up = GATE_UP(x; parameters.gate,parameters.up)
+    y = linear(silu(gate)*up; parameters.down)
+    return y
+}
+
+bind decoder.0.attn.resources.cache = request.kv0
+bind decoder.2.attn.resources.cache = request.kv2
+bind decoder.5.cross_attn.resources.encoder = read_view(request.encoder_tokens)
+bind model.output.resources.destination = write_view(request.logits_out)
+```
+
+This interface-focused notation uses mandatory precision/attribute specialization
+as in the earlier bodies. `read_append` permits reading valid old slots and
+appending new ones. Overwriting a ring cache needs different declared rights
+and an explicit window/overwrite computation. Logical positions are not assumed
+physical page offsets. Every child call binds its required ports from the
+parent's permitted ports. `ATTN_QKV`, `ROPE_LLAMA3` and `KV_APPEND` operate on
+passed values and each declares `resources {}`; only `SELF_ATTENTION_0` accesses
+the external cache in this example.
+
+The emitted access map for these example bindings contains:
+
+| Who: exact block and port | What: resource and typed view | Rights | When: semantic interval/guard |
+| --- | --- | --- | --- |
+| `decoder.0.attn.cache` | `request.kv0`, K/V `bf16[B,8,C,64]` plus typed metadata | Read prefix; append | Prefill/decode/verify, `cache.read_prefix` through `attention.done`; publish the new version after append completes. |
+| `decoder.2.attn.cache` | `request.kv2`, K/V `bf16[B,4,C,128]` plus typed metadata | Read prefix; append | Layer 2 attention; persist afterward for later token steps. |
+| `decoder.0.mlp` | None | None | Explicit empty resource set in every phase. |
+| `decoder.5.cross_attn.encoder` | `request.encoder_tokens`, `bf16[B,Nimage,2048]` | Read | After `vision.encode` completion, whenever cross-attention runs; retain until its final future consumer. |
+| `model.output.destination` | `request.logits_out`, `fp32[B,Tout,Vocab]` | Write | Selected output entry point; caller consumes after output completion. |
+
+"When" names semantic entry points, branch guards, token/chunk intervals,
+versions and operation/completion events, not guessed wall-clock times or
+ordinal subsets. A prefill-only resource is absent from a decode branch that
+never accesses it. A cache produced at layer 2 and consumed at layers 8 and 14
+has all three exact mappings; it cannot be reclaimed after layer 2.
+
+### Scheduling, replay and failure contracts
+
+The compiler derives lifetimes and read/write ordering from mapped accesses,
+aliases and versioned effect tokens. Concurrent reads of an immutable version
+are legal; overlapping writes need proven disjoint ranges or explicit ordering.
+Device streams, peer transfers, host I/O and external users contribute completion
+events. A completed host call, subset or dispatch submission does not prove
+that underlying memory is safe to reuse.
+
+Proposed resource planning/binding flow (not implemented):
+
+```mermaid
+flowchart TD
+    R["Request schemas: dtype, extent, owner and lifetime"] --> V["Verify every block interface and exact resource bindings"]
+    B["Block ports, guarded use points and body accesses"] --> V
+    V -->|undeclared access or incompatible view| E["Reject before request memory changes"]
+    V -->|complete| P["Plan resource versions, aliases and completion dependencies"]
+    P --> L["Bind request handles and external leases"]
+    L -->|stale identity or insufficient capacity| E
+    L --> X["Execute mapped accesses across prefill and decode"]
+    X --> J["Join final device, host and external completion"]
+    J --> F["Release owned allocations and return borrowed leases"]
+    style E fill:#ffe0e0,stroke:#b00020
+```
+
+Replay captures resource versions/valid extents as well as tensor live-ins.
+Calibration candidates and speculative decoding use forked bindings with
+copy-on-write or a qualified transactional implementation. Failure/rejection
+cannot advance live KV lengths, recurrent state, indexes or residual history.
+Irreversible external side effects cannot enter replay without a replay-safe
+adapter. Branch commit atomically publishes all coupled resource versions.
+
+Binding validates every port, dtype/layout, capacity, identity, placement and
+caller lease before dispatch. Missing bindings, undeclared accesses, reads
+before initialization, stale aliases, unsynchronized conflicts and premature
+release are errors. Fusion composes the constituent resource interfaces and
+use/effect maps; it cannot hide dependencies or grant unrelated blocks extra
+resources. A backend may add typed bounded physical workspace to its lowering,
+but cannot introduce undeclared persistent semantic state.
 
 ## Quantization consumes executable graph regions
 
@@ -607,6 +794,8 @@ captures; a matching model name is never sufficient for cache reuse.
 | Unknown layer variant, multiple selected bodies, missing parameter | Fail compilation/binding before model state changes. |
 | Dtype/shape/layout or branch-output mismatch | Point to both producer and consumer; require an explicit conversion or corrected declaration. |
 | Unsupported custom op or unmodeled state | Reject compiled mode with the unsupported semantic operation named. |
+| Missing resource port, wrong dtype/extent, illegal phase/access or unresolved alias | Reject binding/planning before writes; name the block, resource and use point. |
+| Resource lifetime ends before a future block or asynchronous user completes | Reject the schedule; retain request state independently of subset boundaries. |
 | Unsafe/incomplete AWQ fold or replay context | Tested plain-quantization policy or explicit error; never guess a source or silently shrink the objective. |
 | Unobserved expert or missing activation samples | Apply the configured coverage policy and report it; do not count it as qualified. |
 | Unsupported fusion shape/format | Execute the unfused declared body if its operations are supported. |

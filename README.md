@@ -122,7 +122,7 @@ combine supported attention and MLP operations without changing the saved format
 
 The [model computation DSL design proposal](https://github.com/ModelCloud/GPTQModel/blob/main/docs/model-computation-dsl.md)
 describes a shared executable representation for quantization and inference,
-with typed tensor interfaces, exact per-layer computation and a path to JIT
+with typed tensor interfaces, request-wide resource/state mappings, exact per-layer computation and a path to JIT
 compilation independent of Transformers modeling code. This is a design draft;
 the compiler and executor are not implemented yet.
 
