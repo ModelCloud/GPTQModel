@@ -294,6 +294,19 @@ class GPTAQ(GPTQ):
         self._gptaq_device_dxxT.clear()
         self._gptaq_device_counts.clear()
 
+    def _align_gptaq_hessian_device(self) -> None:
+        """Keep ``dXXT`` on the same device as ``H`` before quantization.
+
+        ``_finalize_gptaq_hessian`` returns early when every batch came from
+        one device. A caller that rehomed only ``H`` (issue #4312) then leaves
+        ``dXXT`` behind, and ``_neutralize_dead_columns`` mixes devices.
+        """
+
+        if self.H is None or self.dXXT is None:
+            return
+        if self.dXXT.device != self.H.device:
+            self.dXXT = safe_move_to(self.dXXT, self.H.device, dtype=torch.float32)
+
     @staticmethod
     def _token_normalized_avg_loss(loss_sum: float, batch_request_count: int, token_count: int) -> float:
         """Convert GPTAQ's batch-normalized loss sum to GPTQ's token-normalized mean.
@@ -342,12 +355,16 @@ class GPTAQ(GPTQ):
         # when a RuntimeError is raised inside the damp-recovery loop and the graph
         # is re-entered.
 
+        # Mirror GPTQ: the Hessian's device is the canonical quantization
+        # device. Move a pre-cloned weight and the auxiliary `dXXT` there so
+        # `_neutralize_dead_columns` never mixes devices (issue #4312).
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
             W = self.clone_module(device=self.H.device)
         else:
-            W = self.module_copy
+            W = safe_move_to(self.module_copy, self.H.device)
             self.module_copy = None
+        self._align_gptaq_hessian_device()
 
         self.quantizer.find_params(W, weight=True)
 
