@@ -155,14 +155,22 @@ class NVFP4ActivationHeadroom:
 
 
 def fp8_token_qdq(x: torch.Tensor) -> torch.Tensor:
-    """Round each Linear input row to E4M3 with its own dynamic scale."""
+    """Round each Linear input row to E4M3 with its own dynamic scale.
+
+    A finite row always produces a finite result.  ``amax / 448`` can underflow
+    to zero while ``amax`` is still a positive FP32 subnormal, and dividing by
+    that zero turns the row's zero elements into ``0 / 0`` NaN.  Every value in
+    such a row is below E4M3's smallest subnormal, so the unscaled fallback
+    still rounds it to zero; the fallback only removes the NaN.
+    """
     if x.shape[-1] == 0 or x.numel() == 0:
         return x
     x32 = x.float()
     if not bool(torch.isfinite(x32).all()):
         raise ValueError("W4AFP8 Linear input contains NaN or infinity.")
     amax = x32.abs().amax(dim=-1, keepdim=True)
-    scale = torch.where(amax > 0, amax / FP8_E4M3_MAX, torch.ones_like(amax))
+    scale = amax / FP8_E4M3_MAX
+    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
     rounded = (x32 / scale).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
     return (rounded.float() * scale).to(x.dtype)
 
