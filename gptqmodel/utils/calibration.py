@@ -328,11 +328,13 @@ def prepare_calibration_dataset(
             "attention_mask": mask_tensor.detach(),
         }
 
-    def _tokenize_text_value(text_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+    def _tokenize_text_value(
+        text_value: Any, idx: int, *, add_special_tokens: bool = True
+    ) -> Dict[str, torch.Tensor]:
         _require_tokenizer("calibration data contains raw text")
         tokenized = tokenizer(  # type: ignore[call-arg]
             text_value,
-            add_special_tokens=True,
+            add_special_tokens=add_special_tokens,
             return_tensors="pt",
         )
         input_ids = tokenized["input_ids"]
@@ -368,7 +370,10 @@ def prepare_calibration_dataset(
             if ids_value is not None:
                 return _pack_ids(ids_value, mask_value, idx)
             if text_value is not None:
-                return _tokenize_text_value(text_value, idx)
+                # A rendered chat template already contains the template's own
+                # special tokens (e.g. a leading BOS on Llama/Gemma). Letting the
+                # tokenizer add them again prepends a duplicate BOS to every row.
+                return _tokenize_text_value(text_value, idx, add_special_tokens=False)
 
         if isinstance(templated, (list, tuple)):
             if len(templated) > 0 and isinstance(templated[0], int):
@@ -381,7 +386,7 @@ def prepare_calibration_dataset(
             return _pack_ids(templated, None, idx)
 
         if isinstance(templated, str):
-            return _tokenize_text_value(templated, idx)
+            return _tokenize_text_value(templated, idx, add_special_tokens=False)
 
         raise ValueError(
             f"tokenizer.apply_template returned unsupported type {type(templated)} for calibration item {idx}."
@@ -658,7 +663,14 @@ def prepare_calibration_dataset(
 
         separator = calibration_concat_separator if calibration_concat_separator is not None else ""
         if separator:
-            new_line = tokenizer(separator, return_tensors="pt")  # type: ignore[call-arg]
+            # The separator is inserted between already-tokenized documents, so
+            # it must not contribute special tokens (a BOS here lands at every
+            # document boundary).
+            new_line = tokenizer(  # type: ignore[call-arg]
+                separator,
+                add_special_tokens=False,
+                return_tensors="pt",
+            )
             new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
             new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
         else:

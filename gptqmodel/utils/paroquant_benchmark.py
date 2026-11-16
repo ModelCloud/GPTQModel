@@ -396,7 +396,9 @@ def _tokenize_calibration_sample(model, sample: dict[str, Any]) -> dict[str, tor
             tokenize=False,
             add_generation_prompt=False,
         )
-        tokenized = tokenizer(rendered, add_special_tokens=True, return_tensors="pt")
+        # The rendered template already carries the template's special tokens.
+        # Adding them again duplicates the BOS on Llama/Gemma-style templates.
+        tokenized = tokenizer(rendered, add_special_tokens=False, return_tensors="pt")
         return {
             "input_ids": tokenized["input_ids"].to(dtype=torch.long),
             "attention_mask": tokenized.get("attention_mask", torch.ones_like(tokenized["input_ids"])).to(dtype=torch.long),
