@@ -17,10 +17,11 @@ import torch.nn as nn
 
 from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.native_processor import NativeProcessor
+from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY, NativeProcessor
 from gptqmodel.quantization.config import FOEMConfig, GPTAQConfig, QuantizeConfig
 from gptqmodel.quantization.foem import FOEM
 from gptqmodel.quantization.gptaq import GPTAQ
+from gptqmodel.quantization.gptq import GPTQ
 
 
 def _qcfg(kind):
@@ -144,3 +145,119 @@ def test_foem_block_boundary_beta_correction_is_blocksize_invariant():
     torch.testing.assert_close(
         torch.tensor(loss128), torch.tensor(loss512), rtol=0, atol=1e-4
     )
+
+
+def _hessian_task(kind, batches, *, columns=16):
+    """Accumulate ``batches`` into a routed-expert task (``dXXT`` disabled)."""
+
+    named = NamedModule(
+        nn.Linear(columns, 8, bias=False),
+        name="proj",
+        full_name="model.layers.0.proj",
+        layer_index=0,
+    )
+    named.state["is_routed_expert"] = True
+    named.state[NATIVE_INPUTS_STATE_KEY] = []
+    task = _cls(kind)(named, _qcfg(kind))
+    task.quantizer.configure(perchannel=True)
+    for batch in batches:
+        task.add_batch(batch, None)
+    return task
+
+
+def _normalized_error(actual, expected):
+    actual = actual.to(device="cpu", dtype=torch.float64)
+    expected = expected.to(device="cpu", dtype=torch.float64)
+    return float(
+        torch.linalg.vector_norm(actual - expected) / torch.linalg.vector_norm(expected)
+    )
+
+
+@pytest.mark.parametrize("kind", ["gptaq", "foem"])
+def test_hessian_normalisation_matches_documented_contract(kind):
+    """FOEM normalizes by tokens, GPTAQ by calibration requests.
+
+    ``docs/quantizer-moe.md`` records the FOEM contract from 60b420d: its
+    ``nsamples`` and loss denominator are calibration tokens, matching GPTQ.
+    A Hessian normalized by requests instead would change with the number of
+    calibration sequences rather than the number of rows, so the same 12 rows
+    grouped as 4x3 and as 12x1 must produce the same FOEM Hessian.
+    """
+
+    torch.manual_seed(0)
+    rows = torch.randn(12, 16)
+    grouped = [rows[i * 3:(i + 1) * 3] for i in range(4)]
+    single = [rows[i:i + 1] for i in range(12)]
+    samples = rows.to(torch.float64)
+    sum_xx = samples.T @ samples
+
+    grouped_task = _hessian_task(kind, grouped)
+    single_task = _hessian_task(kind, single)
+
+    assert grouped_task.nsamples == single_task.nsamples == rows.shape[0]
+
+    if kind == "foem":
+        # Token count: independent of how rows are grouped into forwards.
+        assert _normalized_error(grouped_task.H, single_task.H) <= 1e-6
+        oracle = (2.0 / rows.shape[0]) * sum_xx
+    else:
+        # GPTAQ keeps its upstream per-request normalization.
+        oracle = (2.0 / len(grouped)) * sum_xx
+
+    assert _normalized_error(grouped_task.H, oracle) <= 1e-6
+
+
+def test_foem_token_normalisation_matches_gptq_hessian_and_loss():
+    """FOEM(alpha=0, beta=0) is documented as equivalent to GPTQ.
+
+    That equivalence depends on FOEM's Hessian and loss denominator using the
+    token count. With a request denominator, ``H`` and ``avg_loss`` would differ
+    from GPTQ's by the average sequence length. This is the contract the
+    routed-expert oracle must encode for FOEM.
+    """
+
+    torch.manual_seed(1)
+    weight = torch.randn(8, 16)
+    rows = torch.randn(12, 16)
+    batches = [rows[i * 3:(i + 1) * 3] for i in range(4)]
+
+    def build(cls, qcfg):
+        linear = nn.Linear(16, 8, bias=False)
+        with torch.no_grad():
+            linear.weight.copy_(weight)
+        named = NamedModule(
+            linear, name="proj", full_name="model.layers.0.proj", layer_index=0
+        )
+        named.state["is_routed_expert"] = True
+        named.state[NATIVE_INPUTS_STATE_KEY] = []
+        task = cls(named, qcfg)
+        task.quantizer.configure(perchannel=True)
+        for batch in batches:
+            task.add_batch(batch, None)
+        return task
+
+    gptq = build(GPTQ, QuantizeConfig(bits=4, group_size=8, desc_act=False))
+    gptq.materialize_global_hessian()
+    foem = build(
+        FOEM,
+        QuantizeConfig(
+            bits=4,
+            group_size=8,
+            desc_act=False,
+            foem=FOEMConfig(alpha=0.0, beta=0.0),
+        ),
+    )
+
+    assert _normalized_error(foem.H, gptq.H) <= 1e-6
+
+    foem_out = foem.quantize()
+    gptq_out = gptq.quantize()
+
+    assert foem_out[7] == gptq_out[7] == rows.shape[0]
+    torch.testing.assert_close(
+        torch.tensor(float(foem_out[5])),
+        torch.tensor(float(gptq_out[5])),
+        rtol=1e-6,
+        atol=0,
+    )
+    torch.testing.assert_close(foem_out[0], gptq_out[0], rtol=1e-6, atol=1e-6)
