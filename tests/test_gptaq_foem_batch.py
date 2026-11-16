@@ -103,6 +103,107 @@ def test_native_capture_skips_empty_samples_like_gptq_processor(kind):
     assert quantizer.H.shape == (8, 8)
 
 
+def _run_flattened(kind, module, batches):
+    """Capture flattened ``[B*S, H]`` forwards, then replay GPTQProcessor's 2-D split.
+
+    HF qwen2_moe calls its ``shared_expert`` on ``hidden_states.view(-1, H)``.
+    GPTQProcessor's hook then slices ``inp[b*S:(b+1)*S][keep[b]]`` and calls
+    ``add_batch`` once per kept sample, so the native capture must produce the
+    same per-sample entries.
+    """
+
+    qcfg = _qcfg(kind)
+    named = NamedModule(module, name="shared_expert.gate_proj", full_name="model.layers.0.mlp.shared_expert.gate_proj", layer_index=0)
+    processor = NativeProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=CalibrationConfig(dataset=None, batch_size=4),
+    )
+    processor.preprocess(named)
+    hook = processor.pre_process_fwd_hook(named.name)
+    for batch_index, (x, keep_mask) in enumerate(batches):
+        processor._mask_tls = threading.local()
+        processor._mask_tls.value = keep_mask
+        processor._set_current_batch_index(batch_index)
+        hook(module, (x.reshape(-1, x.shape[-1]),), None)
+    processor.process(named)
+
+    quantizer = _cls(kind)(named, qcfg)
+    for batch_index, (x, keep_mask) in enumerate(batches):
+        flat = x.reshape(-1, x.shape[-1])
+        seq_len = keep_mask.shape[1]
+        processor._set_current_batch_index(batch_index)
+        for sample_index in range(x.shape[0]):
+            if not keep_mask[sample_index].any():
+                continue
+            start = sample_index * seq_len
+            sample = flat[start:start + seq_len][keep_mask[sample_index]]
+            quantizer.add_batch(sample, None, batch_index=batch_index)
+    return quantizer
+
+
+@pytest.mark.parametrize("kind", ["gptaq", "foem"])
+def test_flattened_native_capture_matches_per_sample_reference(kind):
+    """A ``[B*S, H]`` module input splits per sample like a ``[B, S, H]`` one (#4457)."""
+
+    torch.manual_seed(4)
+    module = nn.Linear(8, 4, bias=False)
+    # Variable-length rows padded to S=4, plus one fully padded sample.
+    x = torch.randn(4, 4, 8)
+    keep_mask = torch.tensor(
+        [
+            [True, True, True, True],
+            [True, True, False, False],
+            [False, False, False, False],
+            [True, True, True, False],
+        ]
+    )
+
+    batched = _run_flattened(kind, module, [(x, keep_mask)])
+    reference = _run(
+        kind,
+        module,
+        [(x[i:i + 1], keep_mask[i:i + 1]) for i in range(x.shape[0]) if keep_mask[i].any()],
+    )
+
+    assert batched.nsamples == reference.nsamples == int(keep_mask.sum())
+    torch.testing.assert_close(batched.H, reference.H, rtol=1e-6, atol=1e-6)
+    assert batched.dXXT is not None
+    torch.testing.assert_close(batched.dXXT, reference.dXXT, rtol=1e-6, atol=1e-6)
+
+
+def test_flattened_native_entries_drop_padding_rows():
+    """Native entries for flattened rows keep exactly the masked rows of each sample."""
+
+    torch.manual_seed(5)
+    module = nn.Linear(8, 4, bias=False)
+    x = torch.randn(3, 5, 8)
+    keep_mask = torch.tensor(
+        [
+            [True, True, True, False, False],
+            [False, False, False, False, False],
+            [True, True, True, True, True],
+        ]
+    )
+    named = NamedModule(module, name="shared_expert.up_proj", full_name="model.layers.0.mlp.shared_expert.up_proj", layer_index=0)
+    processor = NativeProcessor(
+        tokenizer=None,
+        qcfg=_qcfg("gptaq"),
+        calibration=CalibrationConfig(dataset=None, batch_size=3),
+    )
+    processor.preprocess(named)
+    processor._mask_tls = threading.local()
+    processor._mask_tls.value = keep_mask
+    processor._set_current_batch_index(0)
+    processor.pre_process_fwd_hook(named.name)(module, (x.reshape(-1, 8),), None)
+    processor.process(named)
+
+    entries = named.state[NATIVE_INPUTS_STATE_KEY]
+    assert [batch for batch, _ in entries] == [0, 0]
+    torch.testing.assert_close(entries[0][1].cpu(), x[0][keep_mask[0]])
+    torch.testing.assert_close(entries[1][1].cpu(), x[2][keep_mask[2]])
+
+
 def _foem_quantize(blocksize, *, group_size=-1, beta=0.2, columns=512, rows=16):
     """Quantize one synthetic linear with FOEM and return Q plus the avg loss."""
 

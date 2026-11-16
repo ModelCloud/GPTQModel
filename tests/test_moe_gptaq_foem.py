@@ -176,7 +176,7 @@ def _build_tiny_qwen2_moe(model_dir: Path):
     return config, fast_tokenizer, calibration
 
 
-def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, device, dtype):
+def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, device, dtype, batch_size: int = 1):
     from gptqmodel import BACKEND, GPTQModel
 
     model = GPTQModel.load(
@@ -187,7 +187,7 @@ def _quantize_and_load(model_dir: Path, output_dir: Path, calibration, qcfg, dev
     )
     model.quantize(
         calibration,
-        batch_size=1,
+        batch_size=batch_size,
         backend=BACKEND.TORCH,
         calibration_data_min_length=1,
     )
@@ -204,7 +204,11 @@ def _perplexity(model, tokenizer, text: str) -> float:
 
 
 @pytest.mark.slow
-def test_tiny_qwen2_moe_gptaq_and_foem_quantize(tmp_path: Path):
+# batch_size=4 pads the variable-length rows. HF qwen2_moe calls its
+# shared_expert on flattened `[B*S, H]` rows, so the native capture must split
+# them per sample exactly like the quantized-pass hook (#4457).
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_tiny_qwen2_moe_gptaq_and_foem_quantize(tmp_path: Path, batch_size: int):
     """The issue's repro: GPTAQ and FOEM must complete on a routed Qwen2-MoE."""
 
     from gptqmodel import QuantizeConfig
@@ -232,7 +236,7 @@ def test_tiny_qwen2_moe_gptaq_and_foem_quantize(tmp_path: Path):
     loaded = {}
     for name, qcfg in controls.items():
         loaded[name] = _quantize_and_load(
-            model_dir, tmp_path / name, calibration, qcfg, device, dtype
+            model_dir, tmp_path / name, calibration, qcfg, device, dtype, batch_size=batch_size
         )
 
     eval_text = (
