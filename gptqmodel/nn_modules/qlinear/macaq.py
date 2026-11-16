@@ -208,7 +208,8 @@ class MacaqLinear(WeightOnlyQuantLinear):
     def _refresh_transform_flags(self) -> None:
         """Record whether the stored activation transforms are identities.
 
-        ``block_hadamard=False`` stores an identity ``BH`` and ``pre_mode="none"``
+        ``hadamard=False`` (which trades accuracy for faster inference)
+        stores an identity ``BH`` and ``pre_mode="none"``
         stores a unit ``pre_scale``. Multiplying by either is exact in every
         compute dtype, so skipping them changes no output bit; with both
         skipped the W4A16 forward is a plain MXFP4 matmul.

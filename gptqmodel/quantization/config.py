@@ -6174,11 +6174,14 @@ class MacaqConfig(PreProcessorConfig):
     # Block-Hadamard width. 32 matches the MXFP4 scale group and enables the
     # fused rotate+quantize Triton kernel; larger powers of two are supported.
     had_block: int = field(default=32)
-    # Rotate weights and activations by the block Hadamard. `False` keeps the
+    # Rotate weights and activations by the block Hadamard (default `True`).
+    # `False` trades accuracy for faster inference: quantization stays in the
     # original frame (an identity `BH` is stored, so the checkpoint layout is
-    # unchanged); with `pre_mode="none"` and `w4a16` the runtime has no online
-    # activation transform and the layer is a plain MXFP4 matmul.
-    block_hadamard: bool = field(default=True)
+    # unchanged) and, with `pre_mode="none"` and `w4a16`, the runtime has no
+    # online activation transform, so the layer is a plain MXFP4 matmul that
+    # also exports to stock MLX. Expect higher quantization error than with
+    # the rotation, most of all for W4A4 where it suppresses activation outliers.
+    hadamard: bool = field(default=True)
     # Greedy single-level flip refinement in the fixed Hessian metric.
     do_flip: bool = field(default=True)
     n_flip_iters: int = field(default=256)
@@ -6197,7 +6200,7 @@ class MacaqConfig(PreProcessorConfig):
     activation_precision: str = field(default="w4a4")
 
     _DYNAMIC_FIELDS = frozenset({
-        "had_block", "block_hadamard", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
+        "had_block", "hadamard", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
         "pre_mode", "pre_alpha", "exp_screen", "exp_offsets",
         "activation_precision",
     })
@@ -6234,7 +6237,7 @@ class MacaqConfig(PreProcessorConfig):
         out["sym"] = self.sym
         out["block_size"] = self.block_size
         out["had_block"] = self.had_block
-        out["block_hadamard"] = self.block_hadamard
+        out["hadamard"] = self.hadamard
         out["do_flip"] = self.do_flip
         out["n_flip_iters"] = self.n_flip_iters
         out["fast_flip"] = self.fast_flip
@@ -6279,7 +6282,7 @@ class MacaqConfig(PreProcessorConfig):
 
         self.block_size = int(self.block_size)
         self.had_block = int(self.had_block)
-        self.block_hadamard = bool(self.block_hadamard)
+        self.hadamard = bool(self.hadamard)
         self.n_flip_iters = int(self.n_flip_iters)
         self.ridge = float(self.ridge)
         self.pre_alpha = float(self.pre_alpha)

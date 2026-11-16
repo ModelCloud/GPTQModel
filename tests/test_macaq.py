@@ -1209,19 +1209,19 @@ def test_hf_from_pretrained_refuses_macaq_checkpoint(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# rotation-free (block_hadamard=False) weight-only MXFP4
+# rotation-free (hadamard=False) weight-only MXFP4
 # ---------------------------------------------------------------------------
 def _identity_bh(device="cpu"):
     return torch.eye(32, dtype=torch.bfloat16, device=device)
 
 
-def test_block_hadamard_false_quantizes_in_the_original_frame():
+def test_hadamard_false_quantizes_in_the_original_frame():
     torch.manual_seed(41)
     weight = torch.randn(16, 128)
     hessian = torch.eye(128)
 
     result = macaq.macaq_quantize_weight(
-        weight, hessian, 128, block_hadamard=False, pre_mode="none",
+        weight, hessian, 128, hadamard=False, pre_mode="none",
         do_flip=False, exp_offsets=(0,), return_dequantized=True,
     )
 
@@ -1234,13 +1234,13 @@ def test_block_hadamard_false_quantizes_in_the_original_frame():
     assert torch.equal(result.dequantized_weight, expected_values)
 
 
-def test_block_hadamard_false_flip_refinement_reduces_hessian_error():
+def test_hadamard_false_flip_refinement_reduces_hessian_error():
     torch.manual_seed(43)
     weight = torch.randn(32, 128)
     calibration = torch.randn(512, 128) * torch.linspace(0.1, 3.0, 128)
     hessian = calibration.T @ calibration
 
-    common = {"block_hadamard": False, "pre_mode": "none", "return_dequantized": True}
+    common = {"hadamard": False, "pre_mode": "none", "return_dequantized": True}
     rtn = macaq.macaq_quantize_weight(weight, hessian, 512, do_flip=False, exp_screen=False, **common)
     refined = macaq.macaq_quantize_weight(weight, hessian, 512, n_flip_iters=64, **common)
 
@@ -1250,11 +1250,11 @@ def test_block_hadamard_false_flip_refinement_reduces_hessian_error():
     )
 
 
-def test_macaq_quantizer_honors_block_hadamard_false():
+def test_macaq_quantizer_honors_hadamard_false():
     torch.manual_seed(47)
     layer = torch.nn.Linear(128, 16, bias=False)
     config = MacaqConfig(
-        block_hadamard=False, pre_mode="none", activation_precision="w4a16",
+        hadamard=False, pre_mode="none", activation_precision="w4a16",
         n_flip_iters=16, offload_to_disk=False,
     )
     quantizer = macaq.Macaq(layer, config)
@@ -1270,19 +1270,19 @@ def test_macaq_quantizer_honors_block_hadamard_false():
     assert relative < 0.2
 
 
-def test_macaq_config_block_hadamard_roundtrip_and_legacy_default():
-    config = MacaqConfig(block_hadamard=False, activation_precision="w4a16", offload_to_disk=False)
+def test_macaq_config_hadamard_roundtrip_and_legacy_default():
+    config = MacaqConfig(hadamard=False, activation_precision="w4a16", offload_to_disk=False)
     payload = config.to_dict()
-    assert payload["block_hadamard"] is False
-    assert QuantizeConfig.from_quant_config(payload).block_hadamard is False
+    assert payload["hadamard"] is False
+    assert QuantizeConfig.from_quant_config(payload).hadamard is False
 
     # Checkpoints written before the field existed were always rotated.
     legacy = dict(payload)
-    legacy.pop("block_hadamard")
-    assert QuantizeConfig.from_quant_config(legacy).block_hadamard is True
+    legacy.pop("hadamard")
+    assert QuantizeConfig.from_quant_config(legacy).hadamard is True
 
     # Accepted as a per-module `dynamic` override.
-    MacaqConfig(dynamic={"mlp": {"block_hadamard": False}}, offload_to_disk=False)
+    MacaqConfig(dynamic={"mlp": {"hadamard": False}}, offload_to_disk=False)
 
 
 def _packed_module(result, *, activation_precision, backend=BACKEND.MACAQ_TORCH, cls=MacaqLinear,
@@ -1304,7 +1304,7 @@ def _rotation_free_result(device="cpu", in_features=128, out_features=16):
     weight = torch.randn(out_features, in_features, device=device)
     calibration = torch.randn(256, in_features, device=device)
     return macaq.macaq_quantize_weight(
-        weight, calibration.T @ calibration, 256, block_hadamard=False, pre_mode="none",
+        weight, calibration.T @ calibration, 256, hadamard=False, pre_mode="none",
         n_flip_iters=8,
     )
 
