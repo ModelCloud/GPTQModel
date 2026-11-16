@@ -27,6 +27,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+from transformers.utils import cached_file
 
 from ..utils import _MONKEY_PATCH_LOCK
 
@@ -2834,30 +2835,82 @@ def load_hf_tokenizer(
 
 _patch_transformers_remote_code_compat()
 
+def _sampling_fields_request_sampling(cfg: GenerationConfig) -> bool:
+    """Whether sampling-only fields contradict an explicitly greedy config.
+
+    Transformers refuses to save a config that sets these fields while
+    ``do_sample`` is ``False``. The checkpoint's fields are authoritative, so
+    this is used only to repair that specific contradiction.
+    """
+    if getattr(cfg, "temperature", None) is not None and cfg.temperature != 1.0:
+        return True
+    if getattr(cfg, "top_p", None) is not None and cfg.top_p != 1.0:
+        return True
+    if getattr(cfg, "min_p", None) is not None:
+        return True
+    if getattr(cfg, "typical_p", None) is not None and cfg.typical_p != 1.0:
+        return True
+    # contrastive search uses top_k
+    if (
+        getattr(cfg, "top_k", None) is not None
+        and cfg.top_k != 50
+        and getattr(cfg, "penalty_alpha", None) is None
+    ):
+        return True
+    if getattr(cfg, "epsilon_cutoff", None) is not None and cfg.epsilon_cutoff != 0.0:
+        return True
+    if getattr(cfg, "eta_cutoff", None) is not None and cfg.eta_cutoff != 0.0:
+        return True
+    return False
+
+
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
     if cfg is None:
         return changed
 
-    if getattr(cfg, "do_sample", None) is not True:
+    # `do_sample` is owned by the checkpoint: never force sampling on. An
+    # absent value means the transformers default (greedy), and an explicit
+    # value must survive load/save unchanged. The only repair is an explicitly
+    # greedy config whose own sampling fields contradict it, which transformers
+    # rejects when saving.
+    if getattr(cfg, "do_sample", None) is False and _sampling_fields_request_sampling(cfg):
         cfg.do_sample = True
         changed = True
+        log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
     return changed
 
 
-def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+def _read_generation_config_payload(path: str) -> Optional[dict]:
+    """Read the raw ``generation_config.json`` without normalizing its values."""
     try:
-        # transformers >= 5 exposes generation configs through from_pretrained
-        # only; the old `get_config_dict` helper no longer exists. Calling it
-        # raised AttributeError on every model, so this branch was dead and the
-        # caller always fell back to a defaults-only config.
-        #
-        # `do_sample=True` is passed here rather than forced afterwards: the
-        # loader validates sampling fields (temperature/top_p/top_k) against the
-        # file's own `do_sample`, so a `do_sample: false` config would warn that
-        # those flags "are not valid and may be ignored" before we flip the bit.
-        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+        config_path = cached_file(path, "generation_config.json")
+    except Exception:
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+    declared = _read_generation_config_payload(path)
+    try:
+        if declared is None:
+            # No readable payload, so there is no declared `do_sample` to
+            # preserve. Let transformers resolve the defaults.
+            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
+        else:
+            # Load with `do_sample=True` so transformers does not warn that the
+            # file's sampling fields are invalid, then restore the declared
+            # value. The file remains authoritative.
+            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+            cfg.do_sample = declared.get("do_sample") if "do_sample" in declared else None
     except Exception:
         log.debug("generation config %s could not be loaded; falling back to defaults", path, exc_info=True)
         return None
@@ -2887,7 +2940,7 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
             try:
                 cfg = _load_sanitized_generation_config(path)
                 if cfg is None:
-                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
                     _sanitize_generation_config(cfg, drop_sampling_fields=False)
                 if cfg != model.generation_config:
                     # migrated pad_token_id to config
@@ -2911,30 +2964,6 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
 
 def autofix_hf_generation_config(cfg: GenerationConfig):
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
-    # HF has recently started to perform very strict validation model save which results in warnings on load()
-    # to become exceptions on save().
-    if cfg.do_sample is False:
-        errors = 0
-        if hasattr(cfg, "temperature") and cfg.temperature is not None and cfg.temperature != 1.0:
-            errors += 1
-        if hasattr(cfg, "top_p") and cfg.top_p is not None and cfg.top_p != 1.0:
-            errors += 1
-        if hasattr(cfg, "min_p") and cfg.min_p is not None:
-            errors += 1
-        if hasattr(cfg, "typical_p") and cfg.typical_p is not None and cfg.typical_p != 1.0:
-            errors += 1
-        # contrastive search uses top_k
-        if (hasattr(cfg, "top_k") and cfg.top_k is not None and cfg.top_k != 50) and (hasattr(cfg, "penalty_alpha") and cfg.penalty_alpha is None):
-            errors += 1
-        if hasattr(cfg, "epsilon_cutoff") and cfg.epsilon_cutoff is not None and cfg.epsilon_cutoff != 0.0:
-            errors += 1
-        if hasattr(cfg, "eta_cutoff") and cfg.eta_cutoff is not None and cfg.eta_cutoff != 0.0:
-            errors += 1
-
-        # fix wrong do_sample
-        if errors > 0:
-            cfg.do_sample = True
-            log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
 
 def sanitize_model_config(config):
@@ -2944,24 +2973,56 @@ def sanitize_model_config(config):
         del config.attribute_map["max_length"]
 
 
+def _generation_config_payload_contradicts_greedy(data: dict) -> bool:
+    """JSON-payload counterpart of ``_sampling_fields_request_sampling``."""
+    if data.get("do_sample") is not False:
+        return False
+
+    temperature = data.get("temperature")
+    if temperature is not None and temperature != 1.0:
+        return True
+    top_p = data.get("top_p")
+    if top_p is not None and top_p != 1.0:
+        return True
+    if data.get("min_p") is not None:
+        return True
+    typical_p = data.get("typical_p")
+    if typical_p is not None and typical_p != 1.0:
+        return True
+    top_k = data.get("top_k")
+    if top_k is not None and top_k != 50 and data.get("penalty_alpha") is None:
+        return True
+    epsilon_cutoff = data.get("epsilon_cutoff")
+    if epsilon_cutoff is not None and epsilon_cutoff != 0.0:
+        return True
+    eta_cutoff = data.get("eta_cutoff")
+    if eta_cutoff is not None and eta_cutoff != 0.0:
+        return True
+    return False
+
+
 def sanitize_generation_config_file(path: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as fp:
             data = json.load(fp)
     except FileNotFoundError:
         return False
+    except (OSError, TypeError, ValueError):
+        return False
 
-    changed = False
+    if not isinstance(data, dict):
+        return False
 
-    if data.get("do_sample") is not True:
-        data["do_sample"] = True
-        changed = True
+    # Preserve the checkpoint's declared `do_sample`; never add or force it.
+    # Only an explicit greedy declaration contradicted by its own sampling
+    # fields is repaired, because transformers rejects that payload on save.
+    if not _generation_config_payload_contradicts_greedy(data):
+        return False
 
-    if changed:
-        with open(path, "w", encoding="utf-8") as fp:
-            json.dump(data, fp, indent=2)
-
-    return changed
+    data["do_sample"] = True
+    with open(path, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2)
+    return True
 
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(
