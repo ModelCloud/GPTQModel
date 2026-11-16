@@ -475,6 +475,25 @@ still be consumers of a scaled value. Ragged expert batches and coverage counter
 are explicit. An expert with no calibration traffic remains an observed
 coverage gap; static graph completeness does not prove runtime coverage.
 
+## Architecture stress samples
+
+The [six architecture samples](model-dsl-examples/README.md) apply this design
+to [Llama 3.2 1B Instruct](model-dsl-examples/llama32.md),
+[Qwen 3.8 MoE](model-dsl-examples/qwen38.md),
+[DeepSeek V4.1 Flash](model-dsl-examples/deepseek41.md),
+[MiniMax M3.1 Flash](model-dsl-examples/minimax31.md),
+[Muse Spark Open](model-dsl-examples/muse-spark.md) and
+[Kimi K3.1 Pro](model-dsl-examples/kimi31.md). They identify concrete model
+revisions, per-layer variations, computation excerpts and who/what/when
+resource maps. They also expose source/config conflicts and missing evidence;
+they are not complete emitted programs or model-execution tests.
+
+These cases require more than `ATTN_QKV`: recurrent matrices and convolution
+history, latent attention, cross-layer compressed-cache/index reuse, residual
+depth banks, streaming audio and distinct draft/verify resources all belong
+in the same typed program. Every operation still needs a declared portable
+body and numerical contract before execution can be admitted.
+
 ## Request-global memory and every block's resource interface
 
 Tensor inputs/outputs describe value flow. Every computation block must **also
@@ -719,7 +738,8 @@ Observers/Hessians are keyed by graph/value/parameter versions and calibration
 context. The last-use schedule releases captures and dense temporaries; offload,
 cross-device transfer and asynchronous completion dependencies appear in the
 execution plan. Shared read-only programs contain no mutable per-run counters
-or cache. Each invocation owns its scratch, observers and state transaction;
+or cache. Each request owns its declared resources across entry-point calls.
+Each invocation owns its scratch, observers and state transaction;
 shared packed parameters are immutable or replaced under explicit synchronization.
 
 ## Inference and fusion consume the same graph
@@ -834,6 +854,8 @@ HF modeling dependence; coexistence is a migration boundary, not the end design.
 | Quantization lifecycle | Correct pristine/committed versions, shared observation identity, coverage policy, release/offload timing and deterministic dependency scheduling. |
 | Fused/unfused equivalence | Same logical ports and state, independent weight oracle, native kernel support inventory and measured dtype/device accuracy. |
 | Concurrency and persistent storage | Per-invocation state isolation, version invalidation, actual free-threaded/device qualification where applicable; no retained expanded weights. |
+| Resource interfaces and access maps | Missing/undeclared block ports, wrong dtype/extent, phase guards, aliases and cross-layer read/write maps; blocks with no needs have explicit empty resource sets. |
+| Request-resource lifetime | Prefill/decode continuity, cross-layer shared cache/index readers, external leases, completion before reuse, prefix copy-on-write and rollback of all coupled state. |
 
 Textual syntax and backend technology are secondary choices. The invariants to
 settle first are: an executable operation body for every block, complete typed
