@@ -19,6 +19,10 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+)
 
 
 _GEMMA3_REPLAY_MASK_MAPPING = "__gptqmodel_gemma3_replay_mask_mapping"
@@ -314,9 +318,13 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             samples = (dict(sample) if isinstance(sample, Mapping) else sample for sample in samples)
             return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
 
+        label = type(self).__name__
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
         for batch in batched_conversations(samples, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )

@@ -18,6 +18,11 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -391,11 +396,19 @@ class InternVLChatQModel(BaseQModel):
         self.model.mlp1 = move_to(self.model.mlp1, device=CPU)
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del batch_size, kwargs
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, 1):
+        # The InternVL chat path prepares one conversation at a time.
+        for batch in batched_conversations(conversations, 1):
             calib_data.append(self.prepare_inputs_for_conversation(batch[0]))
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )
 
     def move_input_capture_example(self, example, data_device):
         example = super().move_input_capture_example(example, data_device)
