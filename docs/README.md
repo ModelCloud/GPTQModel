@@ -119,6 +119,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [NF12 validation backend and performance flow](nf12-validation-backends.md)
 - [QQQ in-memory kernel selection](qqq-kernel-selection.md)
 - [Rotation Hadamard device dispatch](rotation-device-dispatch.md)
+- [Rotation model support and opt-in gate](rotation-model-support.md)
 - [Runtime prompt input normalization](runtime-prompt-input-normalization.md)
 - [Tenstorrent GPTQ execution](tenstorrent.md)
 - [Torch Fused INT4 transformations](torch_fused_int4_transformations.md)
@@ -178,6 +179,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [ROCm JIT toolkit path resolution](rocm-jit-toolkit-paths.md)
 - [AMD RDNA4 (gfx1200 / gfx1201 / gfx1250) support](rocm-rdna4.md)
 - [Device thread pool error propagation](thread-pool-error-contract.md)
+- [Torch thread caps](thread-caps.md)
 
 ### Adapters and accuracy recovery
 

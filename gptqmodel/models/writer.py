@@ -27,6 +27,7 @@ from .._quant_methods import REFUSED_HF_QUANT_METHODS
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear._fused_train_state import QZEROS_FORMAT_BUFFER
 from ..quantization.config import (
     FORMAT,
     GGUF_EXPORT_QUANT_METHOD,
@@ -894,7 +895,16 @@ def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activa
         files = [checkpoint]
     else:
         raise ValueError("W4A export requires a safetensors file or shard index")
-    expected, seen = set(model.state_dict()), set()
+    # The qzeros layout marker is a persistent buffer so in-process state-dict
+    # transports keep it, but a checkpoint write deliberately omits it. It is
+    # therefore never present in a native W4A checkpoint and must not be part of
+    # the completeness check (issue #4171 item 2).
+    expected = {
+        name for name in model.state_dict()
+        if name != QZEROS_FORMAT_BUFFER
+        and not name.endswith("." + QZEROS_FORMAT_BUFFER)
+    }
+    seen = set()
     for path in files:
         with safe_open(path, framework="pt", device="cpu") as handle:
             values = {name: handle.get_tensor(name) for name in handle.keys()}
@@ -2523,12 +2533,31 @@ def ModelWriter(cls):
         if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             _load_native_w4a_for_save(model, self.checkpoint_file_name, activation_mode=qcfg.activation_mode)
         else:
+            # The export shell starts with zero-filled buffers, so its live
+            # qzeros layout must be declared before the checkpoint words land.
+            # accelerate refills every key a shard omits from these buffers;
+            # without the declaration a stale v1 placeholder would relabel the
+            # shard's v2 words and convert them again (issue #4166).
+            source_format = getattr(qcfg, "_checkpoint_format_on_disk", None)
+            if source_format is None:
+                source_format = resolve_quant_format(qcfg.format, qcfg.method)
+            if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+                for module in model.modules():
+                    if isinstance(module, GPTQQuantLinear):
+                        module._checkpoint_format_on_disk = source_format
+                        module.qzero_format(
+                            format=1 if source_format == FORMAT.GPTQ else 2
+                        )
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=model_dtype,
-                # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=self.checkpoint_file_name,
-                # device_map=device_map,
+                # Load each tensor exactly once. With ``device_map=None``
+                # accelerate 1.15 calls ``set_model_state_dict`` once per
+                # checkpoint file, so the whole module ``load_state_dict``
+                # runs for every shard and a partial shard is completed from
+                # the module's own buffers.
+                device_map={"": "cpu"},
                 # offload_state_dict=True,
                 # offload_buffers=True,
             )

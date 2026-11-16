@@ -38,15 +38,20 @@ IN_FEATURES = 128
 OUT_FEATURES = 64
 
 
-def _inputs(seed: int = 0, group_size: int = GROUP_SIZE):
+def _inputs(
+    seed: int = 0,
+    group_size: int = GROUP_SIZE,
+    in_features: int = IN_FEATURES,
+    out_features: int = OUT_FEATURES,
+):
     torch.manual_seed(seed)
-    linear = nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False)
+    linear = nn.Linear(in_features, out_features, bias=False)
     with torch.no_grad():
         linear.weight.normal_(0.0, 0.1)
-    groups = IN_FEATURES // group_size
-    g_idx = torch.arange(IN_FEATURES, dtype=torch.int32) // group_size
-    scales = torch.rand(OUT_FEATURES, groups, dtype=torch.float32) * 0.05 + 1e-3
-    zeros = torch.randint(0, 1 << BITS, (OUT_FEATURES, groups), dtype=torch.int32)
+    groups = in_features // group_size
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    scales = torch.rand(out_features, groups, dtype=torch.float32) * 0.05 + 1e-3
+    zeros = torch.randint(0, 1 << BITS, (out_features, groups), dtype=torch.int32)
     return linear, scales, zeros, g_idx
 
 
@@ -352,23 +357,32 @@ def _no_inverse_cases():
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 
-    def _gptq_source(group_size: int):
-        linear, scales, zeros, g_idx = _inputs(group_size=group_size)
+    def _gptq_source(
+        group_size: int,
+        *,
+        in_features: int = IN_FEATURES,
+        out_features: int = OUT_FEATURES,
+        checkpoint_format: FORMAT = FORMAT.GPTQ_V2,
+    ):
+        linear, scales, zeros, g_idx = _inputs(
+            group_size=group_size, in_features=in_features, out_features=out_features
+        )
         module = TorchLinear(
             bits=BITS,
             group_size=group_size,
             sym=True,
             desc_act=False,
-            in_features=IN_FEATURES,
-            out_features=OUT_FEATURES,
+            in_features=in_features,
+            out_features=out_features,
             pack_dtype=torch.int32,
             backend=BACKEND.GPTQ_TORCH,
             bias=False,
+            format=checkpoint_format,
         )
         module.pack_original(linear, scales, zeros, g_idx)
         module._init_wf_unsqueeze_buffers()
         module.qzero_format(format=2)
-        module._checkpoint_format_on_disk = FORMAT.GPTQ_V2
+        module._checkpoint_format_on_disk = checkpoint_format
         return _materialize(module)
 
     def _awq_source(group_size: int):
@@ -394,6 +408,36 @@ def _no_inverse_cases():
     return [
         ("marlin", _repack(lambda: _gptq_source(128), BACKEND.MARLIN)),
         ("awq_marlin", _repack(lambda: _awq_source(128), BACKEND.MARLIN)),
+        # Machete and Swordfish prepack ``qweight`` and rewrite ``qzeros`` into
+        # float offsets in ``post_init``; they must refuse a checkpoint write
+        # exactly like Marlin (issue #4171 item 3). Both declare only the v1
+        # ``gptq`` checkpoint format and require 128-aligned output widths.
+        (
+            "machete",
+            _repack(
+                lambda: _gptq_source(
+                    128,
+                    in_features=256,
+                    out_features=128,
+                    checkpoint_format=FORMAT.GPTQ,
+                ),
+                BACKEND.MACHETE,
+            ),
+        ),
+        (
+            "swordfish",
+            _repack(
+                lambda: _gptq_source(
+                    128,
+                    in_features=256,
+                    out_features=128,
+                    checkpoint_format=FORMAT.GPTQ,
+                ),
+                BACKEND.SWORDFISH,
+            ),
+        ),
+        # BitBLAS replaces the checkpoint payload in ``repack_from_gptq``.
+        ("bitblas", _repack(lambda: _gptq_source(128), BACKEND.GPTQ_BITBLAS)),
     ]
 
 
@@ -444,6 +488,30 @@ def test_no_inverse_kernel_state_dict_contract(case):
         checkpoint_layout.load_state_dict(state)
 
     # A checkpoint write must refuse instead of publishing the runtime layout.
+    with checkpoint_serialization():
+        with pytest.raises(RuntimeError, match="cannot be reconstructed"):
+            module.state_dict()
+
+
+def test_any_runtime_layout_flag_refuses_checkpoint_write():
+    """Issue #4171 item 3: the refusal is a property of the runtime layout.
+
+    Machete, Swordfish and BitBLAS rewrite packed tensors without going through
+    a Marlin/ExLlamaV2-specific hook. The base packed-module write path must
+    refuse them from the shared ``_is_runtime_layout()`` contract.
+    """
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.utils.checkpoint_state import checkpoint_serialization
+
+    module = _as_loaded_from(_gptq_source(TorchLinear, BACKEND.GPTQ_TORCH), FORMAT.GPTQ)
+    module._native_shuffled = True
+    assert module._is_runtime_layout()
+
+    # Read-only collection (PEFT) stays usable and labels the payload.
+    state = module.state_dict()
+    assert state[QZEROS_FORMAT_BUFFER].item() == 0
+
     with checkpoint_serialization():
         with pytest.raises(RuntimeError, match="cannot be reconstructed"):
             module.state_dict()

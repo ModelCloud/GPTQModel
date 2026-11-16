@@ -10,6 +10,12 @@ from .llama import LlamaQModel
 
 
 class Qwen2QModel(LlamaQModel):
+    # Qwen2 keeps the Llama decoder layout (an `x * w` RMSNorm and a
+    # post-attention norm that feeds the MLP), so model-wide rotation is
+    # exact. The declaration is per model type and is never inherited; see
+    # `gptqmodel.models.base.rotation_supported`.
+    supports_rotation = frozenset({"qwen2"})
+
     fusable = FusableConfig("qwen2").merge(LlamaFusableConfig())
 
     shared_input_verified_model_types = frozenset({"qwen2"})

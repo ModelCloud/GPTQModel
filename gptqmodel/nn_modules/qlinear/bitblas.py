@@ -809,6 +809,20 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
     def post_init(self) -> None:
         super().post_init()
 
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_native_shuffled", False):
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    f"{self.__class__.__name__} rewrites packed tensors into a "
+                    "kernel-private BitBLAS runtime layout; the original checkpoint "
+                    "tensors cannot be reconstructed. Use `GPTQModel.save()`/"
+                    "`save_quantized()` for a loadable checkpoint, or reload the "
+                    "original checkpoint."
+                )
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+
     def _transform_bitblas_weight(self, intweight_out_in: torch.Tensor, device: torch.device) -> torch.Tensor:
         from bitblas.quantization.utils import general_compress
 
@@ -965,6 +979,9 @@ class BitblasLinear(BitblasBaseQuantLinear):
             intzeros_group_out=intzeros,
             bias=bias,
         )
+        # The checkpoint tensors were replaced by BitBLAS-compressed runtime
+        # words; they cannot be inverted back to the source GPTQ payload.
+        self._native_shuffled = True
 
 
 BitBLASLinear = BitblasLinear

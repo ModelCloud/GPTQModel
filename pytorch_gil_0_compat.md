@@ -175,6 +175,7 @@ results below for that build.
 | `torch.rsqrt` | SAFE (concurrent) | normalization | - |
 | `torch.topk` | SAFE (concurrent) | act-order selection | - |
 | `torch.argsort` | SAFE (concurrent) | act-order selection | - |
+| `_deterministic_segment_sum` (VPTQ k-means) | SAFE (concurrent), CUDA and ROCm | VPTQ weighted k-means codebook reduction | `scripts/gil0_api_probe.py --only 'VPTQ deterministic segment sum'` passed three independent processes per backend with the GIL disabled, each 8 threads x 4 iterations on assigned devices with per-thread streams. The probe covers `torch.bincount`, `torch.cumsum` (float64 prefix), `Tensor.movedim` / `contiguous` / `double`, `Tensor.clamp_min`, and boolean-mask assignment, and compares every result with an independent float64 `index_add_` oracle (relative error < 1e-6). Empty buckets must be exactly zero and repeat calls must be bitwise identical. |
 | `torch.sum` | SAFE (concurrent) | reductions | Reduction kernels use the current stream. |
 | `torch.mean` | SAFE (concurrent) | reductions | - |
 | `torch.all` | SAFE (concurrent) | validation | - |
