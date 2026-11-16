@@ -1006,6 +1006,87 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     return converted
 
 
+# Fused expert projections that Defuser splits from one 3-D tensor into a
+# per-expert ``nn.Linear``. These names match
+# ``defuser.modeling.moe_experts_interface.KNOWN_PROJECTION_PATTERNS``.
+_FUSED_EXPERT_PROJECTION_NAMES = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
+
+
+def _meta_fused_expert_params(model) -> int:
+    """Park fused 3-D expert projections on meta before Defuser splits them.
+
+    Defuser's tensor defusion copies the whole fused projection to the host and
+    materializes one dense bf16 ``nn.Linear`` per expert. On the quantized-load
+    path those linears are replaced by quantized kernels and filled from the
+    checkpoint right afterwards, so the copies only inflate host memory: an
+    OLMoE-1B-7B 4-bit reload peaked at 12.17 GiB RssAnon for a 3.66 GiB
+    checkpoint (issue #4400).
+
+    Defuser skips tensors that already live on meta, so move the fused
+    projections (and their fused biases) there first; the checkpoint loader
+    then materializes the packed weights straight from disk. Only call this
+    from the quantized-load path: quantization needs the fused values in host
+    memory so Defuser can produce real per-expert linears to quantize.
+
+    Returns the number of parameters/buffers moved.
+    """
+
+    moved = 0
+    for module in model.modules():
+        for projection in _FUSED_EXPERT_PROJECTION_NAMES:
+            weight = module._parameters.get(projection)
+            if weight is None:
+                weight = module._buffers.get(projection)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 3:
+                continue
+            # The fused bias is a 2-D (num_experts, out_features) sibling.
+            for attr in (projection, f"{projection}_bias"):
+                parameter = module._parameters.get(attr)
+                buffer = module._buffers.get(attr)
+                tensor = parameter if parameter is not None else buffer
+                if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
+                    continue
+                empty = torch.empty_like(tensor, device="meta")
+                if parameter is not None:
+                    module._parameters[attr] = torch.nn.Parameter(
+                        empty, requires_grad=parameter.requires_grad
+                    )
+                else:
+                    module._buffers[attr] = empty
+                moved += 1
+    return moved
+
+
+def _materialize_meta_expert_linears(model) -> int:
+    """Restore real CPU storage for the linears Defuser built on meta.
+
+    Defuser materializes meta expert projections as meta ``nn.Linear`` shells
+    (see :func:`_meta_fused_expert_params`). ``to_empty`` allocates their
+    uninitialized storage without touching pages, so the host RSS stays flat;
+    ``make_quant`` then replaces them with kernels whose own buffers are
+    created on a real device. Without this step those kernels would inherit a
+    meta shell, leaving non-checkpoint buffers (``qzeros_format``, ``input_perm``,
+    ...) on meta and breaking the later ``model.to(device)`` dispatch.
+
+    Only fully-meta modules are touched, so the real CPU weights built by
+    ``from_config`` are never discarded.
+
+    Returns the number of modules materialized.
+    """
+
+    moved = 0
+    for module in model.modules():
+        tensors = [*module._parameters.values(), *module._buffers.values()]
+        tensors = [tensor for tensor in tensors if isinstance(tensor, torch.Tensor)]
+        if not tensors or not any(tensor.device.type == "meta" for tensor in tensors):
+            continue
+        if any(tensor.device.type != "meta" for tensor in tensors):
+            continue
+        module.to_empty(device="cpu")
+        moved += 1
+    return moved
+
+
 def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
     """Detect whether the resolved HF architecture exposes FA2 kernels."""
 
@@ -2713,7 +2794,15 @@ def ModelLoader(cls):
                     )
                 else:
                     raise
+            # This path replaces the fused experts with quantized kernels and
+            # fills them from the checkpoint, so keep Defuser's per-expert
+            # copies off the host (issue #4400).
+            _meta_fused_expert_params(model)
             _convert_model_with_defuser(cls, model, cleanup_original=True)
+            # Defuser built the split experts on meta; give them real (but
+            # uninitialized) host storage so the quantized kernels start on a
+            # materialized device.
+            _materialize_meta_expert_linears(model)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)

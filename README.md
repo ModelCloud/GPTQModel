@@ -92,8 +92,10 @@ Quantized kernels keep only packed weights resident; shared per-device scratch a
   are per-run scratch space and are removed at teardown or failure;
   [reference offload](https://github.com/ModelCloud/GPTQModel/blob/main/docs/safetensors-reference-offload.md)
   keeps untouched base modules as source-checkpoint references instead of
-  second copies, and releases pinned staging memory. Distributed EXL3
-  workflows support durable replay and resume.
+  second copies, and releases pinned staging memory. Quantized MoE reloads park
+  fused expert projections on `meta` until the packed weights are read
+  ([meta fused-expert shell](docs/quantized-moe-reload-meta-shell.md)).
+  Distributed EXL3 workflows support durable replay and resume.
 - **Recover accuracy.** Use [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) refinement, [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) low-rank compensation, [rotation](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#rotations),
   [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) training and adapter
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the

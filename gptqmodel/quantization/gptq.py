@@ -2578,250 +2578,288 @@ class GPTQ:
         if Hinv is not None:
             self.H = None
 
-        Losses = torch.zeros_like(W)
-        Q = torch.zeros_like(W)
-
-        fused_block_update = None
-        if (
-            Hinv is not None
-            and W.device.type == "cuda"
-            and blocksize == 128
-            and self.qcfg.bits in (2, 3, 4, 5, 6, 7, 8)
-            and self.quantizer._maxq_value == (1 << self.qcfg.bits) - 1
-            and not self.qcfg.mock_quantization
-            and type(self.quantizer) is Quantizer
-            and resolve_kernel_config(self.qcfg).gptq_fused_block_update
-        ):
-            from .gptq_cuda import block_update_available, gptq_block_update
-
-            if block_update_available():
-                fused_block_update = gptq_block_update
-
-        # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization:
-            # Keep each dynamic group within a block. A group that straddles
-            # Q1 would write beyond its bounds and append duplicate metadata.
-            mock_blocksize = (
-                self.qcfg.group_size
-                if not self.qcfg.static_groups and self.qcfg.group_size > 0
-                else blocksize
-            )
-            for i1 in range(0, self.columns, mock_blocksize):
-                i2 = min(i1 + mock_blocksize, self.columns)
-                count = i2 - i1
-
-                W1 = W[:, i1:i2]
-                Q1 = torch.zeros_like(W1)
-
-                # Handle group quantization parameters efficiently (similar to original)
-                if self.qcfg.group_size != -1:
-                    if not self.qcfg.static_groups:
-                        for group_start in range(i1, i2, self.qcfg.group_size):
-                            group_end = min(
-                                group_start + self.qcfg.group_size,
-                                i2,
-                            )
-                            self.quantizer.find_params(
-                                W[:, group_start:group_end],
-                                weight=True,
-                            )
-                            scale.append(self.quantizer.scale)
-                            zero.append(self.quantizer.zero)
-                            now_idx += 1
-                            for column in range(group_start, group_end):
-                                q = self.quantizer.quantize(
-                                    W[:, column : column + 1]
-                                ).flatten()
-                                Q1[:, column - i1] = q
-                    else:
-                        # A static block can cross several reordered groups.
-                        for i in range(count):
-                            column = i1 + i
-                            idx = i1 + i
-                            if self.qcfg.desc_act:
-                                idx = perm[idx]
-                            elif self.qcfg.act_group_aware and use_hessian:
-                                idx = final_perm[idx]
-                            self.quantizer = groups[idx // self.qcfg.group_size]
-                            q = self.quantizer.quantize(
-                                W[:, column : column + 1]
-                            ).flatten()
-                            Q1[:, column - i1] = q
-                else:
-                    # No grouping - vectorized quantization for entire block
-                    maxq_val = 2 ** self.qcfg.bits - 1
-                    if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
-                        latest_scale, latest_zero = _replace_zero_scale(
-                            self.quantizer.scale, self.quantizer.zero
-                        )
-
-                        if latest_scale.dim() == 1:
-                            latest_scale = latest_scale.view(-1, 1)
-                        if latest_zero.dim() == 1:
-                            latest_zero = latest_zero.view(-1, 1)
-
-                        if self.qcfg.sym:
-                            Q1 = latest_scale * torch.clamp(
-                                torch.round(W1 / latest_scale),
-                                -(maxq_val // 2),
-                                maxq_val // 2
-                            )
-                        else:
-                            quantized = torch.clamp(
-                                torch.round(W1 / latest_scale) + latest_zero,
-                                0,
-                                maxq_val
-                            )
-                            Q1 = latest_scale * (quantized - latest_zero)
-                    else:
-                        # Fallback to individual quantization
-                        for i in range(count):
-                            w = W1[:, i]
-                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                            Q1[:, i] = q
-
-                Q[:, i1:i2] = Q1
-        else:
-            # Original heavy loop for normal quantization
-            effective_block = blocksize
-            if Hinv is None and self.qcfg.group_size and self.qcfg.group_size > 0:
-                # Align RTN fallback work chunks to group boundaries to avoid
-                # redundant quantizer reconfiguration across partial groups.
-                effective_block = self.qcfg.group_size
-
-            for i1 in range(0, self.columns, effective_block):
-                i2 = min(i1 + effective_block, self.columns)
-                count = i2 - i1
-
-                W1 = W[:, i1:i2].clone()
-                Q1 = Q[:, i1:i2]
-                # ``Err1`` is fully overwritten per block by the fused kernel (or by
-                # ``torch.sub(..., out=delta)`` in the eager loop) before it is read,
-                # so skip the redundant zero-fill of a 128-column block.
-                Err1 = torch.empty_like(W1) if Hinv is not None else None
-                Losses1 = Losses[:, i1:i2] if Hinv is not None else None
-
+        # The block update and its W-sized scratch run after the inverse
+        # fallback decision, so a CUDA OOM here used to abort the module even
+        # though the run could finish on the host. Retry the whole block pass
+        # on CPU. The first pass may have appended partial scale/zero entries
+        # and advanced the quantizer, so reset that state before re-running.
+        block_retry = False
+        while True:
+            if block_retry:
+                cpu_device = torch.device("cpu")
+                W = W.to(device=cpu_device)
                 if Hinv is not None:
-                    Hinv1 = Hinv[i1:i2, i1:i2]
+                    Hinv = Hinv.to(device=cpu_device)
+                if self.qcfg.static_groups:
+                    for group_quantizer in groups:
+                        group_quantizer.scale = group_quantizer.scale.to(device=cpu_device)
+                        group_quantizer.zero = group_quantizer.zero.to(device=cpu_device)
+                    # Static groups measured their parameters before the block
+                    # pass; keep those entries but on the retry device.
+                    scale = [group_quantizer.scale for group_quantizer in groups]
+                    zero = [group_quantizer.zero for group_quantizer in groups]
+                else:
+                    self.quantizer.find_params(W, weight=True)
+                    scale = []
+                    zero = []
+                now_idx = 1
 
-                if fused_block_update is not None and count == 128:
-                    # Group parameters are based on W, which the eager column
-                    # loop does not modify until after the block. Thus every
-                    # boundary inside this block can be prepared before launch.
-                    block_group_size = self.qcfg.group_size
-                    uniform_group = block_group_size == -1 or (
-                        i1 // block_group_size == (i2 - 1) // block_group_size
-                        and (
-                            not self.qcfg.static_groups
-                            or static_group_perm is None
-                        )
+            try:
+                Losses = torch.zeros_like(W)
+                Q = torch.zeros_like(W)
+
+                fused_block_update = None
+                if (
+                    Hinv is not None
+                    and W.device.type == "cuda"
+                    and blocksize == 128
+                    and self.qcfg.bits in (2, 3, 4, 5, 6, 7, 8)
+                    and self.quantizer._maxq_value == (1 << self.qcfg.bits) - 1
+                    and not self.qcfg.mock_quantization
+                    and type(self.quantizer) is Quantizer
+                    and resolve_kernel_config(self.qcfg).gptq_fused_block_update
+                ):
+                    from .gptq_cuda import block_update_available, gptq_block_update
+
+                    if block_update_available():
+                        fused_block_update = gptq_block_update
+
+                # Use simplified loop when mock_quantization is active
+                if self.qcfg.mock_quantization:
+                    # Keep each dynamic group within a block. A group that straddles
+                    # Q1 would write beyond its bounds and append duplicate metadata.
+                    mock_blocksize = (
+                        self.qcfg.group_size
+                        if not self.qcfg.static_groups and self.qcfg.group_size > 0
+                        else blocksize
                     )
-                    if uniform_group:
-                        # Every column of this block resolves to the same
-                        # quantizer group, so the per-column bookkeeping
-                        # collapses to one lookup and a constant group index.
-                        if block_group_size != -1:
+                    for i1 in range(0, self.columns, mock_blocksize):
+                        i2 = min(i1 + mock_blocksize, self.columns)
+                        count = i2 - i1
+
+                        W1 = W[:, i1:i2]
+                        Q1 = torch.zeros_like(W1)
+
+                        # Handle group quantization parameters efficiently (similar to original)
+                        if self.qcfg.group_size != -1:
                             if not self.qcfg.static_groups:
-                                if i1 % block_group_size == 0:
-                                    self.quantizer.find_params(
-                                        W[:, i1 : i1 + block_group_size], weight=True,
+                                for group_start in range(i1, i2, self.qcfg.group_size):
+                                    group_end = min(
+                                        group_start + self.qcfg.group_size,
+                                        i2,
                                     )
-                                if (i1 // block_group_size) - now_idx == -1:
+                                    self.quantizer.find_params(
+                                        W[:, group_start:group_end],
+                                        weight=True,
+                                    )
                                     scale.append(self.quantizer.scale)
                                     zero.append(self.quantizer.zero)
                                     now_idx += 1
+                                    for column in range(group_start, group_end):
+                                        q = self.quantizer.quantize(
+                                            W[:, column : column + 1]
+                                        ).flatten()
+                                        Q1[:, column - i1] = q
                             else:
-                                self.quantizer = groups[i1 // block_group_size]
-                        block_scale, block_zero = _replace_zero_scale(
-                            self.quantizer.scale, self.quantizer.zero
-                        )
-                        block_scale = block_scale.flatten().unsqueeze(0)
-                        block_zero = block_zero.flatten().unsqueeze(0)
-                        column_group = _uniform_column_group(count, W.device)
-                    else:
-                        block_scales = []
-                        block_zeros = []
-                        column_groups = []
-                        parameter_indices = {}
-                        for i in range(count):
-                            column = i1 + i
-                            if self.qcfg.group_size != -1:
-                                if not self.qcfg.static_groups:
-                                    if column % self.qcfg.group_size == 0:
-                                        self.quantizer.find_params(
-                                            W[:, column : column + self.qcfg.group_size], weight=True,
-                                        )
-                                    if (column // self.qcfg.group_size) - now_idx == -1:
-                                        scale.append(self.quantizer.scale)
-                                        zero.append(self.quantizer.zero)
-                                        now_idx += 1
-                                else:
-                                    source_column = (
-                                        static_group_perm[column].item()
-                                        if static_group_perm is not None
-                                        else column
-                                    )
-                                    self.quantizer = groups[
-                                        source_column // self.qcfg.group_size
-                                    ]
+                                # A static block can cross several reordered groups.
+                                for i in range(count):
+                                    column = i1 + i
+                                    idx = i1 + i
+                                    if self.qcfg.desc_act:
+                                        idx = perm[idx]
+                                    elif self.qcfg.act_group_aware and use_hessian:
+                                        idx = final_perm[idx]
+                                    self.quantizer = groups[idx // self.qcfg.group_size]
+                                    q = self.quantizer.quantize(
+                                        W[:, column : column + 1]
+                                    ).flatten()
+                                    Q1[:, column - i1] = q
+                        else:
+                            # No grouping - vectorized quantization for entire block
+                            maxq_val = 2 ** self.qcfg.bits - 1
+                            if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
+                                latest_scale, latest_zero = _replace_zero_scale(
+                                    self.quantizer.scale, self.quantizer.zero
+                                )
 
-                            key = id(self.quantizer.scale)
-                            group_index = parameter_indices.get(key)
-                            if group_index is None:
-                                group_index = len(block_scales)
-                                parameter_indices[key] = group_index
+                                if latest_scale.dim() == 1:
+                                    latest_scale = latest_scale.view(-1, 1)
+                                if latest_zero.dim() == 1:
+                                    latest_zero = latest_zero.view(-1, 1)
+
+                                if self.qcfg.sym:
+                                    Q1 = latest_scale * torch.clamp(
+                                        torch.round(W1 / latest_scale),
+                                        -(maxq_val // 2),
+                                        maxq_val // 2
+                                    )
+                                else:
+                                    quantized = torch.clamp(
+                                        torch.round(W1 / latest_scale) + latest_zero,
+                                        0,
+                                        maxq_val
+                                    )
+                                    Q1 = latest_scale * (quantized - latest_zero)
+                            else:
+                                # Fallback to individual quantization
+                                for i in range(count):
+                                    w = W1[:, i]
+                                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                                    Q1[:, i] = q
+
+                        Q[:, i1:i2] = Q1
+                else:
+                    # Original heavy loop for normal quantization
+                    effective_block = blocksize
+                    if Hinv is None and self.qcfg.group_size and self.qcfg.group_size > 0:
+                        # Align RTN fallback work chunks to group boundaries to avoid
+                        # redundant quantizer reconfiguration across partial groups.
+                        effective_block = self.qcfg.group_size
+
+                    for i1 in range(0, self.columns, effective_block):
+                        i2 = min(i1 + effective_block, self.columns)
+                        count = i2 - i1
+
+                        W1 = W[:, i1:i2].clone()
+                        Q1 = Q[:, i1:i2]
+                        # ``Err1`` is fully overwritten per block by the fused kernel (or by
+                        # ``torch.sub(..., out=delta)`` in the eager loop) before it is read,
+                        # so skip the redundant zero-fill of a 128-column block.
+                        Err1 = torch.empty_like(W1) if Hinv is not None else None
+                        Losses1 = Losses[:, i1:i2] if Hinv is not None else None
+
+                        if Hinv is not None:
+                            Hinv1 = Hinv[i1:i2, i1:i2]
+
+                        if fused_block_update is not None and count == 128:
+                            # Group parameters are based on W, which the eager column
+                            # loop does not modify until after the block. Thus every
+                            # boundary inside this block can be prepared before launch.
+                            block_group_size = self.qcfg.group_size
+                            uniform_group = block_group_size == -1 or (
+                                i1 // block_group_size == (i2 - 1) // block_group_size
+                                and (
+                                    not self.qcfg.static_groups
+                                    or static_group_perm is None
+                                )
+                            )
+                            if uniform_group:
+                                # Every column of this block resolves to the same
+                                # quantizer group, so the per-column bookkeeping
+                                # collapses to one lookup and a constant group index.
+                                if block_group_size != -1:
+                                    if not self.qcfg.static_groups:
+                                        if i1 % block_group_size == 0:
+                                            self.quantizer.find_params(
+                                                W[:, i1 : i1 + block_group_size], weight=True,
+                                            )
+                                        if (i1 // block_group_size) - now_idx == -1:
+                                            scale.append(self.quantizer.scale)
+                                            zero.append(self.quantizer.zero)
+                                            now_idx += 1
+                                    else:
+                                        self.quantizer = groups[i1 // block_group_size]
                                 block_scale, block_zero = _replace_zero_scale(
                                     self.quantizer.scale, self.quantizer.zero
                                 )
-                                block_scales.append(block_scale.flatten())
-                                block_zeros.append(block_zero.flatten())
-                            column_groups.append(group_index)
-
-                        block_scale = torch.stack(block_scales)
-                        block_zero = torch.stack(block_zeros)
-                        column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
-                    fused_block_update(
-                        W1, Hinv1, block_scale, block_zero, column_group,
-                        Q1, Err1, Losses1, (1 << self.qcfg.bits) - 1,
-                    )
-                else:
-                    for i in range(count):
-                        w = W1[:, i]
-                        if Hinv is not None:
-                            d = Hinv1[i, i]
-
-                        if self.qcfg.group_size != -1:
-                            if not self.qcfg.static_groups:
-                                if (i1 + i) % self.qcfg.group_size == 0:
-                                    self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
-
-                                if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
-                                    scale.append(self.quantizer.scale)
-                                    zero.append(self.quantizer.zero)
-                                    now_idx += 1
+                                block_scale = block_scale.flatten().unsqueeze(0)
+                                block_zero = block_zero.flatten().unsqueeze(0)
+                                column_group = _uniform_column_group(count, W.device)
                             else:
-                                idx = i1 + i
-                                if static_group_perm is not None:
-                                    idx = static_group_perm[idx].item()
+                                block_scales = []
+                                block_zeros = []
+                                column_groups = []
+                                parameter_indices = {}
+                                for i in range(count):
+                                    column = i1 + i
+                                    if self.qcfg.group_size != -1:
+                                        if not self.qcfg.static_groups:
+                                            if column % self.qcfg.group_size == 0:
+                                                self.quantizer.find_params(
+                                                    W[:, column : column + self.qcfg.group_size], weight=True,
+                                                )
+                                            if (column // self.qcfg.group_size) - now_idx == -1:
+                                                scale.append(self.quantizer.scale)
+                                                zero.append(self.quantizer.zero)
+                                                now_idx += 1
+                                        else:
+                                            source_column = (
+                                                static_group_perm[column].item()
+                                                if static_group_perm is not None
+                                                else column
+                                            )
+                                            self.quantizer = groups[
+                                                source_column // self.qcfg.group_size
+                                            ]
 
-                                self.quantizer = groups[idx // self.qcfg.group_size]
+                                    key = id(self.quantizer.scale)
+                                    group_index = parameter_indices.get(key)
+                                    if group_index is None:
+                                        group_index = len(block_scales)
+                                        parameter_indices[key] = group_index
+                                        block_scale, block_zero = _replace_zero_scale(
+                                            self.quantizer.scale, self.quantizer.zero
+                                        )
+                                        block_scales.append(block_scale.flatten())
+                                        block_zeros.append(block_zero.flatten())
+                                    column_groups.append(group_index)
 
-                        q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                        Q1[:, i] = q
+                                block_scale = torch.stack(block_scales)
+                                block_zero = torch.stack(block_zeros)
+                                column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
+                            fused_block_update(
+                                W1, Hinv1, block_scale, block_zero, column_group,
+                                Q1, Err1, Losses1, (1 << self.qcfg.bits) - 1,
+                            )
+                        else:
+                            for i in range(count):
+                                w = W1[:, i]
+                                if Hinv is not None:
+                                    d = Hinv1[i, i]
+
+                                if self.qcfg.group_size != -1:
+                                    if not self.qcfg.static_groups:
+                                        if (i1 + i) % self.qcfg.group_size == 0:
+                                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
+
+                                        if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
+                                            scale.append(self.quantizer.scale)
+                                            zero.append(self.quantizer.zero)
+                                            now_idx += 1
+                                    else:
+                                        idx = i1 + i
+                                        if static_group_perm is not None:
+                                            idx = static_group_perm[idx].item()
+
+                                        self.quantizer = groups[idx // self.qcfg.group_size]
+
+                                q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                                Q1[:, i] = q
+                                if Hinv is not None:
+                                    delta = Err1[:, i]
+                                    torch.sub(w, q, out=delta)
+                                    Losses1[:, i] = delta.square() / d.square()
+                                    delta.div_(d)
+                                    W1[:, i:] -= delta.unsqueeze(1) * Hinv1[i, i:]
+
                         if Hinv is not None:
-                            delta = Err1[:, i]
-                            torch.sub(w, q, out=delta)
-                            Losses1[:, i] = delta.square() / d.square()
-                            delta.div_(d)
-                            W1[:, i:] -= delta.unsqueeze(1) * Hinv1[i, i:]
+                            Losses1.div_(2)
+                            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-                if Hinv is not None:
-                    Losses1.div_(2)
-                    W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-
-                del W1, Q1, Err1, Losses1
-                if Hinv is not None:
-                    del Hinv1
+                        del W1, Q1, Err1, Losses1
+                        if Hinv is not None:
+                            del Hinv1
+                break
+            except RuntimeError as exc:
+                if (
+                    block_retry
+                    or W.device.type != "cuda"
+                    or not _is_memory_allocation_failure(exc)
+                ):
+                    raise
+                self.log_cpu_fallback("block update", W.device)
+                cpu_fallback_used = True
+                block_retry = True
 
         if Hinv is not None:
             del Hinv
