@@ -3123,11 +3123,20 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
     shapes = _checkpoint_tensor_shapes(checkpoint)
     if not shapes:
         return
-    # Only the escape table is data-dependent. `nf12_packed`,
-    # `nf12_exp_base`, and `bias` shapes follow from the module geometry.
-    suffixes = (".nf12_escapes", ".nf12_exp_base")
+    # Only data-dependent buffers are listed here. `nf12_packed`, `nf12_exp_base`,
+    # and `bias` shapes follow from the module geometry. BitsAndBytes stores its
+    # 4-bit QuantState as JSON bytes whose length depends on the serialized
+    # `nested_offset` float, so the module's template-sized buffer can be a few
+    # bytes short. Accelerate assigns these tensors directly (it does not call
+    # `_load_from_state_dict`), so they must be sized before the load.
+    nf12_suffixes = (".nf12_escapes", ".nf12_exp_base")
     for key, shape in shapes.items():
-        suffix = next((item for item in suffixes if key.endswith(item)), None)
+        if key.endswith(".weight_quant_state"):
+            suffix = ".weight_quant_state"
+            expected_quant_type = "bitsandbytes"
+        else:
+            suffix = next((item for item in nf12_suffixes if key.endswith(item)), None)
+            expected_quant_type = "nf12"
         if suffix is None:
             continue
         module_name = key[: -len(suffix)]
@@ -3135,7 +3144,7 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
             module = model.get_submodule(module_name)
         except AttributeError:
             continue
-        if getattr(module, "QUANT_TYPE", None) != "nf12":
+        if getattr(module, "QUANT_TYPE", None) != expected_quant_type:
             continue
         buffer_name = suffix[1:]
         current = getattr(module, buffer_name, None)
@@ -3267,6 +3276,30 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 restore_dtypes[f"{prefix}scales"] = None
             if getattr(module, "QUANT_TYPE", None) == "awq_torch":
                 for buffer_name in ("scales", "bias"):
+                    if isinstance(module._buffers.get(buffer_name), torch.Tensor):
+                        restore_dtypes[f"{prefix}{buffer_name}"] = None
+        # BitsAndBytes keeps its 4-bit quant metadata in state buffers whose
+        # dtype is part of the kernel contract: the floating state tables must
+        # stay FP32 and the packed map/QuantState bytes must stay byte-exact.
+        # Accelerate casts floating buffers to the model dtype for every load
+        # dtype (fp16 included), which makes the first M=1 `gemm_4bit` call
+        # reject a non-FP32 absmax. Restore them from the checkpoint instead.
+        if any(
+            getattr(module, "QUANT_TYPE", None) == "bitsandbytes"
+            and getattr(module, "is_4bit", False)
+            for module in model.modules()
+        ):
+            from ..nn_modules.qlinear.bitsandbytes import (
+                _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES,
+            )
+
+            for name, module in model.named_modules():
+                if getattr(module, "QUANT_TYPE", None) != "bitsandbytes":
+                    continue
+                if not getattr(module, "is_4bit", False):
+                    continue
+                prefix = f"{name}." if name else ""
+                for buffer_name in _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES:
                     if isinstance(module._buffers.get(buffer_name), torch.Tensor):
                         restore_dtypes[f"{prefix}{buffer_name}"] = None
         if restore_checkpoint_buffer_dtypes:
