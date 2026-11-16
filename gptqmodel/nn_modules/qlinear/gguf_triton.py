@@ -1187,7 +1187,8 @@ def _cuda_device_capability(device: torch.device) -> tuple[int, int] | None:
         # skipped; the generic Triton kernels and GGUF_TORCH remain available.
         log.debug.once(
             "GGUF Triton: ROCm host detected; CUDA capability specializations disabled "
-            "(generic launch configs only). The automatic backend is GGUF_TORCH."
+            "(generic launch configs only). AUTO still selects GGUFTritonKernel; "
+            "GGUF_TORCH remains available as a fallback."
         )
         return None
 
