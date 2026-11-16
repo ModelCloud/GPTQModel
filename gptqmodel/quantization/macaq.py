@@ -281,8 +281,14 @@ def pack_mxfp4_from_signed_index(
     sign = _device_const(E2M1_SIGN_BIT, device)[signed_index]
     nibbles = (sign.to(torch.uint8) << 3) | magnitude.to(torch.uint8)
     packed = (nibbles[:, 1::2] << 4) | nibbles[:, 0::2]
-    biased = (log2_scale + 127).clamp(0, 254).to(torch.int32)
-    scales = biased.to(torch.uint8).contiguous().view(torch.float8_e8m0fnu)
+    biased = (log2_scale + 127).clamp(0, 254)
+    # A block holding a NaN/Inf value has no finite E8M0 exponent. Casting the
+    # non-finite exponent to int folds it into a plausible one (0 on CUDA), so
+    # write the format's NaN code (0xFF) instead and let it reach the output.
+    biased = torch.where(
+        torch.isfinite(log2_scale), biased, torch.full_like(biased, 255.0)
+    )
+    scales = biased.to(torch.int32).to(torch.uint8).contiguous().view(torch.float8_e8m0fnu)
     if scales.shape != (out_features, groups):
         raise AssertionError("MACaQ: packed scale shape mismatch")
     return packed.contiguous(), scales
@@ -309,7 +315,13 @@ def dequantize_mxfp4(
     if packed.shape[1] * 2 < in_features:
         raise ValueError("MACaQ: `packed` holds fewer than `in_features` values.")
     scale_bytes = scales.view(torch.uint8)[:out_features, :groups].to(torch.float32)
-    scale = torch.exp2(scale_bytes - 127.0)
+    # E8M0 0xFF is the format's NaN, not 2**128; `pack_mxfp4_from_signed_index`
+    # writes it for a block that held a NaN/Inf value.
+    scale = torch.where(
+        scale_bytes == 255.0,
+        torch.full_like(scale_bytes, float("nan")),
+        torch.exp2(scale_bytes - 127.0),
+    )
     lo = (packed & 0x0F).to(torch.int64)
     hi = ((packed >> 4) & 0x0F).to(torch.int64)
     code = torch.stack([lo, hi], dim=-1).reshape(out_features, packed.shape[1] * 2)[:, :in_features]

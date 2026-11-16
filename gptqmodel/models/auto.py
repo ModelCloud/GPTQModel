@@ -75,7 +75,7 @@ from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import normalize_device  # noqa: E402
 from .base import BaseQModel  # noqa: E402
-from .loader import native_floatx_source_format  # noqa: E402
+from .loader import _explicit_requested_devices, native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.agnes import AgnesQModel  # noqa: E402
 from .definitions.apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel  # noqa: E402
@@ -766,7 +766,7 @@ def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
     kick_torch_quantize_prewarm(target, dtype)
 
 
-def _prebuild_device_thread_pool() -> None:
+def _prebuild_device_thread_pool(device=None) -> None:
     """
     Build the device thread pool before the quantization loop starts.
 
@@ -774,13 +774,19 @@ def _prebuild_device_thread_pool() -> None:
     `DeviceThreadPool._kick_worker_warmups`). Building the pool at load time lets
     those warmups overlap with the (CPU-bound) model load instead of serializing
     in front of the first quantization task.
+
+    When the caller named concrete accelerators (`device=("cuda:1",)`), only
+    those devices may be warmed. The pool still knows about every visible
+    device, but the excluded ones keep no CUDA context and no linalg warmup
+    allocations until work is actually submitted to them.
     """
     if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
         return
 
     from .. import get_device_thread_pool
 
-    get_device_thread_pool()
+    explicit_devices = _explicit_requested_devices(device)
+    get_device_thread_pool(warmup_devices=explicit_devices)
 
 
 class GPTQModel:
@@ -825,7 +831,7 @@ class GPTQModel:
         kwargs["fuse"] = fuse
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
-            _prebuild_device_thread_pool()
+            _prebuild_device_thread_pool(device)
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
@@ -962,7 +968,7 @@ class GPTQModel:
                 model_init_kwargs.get("device_map"),
                 model_init_kwargs,
             )
-            _prebuild_device_thread_pool()
+            _prebuild_device_thread_pool(model_init_kwargs.get("device"))
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,

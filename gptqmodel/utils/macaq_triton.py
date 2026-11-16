@@ -150,6 +150,14 @@ if TRITON_AVAILABLE:
         xl = tl.load(x_ptr + row * stride_xr + col_lo, mask=gid[:, None] < K // 32, other=0).to(tl.float32)
         xh = tl.load(x_ptr + row * stride_xr + col_hi, mask=gid[:, None] < K // 32, other=0).to(tl.float32)
         amax = tl.maximum(tl.max(tl.abs(xl), axis=1), tl.max(tl.abs(xh), axis=1))
+        # `tl.max` drops NaN, so a NaN block would keep a finite exponent and
+        # the NaN would fold into a plausible finite code. E8M0 0xFF is the
+        # format's NaN and the block-scaled GEMM consumes it as such. Inf has no
+        # E8M0 encoding either, so it takes the same path and the two paths stay
+        # consistent.
+        nonfinite = (tl.max(((xl != xl) | (xh != xh)).to(tl.int32), axis=1) > 0) | (
+            amax == float("inf")
+        )
         amax = tl.maximum(amax, 1e-20)
         e = tl.floor(tl.log2(amax)) - 2.0
         e = tl.minimum(tl.maximum(e, -127.0), 127.0)
@@ -167,7 +175,7 @@ if TRITON_AVAILABLE:
 
         pk_off = row * stride_pr + gid[:, None] * 16 + half[None, :]
         tl.store(pk_ptr + pk_off, packed, mask=gid[:, None] < K // 32)
-        sc_byte = (e + 127.0).to(tl.uint8)
+        sc_byte = tl.where(nonfinite, 255.0, e + 127.0).to(tl.uint8)
         tl.store(sc_ptr + row * stride_sr + gid, sc_byte, mask=gid < K // 32)
 
     @triton.jit
@@ -189,6 +197,11 @@ if TRITON_AVAILABLE:
         r = r.to(tl.bfloat16).to(tl.float32)
         rl, rh = tl.split(tl.reshape(r, (BLOCK_G, 16, 2)))
         amax = tl.maximum(tl.max(tl.abs(rl), axis=1), tl.max(tl.abs(rh), axis=1))
+        # Same poisoning as `_quant_mxfp4_kernel`: the rotation already spread a
+        # NaN/Inf input over its 32-value block, so test the rotated values.
+        nonfinite = (tl.max(((rl != rl) | (rh != rh)).to(tl.int32), axis=1) > 0) | (
+            amax == float("inf")
+        )
         amax = tl.maximum(amax, 1e-20)
         e = tl.floor(tl.log2(amax)) - 2.0
         e = tl.minimum(tl.maximum(e, -127.0), 127.0)
@@ -205,7 +218,11 @@ if TRITON_AVAILABLE:
         half = tl.arange(0, 16)
         pk_off = row * stride_pr + gid[:, None] * 16 + half[None, :]
         tl.store(pk_ptr + pk_off, packed, mask=gid[:, None] < K // 32)
-        tl.store(sc_ptr + row * stride_sr + gid, (e + 127.0).to(tl.uint8), mask=gid < K // 32)
+        tl.store(
+            sc_ptr + row * stride_sr + gid,
+            tl.where(nonfinite, 255.0, e + 127.0).to(tl.uint8),
+            mask=gid < K // 32,
+        )
 
     @triton.jit
     def _dense_w4a4_kernel(
@@ -271,7 +288,8 @@ if TRITON_AVAILABLE:
                          tl.where(mlo == 4, 2.0, tl.where(mlo == 5, 3.0, tl.where(mlo == 6, 4.0, 6.0))))
         maghi = tl.where(mhi < 4, mhi.to(tl.float32) * 0.5,
                          tl.where(mhi == 4, 2.0, tl.where(mhi == 5, 3.0, tl.where(mhi == 6, 4.0, 6.0))))
-        factor = tl.exp2(e - 127.0)[:, None]
+        # E8M0 0xFF is NaN, not 2**128.
+        factor = tl.where((e == 255.0)[:, None], float("nan"), tl.exp2(e - 127.0)[:, None])
         vlo = tl.where((lo >> 3) == 1, -1.0, 1.0) * maglo * factor
         vhi = tl.where((hi >> 3) == 1, -1.0, 1.0) * maghi * factor
         base = out_ptr + row * K + gid[:, None] * 32 + half[None, :] * 2
@@ -343,8 +361,14 @@ def dequantize_mxfp4(packed: torch.Tensor, e8m0: torch.Tensor, k: int) -> torch.
     code = torch.stack([lo, hi], dim=-1).reshape(rows, k).long()
     sign = torch.where((code >> 3) & 1 == 1, -1.0, 1.0)
     value = sign * _E2M1_MAG.to(packed.device)[code & 7]
-    scale_bytes = e8m0.view(torch.uint8)[:rows, :k // MXFP4_BLOCK]
-    scale = torch.exp2((scale_bytes.float() - 127.0)).repeat_interleave(32, dim=1)
+    scale_bytes = e8m0.view(torch.uint8)[:rows, :k // MXFP4_BLOCK].to(torch.float32)
+    # E8M0 0xFF is the format's NaN, written for a block that held a NaN/Inf
+    # value; `exp2(255 - 127)` would be a finite-range overflow instead.
+    scale = torch.where(
+        scale_bytes == 255.0,
+        torch.full_like(scale_bytes, float("nan")),
+        torch.exp2(scale_bytes - 127.0),
+    ).repeat_interleave(32, dim=1)
     return value * scale
 
 

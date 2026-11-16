@@ -23,6 +23,7 @@ from transformers.models.gemma.modeling_gemma import GemmaRMSNorm
 from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
+from gptqmodel._rocm_env import running_on_rocm
 from gptqmodel.quantization.awq.modules.act import ScaledActivation
 from gptqmodel.quantization.awq.utils.module import get_op_by_name, set_op_by_name
 from gptqmodel.quantization.norm_tuning import resolve_gain_offset
@@ -129,8 +130,48 @@ def _resolve_module_exec_device(module: nn.Module) -> torch.device:
     return get_device(module)
 
 
+def _release_rocm_layer_cache(module: nn.Module) -> None:
+    """Return AWQ's freed per-layer scratch to the driver on ROCm.
+
+    AWQ's clip search pre-allocates a ``scratch_prod`` buffer per clip-eligible
+    module sized from the GPU MSE budget (256 MiB by default). PyTorch rounds
+    those 255 MiB requests up to 256 MiB segments, and the ROCm default
+    ``max_split_size_mb:256`` makes the allocator refuse to serve any request
+    below 256 MiB from a free block of at least that size (see
+    ``get_free_block``'s "Do not return an oversized block for a large
+    request"). Consecutive modules therefore cannot reuse each other's
+    segments: Qwen3-0.6B adds four 256 MiB plus one 250 MiB segment per decoder
+    layer, and the reserved cache grows by ~1 GiB per layer while active memory
+    stays flat. ``garbage_collection_threshold`` does not help because it is
+    inert without a memory fraction.
+
+    ``apply_clip`` runs once per AWQ layer, after the clip search has released
+    all of those scratch tensors and before the next layer allocates its own.
+    Releasing the unused cache here keeps reserved memory flat. CUDA is not
+    touched, so its allocator keeps its cache and pays no extra ``cudaMalloc``.
+    """
+
+    if not running_on_rocm():
+        return
+    try:
+        if not torch.cuda.is_available():
+            return
+        device = _resolve_module_exec_device(module)
+        if device.type != "cuda":
+            # Offloaded layers keep their weights on the host while the search
+            # scratch still lives on the quantization device.
+            device = torch.device("cuda", torch.cuda.current_device())
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+    except Exception:  # pragma: no cover - cleanup must never fail a run
+        log.debug("AWQ: ROCm per-layer cache release failed", exc_info=True)
+
+
 @torch.inference_mode()
 def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
+    # One layer boundary: the clip-search scratch is already freed here and the
+    # next layer has not allocated yet. See _release_rocm_layer_cache.
+    _release_rocm_layer_cache(module)
     for name, max_val in clip_list:
         layer: nn.Linear = get_op_by_name(module, name)
         original_device = get_device(layer)

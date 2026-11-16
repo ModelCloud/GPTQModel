@@ -417,9 +417,10 @@ def _default_cuda_workers() -> int:
     return 4
 
 
-def _build_device_thread_pool():
+def _build_device_thread_pool(warmup_devices=None):
     return DeviceThreadPool(
         inference_mode=True,
+        warmup_devices=warmup_devices,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
@@ -438,12 +439,15 @@ def _build_device_thread_pool():
     )
 
 
-def get_device_thread_pool():
+def get_device_thread_pool(warmup_devices=None):
     global _DEVICE_THREAD_POOL
     if _DEVICE_THREAD_POOL is None:
         with _DEVICE_THREAD_POOL_LOCK:
             if _DEVICE_THREAD_POOL is None:
-                pool = _build_device_thread_pool()
+                if warmup_devices is None:
+                    pool = _build_device_thread_pool()
+                else:
+                    pool = _build_device_thread_pool(warmup_devices=warmup_devices)
                 # Register before publishing the pool so every caller that
                 # receives it has a matching exit cleanup. Capture this pool:
                 # a later replacement must not leave its workers unjoined.

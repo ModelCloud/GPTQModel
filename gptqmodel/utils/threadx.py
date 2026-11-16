@@ -422,6 +422,11 @@ class _DeviceWorker:
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
         self._pending_warmups = warmup_plan or ()
+        # A worker thread exists as soon as the pool is built, but the CUDA
+        # context is created only when the worker first activates its device.
+        # Keeping activation lazy lets the pool skip devices whose warmup was
+        # not requested (see `DeviceThreadPool(warmup_devices=...)`).
+        self._device_activated = False
 
         if key_override is not None:
             self.key = key_override
@@ -503,6 +508,14 @@ class _DeviceWorker:
             warmup_state.run(device=self.device, rwlock=self.rwlock)
         self._pending_warmups = ()
 
+    def _ensure_device_activated(self) -> None:
+        """Activate this worker's device once, on first real work."""
+
+        if self._device_activated:
+            return
+        _activate_thread_device(self.device)
+        self._device_activated = True
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -513,7 +526,6 @@ class _DeviceWorker:
         may override via `inference_mode`.
         """
         self._apply_cpu_affinity()
-        _activate_thread_device(self.device)
         # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
         # after every task the pool already accepted, so reaching the sentinel
         # means the queue is drained and every accepted future is resolved.
@@ -528,6 +540,7 @@ class _DeviceWorker:
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
                 try:
+                    self._ensure_device_activated()
                     self._run_warmup()
                 except BaseException as exc:
                     # Warmup runs on the worker thread before the task. Report
@@ -664,6 +677,7 @@ class DeviceThreadPool:
         include_cpu: bool = True,
         inference_mode: bool = False,
         warmups: Optional[Dict[str, WarmupTask]] = None,
+        warmup_devices: Optional[Iterable[DeviceLike]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
@@ -694,6 +708,11 @@ class DeviceThreadPool:
                 physical device with `ctx=DEVICE`, then once per worker thread
                 with `ctx=THREAD`. A special key 'default' applies when no
                 family-specific warmup is found.
+            warmup_devices: optional device allow-list for the eager warmup
+                kicked at construction. Devices not listed still get worker
+                threads and can receive work, but their CUDA/XPU/NPU context is
+                not created and their warmup is deferred until the first task.
+                None warms every discovered accelerator (historical behavior).
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -771,6 +790,9 @@ class DeviceThreadPool:
 
         self._inference_mode = bool(inference_mode)
         self._worker_warmups = self._normalize_worker_warmups(warmups)
+        self._warmup_device_keys: Optional[Set[str]] = None
+        if warmup_devices is not None:
+            self._warmup_device_keys = {self._key(_coerce_device(device)) for device in warmup_devices}
         self._device_warmup_lock = threading.Lock()
         self._device_warmup_states: Dict[str, _WorkerWarmupState] = {}
 
@@ -947,6 +969,8 @@ class DeviceThreadPool:
             return
         for key in self._ordered_keys:
             if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
+                continue
+            if self._warmup_device_keys is not None and key not in self._warmup_device_keys:
                 continue
             for worker in self._worker_groups.get(key, ()):
                 # The no-op runs through the worker's normal completion path,

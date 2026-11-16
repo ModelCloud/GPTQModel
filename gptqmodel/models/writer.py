@@ -2573,7 +2573,33 @@ def ModelWriter(cls):
             )
 
         if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+            # The native W4A load assigns the raw checkpoint words directly.
+            # Declare the source layout first, exactly as the non-W4A branch
+            # does: otherwise the export shell labels the source words with its
+            # own (target) format and a re-save shifts every zero point by one
+            # (issue #4323).
+            source_format = getattr(qcfg, "_checkpoint_format_on_disk", None)
+            if source_format is None:
+                source_format = resolve_quant_format(qcfg.format, qcfg.method)
+            if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+                for module in model.modules():
+                    if isinstance(module, GPTQQuantLinear):
+                        module._checkpoint_format_on_disk = source_format
+                        module.qzero_format(
+                            format=1 if source_format == FORMAT.GPTQ else 2
+                        )
             _load_native_w4a_for_save(model, self.checkpoint_file_name, activation_mode=qcfg.activation_mode)
+            # Validate a requested layout change, but do not apply the v1/v2
+            # shift here: ``_load_from_state_dict`` already normalized the live
+            # words to this kernel's runtime layout, and ``_save_to_state_dict``
+            # converts that layout to the target checkpoint format. Applying
+            # ``convert_loaded_qzeros_for_format_change`` would shift a second
+            # time.
+            resolve_resave_format_conversion(qcfg)
+            target_format = resolve_quant_format(qcfg.format, qcfg.method)
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = target_format
         else:
             # The export shell starts with zero-filled buffers, so its live
             # qzeros layout must be declared before the checkpoint words land.
