@@ -63,6 +63,7 @@ CalibrationInputType = Union[
     List[Dict[str, Union[List[int], torch.LongTensor]]],
     List[str],
     List[List[int]],
+    Mapping[str, Any],
     "HFDataset",  # type: ignore[type-arg]  # noqa: F821
     "HFIterableDataset",  # type: ignore[type-arg]  # noqa: F821
 ]
@@ -133,6 +134,88 @@ def _iter_calibration_rows(dataset):
         yield from zip(example["input_ids"], example["attention_mask"])
 
 
+_CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
+
+
+def _is_batched_column(value: Any) -> bool:
+    """Return True when ``value`` holds one entry per calibration row."""
+
+    ndim = getattr(value, "ndim", None)
+    if ndim is not None:
+        return ndim >= 2
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return False
+        first = value[0]
+        first_ndim = getattr(first, "ndim", None)
+        if first_ndim is not None:
+            return first_ndim >= 1
+        return isinstance(first, (list, tuple))
+    return False
+
+
+def _is_columnar_mapping(mapping: Mapping) -> bool:
+    """Return True when a top-level mapping stores columns instead of one row.
+
+    ``tokenizer(texts)`` returns a ``BatchEncoding`` whose ``input_ids`` is 2-D;
+    a dict of columns behaves the same way. A mapping describing a single
+    example instead carries a 1-D ``input_ids``, one ``text`` string, or one
+    ``messages`` conversation.
+    """
+
+    if "input_ids" in mapping:
+        return _is_batched_column(mapping["input_ids"])
+    if "text" in mapping:
+        value = mapping["text"]
+        return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    if "messages" in mapping:
+        value = mapping["messages"]
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return False
+        return len(value) > 0 and isinstance(value[0], (list, tuple))
+    return False
+
+
+def _is_dataset_split_mapping(mapping: Mapping) -> bool:
+    """Return True for a ``DatasetDict``-style mapping of splits to datasets."""
+
+    hf_dataset_types = _hf_dataset_types()
+    if not hf_dataset_types or not mapping:
+        return False
+    return all(isinstance(value, hf_dataset_types) for value in mapping.values())
+
+
+def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
+    """Split a columnar calibration mapping into one mapping per row."""
+
+    primary = next(name for name in _CALIBRATION_COLUMNS if name in mapping)
+    row_count = len(mapping[primary])
+
+    for name in _CALIBRATION_COLUMNS:
+        if name not in mapping or mapping[name] is None:
+            continue
+        try:
+            column_length = len(mapping[name])
+        except TypeError:
+            continue
+        if column_length != row_count:
+            raise ValueError(
+                f"Quantize: calibration mapping column `{name}` has {column_length} rows, "
+                f"expected {row_count} (same as `{primary}`)."
+            )
+
+    examples: List[Dict[str, Any]] = []
+    for row_index in range(row_count):
+        examples.append(
+            {
+                name: (None if mapping[name] is None else mapping[name][row_index])
+                for name in _CALIBRATION_COLUMNS
+                if name in mapping
+            }
+        )
+    return examples
+
+
 def _is_integer_scalar(value: Any) -> bool:
     """Return True for a scalar token id (Python, NumPy, or 0-D torch)."""
 
@@ -186,7 +269,25 @@ def prepare_calibration_dataset(
     if isinstance(calibration_dataset, str):
         raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")
 
-    if hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
+    if isinstance(calibration_dataset, Mapping):
+        if len(calibration_dataset) == 0:
+            raw_examples = []
+        elif _is_columnar_mapping(calibration_dataset):
+            raw_examples = _columnar_mapping_examples(calibration_dataset)
+        elif _is_dataset_split_mapping(calibration_dataset):
+            splits = ", ".join(repr(key) for key in calibration_dataset.keys())
+            raise ValueError(
+                "Quantize: calibration dataset is a mapping of dataset splits "
+                f"({splits}); select one split, e.g. `calibration_dataset['train']`."
+            )
+        elif any(name in calibration_dataset for name in ("input_ids", "text", "messages")):
+            raw_examples = [calibration_dataset]
+        else:
+            raise ValueError(
+                "Quantize: calibration dataset mapping must provide `input_ids`, `text`, "
+                f"or `messages` columns, got keys={list(calibration_dataset.keys())}."
+            )
+    elif hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
         raw_examples = list(calibration_dataset)
     elif isinstance(calibration_dataset, list):
         raw_examples = calibration_dataset
