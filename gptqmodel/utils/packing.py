@@ -797,9 +797,20 @@ def _instantiate_kernel(
 
 
 def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None:
+    from ..nn_modules.qlinear._fused_train_state import checkpoint_layout_tensor
+
     source_tensors: Dict[str, torch.Tensor] = {}
     source_tensors.update(dict(source.named_parameters()))
     source_tensors.update(dict(source.named_buffers()))
+    # A CPU inference forward replaces the packed operands with the kernel's
+    # private int4pack layout (and keeps the checkpoint tensors in a
+    # non-persistent snapshot). Repacking must consume that canonical
+    # checkpoint snapshot, not the transformed runtime operands, or the target
+    # receives an incompatible shape/ABI after one valid forward (#4466).
+    for key in _PACKED_STATE_KEYS:
+        checkpoint_tensor = checkpoint_layout_tensor(source, key)
+        if checkpoint_tensor is not None:
+            source_tensors[key] = checkpoint_tensor
 
     target_tensors: Dict[str, torch.Tensor] = {}
     target_tensors.update(dict(target.named_parameters()))
