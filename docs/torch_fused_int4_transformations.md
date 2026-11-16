@@ -131,7 +131,10 @@ PyTorch’s helper so the layout matches
    `qzeros` lane into `[G, O]` integer codes. `_cpu_int4pack_scale_dtype`
    checks whether the resulting affine offsets remain finite and exact in the
    activation dtype; it selects FP32 metadata when narrowing would lose the
-   offset. Cast `scales` to that compute dtype.
+   offset or a BF16 activation would round an FP16 scale. Build the packed
+   metadata in that compute dtype only: the registered `scales` buffer keeps
+   the checkpoint dtype so a later forward or save cannot persist a narrowed
+   value.
 2. **Unpack + reorder `qweight`** – same as step 3 above, yielding
    `weight_full = [O, I]` with 4-bit integers.
 3. **Convert to int4pack** – `torch.ops.aten._convert_weight_to_int4pack_for_cpu`
@@ -215,7 +218,7 @@ flowchart TD
 | Mechanism | Before | After |
 | --- | --- | --- |
 | GPTQ CPU zero points | `transform_cpu` replaced packed `qzeros` with `zeros_like(scales)` (`gptqmodel/nn_modules/qlinear/torch_fused.py:281` before this change). | It unpacks the checkpoint codes and stores `(8 - zero_code) * scale` offsets (`gptqmodel/nn_modules/qlinear/torch_fused.py:272-295`). |
-| Narrow offset range | `scales` were cast directly to the activation dtype. | `_cpu_int4pack_scale_dtype` chooses FP32 when low-precision offsets would be nonfinite or inexact (`gptqmodel/nn_modules/qlinear/torch_fused.py:277`). |
+| Narrow offset range | `scales` were cast directly to the activation dtype. | `_cpu_int4pack_scale_dtype` chooses FP32 when low-precision offsets would be nonfinite or inexact, or when a BF16 activation would round an FP16 scale. The packed metadata uses that dtype while `self.scales` stays at the checkpoint dtype. |
 | Eval-to-train | Packed checkpoint buffers were already snapshotted. | The same packed snapshot is restored on `train()`, checkpoint load, and export. `clear_weight_cache()` rebuilds derived metadata from the live packed buffers instead. |
 
 On `origin/main` at `520809c8`, a two-group packed checkpoint with codes 12,

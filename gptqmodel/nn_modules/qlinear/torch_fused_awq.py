@@ -235,17 +235,21 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         from .torch_aten_kernel import _cpu_int4pack_scale_dtype
 
-        dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
+        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
 
         # AWQ has no g_idx — weights are already in natural order, just transpose
         # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
         weight = iweight.t().contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
-        self.scales = self.scales.to(dtype=dtype).contiguous()
-        zeros = (zero_offset - izeros.reshape_as(self.scales).float()) * self.scales.float()
-        self.qzeros = zeros.to(device=self.qweight.device, dtype=dtype).contiguous()
-        self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+        # Packed runtime metadata only: ``self.scales`` keeps the checkpoint
+        # dtype so a later forward or save cannot persist a narrowed scale
+        # (issue #4178).
+        compute_scales = self.scales.to(dtype=compute_dtype).contiguous()
+        zeros = (zero_offset - izeros.reshape_as(compute_scales).float()) * compute_scales.float()
+        self.qzeros = zeros.to(device=self.qweight.device, dtype=compute_dtype).contiguous()
+        self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        self._cpu_transform_dtype = dtype
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form
@@ -283,7 +287,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         elif x.device.type == "cpu":
             self.torch_fused_op.out_dtype = (
                 torch.float32
-                if self.bias is not None and x.dtype == torch.float16
+                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
                 else None
             )
             out = self.torch_fused_op(x)
@@ -354,10 +358,15 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
-        scale_dtype = scales.dtype if transformed else None
+        # The packed layout is keyed by the activation dtype it was built for,
+        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
+        # loaded dtype while the affine metadata follows the activation dtype.
+        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
+        if runtime_dtype is None and transformed:
+            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        refinalize_fused_state_after_apply(self, scale_dtype, device)
+        refinalize_fused_state_after_apply(self, runtime_dtype, device)
         return result
 
     def train(self, mode: bool = True):
