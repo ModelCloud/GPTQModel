@@ -163,6 +163,9 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
             intzeros_group_out=intzeros,
             bias=awq_module.bias.detach() if getattr(awq_module, "bias", None) is not None else None,
         )
+        # The source AWQ payload was replaced by BitBLAS-compressed runtime
+        # words; it cannot be inverted back to the checkpoint tensors.
+        self._native_shuffled = True
 
 
 AwqBitBLASLinear = AWQBitBlasKernel
