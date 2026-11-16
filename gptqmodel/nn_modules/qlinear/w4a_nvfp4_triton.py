@@ -49,12 +49,13 @@ def _e2m1_values(codes):
     return tl.where((codes & 8) != 0, -value, value)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
-                                   M: tl.constexpr, K: tl.constexpr,
-                                   PADDED_M: tl.constexpr):
+                                   M, K: tl.constexpr,
+                                   PADDED_M):
     """Legacy version-2 packer retained for checkpoints without a recipe."""
-    row = tl.program_id(0)
+    # rows * K can exceed 2^31; address rows with 64-bit offsets.
+    row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     block = tl.arange(0, 8)
     element = tl.arange(0, 16)
@@ -62,6 +63,13 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # `tl.max` drops NaN, so a NaN block would keep a finite E4M3 scale and
+    # the NaN would fold into a finite code. E4M3 0x7F is NaN and every
+    # consumer multiplies by this scale; Inf has no finite scale either, so
+    # both take the same path and stay consistent across recipes.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse_four = tl.minimum(tl.maximum(tl.div_rn(maximum, 4.0 * global_scale), 2.0**-9), 448.0)
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
@@ -84,15 +92,18 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
-                                 M: tl.constexpr, K: tl.constexpr,
-                                 PADDED_M: tl.constexpr):
+                                 M, K: tl.constexpr,
+                                 PADDED_M):
     """Exact NVIDIA/TorchAO max-scaled E2M1 plus E4M3 block recipe."""
-    row = tl.program_id(0)
+    # rows * K can exceed 2^31; address rows with 64-bit offsets.
+    row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     block = tl.arange(0, 8)
     element = tl.arange(0, 16)
@@ -100,6 +111,10 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse = tl.minimum(
         tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0
     )
@@ -113,14 +128,17 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "PADDED_M"])
 def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
-                          M: tl.constexpr, K: tl.constexpr, PADDED_M: tl.constexpr,
+                          M, K: tl.constexpr, PADDED_M,
                           GRID_SEARCH: tl.constexpr):
-    row = tl.program_id(0)
+    # rows * K can exceed 2^31; address rows with 64-bit offsets.
+    row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     block = tl.arange(0, 8)
     element = tl.arange(0, 16)
@@ -128,6 +146,10 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse_four = tl.minimum(tl.maximum(tl.div_rn(maximum, 4.0 * global_scale), 2.0**-9), 448.0)
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
@@ -228,6 +250,8 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
@@ -280,10 +304,11 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
     return packed.view(torch.float4_e2m1fn_x2), scales
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "PADDED_M"])
 def _decode_nvfp4(Packed, Scales, GlobalScale, Out,
-                  M: tl.constexpr, K: tl.constexpr, PADDED_M: tl.constexpr):
-    row = tl.program_id(0)
+                  M, K: tl.constexpr, PADDED_M):
+    # rows * K can exceed 2^31; address rows with 64-bit offsets.
+    row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     element = tl.arange(0, 128)
     block = element // 16
@@ -329,12 +354,12 @@ def nvfp4_decode(codes: torch.Tensor, scales: torch.Tensor, global_scale: torch.
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _accumulate_fp4_planes(Both, GroupScales, GlobalScale, TokenScale, Bias, Accumulator, Output,
-                           M: tl.constexpr, N: tl.constexpr, FIRST: tl.constexpr,
+                           M, N: tl.constexpr, FIRST: tl.constexpr,
                            LAST: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_TOKEN_SCALE: tl.constexpr,
                            BLOCK: tl.constexpr):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     active = index < M * N
     plane_offset = (index // N) * (2 * N) + index % N
     low = tl.load(Both + plane_offset, active, other=0).to(tl.float32)

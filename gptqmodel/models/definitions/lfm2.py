@@ -8,6 +8,8 @@ from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class LFM2QModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"lfm2"})
+
     fusable = FusableConfig("lfm2").merge(LlamaFusableConfig())
 
     pre_lm_head_norm_module = "model.embedding_norm"
@@ -20,14 +22,16 @@ class LFM2QModel(BaseQModel):
         "#",
         {
             "operator_norm": ("operator_norm:!",),
-            "conv": ("in_proj", "out_proj"),
+            # `out_proj` consumes the convolution output produced from
+            # `in_proj`, so it must not share the producer's subset.
+            "conv": ("in_proj:0", "out_proj:1"),
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:in=x",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
                 "out_proj:1",
             ),
             "ffn_norm": ("ffn_norm:!",),
-            "feed_forward": ("w1:0", "w3:0", "w2:1"),
+            "feed_forward": ("w1:0:in=x", "w3:0:in=x", "w2:1"),
         },
     ]

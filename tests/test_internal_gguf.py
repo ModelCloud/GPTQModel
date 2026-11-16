@@ -217,6 +217,50 @@ def test_internal_gguf_reader_reads_minimal_f32_tensor(tmp_path):
     np.testing.assert_allclose(reader.tensors[0].data, tensor, rtol=0.0, atol=0.0)
 
 
+def test_internal_gguf_bf16_reader_reinterprets_byte_pairs(tmp_path):
+    values = torch.tensor(
+        [
+            [1.0, -2.5, 3.14, 0.001],
+            [70144.0, -0.5, 2.0, -3.0],
+        ],
+        dtype=torch.bfloat16,
+    )
+    encoded = values.view(torch.uint16).numpy().view(np.uint8).reshape(2, 8)
+    path = _write_minimal_gguf_tensor(
+        tmp_path,
+        tensor_type=internal_gguf.GGMLQuantizationType.BF16,
+        shape=(4, 2),
+        data=encoded.tobytes(),
+    )
+
+    reader = internal_gguf.GGUFReader(path)
+    stored = reader.tensors[0].data
+    assert stored.dtype == np.uint8
+    assert stored.shape == (2, 8)
+
+    oracle_u16 = np.ascontiguousarray(stored).view(np.uint16)
+    oracle = np.left_shift(oracle_u16.astype(np.uint32), np.uint32(16)).view(
+        np.float32
+    )
+    expected = values.float().numpy()
+    actual = internal_gguf.dequantize(
+        stored,
+        internal_gguf.GGMLQuantizationType.BF16,
+    )
+    torch_actual = internal_gguf.dequantize_to_torch(
+        stored,
+        internal_gguf.GGMLQuantizationType.BF16,
+        device="cpu",
+        dtype=torch.float32,
+    )
+    qlinear_actual = gguf_qlinear._dequantize_gguf_tensor_numpy(stored, "BF16")
+
+    np.testing.assert_array_equal(actual, oracle)
+    np.testing.assert_array_equal(actual, expected)
+    torch.testing.assert_close(torch_actual, torch.from_numpy(expected), rtol=0, atol=0)
+    np.testing.assert_array_equal(qlinear_actual, expected)
+
+
 def test_internal_gguf_reader_uses_current_nvfp4_storage_size(tmp_path):
     packed = np.arange(36, dtype=np.uint8)
     path = _write_minimal_gguf_tensor(

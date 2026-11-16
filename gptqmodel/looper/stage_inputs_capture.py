@@ -15,7 +15,7 @@ import torch
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
-from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
+from ..nn_modules.hooked_linear import StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
@@ -43,6 +43,29 @@ def _forward_dtype(model: torch.nn.Module) -> Optional[torch.dtype]:
         return next(model.parameters()).dtype
     except (StopIteration, AttributeError, TypeError):
         return None
+
+
+def _branch_first_layer_indices(layer_names: Optional[Sequence[str]]) -> List[int]:
+    """Return the flat index of each concurrent module-tree branch's first layer.
+
+    ``get_layers_with_prefixes`` concatenates each tree variant's layers, so a
+    prefix change marks a branch boundary.  A single-stack model returns one
+    index and keeps the historical early-stop capture path.
+    """
+
+    if not layer_names:
+        return []
+
+    indices: List[int] = []
+    previous_prefix: Optional[str] = None
+    for index, name in enumerate(layer_names):
+        if not name:
+            continue
+        prefix = name.rsplit(".", 1)[0] if "." in name else name
+        if prefix != previous_prefix:
+            indices.append(index)
+            previous_prefix = prefix
+    return indices
 
 
 class StageInputsCapture:
@@ -148,6 +171,8 @@ class StageInputsCapture:
         attention_masks: List[torch.Tensor | None] = []
         position_ids: List[torch.Tensor] = []
         layer_input_kwargs: List[Dict[str, Any]] = []
+        branch_first_indices = _branch_first_layer_indices(layer_names)
+        multi_branch = len(branch_first_indices) > 1
 
         timer = getattr(self.gptq_model, "quant_region_timer", None)
         layer_label = None
@@ -203,18 +228,38 @@ class StageInputsCapture:
         # materialize / move.to CPU for initial input capture and for first layer to minimize VRAM usage, inputs will be stored on CPU
         # and to mimic behavior of offload_to_disk=False for offload_to_disk=True
         # Use calibration_data_device to specify device for calibration data (or "balanced" for round-robin across GPUs)
-        if self._first_layer_has_deferred_floatx_source(layers[0], module_path=module_path):
-            self.logger.info(
-                "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
-            )
-        else:
-            prepare_capture_layer = getattr(self.gptq_model, "prepare_input_capture_layer", None)
-            if callable(prepare_capture_layer):
-                layers[0] = prepare_capture_layer(layers[0], module_path=module_path, device=CPU)
-            else:
-                layers[0] = self.gptq_model.shell_module_materialize(
-                    target_submodule=layers[0], module_path=module_path, device=CPU,
+        def _materialize_capture_layer(index: int, path: Optional[str]) -> torch.nn.Module:
+            layer = layers[index]
+            if index == 0 and self._first_layer_has_deferred_floatx_source(layer, module_path=path):
+                self.logger.info(
+                    "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
                 )
+                return layer
+            prepare_capture_layer = getattr(self.gptq_model, "prepare_input_capture_layer", None)
+            if callable(prepare_capture_layer) and index == 0:
+                return prepare_capture_layer(layer, module_path=path, device=CPU)
+            return self.gptq_model.shell_module_materialize(
+                target_submodule=layer, module_path=path, device=CPU,
+            )
+
+        if multi_branch:
+            # Reaching a later sibling stack requires running the stacks before
+            # it.  The single-stack early-stop optimization cannot do that, so
+            # materialize every decoder layer for the full capture forward.
+            self.logger.info(
+                "ModuleLooper: capturing %s concurrent module-tree branches; "
+                "materializing all decoder layers for the calibration forward.",
+                len(branch_first_indices),
+            )
+            for branch_index in range(len(layers)):
+                branch_path = (
+                    layer_names[branch_index]
+                    if layer_names and branch_index < len(layer_names)
+                    else None
+                )
+                layers[branch_index] = _materialize_capture_layer(branch_index, branch_path)
+        else:
+            layers[0] = _materialize_capture_layer(0, module_path)
         cur_layer_device = CPU
 
         # Use calibration_data_device if specified, otherwise use cur_layer_device
@@ -263,32 +308,24 @@ class StageInputsCapture:
                 f"Batch 0/{cache_total_batches}"
             ).draw()
 
-        def store_input_hook(module, args, kwargs):
-            """Captures the incoming batch for the first layer and aborts the forward."""
-
-            # Select device for this batch (round-robin for balanced mode)
-            if balanced_mode and balanced_devices:
-                batch_device = balanced_devices[balanced_rr_counter[0] % len(balanced_devices)]
-                balanced_rr_counter[0] += 1
-            else:
-                batch_device = data_device
-
+        def _capture_layer_inputs(
+            args: tuple[Any, ...],
+            kwargs: Dict[str, Any],
+            batch_device: torch.device,
+        ):
             layer_input = self.gptq_model.capture_first_layer_positional_inputs(
                 args=args,
                 kwargs=kwargs,
                 batch_device=batch_device,
             )
-
-            layer_inputs.append(layer_input)
-
-            if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(device=batch_device))
-            else:
-                attention_masks.append(None)
-
+            attention_mask = (
+                kwargs["attention_mask"].to(device=batch_device)
+                if kwargs.get("attention_mask") is not None
+                else None
+            )
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, device=batch_device))
+                pos_ids = move_to(pos_ids, device=batch_device)
             one_kwargs: Dict[str, Any] = {}
             for (k, v) in kwargs.items():
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
@@ -299,12 +336,46 @@ class StageInputsCapture:
                 batch_device=batch_device,
                 layer_input_kwargs=one_kwargs,
             )
+            # `transformers` 5 builds one mask (and, for Gemma3, one rotary tuple)
+            # per layer *type*. The hook fires for the first decoder layer of a
+            # branch, so capture the remaining declared types here; replay
+            # selects the entry that belongs to the layer it is running.
+            capture_layer_type_kwargs = getattr(
+                self.gptq_model, "capture_layer_type_replay_kwargs", None
+            )
+            if callable(capture_layer_type_kwargs):
+                one_kwargs = capture_layer_type_kwargs(
+                    args=args,
+                    kwargs=kwargs,
+                    batch_device=batch_device,
+                    layer_input_kwargs=one_kwargs,
+                )
+            return layer_input, attention_mask, pos_ids, one_kwargs
+
+        def _batch_device() -> torch.device:
+            # Select device for this batch (round-robin for balanced mode)
+            if balanced_mode and balanced_devices:
+                device = balanced_devices[balanced_rr_counter[0] % len(balanced_devices)]
+                balanced_rr_counter[0] += 1
+                return device
+            return data_device
+
+        def store_input_hook(module, args, kwargs):
+            """Captures the incoming batch for the first layer and aborts the forward."""
+
+            layer_input, attention_mask, pos_ids, one_kwargs = _capture_layer_inputs(
+                args, kwargs, _batch_device(),
+            )
+            layer_inputs.append(layer_input)
+            attention_masks.append(attention_mask)
+            if pos_ids is not None:
+                position_ids.append(pos_ids)
             layer_input_kwargs.append(one_kwargs)
 
-            # In normal repeating layer/sbuset early stop happens on the last module forward
-            # but the first model input embedding call we use a simple model register forwar hook
+            # In normal repeating layer/subset early stop happens on the last module forward
+            # but the first model input embedding call we use a simple model register forward hook
             # and wait for the first instance this callback is called
-            raise STOP_FORWARD_EXCEPTION
+            raise StopForward("Forwarding stopped")
 
         # Parameters attached to the shell root must be ready before embedding forward.
         self._materialize_modules_with_direct_meta_tensors(cur_layer_device)
@@ -340,15 +411,58 @@ class StageInputsCapture:
                 module_path=resolved_name,
             )
 
-        handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+        branch_captures: Dict[int, Dict[str, List[Any]]] = {}
+        batch_captured: set[int] = set()
+        handles = []
+
+        if multi_branch:
+            for branch_index in branch_first_indices:
+                branch_captures[branch_index] = {
+                    "layer_inputs": [],
+                    "layer_input_kwargs": [],
+                    "position_ids": [],
+                    "attention_masks": [],
+                }
+
+            def _make_branch_hook(branch_index: int):
+                def hook(module, args, kwargs):
+                    if branch_index in batch_captured:
+                        # A recurrent branch may invoke its first layer more
+                        # than once per sample; only the first invocation is
+                        # the branch-boundary input.
+                        return
+                    batch_captured.add(branch_index)
+                    capture = branch_captures[branch_index]
+                    layer_input, attention_mask, pos_ids, one_kwargs = _capture_layer_inputs(
+                        args, kwargs, _batch_device(),
+                    )
+                    capture["layer_inputs"].append(layer_input)
+                    capture["attention_masks"].append(attention_mask)
+                    if pos_ids is not None:
+                        capture["position_ids"].append(pos_ids)
+                    capture["layer_input_kwargs"].append(one_kwargs)
+                    if len(batch_captured) == len(branch_first_indices):
+                        raise StopForward("Forwarding stopped")
+                return hook
+
+            handles = [
+                layers[index].register_forward_pre_hook(
+                    _make_branch_hook(index), with_kwargs=True
+                )
+                for index in branch_first_indices
+            ]
+        else:
+            handles = [
+                layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+            ]
 
         # `pre_quantize_generate_hook_start` materializes the multimodal side
-        # modules onto the forward device, and the pre-hook above aborts the
-        # forward after the first layer. Both mutate the model for a bounded
-        # window, so both are acquired inside the `try` and released in its
-        # `finally`: a failing start (for example an OOM while moving a vision
-        # tower) must not leave a half-materialized model or a registered hook
-        # behind for the rest of the quantization run.
+        # modules onto the forward device, and the pre-hooks above abort the
+        # forward once every branch's first layer has been captured. Both mutate
+        # the model for a bounded window, so both are acquired inside the `try`
+        # and released in its `finally`: a failing start (for example an OOM
+        # while moving a vision tower) must not leave a half-materialized model
+        # or registered hooks behind for the rest of the quantization run.
         #
         # `capture_failed` tracks *this call's* exit state. Sampling
         # `sys.exc_info()` in the `finally` instead reads the thread's active
@@ -369,6 +483,7 @@ class StageInputsCapture:
                 _forward_dtype(self.gptq_model.model),
             )
             for batch_index, example in enumerate(calibration_data, start=1):
+                batch_captured.clear()
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     forward_device = self.gptq_model.quantize_config.device
                 else:
@@ -419,9 +534,14 @@ class StageInputsCapture:
                     processed_batches = batch_index
                     if cache_forward_pb is not None:
                         rows_for_batch = 0
-                        if batch_index <= len(layer_inputs):
+                        progress_layer_inputs = (
+                            branch_captures[branch_first_indices[0]]["layer_inputs"]
+                            if multi_branch
+                            else layer_inputs
+                        )
+                        if batch_index <= len(progress_layer_inputs):
                             rows_for_batch = self.looper._batch_row_count(
-                                layer_inputs[batch_index - 1]
+                                progress_layer_inputs[batch_index - 1]
                             )
                             if rows_for_batch <= 0:
                                 rows_for_batch = 1
@@ -431,6 +551,26 @@ class StageInputsCapture:
                         if processed_rows > 0:
                             subtitle += f" rows {processed_rows}"
                         cache_forward_pb.subtitle(subtitle).draw()
+                if multi_branch:
+                    missing = [
+                        index
+                        for index in branch_first_indices
+                        if index not in batch_captured
+                    ]
+                    if missing:
+                        missing_names = [
+                            layer_names[index]
+                            if layer_names and index < len(layer_names)
+                            else str(index)
+                            for index in missing
+                        ]
+                        raise ValueError(
+                            "ModuleLooper: the calibration forward never reached the first layer "
+                            f"of module-tree branch(es) {missing_names} for calibration batch "
+                            f"{batch_index}. Refusing to calibrate a branch on another branch's "
+                            "activations. Provide calibration data that exercises every declared "
+                            "branch, or remove the unreachable branch from module_tree."
+                        )
         except BaseException:
             # Record the failure before unwinding so the cleanup below can
             # distinguish "the capture raised" from "only the release raised".
@@ -475,7 +615,29 @@ class StageInputsCapture:
                         "re-raising the original capture error:\n" + traceback.format_exc()
                     )
                 finally:
-                    handle.remove()
+                    for handle in handles:
+                        handle.remove()
+
+        branch_first_layer_inputs = None
+        if multi_branch:
+            branch_first_layer_inputs = {}
+            for branch_index in branch_first_indices:
+                capture = branch_captures[branch_index]
+                branch_first_layer_inputs[branch_index] = InputCache(
+                    layer_inputs=capture["layer_inputs"],
+                    layer_input_kwargs=capture["layer_input_kwargs"],
+                    position_ids=capture["position_ids"],
+                    attention_masks=capture["attention_masks"],
+                    src_inputs=src_inputs,
+                )
+            # Keep the top-level cache fields as the first branch's inputs so
+            # existing consumers that read the cache directly still see a
+            # complete replay boundary.
+            first_branch = branch_first_layer_inputs[branch_first_indices[0]]
+            layer_inputs = first_branch.layer_inputs
+            layer_input_kwargs = first_branch.layer_input_kwargs
+            position_ids = first_branch.position_ids
+            attention_masks = first_branch.attention_masks
 
         result = InputCache(
             layer_inputs=layer_inputs,
@@ -483,6 +645,7 @@ class StageInputsCapture:
             position_ids=position_ids,
             attention_masks=attention_masks,
             src_inputs=src_inputs,
+            branch_first_layer_inputs=branch_first_layer_inputs,
         )
 
         if timer is not None and start_time is not None:

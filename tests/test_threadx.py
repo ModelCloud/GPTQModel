@@ -4,8 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import gc
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
@@ -75,6 +77,44 @@ def test_basic_submit_and_do(pool, devices_two):
     fut = pool.submit(d0, add, a, b)
     out2 = fut.result(timeout=5)
     torch.testing.assert_close(out2, a + b)
+
+
+def test_worker_frame_releases_last_task_references(pool, devices_two):
+    """A worker must not keep the last task's args/result alive.
+
+    After `quantize()` no further task arrives, so anything still bound in the
+    worker frame (`threadx.py` `_run`) stays resident for the life of the
+    process. `forward_executor` submits `forward_batch_worker(replica, ...)`
+    per device, so the pinned object is the last layer replica.
+
+    A weakref is the deterministic assertion; the GPU-memory delta is measured
+    in `docs/multi-gpu-memory.md`. The bounded wait only gives the worker time
+    to reach its `finally` block -- no second task is submitted, because that
+    is exactly what used to release the references.
+    """
+    d1 = devices_two[1]
+    live = {}
+
+    def alloc():
+        live["tensor"] = torch.empty(
+            256 * 1024 * 1024 // 4, dtype=torch.float32, device=d1
+        )
+        return live["tensor"]
+
+    tensor = alloc()
+    ref = weakref.ref(tensor)
+    fut = pool.submit(d1, lambda x: x, tensor)
+    assert fut.result(timeout=10) is tensor
+    del tensor, fut, live["tensor"]
+
+    deadline = time.monotonic() + 5.0
+    while ref() is not None and time.monotonic() < deadline:
+        gc.collect()
+        time.sleep(0.01)
+
+    assert ref() is None, (
+        "DeviceThreadPool worker still pins the last task's callable/args/result"
+    )
 
 
 def test_linear_forward(pool, devices_two):
@@ -797,9 +837,7 @@ def _exercise_thread_local_worker_warmup(*, per_worker: bool):
     }
 
 
-def test_shared_warmup_reproduces_thread_local_initialization_bug(monkeypatch):
-    monkeypatch.setattr(threadx_mod._DeviceWorker, "_abort_process", lambda self, exc: None)
-
+def test_shared_warmup_reproduces_thread_local_initialization_bug():
     with pytest.raises(RuntimeError, match="thread-local warmup missing"):
         _exercise_thread_local_worker_warmup(per_worker=False)
 

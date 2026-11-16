@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
+from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import (
     AWQuantLinear,
     BaseQuantLinear,
@@ -48,6 +49,55 @@ def test_awq_hybrid_kernels_do_not_inherit_gptq_only_base_state():
     assert not issubclass(AWQBitBlasKernel, BitblasLinear)
     assert not hasattr(AWQBitBlasKernel, "qzero_format")
     assert not hasattr(AWQBitBlasKernel, "repack_from_gptq")
+
+
+class _RestrictedContractKernel(GroupedQuantLinear):
+    SUPPORTS_BACKENDS = []
+    SUPPORTS_METHODS = []
+    SUPPORTS_FORMATS = {}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [128]
+    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_TRAINING = True
+    SUPPORTS_ADAPTERS = []
+
+
+def test_desc_act_error_names_the_desc_act_contract_not_bits():
+    ok, err = _RestrictedContractKernel._validate(
+        bits=4,
+        group_size=128,
+        desc_act=True,
+        sym=True,
+        pack_dtype=torch.int32,
+    )
+
+    assert not ok
+    assert "desc_act" in str(err)
+    assert "bits" not in str(err)
+
+
+def test_dynamic_desc_act_error_names_the_desc_act_contract_not_bits():
+    ok, err = _RestrictedContractKernel._validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        dynamic={"proj": {"desc_act": True}},
+    )
+
+    assert not ok
+    assert "desc_act" in str(err)
+    assert "bits" not in str(err)
 
 
 def test_bitblas_gptq_kernel_keeps_gptq_only_repack_surface():

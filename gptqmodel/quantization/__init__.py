@@ -28,6 +28,7 @@ from .config import (
                      GPTAQConfig,
                      GPTQConfig,
                      HessianConfig,
+                     MacaqConfig,
                      MSEConfig,
                      NF12Config,
                      NormConfig,
@@ -65,21 +66,30 @@ from .gptaq import GPTAQ
 from .gptq import GPTQ
 from .gsq_training_config import GSQTrainingConfig
 from .protocol import (
+                     ACTION_REGISTRY,
+                     ActionReport,
                      ExecutionPlan,
                      ExportSpec,
                      MatchSpec,
                      OperationSpec,
+                     ProtocolActionError,
                      QuantizeSpec,
                      Rule,
                      Stage,
                      TargetSpec,
+                     apply_plan_actions,
+                     compile_and_apply_plan,
                      compile_plan_to_quantize_config,
                      compile_protocol,
                      compile_protocol_to_quantize_config,
                      compile_protocol_yaml_file,
                      compile_protocol_yaml_text,
                      compile_protocol_yaml_to_quantize_config,
+                     compile_rule_actions,
+                     known_action_methods,
+                     register_action,
                      skip,
+                     smoothquant,
 )
 from .quantizer import Quantizer, quantize
 from .rtn import RTN

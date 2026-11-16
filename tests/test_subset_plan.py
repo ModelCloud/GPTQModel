@@ -588,11 +588,16 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
         processor,
         fallback,
         layer_module=None,
+        inline_processors=(),
     ):
         requested_name_groups.append(list(names))
         return {name: _make_named_module(name, layer_index=layer_index) for name in names}
 
     looper.create_named_modules.side_effect = _create_named_modules
+    # ``build_layer_subset_plans`` asks the looper which tree branch owns the
+    # layer prefix; a flat test declaration has no branch split, so the caller's
+    # ``layer_modules`` stay authoritative.
+    looper.layer_modules_for_prefix.return_value = None
 
     processor = _StubProcessor(
         ForwardConfig(

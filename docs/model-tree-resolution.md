@@ -375,6 +375,57 @@ flowchart TD
     style SKIP fill:#ffa39e
 ```
 
+### Shared decoder declarations across variants
+
+A multimodal wrapper that embeds a language backbone must publish the *same*
+layer inventory as the backbone definition. The wrapper changes the decoder
+prefix, not the layers, so a locally retyped copy is a silent inventory fork:
+the wrapper keeps quantizing, the compiler still accepts the tree, and every
+leaf the copy forgot stays in the source dtype with no error.
+
+`NemotronOmniQModel` was such a copy. It re-declared `mixer` only, so the routed
+experts, shared experts, top-k router and SSM convolution of
+`language_model.backbone.layers.*` were undeclared (issue #4355).
+
+```mermaid
+flowchart TD
+    DECL["NEMOTRON_H_LAYER_MODULES<br/>declared once in nemotron_h.py"] --> H["NemotronHQModel.module_tree<br/>model.layers"]
+    DECL --> O["NemotronOmniQModel.module_tree<br/>language_model.backbone.layers"]
+    H --> HP["ModulePlan.from_tree"]
+    O --> OP["ModulePlan.from_tree"]
+    HP --> HQ["routed/shared experts, router, conv declared"]
+    OP --> OQ["same inventory at the Omni prefix"]
+    COPY["local retyped mixer-only dict"] --> BAD["experts undeclared<br/>stay in source dtype, no error"]
+    style BAD fill:#ffa39e,stroke:#a8071a
+    style DECL fill:#d9f7be,stroke:#237804
+```
+
+The same declaration also carries the AWQ policy, so the two definitions cannot
+disagree about fold sources:
+
+| Leaf | Flags | Why |
+| --- | --- | --- |
+| `mixer.up_proj` | `:3:nosrc` | `down_proj(relu2(up_proj(x)))`; `relu2` is not positively homogeneous |
+| `mixer.shared_experts.up_proj` | `:0:nosrc` | the shared expert MLP is the same assertion |
+| `mixer.experts.#.up_proj` | `:0:nosrc` | the routed expert MLP is the same assertion |
+| `mixer.gate`, `mixer.conv1d` | `:!` | checkpoint-owned, not quantizable Linears |
+| `mixer.experts:moe` | `moe` | routed-expert container for `#` expansion |
+
+`test_nemotron_omni_reuses_the_nemotron_h_layer_declaration` pins object
+identity, so a future local copy fails immediately instead of silently
+unquantizing the experts. `test_nemotron_omni_*` also resolves the real remote
+decoder layers and re-runs the fold-preservation invariant there.
+
+#### Before and after
+
+| Aspect | Before | After |
+| --- | --- | --- |
+| Omni layer inventory | local mixer-only `dict` at `nemotron_omni.py:38-56` | shared `NEMOTRON_H_LAYER_MODULES` |
+| Declared projections per layer | 9 | 267 at 128 routed experts (9 + 2 shared + 2 x 128 routed) |
+| Routed expert entries | 0 | 258 (2 x 129 blocks, incl. `#`) |
+| Router / conv | undeclared | `:!` |
+| Omni fold sources | inherited none | the same `:nosrc` set as Nemotron-H |
+
 ### Checkpoint weight coverage
 
 The tree is also the oracle for every checkpoint-owned weight inside a decoder
@@ -513,7 +564,7 @@ flowchart TD
 
 | Situation | Behavior |
 | --- | --- |
-| Unknown `model_type`, no definition | `ValueError`; never auto-guesses a tree |
+| Unknown `model_type`, no definition | `ValueError`; never auto-guesses a tree unless the caller passes `module_tree="auto"` |
 | Multiple projections for a role in a single-role consumer | That consumer raises `ValueError`; the plan itself can represent multiple projections |
 | Ambiguous prefix or suffix lookup | `ValueError` naming the candidates |
 | Path not declared in the tree | treated as undeclared: not quantized, no role |
@@ -528,8 +579,11 @@ flowchart TD
   method instead of branching on names inside shared code.
 - **Custom/injected models:** attach `gptqmodel_effective_module_tree` to the
   model object before loading.
-- **Diagnostics only:** `_auto_detect_module_tree()` still exists to inspect an
-  unknown model, but it is deliberately not on the loading path.
+- **Unknown architectures with an explicit opt-in:** `module_tree="auto"` runs
+  the structural detector before this resolution step. It discovers every
+  concurrent decoder stack and returns one complete variant per stack. It is
+  not a default fallback: omitting the argument still fails closed. See
+  [parallel module trees](parallel-module-trees.md).
 
 ## Known limitation
 
@@ -546,6 +600,8 @@ tagging every definition would allow the map to be deleted.
 | --- | --- |
 | `tests/module_tree/test_explicit_module_plan.py` | roles, shared containers, renamed leaves, sibling rejection, fail-closed |
 | `tests/module_tree/test_module_tree_variants.py` | tree variants produce identical declared paths |
-| `tests/module_tree/test_auto_detect.py` | auto-detection stays diagnostic-only |
+| `tests/module_tree/test_auto_detect.py` | auto-detection discovers every concurrent branch and stays opt-in |
+| `tests/module_tree/test_parallel_branch_calibration.py` | concurrent branches are calibrated on their own inputs; an unreachable branch fails loudly |
 | `tests/test_afmoe_support.py`, `tests/test_k2_horizon_support.py` | real MoE definitions resolve without name overrides |
 | `tests/module_tree/test_flash_model_tree_consumption.py` | real Flash-family meta models: quantizable specs, every checkpoint weight owner, roles, MoE hooks, looper helpers, Ripple custom code |
+| `tests/module_tree/test_nemotron_h_model_tree.py` | Nemotron-H and Omni share one decoder declaration; the Omni inventory resolves on the remote `language_model.backbone` decoder and keeps the fold-preservation invariant |

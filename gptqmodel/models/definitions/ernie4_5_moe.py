@@ -3,8 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ...utils.logger import setup_logger
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+
+
+log = setup_logger()
 
 
 class Ernie4_5_MoeQModel(BaseQModel):
@@ -177,4 +181,19 @@ class Ernie4_5_MoeQModel(BaseQModel):
 
         if not self.load_quantized_model:
             ernie4_5_model = type(self.model.model)
+            # The patch replays the official remote-code forward, which builds the
+            # attention mask through `self._update_causal_mask`. transformers 5
+            # removed that helper in favour of `create_causal_mask`, and the
+            # official `baidu/ERNIE-4.5-*` checkpoints ship no `auto_map`/modeling
+            # file, so the native `transformers` class is loaded and the patched
+            # forward would raise `AttributeError` at the first calibration
+            # forward. Only install the patch when the loaded class is the old
+            # remote implementation that actually owns the helper.
+            if not hasattr(ernie4_5_model, "_update_causal_mask"):
+                log.info(
+                    "Ernie4_5_Moe: native forward detected on %s (no `_update_causal_mask`); "
+                    "skipping the remote-code forward patch.",
+                    ernie4_5_model.__name__,
+                )
+                return
             ernie4_5_model.forward = ernie4_5_moe_model_forward

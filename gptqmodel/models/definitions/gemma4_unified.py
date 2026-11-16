@@ -68,13 +68,16 @@ _GEMMA4_UNIFIED_DECODER = {
         "k_norm:!",
         "k_proj:0",
         "v_norm:!",
-        "v_proj:0",
+        # MHA configs pass v through a scale-free `v_norm`, so v_proj's output
+        # is not o_proj's input (same declaration as the text tree).
+        "v_proj:0:nosrc",
         "o_proj:1",
     ),
     "post_attention_layernorm": ("post_attention_layernorm:!",),
     "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
     "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-    "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
+    # Applied to the MLP output before the residual add.
+    "post_feedforward_layernorm": ("post_feedforward_layernorm:!:postnorm",),
 }
 
 
@@ -106,6 +109,9 @@ class Gemma4UnifiedForConditionalGenerationGPTQ(BaseQModel):
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh Gemma 4 unified rope kwargs during cached layer replay."""
 
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_gemma4_unified_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
 
@@ -135,4 +141,7 @@ class Gemma4UnifiedTextQModel(BaseQModel):
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh Gemma 4 unified rope kwargs during cached layer replay."""
 
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_gemma4_unified_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)

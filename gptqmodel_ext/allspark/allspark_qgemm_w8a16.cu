@@ -894,35 +894,17 @@ void restore_N32_K16_dequantize_rhs_w8a16(const QT* qdata, const FT* scales,
   }
 }
 
-// dequant + cuBLAS has no bias epilogue, so the FP32 product is written to a
-// scratch buffer and this kernel adds the bias before the single narrowing
-// cast. Casting the product to FType first is exactly the overflow the fused
-// kernels avoid (FP16 65536 + (-32768) must stay 32768).
-template <typename FType>
-__global__ void add_bias_cast_kernel(const float* __restrict__ src,
-                                     const void* bias, int bias32,
-                                     FType* __restrict__ out, int64_t total,
-                                     int n) {
-  const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= total) return;
-  float v = src[idx];
-  if (bias != nullptr) {
-    const int col = static_cast<int>(idx % n);
-    v += bias32
-        ? reinterpret_cast<const float*>(bias)[col]
-        : static_cast<float>(reinterpret_cast<const FType*>(bias)[col]);
-  }
-  out[idx] = static_cast<FType>(v);
-}
-
+// Unbiased dequant + cuBLAS. A biased call never reaches here: cuBLAS has no
+// bias epilogue, so it would need an FP32 product in a scratch buffer plus a
+// second pass, while the fused MMA kernel adds the bias inside the same FP32
+// accumulation.
 template <typename FT, typename QT>
 void w8a16_gemm_dq_cublas(const FT* in, const QT* rhs_qdata_ptr,
                           const FT* rhs_scales_ptr, const FT* rhs_zeros_ptr,
                           FT* out, void* workspace, const int M,
                           const int N_32align, const int N, const int K,
                           const int group_size, cudaStream_t stream,
-                          cublasHandle_t handle, const void* bias = nullptr,
-                          int bias32 = 0) {
+                          cublasHandle_t handle) {
   static_assert(
       std::is_same<FT, half>::value || std::is_same<FT, nv_bfloat16>::value,
       "only float16 and bfloat16 is supported");
@@ -943,27 +925,24 @@ void w8a16_gemm_dq_cublas(const FT* in, const QT* rhs_qdata_ptr,
   } else {
     cuda_type = CUDA_R_16BF;
   }
-  if (bias == nullptr) {
-    CHECK_CUBLAS(cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
-                              rhs_fdata_ptr, cuda_type, ldb, in, cuda_type, lda,
-                              &beta, out, cuda_type, ldc, CUDA_R_32F,
-                              CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-    return;
-  }
-  // Biased: keep the cuBLAS result in FP32, add the bias there, cast once.
-  auto wide = torch::empty(
-      {static_cast<int64_t>(M), static_cast<int64_t>(N)},
-      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-  float* wide_ptr = wide.data_ptr<float>();
   CHECK_CUBLAS(cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
                             rhs_fdata_ptr, cuda_type, ldb, in, cuda_type, lda,
-                            &beta, wide_ptr, CUDA_R_32F, ldc, CUDA_R_32F,
+                            &beta, out, cuda_type, ldc, CUDA_R_32F,
                             CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-  const int64_t total = static_cast<int64_t>(M) * N;
-  const int block = 256;
-  const int grid = static_cast<int>((total + block - 1) / block);
-  add_bias_cast_kernel<FT><<<grid, block, 0, stream>>>(
-      wide_ptr, bias, bias32, out, total, N);
+}
+
+// Single source of truth for the prefill dispatch. The workspace sizing in
+// ``allspark_w8a16_gemm`` has to make the same choice, and a mismatch is an
+// out-of-bounds workspace rather than a slow path.
+//
+// cuBLAS is only used unbiased: it has no bias epilogue, so a biased call would
+// have to materialise the FP32 product in a scratch buffer and run a second
+// pass before the single narrowing cast. The MMA kernel fuses that same FP32
+// epilogue, and measured faster for every biased large-M shape (M up to 16384,
+// N 1024..11008) with an identical result.
+inline bool allspark_use_cublas(const int M, const int CUBLAS_M_THRESHOLD,
+                                const void* bias) {
+  return M > CUBLAS_M_THRESHOLD && bias == nullptr;
 }
 
 template <typename FType, typename QType>
@@ -974,10 +953,10 @@ void allspark_qgemm_w8a16_perc_ampere(
     const int group_size, int CUBLAS_M_THRESHOLD, const int sm_version,
     cudaStream_t stream, cublasHandle_t handle, const void* bias = nullptr,
     int bias32 = 0) {
-  if (M > CUBLAS_M_THRESHOLD) {
+  if (allspark_use_cublas(M, CUBLAS_M_THRESHOLD, bias)) {
     w8a16_gemm_dq_cublas<FType, QType>(A, B, B_scale, B_zero, C, workspace, M,
                                        N_32align, N, K, group_size, stream,
-                                       handle, bias, bias32);
+                                       handle);
   } else {
     ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32K16_CN_splitk<
         FType, QType>(A, B, B_scale, B_zero, C, M, N, K, workspace, sm_version,
@@ -1059,8 +1038,12 @@ torch::Tensor allspark_w8a16_gemm(
 
   allspark::BlockTileSplitkParams fused_gemm_params;
 
+  // Must mirror the dispatch inside ``allspark_qgemm_w8a16_perc_ampere``; a
+  // biased call always runs the split-K MMA kernel and needs its workspace even
+  // when m is above the cuBLAS threshold.
   size_t ws_size = 0;
-  if (m > CUBLAS_M_THRESHOLD) {
+  if (allspark::allspark_use_cublas(m, static_cast<int>(CUBLAS_M_THRESHOLD),
+                                    bias_ptr)) {
     ws_size = k * n * 2;  // sizeof(f16)==2
   } else {
     ws_size = allspark::allspark_qgemm_w8a16_perc_n32k16_ampere_workspace_size(

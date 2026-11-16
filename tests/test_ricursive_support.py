@@ -38,8 +38,8 @@ _RIPPLE_REPO = "ricursiveAI/Ripple-65B-Preview"
 _QUANTIZED_PER_LAYER = (
     "self_attn.q_proj",
     "self_attn.k_proj",
-    "self_attn.v_proj",
     "self_attn.g_proj",
+    "self_attn.v_proj",
     "self_attn.o_proj",
     "mlp.gate_proj",
     "mlp.up_proj",
@@ -92,14 +92,17 @@ def test_ricursive_module_tree_covers_perinorm_and_gated_attention():
     # Per-head Q/K RMSNorm must stay dense.
     assert "q_norm:!:norm" in attn
     assert "k_norm:!:norm" in attn
-    # Gated attention: g_proj shares the hidden states with q/k.
-    assert "g_proj:0:in=x" in attn
-    for name in ("q_proj:0:q:in=x", "k_proj:0:k:in=x", "o_proj:1:o"):
+    # Gated attention: q/k/g read the input norm, but g_proj's sigmoid gate is
+    # applied to the attention output, so it may not be `o_proj`'s fold source.
+    assert "g_proj:0:in=x:nosrc" in attn
+    for name in ("q_proj:0:q:in=x", "k_proj:0:k:in=x", "v_proj:1:v", "o_proj:2:o"):
         assert name in attn
-    # `use_valres` makes v_proj read a lerp of the first layer's hidden states, so it must
-    # NOT carry the `in=x` tag that groups q/k/g onto one Hessian.
-    assert "v_proj:0:v" in attn
+    # `use_valres` makes v_proj read a lerp of the value residual and the norm
+    # output, so it must be its own stage and must not carry the `in=x` tag
+    # that groups q/k/g onto one Hessian.
     assert not any(token.startswith("v_proj:") and "in=" in token for token in attn)
+    # The lerp means no single v_proj scale can compensate an input-norm fold.
+    assert "input_layernorm:!:norm:nosrc" in layer["input_layernorm"]
 
     assert layer["mlp"] == ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down")
 

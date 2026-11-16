@@ -12,9 +12,25 @@ import os
 from pathlib import Path
 from typing import Optional
 
+# The OpenMP/MKL/OpenBLAS runtimes read their thread counts when they load, so
+# this has to run before the first torch (or gptqmodel) import. The package
+# helper cannot be used here: importing gptqmodel.utils.threads imports the
+# package, which imports torch. ``setdefault`` keeps an explicit environment.
+_DEFAULT_THREADS = min(8, os.cpu_count() or 1)
+for _thread_env in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_env, str(_DEFAULT_THREADS))
+os.environ.setdefault("OMP_NESTED", "FALSE")
+
 import torch
 
 from gptqmodel.utils.model_dequant import dequantize_model
+from gptqmodel.utils.threads import cap_torch_threads
 
 
 def _resolve_dtype(name: str) -> torch.dtype:
@@ -72,6 +88,14 @@ def _parse_args() -> argparse.Namespace:
         help="Reuse valid output shards already present in the output directory",
     )
     parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help=(
+            "Allow executing Python files bundled in the checkpoint. Only use "
+            "this for a repository whose code you have reviewed."
+        ),
+    )
+    parser.add_argument(
         "--env",
         action="append",
         metavar="KEY=VALUE",
@@ -93,6 +117,10 @@ def _apply_env(overrides: Optional[list[str]]) -> None:
 def main() -> None:
     args = _parse_args()
     _apply_env(args.env)
+    # Dequantization walks every shard on one process; cap the intra-op pool so
+    # a host that advertises hundreds of CPUs cannot size it for us. An
+    # explicit --env OMP_NUM_THREADS still wins.
+    cap_torch_threads()
 
     model_path = args.model_path_flag or args.model_path
     output_path = args.output_path_flag or args.output_path
@@ -108,6 +136,7 @@ def main() -> None:
         "output_path": str(Path(output_path)),
         "dtype": dtype,
         "device": device,
+        "trust_remote_code": args.trust_remote_code,
     }
     print(f"[dequantize_model] parsed args: {debug_payload}")
 
@@ -117,6 +146,7 @@ def main() -> None:
         target_dtype=dtype,
         device=device,
         resume=args.resume,
+        trust_remote_code=args.trust_remote_code,
     )
 
 

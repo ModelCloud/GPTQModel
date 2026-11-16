@@ -17,6 +17,7 @@ from gptqmodel.looper.awq_processor import (
     AWQProcessor,
     _accumulate_awq_weight_mean,
     _AWQLayerState,
+    _AWQScaleGroupError,
     _compute_awq_weight_mean,
 )
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -67,6 +68,9 @@ class _DummyQwen3SelfAttention(nn.Module):
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
         self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
+
+    def forward(self, x):
+        return self.q_proj(x) + self.k_proj(x) + self.v_proj(x)
 
 
 class _DummyQwen3MoeExpert(nn.Module):
@@ -351,9 +355,15 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
         assert child_policy == {
             "mode": "token_rows",
         }
-        assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") is None
+        # Dense modules also default to token rows: variable-length calibration
+        # used to collapse them to the latest (shortest) sample (#4063).
+        assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") == {
+            "mode": "token_rows",
+        }
 
-    assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") is None
+    assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") == {
+        "mode": "token_rows",
+    }
 
 
 def test_qwen3_moe_awq_scaling_node_preserves_root_feature_name():
@@ -620,6 +630,429 @@ def test_awq_token_row_budget_tracks_largest_batch_and_preserves_batch_coverage(
     assert AWQProcessor._token_row_budget([torch.zeros(1, 0, 4)]) == 0
 
 
+def test_awq_token_rows_replay_mask_stays_inside_each_document():
+    """Packed token rows must not attend across calibration documents (#4091/#4095).
+
+    ``token_rows`` concatenates rows sampled from several documents into one
+    ``[1, tokens, hidden]`` replay tensor. Replaying that with
+    ``attention_mask=None`` let document A attend to document B and dropped the
+    mask argument entirely for models that require it. The rebuilt mask must be
+    block-diagonal per document, keep every row's original position, and match
+    the model's own causal relation inside a document.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+
+    seq_len = 4
+    masked = torch.finfo(torch.float16).min
+    # One calibration batch with two right-padded documents: 3 and 2 real tokens.
+    batch_mask = torch.full((2, 1, seq_len, seq_len), masked, dtype=torch.float16)
+    for row, length in enumerate((3, 2)):
+        for position in range(length):
+            batch_mask[row, 0, position, : position + 1] = 0.0
+    position_ids = torch.arange(seq_len).unsqueeze(0).expand(2, -1)
+
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[batch_mask],
+        position_ids=[position_ids],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.arange(5 * 4, dtype=torch.float32).reshape(1, 5, 4)],
+        "batch_indices": [0],
+    }
+
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, 5, 4)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.shape == (1, 1, 5, 5)
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 0, 1]]))
+
+    grid = ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1))
+    expected = torch.zeros(5, 5, dtype=torch.bool)
+    for query, (document, position) in enumerate(grid):
+        for key, (key_document, key_position) in enumerate(grid):
+            expected[query, key] = document == key_document and key_position <= position
+    allowed = attention_mask[0, 0] >= 0
+    assert torch.equal(allowed, expected)
+    # Document A may not read document B and vice versa.
+    assert not allowed[:3, 3:].any()
+    assert not allowed[3:, :3].any()
+    # The captured mask was additive, so the replay stays additive (a float
+    # grid in the activation dtype, not a bool keep mask).
+    assert attention_mask.dtype.is_floating_point
+    assert attention_mask.dtype == features[module_name].dtype
+
+
+def test_awq_token_rows_replay_preserves_a_masked_fill_bool_mask():
+    """A bool mask whose True marks *masked* keys must stay bool (#4121 item 1).
+
+    TeleChat2's attention calls ``masked_fill(attn, attention_mask, min)`` with
+    a ``torch.ones(S, S).triu(1)`` bool mask, and its AWQ hook only supplies
+    that mask when ``attention_mask is None``. Turning the captured grid into an
+    additive float mask therefore crashed with
+    ``masked_fill_ only supports boolean masks``.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.query"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 6} if name == module_name else None
+    )
+    seq_len = 6
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[
+            torch.ones(seq_len, seq_len, dtype=torch.bool).triu(1).reshape(1, 1, seq_len, seq_len)
+        ],
+        position_ids=[torch.arange(seq_len).unsqueeze(0)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.arange(seq_len * 4, dtype=torch.float32).reshape(1, seq_len, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.dtype == torch.bool
+    assert attention_mask.shape == (1, 1, seq_len, seq_len)
+    # Same polarity as the captured mask: True marks a masked key.
+    assert torch.equal(
+        attention_mask[0, 0],
+        torch.ones(seq_len, seq_len, dtype=torch.bool).triu(1),
+    )
+    assert torch.equal(replay["position_ids"], torch.arange(seq_len).unsqueeze(0))
+
+
+def test_awq_token_rows_replay_recovers_real_padded_hf_masks():
+    """Real right-padded HF bool masks must still recover the document grid.
+
+    Issue #4125 item 4: a real Hugging Face bool mask keeps padding *keys*
+    masked, but a padding *query* row still sees the real keys. Deriving the
+    keep mask with ``any(dim=-1)`` therefore counted every padding row as a
+    real token, the ``!= row_count`` check failed, and the replay fell back to
+    one causal sequence across the whole batch. The diagonal is the fix: a real
+    token always attends to itself.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 8} if name == module_name else None
+    )
+
+    padded_len = 8
+    real_lengths = (5, 3)
+
+    # One calibration batch with two right-padded documents. Unlike the
+    # hand-built mask above, a padding *query* row still sees the real keys,
+    # which is what Hugging Face actually produces.
+    mask = torch.zeros(2, padded_len, padded_len, dtype=torch.bool)
+    for row, real_len in enumerate(real_lengths):
+        for query in range(padded_len):
+            for key in range(padded_len):
+                mask[row, query, key] = key <= query and key < real_len
+
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[mask.reshape(2, 1, padded_len, padded_len)],
+        position_ids=[torch.arange(padded_len).unsqueeze(0).expand(2, -1)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.zeros(1, sum(real_lengths), 4)],
+        "batch_indices": [0],
+    }
+
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, 8, 4)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    # Original per-document offsets, not one synthetic range. This is the
+    # structure the `any(dim=-1)` keep mask lost on a real padded batch.
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 3, 4, 0, 1, 2]]))
+
+    allowed = attention_mask[0, 0]
+    if allowed.dtype != torch.bool:
+        allowed = allowed >= 0
+    expected = torch.zeros(8, 8, dtype=torch.bool)
+    expected[:5, :5] = torch.tril(torch.ones(5, 5, dtype=torch.bool))
+    expected[5:, 5:] = torch.tril(torch.ones(3, 3, dtype=torch.bool))
+    assert torch.equal(allowed, expected)
+    # The second document may not read the first; the old fallback did, and it
+    # also reported synthetic positions 0..7 instead of the per-document ones.
+    assert not allowed[5:, :5].any()
+    assert not allowed[:5, 5:].any()
+    # The captured mask was a bool keep grid, so the replay stays bool.
+    assert attention_mask.dtype == torch.bool
+    assert attention_mask.shape == (1, 1, 8, 8)
+
+
+def test_awq_token_row_source_structure_recovers_an_all_zero_additive_mask():
+    """An all-zero additive mask attends to every key, not none of them (#4187).
+
+    Additive attention masks are summed into the logits: ``0`` is neutral and
+    only a negative entry suppresses a key. An unpadded ``batch_size > 1``
+    capture therefore stores an all-zero ``[B, 1, S, S]`` mask. The old
+    ``(m > 0)`` branch read that as "everything masked", so the diagonal keep
+    mask was all ``False``, the ``row_count`` check failed, and the replay
+    silently fell back to one causal sequence across every packed document.
+    """
+
+    batch, seq_len = 2, 3
+    mask = torch.zeros(batch, 1, seq_len, seq_len, dtype=torch.float16)
+
+    structure = AWQProcessor._token_row_source_structure(mask, batch * seq_len)
+
+    assert structure is not None
+    documents, positions, allowed, form = structure
+    assert form == AWQProcessor._MASK_FORM_ADDITIVE
+    assert documents.tolist() == [0, 0, 0, 1, 1, 1]
+    assert positions.tolist() == [0, 1, 2, 0, 1, 2]
+    # Every real token attended to itself, so every row is retained and the
+    # captured all-attended relation survives normalization.
+    assert allowed.shape == (batch * seq_len, batch * seq_len)
+    assert allowed.all()
+
+
+def test_awq_token_rows_replay_unpadded_additive_mask_is_block_diagonal():
+    """An unpadded ``bs > 1`` additive capture must replay per document (#4187).
+
+    With no padding the captured ``[B, 1, S, S]`` additive mask is all zeros.
+    Reading it as fully masked returned ``None`` from
+    ``_token_row_source_structure`` and the replay fell back to one causal
+    sequence over all ``B*S`` rows, letting document 1 attend to document 0.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 6} if name == module_name else None
+    )
+
+    batch, seq_len = 2, 3
+    # Unpadded calibration batch: every document has seq_len real tokens, so
+    # the additive mask has no negative entries at all.
+    batch_mask = torch.zeros(batch, 1, seq_len, seq_len, dtype=torch.float16)
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[batch_mask],
+        position_ids=[torch.arange(seq_len).unsqueeze(0).expand(batch, -1)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [
+            torch.arange(batch * seq_len * 4, dtype=torch.float32).reshape(
+                1, batch * seq_len, 4
+            )
+        ],
+        "batch_indices": [0],
+    }
+
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, batch * seq_len, 4)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.shape == (1, 1, batch * seq_len, batch * seq_len)
+    assert attention_mask.dtype.is_floating_point
+
+    allowed = attention_mask[0, 0] >= 0
+    # The captured grid has no suppression at all, so every retained row keeps
+    # its own document's full relation; causality stays inside the attention
+    # implementation for this captured form. Cross-document cells must be the
+    # only thing the replay adds.
+    expected = torch.zeros(batch * seq_len, batch * seq_len, dtype=torch.bool)
+    expected[:seq_len, :seq_len] = True
+    expected[seq_len:, seq_len:] = True
+    assert torch.equal(allowed, expected)
+    # Document 1 may not read document 0, and vice versa. The broken fallback
+    # produced exactly one causal block spanning the whole packed batch.
+    assert not allowed[:seq_len, seq_len:].any()
+    assert not allowed[seq_len:, :seq_len].any()
+    assert not torch.equal(
+        allowed,
+        torch.tril(torch.ones(batch * seq_len, batch * seq_len, dtype=torch.bool)),
+    )
+    assert torch.equal(
+        replay["position_ids"],
+        torch.tensor([[0, 1, 2, 0, 1, 2]]),
+    )
+
+
+def test_awq_token_row_source_structure_keeps_padded_additive_and_bool_forms():
+    """The working mask forms must keep recovering the document grid (#4187).
+
+    Guards the two conventions this fix must not trade away: an additive mask
+    that suppresses padding keys with ``finfo.min``, and bool grids in both
+    polarities (``True`` = attended for SDPA, ``True`` = masked for
+    ``masked_fill``).
+    """
+
+    def block_causal(kept_documents, kept_positions):
+        same_document = kept_documents.unsqueeze(1) == kept_documents.unsqueeze(0)
+        causal = kept_positions.unsqueeze(1) >= kept_positions.unsqueeze(0)
+        return same_document & causal
+
+    padded_len = 4
+    padded_additive = torch.full(
+        (2, 1, padded_len, padded_len),
+        torch.finfo(torch.float16).min,
+        dtype=torch.float16,
+    )
+    for row, length in enumerate((3, 2)):
+        for query in range(length):
+            padded_additive[row, 0, query, : query + 1] = 0.0
+
+    structure = AWQProcessor._token_row_source_structure(padded_additive, 5)
+    assert structure is not None
+    documents, positions, allowed, form = structure
+    assert form == AWQProcessor._MASK_FORM_ADDITIVE
+    assert documents.tolist() == [0, 0, 0, 1, 1]
+    assert positions.tolist() == [0, 1, 2, 0, 1]
+    assert torch.equal(
+        allowed & block_causal(documents, positions), block_causal(documents, positions)
+    )
+
+    bool_seq_len = 3
+    bool_keep = torch.zeros(2, 1, bool_seq_len, bool_seq_len, dtype=torch.bool)
+    for row in range(2):
+        for query in range(bool_seq_len):
+            bool_keep[row, 0, query, : query + 1] = True
+
+    for mask, expected_form in (
+        (bool_keep, AWQProcessor._MASK_FORM_BOOL_KEEP),
+        (~bool_keep, AWQProcessor._MASK_FORM_BOOL_MASKED),
+    ):
+        structure = AWQProcessor._token_row_source_structure(mask, 6)
+        assert structure is not None
+        documents, positions, allowed, form = structure
+        assert form == expected_form
+        assert documents.tolist() == [0, 0, 0, 1, 1, 1]
+        assert positions.tolist() == [0, 1, 2, 0, 1, 2]
+        assert torch.equal(
+            allowed & block_causal(documents, positions), block_causal(documents, positions)
+        )
+
+
+def test_awq_token_row_source_structure_recovers_a_0_1_keep_grid():
+    """An integer 0/1 keep grid is not an additive mask (#4187).
+
+    LLaDA2 expands its tokenizer mask with ``tril * padding`` into an integer
+    ``[B, 1, S, S]`` grid where ``1`` marks an attended key. Reading it as an
+    additive mask would count padding queries as real and fall back, so it is
+    classified as the ``positive = attended`` form instead.
+    """
+
+    padded_len = 4
+    mask = torch.zeros(2, 1, padded_len, padded_len, dtype=torch.int64)
+    for row, length in enumerate((3, 2)):
+        for query in range(padded_len):
+            for key in range(padded_len):
+                mask[row, 0, query, key] = int(key <= query and key < length)
+
+    structure = AWQProcessor._token_row_source_structure(mask, 5)
+    assert structure is not None
+    documents, positions, allowed, form = structure
+    assert form == AWQProcessor._MASK_FORM_POSITIVE_KEEP
+    assert documents.tolist() == [0, 0, 0, 1, 1]
+    assert positions.tolist() == [0, 1, 2, 0, 1]
+    expected = torch.zeros(5, 5, dtype=torch.bool)
+    expected[:3, :3] = torch.tril(torch.ones(3, 3, dtype=torch.bool))
+    expected[3:, 3:] = torch.tril(torch.ones(2, 2, dtype=torch.bool))
+    same_document = documents.unsqueeze(1) == documents.unsqueeze(0)
+    assert torch.equal(allowed & same_document, expected)
+
+
+def test_awq_token_rows_replay_preserves_a_0_1_keep_grid():
+    """The rebuilt replay must stay a multiplicative 0/1 keep grid (#4187)."""
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 5} if name == module_name else None
+    )
+
+    padded_len = 4
+    mask = torch.zeros(2, 1, padded_len, padded_len, dtype=torch.int64)
+    for row, length in enumerate((3, 2)):
+        for query in range(padded_len):
+            for key in range(padded_len):
+                mask[row, 0, query, key] = int(key <= query and key < length)
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[mask],
+        position_ids=[torch.arange(padded_len).unsqueeze(0).expand(2, -1)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.zeros(1, 5, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.dtype == torch.int64
+    assert attention_mask.shape == (1, 1, 5, 5)
+    expected = torch.zeros(5, 5, dtype=torch.int64)
+    expected[:3, :3] = torch.tril(torch.ones(3, 3, dtype=torch.int64))
+    expected[3:, 3:] = torch.tril(torch.ones(2, 2, dtype=torch.int64))
+    assert torch.equal(attention_mask[0, 0], expected)
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 0, 1]]))
+
+
+def test_awq_token_rows_replay_keeps_a_2d_mask_two_dimensional():
+    """A 2-D captured mask (FlashAttention) must not be replaced by a 4-D mask."""
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[torch.ones(1, 5, dtype=torch.bool)],
+        position_ids=[torch.arange(5).unsqueeze(0)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.arange(5 * 4, dtype=torch.float32).reshape(1, 5, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    assert replay["attention_mask"].shape == (1, 5)
+    assert replay["attention_mask"].dtype == torch.bool
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 3, 4]]))
+
+
 def test_awq_quant_log_nsamples_changes_only_for_token_row_aggregation():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor._nsamples_total = 459
@@ -653,6 +1086,54 @@ def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows
 
     processor._feature_stats[module_name]["mode"] = "token_rows"
     assert processor._should_fallback_group([module_name], input_feat) is False
+
+
+def test_awq_fallback_group_checks_each_layer_independently():
+    """A starved sibling must not borrow coverage from the rest of the group."""
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    names = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+    input_feat = {name: torch.ones(1, 10, 4) for name in names}
+    processor._nsamples_total = 1000
+    processor.fallback = {"threshold": "50%"}
+    processor._feature_stats = {
+        "self_attn.q_proj": {"mode": "latest_batch", "raw_tokens": 1000, "retained_tokens": 600},
+        "self_attn.k_proj": {"mode": "latest_batch", "raw_tokens": 1000, "retained_tokens": 600},
+        "self_attn.v_proj": {"mode": "latest_batch", "raw_tokens": 1000, "retained_tokens": 10},
+    }
+
+    # Summed coverage is 1210 >= 500, but v_proj alone captured 1% of the corpus.
+    assert processor._should_fallback_group(names, input_feat) is True
+
+    processor._feature_stats["self_attn.v_proj"]["retained_tokens"] = 600
+    assert processor._should_fallback_group(names, input_feat) is False
+
+
+def test_awq_dense_variable_length_packs_every_batch_by_default():
+    """Default policy must keep samples from all captures, not only the last."""
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor.gptq_model.awq_input_feature_aggregation = Qwen3QModel.awq_input_feature_aggregation
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.tasks[module_name] = {
+        "inputs": [
+            torch.full((1, 423, 4), 10.0),
+            torch.full((1, 36, 4), 20.0),
+        ],
+        "batch_indices": [0, 1],
+    }
+
+    features = processor._layer_input_features(state)
+
+    assert processor._feature_stats[module_name]["mode"] == "token_rows"
+    assert processor._feature_stats[module_name]["raw_tokens"] == 459
+    # One largest-batch equivalent: max(423, 2 batches) = 423 rows, not the
+    # 36-row latest (shortest) capture the old fallback kept.
+    assert processor._feature_stats[module_name]["retained_tokens"] == 423
+    assert features[module_name].shape == (1, 423, 4)
+    assert set(features[module_name][0, :, 0].tolist()) == {10.0, 20.0}
+    assert processor._awq_feature_kwargs[module_name] == {}
 
 
 def test_awq_previous_subset_scale_is_cached_per_subset_identity():
@@ -774,7 +1255,7 @@ def test_awq_early_layer_completion_releases_all_feature_state(completion_path):
         QuantizeConfig(
             quant_method=METHOD.AWQ,
             format=FORMAT.GEMM,
-            group_size=128,
+            group_size=4,
         )
     )
     layer = nn.Module()
@@ -1216,7 +1697,9 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         monkey_patcher.undo()
 
     assert captured["inp_device"] == "cpu"
-    assert captured["fp16_output_devices"] == ["cpu"]
+    # Chunked reference outputs stay on the replay (module) device; the grid
+    # loop moves them per group instead of paying a host round trip here.
+    assert captured["fp16_output_devices"] == ["cuda"]
     assert captured["fp16_output_shapes"] == [(4, 8, 16)]
     assert captured["replay_batch_size"] == 0
     assert captured["prepared_forward"] is not None
@@ -1636,7 +2119,7 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
             layers[0],
             layers,
             inp,
-            module2inspect=layers[0],
+            module2inspect=attn,
             kwargs={},
         )
     finally:
@@ -1718,3 +2201,102 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         f"Streaming mean slower than legacy for {param_name}: "
         f"{fast_time*1e3:.3f} ms vs {legacy_time*1e3:.3f} ms"
     )
+
+
+def test_awq_token_rows_replay_rotary_uses_the_retained_rows_positions():
+    """Rotary must be rebuilt from the retained rows' real positions (#4176 item 4).
+
+    Attention modules that take ``position_embeddings`` do not accept
+    ``position_ids``, so ``_sanitize_kwargs`` drops the replay positions and
+    ``_prepare_module_forward`` rebuilt rotary from ``arange(N)``. The retained
+    rows' positions were ``[0, 51, 102, ...]``, so rotary was evaluated at
+    synthetic offsets and contradicted ``docs/awq-calibration-aggregation.md``.
+    """
+
+    class _RecordingRotary(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("inv_freq", torch.zeros(1))
+            self.seen = []
+
+        def forward(self, x, position_ids, **kwargs):
+            self.seen.append(position_ids.detach().clone())
+            return (torch.zeros_like(x), torch.zeros_like(x))
+
+    class _Attention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(4, 4))
+
+        def forward(self, x, position_embeddings=None, attention_mask=None):
+            return x
+
+    class _Root(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rotary_emb = _RecordingRotary()
+
+    root = _Root()
+    attention = _Attention()
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(format=FORMAT.GEMM, group_size=4, bits=4),
+        calibration=CalibrationConfig(),
+        gptq_model=types.SimpleNamespace(rotary_embedding="rotary_emb"),
+        model=root,
+    )
+    doc_len = 1024
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[None],
+        position_ids=[torch.arange(doc_len).unsqueeze(0)],
+        layer_input_kwargs=[{}],
+    )
+
+    # Rows 0, 51 and 102 of one long document were retained.
+    retained = [0, 51, 102]
+    replay = processor._token_row_replay_kwargs(
+        [torch.zeros(1, len(retained), 4)],
+        [0],
+        [(0, row) for row in retained],
+        torch.float32,
+    )
+    assert replay["position_ids"].tolist() == [retained]
+
+    sanitized = processor._sanitize_kwargs(replay, attention)
+    assert "position_ids" not in sanitized
+    processor._prepare_module_forward(
+        torch.zeros(1, len(retained), 4), attention, sanitized
+    )
+
+    assert root.rotary_emb.seen, "rotary was never called"
+    assert root.rotary_emb.seen[-1].tolist() == [retained], (
+        "rotary was rebuilt from synthetic arange positions instead of the "
+        "retained rows' real positions"
+    )
+
+
+def test_awq_best_scale_all_nan_losses_raise_scale_group_error():
+    """An all-NaN grid must take the fallback contract, not a bare Exception (#4176 item 5)."""
+
+    processor = _make_scale_search_processor(sym=True, chunked=True)
+    linear = _NaNLinear(8, 4, bias=False, dtype=torch.float32)
+    linear.weight.requires_grad_(False)
+    x = torch.randn(5, 8, dtype=torch.float32)
+    fp16_output = torch.zeros(5, 4, dtype=torch.float32)
+
+    with pytest.raises(_AWQScaleGroupError) as excinfo:
+        processor._compute_best_scale(
+            x,
+            torch.linspace(0.2, 1.4, 8),
+            torch.linspace(1.6, 0.3, 8),
+            linear,
+            [linear],
+            fp16_output,
+            {},
+            replay_batch_size=2,
+            prepared_forward=(x, {}),
+        )
+
+    message = str(excinfo.value)
+    assert "_NaNLinear" in message
+    assert "no finite reconstruction loss" in message

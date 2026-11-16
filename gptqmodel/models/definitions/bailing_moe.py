@@ -26,10 +26,10 @@ class BailingMoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             # bailing_hybrid mixes delta/linear-attention, full-attention MoE and
             # MLA layers, but every variant keeps its attention projections under
-            # `self_attn`. The legacy bailing_moe layout (attention.query_key_value)
-            # no longer exists in transformers 5.20.2, so it is intentionally not
-            # kept: with layer_modules_strict=False a stale entry would just be
-            # silently skipped.
+            # `self_attn`. The remote-code `bailing_moe` layout (Ling 2.0) still
+            # exposes `attention.query_key_value`/`attention.dense`, so both
+            # branches are declared. `layer_modules_strict=False` lets each
+            # checkpoint resolve only the branch it owns.
             "self_attn": (
                 "q_proj:0",
                 "k_proj:0",
@@ -40,11 +40,20 @@ class BailingMoeQModel(BaseQModel):
                 "kv_b_proj:1",
                 "forget_gate.f_proj:0",
                 "b_proj:0",
+                # Linear-attention short convolution (checkpoint-owned, not a
+                # quantizable projection).
+                "conv1d:!",
+            ),
+            "attention": (
+                "query_key_value:0",
+                "dense:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
-                "shared_experts": ("gate_proj", "up_proj", "down_proj"),
+                # `down_proj` consumes the gate/up product, so it must be
+                # calibrated (and AWQ-scaled) after gate/up are quantized.
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },

@@ -8,6 +8,8 @@ from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class PhiQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"phi"})
+
     fusable = FusableConfig("phi").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "model.final_layernorm"
@@ -17,9 +19,11 @@ class PhiQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "dense:3"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("fc1:0", "fc2:1"),
+            # Phi runs attention and the MLP in parallel from one norm, and has
+            # no post-attention norm. The shared norm cannot be a scale source
+            # for either branch alone, and the MLP's GELU separates fc1 from fc2.
+            "input_layernorm": ("input_layernorm:!:nosrc",),
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "dense:1:nosrc"),
+            "mlp": ("fc1:0:nosrc", "fc2:1"),
         }
     ]

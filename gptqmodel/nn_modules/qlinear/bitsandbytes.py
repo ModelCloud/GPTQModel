@@ -22,7 +22,7 @@ from ...quantization.config import (
 )
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -46,7 +46,6 @@ _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES = (
 _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
 _MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
 _MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
-_CPU_PACKED_ENV = "GPTQMODEL_BITSANDBYTES_CPU_PACKED"
 _CPU_PACKED_SMALL_WEIGHT_ELEMENTS = 512 * 512
 _CPU_PACKED_SMALL_WEIGHT_MAX_M = 512
 _CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M = 64
@@ -54,7 +53,6 @@ _CPU_PACKED_WIDE_WEIGHT_MAX_M = 48
 _CPU_PACKED_SINGLE_THREAD_MAX_M = 32
 _CPU_PACKED_SMALL_WEIGHT_MIN_THREADS = 4
 _CPU_PACKED_REL_TOL = 2e-3
-_CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
 _CPU_INT8_DENSE_MIN_ROWS = 64
 _CPU_INT8_DENSE_MAX_ROWS = 256
 _CPU_INT8_DENSE_SQUARE = 512
@@ -118,7 +116,12 @@ def _clear_availability_state() -> None:
     process ends.
     """
 
+    global _VALIDATED_BITSANDBYTES
+
     sys.modules[__name__].__dict__.pop("BITSANDBYTES_AVAILABLE", None)
+    # The validated module is cached on the forward path; drop it with the
+    # version probe so a later install/upgrade is re-validated.
+    _VALIDATED_BITSANDBYTES = None
     _probe_cache_clear()
     cls = globals().get("BitsAndBytesLinear")
     if cls is not None:
@@ -157,7 +160,18 @@ def __dir__():
     return sorted(set(globals()) | {"BITSANDBYTES_AVAILABLE"})
 
 
+_VALIDATED_BITSANDBYTES = None
+
+
 def import_bitsandbytes():
+    """Import bitsandbytes and validate its version once per process."""
+
+    global _VALIDATED_BITSANDBYTES
+
+    cached = _VALIDATED_BITSANDBYTES
+    if cached is not None:
+        return cached
+
     import bitsandbytes as bnb
 
     # ``getattr`` + ``try`` keep a build with a missing or unparsable
@@ -169,6 +183,8 @@ def import_bitsandbytes():
         raise ImportError(BITSANDBYTES_INSTALL_HINT) from exc
     if parsed_version < version.parse(MINIMUM_BITSANDBYTES_VERSION):
         raise ImportError(BITSANDBYTES_INSTALL_HINT)
+
+    _VALIDATED_BITSANDBYTES = bnb
     return bnb
 
 
@@ -288,6 +304,26 @@ def _dequantize_int8_weight(
     return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
 
 
+def _int8_vectorwise_quant_fp32(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, None]:
+    """LLM.int8() row quantizer that keeps the row scale in FP32.
+
+    ``bitsandbytes.functional.int8_vectorwise_quant`` accepts FP16 only, so a
+    BF16/FP32 activation had to be narrowed first and any magnitude above
+    65504 became inf. Compute the row absmax and codes in FP32 instead. The
+    returned statistics match the native op (the row absmax, not the divided
+    scale), so the shared dequant epilogue stays valid.
+    """
+
+    x_fp32 = x.to(torch.float32)
+    row_absmax = x_fp32.abs().amax(dim=1)
+    scale = row_absmax / 127.0
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    return codes, row_absmax, None
+
+
 def _cpu_packed_max_rows(
     *,
     in_features: int,
@@ -319,6 +355,7 @@ def _cpu_int8_dense_should_use(
     in_features: int,
     out_features: int,
     compute_dtype: torch.dtype,
+    kernel=None,
 ) -> bool:
     """Return whether a tiled FP32 recompute is accurate and faster than native INT8.
 
@@ -331,7 +368,7 @@ def _cpu_int8_dense_should_use(
     retains a dense weight.
     """
 
-    if not env_flag(_CPU_INT8_DENSE_ENV, default=True):
+    if not resolve_kernel_config(kernel).bitsandbytes_cpu_int8_dense:
         return False
     if not has_avx512_bf16():
         return False
@@ -574,14 +611,16 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self._ensure_unpacked()
 
         bnb = import_bitsandbytes()
+        # One attribute lookup per tensor instead of four, and no string
+        # formatting: ``torch.Size`` and ``torch.device`` compare by value.
         signature = tuple(
-            (
-                name,
-                tuple(getattr(self, name).shape),
-                str(getattr(self, name).device),
-                getattr(self, name).dtype,
+            (tensor.shape, tensor.device, tensor.dtype)
+            for tensor in (
+                self.weight,
+                self.weight_absmax,
+                self.weight_quant_map,
+                self.weight_quant_state,
             )
-            for name in ("weight", "weight_absmax", "weight_quant_map", "weight_quant_state")
         )
         if not force and self.quant_state is not None and signature == self._quant_state_signature:
             return self.quant_state
@@ -594,7 +633,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         return self.quant_state
 
     def _cpu_packing_supported(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if self._cpu_packing_disabled or not env_flag(_CPU_PACKED_ENV, default=False):
+        if self._cpu_packing_disabled or not self.kernel.bitsandbytes_cpu_packed:
             return False
         if not self.is_4bit or self.training or self.weight.device.type != "cpu":
             return False
@@ -815,15 +854,14 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 self._buffers[_packed_state_key_to_buffer_name(key)] = tensor.contiguous()
             self._refresh_quant_state(force=True)
         else:
-            weight = weight.to(torch.float16).contiguous()
+            # Keep the INT8 weight scale in FP32: narrowing the source to FP16
+            # first overflows any weight magnitude above 65504.
+            weight = weight.to(torch.float32).contiguous()
             if _mlx_quantization_available() and weight.numel() >= _MLX_INT8_MIN_ELEMENTS:
-                qweight, scales = _quantize_int8_weight_mlx_to_torch(weight)
+                qweight, scales = _quantize_int8_weight_mlx_to_torch(weight.to(torch.float16))
                 outlier_cols = None
             else:
-                qweight, scales, outlier_cols = bnb.functional.int8_vectorwise_quant(
-                    weight,
-                    threshold=0.0,
-                )
+                qweight, scales, outlier_cols = _int8_vectorwise_quant_fp32(weight)
             if outlier_cols is not None and outlier_cols.numel() > 0:
                 raise NotImplementedError(
                     "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
@@ -857,6 +895,9 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 triton_backend is not None
                 and self.weight.device.type == "cuda"
                 and not self._cpu_packing_active
+                # The raw Triton launch has no backward; fall back to the
+                # vendor kernel when autograd must flow through the input.
+                and not (torch.is_grad_enabled() and x.requires_grad)
                 and triton_backend.should_use(
                     self.weight.device,
                     compute_dtype,
@@ -951,21 +992,41 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 in_features=self.in_features,
                 out_features=self.out_features,
                 compute_dtype=compute_dtype,
+                kernel=self.kernel,
             )
         ):
             return self._cpu_int8_tiled_forward(x, bias)
 
-        x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
-            x.to(torch.float16),
-            threshold=0.0,
-        )
+        if x.dtype == torch.float16:
+            x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
+                x,
+                threshold=0.0,
+            )
+        else:
+            x_int8, x_stats, outlier_cols = _int8_vectorwise_quant_fp32(x)
         if outlier_cols is not None and outlier_cols.numel() > 0:
             raise NotImplementedError(
                 "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
             )
 
         mm_out = bnb.functional.int8_linear_matmul(x_int8, self.weight)
-        out = bnb.functional.int8_mm_dequant(mm_out, x_stats, self.weight_scb, bias=bias)
+        if x.dtype == torch.float16 and bias is None:
+            # The native fused epilogue is safe without a bias: there is no
+            # later cancellation that could be destroyed by its FP16 rounding.
+            return bnb.functional.int8_mm_dequant(
+                mm_out, x_stats, self.weight_scb
+            ).to(input_dtype)
+        # ``int8_mm_dequant`` runs its epilogue in FP16, which rounds (or
+        # overflows) the partial sum before a cancelling bias is added. Keep
+        # the row/column scales and the bias in FP32 and round once.
+        out = (
+            mm_out.to(torch.float32)
+            * x_stats.to(torch.float32).reshape(-1, 1)
+            * self.weight_scb.to(torch.float32).reshape(1, -1)
+            / (127.0 * 127.0)
+        )
+        if bias is not None:
+            out = out + bias.to(torch.float32)
         return out.to(input_dtype)
 
 

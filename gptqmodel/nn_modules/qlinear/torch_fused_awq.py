@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+from typing import Optional
 
 import torch
 
 from ...adapter.adapter import Adapter
 from ...looper.linear_mode import LinearMode
+from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
@@ -24,8 +26,15 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
-from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
+from .torch_fused import (
+    Int4PackedOp,
+    TorchFusedLinear,
+    _validate_cpu_int4pack_group_size,
+    _validate_cpu_int4pack_out_features,
+    pack_scales_and_zeros,
+)
 
 
 log = setup_logger()
@@ -119,15 +128,56 @@ class TorchFusedAwqLinear(AWQuantLinear):
             else:
                 self.bias = None
 
+    @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE | torch.device] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ):
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        ok, err = _validate_cpu_int4pack_group_size(
+            cls, group_size=group_size, in_features=in_features, device=device
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls, out_features=out_features, device=device
+        )
+
     def post_init(self):
         super().post_init()
         self.optimize()
 
-    def optimize(self):
+    def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
 
-        super().optimize()
+        super().optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def prepare_awq_fused_tensors(self, need_zeros: bool = True):
         self.scales.to(torch.float16).contiguous()
@@ -196,17 +246,21 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         from .torch_aten_kernel import _cpu_int4pack_scale_dtype
 
-        dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
+        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros.reshape_as(self.scales), self.bits, dtype)
 
         # AWQ has no g_idx — weights are already in natural order, just transpose
         # iweight: (in_features, out_features) -> (out_features, in_features) for int4pack
         weight = iweight.t().contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
-        self.scales = self.scales.to(dtype=dtype).contiguous()
-        zeros = (zero_offset - izeros.reshape_as(self.scales).float()) * self.scales.float()
-        self.qzeros = zeros.to(device=self.qweight.device, dtype=dtype).contiguous()
-        self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+        # Packed runtime metadata only: ``self.scales`` keeps the checkpoint
+        # dtype so a later forward or save cannot persist a narrowed scale
+        # (issue #4178).
+        compute_scales = self.scales.to(dtype=compute_dtype).contiguous()
+        zeros = (zero_offset - izeros.reshape_as(compute_scales).float()) * compute_scales.float()
+        self.qzeros = zeros.to(device=self.qweight.device, dtype=compute_dtype).contiguous()
+        self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        self._cpu_transform_dtype = dtype
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form
@@ -242,6 +296,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 x, self.qweight, self.group_size, self.scales, self.qzeros
             )
         elif x.device.type == "cpu":
+            self.torch_fused_op.out_dtype = (
+                torch.float32
+                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
+                else None
+            )
             out = self.torch_fused_op(x)
         else:
             raise NotImplementedError
@@ -310,10 +369,15 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
-        scale_dtype = scales.dtype if transformed else None
+        # The packed layout is keyed by the activation dtype it was built for,
+        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
+        # loaded dtype while the affine metadata follows the activation dtype.
+        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
+        if runtime_dtype is None and transformed:
+            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        refinalize_fused_state_after_apply(self, scale_dtype, device)
+        refinalize_fused_state_after_apply(self, runtime_dtype, device)
         return result
 
     def train(self, mode: bool = True):
@@ -339,6 +403,14 @@ class TorchFusedAwqLinear(AWQuantLinear):
             and not x_flat.requires_grad
             and self.linear_mode is None
             and TORCH_HAS_FUSED_OPS
+            # FP16 can overflow before a cancelling bias. BF16 has FP32's
+            # range, so it can use the fused op and add the bias once. The CPU
+            # fused op returns an FP32 product for a biased FP16 layer, so it
+            # can add the bias before the single visible cast too.
+            and (
+                self.bias is None
+                or x_flat.dtype in (torch.bfloat16, torch.float16)
+            )
         ):
             capture_fused_train_state(self)
             self.transform(x_flat.dtype, x_flat.device.type)
@@ -353,13 +425,15 @@ class TorchFusedAwqLinear(AWQuantLinear):
         if self.linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
+            if self.bias is not None:
+                out = (out.float() + self.bias.to(out.device, torch.float32)).to(x_flat.dtype)
         else:
             # log.debug("awq dense path")
             weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
-            out = torch.matmul(x_flat, weight)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+            if self.bias is not None:
+                out = matmul_fp32_reduce(x_flat, weight, self.bias)
+            else:
+                out = torch.matmul(x_flat, weight)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
 

@@ -39,6 +39,10 @@ class TritonV2Linear(TorchLinear):
 
     # TODO: ROCM also has Triton support. Need to validate ROCM for triton
     SUPPORTS_DEVICES = [DEVICE.CUDA]  # Intel XPU can use Triton but this has not been validated yet
+    # `post_init` only validates g_idx bounds with CPU Torch ops; the Triton
+    # kernel runs after Accelerate materializes the layer on the execution
+    # device, so a CPU-mapped layer loads correctly.
+    SUPPORTS_CPU_OFFLOAD = True
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
     SUPPORTS_ADAPTERS = [Lora]
@@ -151,6 +155,17 @@ class TritonV2Linear(TorchLinear):
 
         if self.training:
             return super().forward(x)
+
+        # The fused GEMV / small-M GEMM already dispatch from
+        # ``TorchLinear._forward_eager`` on Ada, Blackwell and ROCm.  This
+        # backend used to bypass them and always dequantize the whole weight,
+        # which made decode slower than ``BACKEND.TORCH`` on the same hardware.
+        x2 = x.reshape(-1, x.shape[-1])
+        if self._can_use_rocm_gemv(x2) or self._can_use_rocm_gemm(x2):
+            x2 = self._apply_rotation_to_input(x2)
+            return TorchLinear._forward_eager(
+                self, x2, x.shape[:-1] + (self.out_features,)
+            )
 
         x = self._apply_rotation_to_input(x)
 

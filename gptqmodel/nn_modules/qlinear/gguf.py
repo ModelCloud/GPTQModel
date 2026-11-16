@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import math
-import os
 import platform
 import sys
 import time
@@ -32,6 +31,7 @@ from ...quantization.config import (
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from ._numerics import matmul_fp32_reduce
@@ -234,6 +234,16 @@ def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
     return bits_spec, tensor_qtype
 
 
+def gguf_tensor_qtype(bits) -> str:
+    """Return the concrete ggml tensor layout a GGUF bits spec resolves to.
+
+    A bit width alone is ambiguous (width 4 is Q4_0, Q4_K or IQ4_NL), so kernel
+    selection must compare the resolved layout, not just the width.
+    """
+
+    return _normalize_gguf_bits(bits)[1]
+
+
 def _apply_optional_smoother(
     weight: torch.Tensor,
     *,
@@ -289,6 +299,30 @@ def _gguf_quantize_q4_0(blocks: np.ndarray) -> np.ndarray:
 
     d = d.astype(np.float16).view(np.uint8)
     return np.concatenate([d, qs], axis=-1)
+
+
+def _gguf_quantize_q5_0(blocks: np.ndarray) -> np.ndarray:
+    n_blocks = blocks.shape[0]
+    block_size = _GGUF_TYPE_INFO["Q5_0"]["block_size"]
+
+    imax = np.abs(blocks).argmax(axis=-1, keepdims=True)
+    max_vals = np.take_along_axis(blocks, imax, axis=-1)
+
+    d = max_vals / -16.0
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+
+    # Match ggml's q5_0 reference path: an unsigned 0..31 code centered at 16,
+    # truncated after the +16.5 offset.
+    q = np.trunc(blocks.astype(np.float64) * inv_d.astype(np.float64) + 16.5).astype(np.uint8)
+    q = np.clip(q, 0, 31)
+
+    qs = q.reshape((n_blocks, 2, block_size // 2))
+    qs = (qs[:, 0, :] & np.uint8(0x0F)) | (qs[:, 1, :] << np.uint8(4))
+    qh = np.packbits((q >> np.uint8(4)).astype(np.uint8), axis=-1, bitorder="little").reshape(n_blocks, 4)
+
+    d = d.astype(np.float16).view(np.uint8)
+    return np.concatenate([d, qh, qs], axis=-1)
 
 
 def _gguf_quantize_q8_0(blocks: np.ndarray) -> np.ndarray:
@@ -635,6 +669,8 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
         quantized_blocks = _gguf_quantize_q2_0(blocks)
     elif tensor_qtype == "Q4_0":
         quantized_blocks = _gguf_quantize_q4_0(blocks)
+    elif tensor_qtype == "Q5_0":
+        quantized_blocks = _gguf_quantize_q5_0(blocks)
     elif tensor_qtype == "Q8_0":
         quantized_blocks = _gguf_quantize_q8_0(blocks)
     elif tensor_qtype == "Q4_K":
@@ -1027,6 +1063,38 @@ _GGUF_RAW_NUMPY_DTYPES = {
 }
 
 
+def _decode_gguf_bf16(data: np.ndarray) -> np.ndarray:
+    """Reinterpret GGUF BF16 storage bytes as little-endian uint16 pairs."""
+
+    array = np.asarray(data)
+    if array.dtype == np.uint8:
+        if array.ndim == 0 or array.shape[-1] % 2:
+            raise ValueError("BF16 byte storage must have an even final dimension")
+        rows = np.ascontiguousarray(array).view(np.uint16)
+    else:
+        rows = np.asarray(array, dtype=np.uint16)
+    return np.left_shift(rows.astype(np.uint32), np.uint32(16)).view(np.float32)
+
+
+def _dequantize_q5_0_numpy(data: np.ndarray) -> np.ndarray:
+    """Decode ggml Q5_0 blocks: fp16 scale, 32 high bits, 16 packed nibbles."""
+
+    rows = np.asarray(data, dtype=np.uint8)
+    type_size = _GGUF_TYPE_INFO["Q5_0"]["type_size"]
+    blocks = rows.reshape(-1, type_size)
+    d = blocks[:, :2].view(np.float16).astype(np.float32)
+    qh = blocks[:, 2:6].view(np.uint32).reshape(-1)
+    qs = blocks[:, 6:]
+    low = qs & np.uint8(0x0F)
+    high = qs >> np.uint8(4)
+    ql = np.concatenate([low, high], axis=1).reshape((-1, 32)).astype(np.uint16)
+    high_bits = (
+        (qh[:, None] >> np.arange(32, dtype=np.uint32)) & np.uint32(1)
+    ).astype(np.uint16)
+    q = (ql | (high_bits << np.uint16(4))).astype(np.int16) - 16
+    return (d * q.astype(np.float32)).reshape(rows.shape[0], -1)
+
+
 def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
 
@@ -1035,8 +1103,7 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     if resolved_qtype == "F16":
         return np.asarray(data, dtype=np.float16).astype(np.float32)
     if resolved_qtype == "BF16":
-        rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
-        return np.left_shift(rows, np.uint32(16)).view(np.float32)
+        return _decode_gguf_bf16(data)
     raw_dtype = _GGUF_RAW_NUMPY_DTYPES.get(resolved_qtype)
     if raw_dtype is not None:
         return np.asarray(data, dtype=raw_dtype).astype(np.float32)
@@ -1050,6 +1117,8 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
         high = qs >> np.uint8(4)
         q = np.concatenate([low, high], axis=1).reshape((-1, 32)).astype(np.int16) - 8
         return (d * q.astype(np.float32)).reshape(rows.shape[0], -1)
+    if resolved_qtype == "Q5_0":
+        return _dequantize_q5_0_numpy(np.asarray(data, dtype=np.uint8))
     if resolved_qtype == "Q8_0":
         rows = np.asarray(data, dtype=np.uint8)
         type_size = _GGUF_TYPE_INFO["Q8_0"]["type_size"]
@@ -1125,25 +1194,18 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     AUTOTUNE = True
 
     QUANT_TYPE = "gguf"
-    GGUF_FUSED_CUDA_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MAX_ROWS", "32")))
-    GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS = max(
-        0,
-        int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS", "8388608")),
-    )
-    GGUF_FUSED_CPU_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MAX_ROWS", "64")))
-    GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS = max(
-        0,
-        int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS", "0")),
-    )
-    # A positive block count is an explicit override. Zero selects the
-    # byte-budgeted default, which uses one GEMM for ordinary layers and
-    # narrows the K chunk only when the expanded chunk would exceed the
-    # transient-memory budget.
-    GGUF_FUSED_CHUNK_BLOCKS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS", "0")))
-    GGUF_FUSED_CHUNK_BYTES = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BYTES", str(32 * 1024 * 1024))))
-    GGUF_FUSED_AUTOTUNE_WARMUP = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_WARMUP", "1")))
-    GGUF_FUSED_AUTOTUNE_ITERS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_ITERS", "2")))
-    GGUF_FUSED_AUTOTUNE_MARGIN = max(0.0, float(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_MARGIN", "0.05")))
+    # Defaults for the fused forward. Per-instance overrides come from
+    # ``KernelConfig``; a positive chunk block count is an explicit override and
+    # zero selects the byte-budgeted default.
+    GGUF_FUSED_CUDA_MAX_ROWS = 32
+    GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS = 8_388_608
+    GGUF_FUSED_CPU_MAX_ROWS = 64
+    GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS = 0
+    GGUF_FUSED_CHUNK_BLOCKS = 0
+    GGUF_FUSED_CHUNK_BYTES = 32 * 1024 * 1024
+    GGUF_FUSED_AUTOTUNE_WARMUP = 1
+    GGUF_FUSED_AUTOTUNE_ITERS = 2
+    GGUF_FUSED_AUTOTUNE_MARGIN = 0.05
 
     def __init__(
         self,
@@ -1164,17 +1226,18 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_block_size = qtype_info["block_size"]
         self.gguf_type_size = qtype_info["type_size"]
         self.padded_in_features = math.ceil(in_features / self.gguf_block_size) * self.gguf_block_size
-        self.gguf_fused_cuda_max_rows = self.GGUF_FUSED_CUDA_MAX_ROWS
-        self.gguf_fused_cuda_min_matrix_elements = self.GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS
-        self.gguf_fused_cpu_max_rows = self.GGUF_FUSED_CPU_MAX_ROWS
-        self.gguf_fused_cpu_min_matrix_elements = self.GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS
-        self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
-        self.gguf_fused_chunk_bytes = self.GGUF_FUSED_CHUNK_BYTES
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        self.gguf_fused_cuda_max_rows = kernel.gguf_fused_cuda_max_rows
+        self.gguf_fused_cuda_min_matrix_elements = kernel.gguf_fused_cuda_min_matrix_elements
+        self.gguf_fused_cpu_max_rows = kernel.gguf_fused_cpu_max_rows
+        self.gguf_fused_cpu_min_matrix_elements = kernel.gguf_fused_cpu_min_matrix_elements
+        self.gguf_fused_chunk_blocks = kernel.gguf_fused_chunk_blocks
+        self.gguf_fused_chunk_bytes = kernel.gguf_fused_chunk_bytes
         self._k_scale_overflow_cache: dict[tuple, bool] = {}
         self._k_scale_overflow_cache_source_key = None
-        self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
-        self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
-        self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
+        self.gguf_fused_autotune_warmup = kernel.gguf_fused_autotune_warmup
+        self.gguf_fused_autotune_iters = kernel.gguf_fused_autotune_iters
+        self.gguf_fused_autotune_margin = kernel.gguf_fused_autotune_margin
 
         super().__init__(
             bits=int(bits_spec),

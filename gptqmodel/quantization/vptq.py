@@ -52,6 +52,51 @@ _LOSS_CHUNK_BYTES = 64 * 1024 * 1024
 _EPS = 1e-12
 
 
+def _deterministic_segment_sum(
+    num_buckets: int,
+    index: torch.Tensor,
+    source: torch.Tensor,
+) -> torch.Tensor:
+    """Sum ``source`` rows into ``num_buckets`` buckets, deterministically.
+
+    ``index_add_`` reduces with floating-point atomics on CUDA and HIP, so the
+    summation order — and therefore the low bits of every Lloyd codebook —
+    changes from run to run. VPTQ's sequential column pass amplifies that noise
+    into a different checkpoint for the same seed and calibration (issue
+    #4137).
+
+    Sort the rows by bucket, then reduce each contiguous bucket with
+    ``torch.segment_reduce``. The stable sort fixes the row order, and
+    ``segment_reduce`` is a per-segment reduction kernel with no floating-point
+    atomics, so the summation order is fixed and repeated runs are bitwise
+    identical. A cumulative sum is not an option: ``torch.cumsum`` over a
+    floating-point CUDA tensor is itself nondeterministic (issue #4224).
+    This is deliberately local: ``torch.use_deterministic_algorithms`` is a
+    process-global switch, and quantization runs on a device worker pool, so
+    enabling it around this call would also re-route a concurrent worker's
+    kernels and can raise for an op that has no deterministic implementation.
+    """
+
+    result = torch.zeros(
+        (num_buckets, *source.shape[1:]), dtype=source.dtype, device=source.device
+    )
+    if index.numel() == 0:
+        return result
+
+    order = torch.argsort(index, stable=True)
+    sorted_source = source.index_select(0, order)
+    counts = torch.bincount(index, minlength=num_buckets)
+    nonzero = counts > 0
+    # A float32 reduction over a whole bucket loses low bits, so accumulate in
+    # float64 and round once at the end. The result is still a fixed-order
+    # reduction.
+    totals = torch.segment_reduce(
+        sorted_source.double(), "sum", lengths=counts[nonzero]
+    )
+    result[nonzero] = totals.to(source.dtype)
+    return result
+
+
 def _matrix_to_vectors(data: torch.Tensor, vector_len: int) -> Tuple[torch.Tensor, int]:
     """Split a `[rows, cols]` matrix into `vector_len`-sized vectors along rows.
 
@@ -120,7 +165,13 @@ def _weighted_kmeans(
     tol: float,
     seed: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Deterministic weighted k-means (Lloyd) on `[num_vectors, vector_len]`.
+    """Reproducible weighted k-means (Lloyd) on `[num_vectors, vector_len]`.
+
+    The centroid update reduces with
+    :func:`_deterministic_segment_sum`, so repeated runs with the same inputs and
+    seed produce a bitwise-identical codebook on the same device. Cross-vendor
+    results are not bit-identical: `randperm` draws from each device's own RNG
+    stream, and CUDA and ROCm streams differ.
 
     Always returns exactly `num_centroids` rows so the packed codebook keeps
     the size declared by the configuration. When there are fewer vectors than
@@ -156,10 +207,8 @@ def _weighted_kmeans(
         inertia = (residual.double() * weights.double()).sum()
 
         weighted = data * weights.unsqueeze(1)
-        sums = torch.zeros_like(centroids).index_add_(0, assignment, weighted)
-        counts = torch.zeros(num_centroids, dtype=data.dtype, device=data.device).index_add_(
-            0, assignment, weights
-        )
+        sums = _deterministic_segment_sum(num_centroids, assignment, weighted)
+        counts = _deterministic_segment_sum(num_centroids, assignment, weights)
         updated = sums / counts.clamp_min(_EPS).unsqueeze(1)
         empty = counts <= 0
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)
@@ -233,6 +282,8 @@ class VPTQ:
         self.H2: Optional[torch.Tensor] = None
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        # Samples already folded into `H2` by a previous materialization.
+        self._materialized_samples = 0
 
         self.fallback = getattr(self.qcfg, "fallback", None)
         self.fallback_used = False
@@ -250,6 +301,7 @@ class VPTQ:
 
     def free(self) -> None:
         self.H2 = None
+        self._materialized_samples = 0
         self._device_hessian_partials.clear()
         self._device_sample_counts.clear()
 
@@ -288,7 +340,8 @@ class VPTQ:
             target_device = self.dev
         target_device = torch.device(target_device)
 
-        total_samples = sum(self._device_sample_counts.values())
+        pending_samples = sum(self._device_sample_counts.values())
+        total_samples = self._materialized_samples + pending_samples
         if total_samples == 0:
             self.H2 = torch.zeros(
                 (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
@@ -296,7 +349,38 @@ class VPTQ:
             self.nsamples = 0
             return self.H2
 
-        merged = torch.zeros((self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device)
+        # A repeat materialization with no new batches returns the existing
+        # Hessian unchanged instead of clearing the statistics.
+        if pending_samples == 0:
+            if self.H2 is not None:
+                self.nsamples = self._materialized_samples
+                # The cached Hessian is a read-only view of the statistics, so
+                # an explicit target device is honoured by moving the result
+                # rather than by relocating the cached state. A caller that
+                # inspects on CPU and then quantizes on GPU must not receive
+                # host data.
+                if self.H2.device == target_device and self.H2.dtype == _HESSIAN_DTYPE:
+                    return self.H2
+                return safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
+            self._materialized_samples = 0
+            total_samples = 0
+            self.H2 = torch.zeros(
+                (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
+            )
+            self.nsamples = 0
+            return self.H2
+
+        # Rebuild the unnormalized sum from the previously materialized mean so
+        # batches captured after a materialization extend it rather than
+        # replacing it.
+        if self._materialized_samples and self.H2 is not None:
+            merged = safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
+            # `H2` is a mean, so scale it back to the sample sum before adding
+            # the new partials; the final divide renormalizes over all samples.
+            merged = merged * float(self._materialized_samples)
+        else:
+            self._materialized_samples = 0
+            merged = torch.zeros((self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device)
         while self._device_hessian_partials:
             dev, partial = self._device_hessian_partials.popitem()
             if partial.device == target_device and partial.dtype == _HESSIAN_DTYPE:
@@ -314,6 +398,7 @@ class VPTQ:
         merged.div_(float(total_samples))
         self.H2 = merged
         self.nsamples = total_samples
+        self._materialized_samples = total_samples
         self._device_sample_counts.clear()
         return self.H2
 
@@ -437,6 +522,17 @@ class VPTQ:
             if kmeans_weight is not None:
                 kmeans_weight = kmeans_weight[:, perm]
 
+        # ``norm_dim=0`` divides each input channel by its own scale, so the
+        # error in the original weight space is ``D * e`` with
+        # ``D = diag(scale)``. Error feedback must minimize
+        # ``e^T (D H D) e``; using the raw Hessian biases the compensation
+        # toward channels whose normalization happened to be large.
+        pass_hessian = hessian
+        if qcfg.enable_norm and int(qcfg.norm_dim) == 0 and weight_scale is not None:
+            channel_scale = weight_scale[perm] if perm is not None else weight_scale
+            channel_scale = channel_scale.to(dtype=hessian.dtype, device=hessian.device)
+            pass_hessian = hessian * channel_scale.unsqueeze(0) * channel_scale.unsqueeze(1)
+
         group_bounds = [(0, outlier_size)] + [
             (
                 outlier_size + index * group_size,
@@ -479,7 +575,7 @@ class VPTQ:
 
         quantized, qerror, indices, res_indices = self._vptq_pass(
             weight=weight,
-            hessian=hessian,
+            hessian=pass_hessian,
             group_bounds=group_bounds,
             vector_lens=vector_lens,
             centroids=working_centroids,
@@ -511,7 +607,7 @@ class VPTQ:
 
             quantized, qerror, indices, res_indices = self._vptq_pass(
                 weight=weight,
-                hessian=hessian,
+                hessian=pass_hessian,
                 group_bounds=group_bounds,
                 vector_lens=vector_lens,
                 centroids=working_centroids,

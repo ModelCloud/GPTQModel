@@ -40,6 +40,27 @@ def test_hessian_accumulation_matches_float64_oracle():
     assert float(normalized_error) <= 1e-6
 
 
+def test_bf16_activations_never_stage_to_fp16_range():
+    """A bf16 activation above fp16's max must not become inf during staging."""
+
+    torch.manual_seed(6)
+    task = _task(chunk_size=64, staging_dtype=torch.float16)
+    samples = torch.randn(64, 8, dtype=torch.bfloat16)
+    samples[:, 3] = samples[:, 3] * 1e5
+
+    assert task.preferred_staging_dtype(samples.dtype, samples.device) != torch.float16
+
+    task.add_batch(samples, torch.empty(0))
+    actual = task.finalize_hessian()
+
+    samples64 = samples.to(torch.float64)
+    oracle = 2.0 * (samples64.T @ samples64) / samples64.shape[0]
+    normalized_error = torch.linalg.vector_norm(actual.to(torch.float64) - oracle) / torch.linalg.vector_norm(oracle)
+
+    assert torch.isfinite(actual).all()
+    assert float(normalized_error) <= 1e-6
+
+
 def test_shared_factor_cache_is_single_flight_on_cpu():
     cache = SharedHessianFactorCache(generation=3, cohort="attn")
     calls = 0

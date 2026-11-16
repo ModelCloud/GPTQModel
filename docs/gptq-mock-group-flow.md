@@ -45,3 +45,31 @@ last block; no extra scale or zero-point entry is emitted.
 The packed roundtrip in `tests/test_gptq_static_group_order.py` also runs in
 mock mode after PR #3719, checking the combined group reordering, metadata,
 packed words, and decoded weight against an independent affine oracle.
+
+## Retry ordering snapshot
+
+The NaN-loss retry re-enters the mock path with `mock_quantization = True`.
+`GPTQ._quantize_impl` captures `retry_hessian_diag` from the natural-order
+Hessian diagonal before `desc_act` / `act_group_aware` permutes `H` and `W`
+(`gptqmodel/quantization/gptq.py:2311`). The retry restores
+`H = torch.diag(retry_hessian_diag)`, and because it clones `W` in natural
+column order it recomputes the same permutation as the primary path.
+
+```mermaid
+flowchart TD
+    A["finalize_hessian"] --> B["capture retry_hessian_diag (natural order)"]
+    B --> C["neutralize dead columns"]
+    C --> D["desc_act / act_group_aware permutation"]
+    D --> E["primary blockwise update"]
+    E --> F{"avg_loss is NaN"}
+    F -- yes --> G["H = diag(natural-order diagonal)"]
+    G --> H["mock retry re-permutes W and H identically"]
+    H --> I["g_idx and column order match the primary path"]
+    style I fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Retry diagonal source | `gptq.py:2397` captured `self.H.diagonal()` after permutation | `gptq.py:2311` captures it before permutation |
+| Retry permutation | `argsort` of an already-sorted diagonal was the identity, so the retry quantized in natural order | The retry recomputes the primary permutation from the same natural-order diagonal |
+| `g_idx` | Not act-ordered on retry | Equal to the primary path's `g_idx` |

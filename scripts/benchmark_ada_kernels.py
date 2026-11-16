@@ -95,7 +95,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iters", type=int, default=60)
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit 0.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # A real run always allocates the L2 flush buffer and reports the hot and
+    # flushed medians separately, so odd iterations are the flushed samples.
+    # Fewer than two iterations leaves one of those medians undefined.
+    if args.iters < 2:
+        parser.error(
+            f"--iters must be at least 2 (got {args.iters}): the benchmark reports "
+            "a hot median from even iterations and a flushed median from odd ones"
+        )
+    if args.warmup < 0:
+        parser.error(f"--warmup cannot be negative (got {args.warmup})")
+    return args
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -183,6 +194,15 @@ class L2Flush:
 
 
 def _timed_us(device: torch.device, fn, *, warmup: int, iters: int, l2: L2Flush | None) -> tuple[float, float | None]:
+    # Name the degenerate count instead of letting ``statistics.median`` raise
+    # ``StatisticsError: no median for empty data`` from a partition below.
+    if iters < 1:
+        raise ValueError(f"_timed_us needs at least one iteration, got iters={iters}")
+    if l2 is not None and iters < 2:
+        raise ValueError(
+            "_timed_us needs at least two iterations when an L2 flush is used: "
+            f"odd iterations are the flushed samples, got iters={iters}"
+        )
     with torch.inference_mode():
         for _ in range(warmup):
             fn()
@@ -439,6 +459,7 @@ def _gptq_gemm_row(module, in_features, out_features, m, args, device, dtype, l2
         return gemm_mod.gptq_gemm(
             x, module.qweight, module.scales, module.qzeros, module.g_idx,
             out_dtype=dtype, bits=args.bits,
+            uniform_group=module._gptq_gemm_uniform_group,
         )
 
     def split_fn():
@@ -456,12 +477,13 @@ def _gptq_gemm_row(module, in_features, out_features, m, args, device, dtype, l2
     magnitude = oracle.abs().max().item()
     fused_oracle_abs = (fused64 - oracle).abs().max().item()
     cfg = gemm_mod.launch_config(x.device)
+    block_m, block_n = gemm_mod.tile_for_m(cfg, m)
     return {
         "section": "gemm",
         "in_features": in_features,
         "out_features": out_features,
         "m": m,
-        "shipped_cfg": [cfg.block_m, cfg.block_n, cfg.block_k, cfg.num_warps, cfg.num_stages],
+        "shipped_cfg": [block_m, block_n, cfg.block_k, cfg.num_warps, cfg.num_stages],
         "gate": [cfg.small_m_max, cfg.max_in_features, cfg.max_out_features],
         "fused_hot_us": fused_hot,
         "fused_flushed_us": fused_flushed,

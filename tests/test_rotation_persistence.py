@@ -52,6 +52,42 @@ def test_quantize_config_rotation_none_omitted():
     assert "rotation" not in d
 
 
+def test_hadamard_supported_matches_get_hadK():
+    from gptqmodel.quantization.rotation.hadamard_utils import (
+        get_hadK,
+        hadamard_supported,
+    )
+
+    for width in (12, 28, 40, 64, 896, 1536, 2048, 3584, 4864, 8960, 18944):
+        try:
+            get_hadK(width)
+        except AssertionError:
+            expected = False
+        else:
+            expected = True
+        assert hadamard_supported(width) is expected, width
+
+
+def test_rotation_rejects_unsupported_intermediate_size_before_mutation():
+    from transformers import Qwen2Config
+
+    from gptqmodel.quantization.rotation.rotation import validate_rotation_dimensions
+
+    config = Qwen2Config(hidden_size=896, intermediate_size=4864)
+    with pytest.raises(ValueError, match=r"intermediate_size`=4864"):
+        validate_rotation_dimensions(config, "hadamard")
+    with pytest.raises(ValueError, match=r"intermediate_size`=4864"):
+        validate_rotation_dimensions(config, "random")
+
+    # Supported widths must still pass.
+    validate_rotation_dimensions(
+        Qwen2Config(hidden_size=896, intermediate_size=896), "hadamard"
+    )
+    validate_rotation_dimensions(
+        Qwen2Config(hidden_size=2048, intermediate_size=8192), "hadamard"
+    )
+
+
 class _DummyQuantLinear(BaseQuantLinear):
     def __init__(self, in_features, out_features):
         torch.nn.Module.__init__(self)
@@ -261,3 +297,119 @@ def test_hooked_linear_online_hadamard_cancels_in_forward():
     _ = hl(x)
     assert len(seen_inputs) == 1
     assert torch.allclose(seen_inputs[0], hadamard_utils.matmul_hadU_cuda(x, None, 1), atol=1e-2)
+
+
+class _CudaOnlyHadamardBackend:
+    """Stand-in for the native/JIT Hadamard op, which registers only CUDA.
+
+    The JIT extension's C++ entry point is ``TORCH_CHECK(x.is_cuda(), ...)``
+    and its dispatcher registration covers CUDA only, so calling it with a CPU
+    tensor raises exactly the error the issue reports.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def hadamard_transform(self, x, scale=1.0):
+        from gptqmodel.quantization.rotation import hadamard_utils as had
+
+        self.calls.append(x.device.type)
+        if x.device.type != "cuda":
+            raise NotImplementedError(
+                "Could not run 'gptqmodel_hadamard::fast_hadamard_transform' "
+                "with arguments from the 'CPU' backend."
+            )
+        return had._TorchHadamardTransform.hadamard_transform(x, scale)
+
+
+@pytest.mark.parametrize("width", [256, 2560])  # K=1 and K=40 (non-trivial hadK)
+def test_online_hadamard_dispatches_on_the_tensor_device(monkeypatch, width):
+    """A CPU tensor must not be sent to the CUDA-only Hadamard op."""
+    from gptqmodel.quantization.rotation import hadamard_utils as had
+
+    backend = _CudaOnlyHadamardBackend()
+    monkeypatch.setattr(had, "fast_hadamard_transform", backend)
+
+    x = torch.randn(2, 3, width, dtype=torch.float32)
+    had_K, K = had.get_hadK(width)
+
+    actual = had.apply_online_hadamard(x, True, False, had_K, K)
+
+    assert actual.device.type == "cpu"
+    assert "cpu" not in backend.calls
+    # `matmul_hadU` is the portable, backend-independent implementation of the
+    # same normalized Walsh transform.
+    torch.testing.assert_close(actual, had.matmul_hadU(x), rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_online_hadamard_still_uses_the_accelerator_on_cuda(monkeypatch):
+    from gptqmodel.quantization.rotation import hadamard_utils as had
+
+    backend = _CudaOnlyHadamardBackend()
+    monkeypatch.setattr(had, "fast_hadamard_transform", backend)
+
+    x = torch.randn(2, 3, 256, device="cuda", dtype=torch.float32)
+    actual = had.apply_online_hadamard(x, True, False, None, 1)
+
+    assert backend.calls == ["cuda"]
+    assert actual.device.type == "cuda"
+    torch.testing.assert_close(actual.cpu(), had.matmul_hadU(x.cpu()), rtol=1e-6, atol=1e-6)
+
+
+def test_exact_hadamard_fuses_on_the_weight_device(monkeypatch):
+    """`apply_exact_had_to_linear` must not force the weight onto CUDA."""
+    from gptqmodel.quantization.rotation import hadamard_utils as had
+
+    backend = _CudaOnlyHadamardBackend()
+    monkeypatch.setattr(had, "fast_hadamard_transform", backend)
+
+    linear = torch.nn.Linear(256, 64, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.normal_()
+    weight = linear.weight.detach().clone()
+
+    had.apply_exact_had_to_linear(linear, had_dim=-1, output=False)
+
+    assert linear.weight.device.type == "cpu"
+    assert linear.weight.dtype == torch.float32
+    assert backend.calls == []
+    torch.testing.assert_close(linear.weight.detach(), had.matmul_hadU(weight), rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("output", [True, False])
+def test_exact_hadamard_head_dim_uses_the_weight_device(monkeypatch, output):
+    from gptqmodel.quantization.rotation import hadamard_utils as had
+
+    backend = _CudaOnlyHadamardBackend()
+    monkeypatch.setattr(had, "fast_hadamard_transform", backend)
+
+    # `output=True` is the only branch that transforms the bias, so only that
+    # branch carries one (the untransformed path rewrites `bias` at 2-D, which
+    # is a separate pre-existing issue outside this fix).
+    linear = torch.nn.Linear(256, 64, bias=output, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.normal_()
+        if linear.bias is not None:
+            linear.bias.normal_()
+    weight = linear.weight.detach().clone()
+    bias = None if linear.bias is None else linear.bias.detach().clone()
+
+    had.apply_exact_had_to_linear(linear, had_dim=64, output=output)
+
+    def block_hadamard(matrix):
+        blocks = matrix.reshape(-1, matrix.shape[-1] // 64, 64)
+        return torch.stack([had.matmul_hadU(block) for block in blocks]).reshape(matrix.shape)
+
+    if output:
+        expected_weight = block_hadamard(weight.t()).t()
+        expected_bias = block_hadamard(bias.reshape(1, -1)).reshape(bias.shape)
+    else:
+        expected_weight = block_hadamard(weight)
+
+    assert linear.weight.device.type == "cpu"
+    assert backend.calls == []
+    torch.testing.assert_close(linear.weight.detach(), expected_weight, rtol=1e-6, atol=1e-6)
+    if output:
+        assert linear.bias.device.type == "cpu"
+        torch.testing.assert_close(linear.bias.detach(), expected_bias, rtol=1e-6, atol=1e-6)

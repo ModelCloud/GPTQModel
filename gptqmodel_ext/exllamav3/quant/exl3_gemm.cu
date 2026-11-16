@@ -8,6 +8,7 @@
 #include "exl3_kernel_map.cuh"
 #include "exl3_devctx.cuh"
 #include <set>
+#include <shared_mutex>
 
 constexpr int EXL3_GEMM_SMEM_MAX = 90 * 1024;
 
@@ -26,7 +27,15 @@ limitations:
 - n % 128 == 0
 */
 
+// One entry per (device, kernel) records that the shared-memory attribute was
+// already raised.  The set is process-wide and is filled on the first launch of
+// each kernel variant, which GIL=0 callers can reach concurrently; an
+// unsynchronized find/insert on a std::set is a data race.  The steady state
+// only reads, so a shared lock keeps concurrent launches parallel and the
+// exclusive lock is taken only the first time a kernel variant is seen on a
+// device.
 std::set<void*> kernel_attr_set[MAX_DEVICES] = {};
+std::shared_mutex kernel_attr_mutex;
 
 int exl3_gemm
 (
@@ -73,6 +82,10 @@ int exl3_gemm
     // Device properties
     int device;
     cudaGetDevice(&device);
+    // Per-device tables below are MAX_DEVICES entries. Reject an ordinal that
+    // would index past them instead of writing host memory out of bounds.
+    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
+                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
     int num_sms = force_num_sms ? force_num_sms : DevCtx::instance().get_num_sms(device);
     int cc = DevCtx::instance().get_cc(device);
     int* locks = DevCtx::instance().get_locks(device);
@@ -116,14 +129,28 @@ int exl3_gemm
     );
 
     // Launch
-    if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
+    bool attr_ready;
     {
-        // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
-        // template overload that accepts a function pointer directly has no HIP
-        // equivalent, so cast to the void* form that both runtimes expose.
-        cudaFuncSetAttribute((const void*) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, EXL3_GEMM_SMEM_MAX);
-        kernel_attr_set[device].insert((void*) kernel);
-        cuda_check(cudaPeekAtLastError());
+        std::shared_lock<std::shared_mutex> guard(kernel_attr_mutex);
+        attr_ready = kernel_attr_set[device].find((void*) kernel) != kernel_attr_set[device].end();
+    }
+    if (!attr_ready)
+    {
+        // First launch of this kernel variant on this device.  Re-check under the
+        // exclusive lock: another thread may have raised the attribute while this
+        // one waited for it.
+        std::unique_lock<std::shared_mutex> guard(kernel_attr_mutex);
+        if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
+        {
+            // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
+            // template overload that accepts a function pointer directly has no HIP
+            // equivalent, so cast to the void* form that both runtimes expose.
+            cudaFuncSetAttribute((const void*) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, EXL3_GEMM_SMEM_MAX);
+            cuda_check(cudaPeekAtLastError());
+            // Publish only after the attribute call succeeded, so a failed setup
+            // is retried by the next launch instead of being treated as done.
+            kernel_attr_set[device].insert((void*) kernel);
+        }
     }
     void* kernelArgs[] =
     {

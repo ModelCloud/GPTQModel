@@ -448,11 +448,14 @@ class NF12Linear(WeightOnlyQuantLinear):
             # `empty_linear_output` already applies the adapter, exactly once.
             return self.empty_linear_output(x)
 
-        if apply_rotation and (self.online_full_had or self.online_partial_had):
-            x = self._apply_rotation_to_input(x)
-
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
+
+        # Answer the empty-rows case before the online rotation. The rotation
+        # used to run first and both its native and Torch implementations
+        # rejected a zero-element operand.
+        if apply_rotation and (self.online_full_had or self.online_partial_had):
+            x = self._apply_rotation_to_input(x)
 
         out = self._native_forward(x, bias)
         if out is None:
@@ -520,6 +523,15 @@ class NF12Linear(WeightOnlyQuantLinear):
                 f"NF12Linear `{self.name}`: unexpected `nf12_packed` shape "
                 f"{tuple(self.nf12_packed.shape)}"
             )
+        # Escape indices are read from the checkpoint's packed stream; reject
+        # out-of-table values at load instead of decoding arbitrary memory.
+        if self.nf12_packed.device.type != "meta":
+            from gptqmodel_nf12.api import validate_escape_indices
+
+            try:
+                validate_escape_indices(self.nf12_packed, self.nf12_escapes)
+            except ValueError as exc:
+                raise ValueError(f"NF12Linear `{self.name}`: {exc}") from exc
 
     def extra_repr(self) -> str:
         exponent = getattr(self, "nf12_exp_base", None)

@@ -11,16 +11,18 @@ import copy
 import json
 import os
 import shutil
+import threading
 import time
 import weakref
-from functools import partial
+from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
 import transformers
 
+from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
@@ -57,13 +59,17 @@ from ..quantization.config import (
     configure_dynamic_override_cache_for_model,
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
 from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
+    assert_loaded_model_state,
+    get_config_selection_kwargs,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
@@ -72,6 +78,7 @@ from ..utils.hf import (
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
     prepare_remote_model_init_compat,
+    resolve_checkpoint_subfolder,
     resolve_trust_remote_code,
     set_hf_config_dtype,
     suspend_hf_weight_init,
@@ -127,6 +134,41 @@ def __getattr__(name: str):
 
 log = setup_logger()
 
+
+def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
+    """Return the key converter the quantized loader should apply.
+
+    A definition may declare an explicit ``checkpoint_key_for_load`` /
+    ``checkpoint_key_for_save``. Every other family falls back to its
+    Transformers checkpoint conversion map, inferred from the live model, so a
+    legacy-layout checkpoint (Transformers 4.x keys such as ``model.layers.*``
+    and ``visual.*``) is remapped to the runtime names. The map is idempotent
+    for checkpoints already written with runtime keys: their names do not match
+    the checkpoint-side patterns and pass through unchanged.
+    """
+
+    explicit = getattr(
+        cls,
+        "checkpoint_key_for_load" if to_runtime else "checkpoint_key_for_save",
+        None,
+    )
+    if callable(explicit):
+        return explicit
+
+    try:
+        mapping = cls.resolve_hf_conversion_map_reversed(target_model=model)
+    except Exception:
+        log.debug("Loader: could not infer an HF checkpoint conversion map", exc_info=True)
+        return None
+    if mapping is None:
+        return None
+
+    def convert(name: str) -> str:
+        return LazyTurtle.convert_hf_checkpoint_key(name, mapping, to_runtime=to_runtime)
+
+    return convert
+
+
 _GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
 
 
@@ -163,7 +205,7 @@ _EXTERNAL_BACKEND_FORMATS = {
 
 def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format_code, adapter):
     """Select MLX when its Metal runtime can use the checkpoint directly."""
-    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
+    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or resolve_model_rotation(qcfg):
         return backend
     if quant_method == METHOD.GGUF and getattr(getattr(qcfg, "runtime_bits", None), "name", None) not in {
             "q1_0", "q1_0_g128", "q2_0", "q4_0", "q8_0", "q4_k", "q4_k_s", "q4_k_m",
@@ -525,6 +567,112 @@ def _native_ttnn_backend(backend: BACKEND) -> bool:
     return backend in (BACKEND.GPTQ_TTNN,)
 
 
+def _module_tensor_bytes(module: torch.nn.Module) -> int:
+    """Return the resident bytes of a module's own parameters and buffers.
+
+    Meta tensors keep their shape and element size, so the estimate works
+    before the checkpoint is materialized. A tied weight is one tensor object
+    and is counted once.
+    """
+    seen = set()
+    total = 0
+    for tensor in chain(module.parameters(), module.buffers()):
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        key = id(tensor)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += tensor.numel() * tensor.element_size()
+    return total
+
+
+def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
+    """Normalize an Accelerate-style ``max_memory`` map into ordered budgets.
+
+    Keys are integer accelerator ordinals, ``"cpu"``, or concrete device
+    strings; values are byte counts or size strings such as ``"4GiB"``. The
+    returned order is the caller's insertion order and is also the placement
+    priority.
+    """
+    if not isinstance(max_memory, dict) or not max_memory:
+        raise TypeError("`max_memory` must be a non-empty dict of device -> size.")
+
+    from accelerate.utils import convert_file_size_to_int
+
+    family = selector_device_family(device) or DEVICE.CPU
+    budgets: List[tuple[str, int]] = []
+    seen = set()
+    for key, value in max_memory.items():
+        if isinstance(key, int):
+            name = f"{family.type}:{key}"
+        else:
+            name = str(key).strip().lower()
+            if name != "cpu":
+                try:
+                    name = str(torch.device(name))
+                except (RuntimeError, ValueError) as exc:
+                    raise ValueError(
+                        f"`max_memory` has an unsupported device key `{key}`."
+                    ) from exc
+        if name in seen:
+            raise ValueError(f"`max_memory` names `{name}` more than once.")
+        seen.add(name)
+        try:
+            budget = convert_file_size_to_int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"`max_memory[{key!r}]` is not a valid size: {value!r}."
+            ) from exc
+        if budget <= 0:
+            raise ValueError(f"`max_memory[{key!r}]` must be greater than zero.")
+        budgets.append((name, budget))
+    return budgets
+
+
+def _device_map_uses_cpu(device_map) -> bool:
+    """Whether a placement map contains a CPU-resident entry."""
+    if not isinstance(device_map, dict):
+        return False
+    for value in device_map.values():
+        if value is None or isinstance(value, int):
+            continue
+        try:
+            if torch.device(value).type == "cpu":
+                return True
+        except (RuntimeError, ValueError):
+            continue
+    return False
+
+
+def _assign_greedy_device_ids(
+    sizes: Sequence[int],
+    budgets: List[Optional[int]],
+    labels: Optional[Sequence[str]] = None,
+) -> List[int]:
+    """Place each unit on the first device that still has room, in order.
+
+    ``budgets`` is mutated so the caller can keep reserving room for the
+    embedding and output head. A unit that does not fit anywhere is an error:
+    silently exceeding a memory cap is what the caller asked us not to do.
+    """
+    cursor = 0
+    assignments: List[int] = []
+    for index, size in enumerate(sizes):
+        while cursor < len(budgets) and budgets[cursor] is not None and budgets[cursor] < size:
+            cursor += 1
+        if cursor >= len(budgets):
+            label = labels[index] if labels is not None else f"unit {index}"
+            raise ValueError(
+                f"`max_memory` cannot hold `{label}` ({size} bytes); increase a "
+                "device budget or add a `cpu` entry."
+            )
+        assignments.append(cursor)
+        if budgets[cursor] is not None:
+            budgets[cursor] -= size
+    return assignments
+
+
 def _resolve_default_layerwise_device(device, backend: BACKEND):
     """Keep explicit device sequences intact instead of collapsing singletons."""
     requested = _explicit_requested_devices(device)
@@ -539,6 +687,127 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
         # ``xla:N`` ordinal, so keep the abstract family unexpanded here.
         return selected
     return expand_selector_device_family(selected)
+
+
+_ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})
+
+
+def _is_accelerate_device_map_string(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered in _ACCELERATE_DEVICE_MAP_STRINGS or lowered.startswith("balanced_low_")
+
+
+def _validate_device_and_device_map_agree(device, device_map) -> None:
+    """Reject a `device` request that contradicts an explicit `device_map`."""
+
+    requested_family = selector_device_family(normalize_device_device_map(device, None))
+    mapped_family = selector_device_family(normalize_device_device_map(None, device_map))
+    if requested_family != mapped_family:
+        requested_name = requested_family.value if requested_family is not None else None
+        mapped_name = mapped_family.value if mapped_family is not None else None
+        raise ValueError(
+            f"`device={device!r}` conflicts with `device_map={device_map!r}`: "
+            f"`device` selects {requested_name} but `device_map` selects {mapped_name}. "
+            "Pass one placement argument, or make them agree."
+        )
+
+
+def _normalize_requested_device_map(device, device_map):
+    """Apply Hugging Face string shorthand and check device/device_map agreement.
+
+    Hugging Face accepts `device_map="cpu"` and `device_map="cuda:0"` as
+    shorthand for `{"": value}`. GPT-QModel used to reject those strings and
+    then let an explicit `device_map` silently replace `device`.
+    """
+
+    if device_map is None:
+        return None
+    if isinstance(device_map, str):
+        if _is_accelerate_device_map_string(device_map):
+            normalized = device_map
+        else:
+            try:
+                torch.device(device_map)
+            except (RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    "If passing a string for `device_map`, choose 'auto', 'balanced', "
+                    "'balanced_low_0', 'sequential', or a concrete device such as 'cpu' "
+                    "or 'cuda:0'."
+                ) from exc
+            if device_map.strip().lower() in {"disk", "meta"}:
+                raise ValueError(
+                    "A full-model `device_map` cannot be an offload target; use a "
+                    "per-module map for 'disk' or 'meta' entries."
+                )
+            normalized = {"": device_map}
+    else:
+        normalized = dict(device_map)
+    if device is not None:
+        _validate_device_and_device_map_agree(device, normalized)
+    return normalized
+
+
+def _indexed_device_request(device) -> Optional[str]:
+    """Return an indexed ``device`` request as a placement string, if any."""
+
+    if isinstance(device, str) and ":" in device:
+        return device
+    if isinstance(device, torch.device) and device.index is not None:
+        return str(device)
+    return None
+
+
+def _normalize_explicit_placement(device, device_map, max_memory):
+    """Resolve ``device``/``device_map``/``max_memory`` into placement inputs.
+
+    An indexed ``device`` such as ``"cuda:0"`` is shorthand for a full-model
+    map, but only when the caller did not also supply a memory budget. With
+    ``max_memory`` the indexed device selects the accelerator family for the
+    budgeted layer-wise map; converting it to ``{"": device}`` first would
+    silently drop the cap.
+    """
+
+    requested_device_map = _normalize_requested_device_map(device, device_map)
+    explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+    if max_memory is not None and explicit_device_map is not None:
+        raise ValueError(
+            "Pass either an explicit `device_map` dict or `max_memory`, not both."
+        )
+    if requested_device_map is None and max_memory is None:
+        explicit_device = _indexed_device_request(device)
+        if explicit_device is not None:
+            explicit_device_map = {"": explicit_device}
+            requested_device_map = explicit_device_map
+    return requested_device_map, explicit_device_map
+
+
+def _resolve_max_memory_device(max_memory, device) -> Optional[DEVICE]:
+    """Validate ``device`` against the devices a ``max_memory`` budget names.
+
+    ``max_memory`` is the authoritative list of devices that may hold weights
+    (#4082). When every entry is ``cpu`` the budget can only place layers on
+    CPU, so kernel selection must use CPU too; otherwise a CUDA kernel is
+    selected for a CPU-resident model and the first forward raises
+    ``Expected a cuda device, but got: cpu`` (#4091 item 7).
+
+    Returns ``DEVICE.CPU`` for a CPU-only budget and ``None`` when the budget
+    admits an accelerator. An explicit accelerator ``device`` that contradicts
+    a CPU-only budget is rejected rather than silently ignored.
+    """
+
+    if max_memory is None:
+        return None
+    if any(name != "cpu" for name, _ in _normalize_max_memory(max_memory, device)):
+        return None
+    requested_family = selector_device_family(device) if device is not None else None
+    if requested_family is not None and requested_family != DEVICE.CPU:
+        raise ValueError(
+            "`max_memory` has no accelerator entry, so it can only place layers "
+            f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
+            "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
+            "CPU-only placement."
+        )
+    return DEVICE.CPU
 
 
 def _external_runtime_device_kwargs(
@@ -619,6 +888,25 @@ def _should_print_module_tree() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 
+def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool) -> None:
+    """Run a definition's pre-load hook for every load path.
+
+    `before_model_load` is a plain method on the definition class, not an
+    instance method: no model instance exists yet, so the class is passed as
+    the receiver. Definitions that patch remote modules guard their work, so
+    running the hook for quantize and quantized reload in the same process is
+    idempotent. Native (non-quantized) loads need the same hook because the
+    mask-helper and config patches it installs are also required by
+    `generate()`/`forward()` on an unquantized model.
+    """
+
+    cls.before_model_load(
+        cls,
+        model_local_path=model_local_path,
+        load_quantized_model=load_quantized_model,
+    )
+
+
 def _maybe_print_module_tree(model) -> None:
     """Print the module tree only when explicitly requested for debugging."""
 
@@ -626,8 +914,64 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
+# `requirements.txt` pins `defuser>=0.0.31`. Older releases do not split the
+# fused 3-D expert tensors of afmoe / flint / granitemoe_swa, so their routed
+# experts stay fused and are silently left unquantized; the only symptom is a
+# "0 layer matches" line in the module-coverage report. Defuser 0.0.31 also
+# fixes the GLM-4.x replacement MoE blocks, which crashed on the Transformers
+# 5.22 router tuple.
+DEFUSER_MIN_VERSION = "0.0.31"
+_defuser_version_warning_emitted = False
+
+
+def defuser_version_too_old(installed: Optional[str] = None) -> Optional[str]:
+    """Return the installed `defuser` version when it predates the supported floor."""
+
+    if installed is None:
+        try:
+            installed = version("defuser")
+        except PackageNotFoundError:
+            return None
+    try:
+        outdated = Version(installed) < Version(DEFUSER_MIN_VERSION)
+    except InvalidVersion:
+        return installed
+    return installed if outdated else None
+
+
+def _check_defuser_version() -> None:
+    """Report an unsupported `defuser` before its conversion silently no-ops."""
+
+    global _defuser_version_warning_emitted
+    if _defuser_version_warning_emitted:
+        return
+    _defuser_version_warning_emitted = True
+    outdated = defuser_version_too_old()
+    if outdated is None:
+        return
+    log.error(
+        "Loader: defuser %s is installed but >= %s is required. Fused 3-D expert "
+        "tensors (afmoe, flint, granitemoe_swa, ...) will not be split and the "
+        "GLM-4.x defused MoE blocks cannot run on Transformers 5.22; upgrade defuser.",
+        outdated,
+        DEFUSER_MIN_VERSION,
+    )
+
+
 def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
+    _check_defuser_version()
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
+
+    # Defuser gates `convert_model()` on its own model registry. Model types
+    # that GPT-QModel supports through the generic Transformers experts
+    # interface (native Kimi-Linear / MiMo-V2-Flash) have no registry entry,
+    # so run Defuser's generic replacement pass explicitly instead of leaving
+    # the fused 3-D expert parameters unquantized.
+    if not converted and getattr(cls, "defuser_generic_experts", False):
+        from defuser.modeling.update_module import update_module
+
+        update_module(model, cleanup_original=cleanup_original)
+        converted = True
 
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())
     if defuser_module_paths:
@@ -881,6 +1225,40 @@ def compare_versions(installed_version, required_version, operator):
         raise ValueError(f"Unsupported operator: {operator}")
 
 
+# transformers' ``from_pretrained`` / ``from_config`` mutate process-wide state:
+# they save, set and restore ``torch.set_default_dtype``
+# (``transformers/modeling_utils.py``) and build parameters through meta-device
+# and no-init contexts. Two loads in different threads interleave those changes
+# and hand back models with mixed fp16/fp32 parameters, a meta ``lm_head`` and
+# untied embeddings (issue #4129). Model construction is serialized process-wide
+# through this lock; ``quantize()`` on already-loaded models stays concurrent.
+_MODEL_LOAD_LOCK = threading.RLock()
+
+
+def model_load_lock():
+    """Return the process-wide, re-entrant lock guarding model construction.
+
+    Every site that builds a model through transformers -- ``from_pretrained``,
+    ``from_quantized``, the save-side shell rebuild, the dequant path and the
+    TT block-float path -- must enter this same lock. Look the lock up through
+    this accessor (not a module-level import of ``_MODEL_LOAD_LOCK``) so the
+    single lock object is shared and can be spied on in tests.
+    """
+
+    return _MODEL_LOAD_LOCK
+
+
+def _serialized_model_load(method):
+    """Serialize a model-construction entry point across threads."""
+
+    @wraps(method)
+    def wrapper(*args, **kwargs):
+        with model_load_lock():
+            return method(*args, **kwargs)
+
+    return wrapper
+
+
 def _is_meta_shell_build_error(exc: Exception) -> bool:
     # Some trust_remote_code model constructors call int()/item() on tensors
     # during __init__, which breaks when the shell is built on the meta device.
@@ -1072,7 +1450,16 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
 
 
 def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
-    return get_hf_gguf_load_kwargs(model_init_kwargs)
+    """Tokenizer options that must match the config/weight selection.
+
+    A nested checkpoint keeps its tokenizer beside the config, so forwarding
+    only ``gguf_file`` would load the repository-root tokenizer (or fail when
+    the root has none) while the weights came from the requested subfolder.
+    """
+
+    kwargs = get_config_selection_kwargs(model_init_kwargs)
+    kwargs.update(get_hf_gguf_load_kwargs(model_init_kwargs))
+    return kwargs
 
 
 def _resolve_local_gguf_checkpoint_path(model_local_path: str, hf_gguf_load_kwargs: Dict[str, str]) -> Optional[str]:
@@ -1247,13 +1634,71 @@ def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None)
     return BACKEND.EXL3_TORCH
 
 
+def _apply_requested_module_tree(
+    definition_cls,
+    model,
+    module_tree,
+    quantize_config,
+    *,
+    allow_auto: bool,
+) -> None:
+    """Attach an explicit or auto-detected module tree to a loaded model.
+
+    ``None`` keeps the existing fail-closed behavior.  A list/tuple is an
+    explicit declaration.  ``"auto"`` asks the definition's structural
+    discovery to build one complete variant per concurrent decoder stack; it is
+    only valid for an unquantized source because a quantized checkpoint no
+    longer exposes the dense ``Linear`` leaves discovery looks for.
+    """
+
+    if module_tree is None:
+        return
+
+    if isinstance(module_tree, str):
+        if module_tree != "auto":
+            raise ValueError(
+                f"module_tree={module_tree!r} is not supported; "
+                "pass a tree declaration (list/tuple) or 'auto'."
+            )
+        if quantize_config is None:
+            raise ValueError(
+                "module_tree='auto' requires a quantize_config so the quantization "
+                "method is known; omit module_tree when loading only for evaluation."
+            )
+        if not allow_auto:
+            raise ValueError(
+                "module_tree='auto' requires an unquantized source model loaded through "
+                "from_pretrained(); quantized checkpoints need an explicit module tree."
+            )
+        detected = definition_cls._auto_detect_module_tree(
+            model, getattr(quantize_config, "method", None)
+        )
+        if detected is None:
+            model_type = getattr(getattr(model, "config", None), "model_type", "<unknown>")
+            raise ValueError(
+                f"module_tree='auto' could not resolve any quantizable decoder branch for "
+                f"model_type {model_type!r}. Register an explicit model definition or pass "
+                "an explicit module tree declaration."
+            )
+        model.gptqmodel_effective_module_tree = copy.deepcopy(detected)
+        return
+
+    if not isinstance(module_tree, (list, tuple)):
+        raise TypeError(
+            "module_tree must be None, 'auto', or a list/tuple tree declaration; "
+            f"got {type(module_tree).__name__}."
+        )
+
+    model.gptqmodel_effective_module_tree = copy.deepcopy(module_tree)
+
+
 def ModelLoader(cls):
     @classmethod
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
@@ -1261,15 +1706,25 @@ def ModelLoader(cls):
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ):
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+        if kernel is not None and quantize_config is not None:
+            # The loopers read this field and install it before kernel selection.
+            quantize_config.kernel = (
+                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+            )
 
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
+        default_dtype_before = torch.get_default_dtype()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -1282,6 +1737,7 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_pretrained",
             explicit_dtype=dtype,
         )
+        requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         backend = normalize_backend(backend)
         profile = normalize_profile(profile)
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
@@ -1299,7 +1755,9 @@ def ModelLoader(cls):
         defuser.replace_fused_blocks(config.model_type)
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(model_local_path, config)
+        prepare_remote_model_init_compat(
+            model_local_path, config, trust_remote_code=trust_remote_code
+        )
 
         from ..utils.mimo import is_mimo_mixed_source
 
@@ -1389,9 +1847,11 @@ def ModelLoader(cls):
                         device_map=device_map,
                         device=device,
                         backend=backend,
+                        kernel=kernel,
                         dtype=dtype,
                         trust_remote_code=trust_remote_code,
                         tokenizer_trust_remote_code=tokenizer_trust_remote_code,
+                        module_tree=module_tree,
                         **redirect_kwargs,
                     )
 
@@ -1410,6 +1870,11 @@ def ModelLoader(cls):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
+            _call_before_model_load(
+                cls,
+                model_local_path=model_local_path,
+                load_quantized_model=False,
+            )
             model = _hf_loader_from_pretrained_with_dynamic_module_retry(
                 cls.loader,
                 model_local_path,
@@ -1418,6 +1883,9 @@ def ModelLoader(cls):
             )
             model._model_init_kwargs = hf_model_init_kwargs
             _maybe_print_module_tree(model=model)
+            _apply_requested_module_tree(
+                cls, model, module_tree, quantize_config, allow_auto=False
+            )
 
             turtle_model = None
 
@@ -1433,6 +1901,13 @@ def ModelLoader(cls):
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
+            assert_loaded_model_state(
+                model,
+                api_name=f"{cls.__name__}.from_pretrained",
+                default_dtype_before=default_dtype_before,
+                expected_dtype=requested_dtype,
+                require_uniform_dtype=True,
+            )
             return instance
 
         load_start = time.perf_counter()
@@ -1490,7 +1965,11 @@ def ModelLoader(cls):
             model_init_kwargs_without_internal["_fast_init"] = cls.require_fast_init
             #model_init_kwargs["low_cpu_mem_usage"] = True
 
-            cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=False)
+            _call_before_model_load(
+                cls,
+                model_local_path=model_local_path,
+                load_quantized_model=False,
+            )
             from ..utils.hf import build_shell_model
 
             # XIELUActivation will use some weights when activation init, so can't use init_empty_weights
@@ -1553,6 +2032,11 @@ def ModelLoader(cls):
                             cls.resolve_hf_conversion_map_reversed(target_model=model)
                         ),
                         target_model=model,
+                        # A `.bin`/`.pt` source is converted to a full safetensors
+                        # copy.  Put that copy under the configured offload root
+                        # instead of the system TMPDIR; the turtle only falls back
+                        # to `tempfile.gettempdir()` when no path is configured.
+                        offload_path=getattr(quantize_config, "offload_to_disk_path", None),
                     )
 
                     if turtle_model is None:
@@ -1586,6 +2070,10 @@ def ModelLoader(cls):
                 _maybe_print_module_tree(model=model)
 
                 turtle_model = None
+
+        _apply_requested_module_tree(
+            cls, model, module_tree, quantize_config, allow_auto=True
+        )
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -1621,9 +2109,20 @@ def ModelLoader(cls):
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
             timer.record("model_load", time.perf_counter() - load_start, source=source_label)
 
+        # ``offload_to_disk`` builds a meta shell that ``LazyTurtle`` fills in
+        # later, so only the default-dtype invariant applies to it.
+        materialized = turtle_model is None
+        assert_loaded_model_state(
+            model,
+            api_name=f"{cls.__name__}.from_pretrained",
+            default_dtype_before=default_dtype_before,
+            expected_dtype=requested_dtype if materialized else None,
+            require_uniform_dtype=materialized,
+            require_materialized=materialized,
+        )
         return instance
 
-    cls.from_pretrained = from_pretrained
+    cls.from_pretrained = classmethod(_serialized_model_load(from_pretrained.__func__))
 
     @classmethod
     def from_quantized(
@@ -1631,7 +2130,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
@@ -1640,9 +2139,12 @@ def ModelLoader(cls):
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
+            module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
-
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
         warn_unsupported_rocm()
 
         # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
@@ -1657,11 +2159,14 @@ def ModelLoader(cls):
         # Install the peer-to-peer policy before any multi-device load so the
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
+        # Install the kernel policy before any quantized module is built.
+        configure_kernel(kernel)
 
         # post-quant is safe with GIL=0 and torch.compile/graphs
 
         import torch._dynamo
         torch._dynamo.reset()
+        default_dtype_before = torch.get_default_dtype()
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -1675,23 +2180,31 @@ def ModelLoader(cls):
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
+        max_memory = kwargs_without_internal.pop("max_memory", None)
         tokenizer_trust_remote_code = kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
-        requested_device_map = device_map
-        explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+        requested_device_map, explicit_device_map = _normalize_explicit_placement(
+            device, device_map, max_memory
+        )
         # Kept for the block-float route, which builds on CPU and must not
         # silently ignore a placement request the caller made.
         requested_device = device
 
-        if requested_device_map is None:
-            explicit_device = None
-            if isinstance(device, str) and ":" in device:
-                explicit_device = device
-            elif isinstance(device, torch.device) and device.index is not None:
-                explicit_device = str(device)
+        # A budget that names only CPU can only place weights on CPU, so the
+        # kernel must be a CPU kernel. The placement builder already honours the
+        # budget; without this the selected CUDA kernel crashes on the first
+        # CPU-resident layer's forward.
+        max_memory_device = _resolve_max_memory_device(max_memory, device)
+        if max_memory_device is not None:
+            device = max_memory_device
+            requested_device_map = None
 
-            if explicit_device is not None:
-                explicit_device_map = {"": explicit_device}
-                requested_device_map = explicit_device_map
+        # A CPU-resident layer runs `post_init` on CPU. AUTO must therefore not
+        # select a CUDA-only kernel for a map that offloads some layers.
+        cpu_offload = _device_map_uses_cpu(explicit_device_map)
+        if max_memory is not None and any(
+            str(key).strip().lower() == "cpu" for key in max_memory
+        ):
+            cpu_offload = True
 
         # Keep string inputs compatible while allowing canonical method-prefixed names.
         backend = normalize_backend(backend)
@@ -1754,6 +2267,11 @@ def ModelLoader(cls):
         use_auth_token = kwargs_without_internal.pop("use_auth_token", None)
         revision = kwargs_without_internal.pop("revision", None)
         subfolder = kwargs_without_internal.pop("subfolder", "")
+        # Resolve the requested repo subfolder once. The quantize config, the
+        # checkpoint shards, and a relative adapter manifest must all be read
+        # from the same directory, and that directory must stay inside the
+        # checkpoint the caller named.
+        checkpoint_dir = resolve_checkpoint_subfolder(model_local_path, subfolder)
         commit_hash = kwargs_without_internal.pop("_commit_hash", None)
         attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
 
@@ -1782,7 +2300,9 @@ def ModelLoader(cls):
         defuser.replace_fused_blocks(config.model_type)
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
-        prepare_remote_model_init_compat(model_local_path, config)
+        prepare_remote_model_init_compat(
+            model_local_path, config, trust_remote_code=trust_remote_code
+        )
 
         if cls.require_dtype:
             dtype = cls.require_dtype
@@ -1818,6 +2338,10 @@ def ModelLoader(cls):
         else:
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
 
+        # Runtime policy belongs to this checkpoint's modules, not whichever
+        # model most recently installed a process policy.
+        qcfg.kernel = kernel
+
         if adapter is None:
             if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
                 raise ValueError(
@@ -1825,7 +2349,7 @@ def ModelLoader(cls):
                     "checkpoint metadata cannot authorize remote adapter downloads."
                 )
             if qcfg.adapter is not None and qcfg.adapter.path not in (None, ""):
-                qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, model_local_path)
+                qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, checkpoint_dir)
         else:
             qcfg.adapter = normalize_adapter(adapter)
             configure_explicit_remote_adapter(
@@ -1837,6 +2361,18 @@ def ModelLoader(cls):
 
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
+        # Remember the layout the tensors actually have on disk.  A re-save
+        # after mutating `quantize_config.format` must convert qzeros instead
+        # of copying the old words under a new label.
+        qcfg._checkpoint_format_on_disk = format_code
+        qcfg._checkpoint_layout_snapshot = {
+            "format": format_code,
+            "bits": qcfg.bits,
+            "group_size": qcfg.group_size,
+            "sym": qcfg.sym,
+            "desc_act": qcfg.desc_act,
+            "pack_dtype": qcfg.pack_dtype,
+        }
         backend = normalize_backend(backend, quant_method=export_quant_method)
         backend = backend_for_activation(qcfg.activation_mode, backend)
         backend = _auto_select_mlx_backend(
@@ -1894,6 +2430,22 @@ def ModelLoader(cls):
             model_local_path,
             model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
+            # The tokenizer must come from the same directory and revision as
+            # the config and weights. A nested checkpoint keeps all of them in
+            # the requested subfolder, so resolving only the weights there would
+            # load the root tokenizer (or fail on a repo that has none).
+            **_get_tokenizer_load_kwargs(
+                {
+                    "cache_dir": cache_dir,
+                    "force_download": force_download,
+                    "resume_download": resume_download,
+                    "proxies": proxies,
+                    "local_files_only": local_files_only,
+                    "use_auth_token": use_auth_token,
+                    "revision": revision,
+                    "subfolder": subfolder,
+                }
+            ),
             **hf_gguf_load_kwargs,
         )
 
@@ -2031,7 +2583,11 @@ def ModelLoader(cls):
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         gguf_tensor_key_mapping = None
         with suspend_hf_weight_init():
-            cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=True)
+            _call_before_model_load(
+                cls,
+                model_local_path=model_local_path,
+                load_quantized_model=True,
+            )
 
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)
@@ -2104,6 +2660,9 @@ def ModelLoader(cls):
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
             dynamic_cache_stats_before = dynamic_override_cache_stats(qcfg.dynamic) if qcfg.dynamic else None
+            _apply_requested_module_tree(
+                cls, model, module_tree, qcfg, allow_auto=False
+            )
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
@@ -2142,6 +2701,7 @@ def ModelLoader(cls):
                 )
 
                 simple_layer_modules = cls.simple_layer_modules(config, qcfg)
+            external_inclusions = qcfg.external_module_inclusions()
             for name in list(modules.keys()):
                 if input_embed_quantized and name == input_embed_name:
                     continue
@@ -2173,10 +2733,18 @@ def ModelLoader(cls):
                         for leaf in declared
                     )
                 )
+                inclusion_match = (
+                    external_inclusions is None
+                    or relative is None
+                    or any(
+                        relative.endswith(entry) or name.endswith(entry)
+                        for entry in external_inclusions
+                    )
+                )
                 if layer_prefix is None or any(
                         name == ignore_module or name.startswith(f"{ignore_module}.")
                         for ignore_module in ignore_modules
-                ) or not relative_match:
+                ) or not relative_match or not inclusion_match:
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
                         log.info(f"The layer {name} is not quantized.")
@@ -2187,7 +2755,7 @@ def ModelLoader(cls):
                     log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
-            if qcfg.rotation:
+            if resolve_model_rotation(qcfg):
                 if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
                     raise NotImplementedError(
                         f"`rotation` is only supported for GPTQ/GPTQ_V2 checkpoints, got `{format_code}`."
@@ -2229,13 +2797,14 @@ def ModelLoader(cls):
                     device=device,
                     dtype=dtype,
                     is_sharded=is_sharded,
+                    cpu_offload=cpu_offload,
                 )
 
         validate_checkpoint_qweights(
             model,
             model_save_name,
             format_code,
-            key_converter=getattr(cls, "checkpoint_key_for_save", None),
+            key_converter=_checkpoint_key_converter(cls, model, to_runtime=False),
         )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
@@ -2256,6 +2825,7 @@ def ModelLoader(cls):
                 layers: List[torch.nn.Module],
                 ignore_modules: List[torch.nn.Module],
                 num_gpus: Optional[int] = None,
+                max_memory=None,
         ) -> Dict[str, str]:
             """
             Build a deterministic alternating device_map for multi-GPU loading.
@@ -2276,11 +2846,23 @@ def ModelLoader(cls):
                 family = selector_device_family(device) or DEVICE.CPU
                 raise RuntimeError(f"No devices detected for accelerator family `{family.value}`")
 
+            if max_memory is not None:
+                # A memory cap names the devices that may be used. It replaces
+                # the visible-device round-robin so an unlisted GPU is never
+                # touched, and a `cpu` entry becomes the offload target.
+                max_memory_budgets = _normalize_max_memory(max_memory, device)
+                device_strs = [name for name, _ in max_memory_budgets]
+                device_budgets: Optional[List[Optional[int]]] = [
+                    budget for _, budget in max_memory_budgets
+                ]
+                num_gpus = len(device_strs)
+            else:
+                device_budgets = None
+                device_strs = _layerwise_device_strings(device, num_gpus, backend)
+
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
-
-            device_strs = _layerwise_device_strings(device, num_gpus, backend)
 
             def assign(mod, device_id):
                 if mod is None:
@@ -2288,6 +2870,18 @@ def ModelLoader(cls):
                 name = mod2name.get(mod)
                 if name is not None:
                     device_map[name] = device_strs[device_id]
+
+            def default_fallback_device_id() -> int:
+                if device_budgets is None:
+                    return device_ids[-1]
+                # A parameterless module (rotary embeddings, for example)
+                # cannot carry an Accelerate CPU-offload hook: its
+                # `pre_forward` reads `next(module.parameters())`. Keep the
+                # structural modules on an accelerator when one is budgeted.
+                return next(
+                    (index for index, name in enumerate(device_strs) if name != "cpu"),
+                    device_ids[-1],
+                )
 
             # -------------------------------------------------------------
             # 1–3. Assign input embeddings, layers, and ignored modules
@@ -2298,17 +2892,33 @@ def ModelLoader(cls):
             except NotImplementedError:
                 log.warning("Model does not implement get_input_embeddings. Skipping input embeddings assignment.")
                 in_emb = None
-            assign(in_emb, device_ids[0])
 
             # Alternating layers
             layer_name2devid: Dict[str, int] = {}
+            in_emb_device_id: Optional[int] = None
 
-            for i, layer in enumerate(layers):
-                gpu = device_ids[i % num_gpus]
-                assign(layer, gpu)
-                lname = mod2name.get(layer)
-                if lname is not None:
-                    layer_name2devid[lname] = gpu
+            if device_budgets is not None:
+                units = ([in_emb] if in_emb is not None else []) + list(layers)
+                sizes = [_module_tensor_bytes(unit) for unit in units]
+                labels = [mod2name.get(unit, "<unnamed>") for unit in units]
+                placements = _assign_greedy_device_ids(sizes, device_budgets, labels)
+                for unit, dev_id in zip(units, placements):
+                    assign(unit, dev_id)
+                    if unit is in_emb:
+                        in_emb_device_id = dev_id
+                    lname = mod2name.get(unit)
+                    if lname is not None:
+                        layer_name2devid[lname] = dev_id
+            else:
+                assign(in_emb, device_ids[0])
+                if in_emb is not None:
+                    in_emb_device_id = device_ids[0]
+                for i, layer in enumerate(layers):
+                    gpu = device_ids[i % num_gpus]
+                    assign(layer, gpu)
+                    lname = mod2name.get(layer)
+                    if lname is not None:
+                        layer_name2devid[lname] = gpu
 
             # Ignored modules - skip input embeddings to avoid overriding GPU 0 assignment
             # Iterate over modules that should be ignored during default layer-wise mapping
@@ -2330,9 +2940,9 @@ def ModelLoader(cls):
                     if "." not in owner:
                         break
                     owner = owner.rsplit(".", 1)[0]
-                # If no ancestor is found, fall back to the last GPU
+                # If no ancestor is found, fall back to the default device
                 if dev_id is None:
-                    dev_id = device_ids[-1]
+                    dev_id = default_fallback_device_id()
                 # Assign the current module to the determined device
                 assign(mod, dev_id)
             # -------------------------------------------------------------
@@ -2347,14 +2957,19 @@ def ModelLoader(cls):
                         break
 
             if head is not None:
-                assign(head, device_ids[-1])
-                # If weight-tied, co-locate on GPU 0
                 tie_cfg = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
-                if (
-                    in_emb is not None
-                    and tie_cfg
-                ):
-                    assign(head, device_ids[0])
+                if in_emb is not None and tie_cfg:
+                    # A tied head is the same tensor as the input embedding, so
+                    # it follows that placement instead of consuming budget.
+                    assign(head, in_emb_device_id if in_emb_device_id is not None else device_ids[0])
+                elif device_budgets is not None:
+                    head_size = _module_tensor_bytes(head)
+                    placement = _assign_greedy_device_ids(
+                        [head_size], device_budgets, [mod2name.get(head, "<head>")]
+                    )
+                    assign(head, placement[0])
+                else:
+                    assign(head, device_ids[-1])
 
             # -------------------------------------------------------------
             # 5. Safety check: ensure all params are covered
@@ -2365,8 +2980,8 @@ def ModelLoader(cls):
             ]
             module_names = set(mod2name.values())
             if missing:
-                # map any leftover params (rare) to last GPU
-                fallback_device = device_ids[-1]
+                # map any leftover params (rare) to the default device
+                fallback_device = default_fallback_device_id()
                 for param_name in missing:
                     owner = param_name
                     while owner and owner not in module_names:
@@ -2401,7 +3016,7 @@ def ModelLoader(cls):
             ]
             # If any tensors remain unmapped, assign them to the last GPU as a fallback
             if missing_after_prune:
-                fallback_device = device_ids[-1]
+                fallback_device = default_fallback_device_id()
                 for param_name in missing_after_prune:
                     # Walk up the module tree until we find a module name that exists in module_names
                     owner = param_name
@@ -2437,7 +3052,10 @@ def ModelLoader(cls):
             else:
                 layers, _ = get_layers_with_prefixes(model, extract_layers_node)
                 num_gpus = _layerwise_device_count(device, backend)
-                device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+                device_map = build_layerwise_device_map(
+                    model, device, layers, ignore_modules, num_gpus,
+                    max_memory=max_memory,
+                )
         else:
             device_map = dict(explicit_device_map)
             log.info(f"Loader: honoring explicit device_map request: {device_map}")
@@ -2465,6 +3083,21 @@ def ModelLoader(cls):
             enable_for_devices(map_devices)
 
         load_checkpoint_in_model = native_gguf_qspec is None
+        load_extra_kwargs = {}
+        if "offload_folder" in kwargs:
+            load_extra_kwargs["offload_folder"] = kwargs["offload_folder"]
+        elif (
+            getattr(qcfg, "offload_to_disk_path", None) is not None
+            and isinstance(device_map, dict)
+            and "disk" in device_map.values()
+        ):
+            load_extra_kwargs["offload_folder"] = qcfg.offload_to_disk_path
+
+        if "offload_state_dict" in kwargs:
+            load_extra_kwargs["offload_state_dict"] = kwargs["offload_state_dict"]
+        if "offload_buffers" in kwargs:
+            load_extra_kwargs["offload_buffers"] = kwargs["offload_buffers"]
+
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
             load_checkpoint_in_model_then_tie_weights(
@@ -2473,9 +3106,8 @@ def ModelLoader(cls):
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
-                key_converter=getattr(cls, "checkpoint_key_for_load", None),
+                key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             load_checkpoint_in_model = False
@@ -2581,9 +3213,8 @@ def ModelLoader(cls):
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                # offload_state_dict=True,
-                # offload_buffers=True,
-                key_converter=getattr(cls, "checkpoint_key_for_load", None),
+                key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             if format_code == FORMAT.GPTQ_V2:
@@ -2622,6 +3253,7 @@ def ModelLoader(cls):
                 device=device,
                 pack_dtype=qcfg.pack_dtype,
                 is_sharded=is_sharded,
+                cpu_offload=cpu_offload,
             )
 
         # == step4: set seqlen == #
@@ -2665,6 +3297,14 @@ def ModelLoader(cls):
 
                     model, _ = load(temp_dir)
 
+        # Record the layout the tensors had on disk so a later
+        # `model.save_pretrained()` can emit checkpoint-layout qzeros instead of
+        # the kernel's converted runtime words.
+        if hasattr(model, "modules"):
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear):
+                    module._checkpoint_format_on_disk = format_code
+
         instance = cls(
             model,
             quantized=True,
@@ -2681,15 +3321,25 @@ def ModelLoader(cls):
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(
             instance.model,
-            qcfg.rotation,
+            resolve_model_rotation(qcfg),
             module_plan=instance.module_plan(),
             layer_prefixes=instance.extract_layers_node(),
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
         if qcfg.dynamic:
             log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before, dynamic=qcfg.dynamic)
+        # Quantized loads keep their own scale dtypes, so the strict dtype
+        # contract only applies to dense loads. A CPU-offloaded map may hold
+        # meta placeholders by design, so only the default-dtype invariant is
+        # asserted there.
+        assert_loaded_model_state(
+            model,
+            api_name=f"{cls.__name__}.from_quantized",
+            default_dtype_before=default_dtype_before,
+            require_materialized=not cpu_offload,
+        )
         return instance
 
-    cls.from_quantized = from_quantized
+    cls.from_quantized = classmethod(_serialized_model_load(from_quantized.__func__))
 
     return cls

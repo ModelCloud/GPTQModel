@@ -143,6 +143,95 @@ def test_module_looper_create_named_modules_records_missing_spec():
     assert snapshot["mlp.experts.#.gate_proj"]["miss_layers"] == 1
 
 
+def test_tracker_warns_about_undeclared_quantizable_modules(monkeypatch):
+    """Issue #4093 item 3: a leaf with no spec is invisible to hit/miss counts."""
+
+    logger = _RecordingLogger()
+    monkeypatch.setattr(module_coverage, "log", logger)
+
+    tracker = LayerModuleCoverageTracker()
+    tracker.record_hit("self_attention.dense", 0)
+    tracker.record_undeclared("self_attention.query", 0)
+    tracker.record_undeclared("self_attention.key_value", 0)
+    tracker.report("TeleChat2QModel")
+
+    assert tracker.undeclared_snapshot() == {
+        "self_attention.query": {"example": "self_attention.query", "layers": 1},
+        "self_attention.key_value": {"example": "self_attention.key_value", "layers": 1},
+    }
+    assert any("NOT declared" in message for message in logger.warnings)
+    assert any("self_attention.query" in message for message in logger.warnings)
+    assert any("self_attention.key_value" in message for message in logger.warnings)
+
+
+def test_module_looper_create_named_modules_records_undeclared_leaf():
+    """A quantizable Linear that no spec declares must be reported, not ignored."""
+
+    from gptqmodel.models.module_plan import ModulePlan
+
+    # The pre-fix TeleChat2 tree: `query`/`key_value` are absent.
+    plan = ModulePlan.from_tree(
+        [
+            "model",
+            "layers",
+            "#",
+            {
+                "input_layernorm": ("input_layernorm:!",),
+                "self_attention": {"dense": ("dense",)},
+                "post_attention_layernorm": ("post_attention_layernorm:!",),
+                "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        ]
+    )
+    tracker = LayerModuleCoverageTracker()
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = SimpleNamespace(
+        layer_modules_strict=False, module_plan=lambda: plan
+    )
+    looper.layer_module_coverage = tracker
+    looper.input_embeddings_name = None
+    looper.output_embeddings_name = None
+
+    full = {
+        "self_attention.query": nn.Linear(8, 8),
+        "self_attention.key_value": nn.Linear(8, 8),
+        "self_attention.dense": nn.Linear(8, 8),
+        "mlp.gate_proj": nn.Linear(8, 8),
+    }
+    looper.create_named_modules(
+        module=nn.Module(),
+        full=full,
+        is_lm_head_module=False,
+        layer_index=3,
+        layers_prefix="transformer.h.3",
+        names=[],
+        processor=None,
+        fallback=None,
+    )
+
+    undeclared = tracker.undeclared_snapshot()
+    assert set(undeclared) == {"self_attention.query", "self_attention.key_value"}
+    assert undeclared["self_attention.query"]["layers"] == 1
+    # Declared leaves are not reported as undeclared.
+    assert "self_attention.dense" not in undeclared
+    assert "mlp.gate_proj" not in undeclared
+
+    # The LM head is quantized through its own path, not the layer tree.
+    tracker = LayerModuleCoverageTracker()
+    looper.layer_module_coverage = tracker
+    looper.create_named_modules(
+        module=nn.Module(),
+        full={"lm_head": nn.Linear(8, 8)},
+        is_lm_head_module=True,
+        layer_index=None,
+        layers_prefix="",
+        names=[],
+        processor=None,
+        fallback=None,
+    )
+    assert tracker.undeclared_snapshot() == {}
+
+
 def test_mixed_expert_block_does_not_duplicate_non_expert_specs():
     """Non-placeholder specs must be emitted once, not once per routed expert.
 

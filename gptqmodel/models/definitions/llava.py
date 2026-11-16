@@ -13,6 +13,11 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 from .llama import LlamaQModel
 
 
@@ -110,20 +115,28 @@ class LlavaQModel(BaseQModel):
                 setattr(parent, name, move_to(module, device=CPU))
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.processor or self.load_processor()
         calibration = []
-        for batch in batched_conversations(calibration_dataset, batch_size):
+        for batch in batched_conversations(conversations, batch_size):
             calibration.append(
                 processor.apply_chat_template(
                     batch,
                     add_generation_prompt=True,
+                    padding=True,
                     tokenize=True,
                     return_dict=True,
                     return_tensors="pt",
                 )
             )
-        return calibration
+        return finalize_conversation_batches(
+            calibration, sort=sort, min_length=min_length, label=label
+        )
 
     def move_input_capture_example(self, example: Dict[str, Any], data_device: torch.device) -> Dict[str, Any]:
         example = super().move_input_capture_example(example, data_device)

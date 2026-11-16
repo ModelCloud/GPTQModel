@@ -141,6 +141,43 @@ def test_repeat4_uses_single_copy_from_preloaded_legacy_namespace(monkeypatch):
                        single.unsqueeze(-2).repeat(1, 1, 4, 1).view(torch.int16))
 
 
+def test_preloaded_partial_namespace_is_reused_without_a_second_load(monkeypatch):
+    """A legacy namespace must not trigger a JIT/load attempt (#3886)."""
+    from gptqmodel_nf12 import _library
+
+    legacy = SimpleNamespace(embedding=lambda *args: None, decode=lambda *args: None)
+    monkeypatch.setattr(torch.ops, "nf12", legacy)
+    monkeypatch.setattr(_library, "_loaded", threading.Event())
+
+    def _unexpected_build(*args, **kwargs):
+        raise AssertionError("a preloaded namespace must not start a build")
+
+    monkeypatch.setattr(_library, "library_path", _unexpected_build)
+
+    assert _library.has_ops("embedding")
+    assert not _library.has_ops("embedding", "rowmajor_pack")
+    assert not _library._registered()
+
+    _library.load()
+
+    assert _library._loaded.is_set()
+    assert _library.has_ops("embedding", "decode")
+
+
+def test_require_reports_only_the_missing_operator(monkeypatch):
+    from gptqmodel_nf12 import _library
+
+    legacy = SimpleNamespace(embedding=lambda *args: None)
+    monkeypatch.setattr(torch.ops, "nf12", legacy)
+    monkeypatch.setattr(_library, "_loaded", threading.Event())
+
+    _library.require("embedding")
+    assert _library._loaded.is_set()
+
+    with pytest.raises(RuntimeError, match="rowmajor_pack"):
+        _library.require("embedding", "rowmajor_pack")
+
+
 @pytest.mark.parametrize("m,id_dtype", [(6, torch.int32), (312, torch.int64),
                                           (1536, torch.int64), (3072, torch.int64)])
 def test_native_embedding_repeat4_matches_dense_torch_and_keeps_packed_weight(m, id_dtype):

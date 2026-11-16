@@ -44,6 +44,11 @@ class Raon1MiniQModel(BaseQModel):
     ]
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        # Let the base hook consume the captured per-layer-type mask/rotary state
+        # before Raon's cache-specific kwargs are applied.
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         # Raon decoder layers take `cache`, not the Transformers `use_cache` flag.
         additional_inputs.pop("use_cache", None)
         additional_inputs.setdefault("cache", None)

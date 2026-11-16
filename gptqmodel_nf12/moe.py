@@ -55,6 +55,15 @@ class NF12MoEWeight:
         for name, t in (("escapes", e), ("escape_offsets", off), ("exp_base", b)):
             if t.device != p.device:
                 raise ValueError(f"nf12: packed ({p.device}) and {name} ({t.device}) must share a device")
+        if off.device.type != "meta":
+            offsets = [int(v) for v in off.tolist()]
+            if offsets[0] < 0 or offsets[-1] > int(e.shape[0]):
+                raise ValueError(
+                    f"nf12: escape_offsets must stay inside the {e.shape[0]}-row escape "
+                    f"table, got [{offsets[0]}, {offsets[-1]}]"
+                )
+            if any(b < a for a, b in zip(offsets, offsets[1:])):
+                raise ValueError("nf12: escape_offsets must be non-decreasing")
         self.shape = (num_experts, p.shape[1], p.shape[2] * 2 // 3)
         check_weight_shape(*self.shape[1:])
 

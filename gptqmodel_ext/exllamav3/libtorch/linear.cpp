@@ -20,6 +20,10 @@ void bc_linear_exl3_run
 )
 {
     TORCH_CHECK(K == trellis.size(-1) / 16, "K does not match packed trellis width");
+    // The small-batch tensor-core GEMM reads the activation and writes the
+    // result as densely packed rows.
+    TORCH_CHECK(x.is_contiguous(), "bc_linear_exl3_run requires a contiguous input");
+    TORCH_CHECK(y.is_contiguous(), "bc_linear_exl3_run requires a contiguous output");
 
     if (x.numel() == x.size(-1))
     {

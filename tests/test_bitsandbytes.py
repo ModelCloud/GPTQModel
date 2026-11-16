@@ -26,6 +26,7 @@ from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.model_dequant import dequantize_model, detect_format
 
 
@@ -101,7 +102,7 @@ def _relative_l2(output: torch.Tensor, reference: torch.Tensor) -> float:
 
 def _enable_packed_candidate(monkeypatch, *, accuracy_tol: float = 1.0) -> None:
     bnb_module = sys.modules[BitsAndBytesLinear.__module__]
-    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", "1")
+    configure_kernel(KernelConfig(bitsandbytes_cpu_packed=True))
     monkeypatch.setattr(bnb_module, "_CPU_PACKED_REL_TOL", accuracy_tol)
 
 
@@ -288,7 +289,7 @@ def test_bitsandbytes_int8_dense_dispatch_gate(monkeypatch):
         compute_dtype=torch.bfloat16,
     )
 
-    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE", "0")
+    configure_kernel(KernelConfig(bitsandbytes_cpu_int8_dense=False))
     assert not _cpu_int8_dense_should_use(
         rows=64,
         in_features=512,
@@ -407,10 +408,12 @@ def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
     with torch.inference_mode():
         out = kernel(x)
 
-    x_fp16 = x.to(torch.float16).float()
-    absmax = x_fp16.abs().amax(dim=1)
+    # The INT8 path computes the row scale in FP32 from the source dtype; an
+    # intermediate FP16 cast would overflow any magnitude above 65504.
+    x_fp32 = x.float()
+    absmax = x_fp32.abs().amax(dim=1)
     x_scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
-    x_int8 = (x_fp16 / x_scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    x_int8 = (x_fp32 / x_scale[:, None]).round().clamp(-127, 127).to(torch.int8)
     weight_scale = kernel.weight_scb.float() / 127.0
     expected = (
         (x_int8.float() @ kernel.weight.float().t())
@@ -560,7 +563,7 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     assert not kernel._cpu_packing_active
 
     _, kernel = _build_cpu_packed_kernel()
-    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", "0")
+    configure_kernel(KernelConfig(bitsandbytes_cpu_packed=False))
     with torch.inference_mode():
         kernel(x)
     assert not kernel._cpu_packing_active
@@ -571,7 +574,7 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     reason="bitsandbytes CPU packed kernel unavailable",
 )
 def test_bitsandbytes_cpu_packed_defaults_to_opt_in(monkeypatch):
-    monkeypatch.delenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", raising=False)
+    configure_kernel(KernelConfig())
     linear, kernel = _build_cpu_packed_kernel()
     x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
 

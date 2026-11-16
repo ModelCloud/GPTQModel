@@ -5,7 +5,11 @@
 
 import torch
 
+from ...utils.logger import setup_logger
 from ..base import BaseQModel
+
+
+log = setup_logger()
 
 
 class FalconMambaQModel(BaseQModel):
@@ -18,7 +22,8 @@ class FalconMambaQModel(BaseQModel):
         "#",
         {
             "norm": ("norm:!",),
-            "mixer": ("in_proj:0", "x_proj:0", "out_proj:1"),
+            # Convolution, activation and SSM transforms separate the linears.
+            "mixer:!": ("in_proj:0:nosrc", "x_proj:1:nosrc", "out_proj:2:nosrc", "conv1d:3:!:nosrc", "dt_proj:3:!:nosrc"),
         },
     ]
 
@@ -55,6 +60,28 @@ class FalconMambaQModel(BaseQModel):
             _restore_buffer("b_c_rms", getattr(mixer, "ssm_state_size"))
             _restore_buffer("dt_rms", getattr(mixer, "intermediate_size"))
 
+            # Transformers 5.22 replaced the legacy ``b_c_rms`` / ``dt_rms``
+            # buffers with ``FalconMambaWeightlessRMSNorm`` submodules whose
+            # ``weight`` buffers are non-persistent, so they never appear in the
+            # checkpoint. Rebuild them after the lazy shell is materialized.
+            for norm_name, size in (
+                ("dt_layernorm", getattr(mixer, "intermediate_size")),
+                ("b_layernorm", getattr(mixer, "ssm_state_size")),
+                ("c_layernorm", getattr(mixer, "ssm_state_size")),
+            ):
+                norm = getattr(mixer, norm_name, None)
+                if not isinstance(norm, torch.nn.Module):
+                    continue
+                weight = getattr(norm, "weight", None)
+                if isinstance(weight, torch.Tensor) and not getattr(weight, "is_meta", False) and weight.device.type != "meta":
+                    continue
+                target_dtype = weight.dtype if isinstance(weight, torch.Tensor) else torch.float32
+                norm.register_buffer(
+                    "weight",
+                    torch.ones(size, dtype=target_dtype, device=target_device),
+                    persistent=False,
+                )
+
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
         self._restore_falcon_mamba_rms_buffers(model)
@@ -64,16 +91,20 @@ class FalconMambaQModel(BaseQModel):
         self._restore_falcon_mamba_rms_buffers(self.model)
 
     def monkey_patch(self):
-        from transformers.models.falcon_mamba.modeling_falcon_mamba import (
-            causal_conv1d_fn,
-            causal_conv1d_update,
-            falcon_mamba_inner_fn,
-            is_torchdynamo_compiling,
-            selective_scan_fn,
-            selective_state_update,
-        )
+        from transformers.models.falcon_mamba import modeling_falcon_mamba
 
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+        # Transformers 5.22 removed the fused ``falcon_mamba_inner_fn`` entry
+        # point and the mixer's explicit ``slow_forward`` / ``cuda_kernels_forward``
+        # methods. The native mixer now selects the eager path itself, so the
+        # legacy replacement must not be installed.
+        causal_conv1d_fn = getattr(modeling_falcon_mamba, "causal_conv1d_fn", None)
+        causal_conv1d_update = getattr(modeling_falcon_mamba, "causal_conv1d_update", None)
+        falcon_mamba_inner_fn = getattr(modeling_falcon_mamba, "falcon_mamba_inner_fn", None)
+        is_torchdynamo_compiling = getattr(modeling_falcon_mamba, "is_torchdynamo_compiling", None)
+        selective_scan_fn = getattr(modeling_falcon_mamba, "selective_scan_fn", None)
+        selective_state_update = getattr(modeling_falcon_mamba, "selective_state_update", None)
 
         is_fast_path_available = all(
             (
@@ -109,12 +140,25 @@ class FalconMambaQModel(BaseQModel):
                 and _has_dense_cuda_weight(self.x_proj)
                 and _has_dense_cuda_weight(self.dt_proj)
                 and _has_dense_cuda_weight(self.out_proj)
-                and not is_torchdynamo_compiling()
+                and not (is_torchdynamo_compiling is not None and is_torchdynamo_compiling())
             ):
                 return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask)
             return self.slow_forward(hidden_states, cache_params, attention_mask)
 
-        for layer in self.model.backbone.layers:
-            if layer.mixer.__class__.__name__ == "FalconMambaMixer":
-                mixer_class = type(layer.mixer)
-                mixer_class.forward = forward
+        backbone = getattr(self.model, "backbone", None)
+        layers = getattr(backbone, "layers", None)
+        if layers is None:
+            return
+
+        for layer in layers:
+            mixer = getattr(layer, "mixer", None)
+            if mixer is None or mixer.__class__.__name__ != "FalconMambaMixer":
+                continue
+            mixer_class = type(mixer)
+            if not all(hasattr(mixer_class, name) for name in ("slow_forward", "cuda_kernels_forward")):
+                log.info.once(
+                    "FalconMamba mixer does not expose the legacy slow/fast forward methods; "
+                    "leaving the upstream forward in place because it selects kernels internally."
+                )
+                continue
+            mixer_class.forward = forward

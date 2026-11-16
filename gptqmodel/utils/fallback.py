@@ -4,23 +4,56 @@
 
 from typing import Any, Optional, Tuple
 
-from gptqmodel.quantization.config import Fallback, FallbackStrategy
+from gptqmodel.quantization.config import Fallback, FallbackStrategy, _normalize_fallback
+
+
+# Every key the config normalizer accepts for a smoother. An override that
+# names one of them replaces the inherited smoother; leaving the inherited
+# `smooth` in place would make `_normalize_fallback` skip the alias.
+_SMOOTH_KEYS = (
+    "smooth",
+    "smooth_method",
+    "clip_method",
+    "smooth_percentile",
+    "smooth_mad_k",
+    "smooth_mse_steps",
+    "smooth_mse_maxshrink",
+    "smooth_outlier_pct",
+    "smooth_rms_k",
+    "smooth_log_mu",
+    "smooth_axis",
+)
 
 
 def normalize_fallback(
     value: Any,
     default: Optional[Fallback] = None,
 ) -> Optional[Fallback]:
+    """Merge a per-module fallback override onto ``default``.
+
+    Dict construction is delegated to the one config normalizer so the
+    threshold default cannot drift from ``Fallback``. Every field is merged,
+    including ``smooth``: forwarding only ``strategy`` and ``threshold``
+    silently dropped the override's own smoother and the inherited one.
+    """
+
     if value is None:
         return default
     if isinstance(value, Fallback):
         return value
     if isinstance(value, dict):
         fallback = default if isinstance(default, Fallback) else Fallback()
-        return Fallback(
-            strategy=value.get("strategy", fallback.strategy),
-            threshold=value.get("threshold", fallback.threshold),
-        )
+        merged = {
+            "strategy": fallback.strategy,
+            "threshold": fallback.threshold,
+            "smooth": fallback.smooth,
+        }
+        merged.update(value)
+        if "smooth" not in value and any(key in value for key in _SMOOTH_KEYS):
+            # The override names its smoother through an alias; clear the
+            # inherited value so the alias is what the normalizer sees.
+            merged["smooth"] = None
+        return _normalize_fallback(merged)
     raise ValueError(
         "normalize_fallback: expected Fallback, dict, or None. "
     )

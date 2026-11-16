@@ -8,7 +8,10 @@ from ..base import BaseQModel
 
 class GPTNeoXQModel(BaseQModel):
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
-    lm_head = "embed_out"
+    # Transformers 5.22 renamed the runtime module to ``lm_head``; the
+    # checkpoint still stores ``embed_out.weight`` and is bridged by the
+    # class-keyed conversion mapping handled in LazyTurtle.
+    lm_head = "lm_head"
 
     module_tree= [
         "gpt_neox",
@@ -18,6 +21,7 @@ class GPTNeoXQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "attention": ("query_key_value:0", "dense:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+            # GELU between the two projections is not positively homogeneous.
+            "mlp": ("dense_h_to_4h:0:nosrc", "dense_4h_to_h:1"),
         }
     ]

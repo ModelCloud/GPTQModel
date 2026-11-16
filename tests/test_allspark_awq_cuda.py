@@ -262,6 +262,7 @@ def test_awq_module_pack_boundaries_and_dtype_moves(dtype):
         mod(x)
     assert set(dict(mod.named_buffers())) == {
         "qweight", "qzeros", "scales", "qweight_packed", "scales_packed", "zeros_packed",
+        "qzeros_format",
     }
     assert mod.qweight_packed.dtype == torch.uint8
     # Packed scales are authoritative, so mutation and dtype/device moves do
@@ -367,12 +368,12 @@ def test_awq_module_export_keeps_checkpoint_layout(dtype):
     )
 
     pristine = {name: tuple(t.shape) for name, t in module.state_dict().items()}
-    assert set(pristine) == {"qweight", "qzeros", "scales", "bias"}
+    assert set(pristine) == {"qweight", "qzeros", "scales", "bias", "qzeros_format"}
     module.post_init()
     assert module.packed_ready()
     assert {name: tuple(t.shape) for name, t in module.state_dict().items()} == pristine
     exported = {name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()}
-    assert exported == pristine
+    assert exported == {name: shape for name, shape in pristine.items() if name != "qzeros_format"}
     packed = {"qweight_packed", "scales_packed", "zeros_packed"}
     assert packed <= set(dict(module.named_buffers()))
     assert not packed & set(module.state_dict())

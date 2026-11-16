@@ -128,7 +128,8 @@ __device__ __forceinline__ uint4 ld_shared_v4(uint32_t addr) {
 template <WeightSource S, int MT, int WARPS, int kStages, int KP = 1, bool Retain = false,
           bool CoherentWeights = false, bool DirectGlobalStore = false, class XRow, class Prep, class Store>
 __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, const uint8_t* wp, int cnt,
-                                             uint32_t base_x4, const uint4* __restrict__ escapes, int m, int slice,
+                                             uint32_t base_x4, const uint4* __restrict__ escapes,
+                                             uint32_t num_escapes, int m, int slice,
                                              int xstride, int kc, int rank, XRow xrow, Prep prep, Store store) {
   using T = WeightTraits<S, CoherentWeights>;
   constexpr bool kBulk = kStages > 0;
@@ -259,7 +260,7 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
                 nxt[l] = ld_shared_v4(src + (c + 1) * T::kSuperAtomBytes + l * kPlaneBytes);
             }
             uint32_t a[4][4];
-            T::fragments(cur, base_x4, escapes, a);
+            T::fragments(cur, base_x4, escapes, num_escapes, a);
             mma_tiles(a, xslot + (u + c - u0) * 128);
 #pragma unroll
             for (int l = 0; l < T::kLoads; ++l) cur[l] = nxt[l];
@@ -280,7 +281,7 @@ __device__ __forceinline__ void small_m_core(uint8_t* smem, uint8_t* wring, cons
         for (int d = 0; d < kDepth; ++d) {
           if (j + d < j1) {
             uint32_t a[4][4];
-            T::fragments(ring[d], base_x4, escapes, a);
+            T::fragments(ring[d], base_x4, escapes, num_escapes, a);
             if (j + d + kDepth < wcnt) {
               const uint8_t* src = wp + static_cast<size_t>(j + d + kDepth) * (KP * T::kSuperAtomBytes);
 #pragma unroll

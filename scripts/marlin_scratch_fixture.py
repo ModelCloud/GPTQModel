@@ -25,7 +25,9 @@ def make_layer(method, dtype, k=256, n=128, *, act_order=False, bits=4,
 
     def pack_cols(values, awq=False):
         packed = torch.zeros(values.shape[0], values.shape[1] // factor, dtype=torch.int32)
-        order = ((0, 2, 4, 6, 1, 3, 5, 7) if bits == 4 else (0, 2, 1, 3)) if awq else range(factor)
+        # Only the 4-bit AWQ packer interleaves; 8-bit AWQ is a contiguous
+        # little-endian stream in natural lane order.
+        order = (0, 2, 4, 6, 1, 3, 5, 7) if (awq and bits == 4) else range(factor)
         for lane, source in enumerate(order):
             packed.bitwise_or_(values[:, source::factor] << (bits * lane))
         return packed

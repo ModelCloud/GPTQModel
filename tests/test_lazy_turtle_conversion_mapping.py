@@ -1844,7 +1844,7 @@ def test_lazy_turtle_converts_non_safetensors_checkpoints_via_full_model_reload(
     )
 
 
-def test_lazy_turtle_disables_itself_when_transformers_full_reload_fails(tmp_path):
+def test_lazy_turtle_surfaces_transformers_full_reload_failure(tmp_path):
     checkpoint_tensors = {
         "model.layers.0.self_attn.q_proj.weight": torch.arange(4, dtype=torch.float32).reshape(2, 2),
     }
@@ -1853,15 +1853,17 @@ def test_lazy_turtle_disables_itself_when_transformers_full_reload_fails(tmp_pat
     torch.save({"state_dict": checkpoint_tensors}, model_dir / "pytorch_model.pt")
 
     _FailingConvertibleCheckpointModel.reset_tracking()
-    turtle = LazyTurtle.maybe_create(
-        model_local_path=str(model_dir),
-        config=SimpleNamespace(_experts_implementation=None, model_type="dummy"),
-        model_init_kwargs={"device_map": {"": "cpu"}},
-        hf_conversion_map_reversed={},
-        target_model=_FailingConvertibleCheckpointModel(),
-    )
+    with pytest.raises(RuntimeError, match="cannot open") as excinfo:
+        LazyTurtle.maybe_create(
+            model_local_path=str(model_dir),
+            config=SimpleNamespace(_experts_implementation=None, model_type="dummy"),
+            model_init_kwargs={"device_map": {"": "cpu"}},
+            hf_conversion_map_reversed={},
+            target_model=_FailingConvertibleCheckpointModel(),
+        )
 
-    assert turtle is None
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "full model reload is unavailable in this test" in str(excinfo.value.__cause__)
     assert len(_FailingConvertibleCheckpointModel.from_pretrained_calls) == 1
     assert _FailingConvertibleCheckpointModel.save_pretrained_calls == []
 
@@ -1897,3 +1899,124 @@ def test_lazy_turtle_registers_atexit_cleanup_for_temporary_checkpoint_dir(tmp_p
     assert registered == [
         (structure_module.shutil.rmtree, (str(temp_path),), {"ignore_errors": True}),
     ]
+
+
+def test_class_keyed_hf_conversion_mapping_is_discovered():
+    """Transformers registers some renames under the model class name only."""
+
+    class GPTNeoXForCausalLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(model_type="not_a_registered_model_type", architectures=None)
+
+    resolved = LazyTurtle.infer_hf_conversion_map_reversed(target_model=GPTNeoXForCausalLM())
+
+    assert _renaming_pairs(resolved) == [("lm_head.", r"^embed_out\.")]
+    assert LazyTurtle.convert_hf_checkpoint_key("lm_head.weight", resolved) == "embed_out.weight"
+
+
+def test_config_architectures_hf_conversion_mapping_is_discovered():
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(
+                model_type="not_a_registered_model_type",
+                architectures=["GPTNeoXForCausalLM"],
+            )
+
+    resolved = LazyTurtle.infer_hf_conversion_map_reversed(target_model=Shell())
+
+    assert _renaming_pairs(resolved) == [("lm_head.", r"^embed_out\.")]
+
+
+def test_gpt_neox_definition_resolves_lm_head_through_class_keyed_mapping(tmp_path):
+    from transformers.models.gpt_neox.configuration_gpt_neox import GPTNeoXConfig
+    from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
+
+    from gptqmodel.models.definitions.gpt_neox import GPTNeoXQModel
+
+    config = GPTNeoXConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        max_position_embeddings=128,
+        rotary_pct=0.25,
+    )
+    model = GPTNeoXForCausalLM(config)
+
+    assert GPTNeoXQModel.lm_head == "lm_head"
+    resolved = GPTNeoXQModel.resolve_hf_conversion_map_reversed(target_model=model)
+    assert _renaming_pairs(resolved) == [("lm_head.", r"^embed_out\.")]
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "gpt_neox.embed_in.weight": torch.zeros(128, 64),
+            "embed_out.weight": torch.zeros(128, 64),
+        },
+        module_tree=GPTNeoXQModel.module_tree,
+        target_model=model,
+    )
+    assert turtle._resolve_checkpoint_tensor_name("lm_head", "weight") == "embed_out.weight"
+
+
+def test_maybe_create_surfaces_construction_error(tmp_path, monkeypatch):
+    """Issue #4093 item 8: a swallowed cause hid the real .bin conversion error."""
+
+    def _boom(self, **kwargs):
+        del self, kwargs
+        raise AttributeError("'list' object has no attribute 'keys'")
+
+    monkeypatch.setattr(LazyTurtle, "__init__", _boom)
+
+    with pytest.raises(RuntimeError, match="cannot open") as excinfo:
+        LazyTurtle.maybe_create(
+            model_local_path=str(tmp_path),
+            config=SimpleNamespace(),
+        )
+
+    assert isinstance(excinfo.value.__cause__, AttributeError)
+    assert "'list' object has no attribute 'keys'" in str(excinfo.value)
+
+
+def test_bin_conversion_normalizes_legacy_tied_weights_keys(tmp_path, monkeypatch):
+    """Issue #4093 item 8: normalize list `_tied_weights_keys` before saving."""
+
+    bin_path = tmp_path / "pytorch_model.bin"
+    bin_path.write_bytes(b"placeholder")
+
+    class _LegacyTiedCheckpointModel(nn.Module):
+        _tied_weights_keys = ["lm_head.weight"]
+
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(tie_word_embeddings=False)
+
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            del path, kwargs
+            return cls()
+
+        def save_pretrained(self, save_directory, safe_serialization=True):
+            del safe_serialization
+            if not isinstance(self._tied_weights_keys, dict):
+                raise AttributeError("'list' object has no attribute 'keys'")
+            (Path(save_directory) / "model.safetensors").write_bytes(b"")
+
+    monkeypatch.setattr(
+        "gptqmodel.utils.model.get_checkpoints",
+        lambda *args, **kwargs: (False, str(bin_path), None),
+    )
+
+    turtle = LazyTurtle.__new__(LazyTurtle)
+    turtle._model_init_kwargs = {}
+    turtle.config = SimpleNamespace()
+
+    converted = turtle._convert_checkpoint_source_to_safetensors(
+        model_local_path=str(tmp_path),
+        target_model=_LegacyTiedCheckpointModel(),
+    )
+
+    assert (Path(converted) / "model.safetensors").is_file()

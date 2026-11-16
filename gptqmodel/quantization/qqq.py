@@ -14,6 +14,7 @@ from typing import Dict, Optional
 import torch
 import transformers
 from torch import nn
+from torch.nn import functional as F
 
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
@@ -21,9 +22,10 @@ from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
-from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
-from .fallback_smooth import mse_optimal_quant, smooth_block
+from .conv_padding import conv_padding_pairs, pad_mode
+from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
 from .gptq import _uniform_column_group, get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
 
@@ -179,8 +181,13 @@ class Quantizer(nn.Module):
         xmax = torch.maximum(x.max(1)[0], tmp)
 
         if self.sym:
+            # The symmetric zero point below is fixed at ``(maxq + 1) // 2``,
+            # so the range must be zero-centered for every group.  Mirroring
+            # only ``xmin < 0`` left all-positive groups fitted as ``[0, max]``
+            # and saturated the positive half of the grid at 7/15 of the
+            # maximum for INT4.
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            xmin = torch.where(xmin < 0, -xmax, xmin)
+            xmin = -xmax
         both_zero = (xmin == 0) & (xmax == 0)
         xmin = torch.where(both_zero, xmin - 1, xmin)
         xmax = torch.where(both_zero, xmax + 1, xmax)
@@ -343,6 +350,8 @@ class QQQ:
         self.H: Optional[torch.Tensor] = None
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        # Samples already folded into `H` by a previous materialization.
+        self._materialized_samples = 0
         self._gsq_moments = {}
         from .gsq_scalar import gsq_enabled_for
 
@@ -357,6 +366,19 @@ class QQQ:
     def _validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        if isinstance(module, (nn.Conv1d, nn.Conv2d)) and module.groups != 1:
+            raise ValueError(
+                "QQQ does not support grouped convolution capture: "
+                f"`{type(module).__name__}` has groups={module.groups}, but the "
+                "Hessian is built from the full unfolded input while the weight "
+                "width is per-group. Exclude grouped convolutions from QQQ "
+                "quantization or use an ungrouped equivalent."
+            )
+        if isinstance(module, (nn.Conv1d, nn.Conv2d)):
+            # Resolve the padding contract once, at validation, so an
+            # unsupported setting fails before calibration instead of silently
+            # capturing a Hessian for a different operator.
+            conv_padding_pairs(module)
 
     @staticmethod
     def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
@@ -382,7 +404,7 @@ class QQQ:
             mse_maxshrink = smooth_method.maxshrink
 
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d)):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
@@ -398,6 +420,30 @@ class QQQ:
         Q = torch.empty_like(W)
         scale_chunks = []
         zero_chunks = []
+
+        def _affine_quantize(block_mod, lo, hi):
+            """Quantize one group against a range that includes zero.
+
+            ``lo``/``hi`` are the strategy's desired endpoints. Extending them
+            to include zero keeps the derived integer zero point inside
+            ``[0, maxq]`` instead of clamping a positive-only group to zero and
+            shifting every value by roughly the group minimum.
+            """
+
+            if self.qcfg.sym:
+                # Every symmetric kernel assumes zero = 2 ** (bits - 1);
+                # Marlin does not even read the stored qzeros. Fit the common
+                # symmetric range so all strategies store that fixed zero.
+                lo, hi = symmetric_range(block_mod)
+            else:
+                lo, hi = affine_range_with_zero(lo, hi)
+            scale = torch.clamp((hi - lo) / maxq, min=1e-8)
+            if self.qcfg.sym:
+                zero = torch.full_like(scale, (maxq + 1) // 2)
+            else:
+                zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
+            q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
+            return (q - zero) * scale, scale, zero
 
         for start in range(0, self.columns, group_size):
             end = min(start + group_size, self.columns)
@@ -420,48 +466,28 @@ class QQQ:
                 if strategy == FallbackStrategy.MIDPOINT:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
-                    mid = (w_max + w_min) / 2.0
-                    scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - mid) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (mid / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
+                    dequant, scale, zero = _affine_quantize(block_mod, w_min, w_max)
                 elif strategy == FallbackStrategy.MEAN:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = (2 * max_dev) / maxq
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - mean) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (mean / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, mean - max_dev, mean + max_dev
+                    )
                 elif strategy == FallbackStrategy.MEDIAN:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = (2 * max_dev) / maxq
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - median) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (median / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, median - max_dev, median + max_dev
+                    )
                 elif strategy == FallbackStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     std = block_mod.std(dim=1, keepdim=True, unbiased=False)
                     std = torch.clamp(std, min=1e-8)
                     lo = mean - sigma * std
                     hi = mean + sigma * std
-                    scale = torch.clamp((hi - lo) / maxq, min=1e-8)
-                    zero = torch.round(-lo / scale)
-                    zero = torch.clamp(zero, 0, maxq)
-                    q = torch.round(block_mod / scale + zero)
-                    q = torch.clamp(q, 0, maxq)
-                    dequant = (q - zero) * scale
+                    dequant, scale, zero = _affine_quantize(block_mod, lo, hi)
                 elif strategy == FallbackStrategy.RTN:
                     self.quantizer.find_params(block_mod, weight=True)
                     dequant = self.quantizer.quantize(block_mod)
@@ -515,7 +541,11 @@ class QQQ:
                 sym=True,
                 mse=False,
             )
-            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            # The exported INT8 channel scale must describe the quantized
+            # weight, not the original one: GPTQ error propagation can push
+            # max|Q| above max|W|, and a scale fitted to W then saturates the
+            # packed codes (and no longer reproduces the in-memory `wq`).
+            quantizer_extra.find_params(Q.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start_time
@@ -537,11 +567,37 @@ class QQQ:
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv1d):
+            # nn.Unfold only accepts integer zero padding, so apply the
+            # convolution's own padding (including its mode) first and unfold
+            # the already-padded input. This keeps the Hessian describing the
+            # operator that will actually run.
+            (left, right), = conv_padding_pairs(self.layer)
+            inp = F.pad(
+                inp.unsqueeze(2),
+                (left, right, 0, 0),
+                mode=pad_mode(self.layer.padding_mode),
+            )
+            unfold = nn.Unfold(
+                (1, self.layer.kernel_size[0]),
+                dilation=(1, self.layer.dilation[0]),
+                padding=0,
+                stride=(1, self.layer.stride[0]),
+            )
+            inp = unfold(inp)
+            inp = inp.permute([1, 0, 2])
+            inp = inp.flatten(1)
+        elif isinstance(self.layer, nn.Conv2d):
+            (left, right), (top, bottom) = conv_padding_pairs(self.layer)
+            inp = F.pad(
+                inp,
+                (left, right, top, bottom),
+                mode=pad_mode(self.layer.padding_mode),
+            )
             unfold = nn.Unfold(
                 self.layer.kernel_size,
                 dilation=self.layer.dilation,
-                padding=self.layer.padding,
+                padding=0,
                 stride=self.layer.stride,
             )
             inp = unfold(inp)
@@ -590,8 +646,25 @@ class QQQ:
             target_device = self.dev
         target_device = torch.device(target_device)
 
-        total_samples = sum(self._device_sample_counts.values())
+        pending_samples = sum(self._device_sample_counts.values())
+        total_samples = self._materialized_samples + pending_samples
         if total_samples == 0:
+            self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
+            self.nsamples = 0
+            return self.H
+
+        # A repeat materialization with no new batches returns the existing
+        # Hessian unchanged instead of clearing the statistics.
+        if pending_samples == 0:
+            if getattr(self, "H", None) is not None:
+                self.nsamples = self._materialized_samples
+                # The cached Hessian is a read-only view of the statistics, so
+                # an explicit target device is honoured by moving the result
+                # rather than by relocating the cached state.
+                if self.H.device == target_device and self.H.dtype == torch.float32:
+                    return self.H
+                return safe_move_to(self.H, target_device, dtype=torch.float32)
+            self._materialized_samples = 0
             self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
             self.nsamples = 0
             return self.H
@@ -599,7 +672,14 @@ class QQQ:
         # Merge per-device partials into a single Hessian on the target device.
         # Pop and delete each partial as it is added so the peak memory stays
         # at result + one partial instead of result + all partials.
-        result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
+        if self._materialized_samples and getattr(self, "H", None) is not None:
+            # `H` stores `2 * sum(x^T x) / samples`, so scale it back to the
+            # sample sum before adding the new partials.
+            result = safe_move_to(self.H, target_device, dtype=torch.float32)
+            result = result * (float(self._materialized_samples) * 0.5)
+        else:
+            self._materialized_samples = 0
+            result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=target_device)
         while self._device_hessian_partials:
             dev, partial = self._device_hessian_partials.popitem()
             if partial.device == target_device and partial.dtype == torch.float32:
@@ -614,6 +694,7 @@ class QQQ:
         result.mul_(2.0 / float(total_samples))
         self.H = result
         self.nsamples = total_samples
+        self._materialized_samples = total_samples
         self._device_sample_counts.clear()
         return self.H
 
@@ -669,7 +750,11 @@ class QQQ:
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
 
-        self.materialize_hessian()
+        # Consume the Hessian this pass asks for. A previous explicit
+        # materialization may have left `self.H` on another device, and the
+        # cached branch returns a device-corrected value without moving the
+        # cache, so the return value is the one to quantize with.
+        self.H = self.materialize_hessian(self.layer.weight.device)
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
@@ -677,7 +762,7 @@ class QQQ:
         static_groups = self.qcfg.static_groups
 
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d)):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
@@ -698,6 +783,9 @@ class QQQ:
 
         H = self.H
         del self.H
+        # The quantizer consumes and mutates this Hessian; it is no longer the
+        # materialized calibration state, so later batches start a fresh merge.
+        self._materialized_samples = 0
         _neutralize_dead_columns(H, W)
 
         g_idx = []
@@ -729,7 +817,10 @@ class QQQ:
 
         try:
             if H.device.type == "npu":
-                H = npu_inverse_cholesky_factor(H)
+                H = npu_inverse_cholesky_factor(
+                    H,
+                    block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
+                )
             else:
                 H = torch.linalg.cholesky(H)
                 H = torch.cholesky_inverse(H)
@@ -794,7 +885,7 @@ class QQQ:
                 and groupsize != -1
                 and type(self.quantizer) is Quantizer
                 and not self.qcfg.mock_quantization
-                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+                and resolve_kernel_config(self.qcfg).gptq_fused_block_update
             ):
                 from .gptq_cuda import block_update_available, gptq_block_update
 
@@ -1011,7 +1102,12 @@ class QQQ:
                 sym=True,
                 mse=False,
             )
-            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            # Derive the INT8 channel scale from the quantized weight `Q` that
+            # is about to become `layer.weight` (as upstream QQQ does), not
+            # from the pre-quantization `W`. Error propagation can raise
+            # max|Q| above max|W|; a W-fitted scale then clamps packed codes
+            # and the export no longer equals the in-memory `wq`.
+            quantizer_extra.find_params(Q.clone(), weight=True)
             scale_extra = quantizer_extra.scale
 
         duration = time.time() - start
@@ -1023,6 +1119,7 @@ class QQQ:
             self.inp1 = None
             self.out1 = None
         self.H = None
+        self._materialized_samples = 0
         self._device_hessian_partials.clear()
         self._device_sample_counts.clear()
         self.Losses = None

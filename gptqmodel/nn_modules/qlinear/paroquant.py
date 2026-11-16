@@ -18,37 +18,67 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.paroquant import (
     apply_paroquant_rotation,
     apply_paroquant_rotation_vectorized,
     build_identity_rotation_buffers,
     is_identity_rotation,
+    validate_rotation_buffers,
 )
+from ...utils.rocm import IS_ROCM
+from ._numerics import linear_wide_bias
 from ._runtime_cache import tensor_cache_key
-from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
+from .gemm_awq import (
+    _awq_cuda_gemm_forward,
+    _awq_cuda_gemm_forward_fp32_reduce,
+)
 from .torch_awq import AwqTorchLinear
 
 
 log = setup_logger()
 
+# INT4 AWQ stores eight codes per int32, so `pack_awq` rejects a packed
+# dimension that is not a multiple of eight. ParoQuant reuses that packer for
+# every path (CPU ATen, dense fallback, AWQ CUDA, Triton), so the alignment is
+# a property of the format rather than of one kernel. Declaring it here keeps
+# backend selection, the constructor, and the packer on one source of truth
+# instead of accepting a width that can only fail later at packing.
+PAROQUANT_OUT_FEATURES_ALIGN = 8
+
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PAROQUANT_AWQ_SPLIT_K = 4
-_PAROQUANT_CACHE_RUNTIME_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_RUNTIME_DTYPE", default=False)
-_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE = env_flag(
-    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE", default=True
-)
-# Cache typed rotation metadata so BF16 runs do not re-cast theta/scales every call.
-_PAROQUANT_CACHE_ROTATION_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_ROTATION_DTYPE", default=False)
-_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
-    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE", default=True
-)
-# CPU inference applies the same per-row rotation contract as the reference
-# implementation, but vectorizes the group loop.  The shared AWQ-layout AVX512
-# int4 GEMM then consumes the rotated BF16 activations; FP16 uses ATen's native
-# int4pack kernel because dense FP16 matmul is substantially slower on CPU.
-_PAROQUANT_CPU_AVX512 = env_flag("GPTQMODEL_PAROQUANT_CPU_AVX512", default=True)
+
+
+def awq_gemm_shape_supported(*, bits: int, in_features: int, out_features: int, groups: int) -> bool:
+    """Whether the native AWQ GEMM accepts a packed layer of this shape.
+
+    Mirrors ``validate_awq_gemm_args`` in
+    ``gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu``: uint4b codes only, a
+    group size divisible by 32, an output width divisible by the 64-column CTA
+    tile, and an output width divisible by the group size. ``groups`` is the
+    packed scale-row count, so ``group_size`` is derived exactly as the kernel
+    derives it from ``scaling_factors.size(0)``.
+    """
+
+    if bits != 4 or groups <= 0 or in_features <= 0 or out_features <= 0:
+        return False
+    if in_features % groups:
+        return False
+    group_size = in_features // groups
+    if group_size % 32 or out_features % 64:
+        return False
+    return out_features % group_size == 0
+
+
+def awq_gemm_bf16_supported(device: torch.device) -> bool:
+    """Whether the native AWQ BF16 kernel can run on ``device`` (SM 8.0+)."""
+
+    try:
+        return torch.cuda.get_device_capability(device)[0] >= 8
+    except Exception:  # noqa: BLE001 - device probe
+        return False
 
 
 class ParoLinear(AwqTorchLinear):
@@ -65,7 +95,12 @@ class ParoLinear(AwqTorchLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    # The inherited INT4 AWQ packer writes eight codes per int32, so an output
+    # width that is not a multiple of eight cannot be packed at all. Advertising
+    # 1 here let backend selection accept such a layer and fail later inside
+    # `pack_awq`; every ParoQuant inference path consumes the same packed
+    # layout, so the constraint is a declaration, not a per-kernel detail.
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [PAROQUANT_OUT_FEATURES_ALIGN]
 
     SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU, DEVICE.MPS]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
@@ -89,22 +124,46 @@ class ParoLinear(AwqTorchLinear):
         adapter: Adapter = None,
         register_buffers: bool = False,
         krot: int = 8,
-        fp32_accum: bool = FP32_ACCUM,
-        cache_runtime_dtype: bool = _PAROQUANT_CACHE_RUNTIME_DTYPE,
-        auto_cache_bf16_runtime_dtype: bool = _PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE,
-        cache_rotation_dtype: bool = _PAROQUANT_CACHE_ROTATION_DTYPE,
-        auto_cache_bf16_rotation_dtype: bool = _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE,
+        fp32_accum: bool = None,
+        cache_runtime_dtype: bool = None,
+        auto_cache_bf16_runtime_dtype: bool = None,
+        cache_rotation_dtype: bool = None,
+        auto_cache_bf16_rotation_dtype: bool = None,
         **kwargs,
     ):
         """Initialize AWQ buffers plus the extra ParoQuant rotation state."""
         self.krot = int(krot)
         if self.krot <= 0:
             raise ValueError(f"ParoLinear: `krot` must be positive, got {krot}.")
-        self.fp32_accum = bool(fp32_accum)
-        self.cache_runtime_dtype = bool(cache_runtime_dtype)
-        self.auto_cache_bf16_runtime_dtype = bool(auto_cache_bf16_runtime_dtype)
-        self.cache_rotation_dtype = bool(cache_rotation_dtype)
-        self.auto_cache_bf16_rotation_dtype = bool(auto_cache_bf16_rotation_dtype)
+        # Backend selection already rejects this through
+        # `SUPPORTS_OUT_FEATURES_DIVISIBLE_BY`, but a directly constructed layer
+        # must fail here with the real reason instead of inside `pack_awq`.
+        if int(out_features) % PAROQUANT_OUT_FEATURES_ALIGN:
+            raise ValueError(
+                f"ParoLinear: `out_features` must be a multiple of "
+                f"{PAROQUANT_OUT_FEATURES_ALIGN}, got {out_features}. INT4 AWQ packs "
+                "eight codes per int32, and ParoQuant reuses that layout for every "
+                "inference path, so a narrower output cannot be packed."
+            )
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        self._paroquant_cpu_avx512 = kernel.paroquant_cpu_avx512
+        self.fp32_accum = bool(kernel.fp32_accum if fp32_accum is None else fp32_accum)
+        self.cache_runtime_dtype = bool(
+            kernel.paroquant_cache_runtime_dtype if cache_runtime_dtype is None else cache_runtime_dtype
+        )
+        self.auto_cache_bf16_runtime_dtype = bool(
+            kernel.paroquant_auto_cache_bf16_runtime_dtype
+            if auto_cache_bf16_runtime_dtype is None
+            else auto_cache_bf16_runtime_dtype
+        )
+        self.cache_rotation_dtype = bool(
+            kernel.paroquant_cache_rotation_dtype if cache_rotation_dtype is None else cache_rotation_dtype
+        )
+        self.auto_cache_bf16_rotation_dtype = bool(
+            kernel.paroquant_auto_cache_bf16_rotation_dtype
+            if auto_cache_bf16_rotation_dtype is None
+            else auto_cache_bf16_rotation_dtype
+        )
         self._rotation_runtime_dtype: Optional[torch.dtype] = None
         self._rotation_runtime_device: Optional[torch.device] = None
         self._runtime_theta: Optional[torch.Tensor] = None
@@ -169,6 +228,20 @@ class ParoLinear(AwqTorchLinear):
             not self.theta.is_meta
             and not self.channel_scales.is_meta
             and is_identity_rotation(self.theta, self.channel_scales)
+        )
+
+    def post_init(self) -> None:
+        super().post_init()
+        # Rotation pairs are checkpoint data used as shared-memory indices by
+        # the fused CUDA kernel. Validate them once after the weights load.
+        validate_rotation_buffers(
+            self.pairs,
+            self.theta,
+            self.channel_scales,
+            group_size=self.group_size,
+            in_features=self.in_features,
+            krot=self.krot,
+            layer_name=f"ParoQuant `{self.name}`",
         )
 
     @classmethod
@@ -305,18 +378,67 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
-        weight = self._dequantize_weight_for_inference(x_flat, dtype=x_flat.dtype)
-        out = torch.matmul(x_flat, weight)
-        if self.bias is not None:
-            out = out + self.bias.to(device=x_flat.device, dtype=x_flat.dtype)
-        return out
+        # Keep the reconstructed grid, the reduction and the stored bias in
+        # FP32, then round once.  Decoding to the activation dtype first makes
+        # a finite FP16/BF16 result overflow before the bias can cancel it.
+        compute_dtype = (
+            torch.float32
+            if x_flat.dtype in (torch.float16, torch.bfloat16)
+            else x_flat.dtype
+        )
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
+        return linear_wide_bias(
+            x_flat,
+            # AWQ reconstructs [in_features, out_features]; the wide epilogue
+            # takes the F.linear operand order.
+            weight.t(),
+            self._bias_for_compute(device=x_flat.device),
+        )
+
+    def _cuda_awq_kernel_supported(self, compute_dtype: torch.dtype) -> bool:
+        """Whether the native AWQ GEMM can accept this layer's packed shape.
+
+        The kernel's own validator (``validate_awq_gemm_args``) requires an
+        output width that is a multiple of its 64-column CTA tile, a group size
+        that is a multiple of 32, and an output width divisible by that group
+        size. ParoQuant advertises ``group_size=16`` and output widths that the
+        shared INT4 packer accepts (multiples of eight) even though they miss
+        this tile, because the CPU, ATen and dense paths support them; the
+        native path is skipped for those configurations instead of raising from
+        inside the kernel.
+
+        The group size is derived from the packed tensors the kernel actually
+        reads, not from the config value: ``group_size=-1`` packs one scale row
+        per input channel, which the kernel turns into
+        ``in_features / scales.size(0)``. The extension is also CUDA-only, so a
+        HIP build always takes the portable path.
+        """
+
+        if IS_ROCM or self.qweight.device.type != "cuda":
+            return False
+        qweight, scales = self.qweight, self.scales
+        if qweight.numel() == 0 or scales.numel() == 0:
+            return False
+        if self.bits != 4:
+            # The native kernel decodes uint4b codes only.
+            return False
+        if not awq_gemm_shape_supported(
+            bits=self.bits,
+            in_features=self.in_features,
+            out_features=qweight.size(1) * (32 // self.bits),
+            groups=scales.size(0),
+        ):
+            return False
+        if compute_dtype == torch.bfloat16 and not awq_gemm_bf16_supported(qweight.device):
+            # ``validate_bf16_device`` rejects the BF16 kernel below SM 8.0.
+            return False
+        return True
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
-        if x_flat.device.type != "cuda":
-            return None
-
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        if not self._cuda_awq_kernel_supported(compute_dtype):
+            return None
         kernel_input = (
             x_flat
             if x_flat.dtype == compute_dtype and x_flat.is_contiguous()
@@ -330,13 +452,30 @@ class ParoLinear(AwqTorchLinear):
             compute_dtype,
             cache=use_cached_runtime_dtype,
         )
+        kernel_input_2d = kernel_input.reshape(-1, kernel_input.shape[-1])
+        if self.bias is not None and self.fp32_accum:
+            # The split-K partials are already FP32.  Ask for an FP32 result
+            # and add the stored bias there, so a finite sum that overflows the
+            # activation dtype is not rounded before the bias cancels it.
+            out = _awq_cuda_gemm_forward_fp32_reduce(
+                kernel_input_2d,
+                self.qweight,
+                kernel_scales,
+                self.qzeros,
+                _PAROQUANT_AWQ_SPLIT_K,
+                kernel=self.kernel,
+            )
+            bias = self._bias_for_compute(device=x_flat.device).float()
+            return (out + bias).to(dtype=x_flat.dtype)
+
         out = _awq_cuda_gemm_forward(
-            kernel_input.reshape(-1, kernel_input.shape[-1]),
+            kernel_input_2d,
             self.qweight,
             kernel_scales,
             self.qzeros,
             _PAROQUANT_AWQ_SPLIT_K,
             fp32_accum=self.fp32_accum,
+            kernel=self.kernel,
         )
         if kernel_bias is not None:
             out = out + kernel_bias
@@ -452,14 +591,16 @@ class ParoLinear(AwqTorchLinear):
             # Rotation and AWQ GEMM both require a positive row count; keep the
             # empty batch on the shared shape-preserving path instead.
             return self.empty_linear_output(x)
-        x_flat = x.reshape(-1, x.shape[-1])
+        # The fused rotation op requires a densely packed operand and rejects
+        # a strided `reshape` view (for example `hidden_states[:, -1:, :]`).
+        x_flat = x.reshape(-1, x.shape[-1]).contiguous()
         rotated = self._rotate_inputs(x_flat)
 
         out = self._forward_cuda_awq_kernel(rotated)
         if out is None:
             out = self._forward_cpu_avx512(
                 rotated,
-                enabled=_PAROQUANT_CPU_AVX512 and rotated.dtype == torch.bfloat16,
+                enabled=self._paroquant_cpu_avx512 and rotated.dtype == torch.bfloat16,
             )
         if out is None:
             out = self._forward_cpu_aten(rotated)

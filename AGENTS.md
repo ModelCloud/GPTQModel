@@ -169,6 +169,23 @@ design, estimate test results, or include follow-up work as if implemented. Keep
 diagrams in sync with the code: a later change to the same flow updates the page
 in the same pull request.
 
+## AWQ safety for model onboarding
+
+Before adding a model type/alias or changing model paths, tags, layout/config
+variants, AWQ overrides, grouping, replay, search, or folding, read and follow
+`.agents/skills/gptqmodel-awq-model-onboarding/SKILL.md` alongside the
+module-plan test skill. This applies even when onboarding is motivated by
+another quantizer: state the new model's AWQ policy explicitly.
+
+Module-plan coverage, matching widths, module order, and observing declared
+replay targets do not prove producer identity or complete consumer coverage.
+Require native source/consumer evidence, full-output neutral-fold tests,
+candidate-search/routing invariants, native context and chunk parity, and
+rollback/fallback tests as applicable. Shared sources fold once; non-quantized
+routers/gates still need final compensation. Unknown or unsafe relationships
+must use tested plain quantization or explicit rejection, never guessed groups.
+Record qualification per layout/config; skipped tests are not AWQ validation.
+
 ## Model-definition weight coverage
 
 For every new model type or alias in `MODEL_MAP`, and every change to a model

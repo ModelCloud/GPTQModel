@@ -285,6 +285,10 @@ __global__ void moe_decode_kernel(const uint4* __restrict__ packed_in,
   const int64_t row_base = row0 + int64_t(blockIdx.x) * kSuperAtomRows;
   const int64_t nb = row_base / kSuperAtomRows;
   const uint4* const esc = (escapes != nullptr) ? escapes + escape_offsets[e] : nullptr;
+  const uint32_t esc_count =
+      (escapes != nullptr && escape_offsets[e + 1] > escape_offsets[e])
+          ? static_cast<uint32_t>(escape_offsets[e + 1] - escape_offsets[e])
+          : 0u;
   const uint32_t base_x4 = exp_base_x4(exp_base[e]);
   // `row_tile_offset` re-adds row_base through the super-atom's row index, so
   // the base pointer is shifted by (e * rows - row0).
@@ -295,7 +299,7 @@ __global__ void moe_decode_kernel(const uint4* __restrict__ packed_in,
     uint4 planes[SourceTraits<WeightSource::kNf12>::kLoads];
     load_source_planes<WeightSource::kNf12>(packed, sa, lane, planes);
     AtomRegs r;
-    source_planes_to_atoms<WeightSource::kNf12>(planes, base_x4, esc, r);
+    source_planes_to_atoms<WeightSource::kNf12>(planes, base_x4, esc, esc_count, r);
     RowTile x;
     atoms_to_tile(r, x);
 #pragma unroll

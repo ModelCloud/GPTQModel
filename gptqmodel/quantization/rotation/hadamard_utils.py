@@ -70,6 +70,21 @@ def get_hadK(n, transpose=False):
     return hadK, K
 
 
+def hadamard_supported(n: int) -> bool:
+    """Return True when ``get_hadK(n)`` can build an exact Hadamard matrix.
+
+    ``get_hadK`` reports an unsupported width with a bare ``AssertionError``
+    from deep inside a transform. Callers that must fail before mutating a
+    model use this predicate instead of discovering the width too late.
+    """
+
+    try:
+        get_hadK(n)
+    except AssertionError:
+        return False
+    return True
+
+
 def matmul_hadU(X, transpose=False):
     n = X.shape[-1]
     hadK, K = get_hadK(n, transpose)
@@ -126,6 +141,10 @@ class _TorchHadamardTransform:
         n = x.shape[-1]
         if not is_pow2(n):
             raise ValueError(f"Torch Hadamard fallback requires a power-of-two width, got {n}.")
+        if x.numel() == 0:
+            # `reshape(..., -1, 2, stride)` cannot infer the missing extent for
+            # a zero-element tensor, and there is nothing to transform anyway.
+            return torch.empty_like(x)
         original_shape = x.shape
         original_dtype = x.dtype
         # A half-precision butterfly can overflow before the final 1/sqrt(n)
@@ -223,10 +242,27 @@ class _HadamardAutograd(torch.autograd.Function):
 
 
 def _hadamard_with_grad(x, scale):
-    transform = fast_hadamard_transform.hadamard_transform
+    transform = _transform_for(x)
     if torch.is_grad_enabled() and x.requires_grad:
         return _HadamardAutograd.apply(x, float(scale), transform)
     return transform(x, scale)
+
+
+def _transform_for(x: torch.Tensor):
+    """Select the Hadamard backend from the tensor's own device.
+
+    ``fast_hadamard_transform`` (the native package or the JIT
+    ``gptqmodel_hadamard`` op) only registers a CUDA kernel. Importing it
+    whenever it exists made every CPU tensor fail with
+    ``NotImplementedError ... 'CPU' backend`` on a CUDA host, so the choice
+    must be per call, not per process. Non-CUDA devices, including the CPU
+    placement ``models/base.py`` uses for MPS rotation, always take the
+    portable butterfly.
+    """
+    import_fast_hadamard_transform()
+    if x.device.type == "cuda":
+        return fast_hadamard_transform.hadamard_transform
+    return _TorchHadamardTransform.hadamard_transform
 
 
 def import_fast_hadamard_transform():
@@ -291,6 +327,12 @@ def apply_online_hadamard(
     This mirrors ``BaseQuantLinear._apply_rotation_to_input`` so the same transform
     can be reused by ``HookedLinear`` during calibration/replay.
     """
+    if x.numel() == 0:
+        # Empty decode/prefill batches reach this from every quant-linear
+        # backend. Both the native extension (zero-sized grid) and the Torch
+        # butterfly (ambiguous reshape) reject them, and the transform of an
+        # empty tensor is itself empty.
+        return x
     if not online_full_had and not online_partial_had:
         return x
     if had_K is None and K != 1:
@@ -311,8 +353,6 @@ def apply_online_hadamard(
 
 
 def apply_exact_had_to_linear(module, had_dim=-1, output=False):
-    import_fast_hadamard_transform()
-
     assert isinstance(module, torch.nn.Linear)
     in_features, out_features = module.in_features, module.out_features
 
@@ -324,7 +364,10 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
     dtype = W_.dtype
     dev = W_.device
     init_shape = W_.shape
-    W_ = W_.float().cuda()
+    # Compute on the weight's own device. ``models/base.py`` routes MPS
+    # rotation to the CPU, and a CUDA-only host has no GPU at all, so an
+    # unconditional ``.cuda()`` made exact Hadamard fusion impossible there.
+    W_ = W_.float().to(dev)
 
     # bias
     # bias needs to apply hadamard when output=True
@@ -333,7 +376,7 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
         b_dtype = b_.dtype
         b_init_shape = b_.shape
         b_ = b_.unsqueeze(0) if len(b_init_shape) == 1 else b_
-        b_ = b_.float().cuda()
+        b_ = b_.float().to(dev)
 
     if had_dim == -1:
         if output:
@@ -350,9 +393,9 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
             W_ = W_.t()
             transposed_shape = W_.shape
             W_ = (
-                fast_hadamard_transform.hadamard_transform( # noqa: F821
+                _hadamard_with_grad(
                     W_.reshape(-1, transposed_shape[-1] // had_dim, had_dim),
-                    scale=1 / math.sqrt(had_dim),
+                    1 / math.sqrt(had_dim),
                 )
                 .reshape(transposed_shape)
                 .t()
@@ -360,18 +403,18 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
             )
             if module.bias is not None:
                 b_ = (
-                    fast_hadamard_transform.hadamard_transform( # noqa: F821
+                    _hadamard_with_grad(
                         b_.reshape(-1, b_.shape[-1] // had_dim, had_dim),
-                        scale=1 / math.sqrt(had_dim),
+                        1 / math.sqrt(had_dim),
                     )
                     .reshape(b_init_shape)
                     .contiguous()
                 )
 
         else:
-            W_ = fast_hadamard_transform.hadamard_transform( # noqa: F821
+            W_ = _hadamard_with_grad(
                 W_.reshape(-1, init_shape[1] // had_dim, had_dim),
-                scale=1 / math.sqrt(had_dim),
+                1 / math.sqrt(had_dim),
             ).reshape(init_shape)
     module.weight.data = W_.to(device=dev, dtype=dtype)
     if module.bias is not None:

@@ -51,16 +51,24 @@ class Qwen4ExpQModel(BaseQModel):
                 "k_proj:0",
                 "k_norm:!",
                 "v_proj:0",
-                "o_proj:1",
+                # The hyper-connection `attn_hyper_connection` mixes the
+                # residual through a gated low-rank transform; `o_proj`'s
+                # output is not the MLP input, so it may not be a fold source.
+                "o_proj:1:nosrc",
             ),
             "linear_attn": (
                 "conv1d:!",
                 "in_proj_qkv:0",
                 "in_proj_z:1",
                 "in_proj_b:!:1",
-                "in_proj_a:!:1",
+                # `in_proj_a` gates the DeltaNet decay, not `out_proj`'s
+                # input; the gated norm sits between them.
+                "in_proj_a:!:1:nosrc",
                 "norm:!",
-                "out_proj:2",
+                # `mlp_hyper_connection` mixes the residual with a gated
+                # low-rank transform before the MLP, so this output is not the
+                # shared-expert input.
+                "out_proj:2:nosrc",
             ),
             "mlp:moe": {
                 # Keep shared experts separate so placeholder expansion does not duplicate them.

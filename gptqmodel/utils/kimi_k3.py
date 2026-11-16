@@ -21,13 +21,21 @@ from safetensors import safe_open
 from torch import nn
 
 
-def load_calibration_reference(snapshot):
+def load_calibration_reference(snapshot, trust_remote_code: bool = False):
     """Load unmodified decoder math, excluding unused HF whole-model wrappers.
 
     K3's bundled decoder imports HF4's removed OutputRecorder/check_model_inputs
     solely for its top-level model wrapper. Excluding those wrappers lets HF5
     execute the same decoder without global monkey patches or checkpoint edits.
+
+    This executes Python files from the snapshot, so it requires an explicit
+    ``trust_remote_code=True`` from the caller.
     """
+    if trust_remote_code is not True:
+        raise ValueError(
+            "Kimi K3 calibration executes code from the checkpoint snapshot; "
+            "pass trust_remote_code=True to opt in."
+        )
     snapshot = Path(snapshot).resolve()
     name = "_gptqmodel_kimi_k3_" + hashlib.sha256(str(snapshot).encode()).hexdigest()[:16]
     if name + ".modeling_kimi_linear" in sys.modules:
@@ -81,7 +89,7 @@ def decode_mxfp4(packed, scales, *, dtype=torch.bfloat16):
 
 class KimiK3Source:
     """Read one tensor at a time; never materialize the 2.8T model in host RAM."""
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, *, trust_remote_code: bool = False):
         self.snapshot = Path(snapshot).resolve()
         self.config = json.loads((self.snapshot / "config.json").read_text())
         if self.config.get("model_type") != "kimi_k3":
@@ -91,7 +99,9 @@ class KimiK3Source:
         for shard in set(self.weight_map.values()):
             if Path(shard).name != shard or not (self.snapshot / shard).is_file():
                 raise ValueError(f"invalid/missing K3 shard: {shard}")
-        self.reference = load_calibration_reference(self.snapshot)
+        self.reference = load_calibration_reference(
+            self.snapshot, trust_remote_code=trust_remote_code
+        )
 
     def tensor(self, name, device="cpu"):
         with safe_open(self.snapshot / self.weight_map[name], framework="pt", device="cpu") as file:

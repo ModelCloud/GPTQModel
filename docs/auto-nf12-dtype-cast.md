@@ -45,6 +45,98 @@ Native FP8, FP4, MXFP4, and MXFP8 execution keeps its validated source path.
 When that path is unavailable, the existing floatx decoder materializes a dense
 BF16 view and `AUTO_NF12` stores that view in NF12 for calibration.
 
+## Native availability
+
+The row-major embedding layout is a native extension, so a supported compute
+capability is not evidence that it can run. `_rowmajor_ops` therefore asks for
+the two operators this layout actually needs — `rowmajor_pack` and
+`rowmajor_embedding` — instead of asking whether the namespace is usable at
+all, and a pack that still fails falls back to the generic layout.
+
+```mermaid
+flowchart TD
+    A[AutoNF12Embedding.__init__] --> B[quantize_nf12_weight]
+    B --> C[_rowmajor_ops device]
+    C --> D{HIP build?}
+    D -- Yes --> E{nf12_hip.rowmajor_available device}
+    D -- No --> F{compute capability 8.0 or newer?}
+    F -- No --> G[Generic packed buffers]
+    F -- Yes --> H{nf12.available_ops rowmajor_pack and rowmajor_embedding}
+    E -- No --> G
+    E -- Yes --> P{pack succeeds?}
+    H -- No --> G
+    H -- Yes --> P
+    P -- No --> W[Warn once, then use the generic layout]
+    W --> G
+    P -- Yes --> R[Row-major packed buffers]
+    R --> X[torch.ops.nf12.rowmajor_embedding]
+    G --> Y[nf12.embedding when available]
+    Y --> Z[nf12_codec.decode]
+    style G fill:#fee,stroke:#c00
+    style W fill:#fee,stroke:#c00
+    style Z fill:#fee,stroke:#c00
+```
+
+`available_ops()` is a capability probe, not a build. It is true when the named
+operators are registered, when both native libraries ship with the package, when
+a source build for the visible GPUs is already cached, or when the JIT build
+tools (nvcc, CMake, Ninja) are present. Otherwise the generic packed layout is
+selected and decoding uses the pure-Torch codec. Both branches keep packed NF12
+bytes resident; neither retains a dense weight cache.
+
+On HIP, `nf12_hip.rowmajor_available(device)` loads the optional extension and
+checks that it bound both row-major operators. The Python wrapper
+`nf12_hip.rowmajor_pack` exists whether or not the extension can load, so a
+`hasattr` check proves nothing and the first pack would raise.
+
+A failed pack is treated as "this host cannot use the row-major layout": the
+constructor warns once per namespace — the names already reported live in
+`_ROWMAJOR_FALLBACK_REPORTED`, so a model with one embedding per layer emits a
+single message — and keeps the generic packed buffers. A probe that was
+optimistic (a partial preloaded namespace, or an extension that loads but omits
+an operator) therefore never aborts an otherwise supported quantization run.
+
+The probe is a property of the host, not a configuration switch. There is no
+`GPTQMODEL_*` override for it.
+
+### Preloaded operator namespaces
+
+An older standalone NF12 library, or GPTQModel's legacy runtime, can already own
+`torch.ops.nf12` with only a subset of the current operators. Loading a second
+library would fail registration, so the loader reuses whatever is registered.
+
+```mermaid
+flowchart TD
+    A["api call, e.g. embedding_repeat4"] --> B["load()"]
+    B --> C{"any nf12 op registered?"}
+    C -- Yes --> D["reuse the namespace, no build"]
+    C -- No --> E{"complete current operator set?"}
+    E -- Yes --> D
+    E -- No --> F["JIT build or packaged library"]
+    F --> G["torch.ops.load_library"]
+    D --> H["caller uses the operators it needs"]
+    G --> H
+    H --> I{"required op present?"}
+    I -- Yes --> OK["run"]
+    I -- No --> R["RuntimeError naming the missing operator"]
+    style R fill:#fee,stroke:#c00
+    style D fill:#dfd,stroke:#060
+```
+
+`embedding_repeat4` therefore keeps its documented fallback: with a legacy
+namespace that has `embedding` but not `embedding_repeat4`, it uses the
+single-copy lookup and repeats the result in Torch. `require()` and `has_ops()`
+let a caller name the operators it actually needs, and `available_ops()` answers
+the same question without loading anything.
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Namespace has only `embedding`/`decode` | Rejected as incomplete, then a JIT build was attempted and raised `_MissingBuildTools` | Namespace reused; `embedding_repeat4` takes the single-copy fallback |
+| Namespace has the full current set | Reused | Reused (unchanged) |
+| Nothing registered, build tools present | Build | Build (unchanged) |
+| Required operator genuinely missing | Generic build error | `RuntimeError` naming the operator |
+| Namespace owns `nf12` without `rowmajor_pack` | `available()` true, so the first pack raised `AttributeError` and aborted the cast | `available_ops()` false, so the generic packed layout is chosen |
+
 ## Quantization handoff
 
 The processor creates its quantization task before the source is packed. The
@@ -105,6 +197,7 @@ executes the same forward behavior as the original source.
 | Quantizer input | The dense module was already present. | Exact source dtype and bits are restored before `process()`. |
 | Native floatx source | Native or decoded path selected by `AutoModuleDecoderConfig`. | Native execution remains; decoded BF16 is eligible for NF12. |
 | FP16 source | Stayed dense. | Stays dense unless the BF16 round trip is bit exact. |
+| Row-major embedding layout | Assumed from compute capability; the first cast attempted a JIT build and could raise `_MissingBuildTools`. | Probed with `gptqmodel_nf12.available()`; an unavailable extension keeps the generic packed layout. |
 
 ## Failure and ambiguity path
 
@@ -112,6 +205,35 @@ An unsupported device, unaligned shape, non-exact FP16 matrix, vector, or
 unsupported module remains dense. Packing or decoding errors are not treated as
 successful compression. Native floatx selection takes precedence over NF12
 when its capability check succeeds.
+
+An eligible embedding never aborts quantization because the row-major extension
+cannot be built or cannot serve the layout. `_rowmajor_ops` requires the two
+row-major operators, and a pack that still fails keeps the generic packed
+buffers. The generic layout decodes through `nf12_codec` (and uses
+`nf12.embedding` when `available()`); a dense view exists only for the duration
+of that forward. Previous failures were a `_MissingBuildTools` exception raised
+from the first cast on a CUDA host without a toolkit, and an `AttributeError`
+when a preloaded namespace owned `torch.ops.nf12` without the row-major
+operators.
+
+### Embedding index contract
+
+Every embedding path returns a `+0.0` row for an ID outside
+`[0, num_embeddings)`: the row-major operator, the canonical `nf12.embedding`
+operator, the HIP operator, and the portable `nf12_codec` fallback. The
+fallback masks the lookup before calling `F.embedding`, because that function
+gathers the raw ID — an out-of-range ID raises `IndexError` on the host and
+trips a device-side assert (`indexSelectSmallIndex`) on CUDA, poisoning the
+context for the rest of the process.
+
+| Path | Invalid-ID behavior |
+| --- | --- |
+| `torch.ops.nf12.rowmajor_embedding` | `+0.0` row |
+| `nf12.embedding` / `nf12_hip.embedding` | `+0.0` row |
+| `nf12_codec` fallback (`F.embedding`) | `+0.0` row, lookup masked first |
+
+Valid IDs always select the exact decoded BF16 row, including signed zero and
+subnormal escapes.
 
 ## Measured validation
 
@@ -128,6 +250,13 @@ occupied 1,856.0 MiB and their NF12 representation occupied 1,394.532 MiB.
 The R9700 keeps the 24.9% smaller packed weights, but its calibration workspace
 dominates peak allocation. A 4090 GPTQ A/B save produced 482 state tensors on
 both policies; all 482 were bit-identical, including packed weights and scales.
+
+Layout selection on one RTX 4090 (SM 8.9) with the same 16x64 BF16 embedding:
+
+| Host state | `available()` | Layout | Buffers | Max output error |
+| --- | --- | --- | --- | ---: |
+| Toolkit on `PATH`, `CUDA_HOME` unset | True | row-major | `nf12_row_packed`, `nf12_row_escapes`, `nf12_exp_base` | 0.0 |
+| `PATH=/usr/bin:/bin`, `CUDA_HOME=/nonexistent` | False | generic packed | `nf12_packed`, `nf12_escapes`, `nf12_exp_base` | 0.0 |
 
 Full dense-model inference packed 113 linear matrices. Dense allocation was
 2,360.311 MiB and packed allocation was 2,275.021 MiB. The next-token IDs

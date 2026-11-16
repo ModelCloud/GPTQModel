@@ -489,6 +489,16 @@ def normalize_device_like(device_like) -> Optional[torch.device]:
     return _canonical_device(device)
 
 
+def _module_is_resident_on(module: torch.nn.Module, device: torch.device) -> bool:
+    """Return True when every parameter and buffer already lives on ``device``."""
+
+    for sub in module.modules():
+        for tensor in (*sub._parameters.values(), *sub._buffers.values()):
+            if tensor is not None and tensor.device != device:
+                return False
+    return True
+
+
 def clone_module_for_devices(
     module: torch.nn.Module,
     devices: List[torch.device],
@@ -497,6 +507,15 @@ def clone_module_for_devices(
     root_module: Optional[torch.nn.Module] = None,
     progress_callback: Optional[Callable[[int, int, torch.device, str], None]] = None,
 ) -> Dict[torch.device, torch.nn.Module]:
+    """Return one forwardable module per device.
+
+    The device the module is already staged on gets the module itself, not a
+    copy: the caller owns that instance for the duration of the forward and the
+    serial path forwards the same object. Deep-copying it back onto the device
+    it already occupies costs a full extra layer copy (and a layer's VRAM) for
+    a replica the forward never needed.
+    """
+
     clones: Dict[torch.device, torch.nn.Module] = {}
     if not devices:
         return clones
@@ -637,6 +656,13 @@ def clone_module_for_devices(
         _notify(0, stage_device, "stage")
 
     for idx, dev in enumerate(devices, start=1):
+        if _module_is_resident_on(module, dev):
+            # Already staged here by `_prepare_module` (or the caller): this
+            # device's replica is the module itself.
+            setattr(module, "_gptqmodule_device_hint", dev)
+            clones[dev] = module
+            _notify(idx, dev, "reuse")
+            continue
         start_ts = time.perf_counter()
         with _DEEPCOPY_LOCK:
             replica = copy.deepcopy(module)
@@ -673,14 +699,18 @@ def forward_batch_worker(
 ):
     processor._set_current_batch_index(batch_index)
     module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
-    # TODO: rehome was done during cloning, is it still needed there?
-    rehome_module_to_device(
-        module,
-        module_device,
-        move_parameters=True,
-        move_buffers=True,
-        root_module=getattr(gptq_model, "model", None),
-    )
+    # Staging already moved this replica onto `module_device` and realigned its
+    # hooks. The rehome below takes a process-wide lock and walks every
+    # parameter and buffer, so only pay for it when the replica is not fully
+    # resident (for example after a caller moved a tensor out from under it).
+    if not _module_is_resident_on(module, module_device):
+        rehome_module_to_device(
+            module,
+            module_device,
+            move_parameters=True,
+            move_buffers=True,
+            root_module=getattr(gptq_model, "model", None),
+        )
 
     # Replica preparation may enqueue non-blocking parameter or buffer copies.
     torch_sync(device=module_device)

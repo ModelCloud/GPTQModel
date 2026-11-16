@@ -608,6 +608,36 @@ upload for the whole model needs those ops on device too — that is a TT-native
 model runner, not a linear replacement, and it is the explicit next step rather
 than something this change claims to have delivered.
 
+## Device-resident Llama decode
+
+`gptqmodel/utils/tt_llama.py` (`TTLlama`) runs Llama prefill and decode on the
+chip for a block-float checkpoint written with `block_axis="out"`. The flow,
+storage lifecycle, paged KV cache, active-row attention and the 8k-64k
+measurements are in [Tenstorrent Llama serving](tt-llama-paged-serving.md).
+`scripts/tt_llama_decode.py` wraps it (`generate`, `bench`, `passkey`).
+
+Short-context throughput, 4x p300c, 32 users per card, one process per card
+(measured with the contiguous-cache runner in #3998):
+
+| context position | per card, traced | 4 cards, traced |
+| --- | --- | --- |
+| 0 | ~3,700 tok/s | 14,840 tok/s |
+| 512 | ~3,050 tok/s | 12,181 tok/s |
+| 1024 | ~2,650 tok/s | 10,625 tok/s |
+
+What was measured to matter:
+
+| lever | effect |
+| --- | --- |
+| out-axis checkpoint | exact upload; an in-axis checkpoint is re-quantized (8 % bf4 output error) |
+| matmul `core_grid` per projection | `down_proj` 0.147 -> 0.048 ms, `o_proj` 0.039 -> 0.019 ms; step 9.2 -> 6.6 ms |
+| trace capture | 16.1 -> 9.2 ms per step before grid tuning |
+| HiFi4 vs HiFi2 | +2 % step time, top-1 96.8 -> 98.1 % |
+| one process per card vs a 1x4 `MeshDevice` | linear scaling vs ~2x slower per step on the mesh |
+| attention over active rows only | one user at 16k: 54 -> 13.5 ms per step |
+| fused gate/up | no gain over two tuned matmuls, not used |
+| bf8 KV cache | 16k full batch 96 -> 61 ms per step; opt-in |
+
 ## GPTQ kernel conversion matrix
 
 `XLALinear` and `TTNNLinear` both declare `DEVICE.XLA`, because Tenstorrent
@@ -732,6 +762,25 @@ that complete set, the script installs the local GPT-QModel checkout with
 PYTHON_BIN="$HOME/.pyenv/versions/3.12.16/bin/python" \
   requirements/install-tenstorrent-py312.sh /path/to/gptqmodel
 ```
+
+### Torch safety gate
+
+The pinned `torch 2.11.0+cpu` is below the patch for
+[GHSA-rrmf-rvhw-rf47](https://github.com/advisories/GHSA-rrmf-rvhw-rf47)
+(CVE-2025-3000), and Tenstorrent's PJRT plugin has no newer compatible
+Torch/XLA stack. This validated environment therefore opts into the documented
+startup-gate override:
+
+```bash
+export GPTQ_BYPASS_SAFETY_CHECKS=1
+```
+
+The installer exports it, verifies that `import gptqmodel` succeeds with it, and
+warns if the import ever starts succeeding without it (which would mean the
+pinned manifest has moved past the advisory range and the override should be
+removed). The override must be set in every shell that imports GPT-QModel from
+this environment. See [PyTorch runtime safety gate](torch-runtime-safety-gate.md)
+for the affected ranges and the override contract.
 
 The validated Python pins are listed below. This records installed package
 versions; it is not permission to replace GPT-QModel's global requirements.

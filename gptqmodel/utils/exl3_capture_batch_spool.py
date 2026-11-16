@@ -21,10 +21,6 @@ from safetensors import safe_open
 from safetensors.torch import save as serialize_safetensors
 
 
-CAPTURE_BATCH_SPOOL_ENV = "GPTQMODEL_EXL3_CAPTURE_BATCH_SPOOL"
-CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV = (
-    "GPTQMODEL_EXL3_CAPTURE_BATCH_CHECKPOINT_INTERVAL"
-)
 CAPTURE_BATCH_SPOOL_SCHEMA = "ds4rt.exl3-capture-batch-spool"
 CAPTURE_BATCH_SPOOL_SCHEMA_VERSION = 1
 CAPTURE_BATCH_SPOOL_CONTRACT = (
@@ -437,8 +433,6 @@ class EXL3CaptureBatchSpool:
 
 __all__ = [
     "CAPTURE_BATCH_SPOOL_CONTRACT",
-    "CAPTURE_BATCH_SPOOL_ENV",
-    "CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV",
     "EXL3CaptureBatchSpool",
     "EXL3CaptureBatchSpoolError",
 ]

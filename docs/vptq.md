@@ -89,7 +89,7 @@ reported as `config.bits` and can be tuned by changing the codebook sizes
 | `kmeans_mode` | `"hessian"` | Sample weighting for codebook learning: `"hessian"` (Hessian-diagonal weighted, the reference default) or `""` (uniform). |
 | `kmeans_iters` | `100` | Maximum Lloyd iterations per codebook. |
 | `kmeans_tol` | `1e-5` | Relative centroid-movement tolerance for early stop. |
-| `kmeans_seed` | `0` | Seed for deterministic centroid initialization. |
+| `kmeans_seed` | `0` | Seed for centroid initialization. Repeated runs on the same device are bitwise reproducible; the CUDA and ROCm `randperm` streams differ (see [Reproducibility](#reproducibility)). |
 | `enable_norm` | `False` | Per-channel min/max normalization before vector quantization. |
 | `norm_dim` | `0` | Normalization axis: `0` (columns) or `1` (rows). |
 | `enable_perm` | `False` | Re-order input channels by descending Hessian diagonal before quantization. |
@@ -128,6 +128,37 @@ Configuration constraints:
   the computed group width. Valid group counts do not form a contiguous range:
   for 64 input channels, 31 groups leave empty codebooks, while both 32 and 64
   groups are valid.
+
+## Reproducibility
+
+VPTQ quantization is reproducible for a fixed device, seed, calibration
+dataset and configuration: repeated runs produce a bitwise-identical checkpoint
+(codebooks, residual codebooks, indices and packed weights).
+
+The codebook update is a weighted segment sum, and `index_add_` reduces with
+floating-point atomics on CUDA and HIP. Atomic summation order is not fixed, so
+each Lloyd iteration used to change the codebook in its last bits; the
+sequential column pass then amplified a flipped near-tie into a different
+checkpoint for the same seed and calibration (issue #4137). The quantizer runs
+that reduction by sorting the vectors by assigned centroid and summing each
+contiguous bucket with `torch.segment_reduce`, a per-segment kernel with no
+floating-point atomics, so the summation order is fixed and repeated runs are
+bitwise identical. A float `torch.cumsum` is not used because it is itself
+nondeterministic on CUDA and HIP (issue #4224). The reduction is local to the
+quantizer; it does not toggle the process-global
+`torch.use_deterministic_algorithms` switch, which would also re-route a
+concurrent quantization worker's kernels and can raise for an op that has no
+deterministic implementation.
+
+Cross-device results are **not** bit-identical. `kmeans_seed` seeds the initial
+`randperm`, and CUDA and ROCm draw that permutation from different device RNG
+streams, so their initial centroids differ. Both streams are uniform, so
+neither device is biased, but a CUDA run and a ROCm run of the same
+configuration can land on different equal-loss solutions and therefore report
+different held-out perplexity. A checkpoint produced on one device still runs
+on the other. Compare runs on one device when checking a change; a
+cross-platform comparison needs the same starting checkpoint, not the same
+seed.
 
 ## Group layout resolution
 

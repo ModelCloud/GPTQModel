@@ -45,6 +45,24 @@ See `.agents/skills/gptqmodel-model-plan-tests/SKILL.md`.
 
 Model test node IDs and results (or "not applicable"):
 
+### AWQ onboarding safety
+
+Required for new models/aliases and definition or AWQ grouping/search/replay/fold
+changes, even when another quantizer motivates onboarding. Follow
+`.agents/skills/gptqmodel-awq-model-onboarding/SKILL.md`.
+
+- [ ] Native forward evidence identifies each source, all quantized and
+      non-quantized consumers, intervening operations, and complete replay scope.
+- [ ] Real-model neutral-fold and candidate-search tests cover applicable
+      layouts/configs, shared branches/routers, and nontrivial scales; passing
+      module-plan or width checks alone is not AWQ qualification.
+- [ ] Native context/chunk parity, failure rollback, and configured fallback/error
+      behavior are tested where applicable; no-group modes still quantize all linears.
+- [ ] Each variant is AWQ-scaling qualified, tested plain-quantization-only, or
+      explicitly unsupported/unverified; exact test nodes, skips and limits are recorded.
+
+AWQ evidence and per-variant policy (or "not applicable" with a reason):
+
 ## Logic Flow Documentation
 
 Required for changes that alter control flow, replace a decision mechanism

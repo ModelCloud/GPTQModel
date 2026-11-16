@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ctypes
-import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -18,6 +17,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.kernel import get_kernel_config
 from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
@@ -77,7 +77,57 @@ class _GGMLInitParams(ctypes.Structure):
     ]
 
 
+class _GGMLSharedWeight:
+    """One ggml weight tensor per device, referenced by every plan on it.
+
+    The packed weight used to be created (and uploaded) inside each
+    batch-size plan, so a layer with up to ``_MAX_GGML_CUDA_PLANS`` plans kept
+    that many device copies of it (#4216). A plan's graph now references this
+    tensor, and only its activation/output tensors live in the plan's buffer.
+    """
+
+    def __init__(
+        self,
+        *,
+        ctx,
+        buffer,
+        tensor,
+        nbytes: int,
+        backend_buffer_free,
+        ctx_free,
+    ) -> None:
+        self.ctx = ctx
+        self.buffer = buffer
+        self.tensor = tensor
+        self.nbytes = nbytes
+        self._backend_buffer_free = backend_buffer_free
+        self._ctx_free = ctx_free
+
+    def close(self) -> None:
+        if self.buffer:
+            self._backend_buffer_free(self.buffer)
+            self.buffer = None
+        if self.ctx:
+            self._ctx_free(self.ctx)
+            self.ctx = None
+        self.tensor = None
+
+    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
+        try:
+            self.close()
+        except Exception:
+            # Destructors must not raise during GC or interpreter shutdown.
+            pass
+
+
 class _GGMLMatmulPlan:
+    """Per-batch-size ggml graph.
+
+    ``buffer`` covers only the activation, output and any intermediate tensors
+    of this plan; the quantized weight is owned by a :class:`_GGMLSharedWeight`
+    that every plan on the device references.
+    """
+
     def __init__(
         self,
         *,
@@ -186,6 +236,11 @@ class _GGMLBridge:
         self._cpu_backend: Optional[int] = None
         self._cpu_backend_lock = threading.RLock()
         self._cuda_backends: Dict[int, int] = {}
+        # One lock per CUDA device. Every layer on a device shares the same
+        # ggml CUDA backend (and its stream, graph-capture state and memory
+        # pool), so calls that touch it must serialize across layers too.
+        self._cuda_backend_locks: Dict[int, threading.RLock] = {}
+        self._cuda_backend_locks_guard = threading.Lock()
         self._quantize_initialized: set[int] = set()
         self._quantize_init_lock = threading.Lock()
         self._dequantize_fns: Dict[str, object] = {}
@@ -387,12 +442,9 @@ class _GGMLBridge:
 
     @staticmethod
     def _cpu_threads() -> int:
-        override = os.environ.get("GPTQMODEL_GGUF_CPP_THREADS")
+        override = get_kernel_config().gguf_cpp_threads
         if override is not None:
-            try:
-                return max(1, int(override))
-            except ValueError:
-                pass
+            return max(1, int(override))
         return max(1, torch.get_num_threads())
 
     def cpu_available(self) -> Tuple[bool, Optional[Exception]]:
@@ -426,6 +478,17 @@ class _GGMLBridge:
                 self._cpu_backend = backend
             return self._cpu_backend
 
+    def cuda_backend_lock(self, device_index: int) -> threading.RLock:
+        """Return the lock serializing the shared ggml CUDA backend on a device."""
+        if device_index < 0:
+            device_index = 0
+        with self._cuda_backend_locks_guard:
+            lock = self._cuda_backend_locks.get(device_index)
+            if lock is None:
+                lock = threading.RLock()
+                self._cuda_backend_locks[device_index] = lock
+            return lock
+
     def _get_cuda_backend(self, device_index: int) -> int:
         if self._ggml_cuda is None:
             raise RuntimeError("llama-cpp-python was built without GGML CUDA support.") from self._ggml_cuda_error
@@ -436,12 +499,18 @@ class _GGMLBridge:
             raise RuntimeError(
                 f"GGML CUDA backend device index `{device_index}` is out of range for `{device_count}` devices."
             )
-        if device_index not in self._cuda_backends:
-            backend = self._ggml_cuda.ggml_backend_cuda_init(device_index)
-            if not backend:
-                raise RuntimeError(f"GGUFCudaKernel failed to initialize GGML CUDA backend for device `{device_index}`.")
-            self._cuda_backends[device_index] = backend
-        return self._cuda_backends[device_index]
+        # The dict is shared by every layer; initializing a device backend is
+        # also not safe to race (it allocates the backend memory pool).
+        with self.cuda_backend_lock(device_index):
+            backend = self._cuda_backends.get(device_index)
+            if backend is None:
+                backend = self._ggml_cuda.ggml_backend_cuda_init(device_index)
+                if not backend:
+                    raise RuntimeError(
+                        f"GGUFCudaKernel failed to initialize GGML CUDA backend for device `{device_index}`."
+                    )
+                self._cuda_backends[device_index] = backend
+            return backend
 
     @staticmethod
     def _normalize_qweight_cpu(qweight: torch.Tensor) -> torch.Tensor:
@@ -607,18 +676,84 @@ class _GGMLBridge:
                 self._ggml_base.ggml_backend_buffer_free(buffer)
             self._ggml_base.ggml_free(ctx)
 
+    def build_cuda_weight(
+        self,
+        *,
+        device: torch.device,
+        qweight: torch.Tensor,
+        gguf_tensor_qtype: str,
+        padded_in_features: int,
+        out_features: int,
+        kernel_name: str,
+    ) -> _GGMLSharedWeight:
+        """Upload the packed weight once per device for all batch-size plans."""
+
+        device_index = 0 if device.index is None else device.index
+        previous_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+        try:
+            backend = self._get_cuda_backend(device_index)
+            qweight_device = self._normalize_qweight_cuda(qweight, device=device)
+            ctx = self._ggml_base.ggml_init(
+                _GGMLInitParams(
+                    mem_size=self.GGML_METADATA_BYTES,
+                    mem_buffer=None,
+                    no_alloc=True,
+                )
+            )
+            if not ctx:
+                raise RuntimeError(f"{kernel_name} failed to initialize GGML weight context.")
+
+            buffer = None
+            try:
+                weight_tensor = self._ggml_base.ggml_new_tensor_2d(
+                    ctx,
+                    self.ggml_qtypes[gguf_tensor_qtype],
+                    padded_in_features,
+                    out_features,
+                )
+                if not weight_tensor:
+                    raise RuntimeError(f"{kernel_name} failed to create the GGML weight tensor.")
+                buffer = self._ggml_base.ggml_backend_alloc_ctx_tensors(ctx, backend)
+                if not buffer:
+                    raise RuntimeError(f"{kernel_name} failed to allocate the GGML weight buffer.")
+                weight_nbytes = qweight_device.numel() * qweight_device.element_size()
+                self._ggml_base.ggml_backend_tensor_set(
+                    weight_tensor,
+                    ctypes.c_void_p(qweight_device.data_ptr()),
+                    0,
+                    weight_nbytes,
+                )
+                return _GGMLSharedWeight(
+                    ctx=ctx,
+                    buffer=buffer,
+                    tensor=weight_tensor,
+                    nbytes=weight_nbytes,
+                    backend_buffer_free=self._ggml_base.ggml_backend_buffer_free,
+                    ctx_free=self._ggml_base.ggml_free,
+                )
+            except Exception:
+                if buffer:
+                    self._ggml_base.ggml_backend_buffer_free(buffer)
+                self._ggml_base.ggml_free(ctx)
+                raise
+        finally:
+            # ggml's CUDA backend calls `cudaSetDevice`; see `quantized_matmul_cuda`.
+            if previous_device is not None and torch.cuda.current_device() != previous_device:
+                torch.cuda.set_device(previous_device)
+
     def build_quantized_matmul_cuda_plan(
         self,
         *,
         backend: int,
-        qweight: torch.Tensor,
-        gguf_tensor_qtype: str,
+        weight: _GGMLSharedWeight,
         padded_in_features: int,
         out_features: int,
         rows: int,
         input_ggml_type: int,
         kernel_name: str,
     ) -> _GGMLMatmulPlan:
+        """Build the batch-size-specific graph around a shared weight tensor."""
+
         ctx = self._ggml_base.ggml_init(
             _GGMLInitParams(
                 mem_size=self.GGML_METADATA_BYTES,
@@ -631,12 +766,7 @@ class _GGMLBridge:
 
         buffer = None
         try:
-            weight_tensor = self._ggml_base.ggml_new_tensor_2d(
-                ctx,
-                self.ggml_qtypes[gguf_tensor_qtype],
-                padded_in_features,
-                out_features,
-            )
+            weight_tensor = weight.tensor
             input_tensor = self._ggml_base.ggml_new_tensor_2d(
                 ctx,
                 input_ggml_type,
@@ -656,16 +786,12 @@ class _GGMLBridge:
                 raise RuntimeError(f"{kernel_name} failed to allocate GGML graph.")
             self._ggml_base.ggml_build_forward_expand(graph, output_tensor)
 
+            # Only this plan's tensors are allocated here: `weight_tensor`
+            # belongs to the shared weight context and keeps its own buffer.
             buffer = self._ggml_base.ggml_backend_alloc_ctx_tensors(ctx, backend)
             if not buffer:
                 raise RuntimeError(f"{kernel_name} failed to allocate GGML backend tensors.")
 
-            self._ggml_base.ggml_backend_tensor_set(
-                weight_tensor,
-                ctypes.c_void_p(qweight.data_ptr()),
-                0,
-                qweight.numel() * qweight.element_size(),
-            )
             output_nbytes = self._ggml_base.ggml_nbytes(output_tensor)
             output_dtype = self._torch_dtype_from_ggml_element_size(
                 int(self._ggml_base.ggml_element_size(output_tensor)),
@@ -699,6 +825,13 @@ class _GGMLBridge:
         x: torch.Tensor,
         kernel_name: str,
     ) -> torch.Tensor:
+        # ggml runs the graph on its own CUDA stream. Any work the caller
+        # enqueued on its current stream (for example under
+        # `torch.cuda.stream(s)`) must be visible before ggml copies the input
+        # from `x.data_ptr()`, otherwise the copy reads stale memory and the
+        # result is wrong. A synchronize is the portable ordering primitive
+        # here: ggml's stream is not exposed.
+        torch.cuda.current_stream(x.device).synchronize()
         self._ggml_base.ggml_backend_tensor_set(
             plan.input_tensor,
             ctypes.c_void_p(x.data_ptr()),
@@ -736,6 +869,7 @@ class _GGMLBridge:
         gguf_tensor_qtype: str,
         padded_in_features: int,
         out_features: int,
+        threads: Optional[int] = None,
     ) -> torch.Tensor:
         if x.device.type != "cpu":
             raise RuntimeError("GGUFCppKernel only supports CPU input tensors.")
@@ -758,8 +892,12 @@ class _GGMLBridge:
 
         # ggml's CPU backend owns mutable graph scratch shared by all callers.
         with self._cpu_backend_lock:
+            backend = self._get_cpu_backend()
+            self._ggml_cpu.ggml_backend_cpu_set_n_threads(
+                backend, self._cpu_threads() if threads is None else threads,
+            )
             return self._run_quantized_matmul(
-                backend=self._get_cpu_backend(),
+                backend=backend,
                 qweight_cpu=self._normalize_qweight_cpu(qweight),
                 x_cpu=self._normalize_input_cpu(x, padded_in_features),
                 gguf_tensor_qtype=gguf_tensor_qtype,
@@ -771,12 +909,12 @@ class _GGMLBridge:
     def quantized_matmul_cuda(
         self,
         *,
-        qweight: torch.Tensor,
         x: torch.Tensor,
         gguf_tensor_qtype: str,
         padded_in_features: int,
         out_features: int,
         plan: _GGMLMatmulPlan | None = None,
+        weight: _GGMLSharedWeight | None = None,
     ) -> tuple[torch.Tensor, _GGMLMatmulPlan]:
         if x.device.type != "cuda":
             raise RuntimeError("GGUFCudaKernel only supports CUDA input tensors.")
@@ -789,27 +927,38 @@ class _GGMLBridge:
             )
 
         device = x.device
-        backend = self._get_cuda_backend(0 if device.index is None else device.index)
-        x_cuda, input_ggml_type = self._normalize_input_cuda(x, padded_in_features)
-        if plan is None:
-            qweight_cuda = self._normalize_qweight_cuda(qweight, device=device)
-            plan = self.build_quantized_matmul_cuda_plan(
+        previous_device = torch.cuda.current_device()
+        try:
+            backend = self._get_cuda_backend(0 if device.index is None else device.index)
+            x_cuda, input_ggml_type = self._normalize_input_cuda(x, padded_in_features)
+            if plan is None:
+                if weight is None:
+                    raise RuntimeError(
+                        "GGML CUDA matmul needs the shared weight tensor to build a plan."
+                    )
+                plan = self.build_quantized_matmul_cuda_plan(
+                    backend=backend,
+                    weight=weight,
+                    padded_in_features=padded_in_features,
+                    out_features=out_features,
+                    rows=x_cuda.shape[0],
+                    input_ggml_type=input_ggml_type,
+                    kernel_name="GGUFCudaKernel",
+                )
+            output = self.run_quantized_matmul_cuda_plan(
                 backend=backend,
-                qweight=qweight_cuda,
-                gguf_tensor_qtype=gguf_tensor_qtype,
-                padded_in_features=padded_in_features,
-                out_features=out_features,
-                rows=x_cuda.shape[0],
-                input_ggml_type=input_ggml_type,
+                plan=plan,
+                x=x_cuda,
                 kernel_name="GGUFCudaKernel",
             )
-        output = self.run_quantized_matmul_cuda_plan(
-            backend=backend,
-            plan=plan,
-            x=x_cuda,
-            kernel_name="GGUFCudaKernel",
-        )
-        return output, plan
+            return output, plan
+        finally:
+            # ggml's CUDA backend calls `cudaSetDevice`; without restoring it
+            # a forward on cuda:1 leaves the process's current device on 1, so
+            # later `torch.empty(device="cuda")` allocations land on the wrong
+            # GPU.
+            if torch.cuda.current_device() != previous_device:
+                torch.cuda.set_device(previous_device)
 
 
 _GGML_BRIDGE: Optional[_GGMLBridge] = None
@@ -824,14 +973,89 @@ def _get_ggml_bridge() -> _GGMLBridge:
         return _GGML_BRIDGE
 
 
+# The native ggml matmul quantizes activations to Q8_0/Q8_1 (legacy layouts) or
+# Q8_K (K-quant layouts) before the integer dot product; ``ggml_mul_mat`` has no
+# full-precision activation path, so the loss is a property of the kernel rather
+# than of the packed weights or of the Python glue. Measured against an FP64
+# matmul of exactly dequantized weights, over every supported layout, M in
+# {1, 8, 32} and FP32/FP16/BF16 activations:
+#
+# * Gaussian activations, CPU: 4.9e-3 .. 7.9e-3. The native result reproduces
+#   an independent Q8 round trip of the activations to ~1e-7, so the whole CPU
+#   error is activation quantization.
+# * Gaussian activations, CUDA: 4.9e-3 .. 1.5e-2 for FP32/BF16 activations
+#   (ggml-cuda adds low-precision accumulation), and 5.9e-4 .. 9.3e-4 for FP16
+#   activations, which take a different kernel.
+# * Outlier channels, CPU: 3.3e-2 .. 3.8e-2 relative, 7.6e-2 .. 8.4e-2 worst
+#   row for 16 of 4096 channels scaled by 100 (#4316). Q8_K stores one scale
+#   per 256-element super-block, so one large channel widens the step for every
+#   element of its block. There is no activation-independent bound.
+#
+# ``GGML_NATIVE_MATMUL_ERROR_BOUND`` is the Gaussian envelope the native path is
+# validated against, not a bound for every input. ``GGUF_TORCH`` is the exact
+# path, and ``GGUFCppKernel(exact_matmul=True)`` forces it for a CPU layer. See
+# ``docs/gguf-cpp-activation-quantization.md`` and
+# ``tests/kernels/test_gguf_cpp_activation_quantization.py``.
+GGML_NATIVE_MATMUL_ERROR_BOUND = 2e-2
+# Worst-row envelope measured on the #4316 outlier repro (8.4e-2). Recorded so
+# the regression test can pin the observed magnitude; it is not a universal
+# bound either.
+GGML_NATIVE_MATMUL_OUTLIER_ERROR_ENVELOPE = 1e-1
+
+
+def _ggml_native_output_needs_exact_epilogue(
+    *,
+    device_type: str,
+    bias_present: bool,
+    native_dtype: torch.dtype,
+) -> bool:
+    """Whether the native ggml product must be recomputed in FP32 for the bias.
+
+    The rule is a pure function of static configuration: the backend, whether
+    the layer owns a bias buffer, and the dtype ggml chose for the product. It
+    never inspects activation values, never times the two paths, and never
+    depends on call order, so a given checkpoint takes the same path in every
+    process (#4219).
+
+    Only a biased layer needs it: with ``bias is None`` the native product *is*
+    the answer, and its Q8 activation loss stays within
+    ``GGML_NATIVE_MATMUL_ERROR_BOUND`` for Gaussian activations (outlier
+    channels can exceed it; see the module constant). A biased layer cannot add
+    the bias to a product that has already been rounded (FP16/BF16 output) or
+    that overflowed inside ggml's low-precision accumulation -- ggml-cuda's FP32
+    output tensor
+    can still hold ``inf``/``nan`` for a finite result (measured: Q4_0 with FP32
+    activations of magnitude 1e4 returns NaN), so an FP32 bias would not cancel
+    it. Those cases recompute exactly instead (#3789).
+    """
+
+    if not bias_present:
+        return False
+    return device_type == "cuda" or native_dtype in (torch.float16, torch.bfloat16)
+
+
 def _finish_ggml_output(
     module: GGUFTorchLinear, x_flat: torch.Tensor, output: torch.Tensor
 ) -> torch.Tensor:
-    """Add the stored bias before rounding a ggml result to the input dtype."""
+    """Add the stored bias before rounding a ggml result to the input dtype.
+
+    The native ggml kernel quantizes activations to Q8_0/Q8_1/Q8_K before the
+    dot product, so its result differs from an FP32 dequantized-weight oracle.
+    On CPU it stays within 1e-2 for Gaussian activations (measured 4.9e-3 ..
+    7.9e-3); the documented ``GGML_NATIVE_MATMUL_ERROR_BOUND`` is 2e-2 because
+    the CUDA FP32/BF16 envelope reaches 1.5e-2 from ggml-cuda's low-precision
+    accumulation. Outlier channels can exceed 2e-2 on both backends because
+    Q8_K shares one scale per 256-element block (#4316). That loss is inherent
+    to ``GGUF_CPP``; ``GGUF_TORCH`` and ``GGUFCppKernel(exact_matmul=True)`` are
+    the exact paths. Biased layers take the exact FP32 epilogue described by
+    ``_ggml_native_output_needs_exact_epilogue``.
+    """
 
     bias = module.bias
-    if bias is not None and (
-        x_flat.device.type == "cuda" or output.dtype in (torch.float16, torch.bfloat16)
+    if _ggml_native_output_needs_exact_epilogue(
+        device_type=x_flat.device.type,
+        bias_present=bias is not None,
+        native_dtype=output.dtype,
     ):
         # A low-precision ggml output has already rounded the dot product.
         # GGML CUDA can also return an FP32 tensor whose product has already
@@ -889,8 +1113,17 @@ class GGUFCppKernel(GGUFTorchLinear):
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
         register_buffers: bool = True,
+        exact_matmul: Optional[bool] = None,
         **kwargs,
     ):
+        """CPU GGUF kernel backed by ggml.
+
+        ``exact_matmul`` selects the activation path per layer: ``True`` uses
+        the exact torch dequantize-then-matmul path (``GGUF_TORCH`` numerics),
+        ``False`` requests the lossy native ggml matmul, and ``None`` (default)
+        keeps the capability-based native choice controlled by
+        ``GGUFCPPConfig.native_matmul``. The constructor argument wins.
+        """
         kwargs.setdefault("backend", BACKEND.GGUF_CPP_CPU)
         super().__init__(
             bits=bits,
@@ -905,6 +1138,9 @@ class GGUFCppKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
+        self.exact_matmul = None if exact_matmul is None else bool(exact_matmul)
+        if self.kernel.gguf_cpp_threads is None:
+            self.kernel.gguf_cpp_threads = torch.get_num_threads()
         self._gguf_cpu_autotune_cache: Dict[tuple, bool] = {}
 
     @classmethod
@@ -921,6 +1157,7 @@ class GGUFCppKernel(GGUFTorchLinear):
             gguf_tensor_qtype=self.gguf_tensor_qtype,
             padded_in_features=self.padded_in_features,
             out_features=self.out_features,
+            threads=self.kernel.gguf_cpp_threads,
         )
 
     def _forward_torch_cpu(
@@ -930,34 +1167,33 @@ class GGUFCppKernel(GGUFTorchLinear):
             return self._forward_fused_k(x_flat, bias=bias)
         return self._forward_dequant_matmul(x_flat, bias=bias)
 
+    def _ggml_cpu_matmul_key(self, x_flat: torch.Tensor) -> tuple:
+        return (x_flat.shape[0], x_flat.dtype, self.gguf_tensor_qtype)
+
     def _use_ggml_cpu_matmul(self, x_flat: torch.Tensor) -> bool:
+        """Whether this forward should use the native ggml CPU matmul.
+
+        The default choice is capability-based and therefore stable for a given
+        config: the native kernel is used whenever the CPU backend has a vec_dot
+        for the weight layout. It used to be decided by timing the two paths,
+        which made the numerics (ggml quantizes activations, the torch path
+        does not) depend on the machine and on the run (#4219).
+
+        An explicit ``exact_matmul`` constructor argument selects the path for
+        one layer (``True`` = exact torch path, ``False`` = native). Without it,
+        ``KernelConfig.gguf_cpp_native_matmul`` selects the path; ``None`` keeps
+        the capability default. A layout that fails at compute time is recorded
+        as unusable so the following calls take the exact torch path.
+        """
+
         if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
             return False
-        override = os.environ.get("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL")
+        if self.exact_matmul is not None:
+            return not self.exact_matmul
+        override = self.kernel.gguf_cpp_native_matmul
         if override is not None:
-            return override.strip().lower() not in {"0", "false", "off"}
-
-        key = (x_flat.shape[0], x_flat.dtype, self.gguf_tensor_qtype)
-        cached = self._gguf_cpu_autotune_cache.get(key)
-        if cached is None:
-            try:
-                ggml_time = self._benchmark_forward_runner(
-                    lambda: _finish_ggml_output(
-                        self, x_flat, self._forward_ggml_cpu(x_flat)
-                    ),
-                    device=x_flat.device,
-                )
-                torch_time = self._benchmark_forward_runner(
-                    lambda: self._forward_torch_cpu(x_flat, bias=self.bias),
-                    device=x_flat.device,
-                )
-                cached = ggml_time <= torch_time
-            except Exception:
-                # Any benchmark failure (including qtypes ggml cannot matmul)
-                # falls back to the always-correct torch path.
-                cached = False
-            self._gguf_cpu_autotune_cache[key] = cached
-        return cached
+            return override
+        return self._gguf_cpu_autotune_cache.get(self._ggml_cpu_matmul_key(x_flat), True)
 
     def clear_autotune(self):
         super().clear_autotune()
@@ -975,7 +1211,14 @@ class GGUFCppKernel(GGUFTorchLinear):
             )
 
         if self._use_ggml_cpu_matmul(x_flat):
-            output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
+            try:
+                output = _finish_ggml_output(self, x_flat, self._forward_ggml_cpu(x_flat))
+            except Exception:
+                # A layout the backend cannot actually run must not make the
+                # path depend on timing or on call order: remember it and take
+                # the exact torch path from here on.
+                self._gguf_cpu_autotune_cache[self._ggml_cpu_matmul_key(x_flat)] = False
+                output = self._forward_torch_cpu(x_flat, bias=self.bias).to(x_flat.dtype)
         else:
             output = self._forward_torch_cpu(x_flat, bias=self.bias).to(x_flat.dtype)
 
@@ -1046,6 +1289,11 @@ class GGUFCudaKernel(GGUFTorchLinear):
         self._ggml_cuda_plans: OrderedDict[
             tuple[int, int, torch.dtype, tuple], _GGMLMatmulPlan
         ] = OrderedDict()
+        # One device copy of the packed weight, shared by every plan. Plans hold
+        # pointers into its buffer, so it may only be replaced after they are
+        # closed.
+        self._ggml_cuda_weight: _GGMLSharedWeight | None = None
+        self._ggml_cuda_weight_key: tuple | None = None
         # Reject at construction: `create_quant_layer` retries the next AUTO
         # candidate only on a NotImplementedError raised here. A guard in
         # `forward()` is too late to fall back and would surface as a runtime
@@ -1063,11 +1311,69 @@ class GGUFCudaKernel(GGUFTorchLinear):
         except Exception as exc:
             return False, exc
 
-    def clear_weight_cache(self) -> None:
+    def _close_cuda_plans(self) -> None:
         for plan in self._ggml_cuda_plans.values():
             plan.close()
         self._ggml_cuda_plans.clear()
+
+    def _release_cuda_weight(self) -> None:
+        if self._ggml_cuda_weight is not None:
+            self._ggml_cuda_weight.close()
+            self._ggml_cuda_weight = None
+        self._ggml_cuda_weight_key = None
+
+    @staticmethod
+    def _cuda_lock_for_device(device_index: int) -> threading.RLock:
+        return _get_ggml_bridge().cuda_backend_lock(device_index)
+
+    def _cuda_weight_lock(self) -> threading.RLock:
+        key = self._ggml_cuda_weight_key
+        # `_cuda_weight` sets the key and the weight together before a plan is
+        # ever cached, so a missing key means there is nothing to free.
+        return self._cuda_lock_for_device(0 if key is None else key[0])
+
+    def clear_weight_cache(self) -> None:
+        if self._ggml_cuda_weight_key is not None:
+            with self._cuda_weight_lock():
+                self._close_cuda_plans()
+                self._release_cuda_weight()
         return super().clear_weight_cache()
+
+    def _cuda_weight(self, x_flat: torch.Tensor) -> _GGMLSharedWeight:
+        device_index = 0 if x_flat.device.index is None else x_flat.device.index
+        key = (device_index, tensor_cache_key(self.qweight))
+        # Closing plans and freeing the shared weight is only safe while no
+        # other thread is computing with it; forwards on this device take the
+        # same (re-entrant) lock.
+        with self._cuda_lock_for_device(device_index):
+            weight = self._ggml_cuda_weight
+            if weight is not None and self._ggml_cuda_weight_key == key:
+                return weight
+            # A new weight (or device) invalidates every plan built against the
+            # old buffer, so drop them before freeing it.
+            self._close_cuda_plans()
+            self._release_cuda_weight()
+            weight = _get_ggml_bridge().build_cuda_weight(
+                device=x_flat.device,
+                qweight=self.qweight,
+                gguf_tensor_qtype=self.gguf_tensor_qtype,
+                padded_in_features=self.padded_in_features,
+                out_features=self.out_features,
+                kernel_name=self.__class__.__name__,
+            )
+            self._ggml_cuda_weight = weight
+            self._ggml_cuda_weight_key = key
+            return weight
+
+    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
+        try:
+            if self._ggml_cuda_weight_key is not None:
+                with self._cuda_weight_lock():
+                    self._close_cuda_plans()
+                    self._release_cuda_weight()
+        except Exception:
+            # Destructors must not raise during GC or interpreter shutdown.
+            pass
 
     def _cuda_plan_key(
         self,
@@ -1106,20 +1412,31 @@ class GGUFCudaKernel(GGUFTorchLinear):
             )
 
         plan_key = self._cuda_plan_key(x_flat)
-        cached_plan = self._ggml_cuda_plans.get(plan_key)
-        output, plan = _get_ggml_bridge().quantized_matmul_cuda(
-            qweight=self.qweight,
-            x=x_flat,
-            gguf_tensor_qtype=self.gguf_tensor_qtype,
-            padded_in_features=self.padded_in_features,
-            out_features=self.out_features,
-            plan=cached_plan,
-        )
-        self._remember_cuda_plan(
-            plan_key,
-            plan,
-            cached=cached_plan is not None,
-        )
+        device_index = 0 if x_flat.device.index is None else x_flat.device.index
+        # The ggml CUDA backend is shared by every layer on a device and owns a
+        # single stream, graph-capture state and memory pool, so weight/plan
+        # cache mutation and the backend call must not interleave with another
+        # forward on the same device. The lock is re-entrant: `_cuda_weight`
+        # takes it again for the swap itself.
+        with self._cuda_lock_for_device(device_index):
+            # Resolve the shared weight first: it may drop plans built against
+            # a stale weight buffer, so the plan lookup below must happen after
+            # it.
+            weight = self._cuda_weight(x_flat)
+            cached_plan = self._ggml_cuda_plans.get(plan_key)
+            output, plan = _get_ggml_bridge().quantized_matmul_cuda(
+                x=x_flat,
+                gguf_tensor_qtype=self.gguf_tensor_qtype,
+                padded_in_features=self.padded_in_features,
+                out_features=self.out_features,
+                plan=cached_plan,
+                weight=weight,
+            )
+            self._remember_cuda_plan(
+                plan_key,
+                plan,
+                cached=cached_plan is not None,
+            )
         output = _finish_ggml_output(self, x_flat, output)
 
         if self.adapter:

@@ -537,7 +537,13 @@ def test_fused_refresh_preserves_wider_source_metadata(cls, dtype, operation):
     with torch.no_grad():
         module(activation)
         if operation == "load_assign":
-            state = {name: value.clone() for name, value in module.state_dict().items()}
+            # ``state_dict()`` emits the checkpoint snapshot layout (#4091), so
+            # a wider-dtype load of *runtime* metadata must be driven from the
+            # live packed buffers, not from ``state_dict()``.
+            state = {
+                name: getattr(module, name).detach().clone()
+                for name in ("qweight", "qzeros", "scales", "g_idx")
+            }
             state["scales"] = state["scales"].float().fill_(2049)
             state["qzeros"] = state["qzeros"].float().fill_(-2048)
             module.load_state_dict(state, assign=True)

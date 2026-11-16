@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import inspect
 import json
 import os
 import threading
@@ -14,7 +15,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from itertools import count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -37,6 +38,7 @@ from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
+from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import (
     FORMAT,
     METHOD,
@@ -54,6 +56,7 @@ from ..quantization.config import (
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
     normalize_norm_types,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.dtype import (
@@ -67,15 +70,28 @@ from ..quantization.dtype import (
     quark_floatx_formats,
 )
 from ..quantization.norm_tuning import norm_type_of
-from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
+from ..quantization.rotation.rotation import (
+    fuse_layer_norms,
+    rotate_model,
+    validate_rotation_dimensions,
+)
 from ..utils.attn_mask import normalize_seq_mask
-from ..utils.backend import BACKEND, awq_gemm_pack_backend, backend_for_activation, normalize_backend
+from ..utils.backend import (
+    BACKEND,
+    awq_gemm_pack_backend,
+    awq_gemv_pack_backend,
+    backend_for_activation,
+    normalize_backend,
+)
+from ..utils.backend_config import Backend, resolve_quantize_backend
 from ..utils.calibration import prepare_calibration_dataset
+from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config
+from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
-from ..utils.logger import QuantizationRegionTimer, setup_logger
+from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
+from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.model import (
     MODALITY,
     _module_has_meta_tensors,
@@ -97,6 +113,7 @@ from ..utils.structure import (
     _get_qualified_name,
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
+    restore_init_owned_rotary_buffers,
 )
 from ..utils.torch import TORCH_HAS_COMPILE, as_torch_device, torch_compile, torch_empty_cache
 from ._const import (
@@ -118,6 +135,7 @@ from .writer import ModelWriter
 if TYPE_CHECKING:
     from ..looper.checkpoint_store import CheckpointConfig
     from .fusion import FusionPlanner
+
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
@@ -125,6 +143,223 @@ if TYPE_CHECKING:
         HFDatasetType = HFIterableDatasetType = object
 
     from ..looper.named_module import NamedModule
+
+
+# Processor steps that accumulate an input Hessian/Gram from calibration
+# activations and then invert or consume it. Their fp32 GEMMs must run on
+# rocBLAS to be reproducible across processes (issues #4075, #4092, #4123).
+_HESSIAN_PROCESSOR_STEPS = frozenset({
+    ProcessorStep.GPTQ,
+    ProcessorStep.QQQ,
+    ProcessorStep.VPTQ,
+    ProcessorStep.MACAQ,
+    ProcessorStep.EXL3,
+    ProcessorStep.FP8_GSQ,
+})
+
+
+def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
+    """Whether a run accumulates a Hessian whose GEMMs must be reproducible.
+
+    GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+    Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+    AWQ, ParoQuant and weight-only (RTN) do not, so they keep hipBLASLt for the
+    fp16/bf16 GEMMs that are 8-14x faster there on gfx1201.
+    """
+
+    return not _HESSIAN_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
+
+
+# Model types whose definition class declares `supports_rotation`. This is the
+# set named by the rotation gate's error message and documented in
+# docs/rotation-model-support.md. tests/test_rotation_opt_in.py fails if it
+# drifts from the declarations on the definition classes.
+ROTATION_SUPPORTED_MODEL_TYPES = frozenset({"llama", "qwen2"})
+
+
+def rotation_supported(model_def) -> bool:
+    """Whether this exact definition class opted into model-wide rotation.
+
+    The lookup is deliberately non-inheriting: ``LlamaQModel`` is the base of
+    Gemma2/Gemma3/Qwen3/Olmo2 and of every other Llama-shaped definition, so an
+    inherited opt-in would re-admit exactly the layouts the rotation math
+    cannot preserve. A subclass must declare its own ``supports_rotation``.
+
+    The declaration is a frozenset of verified ``model_type`` values. One class
+    can serve several model types with different norm semantics (``LlamaQModel``
+    covers ``llama``, ``mistral``, ``gemma``, ...), so the opt-in names the
+    model types it covers instead of claiming the whole class.
+    """
+
+    declared = type(model_def).__dict__.get("supports_rotation", False)
+    if not isinstance(declared, frozenset):
+        return False
+    config = getattr(getattr(model_def, "model", None), "config", None)
+    return getattr(config, "model_type", None) in declared
+
+
+def validate_rotation_model_support(model_def) -> None:
+    """Fail before any weight is touched when rotation is not opted in."""
+
+    if rotation_supported(model_def):
+        return
+
+    config = getattr(getattr(model_def, "model", None), "config", None)
+    model_type = getattr(config, "model_type", None)
+    supported = ", ".join(sorted(ROTATION_SUPPORTED_MODEL_TYPES))
+    raise ValueError(
+        f"rotation is not supported for model {type(model_def).__name__} "
+        f"(model_type={model_type!r}); supported model types: {supported}. "
+        "No weights were modified."
+    )
+
+
+def _torch_cuda_device(value: object) -> Optional[torch.device]:
+    """Resolve one pool entry to a concrete CUDA device, or None."""
+
+    try:
+        if isinstance(value, torch.device):
+            device = value
+        elif hasattr(value, "to_torch_device"):
+            device = value.to_torch_device()
+        else:
+            device = torch.device(str(value))
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    if device.type != "cuda":
+        return None
+    if device.index is None:
+        try:
+            return torch.device("cuda", torch.cuda.current_device())
+        except Exception:  # pragma: no cover - driver/host edge cases
+            return None
+    return device
+
+
+def _quantize_vram_devices(quantize_config: object = None) -> List[torch.device]:
+    """Concrete CUDA devices whose peak counters describe this quantization run.
+
+    `quantize_config.device` names an accelerator family only (ordinals are
+    stripped by `normalize_device`), so the concrete devices are resolved from
+    the same pool the loopers use: every visible device of that family, narrowed
+    by `compute_device_filter` when the caller set one. A CPU run resolves to an
+    empty list, so it must not reset or read any CUDA peak counter.
+    """
+
+    if quantize_config is None or not torch.cuda.is_available():
+        return []
+    raw_device = getattr(quantize_config, "device", None)
+    if raw_device is None:
+        # Auto selection on a CUDA host resolves to CUDA; keep reporting it.
+        family_type = "cuda"
+    else:
+        try:
+            family_type = getattr(normalize_device(raw_device), "type", None)
+        except Exception:
+            return []
+    if family_type != "cuda":
+        return []
+    try:
+        device_count = int(torch.cuda.device_count())
+    except Exception:  # pragma: no cover - driver/host edge cases
+        return []
+
+    candidates: List[object] = [torch.device("cuda", index) for index in range(device_count)]
+    compute_device_filter = getattr(quantize_config, "compute_device_filter", None)
+    if compute_device_filter is not None:
+        try:
+            filtered = compute_device_filter(candidates)
+        except Exception:
+            filtered = None
+        # The loopers keep the full pool when the filter rejects everything.
+        if filtered:
+            candidates = list(filtered)
+
+    devices: List[torch.device] = []
+    for candidate in candidates:
+        device = _torch_cuda_device(candidate)
+        if device is not None and device not in devices:
+            devices.append(device)
+    return devices
+
+
+def _reset_peak_vram_stats(devices: Sequence[torch.device]) -> None:
+    """Reset peak counters only for the devices this run quantizes on."""
+
+    for device in devices:
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:  # pragma: no cover - driver/host edge cases
+            continue
+
+
+def _peak_vram_gib(
+    quantize_config: object = None,
+    devices: Optional[Sequence[torch.device]] = None,
+) -> Optional[float]:
+    """Largest per-device peak allocation across the GPUs this run quantized on.
+
+    `torch.cuda.max_memory_allocated()` without a device reads the calling
+    thread's current device, which is not necessarily the card a quantization
+    worker used. Every tracked device is queried explicitly and the maximum is
+    reported, so the summary never hides the busiest card. Returns None when the
+    run did not quantize on CUDA.
+    """
+
+    if devices is None:
+        devices = _quantize_vram_devices(quantize_config)
+    if not devices:
+        return None
+    peaks: List[float] = []
+    for device in devices:
+        try:
+            peaks.append(torch.cuda.max_memory_allocated(device) / (1024 ** 3))
+        except Exception:  # pragma: no cover - driver/host edge cases
+            continue
+    return max(peaks) if peaks else None
+
+
+def _quantize_summary_counts(result: object) -> object:
+    """Normalize a `quantize()` result to the layer -> modules mapping the summary counts.
+
+    The staged-GSQ helper returns `{'gsq_training': [block, ...]}`: one record
+    per decoder layer, whose `stages` are that layer's projections. The generic
+    formatter would count that single top-level key as one layer, so map every
+    block to its own layer entry instead.
+    """
+
+    if not isinstance(result, dict) or set(result) != {"gsq_training"}:
+        return result
+    blocks = result["gsq_training"]
+    if not isinstance(blocks, (list, tuple)):
+        return result
+    counts: Dict[str, Tuple[Any, ...]] = {}
+    for position, block in enumerate(blocks):
+        if isinstance(block, dict):
+            stages = block.get("stages")
+            index = block.get("layer_index", position)
+        else:
+            stages = None
+            index = position
+        counts[f"layer.{index}"] = tuple(stages or ())
+    return counts
+
+
+def _log_quantize_summary(
+    result: object,
+    *,
+    run_started: float,
+    vram_devices: Sequence[torch.device],
+) -> None:
+    """Log the end-of-run summary for a run that finished its finalization."""
+
+    log.info(
+        format_quantize_summary(
+            _quantize_summary_counts(result),
+            elapsed_s=time.perf_counter() - run_started,
+            peak_vram_gib=_peak_vram_gib(devices=vram_devices),
+        )
+    )
 
 
 class _QuantizedCheckpointSource:
@@ -159,7 +394,17 @@ class _QuantizedCheckpointSource:
             # Validate shard headers before any tuning; this maps files but does
             # not load checkpoint tensors into CPU/GPU memory.
             for shard_name in set(self._weight_map.values()):
-                with safe_open(os.path.join(self.model_local_path, shard_name), framework="pt", device="cpu"):
+                # A `weight_map` entry is untrusted: an absolute or `..` shard
+                # name would later be joined to the output directory. Validate
+                # it before the header probe so the source path is contained
+                # lexically; HF blob symlinks must keep resolving.
+                shard_path = resolve_checkpoint_path(
+                    self.model_local_path,
+                    shard_name,
+                    kind="checkpoint weight_map shard",
+                    follow_symlinks=False,
+                )
+                with safe_open(shard_path, framework="pt", device="cpu"):
                     pass
             self._index_filename = os.path.basename(checkpoint_file_name)
             return
@@ -251,8 +496,19 @@ def _apply_module_tree_override_in_place(module_tree, override):
 
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
+# Declares that a leaf's output is not the direct input of the following scaling
+# consumer, so it must never be used as an AWQ `prev_op`. Used by definitions
+# whose forward graph has a residual add, a non-homogeneous activation, or a
+# second consumer between the leaf and the quantized block (see
+# docs/awq-scaling-groups.md).
+AWQ_NO_SCALE_SOURCE_FLAG = "nosrc"
 MOE_FLAG = ":moe"
 NORM_FLAG = ":norm"
+# Marks a normalization that consumes the block output (a "sandwich" post-norm).
+# It still owns checkpoint weights and may be trained, but it never feeds the
+# next quantized projection, so AWQ must not fold the consumer's input scale
+# into it.
+POST_NORM_FLAG = ":postnorm"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -312,6 +568,23 @@ def _module_tree_for_class(cls):
     active = _ACTIVE_MODULE_TREE.get()
     return active[1] if active is not None and active[0] is cls else cls.module_tree
 
+
+# Replay metadata key: the per-layer-type `attention_mask` / `position_embeddings`
+# captured from the first decoder layer's forward. `capture_first_layer_input_kwargs`
+# stores it in the cached batch kwargs and `prepare_layer_replay_kwargs` consumes it,
+# selecting the entry for the layer being replayed and dropping the key again.
+_LAYER_TYPE_REPLAY_KWARGS_KEY = "_gptqmodel_layer_type_replay_kwargs"
+
+# `transformers` names the windowed attention layer type this string; every other
+# declared type (`full_attention`, `hybrid`, ...) uses the plain causal mask.
+_LAYER_TYPE_SLIDING = "sliding_attention"
+
+# Returned when a declared layer type has no single mask builder (for example
+# the composite `hybrid` pattern). Replay then keeps the captured layer-0 mask
+# instead of guessing one.
+_LAYER_TYPE_MASK_UNSUPPORTED = object()
+
+
 class BaseQModel(nn.Module):
     # Class-method APIs remain available to model definitions.  Calls through
     # an instance are wrapped in ``__getattribute__`` below so they resolve
@@ -325,6 +598,7 @@ class BaseQModel(nn.Module):
         "is_moe_module",
         "get_moe_module_name",
         "get_norm_modules",
+        "get_post_norm_modules",
         "build_layer_modules",
         "simple_layer_modules",
         "shared_input_plan",
@@ -516,6 +790,7 @@ class BaseQModel(nn.Module):
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         self.qlinear_kernel = qlinear_kernel
+        self.quantize_backend: Optional[BACKEND] = None
         self.trust_remote_code = trust_remote_code
         self.model_local_path = model_local_path
         self.quantize_config = quantize_config
@@ -541,6 +816,28 @@ class BaseQModel(nn.Module):
             if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        # transformers 5 materializes checkpoint-absent non-persistent buffers
+        # with `torch.empty_like`, and only re-derives native rotary buffers in
+        # the default `_init_weights`. Restore constructor-owned rotary buffers
+        # here so every load path (native eval, quantization, quantized reload)
+        # sees real RoPE frequencies instead of uninitialized memory.
+        restored_rotary_buffers = restore_init_owned_rotary_buffers(self.model)
+        if restored_rotary_buffers:
+            log.debug(
+                "Model: restored %d init-owned rotary buffer(s) for `%s`.",
+                restored_rotary_buffers,
+                type(self.model).__name__,
+            )
+        # transformers 5 always hands `generate()`'s cache to the remote
+        # `prepare_inputs_for_generation`, even before the first prefill, and
+        # replaced the tuple/attribute cache interface those implementations
+        # were written against. Install the shared legacy adapter here so every
+        # load path (native eval, quantization, quantized reload) gets it.
+        if install_legacy_generation_compat(self.model):
+            log.debug(
+                "Model: installed legacy generate() adapter for `%s`.",
+                type(self.model).__name__,
+            )
         hooks = getattr(self, "moe_lifecycle_hooks", None)
         if hooks is not None:
             hooks = copy.copy(hooks)
@@ -594,7 +891,7 @@ class BaseQModel(nn.Module):
         self.quant_log = []
 
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.require_trust_remote_code)
+            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
@@ -970,8 +1267,14 @@ class BaseQModel(nn.Module):
         return found_names
 
     @classmethod
-    def _collect_norm_modules_from_tree(cls, tree_node, parent_path: str = "") -> List[str]:
-        """Collect layer-relative paths of modules tagged with the `:norm` flag."""
+    def _collect_norm_modules_from_tree(
+        cls,
+        tree_node,
+        parent_path: str = "",
+        flag: str = NORM_FLAG,
+    ) -> List[str]:
+        """Collect layer-relative paths of modules tagged with ``flag``."""
+        flag_name = flag.lstrip(":")
         found = []
         if isinstance(tree_node, dict):
             for key, value in tree_node.items():
@@ -979,18 +1282,18 @@ class BaseQModel(nn.Module):
                     continue
                 module_name, flags = cls._parse_module_flags(key)
                 path = f"{parent_path}.{module_name}" if parent_path else module_name
-                if NORM_FLAG.lstrip(":") in flags:
+                if flag_name in flags:
                     found.append(path)
-                found.extend(cls._collect_norm_modules_from_tree(value, path))
+                found.extend(cls._collect_norm_modules_from_tree(value, path, flag))
         elif isinstance(tree_node, (tuple, list)):
             for item in tree_node:
                 if isinstance(item, dict):
-                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path))
+                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path, flag))
                     continue
                 if not isinstance(item, str):
                     continue
                 module_name, flags = cls._parse_module_flags(item)
-                if NORM_FLAG.lstrip(":") not in flags:
+                if flag_name not in flags:
                     continue
                 # Same leaf rule as the layer walker: a child named like its parent is the parent.
                 if parent_path == module_name or parent_path.endswith(f".{module_name}"):
@@ -998,6 +1301,22 @@ class BaseQModel(nn.Module):
                 else:
                     found.append(f"{parent_path}.{module_name}" if parent_path else module_name)
         return found
+
+    @classmethod
+    def _collect_flagged_layer_modules(cls, flag: str) -> List[str]:
+        """Collect the deduplicated layer-relative paths tagged with ``flag``."""
+        names = []
+        for tree in cls._iter_module_tree_variants():
+            found_hash = False
+            for item in tree:
+                if item == "#":
+                    found_hash = True
+                elif found_hash and isinstance(item, dict):
+                    for name in cls._collect_norm_modules_from_tree(item, flag=flag):
+                        if name not in names:
+                            names.append(name)
+                    break
+        return names
 
     @classmethod
     def get_norm_modules(cls) -> List[str]:
@@ -1008,18 +1327,31 @@ class BaseQModel(nn.Module):
 
         Example (Qwen3): ["input_layernorm", "self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm"]
         """
-        names = []
-        for tree in cls._iter_module_tree_variants():
-            found_hash = False
-            for item in tree:
-                if item == "#":
-                    found_hash = True
-                elif found_hash and isinstance(item, dict):
-                    for name in cls._collect_norm_modules_from_tree(item):
-                        if name not in names:
-                            names.append(name)
-                    break
-        return names
+        return cls._collect_flagged_layer_modules(NORM_FLAG)
+
+    @classmethod
+    def get_post_norm_modules(cls) -> List[str]:
+        """Layer-relative paths of sandwich post-norms declared via `:postnorm`.
+
+        These norms consume a block's output (after the residual add), so their
+        output never feeds the next quantized projection. AWQ must not fold a
+        consumer's input scale into them.
+        """
+        return cls._collect_flagged_layer_modules(POST_NORM_FLAG)
+
+    def awq_post_norm_modules(self, layer: nn.Module) -> Set[str]:
+        """Layer-relative post-norms for ``layer``.
+
+        `get_post_norm_modules` is static because most definitions declare one
+        `:postnorm` set for every layer. A hybrid model whose decoder layers
+        alternate between pre-norm and post-norm shapes cannot: OLMo Hybrid's
+        full-attention layer post-norms the attention output and adds it to the
+        residual, while its linear-attention layer feeds the same norm straight
+        into the MLP. Such a definition overrides this to add the norm only on
+        the shapes where it sits on the residual branch.
+        """
+
+        return set(self.get_post_norm_modules())
 
     @classmethod
     def has_norm_flag(cls, module_spec: str) -> bool:
@@ -1563,7 +1895,7 @@ class BaseQModel(nn.Module):
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
+        backend: Optional[Backend] = BACKEND.AUTO,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
@@ -1575,6 +1907,10 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        run_started = time.perf_counter()
+        vram_devices = _quantize_vram_devices(self.quantize_config)
+        _reset_peak_vram_stats(vram_devices)
+
         if fuse is not None and type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         fusion_requested = fuse if fuse is not None else getattr(self, "_auto_fusion", False)
@@ -1592,12 +1928,14 @@ class BaseQModel(nn.Module):
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
+        # A typed choice on the dense-model load survives into quantize(),
+        # while an explicit quantize backend may replace that choice.
+        backend, _ = resolve_quantize_backend(backend, self.quantize_config, inherit=True)
+
         dynamic_cache_stats_before = (
             dynamic_override_cache_stats(self.quantize_config.dynamic) if self.quantize_config.dynamic else None
         )
 
-        if os.environ.get("GPTQMODEL_RESUME") == "1":
-            raise ValueError("GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory")
         if checkpoint is not None:
             from ..looper.checkpoint_store import CheckpointConfig
             from ..looper.gptq_checkpoint import validate_checkpoint_support
@@ -1623,24 +1961,35 @@ class BaseQModel(nn.Module):
             if self.quantize_config.method == METHOD.GPTQ:
                 from ..looper.gsq_training_model import quantize_llama_gsq_public
 
-                result = quantize_llama_gsq_public(
-                    self, calibration=calibration, tokenizer=tokenizer, backend=backend,
-                    calibration_concat_size=calibration_concat_size,
-                    calibration_sort=calibration_sort,
-                    calibration_data_min_length=calibration_data_min_length,
-                    calibration_concat_separator=calibration_concat_separator,
-                    unsupported={
-                        "adapter": adapter,
-                        "adapter_calibration_dataset": adapter_calibration_dataset,
-                        "embed_quant_config": embed_quant_config,
-                        "checkpoint": checkpoint,
-                    },
-                )
+                # Staged GSQ builds the same input Hessian as the regular GPTQ
+                # path, so its calibration forwards need the run-level
+                # deterministic pin too. This path returns before the shared
+                # `quant_blas_backend` scope below, which left it on hipBLASLt
+                # and made the checkpoint process-dependent (issue #4232).
+                with quant_blas_backend(deterministic=True):
+                    result = quantize_llama_gsq_public(
+                        self, calibration=calibration, tokenizer=tokenizer, backend=backend,
+                        calibration_concat_size=calibration_concat_size,
+                        calibration_sort=calibration_sort,
+                        calibration_data_min_length=calibration_data_min_length,
+                        calibration_concat_separator=calibration_concat_separator,
+                        unsupported={
+                            "adapter": adapter,
+                            "adapter_calibration_dataset": adapter_calibration_dataset,
+                            "embed_quant_config": embed_quant_config,
+                            "checkpoint": checkpoint,
+                        },
+                    )
                 self.after_quantize()
                 if self._auto_fusion:
                     self.fuse()
                 if timer is not None:
                     timer.flush()
+                _log_quantize_summary(
+                    result,
+                    run_started=run_started,
+                    vram_devices=vram_devices,
+                )
                 return result
             if self.quantize_config.method != METHOD.AWQ:
                 raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
@@ -1700,7 +2049,10 @@ class BaseQModel(nn.Module):
                 elif format_code == FORMAT.BITBLAS:
                     preferred_backend = BACKEND.AWQ_BITBLAS
                 elif format_code == FORMAT.GEMV:
-                    preferred_backend = BACKEND.AWQ_GEMV
+                    # The native GEMV extension is CUDA-only. ROCm packs the
+                    # identical GEMV layout with the portable Triton kernel
+                    # instead of selecting a class its runtime cannot build.
+                    preferred_backend = awq_gemv_pack_backend(is_rocm=IS_ROCM)
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                     preferred_backend = BACKEND.AWQ_GEMV_FAST
                 else:
@@ -1720,6 +2072,15 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.VPTQ_TORCH
             elif self.quantize_config.method == METHOD.NF12:
                 preferred_backend = BACKEND.NF12
+            elif self.quantize_config.method == METHOD.MACAQ:
+                from ..utils.macaq_triton import triton_mxfp4_available
+
+                preferred_backend = (
+                    BACKEND.MACAQ_TRITON
+                    if quant_device_type in ("cuda", "rocm")
+                    and triton_mxfp4_available(quant_device)
+                    else BACKEND.MACAQ_TORCH
+                )
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -1732,6 +2093,11 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.BITSANDBYTES
             else:
                 preferred_backend = BACKEND.GPTQ_TORCH
+
+        # Record the effective pack backend so the weight-only finalize path can
+        # tell an AUTO request (which may fall back per module) from an explicit
+        # one (which must raise instead).
+        self.quantize_backend = preferred_backend
 
         if self.quantize_config.method == METHOD.EXL3:
             if preferred_backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3):
@@ -1809,12 +2175,17 @@ class BaseQModel(nn.Module):
                 )
 
         # rotate model
-        if self.quantize_config.rotation:
-            from gptqmodel.models.definitions.llama import LlamaQModel
-            from gptqmodel.models.definitions.qwen2 import Qwen2QModel
-            if not isinstance(self, (LlamaQModel, Qwen2QModel)):
-                raise ValueError(f"rotation only supports: llama/qwen2 model, "
-                                    f"current model is {self.__class__.__name__}")
+        if resolve_model_rotation(self.quantize_config):
+            validate_rotation_model_support(self)
+
+            # Validate every width rotation will transform before
+            # `fuse_layer_norms` mutates the model in place. A width without an
+            # exact Hadamard factor otherwise fails inside `rotate_mlp_output`
+            # only after embeddings, head, norms and attention have already
+            # been rotated and fused.
+            validate_rotation_dimensions(
+                self.model.config, resolve_model_rotation(self.quantize_config)
+            )
 
             if self.model.config.tie_word_embeddings:
                 log.info("Rotation requires word embeddings to be untied. Untying.")
@@ -1839,12 +2210,12 @@ class BaseQModel(nn.Module):
             )
             if rotation_device is not None and rotation_device.type == "mps":
                 rotation_device = CPU
-            self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
+            self.model, _ = rotate_model(model=self.model, rotate_mode=resolve_model_rotation(self.quantize_config),
                                             device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
 
-        if self.quantize_config.rotation:
+        if resolve_model_rotation(self.quantize_config):
             backend = normalize_backend(backend, quant_method=self.quantize_config.method)
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GPTQ_TORCH
@@ -1879,10 +2250,20 @@ class BaseQModel(nn.Module):
         # load there (issue #1455).
         self._warn_fused_unit_dynamic_overrides()
 
-        # On ROCm, hipBLASLt's lazy Tensile-library loading dominates a cold
-        # quantize while rocBLAS covers the same math for a fraction of the
-        # loading cost. The override spans only the quantization phase.
-        with quant_blas_backend():
+        # On ROCm the deterministic rocBLAS selection is scoped to methods that
+        # accumulate a Hessian (GPTQ, QQQ, VPTQ, MACaQ, EXL3, calibrated FP8
+        # GSQ). Their calibration forward and replay produce the activations
+        # accumulated into the Hessian, so those GEMMs must be reproducible
+        # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
+        # 332/795 differing tensors across processes. Methods without a Hessian
+        # (AWQ, ParoQuant, RTN) keep hipBLASLt, which is 8-14x faster for their
+        # fp16/bf16 GEMMs on gfx1201. Every run pins its backend for the whole
+        # run; a concurrent run that needs the other one waits rather than
+        # flipping it mid-run (issue #4123).
+        blas_context = quant_blas_backend(
+            deterministic=_needs_deterministic_hessian(run_plan)
+        )
+        with blas_context:
             if run_plan.weight_only:
                 result = self._quantize_weight_only(
                     run_plan=run_plan,
@@ -1935,7 +2316,7 @@ class BaseQModel(nn.Module):
                 attention_mode=self.quantize_config.activation_attention_mode,
                 attention_recipe=self.quantize_config.activation_attention_recipe,
                 mlp_fp8_layers=self.quantize_config.activation_mlp_fp8_layers,
-                fused_norms=bool(self.quantize_config.rotation),
+                fused_norms=bool(resolve_model_rotation(self.quantize_config)),
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1944,7 +2325,7 @@ class BaseQModel(nn.Module):
 
         _setup_rotation_online_had(
             self.model,
-            self.quantize_config.rotation,
+            resolve_model_rotation(self.quantize_config),
             module_plan=self.module_plan(),
             layer_prefixes=self.extract_layers_node(),
         )
@@ -1952,6 +2333,12 @@ class BaseQModel(nn.Module):
             log_dynamic_override_cache_stats(dynamic_cache_stats_before, dynamic=self.quantize_config.dynamic)
         if self._auto_fusion:
             self.fuse()
+
+        _log_quantize_summary(
+            result,
+            run_started=run_started,
+            vram_devices=vram_devices,
+        )
         return result
 
     @staticmethod
@@ -2214,8 +2601,14 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..looper.loop_processor import CalibrationConfig
+        from ..looper.loop_processor import CalibrationConfig, _reusable_calibration_dataset
         from ..looper.module_looper import ModuleLooper
+
+        # The native and EoRA steps each prepare their calibration input, so a
+        # one-shot iterator must be materialised once here or the second
+        # processor sees an exhausted dataset (issue #4307).
+        calibration = _reusable_calibration_dataset(calibration)
+        adapter_calibration_dataset = _reusable_calibration_dataset(adapter_calibration_dataset)
 
         if run_plan is None:
             from ..adapter.adapter import Lora
@@ -2301,8 +2694,9 @@ class BaseQModel(nn.Module):
                 processors.append(factory(**fp8_args))
             elif step is ProcessorStep.QQQ:
                 processors.append(factory(**args, backend=run_plan.loop_backend))
+            elif step is ProcessorStep.MACAQ:
+                processors.append(factory(**args, backend=run_plan.pack_backend))
             elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
-                os.environ["AWQ_BATCH_SIZE"] = str(run_plan.batch_size)
                 processors.append(factory(
                     **args, gptq_model=self, model=self.model,
                 ))
@@ -2447,6 +2841,21 @@ class BaseQModel(nn.Module):
 
         assert isinstance(self.quantize_config.adapter, Lora)
 
+        # EoRA generation consumes and rewrites dense native weights: it needs
+        # `w - wq` and installs `wq + BA` back into each module. AUTO_NF12
+        # replaces the native linear with a packed wrapper that has no
+        # `weight` attribute, so the generator runs on the dense source
+        # instead. This is a generation-time layout choice, not a change to the
+        # saved adapter dtype or to the quantized checkpoint.
+        if self.quantize_config.auto_dtype_cast == AutoDtypeCast.AUTO_NF12:
+            log.warn(
+                "EoRA generation disables AUTO_NF12 for this pass: the adapter "
+                "generator rewrites dense native weights (`w - wq`, then "
+                "`wq + BA`) and cannot do that through the packed NF12 wrapper. "
+                "The saved adapter is unaffected."
+            )
+            self.quantize_config.auto_dtype_cast = AutoDtypeCast.OFF
+
         # init processor with EoRA processor
         calibration_config = self._build_calibration_config(
             calibration_dataset,
@@ -2468,6 +2877,7 @@ class BaseQModel(nn.Module):
             [
                 DequantizeProcessor(
                     quantized_modules=quantized_modules,
+                    qcfg=self.quantize_config,
                 ),
                 EoraProcessor(
                     tokenizer=self.tokenizer,
@@ -3008,12 +3418,13 @@ class BaseQModel(nn.Module):
         return self
 
     def serve(self,
-               host: str = "0.0.0.0",
+               host: str = "127.0.0.1",
                port: int = 80,
                async_mode: bool = False,
-               api_key: Optional[Union[str, List[str]]] = None):
+               api_key: Optional[Union[str, List[str]]] = None,
+               allowed_hosts: Optional[List[str]] = None):
         from ..utils.openai_server import OpenAiServer
-        self.server = OpenAiServer(model=self, api_key=api_key)
+        self.server = OpenAiServer(model=self, api_key=api_key, allowed_hosts=allowed_hosts)
         self.server.start(host=host, port=port, async_mode=async_mode)
 
     def serve_shutdown(self):
@@ -3104,12 +3515,23 @@ class BaseQModel(nn.Module):
         example: Dict[str, Any],
         batch_device: torch.device,
     ) -> None:
-        """Expose original model inputs while the first-layer hook executes."""
+        """Expose original model inputs while the first-layer hook executes.
 
-        del example, batch_device
+        The first-layer hook only sees the mask and rotary embeddings that the
+        outer decoder block selected for *that* layer. Rebuilding the kwargs of
+        the other declared layer types needs the unexpanded inputs (the 2-D
+        padding mask and the position ids), so keep a reference for the duration
+        of one example and release it in `end_input_capture_example`.
+        """
+
+        del batch_device
+        self._layer_type_replay_source = example
 
     def end_input_capture_example(self) -> None:
         """Release any model-specific original-input capture state."""
+
+        self._layer_type_replay_source = None
+        self._layer_type_replay_rotary = None
 
     def capture_first_layer_input_kwargs(
         self,
@@ -3121,6 +3543,279 @@ class BaseQModel(nn.Module):
         """Allow model definitions to persist extra first-layer replay metadata during calibration capture."""
 
         return layer_input_kwargs
+
+    @staticmethod
+    def _layer_type_param_name(module: nn.Module) -> Optional[str]:
+        """Name of the rotary-embedding argument that selects a layer type."""
+
+        try:
+            parameters = inspect.signature(module.forward).parameters
+        except (TypeError, ValueError):
+            return None
+        for name in ("layer_type", "attention_type"):
+            if name in parameters:
+                return name
+        return None
+
+    def _resolve_layer_type_replay_rotary(self) -> Optional[nn.Module]:
+        """Rotary module that builds a different `position_embeddings` per layer type."""
+
+        state = object.__getattribute__(self, "__dict__")
+        cached = state.get("_layer_type_replay_rotary")
+        if cached is not None:
+            return cached
+
+        model = self._replay_root_model()
+        if model is None:
+            return None
+
+        declared = getattr(self, "rotary_embedding", None)
+        if declared:
+            module, _ = get_module_by_name_prefix(model, [declared])
+            if module is not None and self._layer_type_param_name(module) is not None:
+                self._layer_type_replay_rotary = module
+                return module
+
+        for name, module in model.named_modules():
+            if "rotary" not in name.lower() and "rotary" not in type(module).__name__.lower():
+                continue
+            if self._layer_type_param_name(module) is not None:
+                self._layer_type_replay_rotary = module
+                return module
+        return None
+
+    def _replay_root_model(self) -> Optional[nn.Module]:
+        """The loaded model, or None for a definition instance built without `nn.Module.__init__`.
+
+        `BaseQModel.__getattr__` resolves missing attributes through `self.model`,
+        so probing attributes on a bare instance recurses. Read the module table
+        directly instead.
+        """
+
+        modules = object.__getattribute__(self, "__dict__").get("_modules") or {}
+        model = modules.get("model")
+        return model if isinstance(model, nn.Module) else None
+
+    def _layer_type_replay_config(self):
+        """Config that declares `layer_types` (the text tower for multimodal wrappers)."""
+
+        model = self._replay_root_model()
+        if model is None:
+            return None
+        config = getattr(model, "config", None)
+        if config is None:
+            return None
+        text_config = getattr(config, "text_config", config)
+        return text_config if text_config is not None else config
+
+    def _declared_layer_types(self) -> Optional[tuple]:
+        """Distinct-typed `config.layer_types`, or None when one type covers the stack."""
+
+        text_config = self._layer_type_replay_config()
+        layer_types = getattr(text_config, "layer_types", None)
+        if not isinstance(layer_types, (list, tuple)) or not layer_types:
+            return None
+        if len(set(layer_types)) < 2:
+            return None
+        return tuple(layer_types)
+
+    @staticmethod
+    def _layer_type_or_mask(layer_type: str, text_config):
+        """Mask overlay `Gemma3TextModel.forward` applies for bidirectional attention."""
+
+        if layer_type != _LAYER_TYPE_SLIDING:
+            return lambda *args, **kwargs: torch.tensor(True, dtype=torch.bool)
+        try:
+            from transformers.masking_utils import sliding_window_bidirectional_overlay
+        except ImportError:  # pragma: no cover - older transformers
+            return None
+        window = getattr(text_config, "sliding_window", None)
+        if window is None:
+            return None
+        return sliding_window_bidirectional_overlay(window)
+
+    def _build_layer_type_attention_mask(
+        self,
+        text_config,
+        layer_type: str,
+        hidden_states: torch.Tensor,
+        raw_attention_mask: Optional[torch.Tensor],
+        position_ids: torch.Tensor,
+    ):
+        """Rebuild the mask `transformers` would hand to a layer of `layer_type`."""
+
+        from transformers.masking_utils import LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING
+
+        mask_kwargs = {
+            "config": text_config,
+            "inputs_embeds": hidden_states,
+            "attention_mask": raw_attention_mask,
+            "past_key_values": None,
+            "position_ids": position_ids,
+        }
+        if getattr(text_config, "use_bidirectional_attention", False):
+            or_mask_function = self._layer_type_or_mask(layer_type, text_config)
+            if or_mask_function is None:
+                return _LAYER_TYPE_MASK_UNSUPPORTED
+            mask_kwargs["or_mask_function"] = or_mask_function
+        # Use the same pattern-to-builder table `create_masks_for_generate` uses.
+        # A bare `create_causal_mask` fallback silently gives chunked, recurrent,
+        # and other non-sliding types the wrong attention pattern.
+        builder = LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING.get(layer_type)
+        if builder is None or isinstance(builder, dict):
+            return _LAYER_TYPE_MASK_UNSUPPORTED
+        return builder(**mask_kwargs)
+
+    def _build_layer_type_position_embeddings(
+        self,
+        rotary: nn.Module,
+        layer_type: str,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        target_device: torch.device,
+    ):
+        """Rebuild the per-layer-type rotary tuple with the model's own rotary module."""
+
+        rotary_device = get_device(rotary)
+        probe = torch.empty(1, device=rotary_device, dtype=hidden_states.dtype)
+        result = rotary(probe, move_to(position_ids, device=rotary_device), layer_type)
+        if isinstance(result, (tuple, list)):
+            return type(result)(move_to(value, device=target_device) for value in result)
+        return move_to(result, device=target_device)
+
+    def capture_layer_type_replay_kwargs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+        layer_input_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist the replay kwargs of every declared layer type, not only layer 0's.
+
+        Called by the capture stage right after `capture_first_layer_input_kwargs`;
+        a no-op (the key is simply absent) when the model declares one layer type.
+        """
+
+        layer_type_kwargs = self._build_layer_type_replay_kwargs(
+            args=args,
+            kwargs=kwargs,
+            batch_device=batch_device,
+        )
+        if layer_type_kwargs is not None:
+            layer_input_kwargs[_LAYER_TYPE_REPLAY_KWARGS_KEY] = layer_type_kwargs
+        return layer_input_kwargs
+
+    def _build_layer_type_replay_kwargs(
+        self,
+        *,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        batch_device: torch.device,
+    ) -> Optional[Dict[str, Any]]:
+        """Rebuild the mask and rotary tuple of every declared layer type.
+
+        `transformers` 5 builds one mask per layer *type*
+        (`causal_mask_mapping[config.layer_types[i]]`) and Gemma3/OLMo3 also pass a
+        different `position_embeddings` per type. The capture hook fires on the
+        first decoder layer only, so a single captured mask would be replayed to
+        layers whose type expects a different one. Rebuild the missing types from
+        the same inputs the model used, and let replay select by layer index.
+        """
+
+        layer_types = self._declared_layer_types()
+        if layer_types is None:
+            return None
+        source = object.__getattribute__(self, "__dict__").get("_layer_type_replay_source")
+        if not isinstance(source, dict):
+            return None
+
+        hidden_states = kwargs.get("hidden_states")
+        if hidden_states is None and args:
+            hidden_states = args[0]
+        if not torch.is_tensor(hidden_states) or hidden_states.dim() != 3:
+            return None
+
+        text_config = self._layer_type_replay_config()
+        num_layers = getattr(text_config, "num_hidden_layers", None)
+        if isinstance(num_layers, int) and num_layers != len(layer_types):
+            # A per-layer list is the only shape this reconstruction can index.
+            return None
+
+        raw_attention_mask = source.get("attention_mask")
+        if raw_attention_mask is not None:
+            if not torch.is_tensor(raw_attention_mask) or raw_attention_mask.dim() != 2:
+                return None
+            if raw_attention_mask.shape[-1] != hidden_states.shape[1]:
+                return None
+            raw_attention_mask = move_to(raw_attention_mask, device=hidden_states.device)
+
+        position_ids = kwargs.get("position_ids")
+        if not torch.is_tensor(position_ids):
+            position_ids = torch.arange(
+                hidden_states.shape[1], device=hidden_states.device, dtype=torch.long
+            ).unsqueeze(0)
+        position_ids = move_to(position_ids, device=hidden_states.device)
+        if position_ids.shape[-1] != hidden_states.shape[1]:
+            return None
+
+        base_type = layer_types[0]
+        captured_position_embeddings = kwargs.get("position_embeddings")
+        rotary = (
+            self._resolve_layer_type_replay_rotary()
+            if captured_position_embeddings is not None
+            else None
+        )
+
+        by_type: Dict[str, Dict[str, Any]] = {}
+        for layer_type in sorted(set(layer_types)):
+            entry: Dict[str, Any] = {}
+            layer_type_mask = self._build_layer_type_attention_mask(
+                text_config=text_config,
+                layer_type=layer_type,
+                hidden_states=hidden_states,
+                raw_attention_mask=raw_attention_mask,
+                position_ids=position_ids,
+            )
+            if layer_type_mask is not _LAYER_TYPE_MASK_UNSUPPORTED:
+                entry["attention_mask"] = layer_type_mask
+            # The first declared type already owns the captured rotary tuple, but
+            # its mask is still needed: `support_batch_quantize=False` replay
+            # forces `attention_mask=None`, so only a rebuilt base-type mask can
+            # restore the sliding/chunked window HF applies to those layers.
+            if rotary is not None and layer_type != base_type:
+                entry["position_embeddings"] = self._build_layer_type_position_embeddings(
+                    rotary=rotary,
+                    layer_type=layer_type,
+                    hidden_states=hidden_states,
+                    position_ids=position_ids,
+                    target_device=batch_device,
+                )
+            if entry:
+                by_type[layer_type] = entry
+
+        return {
+            "base_type": base_type,
+            "layer_types": layer_types,
+            "by_type": by_type,
+        }
+
+    @staticmethod
+    def _resolve_layer_replay_type(layer: nn.Module, layer_types: Sequence[str]) -> Optional[str]:
+        """Layer type declared by the decoder layer being replayed."""
+
+        attention = getattr(layer, "self_attn", None)
+        declared = getattr(attention, "layer_type", None)
+        if not isinstance(declared, str):
+            declared = getattr(layer, "layer_type", None)
+        if isinstance(declared, str):
+            return declared
+
+        index = getattr(attention, "layer_idx", None)
+        if not isinstance(index, int):
+            index = getattr(layer, "layer_idx", None)
+        if isinstance(index, int) and 0 <= index < len(layer_types):
+            return layer_types[index]
+        return None
 
     def quantization_layer_output_required(
         self,
@@ -3170,7 +3865,110 @@ class BaseQModel(nn.Module):
     ) -> Dict[str, Any]:
         """Allow model definitions to refresh layer-specific kwargs before cached layer replay."""
 
+        layer_type_kwargs = additional_inputs.pop(_LAYER_TYPE_REPLAY_KWARGS_KEY, None)
+        if layer_type_kwargs:
+            self._apply_layer_type_replay_kwargs(
+                layer=layer,
+                layer_type_kwargs=layer_type_kwargs,
+                additional_inputs=additional_inputs,
+                target_device=target_device,
+            )
         return additional_inputs
+
+    def awq_module_replay_inputs(
+        self,
+        module: nn.Module,
+        x: torch.Tensor,
+        module_kwargs: Dict[str, Any],
+    ):
+        """Allow a definition to supply scaffolding an AWQ block replay needs.
+
+        AWQ replays the common parent of a multi-module scaling group to score
+        the combined block. Some attention modules require arguments that the
+        per-linear activation capture never records (TeleChat2's
+        ``TelechatAttention.forward`` needs ``residual`` and ``attention_mask``),
+        so the definition may add them here. Returning ``x`` unchanged and the
+        same kwargs is the default for every other family.
+        """
+
+        return x, module_kwargs
+
+    def awq_module_replay_chunk_kwargs(
+        self,
+        module: nn.Module,
+        module_kwargs: Dict[str, Any],
+        *,
+        start: int,
+        length: int,
+        full_batch_size: int,
+    ) -> Dict[str, Any]:
+        """Override chunk kwargs whose batch layout is not a leading batch axis.
+
+        ``module_kwargs`` is the full, prepared replay context, before generic
+        batch slicing. Return only keys needing model-specific slicing.
+        """
+
+        return {}
+
+    def _apply_layer_type_replay_kwargs(
+        self,
+        *,
+        layer: nn.Module,
+        layer_type_kwargs: Dict[str, Any],
+        additional_inputs: Dict[str, Any],
+        target_device: torch.device,
+    ) -> None:
+        """Swap in the mask/rotary captured for the layer type being replayed."""
+
+        layer_types = layer_type_kwargs.get("layer_types") or ()
+        by_type = layer_type_kwargs.get("by_type") or {}
+        if not by_type:
+            return
+        layer_type = self._resolve_layer_replay_type(layer, layer_types)
+        if layer_type is None:
+            return
+        entry = by_type.get(layer_type)
+        if not entry:
+            return
+        is_base_type = layer_type == layer_type_kwargs.get("base_type")
+
+        # A `None` layer-0 mask can mean "causal skip" rather than "masks are
+        # disabled", so a later layer type that needs a materialized mask (for
+        # example chunked attention after a full-attention layer 0) must still
+        # receive it. Only skip the write when both sides are `None`.
+        if "attention_mask" in entry:
+            layer_type_mask = entry["attention_mask"]
+            if is_base_type:
+                # The base type's captured mask is discarded by
+                # `support_batch_quantize=False`; apply the rebuilt mask whenever
+                # one exists instead of leaving the layer in full causal mode.
+                if layer_type_mask is not None:
+                    additional_inputs["attention_mask"] = move_to(
+                        layer_type_mask, device=target_device
+                    )
+            elif layer_type_mask is not None or additional_inputs.get("attention_mask") is not None:
+                additional_inputs["attention_mask"] = (
+                    None
+                    if layer_type_mask is None
+                    else move_to(layer_type_mask, device=target_device)
+                )
+        position_embeddings = entry.get("position_embeddings")
+        if (
+            not is_base_type
+            and position_embeddings is not None
+            and additional_inputs.get("position_embeddings") is not None
+        ):
+            additional_inputs["position_embeddings"] = self._move_position_embeddings(
+                position_embeddings, target_device
+            )
+
+    @staticmethod
+    def _move_position_embeddings(position_embeddings, target_device: torch.device):
+        if isinstance(position_embeddings, (tuple, list)):
+            return type(position_embeddings)(
+                move_to(value, device=target_device) for value in position_embeddings
+            )
+        return move_to(position_embeddings, device=target_device)
 
     def prepare_layer_replay_keep_mask(
         self,
@@ -3209,16 +4007,41 @@ class BaseQModel(nn.Module):
             self.post_quantize(norm)
         return inputs
 
+    def _pre_quantize_device(self) -> torch.device:
+        """Concrete device on which `pre_quantize` stages one layer.
+
+        ``quantize_config.device`` carries only the accelerator family (the
+        loader strips ordinals through ``normalize_device``), so resolving it
+        directly yields the index-less family device, i.e. the *current*
+        device (cuda:0). A caller who restricted the run through
+        ``compute_device_filter`` (``device=("cuda:1",)``) then gets every
+        layer staged on an excluded GPU, which OOMs when that GPU is full
+        (issue #4233). Follow the same filtered pool the loopers use.
+        """
+
+        base_device = normalize_device_like(getattr(self.quantize_config, "device", None))
+        if base_device is None:
+            return CPU
+        devices = select_forward_devices(base_device)
+        compute_device_filter = getattr(self.quantize_config, "compute_device_filter", None)
+        if compute_device_filter is not None:
+            filtered = compute_device_filter(devices)
+            # The loopers keep the full pool when the filter rejects everything.
+            if filtered:
+                devices = list(filtered)
+        return as_torch_device(devices[0] if devices else base_device)
+
     def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
-            if self._materialize_floatx_layer_shell(module, self.quantize_config.device):
+            device = self._pre_quantize_device()
+            if self._materialize_floatx_layer_shell(module, device):
                 return module
             return self.shell_module_materialize(
                 target_submodule=module,
-                device=self.quantize_config.device,
+                device=device,
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, device=self.quantize_config.device)
+            return move_to(module, device=self._pre_quantize_device())
         else:
             return module
 
@@ -3381,6 +4204,13 @@ class BaseQModel(nn.Module):
         # quantized layer that already lives in the model tree. Re-packing the
         # restored dense source here would replace that layer for the forward.
         full_name = getattr(named_module, "full_name", None)
+        # The lm_head is its own quantization stage rather than a decoder
+        # projection. It is quantized from a dense CPU source that must stay
+        # the module in the tree, so packing it as an NF12 forward wrapper both
+        # saves nothing (the dense source is required anyway) and detaches the
+        # head from the tree that `post_quantize` moves back to CPU.
+        if full_name is not None and full_name == getattr(self, "lm_head", None):
+            return module
         if full_name:
             try:
                 live = self.model.get_submodule(full_name)
@@ -3507,6 +4337,14 @@ class BaseQModel(nn.Module):
                         scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
                         axis=None,
                         target_dtype=torch.float32,
+                        # Resolve the checkpoint convention once so this decoder
+                        # and ``_build_fp8_forward_module`` agree. A direct
+                        # ``weight_scale`` is already normalized to a multiplier.
+                        scale_semantics=(
+                            self._decoder_fp8_scale_semantics()
+                            if isinstance(scale_inv, torch.Tensor)
+                            else "multiplier"
+                        ),
                     )
                 elif decoder_kind == "fp4":
                     decoded_weight = dequantize_f4_e2m1(
@@ -3549,6 +4387,39 @@ class BaseQModel(nn.Module):
         if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
             return int(block_size[0]), int(block_size[1])
         return None
+
+    def _decoder_fp8_scale_semantics(self) -> str:
+        """Resolve how a checkpoint's ``weight_scale_inv`` is applied, once.
+
+        HF/DeepSeek/Qwen FP8 checkpoints store ``amax / 448`` under the
+        historical ``weight_scale_inv`` name and *multiply* it. A checkpoint
+        that stores a true inverse scale declares
+        ``quantization_config.weight_scale_semantics = "inverse"``.
+
+        Both the native forward wrapper and the dense quant-source decoder read
+        this single resolved value so they can never disagree about the same
+        checkpoint tensor.
+        """
+
+        cached = self.__dict__.get("_resolved_fp8_scale_semantics")
+        if cached is not None:
+            return cached
+
+        config = self._decoder_source_config()
+        quant_config = getattr(config, "quantization_config", None)
+        if isinstance(quant_config, dict):
+            declared = quant_config.get("weight_scale_semantics")
+        else:
+            declared = getattr(quant_config, "weight_scale_semantics", None)
+
+        semantics = "multiplier" if declared is None else str(declared).strip().lower()
+        if semantics not in {"multiplier", "inverse"}:
+            raise ValueError(
+                "FP8 `weight_scale_semantics` must be 'multiplier' or 'inverse', "
+                f"got {declared!r}."
+            )
+        self.__dict__["_resolved_fp8_scale_semantics"] = semantics
+        return semantics
 
     def _decoder_declared_floatx_format(self) -> str:
         """Read flat and compressed-tensors group format labels."""
@@ -3855,7 +4726,9 @@ class BaseQModel(nn.Module):
             scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
             result_shape=tuple(weight.shape),
         )
-        if not isinstance(scale_inv, torch.Tensor):
+        if isinstance(scale_inv, torch.Tensor):
+            scale_semantics = self._decoder_fp8_scale_semantics()
+        else:
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
             direct_scale = checkpoint_tensors.get("weight_scale")
@@ -3874,6 +4747,9 @@ class BaseQModel(nn.Module):
                 torch.reciprocal(scale),
                 torch.full_like(scale, 1.0 / tiny),
             )
+            # The synthesized tensor is an inverse scale regardless of any
+            # checkpoint-declared semantics, so the wrapper must divide.
+            scale_semantics = "inverse"
 
         format_name = str(weight.dtype).split(".")[-1]
         try:
@@ -3895,6 +4771,7 @@ class BaseQModel(nn.Module):
                 format=format_name,
                 weight_scale_method=weight_scale_method,
                 weight_block_size=weight_block_size,
+                weight_scale_semantics=scale_semantics,
                 register_buffers=False,
             ).to(device=device)
         except Exception:
@@ -4155,7 +5032,17 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
-        """Declare bounded token-row aggregation for pointwise MoE modules."""
+        """Declare bounded token-row aggregation for every AWQ module.
+
+        Variable-length calibration captures cannot be concatenated on the
+        batch axis. Before #4063 only MoE modules opted into token-row packing;
+        every dense module fell back to the latest (shortest, because
+        calibration is sorted by length) capture, so AWQ scale search saw less
+        than one percent of the calibration tokens. Token-row packing is the
+        default for every module and keeps a bounded, deterministic sample of
+        all captures. MoE roots additionally capture their shared pre-router
+        input for the gate/up scaling group.
+        """
 
         if not isinstance(module_name, str):
             return None
@@ -4172,7 +5059,9 @@ class BaseQModel(nn.Module):
                     "mode": "token_rows",
                 }
 
-        return None
+        return {
+            "mode": "token_rows",
+        }
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
@@ -4198,6 +5087,13 @@ class BaseQModel(nn.Module):
                 if flag in module_name:
                     module_name = module_name.replace(flag, "")
             return module_name
+
+        # A sandwich post-norm (for example LFM3's `post_operator_norm`) is
+        # applied to the block output, after the residual add. It can appear in
+        # the tree immediately before the next consumer and share that
+        # consumer's width, so position and width cannot identify a fold
+        # source. The definition marks it explicitly instead.
+        post_norm_modules = set(self.awq_post_norm_modules(module))
 
         def _select_feature_name(names):
             """Return the first quantized child that has captured activations."""
@@ -4225,6 +5121,178 @@ class BaseQModel(nn.Module):
                 last_module_root = candidate_name.split(".", 1)[0]
             return True
 
+        def _is_gain_norm(candidate_module, candidate_name: str, input_width: int | None) -> bool:
+            """Whether ``candidate_module`` can absorb the consumer's input scale."""
+            if candidate_name in post_norm_modules:
+                return False
+            if norm_type_of(candidate_module) is None:
+                return False
+            weight = getattr(candidate_module, "weight", None)
+            if not isinstance(weight, nn.Parameter) or weight.ndim != 1:
+                return False
+            return input_width is None or weight.numel() == input_width
+
+        last_gain_norm = None
+        # The last norm-like module, even when it cannot absorb a fold (a
+        # weightless or gated norm). A MoE gate/up block reads this module's
+        # output; resolving to it lets the foldability filter drop the group
+        # instead of folding into an unrelated preceding linear.
+        last_norm_candidate = None
+
+        def _select_prev_op(
+            input_width: int | None,
+            allow_block_norm: bool = False,
+            shared_source: nn.Module | None = None,
+        ):
+            """Return the normalization that immediately feeds the consumer block.
+
+            Consecutive non-quantized blocks can contain several modules: the
+            post-attention/post-MLP norms, MoE routers, and capture-only roots.
+            Only the last gain norm whose width matches the consumer's input
+            actually feeds it; earlier entries in the run belong to sibling
+            branches (for example the router) or to a preceding residual.
+            ``last_module`` remains the fallback when no norm matches.
+
+            ``allow_block_norm`` admits the last gain norm seen in the layer when
+            the run was already consumed by a sibling MoE block. A MoE gate/up
+            group always reads the MoE block input, so its fold source is that
+            norm even when the intervening routed-expert blocks cleared the run
+            (DeepSeek orders routed experts before ``shared_experts``).
+
+            ``shared_source`` is the source of an earlier block whose consumers
+            declare the same ``:in=<tag>`` input. Parallel decoder blocks (for
+            example Cohere/Cohere2 attention and MLP) read one norm without an
+            intervening norm block, so the consumer's input tag is the only
+            declaration that both branches share the same source.
+            """
+            for candidate_name, candidate_module in reversed(pending_nonquant):
+                if _is_gain_norm(candidate_module, candidate_name, input_width):
+                    return candidate_module
+            if last_module_name in post_norm_modules:
+                # Folding into a post-norm corrupts the block output. With no
+                # data-flow source in this run, skip the scale instead.
+                return None
+            if allow_block_norm and last_gain_norm is not None:
+                # A MoE gate/up block always reads the block input norm. Return
+                # it even when it is not foldable or its width differs; the
+                # foldability/width filters drop the group rather than folding a
+                # scale into an unrelated preceding linear (for example the last
+                # routed expert's down projection). The most recent gain norm wins
+                # over a shared `:in=` source because a sequential MoE block reads
+                # its post-attention norm, not the attention input norm.
+                return last_gain_norm
+            if allow_block_norm and last_norm_candidate is not None:
+                return last_norm_candidate
+            if shared_source is not None and _norm_width(shared_source) == input_width:
+                return shared_source
+            # A fallback norm whose width differs from the consumer's input
+            # cannot absorb this scale: `scale_ln_fcs` would multiply a
+            # differently sized weight (or raise). DeepSeek MLA is the concrete
+            # case - `o_proj` reads the attention output, not the input norm, so
+            # the last-module fallback would fold a wrong-width scale into
+            # `input_layernorm`. Refuse the fold and leave that group unscaled.
+            if last_module is not None and _norm_width(last_module) is not None:
+                return last_module if _norm_width(last_module) == input_width else None
+            return last_module
+
+        def _norm_width(candidate_module) -> int | None:
+            """Return the gain width of a norm-like module, else ``None``."""
+
+            weight = getattr(candidate_module, "weight", None)
+            if isinstance(weight, nn.Parameter) and weight.ndim == 1:
+                return int(weight.numel())
+            return None
+
+        def _norm_scale_consumers(prev_op_module, input_width: int | None, extra_names=(), block=()):
+            """Non-quantized modules in this run that read ``prev_op``'s output.
+
+            A MoE router (``mlp.gate``, ``router``) and Qwen2's
+            ``shared_expert_gate`` consume the same normed hidden state as the
+            quantized expert gate/up projections but are not part of the fold
+            group, so ``apply_scale`` has to multiply their input columns by the
+            same scale. Routers are not ``nn.Linear``; they own a 2-D ``weight``
+            of shape ``[experts, hidden]`` and apply it as a linear map, so both
+            shapes are accepted here and ``scale_input_columns`` performs the
+            multiplication.
+
+            Non-quantized siblings declared in the same block (for example
+            Laguna's ``self_attn.g_proj:!``) read the same normed input too, so
+            they are collected from ``block`` as well.
+            """
+
+            width = _norm_width(prev_op_module)
+            if width is None or input_width is None or width != input_width:
+                return []
+            consumers = []
+            for candidate_name, candidate_module in pending_nonquant:
+                if candidate_module is prev_op_module or candidate_name in post_norm_modules:
+                    continue
+                if isinstance(candidate_module, nn.Linear):
+                    if candidate_module.in_features == width:
+                        consumers.append(candidate_name)
+                    continue
+                weight = getattr(candidate_module, "weight", None)
+                if isinstance(weight, nn.Parameter) and weight.ndim == 2 and weight.shape[1] == width:
+                    consumers.append(candidate_name)
+            for raw_name in block:
+                if all(flag not in raw_name for flag in NON_QUANTIZE_FLAGS):
+                    continue
+                candidate_name = strip_non_quantize_flags(raw_name)
+                if candidate_name in consumers:
+                    continue
+                candidate_module, _ = get_module_by_name_prefix(module, candidate_name)
+                if candidate_module is None or candidate_module is prev_op_module:
+                    continue
+                if isinstance(candidate_module, nn.Linear):
+                    if candidate_module.in_features == width:
+                        consumers.append(candidate_name)
+                    continue
+                weight = getattr(candidate_module, "weight", None)
+                if isinstance(weight, nn.Parameter) and weight.ndim == 2 and weight.shape[1] == width:
+                    consumers.append(candidate_name)
+            for extra_name in extra_names:
+                if extra_name not in consumers:
+                    consumers.append(extra_name)
+            return consumers
+
+        def _moe_block_consumers(block, width, excluded):
+            """Direct children of the MoE block that read its input.
+
+            Some definitions do not declare the router (DeepSeek V2/V3 trees list
+            only the projections), so the router cannot be found in the
+            non-quantized run. A router is always a direct child of the MoE block
+            with a 2-D ``weight`` of the block-input width; taking it from the
+            module hierarchy keeps the rule structural instead of name-based.
+            """
+
+            moe_root = None
+            for spec in plan.moe_roots():
+                template = spec.template
+                if any(
+                    strip_non_quantize_flags(name) == template
+                    or strip_non_quantize_flags(name).startswith(f"{template}.")
+                    for name in block
+                ):
+                    moe_root = template
+                    break
+            if moe_root is None:
+                return []
+            root_module, _ = get_module_by_name_prefix(module, moe_root)
+            if root_module is None:
+                return []
+            consumers = []
+            for child_name, child in root_module.named_children():
+                if any(child is excluded_module for excluded_module in excluded):
+                    continue
+                child_path = f"{moe_root}.{child_name}"
+                spec = plan.find(child_path)
+                if spec is not None and spec.quantize:
+                    continue
+                weight = getattr(child, "weight", None)
+                if isinstance(weight, nn.Parameter) and weight.ndim == 2 and weight.shape[1] == width:
+                    consumers.append(child_path)
+            return consumers
+
         def _module_kwargs_for_feature(feature_name: str | None):
             kwargs_for_feature = dict(base_module_kwargs)
             if feature_name and isinstance(per_feature_kwargs, dict):
@@ -4238,20 +5306,39 @@ class BaseQModel(nn.Module):
             is_awq_quantize=True,
             include_capture_only=True,
         )
-        for i, block in enumerate(full_layer_modules):
+        # Non-quantized blocks seen since the last quantized block. The run is
+        # resolved at the consumer, where the input width is known.
+        pending_nonquant = []
+        # Source norm recorded for each declared ``:in=<tag>`` input. Parallel
+        # decoder blocks consume one norm through two quantized branches; the
+        # second branch reuses the first branch's source instead of folding into
+        # the previous branch's output projection.
+        shared_input_sources: Dict[str, nn.Module] = {}
+        prev_not_quantized = False
+        for block in full_layer_modules:
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
             if not_quantized:
-                # If both the current block and the previous one are marked as not quantized,
-                # skip remembering the current block. This ensures that when two consecutive
-                # blocks are not quantized, only the first one is remembered as last_module.
-                if i > 0 and all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in full_layer_modules[i - 1]):
+                # An empty block carries no module to remember; it also must not
+                # break the surrounding run of non-quantized blocks.
+                if not block:
                     continue
-
-                # Remember the latest norm (use the last entry if multiple are present)
+                # Remember the first block of the run as the fallback `last_module`.
+                # Every block in the run is kept as a candidate prev_op; the
+                # consumer selects the gain norm that actually feeds it.
                 candidate_name = strip_non_quantize_flags(block[-1])
-                _try_update_last_module(candidate_name)
+                resolved_module, _ = get_module_by_name_prefix(module, candidate_name)
+                if resolved_module is not None:
+                    pending_nonquant.append((candidate_name, resolved_module))
+                    if _is_gain_norm(resolved_module, candidate_name, None):
+                        last_gain_norm = resolved_module
+                    if candidate_name not in post_norm_modules and norm_type_of(resolved_module) is not None:
+                        last_norm_candidate = resolved_module
+                if not prev_not_quantized:
+                    _try_update_last_module(candidate_name)
+                prev_not_quantized = True
                 continue
 
+            prev_not_quantized = False
             try:
                 plan = self.module_plan()
             except RuntimeError:
@@ -4264,11 +5351,23 @@ class BaseQModel(nn.Module):
                 plan.is_expert(strip_non_quantize_flags(name))
                 for name in block
             )
-            is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
-            is_moe_gate_up_block = is_moe_block and any(
-                "gate" in roles or "up" in roles for roles in block_roles.values()
+            is_moe_family = any(
+                plan.is_moe(strip_non_quantize_flags(name))
+                for name in block
             )
+            has_gate_up_roles = any("gate" in roles or "up" in roles for roles in block_roles.values())
+            is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
+            is_moe_gate_up_block = is_moe_block and has_gate_up_roles
+            block_input_tags = set()
+            for name in block:
+                if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
+                    spec = plan.find(self._parse_module_flags(name)[0])
+                    if spec is not None:
+                        block_input_tags.update(flag[3:] for flag in spec.flags if flag.startswith("in="))
+            shared_tag = next(iter(block_input_tags)) if len(block_input_tags) == 1 else None
+            skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
+                pending_nonquant.clear()
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
                 for name in block:
@@ -4295,10 +5394,22 @@ class BaseQModel(nn.Module):
             else:
                 # Normal execution subset
                 subset = []  # preserve execution order while collecting quantizable modules
+                subset_names = []
                 skip = False
                 for name in block:
                     if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
                         m, _ = get_module_by_name_prefix(module, name)
+                        if m is None:
+                            log.debug("awq_get_modules_for_scaling: skipping missing module `%s`", name)
+                            # Definitions with alternative layouts (DeepSeek MLA
+                            # ships `q_proj` only when `q_lora_rank` is unset)
+                            # declare every variant. `layer_modules_strict=False`
+                            # means the missing one is simply not executed, so it
+                            # must not drop the rest of the block.
+                            if self.layer_modules_strict:
+                                skip = True
+                                break
+                            continue
                         # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                         # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
                         if (self.awq_scale_optimize_shape_dependent_modules is not None
@@ -4308,54 +5419,126 @@ class BaseQModel(nn.Module):
                             # log.debug(f'"{name}" attention out skipped.')
                             skip = True
 
-                        if m is None:
-                            log.debug("awq_get_modules_for_scaling: skipping missing module `%s`", name)
-                            skip = True
-                            break
                         subset.append(m)
+                        subset_names.append(name)
 
                 if skip or not subset:
-                    continue
+                    pending_nonquant.clear()
+                    skip_block = True
 
-                prev_op = last_module
-                if prev_op is None:
-                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
-                    continue
+                if not skip_block:
+                    # Match the activation bucket to the first quantized child in this block
+                    feature_name = _select_feature_name(block) or strip_non_quantize_flags(block[0])
+                    root_split = feature_name.split(".")
+                    root = None
+                    module2inspect = None
+                    if len(root_split) >= 2:
+                        root = root_split[0]
+                        if root != last_module_root:
+                            last_module_root = root
+                            module2inspect, _ = get_module_by_name_prefix(module, root)
 
-                # Match the activation bucket to the first quantized child in this block
-                feature_name = _select_feature_name(block) or strip_non_quantize_flags(block[0])
-                root_split = feature_name.split(".")
-                module2inspect = None
-                if len(root_split) >= 2:
-                    root = root_split[0]
-                    if root != last_module_root:
-                        last_module_root = root
-                        module2inspect, _ = get_module_by_name_prefix(module, root)
+                    # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
+                    if is_moe_gate_up_block and module2inspect is not None:
+                        if last_module_root not in input_feat:
+                            log.debug(
+                                "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
+                                last_module_root,
+                                len(block),
+                            )
+                        feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
+                        inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
+                    else:
+                        feature_name = _select_feature_name(block)
+                        inp = input_feat.get(feature_name)
 
-                # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                if is_moe_gate_up_block and module2inspect is not None:
-                    if last_module_root not in input_feat:
+                    if inp is None:
+                        pending_nonquant.clear()
+                        log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
+                        skip_block = True
+
+                input_width = None
+                scale_consumers = []
+                if not skip_block:
+                    input_width = inp.shape[-1] if inp.dim() > 0 else None
+                    allow_block_norm = is_moe_family and has_gate_up_roles
+                    shared_source = shared_input_sources.get(shared_tag) if shared_tag else None
+                    prev_op = _select_prev_op(
+                        input_width,
+                        allow_block_norm=allow_block_norm,
+                        shared_source=shared_source,
+                    )
+                    moe_consumers = (
+                        _moe_block_consumers(block, input_width, subset)
+                        if is_moe_family and input_width is not None
+                        else []
+                    )
+                    scale_consumers = _norm_scale_consumers(
+                        prev_op,
+                        input_width,
+                        extra_names=moe_consumers,
+                        block=block,
+                    )
+                    if (
+                        prev_op is not None
+                        and shared_tag
+                        and _is_gain_norm(prev_op, "", input_width)
+                    ):
+                        shared_input_sources[shared_tag] = prev_op
+                    pending_nonquant.clear()
+                    if prev_op is None:
+                        log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
+                        skip_block = True
+
+                # One group shares one scale vector, so it can only contain
+                # consumers of the same tensor. A layer whose input width differs
+                # from the fold source reads another tensor (DeepSeek MLA:
+                # `q_b_proj` reads `q_a`, `kv_b_proj` reads `kv_a`), and
+                # multiplying it by this norm's scale would either raise in
+                # `scale_ln_fcs` or silently corrupt the layer. Keep those layers
+                # in their own quantized-but-unscaled group.
+                if not skip_block and input_width is not None:
+                    fold_subset, fold_names, foreign_layers = [], [], []
+                    for layer_module, layer_name in zip(subset, subset_names):
+                        weight = getattr(layer_module, "weight", None)
+                        if isinstance(weight, torch.Tensor) and weight.ndim == 2 and weight.shape[1] != input_width:
+                            foreign_layers.append(layer_name)
+                            continue
+                        fold_subset.append(layer_module)
+                        fold_names.append(layer_name)
+                    if foreign_layers:
                         log.debug(
-                            "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
-                            last_module_root,
-                            len(block),
+                            "awq_get_modules_for_scaling: leaving %s unscaled; their input width "
+                            "differs from the %s-wide fold source",
+                            foreign_layers,
+                            input_width,
                         )
-                    feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
-                    inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
-                else:
-                    feature_name = _select_feature_name(block)
-                    inp = input_feat.get(feature_name)
+                    if not fold_subset:
+                        log.debug(
+                            "awq_get_modules_for_scaling: skipping block %s; no consumer matches the fold source width",
+                            block,
+                        )
+                        skip_block = True
+                    subset, subset_names = fold_subset, fold_names
 
-                if inp is None:
-                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
-                    continue
+                # `_search_best_scale` scores a candidate scale by re-running
+                # `module2inspect`. A multi-module group needs a block forward;
+                # scoring a single member would miss the rest of the group.
+                if not skip_block and module2inspect is None and len(subset) > 1:
+                    common_parents = {strip_non_quantize_flags(name).rsplit(".", 1)[0] for name in subset_names}
+                    inspect_name = common_parents.pop() if len(common_parents) == 1 else root
+                    if inspect_name:
+                        module2inspect, _ = get_module_by_name_prefix(module, inspect_name)
 
-                n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
-                                                        module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
-                                                        subset=subset, module2inspect=module2inspect)
-                n["_input_feature_name"] = feature_name
+                if not skip_block:
+                    n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
+                                                            module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
+                                                            subset=subset, module2inspect=module2inspect)
+                    n["_input_feature_name"] = feature_name
+                    if scale_consumers:
+                        n["_scale_consumers"] = scale_consumers
 
-                nodes.append(n)
+                    nodes.append(n)
 
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
@@ -4379,7 +5562,6 @@ class BaseQModel(nn.Module):
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
 
-        import torch
         def format_nodes(nodes):
             out = []
             for n in nodes:
@@ -4400,7 +5582,137 @@ class BaseQModel(nn.Module):
             return out
 
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
-        return nodes
+        nodes = self._merge_shared_source_nodes(module, nodes)
+        return self._filter_awq_scaling_sources(module, nodes)
+
+    def _merge_shared_source_nodes(self, layer_module, nodes):
+        """Fold every group that shares one gain norm into a single scale group.
+
+        Routed experts and ``shared_experts`` read the same post-attention norm,
+        and parallel decoder blocks read one input norm from two quantized
+        branches. Folding those as separate groups divides that norm once per
+        group, so each fold leaves the other group's consumers unscaled. One
+        norm is divided exactly once, so it can have exactly one scale group.
+        """
+
+        merged = []
+        index_by_source: Dict[int, int] = {}
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            gain = getattr(prev_op, "weight", None)
+            if not isinstance(prev_op, nn.Module):
+                merged.append(node)
+                continue
+            # A gated or weightless norm is still a single source, even though it
+            # has no 1-D gain to divide; merging keeps one group per norm so a
+            # later foldability check drops the whole group instead of half.
+            has_gain = isinstance(gain, torch.Tensor) and gain.ndim == 1
+            if not has_gain and norm_type_of(prev_op) is None:
+                merged.append(node)
+                continue
+            key = id(prev_op)
+            existing = index_by_source.get(key)
+            if existing is None:
+                index_by_source[key] = len(merged)
+                merged.append(node)
+                continue
+            base = merged[existing]
+            base_layers = list(base.get("layers") or [])
+            for layer in node.get("layers") or []:
+                if all(layer is not known for known in base_layers):
+                    base_layers.append(layer)
+            base["layers"] = base_layers
+            consumers = list(base.get("_scale_consumers") or [])
+            for consumer in node.get("_scale_consumers") or []:
+                if consumer not in consumers:
+                    consumers.append(consumer)
+            if consumers:
+                base["_scale_consumers"] = consumers
+            # The merged group needs one forward that executes every member, so
+            # re-anchor the inspection module on the deepest common ancestor of
+            # all consumers (routed + shared experts resolve to the MoE root).
+            try:
+                names = [get_op_name(layer_module, layer) for layer in base_layers]
+            except ValueError:
+                names = []
+            inspect_name = ""
+            if names:
+                inspect_name = names[0].rsplit(".", 1)[0] if "." in names[0] else ""
+                for name in names[1:]:
+                    parent = name.rsplit(".", 1)[0] if "." in name else ""
+                    while inspect_name and not (parent == inspect_name or parent.startswith(f"{inspect_name}.")):
+                        inspect_name = inspect_name.rsplit(".", 1)[0] if "." in inspect_name else ""
+            # With no shared ancestor the branches live under different roots
+            # (attention + MoE); keep the inspection module the first group
+            # already resolved instead of widening it to the whole layer.
+            if inspect_name:
+                inspect_module, _ = get_module_by_name_prefix(layer_module, inspect_name)
+                if inspect_module is not None:
+                    base["module2inspect"] = inspect_module
+        return merged
+
+    def _filter_awq_scaling_sources(self, layer_module, nodes):
+        """Drop scaling groups whose ``prev_op`` cannot be folded without changing the layer output.
+
+        ``awq_get_modules_for_scaling`` selects ``prev_op`` from tree order, which
+        cannot see a residual add, a parallel branch, or a non-homogeneous
+        activation between the candidate and the consumer. A definition marks
+        those leaves with the ``nosrc`` tree flag; folding a scale into them
+        changes the decoder layer output, so the group is skipped here and the
+        consumer falls back to plain quantization (the processor falls back to
+        ``_quantize_layer_fallback`` when no group survives).
+
+        The flag is a declaration of the definition's forward data flow, so it
+        is validated by the ``apply_scale`` output-preservation invariant in
+        ``tests/test_awq_scaling_groups.py`` for every family that uses it.
+        """
+
+        if not nodes:
+            return nodes
+        try:
+            plan = self.module_plan()
+        except RuntimeError:
+            effective_tree = getattr(self, "effective_module_tree", None)
+            plan = ModulePlan.from_tree(
+                effective_tree if effective_tree is not None else _module_tree_for_class(type(self))
+            )
+
+        kept = []
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            prev_name = None
+            if prev_op is not None:
+                try:
+                    prev_name = get_op_name(layer_module, prev_op)
+                except Exception:
+                    prev_name = None
+            spec = plan.find(prev_name) if prev_name else None
+            if spec is not None and AWQ_NO_SCALE_SOURCE_FLAG in spec.flags:
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with declared non-source prev_op `%s`",
+                    prev_name,
+                )
+                continue
+            # A gain norm can only absorb the consumer's input scale when its
+            # width matches that input. A stale tracker entry (for example a
+            # norm followed by a projection the definition does not list) would
+            # otherwise reach apply_scale and fail on the shape mismatch.
+            gain = getattr(prev_op, "weight", None)
+            consumers = node.get("layers") or []
+            if (
+                isinstance(gain, torch.Tensor)
+                and gain.ndim == 1
+                and consumers
+                and isinstance(consumers[0], nn.Linear)
+                and gain.numel() != consumers[0].weight.shape[1]
+            ):
+                log.debug(
+                    "awq_get_modules_for_scaling: skipping scaling group with width-mismatched prev_op `%s`",
+                    prev_name,
+                )
+                continue
+            kept.append(node)
+        return kept
 
     # Materialize the target shell module from the lazy turtle source on the requested device.
     def shell_module_materialize(
@@ -4538,24 +5850,34 @@ class BaseQModel(nn.Module):
             )
 
     ## overrides nn.module.train()
-    # def train(self, mode=True):
-    #     old_mode = self.training
-    #     # Call the parent class's train() method to set the training mode
-    #     super().train(mode)
-    #
-    #     if old_mode == mode:
-    #         return
-    #
-    #     # Custom behavior when switching to training mode
-    #     if mode:
-    #         if not self.SUPPORTS_TRAINING:
-    #             err = f"{self.__class__.__name__}: MODEL switching to training mode."
-    #             log.error(err)
-    #             raise NotImplementedError(err)
-    #         else:
-    #             log.info(f"{self.__class__.__name__}: MODEL switching to training mode.")
-    #     else:
-    #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
+    def train(self, mode: bool = True):
+        """Switch training mode without leaving a partially-updated model.
+
+        ``nn.Module.train`` recurses into every child, and each inference-only
+        quant kernel raises from its own ``train``. By then the modules visited
+        earlier are already in training mode, so a retry starts from mixed
+        state. Reject the switch before touching any child.
+        """
+        if mode:
+            model = getattr(self, "_modules", {}).get("model")
+            if model is not None:
+                unsupported = [
+                    name
+                    for name, module in model.named_modules()
+                    if isinstance(module, BaseQuantLinear)
+                    and not module.SUPPORTS_TRAINING
+                    and not module.training
+                ]
+                if unsupported:
+                    raise NotImplementedError(
+                        f"{self.__class__.__name__}: {len(unsupported)} inference-only "
+                        f"quant kernel(s) cannot switch to training mode (first: "
+                        f"`{unsupported[0]}`). Reload the model with "
+                        '`backend="auto_trainable"` or a trainable backend for this '
+                        "quantization method before fine-tuning."
+                    )
+        return super().train(mode)
+
     @classmethod
     def _build_layer_modules_for_tree(cls, tree, include_capture_only: bool = False):
         """
@@ -4931,12 +6253,35 @@ class BaseQModel(nn.Module):
         except Exception as exc:  # torch Modules raise AttributeError here
             model = self.__dict__.get("model")
             if model is None:
-                model = self._modules.get("model") if hasattr(self, "_modules") else None
+                # ``self._modules`` must be read from ``__dict__``: during
+                # ``__init__`` (and for instances built with ``object.__new__``
+                # in tests) it does not exist yet, and ``hasattr(self,
+                # "_modules")`` re-enters this hook forever instead of
+                # returning False.
+                modules = self.__dict__.get("_modules")
+                model = modules.get("model") if modules is not None else None
             if model is not None and item != "model":
                 return getattr(model, item)
             raise exc
 
-    def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
+    @classmethod
+    def _auto_detect_module_tree(cls, model: PreTrainedModel, quant_method: METHOD):
+        """Build a module tree from a live model that has no registered definition.
+
+        A model can expose more than one decoder stack as concurrent siblings
+        (for example ``model.layers`` for text and ``vision_tower.layers`` for
+        vision).  The declaration format already represents that shape as one
+        complete tree variant per stack, so discovery walks the whole module
+        tree and returns every stack it can resolve, not just the first match.
+
+        Discovery is deliberately structural: a candidate must be a sequence of
+        modules whose first element owns ``Linear``/``Conv`` leaves and either
+        carries a known decoder-stack name or looks like a transformer block.
+        The returned tree uses the full dotted path for every branch, which
+        keeps layer names, ``dynamic`` patterns and per-module overrides
+        unambiguous across branches.
+        """
+
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
         if quant_method not in {
@@ -4947,23 +6292,18 @@ class BaseQModel(nn.Module):
             METHOD.EXL3,
             METHOD.PARO,
             METHOD.VPTQ,
+            METHOD.MACAQ,
             METHOD.NF12,
         }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/NF12"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ/MACAQ/NF12"
             )
             return None
 
-        def _get(path):
-            base = model
-            for p in path.split("."):
-                base = getattr(base, p, None)
-                if base is None:
-                    return None
-            return base
-
-        candidates = [
+        # A stack keeps its historical priority when a model exposes more than
+        # one candidate path.  Paths outside this list follow discovery order.
+        legacy_candidates = [
             "model.layers",
             "language_model.layers",
             "model.decoder.layers",
@@ -4973,65 +6313,136 @@ class BaseQModel(nn.Module):
             "blocks",
             "model.blocks",
         ]
+        legacy_order = {path: index for index, path in enumerate(legacy_candidates)}
+        stack_names = frozenset({"layers", "h", "blocks", "block"})
+        transformer_hints = (
+            "attn",
+            "attention",
+            "self_attn",
+            "mlp",
+            "ffn",
+            "feed",
+            "dense",
+            "mixer",
+        )
+        leaf_types = [nn.Linear, nn.Conv1d, nn.Conv2d]
 
-        chosen = None
-        for c in candidates:
-            m = _get(c)
-            if isinstance(m, (nn.ModuleList, list, tuple)) and len(m) > 0 and isinstance(m[0], nn.Module):
-                chosen = c
-                log.warn(f"Module Tree AutoCompat: Matched candidate path '{c}', type={type(m).__name__}")
-                break
+        def _is_sequence(module) -> bool:
+            return (
+                isinstance(module, (nn.ModuleList, list, tuple))
+                and len(module) > 0
+                and isinstance(module[0], nn.Module)
+            )
 
-        if chosen is None:
-            log.warn("Module Tree AutoCompat: All candidate paths invalid, return None")
+        def _looks_like_transformer_layer(layer: nn.Module) -> bool:
+            for child_name, _ in layer.named_children():
+                lowered = child_name.lower()
+                if any(hint in lowered for hint in transformer_hints):
+                    return True
+            return False
+
+        def _linear_names(module: nn.Module):
+            return list(find_modules(module, layers=leaf_types).keys())
+
+        def _named_children(module):
+            if isinstance(module, nn.Module):
+                return module.named_children()
+            # Diagnostic callers may pass a lightweight stand-in object that
+            # exposes torch modules as attributes instead of subclassing
+            # nn.Module.  Keep that shape usable without changing real models.
+            return (
+                (name, value)
+                for name, value in vars(module).items()
+                if isinstance(value, nn.Module)
+            )
+
+        branches: List[tuple[str, nn.Module]] = []
+        seen_ids = set()
+
+        def _walk(module: nn.Module, path: str) -> None:
+            for name, child in _named_children(module):
+                child_path = f"{path}.{name}" if path else name
+                if _is_sequence(child):
+                    layer0 = child[0]
+                    known_stack = name in stack_names
+                    transformer_like = _looks_like_transformer_layer(layer0)
+                    if known_stack or transformer_like:
+                        if not _linear_names(layer0):
+                            log.warn(
+                                f"Module Tree AutoCompat: Skipping '{child_path}': "
+                                f"{type(layer0).__name__} has no Linear/Conv leaves."
+                            )
+                        elif id(child) not in seen_ids:
+                            seen_ids.add(id(child))
+                            branches.append((child_path, child))
+                            log.warn(
+                                f"Module Tree AutoCompat: Matched branch '{child_path}', "
+                                f"type={type(child).__name__}"
+                            )
+                        # A decoder stack owns its blocks.  Never descend into it
+                        # and mistake a nested ModuleList (for example experts)
+                        # for another concurrent decoder branch.
+                        continue
+                _walk(child, child_path)
+
+        _walk(model, "")
+
+        if not branches:
+            log.warn("Module Tree AutoCompat: No decoder layer container found, return None")
             return None
 
-        layer0 = _get(chosen)[0]
-        log.warn(f"Module Tree AutoCompat: Using layer0: {type(layer0).__name__}")
-
-        def _linear_names(module):
-            mods = find_modules(module, layers=[nn.Linear, nn.Conv1d, nn.Conv2d])
-            log.warn(f"Module Tree AutoCompat: _linear_names: found {len(mods)} Linear/Conv modules in {type(module).__name__}")
-            return list(mods.keys())
-
-        all_linear = _linear_names(layer0)
-        if len(all_linear)>0:
-            log.warn(f"Module Tree AutoCompat: found {len(all_linear)} Linear/Conv modules in {type(layer0).__name__}: {all_linear}")
-        else:
-            log.warn("Module Tree AutoCompat: No Linear/Conv names in layer0, return None")
-            return None
-
-        mapping = {}
-
-        def _find_parents(module, possible_names):
-            found = set()
-            for n, _ in module.named_children():
-                lowered_name = n.lower()
-                if any(k in lowered_name for k in possible_names):
-                    found.add(n)
-            return found
-
-        def _leaf_tokens(prefix):
-            return tuple(x.split(".")[-1] for x in all_linear if x.startswith(f"{prefix}."))
+        # Stable sort: historical candidates first in their declared order, then
+        # the remaining stacks in module-registration order.
+        branches.sort(key=lambda item: legacy_order.get(item[0], len(legacy_order)))
 
         possible_parent = ["attn", "attention", "self_attn", "mlp", "ffn", "feed", "dense"]
+        variants = []
+        for branch_path, container in branches:
+            layer0 = container[0]
+            all_linear = _linear_names(layer0)
+            if not all_linear:
+                raise ValueError(
+                    f"Module Tree AutoCompat cannot resolve branch '{branch_path}': "
+                    f"{type(layer0).__name__} exposes no Linear/Conv leaves. "
+                    "Register an explicit model definition or pass an explicit module tree."
+                )
 
-        found_parents = _find_parents(layer0, possible_parent)
+            mapping = {}
+            for name, _ in layer0.named_children():
+                lowered = name.lower()
+                if not any(hint in lowered for hint in possible_parent):
+                    continue
+                leaves = tuple(
+                    path.split(".")[-1]
+                    for path in all_linear
+                    if path.startswith(f"{name}.")
+                )
+                if leaves:
+                    mapping[name] = leaves
 
-        for p in found_parents:
-            t = _leaf_tokens(p)
-            if t:
-                mapping[p] = t
+            if not mapping:
+                # Preserve the historical fallback, but keep the full relative
+                # path so nested leaves remain addressable.
+                mapping[""] = tuple(all_linear)
+                log.warn(
+                    f"Module Tree AutoCompat: '{branch_path}' has no recognized "
+                    f"parent, using all Linear/Conv leaves: {mapping['']}"
+                )
 
-        if not mapping:
-            blocks = tuple(n.split(".")[-1] for n in all_linear)
-            mapping[""] = blocks
-            log.warn(f"Module Tree AutoCompat: Mapping empty, using all Linear as fallback: {blocks}")
+            variant = branch_path.split(".") + ["#", mapping]
+            variants.append(variant)
+            log.warn(f"Module Tree AutoCompat: Resolved branch '{branch_path}' -> {variant}")
 
-        parts = chosen.split(".")
-        tree = parts + ["#", mapping]
-        log.warn(f"Module Tree AutoCompat: Final module_tree: {tree}")
-        return tree
+        if len(variants) == 1:
+            tree = variants[0]
+            log.warn(f"Module Tree AutoCompat: Final module_tree: {tree}")
+            return tree
+
+        log.warn(
+            f"Module Tree AutoCompat: Final module_tree has {len(variants)} concurrent branches: "
+            f"{variants}"
+        )
+        return variants
 
 __all__ = ["BaseQModel"]
 

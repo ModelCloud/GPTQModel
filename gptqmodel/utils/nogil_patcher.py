@@ -5,21 +5,33 @@
 
 """Straightforward monkey patch helpers for nogil runtimes."""
 
+import functools
 import importlib
 import threading
 import time
 from importlib.metadata import version
+from typing import Optional
 
 from packaging.version import InvalidVersion, Version
 
+from .logger import setup_logger
 from .safe import ThreadSafe
 
 
+log = setup_logger()
+
 _PATCHED_ATTR = "_gptqmodel_locked_save_file"
+_MISSING = object()
 
 TRITON_MIN_VERSION_STR = "3.5.0"
-# Alternate distribution names used by Windows and XPU builds.
-TRITON_COMPATIBLE_PKGS = ("triton", "triton-windows", "pytorch_triton_xpu")
+# Alternate distribution names used by Windows, XPU and ROCm builds.
+TRITON_COMPATIBLE_PKGS = (
+    "triton",
+    "triton-windows",
+    "pytorch_triton_xpu",
+    "triton-rocm",
+    "pytorch-triton-rocm",
+)
 
 
 def patch_safetensors_save_file() -> None:
@@ -36,11 +48,16 @@ def patch_safetensors_save_file() -> None:
     safetensors_torch.save_file = wrapper
 
 
-__all__ = ["TritonPatch", "patch_safetensors_save_file", "patch_triton_autotuner"]
+__all__ = [
+    "TritonPatch",
+    "patch_safetensors_save_file",
+    "patch_triton_autotuner",
+    "patch_triton_jit_compile",
+]
 
 
 class TritonPatch:
-    _apply_lock = threading.Lock()
+    _apply_lock = threading.RLock()
     _applied = False
 
     @classmethod
@@ -49,45 +66,132 @@ class TritonPatch:
             if cls._applied:
                 return
 
-            patch_triton_autotuner()
+            errors = []
+            for patch in (patch_triton_autotuner, patch_triton_jit_compile):
+                try:
+                    patch()
+                except Exception as exc:  # keep the other patch installed
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
             cls._applied = True
 
-# TODO: triton has unfixed threading bugs in the autotuner code
-def patch_triton_autotuner() -> None:
+
+# Triton's compiler uses nanobind objects that are not free-thread safe. Two
+# threads that miss the same kernel cache entry compile the same kernel at the
+# same time and libtriton aborts the process ("attempted to delete an unknown
+# instance", exit 134) under PYTHON_GIL=0. The lock also collapses concurrent
+# misses for one key into a single compile: the loser rechecks the kernel cache
+# after acquiring it. It is process-global because the unsafe state is inside
+# libtriton, not per JITFunction.
+_TRITON_COMPILE_LOCK = threading.RLock()
+
+
+def _single_flight_triton_compile(self, key, device, compile_fn):
+    """Compile ``key`` once, serializing every libtriton compile globally."""
+
+    kernel_cache = None
     try:
-        import triton # noqa
+        kernel_cache = self.device_caches[device][0]
+    except (AttributeError, KeyError, IndexError, TypeError):
+        kernel_cache = None
+
+    with _TRITON_COMPILE_LOCK:
+        if kernel_cache is not None:
+            cached = kernel_cache.get(key)
+            if cached is not None:
+                return cached
+        return compile_fn()
+
+
+def patch_triton_jit_compile() -> None:
+    """Serialize Triton JIT compilation so cold concurrent launches are safe."""
+
+    try:
+        from triton.runtime.jit import JITFunction
+    except ImportError:
+        return
+
+    if getattr(JITFunction, "_gptqmodel_compile_serialized", False):
+        return
+
+    original_do_compile = getattr(JITFunction, "_do_compile", None)
+    if original_do_compile is None:
+        # Unknown Triton layout: leave it alone rather than breaking the
+        # autotuner patch that is already installed.
+        return
+
+    @functools.wraps(original_do_compile)
+    def patched_do_compile(self, key, *args, **kwargs):
+        device = kwargs.get("device")
+        if device is None and len(args) > 1:
+            device = args[1]
+
+        def compile_fn():
+            return original_do_compile(self, key, *args, **kwargs)
+
+        return _single_flight_triton_compile(self, key, device, compile_fn)
+
+    JITFunction._do_compile = patched_do_compile
+    JITFunction._gptqmodel_compile_serialized = True
+
+# TODO: triton has unfixed threading bugs in the autotuner code
+def patch_triton_autotuner() -> Optional[bool]:
+    try:
+        import triton
         from triton.runtime import autotuner as module
     except ImportError:
-        # skip
-        return
+        # Triton is an optional dependency.
+        return None
 
-    # Try alternative distribution names used by Windows or XPU builds.
-    triton_version_str = None
-    for package_name in TRITON_COMPATIBLE_PKGS:
-        try:
-            triton_version_str = version(package_name)
-            break
-        except importlib.metadata.PackageNotFoundError:
-            triton_version_str = None
-
-    # skip
+    # ``triton.__version__`` is authoritative. ROCm builds install as
+    # ``triton-rocm`` / ``pytorch-triton-rocm``; relying on the distribution
+    # name alone silently skipped the patch there.
+    triton_version_str = getattr(triton, "__version__", None)
     if not triton_version_str:
-        return
+        # Try alternative distribution names used by Windows, XPU or ROCm.
+        for package_name in TRITON_COMPATIBLE_PKGS:
+            try:
+                triton_version_str = version(package_name)
+                break
+            except importlib.metadata.PackageNotFoundError:
+                triton_version_str = None
+
+    if not triton_version_str:
+        log.warning(
+            "Triton is installed but its version could not be determined from "
+            "triton.__version__ or any of %s; the autotuner threading fix is "
+            "NOT active.",
+            TRITON_COMPATIBLE_PKGS,
+        )
+        return False
 
     try:
         triton_ver = Version(triton_version_str)
         triton_min_version = Version(TRITON_MIN_VERSION_STR)
         # skip
         if triton_ver < triton_min_version:
-            return
+            log.warning(
+                "Triton %s is older than %s; the autotuner threading fix is "
+                "NOT active.",
+                triton_version_str,
+                TRITON_MIN_VERSION_STR,
+            )
+            return False
     except InvalidVersion:
         # skip
         if triton_version_str < TRITON_MIN_VERSION_STR:
-            return
+            log.warning(
+                "Triton %s is older than %s; the autotuner threading fix is "
+                "NOT active.",
+                triton_version_str,
+                TRITON_MIN_VERSION_STR,
+            )
+            return False
 
     autotuner_cls = module.Autotuner
     if getattr(autotuner_cls, "_gptqmodel_threadsafe", False):
-        return
+        return True
 
     builtins_mod = module.builtins
     Config = module.Config
@@ -110,6 +214,45 @@ def patch_triton_autotuner() -> None:
             self.bench_time = None
 
     module.CacheFuture = CacheFuture
+
+    def thread_local_state(instance):
+        """Return the per-instance, per-thread scratch state.
+
+        ``nargs`` and ``best_config`` used to be plain attributes on the shared
+        Autotuner. Two threads running the same kernel then overwrote each
+        other's argument mapping, so a cold-key benchmark could prune and hook
+        against another thread's tensors. Keep those values thread-local while
+        leaving the shared ``cache`` (guarded by ``_cache_lock``) process-wide.
+        """
+
+        tls = instance.__dict__.get("_gptqmodel_tls")
+        if tls is not None:
+            return tls
+        with TritonPatch._apply_lock:
+            tls = instance.__dict__.get("_gptqmodel_tls")
+            if tls is None:
+                tls = threading.local()
+                instance.__dict__["_gptqmodel_tls"] = tls
+        return tls
+
+    def get_thread_local_attr(instance, name):
+        value = getattr(thread_local_state(instance), name, _MISSING)
+        if value is _MISSING:
+            # Instances created before the patch may already carry the old
+            # plain attribute; keep it readable until this thread sets its own.
+            return instance.__dict__.get(name)
+        return value
+
+    if not getattr(autotuner_cls, "_gptqmodel_thread_local_attrs", False):
+        autotuner_cls.nargs = property(
+            lambda self: get_thread_local_attr(self, "nargs"),
+            lambda self, value: setattr(thread_local_state(self), "nargs", value),
+        )
+        autotuner_cls.best_config = property(
+            lambda self: get_thread_local_attr(self, "best_config"),
+            lambda self, value: setattr(thread_local_state(self), "best_config", value),
+        )
+        autotuner_cls._gptqmodel_thread_local_attrs = True
 
     original_init = autotuner_cls.__init__
     rlock_type = type(threading.RLock())
@@ -135,6 +278,7 @@ def patch_triton_autotuner() -> None:
             self.cache = self._cache
             self._cache_lock = threading.RLock()
             self._cache_futures = {}
+            thread_local_state(self)
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -255,44 +399,46 @@ def patch_triton_autotuner() -> None:
         ensure_threadsafe_cache(self)
         nargs = dict(zip(self.arg_names, args))
         self.nargs = nargs
-        used_cached_result = True
-        bench_time = None
-        key = None
-        if len(self.configs) > 1:
-            all_args = {**nargs, **kwargs}
-            named_args = {k: v for (k, v) in all_args.items() if k in self.arg_names}
-            key_values = [named_args[name] for name in self.keys if name in named_args]
-            for _, arg in named_args.items():
-                if hasattr(arg, "dtype"):
-                    key_values.append(str(arg.dtype))
-            key = tuple(key_values)
-            config, used_cached_result, bench_time = _get_config_for_key(self, key, args, kwargs)
-        else:
-            config = self.configs[0]
+        try:
+            used_cached_result = True
+            bench_time = None
+            key = None
+            if len(self.configs) > 1:
+                all_args = {**nargs, **kwargs}
+                named_args = {k: v for (k, v) in all_args.items() if k in self.arg_names}
+                key_values = [named_args[name] for name in self.keys if name in named_args]
+                for _, arg in named_args.items():
+                    if hasattr(arg, "dtype"):
+                        key_values.append(str(arg.dtype))
+                key = tuple(key_values)
+                config, used_cached_result, bench_time = _get_config_for_key(self, key, args, kwargs)
+            else:
+                config = self.configs[0]
 
-        self.cache = self._cache
-        self.best_config = config
-        if knobs.autotuning.print and key is not None and not used_cached_result:
-            bench_time_value = bench_time if bench_time is not None else (self.bench_time or 0.0)
-            print(
-                f"Triton autotuning for function {self.base_fn.__name__},\n"
-                f"with key as {key},\n"
-                f"finished after {bench_time_value:.2f}s,\n"
-                f"best config selected: {self.best_config};"
+            self.cache = self._cache
+            self.best_config = config
+            if knobs.autotuning.print and key is not None and not used_cached_result:
+                bench_time_value = bench_time if bench_time is not None else (self.bench_time or 0.0)
+                print(
+                    f"Triton autotuning for function {self.base_fn.__name__},\n"
+                    f"with key as {key},\n"
+                    f"finished after {bench_time_value:.2f}s,\n"
+                    f"best config selected: {self.best_config};"
+                )
+            full_nargs = {**nargs, **kwargs, **config.all_kwargs()}
+            if config.pre_hook is not None:
+                config.pre_hook(full_nargs)
+            return self.fn.run(
+                *args,
+                **kwargs,
+                **config.all_kwargs(),
             )
-        full_nargs = {**nargs, **kwargs, **config.all_kwargs()}
-        if config.pre_hook is not None:
-            config.pre_hook(full_nargs)
-        result = self.fn.run(
-            *args,
-            **kwargs,
-            **config.all_kwargs(),
-        )
-        self.nargs = None
-        return result
+        finally:
+            self.nargs = None
 
     autotuner_cls.__init__ = patched_init
     autotuner_cls.check_disk_cache = patched_check_disk_cache
     autotuner_cls._get_config_for_key = _get_config_for_key
     autotuner_cls.run = patched_run
     autotuner_cls._gptqmodel_threadsafe = True
+    return True

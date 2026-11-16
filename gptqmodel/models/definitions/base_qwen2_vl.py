@@ -15,6 +15,11 @@ from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 
 
 class BaseQwen2VLGPTQ(BaseQModel):
@@ -166,14 +171,53 @@ class BaseQwen2VLGPTQ(BaseQModel):
         return layer_position_ids, text_position_ids, position_embeddings
 
     @staticmethod
-    def _prepare_first_layer_attention_mask(attention_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    def _layer_zero_mask_builder(text_config):
+        """Mask builder HF uses for the first decoder layer's attention type."""
+
+        layer_types = getattr(text_config, "layer_types", None)
+        layer_type = layer_types[0] if layer_types else None
+        if layer_type == "sliding_attention":
+            from transformers.masking_utils import create_sliding_window_causal_mask
+
+            return create_sliding_window_causal_mask
+
+        from transformers.masking_utils import create_causal_mask
+
+        return create_causal_mask
+
+    def _prepare_first_layer_attention_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        *,
+        text_config,
+        inputs_embeds: torch.Tensor,
+        past_key_values: Any,
+        position_ids: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
         if attention_mask is None or not torch.is_tensor(attention_mask):
             return attention_mask
 
-        if attention_mask.ndim <= 2 and bool(attention_mask.to(dtype=torch.bool).all().item()):
+        if attention_mask.ndim > 2:
+            return attention_mask
+
+        if bool(attention_mask.to(dtype=torch.bool).all().item()):
             return None
 
-        return attention_mask
+        # A 2-D `[B, S]` padding mask must not reach the decoder layer: the
+        # layer expects the materialized 4-D mask HF builds in its own text
+        # loop. Passing it through made batch_size > 1 calibration fail with a
+        # long-dtype attn_mask error.
+        attention_mask = move_to(attention_mask, device=inputs_embeds.device)
+        if torch.is_tensor(position_ids):
+            position_ids = move_to(position_ids, device=inputs_embeds.device)
+        builder = self._layer_zero_mask_builder(text_config)
+        return builder(
+            config=text_config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+        )
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         input_ids = example.get("input_ids")
@@ -258,7 +302,13 @@ class BaseQwen2VLGPTQ(BaseQModel):
             position_ids=position_ids,
             past_key_values=past_key_values,
         )
-        first_layer_attention_mask = self._prepare_first_layer_attention_mask(attention_mask)
+        first_layer_attention_mask = self._prepare_first_layer_attention_mask(
+            attention_mask,
+            text_config=getattr(self.model.config, "text_config", self.model.config),
+            inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            position_ids=text_position_ids,
+        )
 
         return language_model.layers[0](
             inputs_embeds,
@@ -293,9 +343,15 @@ class BaseQwen2VLGPTQ(BaseQModel):
         return AutoProcessor.from_pretrained(self.model_local_path)
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )
@@ -309,4 +365,6 @@ class BaseQwen2VLGPTQ(BaseQModel):
             )
             calib_data.append(inputs)
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )

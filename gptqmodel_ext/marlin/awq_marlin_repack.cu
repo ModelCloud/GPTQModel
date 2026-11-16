@@ -95,13 +95,12 @@ __global__ void awq_marlin_repack_kernel(
     int4* sh_stage_ptr = sh + stage_size * pipe;
     uint32_t* sh_stage_int_ptr = reinterpret_cast<uint32_t*>(sh_stage_ptr);
 
-    // Undo interleaving
-    int cur_n_pos_unpacked;
+    // Undo interleaving. Only the 4-bit AWQ layout is interleaved; wider
+    // widths are a contiguous little-endian stream, so their lane index is
+    // already the natural column position.
+    int cur_n_pos_unpacked = cur_n_pos;
     if constexpr (num_bits == 4) {
       constexpr int undo_pack[8] = {0, 4, 1, 5, 2, 6, 3, 7};
-      cur_n_pos_unpacked = undo_pack[cur_n_pos];
-    } else {
-      constexpr int undo_pack[4] = {0, 2, 1, 3};
       cur_n_pos_unpacked = undo_pack[cur_n_pos];
     }
 

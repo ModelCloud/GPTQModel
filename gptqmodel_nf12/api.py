@@ -38,6 +38,51 @@ def _check_bf16_matrix(w: torch.Tensor, name: str) -> None:
     check_weight_shape(*w.shape)
 
 
+def escape_indices(packed: torch.Tensor, escapes: torch.Tensor) -> torch.Tensor:
+    """Return the escape-table index of every escaped group in ``packed``.
+
+    ``packed`` stores the three planes of each super-atom contiguously
+    (SPEC.md section 4): plane 0 is the four meta words, planes 1 and 2 hold
+    the low bytes. A group is escaped when its meta word is zero, and its
+    ``lo0`` word is then the little-endian escape index.
+    """
+
+    sa = packed.reshape(-1, 3, 512)
+    meta = sa[:, 0].reshape(-1, 32, 4, 4).permute(0, 2, 1, 3).reshape(-1, 4)
+    lo = sa[:, 1:].reshape(-1, 2, 32, 2, 8).permute(0, 1, 3, 2, 4).reshape(-1, 8)
+    escaped = (meta == 0).all(1)
+    if not bool(escaped.any()):
+        return torch.empty(0, dtype=torch.int64, device=packed.device)
+    lo_e = lo[escaped]
+    return (
+        lo_e[:, 0].to(torch.int64)
+        | (lo_e[:, 1].to(torch.int64) << 8)
+        | (lo_e[:, 2].to(torch.int64) << 16)
+        | (lo_e[:, 3].to(torch.int64) << 24)
+    )
+
+
+def validate_escape_indices(packed: torch.Tensor, escapes: torch.Tensor) -> None:
+    """Reject checkpoint escape indices that would read past ``escapes``.
+
+    The native kernels bound the table lookup, but a checkpoint that relies on
+    that clamp decodes the wrong bytes. Fail closed at load instead.
+    """
+
+    if packed.device.type == "meta":
+        return
+    idx = escape_indices(packed, escapes)
+    if idx.numel() == 0:
+        return
+    worst = int(idx.max())
+    count = int(escapes.shape[0])
+    if worst >= count:
+        raise ValueError(
+            f"nf12: checkpoint escape index {worst} is out of range for the "
+            f"{count}-row escape table"
+        )
+
+
 @dataclasses.dataclass(eq=False)
 class NF12Weight:
     """An NF12-encoded ``[N, K]`` BF16 matrix (SPEC.md section 5 tensor set)."""
@@ -106,7 +151,9 @@ class NF12Weight:
         exp_base = state_dict[prefix + EXP_BASE_KEY]
         if exp_base.dtype != torch.uint8 or exp_base.numel() != 1:
             raise ValueError(f"nf12: {prefix + EXP_BASE_KEY} must be a uint8 [1] tensor")
-        return cls(state_dict[prefix + PACKED_KEY], state_dict[prefix + ESCAPES_KEY], int(exp_base.item()))
+        weight = cls(state_dict[prefix + PACKED_KEY], state_dict[prefix + ESCAPES_KEY], int(exp_base.item()))
+        validate_escape_indices(weight.packed, weight.escapes)
+        return weight
 
 
 def encode(w: torch.Tensor) -> NF12Weight:

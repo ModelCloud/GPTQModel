@@ -37,6 +37,7 @@ from ...utils.allspark import (
     allspark_supported,
     prewarm_allspark_extension,
 )
+from ...utils.allspark_bias import narrow_bias_for_kernel
 from ...utils.allspark_hip import (
     allspark_hip_available,
     allspark_hip_gemm,
@@ -168,9 +169,14 @@ class AllSparkLinear(GPTQQuantLinear):
 
         self._repacked = False
         self._packed_key = None
+        self._bias_key = None
+        self._bias_value = None
 
     def _apply(self, fn, recurse=True):
         """Move an FP32 checkpoint bias without narrowing its stored values."""
+        # The derived kernel bias belongs to the old device/dtype.
+        self._bias_key = None
+        self._bias_value = None
         bias = self.bias
         if bias is None or bias.dtype != torch.float32:
             return super()._apply(fn, recurse=recurse)
@@ -181,6 +187,28 @@ class AllSparkLinear(GPTQQuantLinear):
             return fn(tensor)
 
         return super()._apply(preserve_bias_width, recurse=recurse)
+
+    def _kernel_bias(self):
+        """Return the bias buffer the kernel should read.
+
+        ``self.bias`` stays FP32 so a checkpoint value outside the activation
+        dtype's range survives save/load and a dtype move. The kernel only
+        needs FP32 when a value is not exactly representable; otherwise a
+        buffer in the activation dtype keeps the HIP prefill branch on the
+        half-precision ``addmm`` instead of an FP32 matmul.
+
+        In-place writes through the tensor advance its version and re-derive
+        here. A ``.data`` write does not, so call :meth:`clear_weight_cache`
+        after one, exactly like the packed weight layout.
+        """
+        bias = self.bias
+        if bias is None:
+            return None
+        key = tensor_cache_key(bias)
+        if self._bias_key != key:
+            self._bias_value = narrow_bias_for_kernel(bias, self.compute_dtype)
+            self._bias_key = key
+        return self._bias_value
 
     @torch.no_grad()
     def post_init(self):
@@ -212,6 +240,10 @@ class AllSparkLinear(GPTQQuantLinear):
         """
         self._repacked = False
         self._packed_key = None
+        # The kernel bias is derived from ``self.bias`` and is invalidated by
+        # the same events as the packed layout.
+        self._bias_key = None
+        self._bias_value = None
 
     @torch.no_grad()
     def _ensure_repacked(self) -> None:
@@ -259,7 +291,7 @@ class AllSparkLinear(GPTQQuantLinear):
         # The bias is added inside the kernel's FP32 epilogue, never to the
         # already narrowed output: FP16 65536 + (-32768) is 32768, while the
         # narrowed partial sum is inf.
-        bias = self.bias
+        bias = self._kernel_bias()
         if self._hip:
             out = allspark_hip_gemm(
                 x2d,

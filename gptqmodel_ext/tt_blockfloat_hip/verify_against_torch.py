@@ -118,9 +118,10 @@ def check_linear_bf16(dump: Path) -> list[str]:
         return raw.view(torch.bfloat16).reshape(shape)
 
     x = _bf16("lin_bf16_x.bin", (LINEAR_M, COLS))
-    bias = _bf16("lin_bf16_bias.bin", (ROWS,))
+    # The bias is float32: the kernel adds it to its fp32 accumulator.
+    bias = _read(dump / "lin_bf16_bias.bin", np.float32)
     got = _bf16("lin_bf16_out.bin", (LINEAR_M, ROWS))
-    expected = (x.float() @ weight.T + bias.float()).to(torch.bfloat16)
+    expected = (x.float() @ weight.T + bias).to(torch.bfloat16)
     norm_l1 = float((got.float() - expected.float()).abs().sum() / expected.float().abs().sum().clamp_min(1e-6))
     return [
         "bf4 linear bf16 (WMMA) norm_l1",

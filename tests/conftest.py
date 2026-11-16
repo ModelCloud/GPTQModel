@@ -3,8 +3,45 @@ import random
 import sys
 from pathlib import Path
 
+
+# OpenMP, MKL and the other BLAS runtimes read their thread-count variables
+# when they are loaded, so these assignments have to happen before numpy and
+# torch are imported. A container can advertise hundreds of CPUs while sharing
+# a much smaller physical host; without the cap every pytest process sizes its
+# intra-op pool from that advertised count and then spin-waits in the barrier.
+# `setdefault` preserves a caller's explicit values, and an explicit
+# OMP_NUM_THREADS also wins as the torch pool size below.
+_DEFAULT_TEST_THREADS = min(8, os.cpu_count() or 1)
+try:
+    _TEST_THREADS = int(os.environ.get("OMP_NUM_THREADS", _DEFAULT_TEST_THREADS))
+except ValueError:
+    _TEST_THREADS = _DEFAULT_TEST_THREADS
+if _TEST_THREADS < 1:
+    _TEST_THREADS = _DEFAULT_TEST_THREADS
+for _thread_env in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_env, str(_TEST_THREADS))
+os.environ.setdefault("OMP_NESTED", "FALSE")
+
 import numpy
+import pytest
 import torch
+
+
+# The environment variables are not authoritative for torch's own pool once
+# the runtime has loaded, so set the intra-op count explicitly. Inter-op
+# threads cannot be changed after the first parallel region, so that call is
+# best-effort; the intra-op cap above is always applied.
+torch.set_num_threads(_TEST_THREADS)
+try:
+    torch.set_num_interop_threads(max(1, min(2, _TEST_THREADS)))
+except RuntimeError:
+    pass
 
 
 # Reduce logbar progress noise for pytest runs unless a caller explicitly
@@ -17,6 +54,19 @@ import torch
 torch.manual_seed(787)
 random.seed(787)
 numpy.random.seed(787)
+
+
+@pytest.fixture(autouse=True)
+def _reset_kernel_config_between_tests():
+    """Keep the process-wide kernel policy from leaking between tests."""
+
+    from gptqmodel.utils.kernel import reset_kernel_config
+
+    reset_kernel_config()
+    try:
+        yield
+    finally:
+        reset_kernel_config()
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _MODELS_TESTS_DIR = _TESTS_DIR / "models"

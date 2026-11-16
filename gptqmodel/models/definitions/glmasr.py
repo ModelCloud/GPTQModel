@@ -3,25 +3,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModel
+from transformers import AutoModelForMultimodalLM
 
 from ..base import BaseQModel
 
 
 class GlmASRGPTQ(BaseQModel):
-    loader = AutoModel
+    # `AutoModel` builds `GlmAsrModel`, which has no `lm_head` and nests the
+    # text decoder directly under `language_model`. The checkpoint is a
+    # `GlmAsrForConditionalGeneration`, so load the complete wrapper and
+    # quantize the decoder through `model.language_model`.
+    loader = AutoModelForMultimodalLM
 
     require_load_processor = True
 
     # GLM-ASR keeps the speech encoder and projector at the top level while the
-    # text decoder stays under `language_model.model`.
-    lm_head = "language_model.lm_head"
-    pre_lm_head_norm_module = ["language_model.norm", "language_model.model.norm"]
-    rotary_embedding = "language_model.model.rotary_emb"
+    # text decoder stays under `model.language_model`.
+    lm_head = "lm_head"
+    pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm"]
+    rotary_embedding = "model.language_model.rotary_emb"
 
     module_tree = [
-        "language_model",
         "model",
+        "language_model",
         "layers",
         "#",
         {

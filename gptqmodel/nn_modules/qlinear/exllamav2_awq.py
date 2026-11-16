@@ -151,6 +151,16 @@ class AwqExllamaV2Linear(AWQuantLinear):
         self._release_q_handle()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_awq_repacked", False) or getattr(self, "_native_shuffled", False):
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    "ExLlamaV2 AWQ repacks and shuffles `qweight` into its native runtime "
+                    "layout; the original checkpoint tensors cannot be reconstructed. Use "
+                    "`GPTQModel.save()`/`save_quantized()` for a loadable checkpoint, or "
+                    "reload the original checkpoint."
+                )
         super()._save_to_state_dict(destination, prefix, keep_vars)
         metadata = getattr(destination, "_metadata", None)
         if metadata is not None:
@@ -228,17 +238,29 @@ class AwqExllamaV2Linear(AWQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
         self._ensure_q_handle()
-        if not exllamav2_awq_runtime_available():
-            raise ModuleNotFoundError("ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: " + exllamav2_awq_runtime_error())
+        # The availability probe resolves the JIT extension, so pay it once per
+        # module. A failed probe is never memoised.
+        if not getattr(self, "_runtime_ok", False):
+            if not exllamav2_awq_runtime_available():
+                raise ModuleNotFoundError(
+                    "ExLlamaV2 AWQ torch.ops kernels are not properly installed. Error: "
+                    + exllamav2_awq_runtime_error()
+                )
+            self._runtime_ok = True
 
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
 
         x = x.reshape(-1, x.shape[-1]).contiguous()
-
+        # LoRA runs after the visible output cast and must receive the
+        # caller's activation dtype, so adapter weights stay in that dtype.
+        adapter_x = x
+        # Keep FP16 activations on the quantized kernel and request an FP32
+        # output when a bias must be applied before the single visible cast.
+        wide_bias = self.bias is not None and x.dtype == torch.float16
         out = torch.empty(
             (x.shape[0], self.out_features),
-            dtype=x.dtype,
+            dtype=torch.float32 if wide_bias else x.dtype,
             device=x.device,
         )
         handle, temporaries = self.q_handle, None
@@ -254,14 +276,13 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
                 exllamav2_free_q_matrix(handle, awq=True)
 
-        if input_dtype != torch.float16:
+        if self.bias is not None:
+            out = out + self.bias.to(device=out.device, dtype=torch.float32)
+        if out.dtype != input_dtype:
             out = out.to(dtype=input_dtype)
 
-        if self.bias is not None:
-            out.add_(self.bias)
-
         if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+            out = self.adapter.apply(x=adapter_x, out=out)
 
         return out.view(out_shape)
 

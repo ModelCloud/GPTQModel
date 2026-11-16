@@ -158,7 +158,10 @@ def test_builtin_rule_requires_exact_verified_device_and_precision(monkeypatch):
     }
     assert select_awq_triton_plan(**kwargs) == expected
     clear_awq_triton_rules()
-    assert select_awq_triton_plan(**{**kwargs, "output_dtype": torch.float32}) == legacy_plan(64)
+    # The generic fallback is RDNA4-aware: split-K=1 there, split-K=8 elsewhere.
+    assert select_awq_triton_plan(
+        **{**kwargs, "output_dtype": torch.float32}
+    ) == scheduler._generic_fused_plan(64, "cuda:0")
     clear_awq_triton_rules()
     monkeypatch.setattr(
         scheduler,
@@ -167,7 +170,7 @@ def test_builtin_rule_requires_exact_verified_device_and_precision(monkeypatch):
             "cuda", 0, "NVIDIA GeForce RTX 4090", (8, 9), 128, 25_745_473_536,
         ),
     )
-    assert select_awq_triton_plan(**kwargs) == legacy_plan(64)
+    assert select_awq_triton_plan(**kwargs) == scheduler._generic_fused_plan(64, "cuda:0")
 
 
 def test_explicit_and_training_modes():
@@ -269,3 +272,53 @@ def test_plan_cache_is_bounded_and_clearable():
 def test_empty_input_is_rejected_before_scheduling():
     with pytest.raises(ValueError, match="empty"):
         select_awq_triton_plan(M=0, N=512, K=256, group_size=128, device="cpu")
+
+
+def test_generic_fused_plan_drops_split_k_on_rdna4(monkeypatch):
+    """RDNA4 must not use the nondeterministic split-K atomic reduction."""
+
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr(scheduler, "_rocm_arch_for_index", lambda _index: "gfx1201")
+    clear_awq_triton_rules()
+
+    plan = select_awq_triton_plan(
+        M=7, N=2048, K=2048, group_size=128, device="cuda:0",
+        input_dtype=torch.float16, compute_dtype=torch.float16,
+        output_dtype=torch.float16, fp32_accum=True,
+    )
+
+    assert plan.fused and plan.split_k_iters == 1
+
+
+def test_generic_fused_plan_keeps_split_k_on_other_rocm_arches(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr(scheduler, "_rocm_arch_for_index", lambda _index: "gfx942")
+    clear_awq_triton_rules()
+
+    plan = select_awq_triton_plan(
+        M=7, N=2048, K=2048, group_size=128, device="cuda:0",
+        input_dtype=torch.float16, compute_dtype=torch.float16,
+        output_dtype=torch.float16, fp32_accum=True,
+    )
+
+    assert plan.fused and plan.split_k_iters == 8
+
+
+def test_deterministic_algorithms_force_a_single_split():
+    previous = torch.are_deterministic_algorithms_enabled()
+    clear_awq_triton_rules()
+    kwargs = {
+        "M": 7, "N": 512, "K": 256, "group_size": 128, "device": "cpu",
+        "input_dtype": torch.float16, "compute_dtype": torch.float16,
+        "output_dtype": torch.float16, "fp32_accum": True,
+    }
+    try:
+        torch.use_deterministic_algorithms(False)
+        nondeterministic = select_awq_triton_plan(**kwargs)
+        torch.use_deterministic_algorithms(True)
+        deterministic = select_awq_triton_plan(**kwargs)
+    finally:
+        torch.use_deterministic_algorithms(previous)
+
+    assert nondeterministic.split_k_iters == 8
+    assert deterministic.split_k_iters == 1

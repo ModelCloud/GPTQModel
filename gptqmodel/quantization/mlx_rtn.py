@@ -37,8 +37,10 @@ def _rtn_kernel(output_type="float32"):
             minimum = simd_min(minimum);
             maximum = simd_max(maximum);
             if (SYMMETRIC) {
+                // The stored zero point is fixed, so the range is
+                // zero-centered even when the group never goes negative.
                 maximum = max(-minimum, maximum);
-                if (minimum < 0.0f) minimum = -maximum;
+                minimum = -maximum;
             }
             if (minimum == 0.0f && maximum == 0.0f) {
                 minimum = -1.0f;

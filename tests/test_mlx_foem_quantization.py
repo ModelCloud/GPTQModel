@@ -30,7 +30,7 @@ def _torch_params(group, bits, sym):
     maximum = torch.maximum(group.amax(dim=1), torch.zeros(group.shape[0]))
     if sym:
         maximum = torch.maximum(minimum.abs(), maximum)
-        minimum = torch.where(minimum < 0, -maximum, minimum)
+        minimum = -maximum
     empty = (minimum == 0) & (maximum == 0)
     minimum = torch.where(empty, -1, minimum)
     maximum = torch.where(empty, 1, maximum)
@@ -283,15 +283,21 @@ def test_foem_asymmetric_zero_point_tie_and_neighbors():
 
 
 @pytest.mark.parametrize("sym", [True, False])
-def test_foem_fused_params_extrema_match_torch(sym):
-    weight = np.zeros((4, 32), dtype=np.float32)
-    weight[1] = np.linspace(0.125, 2, 32, dtype=np.float32)
-    weight[2] = -weight[1]
-    weight[3, :2] = (-3, 2)
+@pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16])
+def test_foem_fused_params_extrema_match_torch(sym, dtype):
+    source = np.zeros((7, 32), dtype=np.float32)
+    source[1] = np.linspace(0.125, 2, 32, dtype=np.float32)
+    source[2] = -source[1]
+    source[3, :2] = (-3, 2)
+    source[4] = 1
+    source[5] = np.linspace(0, 1, 32, dtype=np.float32)
+    source[6] = -0.0
+    weight = mx.array(source).astype(dtype)
+    resident = np.asarray(weight.astype(mx.float32))
     factor = np.eye(32, dtype=np.float32)
-    expected = _torch_foem_oracle(weight, factor, 4, 32, 0.2, sym)
+    expected = _torch_foem_oracle(resident, factor, 4, 32, 0.2, sym)
     actual = foem_quantize_weight_mlx(
-        mx.array(weight),
+        weight,
         mx.array(factor),
         group_size=32,
         sym=sym,

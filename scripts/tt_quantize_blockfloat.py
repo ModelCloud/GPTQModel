@@ -51,6 +51,31 @@ def main(argv: list) -> int:
             "error rather than on all of them."
         ),
     )
+    parser.add_argument(
+        "--block-axis",
+        default="in",
+        choices=("in", "out"),
+        help=(
+            "axis the 16-value exponent blocks run along. 'out' is the layout a "
+            "Tenstorrent device stores for ttnn.linear(x, W^T) and uploads with "
+            "zero drift; 'in' (the historical default) is re-quantized on upload "
+            "but is what the CUDA/ROCm emulation kernels read."
+        ),
+    )
+    parser.add_argument(
+        "--act-order",
+        action="store_true",
+        help="quantize columns in descending Hessian-diagonal order (needs --block-axis out)",
+    )
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help=(
+            "quantize decoder blocks one at a time, calibrating each on the "
+            "outputs of the already-quantized blocks before it (standard GPTQ)"
+        ),
+    )
+    parser.add_argument("--seqlen", type=int, default=256, help="calibration window length")
     parser.add_argument("--nsamples", type=int, default=8)
     parser.add_argument(
         "--dtype",
@@ -96,6 +121,8 @@ def main(argv: list) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    if args.act_order and args.block_axis != "out":
+        parser.error("--act-order splits in-axis exponent blocks; use --block-axis out")
 
     bits = args.bits
     if args.bits_map:
@@ -157,8 +184,8 @@ def main(argv: list) -> int:
     # Hessian actually reads.
     print(
         f"[Q] calibration: {calibration_records} record(s), {calibration_tokens} "
-        f"tokens; Hessian reads {args.nsamples} windows of 256 = "
-        f"{args.nsamples * 256} tokens spread across the stream",
+        f"tokens; Hessian reads {args.nsamples} windows of {args.seqlen} = "
+        f"{args.nsamples * args.seqlen} tokens spread across the stream",
         flush=True,
     )
 
@@ -175,6 +202,10 @@ def main(argv: list) -> int:
         nsamples=args.nsamples,
         text=calibration,
         embed_bits=args.embed_bits,
+        block_axis=args.block_axis,
+        act_order=args.act_order,
+        sequential=args.sequential,
+        seqlen=args.seqlen,
     )
     print(
         f"[Q] quantized {len(report)} modules in {time.time() - started:.0f}s",
@@ -196,6 +227,7 @@ def main(argv: list) -> int:
         bits=bits,
         embed_bits=args.embed_bits,
         tokenizer=tokenizer,
+        block_axis=args.block_axis,
         metadata={
             "source_model": args.model,
             "tokenizer_has_chat_template": bool(

@@ -7,6 +7,9 @@ GPT-QModel's CUDA-only kernel tests distinguish unsupported hardware and missing
 build prerequisites from regressions in a supported runtime. The shared gates
 live in `tests/accelerator_gates.py`. Family decisions use `normalize_device`;
 HIP's `cuda` namespace must not be interpreted as NVIDIA compute capability.
+The Tenstorrent block-float CUDA suite also gates on the native extension's own
+capability probe, `gptqmodel.utils.tt_blockfloat_cuda.available`, because an
+SM80+ device is not by itself evidence that the JIT extension can load.
 
 ## Gate and failure flow
 
@@ -57,6 +60,40 @@ private `_MissingBuildTools` exception, which alone becomes a prerequisite skip.
 A present but incompatible compiler, corrupt binary or failed registration
 produces a failure with its diagnostic, even if build tools are absent.
 
+## TT block-float native availability
+
+```mermaid
+flowchart TD
+    A["_cuda_kernel_available / _skip_reason"] --> B["cuda_only_skip_reason: normalize_device(cuda)"]
+    B -->|ROCm| SKIP["Skip: CUDA-only kernel"]
+    B -->|NVIDIA| C{"torch.cuda.is_available()?"}
+    C -->|no| SKIP
+    C -->|yes| D["tt_blockfloat_cuda.supported: SM80+ on the target"]
+    D -->|no| SM["Skip: sm_80 or newer required"]
+    D -->|yes| E["tt_blockfloat_cuda.available"]
+    E --> F{"_EXTENSION.loadable_without_build()"}
+    F -->|registered ops| RUN["Run native-only assertions"]
+    F -->|cached binary| RUN
+    F -->|configured prebuilt exists| RUN
+    F -->|no| G{"configured_prebuilt_library() set?"}
+    G -->|yes, missing| PRE["Skip: prebuilt is authoritative"]
+    G -->|no| H{"cuda_source_build_available: nvcc and ninja"}
+    H -->|yes| RUN
+    H -->|no| NOBUILD["Skip: no loadable or buildable extension"]
+    classDef failure fill:#ffe0e0,stroke:#b00020
+    class SKIP,SM,PRE,NOBUILD failure
+```
+
+`loadable_without_build` mirrors the pre-build stages of `TorchOpsJitExtension.load`:
+registered `torch.ops`, a cached binary under `build_root()`, or an existing
+configured prebuilt library. A configured prebuilt library is authoritative —
+`load()` never falls back to a source build when one is set — so a missing file
+means unavailable, not "build it instead". Only a cache miss consults
+`cuda_source_build_available`, which reports whether `nvcc` and `ninja` exist for
+torch's JIT. `available` never compiles; `prewarm`/`ready` still own the build.
+The dense fallback precision tests in `test_tt_blockfloat_precision.py` are not
+gated, so a toolkit-less host keeps validating the reference path.
+
 ## Keeping execution on the selected device
 
 ```mermaid
@@ -96,6 +133,7 @@ The before pointers refer to commit `d68031262` in PR #3805 unless marked
 | `tests/kernels/test_swordfish.py:233`, `test_swordfish_speed.py:101`, `test_swordfish_speed_deepseek_v4.py:136`: runtime checks used the current device, and setup errors became skips | All three `setUpClass` methods scope prewarm to the selected device, validate that explicit target, and propagate errors |
 | `tests/kernels/test_swordfish_speed.py:106`, `test_swordfish_speed_deepseek_v4.py:111`: timing events used the current device | Both `_measure` functions scope warmup and timing to `x.device` |
 | `tests/kernels/test_swordfish.py:449`: default graph stream could belong to another device | Warmup, capture and replay share the selected device scope and an explicit capture stream |
+| `tests/test_tt_blockfloat_precision.py:70` and `tests/test_tt_blockfloat_cuda.py:32`: native tests admitted on `bf_cuda.supported()` alone, which only reads the SM architecture | `tt_blockfloat_cuda.available()` admits the native assertions only for registered ops, a cached/configured prebuilt binary, or a present `nvcc`/`ninja` toolchain |
 
 ## Validation contract
 
@@ -109,6 +147,11 @@ lookup, plus binary-load failures with missing tools. A native regression in
 setup consumers and runs timing and graph tests on a non-current CUDA device.
 The graph test changes its inputs between replays; the timing tests check that
 the measured operation sees its input device and that the caller is restored.
+`tests/test_tt_blockfloat_cuda_availability.py` covers a supported SM with no
+loadable or buildable extension, a cached/registered extension without tools, a
+missing configured prebuilt, and the `nvcc`/`ninja` probe. It also runs both
+test-module gates and the dense fallback precision assertions under a simulated
+toolkit-less host.
 
 The harness tests use a small Torch operation instead of a Swordfish kernel.
 They establish device-context behavior, not Swordfish numerical correctness.
@@ -122,6 +165,7 @@ Measured on 2026-11-13 with the GIL disabled:
 | --- | --- |
 | New regression cases applied to `d68031262` | 12 failed |
 | NF12 runtime regressions applied to `715a36e36` | 7 failed |
+| TT block-float availability regressions applied to `757b7c2f` | 10 failed |
 | Full targeted suite, CUDA | 100 passed, 14 skipped |
 | Full targeted suite, ROCm | 29 passed, 85 skipped |
 | Ruff on the eight targeted Python files | Passed |

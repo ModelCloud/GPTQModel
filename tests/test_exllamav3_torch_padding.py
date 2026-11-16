@@ -427,6 +427,12 @@ def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
     x = (torch.randn((1, 2, 128), generator=gen) * .01).to(device="cuda", dtype=dtype)
     reference = x.float().reshape(-1, 128) @ weight + packed["bias"].to("cuda").float()
 
+    # ``forward`` serves FP16 through the native ``LinearEXL3`` handle and
+    # every other dtype through the bounded torch reconstruction, so the
+    # refreshed handle is the one the chosen path owns (see
+    # ``ExllamaV3Linear.forward``).
+    inner_attribute = "_inner" if dtype == torch.float16 else "_torch_inner"
+
     with torch.inference_mode():
         module = _native_module(packed, outputs, "cuda")
         assert module.bias.is_inference()
@@ -437,12 +443,13 @@ def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
                 raise
             pytest.skip("native EXL3 torch.ops extension is unavailable")
         assert not module.bias.is_inference()
-        initial_inner = module._inner
+        initial_inner = getattr(module, inner_attribute)
+        assert initial_inner is not None, f"{dtype} did not build {inner_attribute}"
         repeated = module(x)
-        assert module._inner is initial_inner
+        assert getattr(module, inner_attribute) is initial_inner
         module.bias.add_(0.25)
         after = module(x)
-        assert module._inner is not initial_inner
+        assert getattr(module, inner_attribute) is not initial_inner
 
     assert before.dtype == repeated.dtype == after.dtype == dtype
     assert before.shape == repeated.shape == after.shape == (1, 2, outputs)
@@ -451,12 +458,15 @@ def test_native_inference_created_bias_keeps_versioned_refresh(outputs, dtype):
     torch.testing.assert_close(before, expected, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(repeated, expected, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(after, changed_expected, rtol=2e-3, atol=2e-3)
-    assert module._inner.trellis is module.trellis
     stored_outputs = math.ceil(outputs / 128) * 128
+    holders = [module, getattr(module, inner_attribute)]
     assert all(
         not isinstance(value, torch.Tensor) or tuple(value.shape) != (128, stored_outputs)
-        for holder in (module, module._inner) for value in vars(holder).values()
+        for holder in holders for value in vars(holder).values()
     )
+    if dtype == torch.float16:
+        # The native handle aliases the packed trellis instead of copying it.
+        assert module._inner.trellis is module.trellis
 
 
 @pytest.mark.cuda

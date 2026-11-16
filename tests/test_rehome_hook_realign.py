@@ -346,7 +346,12 @@ def test_detached_deepcopies_realign_their_own_hooks() -> None:
         module,
         [torch.device("cpu"), torch.device("cpu:0")],
     )
+    # The device the module already lives on gets the module itself (#4183);
+    # the other device gets a detached deep copy that realigns its own hook.
+    assert clones[torch.device("cpu")] is module
     assert hook.execution_device == torch.device("meta")
-    for clone in clones.values():
-        assert clone is not module
-        torch.testing.assert_close(clone(inputs), expected)
+    detached = clones[torch.device("cpu:0")]
+    assert detached is not module
+    # `_realign_materialized_hooks` canonicalizes indexless CPU targets.
+    assert detached._hf_hook.execution_device == torch.device("cpu")
+    torch.testing.assert_close(detached(inputs), expected)

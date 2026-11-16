@@ -5,6 +5,7 @@
 
 import builtins
 import math
+import threading
 import time
 from typing import Dict
 
@@ -18,6 +19,23 @@ Mostly the same as the autotuner in Triton, but with a few changes like using 40
 
 
 class CustomizedTritonAutoTuner(triton.KernelInterface):
+    @property
+    def nargs(self):
+        return getattr(self._nargs_state(), "nargs", None)
+
+    @nargs.setter
+    def nargs(self, value):
+        self._nargs_state().nargs = value
+
+    def _nargs_state(self):
+        tls = self.__dict__.get("_nargs_tls")
+        if tls is None:
+            # ``dict.setdefault`` is a single atomic mapping operation, so two
+            # threads cannot end up with different ``threading.local`` objects
+            # and overwrite each other's ``nargs``.
+            tls = self.__dict__.setdefault("_nargs_tls", threading.local())
+        return tls
+
     def __init__(
         self,
         fn,
@@ -35,6 +53,7 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
         self.key_idx = [arg_names.index(k) for k in key]
         self.nearest_power_of_two = nearest_power_of_two
         self.cache = {}
+        self._cache_lock = threading.RLock()
         # hook to reset all required tensor to zeros before relaunching a kernel
         self.hook = lambda args: 0
         if reset_to_zero is not None:
@@ -60,7 +79,7 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
         self.early_config_prune = early_config_prune
         self.fn = fn
 
-    def _bench(self, *args, config, **meta):
+    def _bench(self, *args, config, nargs, **meta):
         # check for conflicts, i.e. meta-parameters both provided
         # as kwargs and by the autotuner
         conflicts = meta.keys() & config.kwargs.keys()
@@ -74,7 +93,7 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
 
         def kernel_call():
             if config.pre_hook:
-                config.pre_hook(self.nargs)
+                config.pre_hook(nargs)
             self.hook(args)
             self.fn.run(
                 *args,
@@ -91,43 +110,56 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
             return (float("inf"), float("inf"), float("inf"))
 
     def run(self, *args, **kwargs):
-        self.nargs = dict(zip(self.arg_names, args))
-        if len(self.configs) > 1:
-            key = tuple(args[i] for i in self.key_idx)
+        nargs = dict(zip(self.arg_names, args))
+        self.nargs = nargs
+        try:
+            if len(self.configs) > 1:
+                key = tuple(args[i] for i in self.key_idx)
 
-            # This reduces the amount of autotuning by rounding the keys to the nearest power of two
-            # In my testing this gives decent results, and greatly reduces the amount of tuning required
-            if self.nearest_power_of_two:
-                key = tuple([2 ** int(math.log2(x) + 0.5) for x in key])
+                # This reduces the amount of autotuning by rounding the keys to the nearest power of two
+                # In my testing this gives decent results, and greatly reduces the amount of tuning required
+                if self.nearest_power_of_two:
+                    key = tuple([2 ** int(math.log2(x) + 0.5) for x in key])
 
-            if key not in self.cache:
-                # prune configs
-                pruned_configs = self.prune_configs(kwargs)
-                bench_start = time.time()
-                timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
-                bench_end = time.time()
-                self.bench_time = bench_end - bench_start
-                self.cache[key] = builtins.min(timings, key=timings.get)
-                self.hook(args)
-                self.configs_timings = timings
-            config = self.cache[key]
-        else:
-            config = self.configs[0]
-        self.best_config = config
-        if config.pre_hook is not None:
-            config.pre_hook(self.nargs)
-        return self.fn.run(
-            *args,
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
-            **kwargs,
-            **config.kwargs,
-        )
+                with self._cache_lock:
+                    config = self.cache.get(key)
+                if config is None:
+                    # prune configs
+                    pruned_configs = self.prune_configs(kwargs, nargs)
+                    bench_start = time.time()
+                    timings = {
+                        config: self._bench(*args, config=config, nargs=nargs, **kwargs)
+                        for config in pruned_configs
+                    }
+                    bench_end = time.time()
+                    self.bench_time = bench_end - bench_start
+                    best_config = builtins.min(timings, key=timings.get)
+                    with self._cache_lock:
+                        # Another thread may have published the same key while
+                        # this one benchmarked. Keep the first published config
+                        # so every caller observes one cache value.
+                        config = self.cache.setdefault(key, best_config)
+                    self.hook(args)
+                    self.configs_timings = timings
+            else:
+                config = self.configs[0]
+            self.best_config = config
+            if config.pre_hook is not None:
+                config.pre_hook(nargs)
+            return self.fn.run(
+                *args,
+                num_warps=config.num_warps,
+                num_stages=config.num_stages,
+                **kwargs,
+                **config.kwargs,
+            )
+        finally:
+            self.nargs = None
 
-    def prune_configs(self, kwargs):
+    def prune_configs(self, kwargs, nargs):
         pruned_configs = self.configs
         if self.early_config_prune:
-            pruned_configs = self.early_config_prune(self.configs, self.nargs)
+            pruned_configs = self.early_config_prune(self.configs, nargs)
         if self.perf_model:
             top_k = self.configs_top_k
             if isinstance(top_k, float) and top_k <= 1.0:
@@ -135,7 +167,7 @@ class CustomizedTritonAutoTuner(triton.KernelInterface):
             if len(pruned_configs) > top_k:
                 est_timing = {
                     config: self.perf_model(
-                        **self.nargs,
+                        **nargs,
                         **kwargs,
                         **config.kwargs,
                         num_stages=config.num_stages,

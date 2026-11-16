@@ -1,0 +1,209 @@
+# GPT-QModel documentation
+
+[Wiki](https://github.com/ModelCloud/GPTQModel/wiki/) · [Project overview](../README.md)
+
+Use the wiki for task-oriented documentation and API references. The in-repository
+pages below document specific features, compatibility boundaries, and implementation flows.
+
+## Start here
+
+| Goal | Guide |
+| --- | --- |
+| Install and run a model | [Installation and quickstart](https://github.com/ModelCloud/GPTQModel/wiki/Installation-and-Quickstart) · [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference) |
+| Choose a quantization recipe | [End-to-end quantization](quantization-guide.md) · [Configuration reference](https://github.com/ModelCloud/GPTQModel/wiki/QuantizeConfig-Reference) |
+| Check compatibility | [Hardware, formats, and backends](support-matrix.md) · [Supported models](supported-models.md) |
+| Run at scale | [Multi-GPU quantization](multi_gpu_quantization.md) · [Checkpoint and resume](../checkpoint.md) |
+| Recover quality and fine-tune | [EoRA](eora/README.md) · [PEFT](peft.md) · [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) |
+| Evaluate and deploy | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Serving](https://github.com/ModelCloud/GPTQModel/wiki/Serving) |
+| Develop model support | [Module plans](module-plan-guide.md) · [Developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide) |
+| Read release history | [7.8–7.11](changelog/recent.md) · [Older releases](changelog/archive.md) |
+| Credit the research | [Attributions and citations](citations.md) |
+
+## Implementation reference
+
+### Quantization and calibration
+
+- [AWQ affine range and packed decode](awq-affine-range.md)
+- [AWQ calibration aggregation](awq-calibration-aggregation.md)
+- [AWQ GEMM dequantization tiling](awq-dequantize-tiling.md)
+- [AWQ dynamic group-size resolution](awq-dynamic-group-size.md)
+- [AWQ normalization selection and gain probing](awq-norm-selection.md)
+- [AWQ scale folding into normalization modules](awq-scale-folding.md)
+- [AWQ scaling groups](awq-scaling-groups.md)
+- [Calibration Hessian materialization](calibration-hessian-materialization.md)
+- [Calibration layer replay](calibration-replay.md)
+- [Calibration row trimming](calibration-row-trimming.md)
+- [Changelog archive](changelog/archive.md)
+- [Convolution capture padding](conv-capture-padding.md)
+- [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)
+- [Packed payloads and save-time source materialization](fp8-save-offload.md)
+- [FP8 checkpoint scale semantics](fp8-scale-semantics.md)
+- [FP8 weight-only dispatch: W8A16 vs W8A8](fp8-weight-only-dispatch.md)
+- [Native fusion inference on CPU, CUDA and ROCm](fusion-device-validation.md)
+- [Fusion model qualification](fusion-model-coverage.md)
+- [Post-quantization fusion planner](fusion-planner.md)
+- [GGUF dense fallback precision](gguf-dense-fallback-precision.md)
+- [GGUF packed scale overflow cache](gguf-k-scale-overflow-cache.md)
+- [GPTQ Hessian accumulation](gptq-hessian-accumulation.md)
+- [GPTQ mock quantization group flow](gptq-mock-group-flow.md)
+- [GPTQ scale storage range](gptq-scale-storage-range.md)
+- [GPTQ static-group ordering](gptq-static-group-ordering.md)
+- [W4A accuracy campaign notes (appendix)](gptq-w4a-accuracy-notes.md)
+- [GPTQ INT4 weights with FP8 or NVFP4 activations on GB10](gptq-w4a-gb10.md)
+- [Layer-type replay masks](layer-type-replay-masks.md)
+- [Quantized-checkpoint redirect](loader-quantized-redirect.md)
+- [MACaQ (MXFP4 W4A4)](macaq.md)
+- [Marlin device-profile validation](marlin-device-profile-validation.md)
+- [MoE AWQ scale folding and calibration row ownership](moe-awq-calibration.md)
+- [MoE padding ownership and calibration capture lifetimes](moe-padding-and-awq-dedup.md)
+- [Multimodal calibration replay](multimodal-calibration.md)
+- [NumPy-free core: optional dependency, not a hard one](numpy-free-core.md)
+- [ParoQuant](paroquant.md)
+- [Prism Bonsai GGUF compatibility](prism-bonsai-gguf.md)
+- [Protocol actions](protocol-actions.md)
+- [QQQ default Hessian damping](qqq-default-damp.md)
+- [Quantization features: dynamic exclusions, endpoint requantize, post-quant EoRA, rotation, and GSQ](quantization-features.md)
+- [Quantization guide and end-to-end recipes](quantization-guide.md)
+- [GPT-QModel quantization scale storage](quantization-scale-storage.md)
+- [Quantization run summary](quantize-run-summary.md)
+- [Quantized embedding row decode](quantized-embedding-row-decode.md)
+- [Quantizer calibration flows: MoE native inputs, GGUF quality aliases, Hessian staging](quantizer-moe.md)
+- [Ricursive generation, attention, and training contracts](ricursive-cached-generation.md)
+- [Safetensors reference offload](safetensors-reference-offload.md)
+- [Torch compile fallback](torch-compile-fallback.md)
+- [Transformers 5.22 model compatibility](transformers-5-compat.md)
+- [VPTQ (Vector Post-Training Quantization)](vptq.md)
+- [NF12 HIP port (AMD RDNA4)](../gptqmodel_ext/nf12_hip/README.md)
+- [Tenstorrent block-float emulation on CUDA](../gptqmodel_ext/tt_blockfloat_cuda/README.md)
+- [Tenstorrent bf8/bf4 emulation on ROCm](../gptqmodel_ext/tt_blockfloat_hip/README.md)
+- [PyTorch GIL=0 (free-threaded) compatibility ledger](../pytorch_gil_0_compat.md)
+
+### Inference and kernels
+
+- [3-bit zero-point packing width contract](3bit-zero-point-packing.md)
+- [AllSpark W8A16 bias epilogue](allspark-bias-epilogue.md)
+- [Automatic NF12 source storage](auto-nf12-dtype-cast.md)
+- [Excluded-layer replay and AUTO_NF12 source storage](auto-nf12-excluded-layers.md)
+- [AWQ dequantization layouts](awq-dequant-layouts.md)
+- [AWQ split-K kernel boundaries](awq-kernel-splitk.md)
+- [AWQ packed layout](awq-packed-layout.md)
+- [AWQ runtime dtype precision](awq-runtime-dtype-precision.md)
+- [AWQ pack-time scale representability](awq-pack-scale-representability.md)
+- [CUDA quantized linear epilogue](cuda-quantized-bias-epilogue.md)
+- [Checkpoint metadata and runtime decision contracts](checkpoint-and-runtime-contracts.md)
+- [EXL3 runtime weight lifecycle](exl3-runtime-weights.md)
+- [EXL3 wide activation dispatch](exl3-wide-activation-dispatch.md)
+- [External runtime device mapping](external-runtime-device-mapping.md)
+- [Fused kernel dispatch and bias epilogues](fused-kernel-epilogues.md)
+- [GGUF C++ bias epilogue](gguf-cpp-bias-epilogue.md)
+- [GGUF kernel selection and fallback](gguf-kernel-selection.md)
+- [GGUF Triton activation range](gguf-triton-activation-range.md)
+- [GGUF Triton packed metadata cache](gguf-triton-packed-cache.md)
+- [GPTQ qzeros conversion: packed helpers stay on the input device](gptq-qzero-device-conversion.md)
+- [GPTQ qzeros: runtime layout vs checkpoint layout](gptq-qzero-runtime-layout.md)
+- [GPTQ Torch CPU bias epilogue](gptq-torch-cpu-bias-epilogue.md)
+- [FP16 inference overflow and bias epilogues](inference-fp16-overflow-epilogues.md)
+- [Kernel dispatch caching](kernel-dispatch-caching.md)
+- [CPU and offload kernel dispatch](kernel-dispatch-cpu.md)
+- [Kernel input contiguity and launch contracts](kernel-input-contiguity.md)
+- [Low-precision bias epilogues](low-precision-bias-epilogue.md)
+- [MLX runtime generation and export flow](mlx-runtime.md)
+- [NF12 fallback epilogue](nf12-bias-epilogue.md)
+- [NF12 CUDA dispatch and weight readiness](nf12-cuda-dispatch.md)
+- [NF12 embedding prefill dispatch](nf12-embedding-prefill-dispatch.md)
+- [NF12 embedding with four hyper-connection copies](nf12-embedding-repeat4.md)
+- [NF12 HIP device and split-K workspace flow](nf12-hip-device-workspace.md)
+- [NF12 HIP embedding dispatch](nf12-hip-embedding-dispatch.md)
+- [NF12 vendored runtime](nf12-installed-extension.md)
+- [NF12 linear reduction association](nf12-reduction-association.md)
+- [NF12 row-major embedding storage](nf12-row-major-embedding.md)
+- [NF12 short-M dispatch](nf12-short-m-dispatch.md)
+- [NF12 staged B1 and prefill projections](nf12-staged-b1-projections.md)
+- [NF12 validation backend and performance flow](nf12-validation-backends.md)
+- [QQQ in-memory kernel selection](qqq-kernel-selection.md)
+- [Rotation Hadamard device dispatch](rotation-device-dispatch.md)
+- [Rotation model support and opt-in gate](rotation-model-support.md)
+- [Runtime prompt input normalization](runtime-prompt-input-normalization.md)
+- [Tenstorrent GPTQ execution](tenstorrent.md)
+- [Torch Fused INT4 transformations](torch_fused_int4_transformations.md)
+- [GPTQ Triton decode and small-M dispatch](triton-dispatch.md)
+- [Tenstorrent block floats on CPU (ttbfp)](tt-blockfloat-cpu.md)
+- [Tenstorrent Llama serving: paged KV, chunked prefill and quantized storage](tt-llama-paged-serving.md)
+- [Tenstorrent Blackhole — architecture and measured behaviour](../hw/tenstorrent.md)
+
+### Models and module plans
+
+- [DeepSeek V4.1 Flash: checkpoint module inventory](deepseek-v41-module-inventory.md)
+- [Fusion kernel inventory](fusion-kernel-inventory.md)
+- [Kimi K3 native-source calibration](kimi-k3-native-source.md)
+- [Model tree resolution](model-tree-resolution.md)
+- [Module plans and model-definition tags](module-plan-guide.md)
+- [Module tree subset ordering](module-tree-ordering.md)
+- [Native calibration batch split](native-calibration-batch-split.md)
+- [Parallel module trees](parallel-module-trees.md)
+
+### Checkpoints and interoperability
+
+- [Quantization checkpointing and resume](../checkpoint.md)
+- [AllSpark checkpoint layout and derived kernel cache](allspark-checkpoint-layout.md)
+- [Checkpoint compatibility](checkpoint-compat.md)
+- [Checkpoint index validation](checkpoint-index-validation.md)
+- [Checkpoint interop: module filters, format changes, save, Marlin, export, and mixed-bit dequantization](checkpoint-interop.md)
+- [Checkpoint path containment](checkpoint-path-containment.md)
+- [Quantization config serialization](config-serialization.md)
+- [Checkpoint dtype boundary preservation](dtype-boundary-preservation.md)
+- [FP8 inverse-scale checkpoint loading](fp8-inverse-scale-checkpoint-loading.md)
+- [Stable hf_ packing API](hf_packing_api.md)
+- [Hugging Face interoperability](hf-interop.md)
+- [Lazy checkpoint materialization](lazy-checkpoint-materialization.md)
+- [Looper checkpoint/resume](looper-checkpoint-redesign.md)
+- [Cross-layer shared KV cache](looper-shared-kv-cache.md)
+- [Offload index resolution](offload-index-resolution.md)
+- [Quantized checkpoint subfolder resolution](quantized-checkpoint-subfolder-resolution.md)
+- [Reshard source selection](reshard-source-selection.md)
+- [Torch INT8 checkpoint lifecycle and group-preserving layout](torch-int8-checkpoint-lifecycle.md)
+
+### Devices, memory, and concurrency
+
+- [AWQ scale-search replay sizing and fallback thresholds](awq-scale-search-memory.md)
+- [Concurrency guards](concurrency.md)
+- [CPU pool lock scopes](cpu-pool-lock-scopes.md)
+- [CUDA activation copy lifecycle](cuda-activation-copy-lifecycle.md)
+- [Device thread pool shutdown](device-thread-pool-shutdown.md)
+- [EXL3 inference buffer lifecycle](exl3-native-bias-lifecycle.md)
+- [ExLlamaV2 descriptor lifecycle](exllamav2-descriptor-lifecycle.md)
+- [Packed FP8 weight lifecycle](fp8-packed-weight-lifecycle.md)
+- [Input capture cleanup lifecycle](input-capture-cleanup-lifecycle.md)
+- [Kernel and thread selection (KernelConfig)](kernel-config.md)
+- [Kernel validation and cache lifecycle](kernel-validation-and-cache-lifecycle.md)
+- [Multi-GPU quantization](multi_gpu_quantization.md)
+- [Multi-GPU memory retention](multi-gpu-memory.md)
+- [Quantization lifecycle contracts](quantization-lifecycle-contracts.md)
+- [Quantization memory and tensor lifetimes](quantization-memory.md)
+- [ROCm default process environment](rocm-default-environment.md)
+- [ROCm JIT toolkit path resolution](rocm-jit-toolkit-paths.md)
+- [AMD RDNA4 (gfx1200 / gfx1201 / gfx1250) support](rocm-rdna4.md)
+- [Device thread pool error propagation](thread-pool-error-contract.md)
+- [Torch thread caps](thread-caps.md)
+- [Device thread pool intra-op budget](device-thread-pool-intraop-budget.md)
+
+### Adapters and accuracy recovery
+
+- [LoRA adapter pattern matching](adapter-pattern-matching.md)
+- [Adapter rank-pattern matching](adapter-rank-pattern-matching.md)
+- [Adapter weight cache](adapter-weight-cache.md)
+- [Embedding checkpoint shard replacement](embedding-checkpoint-shard-replacement.md)
+- [GSQ paper reproduction: Llama 3.2 1B and distributed Llama 3.1 8B](experiments/gsq-paper-reproduction.md)
+- [GSQ CUDA empty-geometry dispatch](gsq-cuda-empty-geometry.md)
+- [GSQ fused relaxation precision contract](gsq-fused-relaxation-precision.md)
+- [Runtime LoRA output composition](lora-runtime-output.md)
+- [PEFT LoRA Training and Adapter Loading](peft.md)
+
+### Safety and validation
+
+- [Accelerator test gates](accelerator-test-gates.md)
+- [Benchmark methodology](benchmark-methodology.md)
+- [OpenAI server exposure and media fetch bounds](openai-server-exposure.md)
+- [Remote image fetch bounds](remote-image-fetch-bounds.md)
+- [PyTorch runtime safety gate](torch-runtime-safety-gate.md)
+- [Trusted remote-code boundary](trust-remote-code-isolation.md)

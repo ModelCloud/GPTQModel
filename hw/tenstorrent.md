@@ -803,6 +803,47 @@ needs the staging/multicast redesign, not more call-overhead work.
 `nn.Linear` accumulate `X^T X` over calibration text, then each weight is solved
 onto the block-float grid with GPTQ error feedback.
 
+### Sequential calibration replays each block with its own context
+
+`sequential=True` calibrates one decoder block at a time, so each block's
+Hessian comes from the activations produced by its already-quantized
+predecessors. The side inputs that do not depend on weights -- the attention
+mask, rotary embeddings, position ids and cache positions -- must still be the
+ones that block saw in the dense model. Hybrid-attention models such as
+Gemma2/3 build a different causal mask per `attention_type`, so reusing block
+0's kwargs for every block calibrates a full-attention layer on the
+sliding-window mask with no error (#4009, #4150).
+
+`_quantize_sequential` therefore pre-hooks **every** decoder block during one
+dense calibration forward and stops at the last block. Replay keeps propagating
+hidden states through the quantized blocks, but each block gets its own
+captured kwargs. For a pure full-attention model every block shares the same
+mask, so the captured context and the resulting report are unchanged.
+
+```mermaid
+flowchart TD
+    W["calibration window"] --> F["dense backbone forward"]
+    F --> H["pre-hook on every decoder block"]
+    H --> C["captured extras i = args + kwargs<br/>mask / rotary / position ids"]
+    C --> L{"last block reached?"}
+    L -->|no| F
+    L -->|yes| STOP["raise _StopForward"]
+    STOP --> Q["quantize block i"]
+    Q --> R["replay block i with captured[i]<br/>hidden = previous quantized output"]
+    R --> N{"more blocks?"}
+    N -->|yes| Q
+    N -->|no| DONE["report"]
+    style STOP fill:#fff1b8,stroke:#ad8b00
+    style R fill:#d9f7be,stroke:#237804
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Capture hook (`gptqmodel/utils/tt_blockfloat_quant.py:938`) | `blocks[0]` only; stop before block 0 executes. | Every block; stop before the last block executes. |
+| Replay kwargs | Block 0's mask / rotary / positions for every block. | Each block's own captured kwargs. |
+| Hidden states | Propagated through the quantized block. | Unchanged. |
+| Pure full-attention model | One mask object reused for every block. | Every block captures the same shared mask; the quantization report is bit-identical. |
+
 Measured on **facebook/opt-125m**, 72 layers, 4 bits, 8 calibration samples:
 
 | | |
@@ -985,6 +1026,37 @@ Four things are required and none are documented for the wheel:
    `site-packages/pjrt_plugin_tt/tt-metal` makes it work (verify with
    `generic_op_smoke.py`). Rebuilding the plugin with a correct prefix is the
    clean fix.
+
+### Exponent-block orientation: the checkpoint must block along `out_features`
+
+`ttnn.linear(x, W)` takes its weight as `[in_features, out_features]`, and a
+`bf4_b`/`bf8_b` tile shares one exponent per 16 consecutive values of the
+**last** dim. The block-float checkpoints written so far
+(`gptq_solve_blockfloat(..., block_axis="in")`, the default) block along
+`in_features` of `[out, in]`, so uploading them in the orientation `ttnn.linear`
+wants re-quantizes every weight on the host. Measured on a p300c with real
+Llama-3.2-1B-Instruct layers from the published bf4/bf8 checkpoint:
+
+| layer | upload as `[out, in]` | upload as `[in, out]` (what `ttnn.linear` needs) |
+| --- | --- | --- |
+| `q_proj` bf8 | drift 0 | 14 % of values change, weight relL1 0.30 % |
+| `gate_proj` bf4 | drift 0 | 11 % change, weight relL1 3.4 % |
+| `up_proj` (layer 7) bf4 | drift 0 | 16 % change, weight relL1 5.0 % |
+
+At `M = 32` the bf4 `gate_proj` output error against an fp64 reference is
+**8.1 %** with the re-quantized `[in, out]` weight, against 0.42 % with
+`matmul(transpose_b=True)` on the exact `[out, in]` upload, which is also 30 %
+slower (0.065 vs 0.050 ms). Neither is acceptable for serving.
+
+`block_axis="out"` solves GPTQ with blocks of 16 consecutive **output**
+features of one input column. Every block then lies inside one GPTQ column, so
+its exponent is picked when that column is quantized (after error feedback,
+with the same lowest-error neighbour search as `quantize_blockfloat`), and
+`act_order` no longer splits blocks. A Llama-3.2-1B-Instruct checkpoint solved
+this way uploads as `W^T` with **zero drift on all 81 block-float tensors**
+(fused QKV and the `E^T` bf8 tied head included), because concatenating
+`q|k|v` or `gate|up` along `out_features` at tile multiples never cuts a
+block.
 
 ## 10. Qualified host
 

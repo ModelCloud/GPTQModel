@@ -10,14 +10,26 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
+import pytest  # noqa: E402
 import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear  # noqa: E402
+from tests.accelerator_gates import cuda_only_skip_reason  # noqa: E402
 
 
+# BACKEND.TRITON selects TritonV2Linear, which declares DEVICE.CUDA only. On a
+# HIP host the load correctly refuses it, so skip instead of asserting a CUDA
+# kernel runs there.
+_TRITON_CUDA_ONLY_SKIP_REASON = cuda_only_skip_reason("TritonV2Linear")
+
+
+@pytest.mark.skipif(
+    _TRITON_CUDA_ONLY_SKIP_REASON is not None,
+    reason=_TRITON_CUDA_ONLY_SKIP_REASON or "",
+)
 class TestsQ4Triton(ModelTest):
     model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 

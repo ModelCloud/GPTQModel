@@ -23,6 +23,7 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from .base_qwen3_vl import DeepStackReplayMixin
 
 
 _THINKER_LAYER_MODULES = {
@@ -38,7 +39,7 @@ _THINKER_LAYER_MODULES = {
 }
 
 
-class Qwen3OmniMoeGPTQ(BaseQModel):
+class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, BaseQModel):
     fusable = FusableConfig("qwen3_omni_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
@@ -80,6 +81,9 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
                     "Qwen3-Omni calibration supports image content only."
                 )
         return image_inputs or None
+
+    def _deepstack_language_model(self):
+        return thinker_text_model(self.model)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
@@ -150,8 +154,10 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
             self.shell_module_materialize(self.model.talker, self.quantize_config.device)
         if hasattr(self.model, "code2wav"):
             self.shell_module_materialize(self.model.code2wav, self.quantize_config.device)
+        self._start_deepstack_input_capture()
 
     def pre_quantize_generate_hook_end(self):
+        self._stop_deepstack_input_capture()
         text_model = thinker_text_model(self.model)
         mm_model = thinker_multimodal_model(self.model)
         if self.quantize_config.offload_to_disk:

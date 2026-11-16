@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import operator
 import shutil
 from collections import defaultdict
 from contextlib import ExitStack
+from functools import reduce
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
@@ -19,6 +21,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from ..quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
+from ..quantization.config import dynamic_get, quant_bits_width
 from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
@@ -325,15 +329,22 @@ def _discover_compressed_tensors_module_schemes(
     quant_config,
     *,
     deps: dict,
+    trust_remote_code: bool = False,
 ) -> Dict[str, "QuantizationScheme"]:
     AutoConfig = deps["AutoConfig"]
     init_empty_weights = deps["init_empty_weights"]
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
-    from .hf import prepare_remote_code_compat
+    from .hf import normalize_hf_config_compat
 
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    prepare_remote_code_compat(config)
+    config = AutoConfig.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+
+    # ``from_config`` mutates process-global torch state (default dtype,
+    # init hooks); serialize it against loads/saves with the shared lock.
+    from ..models.loader import model_load_lock
 
     loader_candidates = (
         deps["AutoModelForCausalLM"],
@@ -349,11 +360,12 @@ def _discover_compressed_tensors_module_schemes(
 
         with init_empty_weights(include_buffers=True):
             try:
-                model = loader.from_config(
-                    config,
-                    trust_remote_code=True,
-                    dtype=torch.float32,
-                )
+                with model_load_lock():
+                    model = loader.from_config(
+                        config,
+                        trust_remote_code=trust_remote_code,
+                        dtype=torch.float32,
+                    )
             except Exception as exc:  # pragma: no cover - depends on available loaders
                 loader_errors.append((loader.__name__, exc))
                 continue
@@ -383,7 +395,7 @@ def _discover_compressed_tensors_module_schemes(
 
 
 def _prepare_compressed_tensors_context(
-    model_path: Path, quant_cfg: dict
+    model_path: Path, quant_cfg: dict, *, trust_remote_code: bool = False
 ) -> tuple["QuantizationConfig", Dict[str, "QuantizationScheme"], "BaseCompressor"]: # noqa
     deps = _get_compressed_tensors_dependencies()
 
@@ -397,7 +409,10 @@ def _prepare_compressed_tensors_context(
         )
 
     module_to_scheme = _discover_compressed_tensors_module_schemes(
-        model_path, quant_config, deps=deps
+        model_path,
+        quant_config,
+        deps=deps,
+        trust_remote_code=trust_remote_code,
     )
 
     BaseCompressor = deps["BaseCompressor"]
@@ -802,12 +817,18 @@ def unpack_cols(packed: torch.Tensor, bits: int, *, planar: bool = False) -> tor
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
-    packed_uint = packed.to(torch.int64) & ((1 << pack_bits) - 1)
     rows, cols = packed.shape
-    result = torch.empty(rows, cols * pack_factor, dtype=torch.int32)
-    for i in range(pack_factor):
-        result[:, i::pack_factor] = ((packed_uint >> (i * bits)) & mask).to(torch.int32)
-    return result
+    # Decode every packed field at once. The result must live on the input's
+    # device: callers (e.g. `_shift_gptq_qzeros` on a CUDA-resident qzeros)
+    # index the unpacked zeros with device-resident `g_idx`, and a host result
+    # raises "indices should be either on cpu or on the same device".
+    # An arithmetic right shift of the sign-extended word keeps the low
+    # ``bits`` bits of every field identical to the unsigned decode, so 32-bit
+    # lanes are enough for every packed width this path accepts.
+    compute_dtype = torch.int32 if pack_bits <= 32 else torch.int64
+    shifts = torch.arange(pack_factor, device=packed.device, dtype=compute_dtype) * bits
+    fields = (packed.to(compute_dtype).unsqueeze(-1) >> shifts) & mask
+    return fields.to(torch.int32).reshape(rows, cols * pack_factor)
 
 
 def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype, planar: bool = False) -> torch.Tensor:
@@ -828,11 +849,14 @@ def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype, plana
         )
 
     mask = (1 << bits) - 1
-    packed = torch.zeros(rows, cols // pack_factor, dtype=pack_dtype, device=values.device)
-    values_uint = values.to(torch.int64) & mask
-    for i in range(pack_factor):
-        packed |= (values_uint[:, i::pack_factor] << (i * bits)).to(pack_dtype)
-    return packed
+    compute_dtype = torch.int32 if pack_bits <= 32 else torch.int64
+    values_uint = values.to(compute_dtype) & mask
+    # Fields never overlap, so OR-ing the shifted fields equals adding them.
+    # OR keeps the exact bit pattern even when a 2-bit field lands in the sign
+    # bit.  Grouping the columns keeps the whole operation on-device.
+    shifts = torch.arange(pack_factor, device=values.device, dtype=compute_dtype) * bits
+    words = values_uint.reshape(rows, cols // pack_factor, pack_factor) << shifts
+    return reduce(operator.or_, words.unbind(-1)).to(pack_dtype)
 
 
 def unpack_rows(packed: torch.Tensor, bits: int, *, planar: bool = False) -> torch.Tensor:
@@ -844,12 +868,12 @@ def unpack_rows(packed: torch.Tensor, bits: int, *, planar: bool = False) -> tor
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
-    packed_uint = packed.to(torch.int64) & ((1 << pack_bits) - 1)
     rows, cols = packed.shape
-    result = torch.empty(rows * pack_factor, cols, dtype=torch.int32)
-    for i in range(pack_factor):
-        result[i::pack_factor, :] = ((packed_uint >> (i * bits)) & mask).to(torch.int32)
-    return result
+    # Row-packed variant: field `i` of packed row `r` becomes row `r * pf + i`.
+    compute_dtype = torch.int32 if pack_bits <= 32 else torch.int64
+    shifts = torch.arange(pack_factor, device=packed.device, dtype=compute_dtype) * bits
+    fields = (packed.to(compute_dtype).unsqueeze(1) >> shifts.reshape(pack_factor, 1)) & mask
+    return fields.to(torch.int32).reshape(rows * pack_factor, cols)
 
 
 def _require_int32_words_for_3bit(tensor: torch.Tensor) -> None:
@@ -1034,7 +1058,7 @@ def convert_fp8_shard(
     *,
     block_shape: Optional[Tuple[int, int]],
     model_type: Optional[str] = None,
-    scale_semantics: str = "heuristic",
+    scale_semantics: str = "multiplier",
     tensor_lookup: Optional[_ShardTensorLookup] = None,
     ignored_layers: Iterable[str] = (),
     source_config: Optional[dict] = None,
@@ -1204,6 +1228,7 @@ def convert_fp8_shard(
                 scale_inv=scale_inv_arg,
                 axis=None,
                 target_dtype=target_dtype,
+                scale_semantics=scale_semantics,
             )
             tensors[key] = finalize_for_save(deq, target_dtype)
         elif key.endswith("_scale_inv"):
@@ -1518,15 +1543,168 @@ def convert_bitsandbytes_shard(
     return tensors
 
 
+_AWQ_GEMV_FORMATS = frozenset({"gemv"})
+_AWQ_GEMV_FAST_FORMATS = frozenset({"gemv_fast", "gemv-fast", "llm-awq", "llm_awq"})
+
+
+def _awq_layout(config: Optional[dict]) -> str:
+    """Return the packed AWQ layout declared by a saved quantization config.
+
+    ``AWQConfig`` writes ``format`` and mirrors it into ``version`` for older
+    readers; checkpoints without either field use the classic GEMM layout.
+    """
+
+    config = config or {}
+    declared = str(config.get("format") or config.get("version") or "").strip().lower()
+    if declared in _AWQ_GEMV_FORMATS:
+        return "gemv"
+    if declared in _AWQ_GEMV_FAST_FORMATS:
+        return "gemv_fast"
+    return "gemm"
+
+
+def _awq_module_int(config: Optional[dict], prefix: str, key: str, default: int) -> int:
+    """Resolve a per-module AWQ setting, honoring ``dynamic`` overrides."""
+
+    dynamic = (config or {}).get("dynamic")
+    value = dynamic_get(dynamic, prefix, key, default) if dynamic else default
+    # An excluded module (`bits: false`) or a rule that only sets another key is
+    # not a width; fall back to the checkpoint default instead of coercing to 0.
+    if value is False or value is None:
+        return int(default)
+    return int(value)
+
+
+def _gptq_module_int(config: Optional[dict], prefix: str, key: str, default: int) -> int:
+    """Resolve a per-module GPTQ setting, honoring ``dynamic`` overrides."""
+
+    dynamic = (config or {}).get("dynamic")
+    value = dynamic_get(dynamic, prefix, key, default) if dynamic else default
+    # An excluded module (`bits: false`) or a rule that only sets another key is
+    # not a width; fall back to the checkpoint default instead of coercing to 0.
+    if value is False or value is None:
+        return int(default)
+    return int(value)
+
+
+def _awq_group_index(in_features: int, group_size: int, *, device=None) -> torch.Tensor:
+    if group_size is None or int(group_size) <= 0:
+        group_size = in_features
+    return torch.arange(in_features, device=device, dtype=torch.long) // int(group_size)
+
+
+def _awq_gemv_fast_k_order(*, device=None) -> torch.Tensor:
+    """Return ``pack_intweight``'s 32-value input-axis order.
+
+    ``pack_intweight`` first transposes a ``(4, 4, 2)`` view of every 32-value
+    block, then applies the four-bit ``[0, 2, 4, 6, 1, 3, 5, 7]`` reorder.
+    ``order[p]`` is the natural column that ends up at packed position ``p``
+    inside one 32-value block.
+    """
+
+    index = torch.arange(32, device=device, dtype=torch.long)
+    forward = index.reshape(4, 4, 2).permute(1, 0, 2).reshape(32)
+    forward = forward.reshape(4, 4, 2).permute(0, 2, 1).reshape(32)
+    return forward
+
+
+def _dequantize_awq_gemm(qweight, qzeros, scales, bits: int) -> torch.Tensor:
+    """Reconstruct a GEMM-layout AWQ weight as ``[out_features, in_features]``."""
+
+    # AWQ packs along the output axis with the 4-bit `[0, 2, 4, 6, 1, 3, 5, 7]`
+    # interleave; wider widths are a contiguous little-endian stream.
+    unpacked_weight, unpacked_zeros = unpack_awq(qweight, qzeros, bits)
+    unpacked_weight, unpacked_zeros = reverse_awq_order(
+        unpacked_weight, unpacked_zeros, bits
+    )
+    unpacked_weight = unpacked_weight.to(torch.float32)
+    unpacked_zeros = unpacked_zeros.to(torch.float32)
+
+    num_groups = scales.shape[0]
+    group_size = unpacked_weight.shape[0] // num_groups
+    scales_full = scales.to(torch.float32).repeat_interleave(group_size, dim=0)
+    zeros_full = unpacked_zeros.repeat_interleave(group_size, dim=0)
+    return ((unpacked_weight - zeros_full) * scales_full).t().contiguous()
+
+
+def _dequantize_awq_gemv(qweight, qzeros, scales, bits: int, group_size: int) -> torch.Tensor:
+    """Reconstruct a GEMV-layout AWQ weight (``[out, in/8]``, natural order)."""
+
+    if bits != 4:
+        raise NotImplementedError(
+            f"AWQ GEMV checkpoints store 4-bit codes; got bits={bits}. "
+            "Use a GEMM or LLM-AWQ export for other widths."
+        )
+    codes, zeros = unpack_awq(qweight, qzeros, bits)
+    codes = codes.to(torch.float32)
+    zeros = zeros.to(torch.float32)
+    in_features = codes.shape[1]
+    groups = _awq_group_index(in_features, group_size, device=codes.device)
+    # GEMV stores scales and integer zero points as [out_features, padded_groups].
+    scale = scales.to(torch.float32)[:, groups]
+    zero = zeros[:, groups]
+    return (codes - zero) * scale
+
+
+def _dequantize_awq_gemv_fast(qweight, zeros, scales, bits: int, group_size: int) -> torch.Tensor:
+    """Reconstruct a GEMV_FAST / LLM_AWQ weight (``[out/4, in]`` INT16 codes).
+
+    ``pack_intweight`` interleaves four output rows per INT16 word and stores
+    FP16 scale plus the scaled zero-point offset as ``[padded_groups, out]``.
+    """
+
+    if bits != 4:
+        raise NotImplementedError(
+            f"AWQ GEMV_FAST checkpoints store 4-bit codes; got bits={bits}. "
+            "Use a GEMM export for other widths."
+        )
+    in_features = qweight.shape[1]
+    if in_features % 64:
+        raise ValueError(
+            f"AWQ GEMV_FAST requires in_features divisible by 64, got {in_features}"
+        )
+    row_blocks = qweight.shape[0]
+    out_features = row_blocks * 4
+    packed = qweight.to(torch.int32)
+    nibbles = torch.stack(
+        [(packed >> shift) & 0xF for shift in (0, 4, 8, 12)],
+        dim=-1,
+    )
+    # Each packed word holds four output rows; ``pack_intweight`` then reshapes
+    # the (64 columns x 4 lanes) tile as if transposed, which mixes the lane
+    # index with the low column bits. Undo that mapping with a scatter.
+    blocks = in_features // 64
+    tiled = nibbles.reshape(row_blocks, blocks, 64, 4)
+    lane = torch.arange(row_blocks, device=packed.device).view(-1, 1, 1, 1)
+    block = torch.arange(blocks, device=packed.device).view(1, blocks, 1, 1)
+    flat = torch.arange(64, device=packed.device).view(1, 1, 64, 1) * 4 + torch.arange(
+        4, device=packed.device
+    ).view(1, 1, 1, 4)
+    row_lane = flat // 64
+    col_in_block = flat % 64
+    order = _awq_gemv_fast_k_order(device=packed.device)
+    natural_col = block * 64 + order[col_in_block % 32] + 32 * (col_in_block // 32)
+    codes = torch.zeros(
+        out_features, in_features, dtype=torch.int32, device=packed.device
+    )
+    codes[(lane * 4 + row_lane).expand_as(tiled), natural_col.expand_as(tiled)] = tiled
+    groups = _awq_group_index(in_features, group_size, device=codes.device)
+    scale = scales.to(torch.float32)[groups, :]
+    offset = zeros.to(torch.float32)[groups, :]
+    return (codes.to(torch.float32).t() * scale + offset).t().contiguous()
+
+
 def convert_awq_file(
     path: Path,
     target_dtype: torch.dtype,
     device: str,
     *,
+    config: Optional[dict] = None,
     ignored_layers: Iterable[str] = (),
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
+    layout = _awq_layout(config)
     with safe_open(path, framework="pt", device=device) as reader:
         for key in reader.keys():
             tensor = reader.get_tensor(key)
@@ -1545,6 +1723,11 @@ def convert_awq_file(
                 prefix = key[:-len(".qzeros")]
                 module_buffers[prefix]["qzeros"] = tensor
                 LOG.debug("Collected AWQ qzeros tensor '%s'", key)
+            elif key.endswith(".scaled_zeros"):
+                # LLM-AWQ stores the FP16 scaled offset under this name.
+                prefix = key[:-len(".scaled_zeros")]
+                module_buffers[prefix]["scaled_zeros"] = tensor
+                LOG.debug("Collected AWQ scaled-zero tensor '%s'", key)
             elif key.endswith(".scales"):
                 prefix = key[:-len(".scales")]
                 module_buffers[prefix]["scales"] = tensor
@@ -1552,30 +1735,41 @@ def convert_awq_file(
             else:
                 tensors[key] = finalize_for_save(tensor, target_dtype)
 
+    default_bits = int((config or {}).get("bits", 4))
+    default_group_size = int((config or {}).get("group_size", -1))
     for prefix, buf in module_buffers.items():
-        missing = {k for k in ("qweight", "qzeros", "scales") if k not in buf}
+        zeros_key = "qzeros"
+        if layout == "gemv_fast" and "scaled_zeros" in buf:
+            zeros_key = "scaled_zeros"
+        missing = {k for k in ("qweight", "scales", zeros_key) if k not in buf}
         if missing:
             raise KeyError(f"Incomplete AWQ buffers for module {prefix}: missing {missing}")
 
         qweight = buf["qweight"]
-        qzeros = buf["qzeros"]
         scales = buf["scales"]
-        bits = 4
+        bits = _awq_module_int(config, prefix, "bits", default_bits)
+        group_size = _awq_module_int(config, prefix, "group_size", default_group_size)
 
-        unpacked_weight = unpack_cols(qweight, bits).to(torch.float32)
-        unpacked_zeros = unpack_cols(qzeros, bits).to(torch.float32)
+        if layout == "gemv":
+            weight = _dequantize_awq_gemv(qweight, buf["qzeros"], scales, bits, group_size)
+        elif layout == "gemv_fast":
+            weight = _dequantize_awq_gemv_fast(
+                qweight, buf[zeros_key], scales, bits, group_size
+            )
+        else:
+            weight = _dequantize_awq_gemm(qweight, buf["qzeros"], scales, bits)
 
-        num_groups = scales.shape[0]
-        group_size = unpacked_weight.shape[0] // num_groups
-        scales_full = scales.to(torch.float32).repeat_interleave(group_size, dim=0)
-        zeros_full = unpacked_zeros.repeat_interleave(group_size, dim=0)
-
-        weight = (unpacked_weight - zeros_full) * scales_full
         tensors[prefix + ".weight"] = finalize_for_save(
-            weight.to(target_dtype).t().contiguous(),
+            weight.to(target_dtype).contiguous(),
             target_dtype,
         )
-        LOG.debug("Dequantized AWQ module '%s' to dtype %s", prefix, target_dtype)
+        LOG.debug(
+            "Dequantized AWQ module '%s' (%s layout, bits=%s) to dtype %s",
+            prefix,
+            layout,
+            bits,
+            target_dtype,
+        )
         if prefix + ".bias" in tensors:
             tensors[prefix + ".bias"] = finalize_for_save(tensors[prefix + ".bias"], target_dtype)
 
@@ -1635,7 +1829,7 @@ def convert_gptq_file(
         scales = buf["scales"]
         g_idx = buf["g_idx"].to(torch.long)
 
-        bits = config.get("bits", 4)
+        bits = _gptq_module_int(config, prefix, "bits", quant_bits_width(config.get("bits", 4)))
         format_value = str(
             config.get("checkpoint_format") or config.get("format") or ""
         ).strip().lower()
@@ -1747,8 +1941,13 @@ def copy_aux_files(
     *,
     dirs_exist_ok: bool = False,
 ) -> None:
+    skipped_dirs = {".cache", ".git", "__pycache__"}
     for item in model_path.iterdir():
         if item.name in skip:
+            continue
+        # Local snapshots can carry hub/VCS caches that are not model files and
+        # may be read-only; they are never part of the exported checkpoint.
+        if item.is_dir() and item.name in skipped_dirs:
             continue
         target = output_path / item.name
         if item.is_dir():
@@ -1764,6 +1963,7 @@ def dequantize_model(
     target_dtype: torch.dtype = torch.bfloat16,
     device: Optional[str] = None,
     resume: bool = False,
+    trust_remote_code: bool = False,
 ) -> None:
     model_path = Path(model_path)
     output_path = Path(output_path)
@@ -1774,6 +1974,16 @@ def dequantize_model(
 
     config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
+    # Legacy GPTQModel checkpoints persist the quantization payload only in
+    # quantize_config.json. Fill in whichever fields config.json lacks so the
+    # converter sees bits/format/dynamic instead of silently using defaults.
+    legacy_quant_cfg = load_json(model_path / "quantize_config.json")
+    if legacy_quant_cfg:
+        if not quant_cfg:
+            quant_cfg = legacy_quant_cfg
+        else:
+            quant_cfg = {**legacy_quant_cfg, **quant_cfg}
+        config["quantization_config"] = quant_cfg
     fmt = detect_format(model_path, config)
 
     files, index = list_safetensor_files(model_path)
@@ -1789,7 +1999,9 @@ def dequantize_model(
 
     ignored_layers = resolve_ignored_layers(config)
     block_shape = resolve_block_size(config) if fmt in {"fp8", "nvfp8"} else None
-    fp8_scale_semantics = str(quant_cfg.get("weight_scale_semantics") or "heuristic").strip().lower()
+    fp8_scale_semantics = str(
+        quant_cfg.get("weight_scale_semantics") or "multiplier"
+    ).strip().lower()
 
     if block_shape is not None:
         LOG.debug("Configured FP8 block size %s found in quantization_config", block_shape)
@@ -1804,7 +2016,7 @@ def dequantize_model(
                 "compressed-tensors model requires a populated 'quantization_config' entry."
             )
         _, compressed_module_to_scheme, compressed_compressor = _prepare_compressed_tensors_context(
-            model_path, quant_cfg
+            model_path, quant_cfg, trust_remote_code=trust_remote_code
         )
         LOG.debug(
             "Prepared compressed-tensors context with %d modules",
@@ -1892,6 +2104,7 @@ def dequantize_model(
                     path,
                     target_dtype,
                     open_device,
+                    config=quant_cfg,
                     ignored_layers=ignored_layers,
                 )
             elif fmt == "gptq":

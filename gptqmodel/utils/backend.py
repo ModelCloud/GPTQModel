@@ -39,7 +39,7 @@ class BACKEND(str, Enum):
     # Marlin kernels
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
-    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by KernelConfig.marlin_fp32
 
     # Machete kernels
     # A single backend covers both Machete sub-kernels. The quantization method
@@ -82,6 +82,10 @@ class BACKEND(str, Enum):
 
     # NF12 (NyoomFloat12) lossless 12-bit BF16 weights
     NF12 = "nf12"
+
+    # MACaQ MXFP4 kernels
+    MACAQ_TORCH = "macaq_torch"
+    MACAQ_TRITON = "macaq_triton"
 
     # GGUF kernels / engines
     GGUF_TORCH = "gguf_torch"
@@ -166,6 +170,23 @@ _LEGACY_BACKEND_BY_METHOD = {
     "nf12": {
         BACKEND.TORCH: BACKEND.NF12,
     },
+    "macaq": {
+        BACKEND.TORCH: BACKEND.MACAQ_TORCH,
+        BACKEND.TRITON: BACKEND.MACAQ_TRITON,
+    },
+    "qqq": {
+        BACKEND.TORCH: BACKEND.QQQ_TORCH,
+    },
+    # GGUF owns four engines, so the generic aliases must name the matching
+    # engine explicitly. They cannot reach the GPTQ-only ``TorchLinear``:
+    # ``get_kernel_for_backend`` filters candidates by ``SUPPORTS_METHODS``.
+    "gguf": {
+        BACKEND.TORCH: BACKEND.GGUF_TORCH,
+        BACKEND.TRITON: BACKEND.GGUF_TRITON,
+    },
+    "bitsandbytes": {
+        BACKEND.TORCH: BACKEND.BITSANDBYTES,
+    },
 }
 
 # Method-qualified Marlin/Machete/Swordfish/AllSpark names from older releases.
@@ -201,6 +222,11 @@ def normalize_backend(
     *,
     quant_method: Optional[Union[str, Any]] = None,
 ) -> Optional[BACKEND]:
+    # Imported lazily: configs depend on the enum and normalization rules.
+    from .backend_config import BackendConfig
+
+    if isinstance(backend, BackendConfig):
+        backend = backend.backend
     if backend is None:
         return None
 
@@ -253,6 +279,22 @@ def awq_gemm_pack_backend(
     if weight_only or is_rocm or device_type != "cuda":
         return BACKEND.AWQ_TORCH
     return BACKEND.AWQ_GEMM
+
+
+def awq_gemv_pack_backend(*, is_rocm: bool) -> BACKEND:
+    """Return the AWQ GEMV backend used to pack quantized weights.
+
+    The native AWQ GEMV extension (``gemv_forward``/``gemmv2_forward``) is
+    CUDA-only: its sources include ``cuda_fp16.h`` and CUDA-only inline asm, and
+    its hipified warp-sync reduction rejects wave32.  ``AWQ_GEMV_TRITON`` reads
+    the identical packed GEMV layout with a portable Triton kernel, so ROCm
+    packs with that kernel instead of selecting a CUDA-only class.
+
+    Args:
+        is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
+    """
+
+    return BACKEND.AWQ_GEMV_TRITON if is_rocm else BACKEND.AWQ_GEMV
 
 
 def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:

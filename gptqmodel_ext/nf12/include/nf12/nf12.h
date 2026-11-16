@@ -26,7 +26,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef NF12_HIP
+/* ROCm build: the torch extension is backend-agnostic (it calls this API), so
+ * provide the CUDA spellings the shared C++ layer uses as HIP aliases. This is
+ * a type alias, not a second implementation. */
+#include <hip/hip_runtime_api.h>
+typedef hipStream_t cudaStream_t;
+typedef hipError_t cudaError_t;
+#define cudaSuccess hipSuccess
+#define cudaErrorNotSupported hipErrorNotSupported
+#define cudaGetErrorString hipGetErrorString
+#define cudaMemcpyAsync hipMemcpyAsync
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaStreamSynchronize hipStreamSynchronize
+#else
 #include <cuda_runtime_api.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

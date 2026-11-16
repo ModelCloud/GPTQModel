@@ -376,6 +376,10 @@ def test_shell_materialize_forward_defers_fp8_quant_source_until_quantization(tm
     assert quant_source.weight.device.type == "cpu"
     assert quant_source.weight.dtype == torch.bfloat16
     torch.testing.assert_close(quant_source.weight, expected)
+    # The native forward wrapper and the dense quant source decode the same
+    # checkpoint tensor, so they must not disagree about the scale semantics.
+    forward_weight = prepared.dequantize_weight(device="cpu", dtype=torch.float32).T
+    torch.testing.assert_close(forward_weight, expected.float(), rtol=1e-2, atol=1e-8)
     assert harness.auto_module_decoder_events[0]["forward_mode"] == "native"
     assert harness.auto_module_decoder_events[0]["deferred_quant_source_decode"] is True
     assert {record["event"] for record in get_device_telemetry_records()} == {
@@ -383,6 +387,107 @@ def test_shell_materialize_forward_defers_fp8_quant_source_until_quantization(tm
         "floatx_native_forward_used",
         "floatx_deferred_quant_source_decode",
     }
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+@pytest.mark.parametrize(
+    ("semantics", "scale_inv_value"),
+    [("multiplier", 0.01), ("inverse", 100.0)],
+    ids=["deepseek_multiplier", "native_inverse"],
+)
+def test_fp8_forward_and_quant_source_share_the_declared_scale_semantics(
+    tmp_path, semantics, scale_inv_value
+):
+    """Both FP8 decode paths must apply one resolved checkpoint convention.
+
+    HF/DeepSeek checkpoints multiply ``weight_scale_inv``; a native GPT-QModel
+    inverse scale divides. Reading the two paths independently made them differ
+    by 10^4 for the same tensor.
+    """
+
+    model_dir = tmp_path / f"fp8_{semantics}"
+    model_dir.mkdir()
+
+    torch.manual_seed(7)
+    weight_fp8 = (torch.randn(8, 16) * 0.02).to(torch.float8_e4m3fn)
+    scale_inv = torch.full((8,), scale_inv_value, dtype=torch.float32)
+    shard_name = "model.safetensors"
+    save_file(
+        {"linear.weight": weight_fp8, "linear.weight_scale_inv": scale_inv},
+        str(model_dir / shard_name),
+    )
+    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv"])
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(
+            _experts_implementation=None,
+            quantization_config={
+                "quant_method": "fp8",
+                "format": "float8_e4m3fn",
+                "weight_scale_semantics": semantics,
+            },
+        ),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    shell_model = _LinearWrapper(16, 8).eval()
+    shell_model.linear.weight = nn.Parameter(
+        torch.empty_like(shell_model.linear.weight, device="meta"),
+        requires_grad=False,
+    )
+
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = shell_model
+    harness.turtle_model = turtle
+    harness._turtle_lock = threading.RLock()
+    harness.auto_module_decoder_events = []
+
+    checkpoint_tensors = turtle.checkpoint_tensors_for_submodule(
+        target_model=shell_model,
+        target_submodule=shell_model.linear,
+        recurse=False,
+    )
+    forward_module = base_module.BaseQModel._build_fp8_forward_module(
+        harness,
+        target_submodule=shell_model.linear,
+        checkpoint_tensors=checkpoint_tensors,
+        device=torch.device("cpu"),
+        target_dtype=torch.bfloat16,
+    )
+    quant_source = base_module.BaseQModel._build_decoder_quant_source_module(
+        harness,
+        shell_model.linear,
+        checkpoint_tensors=checkpoint_tensors,
+        target_dtype=torch.bfloat16,
+        module_name="linear",
+    )
+
+    assert isinstance(forward_module, TorchFP8Linear)
+    assert forward_module.weight_scale_semantics == semantics
+    # Independent FP64 oracle: no call into either decode path.
+    source = weight_fp8.double()
+    if semantics == "multiplier":
+        expected = source * scale_inv.double()[:, None]
+    else:
+        expected = source / scale_inv.double()[:, None]
+
+    forward_weight = forward_module.dequantize_weight(device="cpu", dtype=torch.float32).T
+    torch.testing.assert_close(forward_weight.double(), expected, rtol=1e-6, atol=0)
+    torch.testing.assert_close(
+        quant_source.weight.double(),
+        expected,
+        rtol=1e-2,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        forward_weight.double(),
+        quant_source.weight.double(),
+        rtol=1e-2,
+        atol=0,
+    )
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")

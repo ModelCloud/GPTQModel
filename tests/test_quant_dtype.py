@@ -222,12 +222,17 @@ def test_dequantize_f8_e4m3_basic_conversion():
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_dequantize_f8_e4m3_with_scale_inv():
+def test_dequantize_f8_e4m3_with_inverse_scale_semantics():
     src = torch.randn(4, 6, dtype=torch.float32)
     fp8 = src.to(torch.float8_e4m3fn)
     scale_inv = torch.arange(1, 5, dtype=torch.float32)
 
-    got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=0)
+    got = dequantize_f8_e4m3(
+        fp8,
+        scale_inv=scale_inv,
+        axis=0,
+        scale_semantics="inverse",
+    )
 
     expected = (fp8.to(torch.bfloat16) / scale_inv.view(-1, 1).to(torch.bfloat16)).to(torch.bfloat16)
     diff = torch.max(torch.abs(got - expected)).item()
@@ -299,7 +304,9 @@ def test_dequantize_f8_cpu_prefers_reference_for_standard_fp8(monkeypatch: pytes
     def fail_load():
         raise AssertionError("native FP8 kernel should be bypassed for standard torch FP8 dtypes")
 
-    monkeypatch.delenv("GPTQMODEL_FLOATX_CPU_FORCE_NATIVE_FP8", raising=False)
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    configure_kernel(KernelConfig(floatx_cpu_native_fp8=False))
     monkeypatch.setattr("gptqmodel.quantization.dtype._load_floatx_cpu_ops", fail_load)
 
     got = dequantize_f8_e4m3(
@@ -332,12 +339,14 @@ def test_device_dtype_support_reports_arch_mapping(monkeypatch):
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
 @pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
-def test_dequantize_f8_e4m3_disable_avx2_override_matches_reference(monkeypatch, target_dtype: torch.dtype):
+def test_dequantize_f8_e4m3_scalar_simd_matches_reference(monkeypatch, target_dtype: torch.dtype):
     src = torch.randn(32, 64, dtype=torch.float32)
     fp8 = src.to(torch.float8_e4m3fn)
     scale_inv = torch.rand(2, 4, dtype=torch.float32) * 0.5
 
-    monkeypatch.setenv("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2", "1")
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    configure_kernel(KernelConfig(floatx_cpu_simd_level=0))
     got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=None, target_dtype=target_dtype)
     expected = _dequantize_f8_reference(
         fp8,
@@ -480,13 +489,15 @@ def test_dequantize_f4_e2m1_matches_nvfp4tensor():
 
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
 @pytest.mark.parametrize("target_dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
-def test_dequantize_f4_e2m1_disable_avx2_override_matches_reference(monkeypatch, target_dtype: torch.dtype):
+def test_dequantize_f4_e2m1_scalar_simd_matches_reference(monkeypatch, target_dtype: torch.dtype):
     torch.manual_seed(4)
     data = torch.randn(32, 64, dtype=torch.float32)
     scales, packed = nvfp4_quantize(data, block_size=16)
     packed_float4 = packed.view(torch.float4_e2m1fn_x2) if hasattr(torch, "float4_e2m1fn_x2") else packed
 
-    monkeypatch.setenv("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2", "1")
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    configure_kernel(KernelConfig(floatx_cpu_simd_level=0))
     got = dequantize_f4_e2m1(packed_float4, scale=scales, axis=None, target_dtype=target_dtype)
     expected = _dequantize_f4_reference(
         packed,

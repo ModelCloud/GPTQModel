@@ -222,7 +222,7 @@ stages = [
         name="balance",
         rules=[
             Rule(
-                match=".*self_attn$",
+                match=r".*self_attn\.q_proj$",
                 actions=[smoothquant(alpha=0.5)],
             ),
         ],
@@ -248,7 +248,7 @@ YAML:
 stages:
   - name: balance
     rules:
-      - match: ".*self_attn$"
+      - match: '.*self_attn\.q_proj$'
         actions:
           - method: smoothquant
             alpha: 0.5
@@ -375,9 +375,9 @@ If the action naturally operates on the matched object, omit `aliases`.
 
 Examples:
 
-- `smoothquant(alpha=0.5)`
-- `awq_balance(ratio=0.7)`
-- `calibrate_router(...)`
+- `smoothquant(alpha=0.5)` — implemented
+- `awq_balance(ratio=0.7)` — not implemented yet
+- `calibrate_router(...)` — not implemented yet
 
 Default behavior:
 
@@ -396,6 +396,106 @@ This keeps placement clear:
 - SmoothQuant or AWQ-like balancing: `actions`
 - local weight clip / pad / smoother: `weight.prepare`
 
+### Shipped behavior
+
+Action methods are resolved through `ACTION_REGISTRY` in
+`gptqmodel/quantization/protocol.py`. `smoothquant` is the only registered
+method today; build it with the `smoothquant(alpha)` helper. `awq_balance`,
+`calibrate_router`, and any other method raise `NotImplementedError` with the
+known-method list, both at config-compilation time and at execution time.
+
+One plan carries both steps: an action stage that folds norms, and the weight
+stage that supplies the quantizer configuration. `compile_and_apply_plan` runs
+both and returns the config plus an `ActionReport`:
+
+```python
+from gptqmodel.quantization.protocol import (
+    ExecutionPlan,
+    QuantizeSpec,
+    Rule,
+    Stage,
+    TargetSpec,
+    compile_and_apply_plan,
+    smoothquant,
+)
+
+plan = ExecutionPlan(
+    version=2,
+    stages=(
+        Stage(name="balance", rules=(Rule(match=r".*self_attn\.q_proj$", actions=(smoothquant(0.5),)),)),
+        Stage(
+            name="ptq",
+            rules=(
+                Rule(
+                    match="*",
+                    weight=TargetSpec(quantize=QuantizeSpec(method="gptq", args={"bits": 4})),
+                ),
+            ),
+        ),
+    ),
+)
+
+config, report = compile_and_apply_plan(model, plan, calibration=lambda: model(input_ids))
+```
+
+`compile_plan_to_quantize_config(plan)` on the same plan returns the
+`GPTQConfig` and validates every action's method and arguments; it never
+executes one. `apply_plan_actions(model, plan, calibration=...)` runs the action
+stage alone. Both accept multi-stage plans as long as exactly one rule carries a
+`weight` target, and its weight target still requires a global match (`"*"` or
+`["*", "-:..."]`).
+
+`calibration` must run one or more forward passes through the model root.
+`smoothquant(alpha)` derives a per-channel scale from those activations, folds
+its inverse into the preceding norm, and multiplies every consumer of that norm
+output by the same scale.
+
+### Resolution and verification
+
+`smoothquant` resolves the fold from the first calibration pass:
+
+- A norm output is matched to a consumer by **tensor identity** through a weak
+  reference, not by a raw address. The allocator reuses freed addresses, so an
+  address match also fired for unrelated layers; a weak reference dereferences
+  to `None` once the tensor is gone, so a recycled address can never match.
+- Every consumer of the folded norm output must be a module with a 2-D weight.
+  One that is not raises, because the fold would change its input and it cannot
+  be rescaled.
+- A consumer whose weight is shared with a module that does not consume the same
+  norm output (a tied `lm_head` / `embed_tokens`) raises, because scaling one
+  would silently change the other.
+- The fold is then **verified numerically**: the captured calibration call is
+  replayed and the output must match the pre-fold output within
+  `1e-3 + 8 * eps(dtype) * max|logits|`. Anything larger - a functional residual,
+  a fused expert parameter, a consumer the resolver cannot see - rolls the fold
+  back and raises.
+
+A broad match such as `match="*"` also matches containers (`ModuleList`,
+`Qwen2DecoderLayer`, ...). Those are skipped and recorded in
+`ActionReport.skipped`; a rule that resolves no foldable `norm -> linear` pair
+raises instead. Matching the parent attention block alone therefore fails closed;
+match the linear that consumes the norm.
+
+Every rule's action methods, arguments, and matches are resolved before the first
+handler runs, and a handler that fails rolls back every earlier rule, so a plan
+is never partly applied. See [Protocol actions](protocol-actions.md) for the
+diagrams, the failure contract, and the v1 scope limits.
+
+### Quality note
+
+SmoothQuant is an activation-balancing transform, not a quality improvement for
+weight-only quantization. On Wikitext-2 with Qwen2.5-0.5B, rule
+`q_proj|gate_proj`, `alpha=0.5`, fp16 (the unquantized baseline is 18.548 with and
+without SmoothQuant, as the fold preserves the function):
+
+| | without SmoothQuant | with SmoothQuant |
+| --- | --- | --- |
+| GPTQ 4-bit | 20.92 | 21.31 |
+| RTN 4-bit | 24.82 | 25.96 |
+| AWQ 4-bit | 24.01 | 23.69 |
+
+Weight-only perplexity gets slightly worse, which is expected: the benefit of
+SmoothQuant appears when activations are also quantized.
 
 ## Tensor Targets
 
@@ -601,6 +701,15 @@ Recommended threshold semantics:
 - percent string such as `"0.5%"`: minimum observed coverage relative to expected calibration traffic
 - `true`: enable quantizer default threshold
 - `false` or `null`: disable fallback
+
+Disabling the threshold fallback does not disable the GPTQ-family safety
+guards. A module that received zero calibration rows is always quantized with
+the data-independent RTN grid (`GPTQ._quantize_impl` zero-sample guard), and a
+non-invertible Hessian always uses the shared
+`GPTQ._rtn_fallback_after_hessian_failure` path. Those are structural
+conditions, not threshold decisions: without the guard a zero Hessian makes
+`_neutralize_dead_columns` zero the entire weight. Both paths log a WARN that
+names the module. See [Quantizer calibration flows](quantizer-moe.md#4-hessian-failure-and-zero-sample-fallback-chain).
 
 Initial runtime contract:
 
@@ -1206,7 +1315,7 @@ Within a stage, recommended engine order is:
 1. evaluate rules in order
 2. resolve matches
 3. resolve optional aliases
-4. run rule `actions`
+4. run rule `actions` (shipped as `apply_plan_actions`, a separate stage from config compilation)
 5. run target `prepare`
 6. collect calibration / replay data required by quantizers
 7. run target `quantize`
@@ -1214,6 +1323,13 @@ Within a stage, recommended engine order is:
 9. emit stage outputs
 
 Stage order then defines the full pipeline order.
+
+In the shipped implementation, `apply_plan_actions` resolves every rule's
+matches and actions before running any of them (steps 2-4; aliases remain
+unsupported), and rolls every applied action back if a later one fails. The
+quantization pipeline performs steps 5-9. `compile_plan_to_quantize_config`
+performs the config-compilation part of the plan's single weight target and
+validates action methods and arguments without executing them.
 
 
 ## How Rule Actions And Target Config Work Together
@@ -1224,7 +1340,7 @@ Python:
 
 ```python
 Rule(
-    match=".*self_attn$",
+    match=r".*self_attn\.q_proj$",
     actions=[smoothquant(alpha=0.5)],
 )
 
@@ -1249,7 +1365,7 @@ Rule(
 YAML:
 
 ```yaml
-- match: ".*self_attn$"
+- match: '.*self_attn\.q_proj$'
   actions:
     - method: smoothquant
       alpha: 0.5
@@ -1373,7 +1489,7 @@ Python:
 
 ```python
 Rule(
-    match=".*self_attn$",
+    match=r".*self_attn\.q_proj$",
     actions=[smoothquant(alpha=0.5)],
 )
 ```
@@ -1381,7 +1497,7 @@ Rule(
 YAML:
 
 ```yaml
-match: ".*self_attn$"
+match: '.*self_attn\.q_proj$'
 actions:
   - method: smoothquant
     alpha: 0.5
@@ -1802,7 +1918,7 @@ stages = [
         name="ptq",
         rules=[
             Rule(
-                match=".*self_attn$",
+                match=r".*self_attn\.q_proj$",
                 actions=[smoothquant(alpha=0.5)],
             ),
             Rule(
@@ -1848,7 +1964,7 @@ version: 2
 stages:
   - name: ptq
     rules:
-      - match: ".*self_attn$"
+      - match: '.*self_attn\.q_proj$'
         actions:
           - method: smoothquant
             alpha: 0.5

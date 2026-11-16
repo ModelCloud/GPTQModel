@@ -14,6 +14,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
 from gptqmodel.quantization.config import QuantizeEmbed, QuantizeEmbedConfig, RTNConfig, VramStrategy
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
 
 class _FakeProgress:
@@ -238,6 +239,17 @@ def test_weight_only_extension_resumes_at_quiescent_boundary(monkeypatch, cursor
     assert processor.quantized == [f"layers.{index}.linear" for index in range(cursor, 2)]
     assert processor.finalize_called
     assert model.model.config.use_cache
+
+
+def test_weight_only_looper_unset_policy_resets_previous_run():
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    previous = get_kernel_config()
+    try:
+        configure_kernel(KernelConfig(marlin_fp32=False, max_packers=2))
+        WeightOnlyLooper(model=_FakeQModel(qcfg), processor=_FakeProcessor(qcfg))
+        assert get_kernel_config().to_dict() == KernelConfig().to_dict()
+    finally:
+        configure_kernel(previous)
 
 
 def test_weight_only_looper_reports_logbar_progress(monkeypatch):
@@ -682,3 +694,96 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
         ("layers.0.mlp.experts.1.up_proj", torch.device("cuda:2")),
         ("layers.0.mlp.shared_expert.down_proj", torch.device("cuda:0")),
     ]
+
+
+class _RecordingFuture:
+    """A future that records whether its worker result was consumed."""
+
+    def __init__(self, fn, args):
+        self._fn = fn
+        self._args = args
+        self.resolved = False
+
+    def result(self):
+        self.resolved = True
+        return self._fn(*self._args)
+
+
+def _named_linear(name: str) -> NamedModule:
+    return NamedModule(
+        nn.Linear(4, 4, bias=False),
+        name=name,
+        full_name=f"layers.0.{name}",
+        layer_index=0,
+    )
+
+
+def test_weight_only_quantize_subset_drains_workers_after_a_failure(monkeypatch):
+    looper = WeightOnlyLooper.__new__(WeightOnlyLooper)
+    looper._quant_devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    looper._assign_quant_device_for_module = lambda named, fallback: torch.device("cpu")
+
+    named = [_named_linear("linear_a"), _named_linear("linear_b")]
+    futures = []
+
+    def fake_submit(device, fn, *args, **kwargs):
+        del device, kwargs
+        future = _RecordingFuture(fn, args)
+        futures.append(future)
+        return future
+
+    def fake_quantize(module, device):
+        del device
+        if module.name == "linear_a":
+            raise RuntimeError("quantize failed")
+        return module, SimpleNamespace(device="cpu")
+
+    looper._quantize_named_module = fake_quantize
+    monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
+    monkeypatch.setattr(
+        weight_only_looper_module, "as_completed", list
+    )
+
+    with pytest.raises(RuntimeError, match="quantize failed"):
+        looper._quantize_subset_modules(named)
+
+    assert len(futures) == 2
+    assert all(future.resolved for future in futures)
+
+
+def test_weight_only_finalize_subset_drains_workers_after_a_failure(monkeypatch):
+    looper = WeightOnlyLooper.__new__(WeightOnlyLooper)
+    looper._quant_devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    looper.processor = SimpleNamespace(name=lambda: "fake_weight_only")
+
+    named = [_named_linear("linear_a"), _named_linear("linear_b")]
+    modules = [
+        (named[0], SimpleNamespace(device="cuda:0")),
+        (named[1], SimpleNamespace(device="cuda:1")),
+    ]
+    futures = []
+
+    def fake_submit(device, fn, *args, **kwargs):
+        del device, kwargs
+        future = _RecordingFuture(fn, args)
+        futures.append(future)
+        return future
+
+    def fake_finalize(module, active_qcfg):
+        del active_qcfg
+        if module.name == "linear_a":
+            raise RuntimeError("finalize failed")
+        return module.full_name
+
+    looper._finalize_quantized_module = fake_finalize
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+    monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
+    monkeypatch.setattr(
+        weight_only_looper_module, "as_completed", list
+    )
+
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        looper._finalize_subset_modules(modules)
+
+    assert len(futures) == 2
+    assert all(future.resolved for future in futures)

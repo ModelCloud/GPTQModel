@@ -11,7 +11,6 @@ import queue
 import sys
 import threading
 import time
-import traceback
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -247,13 +246,39 @@ class _RWLock:
             self.release_read()
 
 
+def _dedupe_lock_pairs(ordered_pairs: List[tuple[str, "_RWLock"]]) -> List[tuple[str, "_RWLock"]]:
+    """Collapse pairs that name the same lock object, keeping first-seen order.
+
+    A virtual pool key shares its parent's ``_RWLock`` (``self._locks[alias] is
+    self._locks[parent]``) while the family map lists both keys. A family or
+    "all" scope therefore contains the same lock more than once, and acquiring
+    it twice is a deadlock: ``_RWLock.acquire_read`` blocks new readers while a
+    writer waits, so the second acquisition waits for a writer that is itself
+    waiting for the reader's first acquisition to be released.
+    """
+
+    seen: set[int] = set()
+    deduped: List[tuple[str, "_RWLock"]] = []
+    for name, lock in ordered_pairs:
+        identity = id(lock)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append((name, lock))
+    return deduped
+
+
 class _LockGroup(contextlib.AbstractContextManager):
     """
     Acquire multiple device **write** locks in deterministic order to avoid deadlocks.
     Helpful for GC passes or any multi-device exclusive operation.
+
+    Pairs that name the same lock object are acquired once (see
+    :func:`_dedupe_lock_pairs`), so a virtual alias in the scope cannot make a
+    group acquire its parent's lock twice.
     """
     def __init__(self, ordered_pairs: List[tuple[str, _RWLock]]):
-        self._pairs = ordered_pairs
+        self._pairs = _dedupe_lock_pairs(ordered_pairs)
 
     def __enter__(self):
         for name, lk in self._pairs:
@@ -273,9 +298,14 @@ class _ReadLockGroup(contextlib.AbstractContextManager):
     """
     Acquire multiple device **read** locks in deterministic order.
     Useful for multi-device snapshots or read-only, consistent views.
+
+    Pairs that name the same lock object are acquired once (see
+    :func:`_dedupe_lock_pairs`). A shared virtual alias must not be read-locked
+    twice: the second acquisition would wait behind a queued writer while that
+    writer waits for the first acquisition to be released.
     """
     def __init__(self, ordered_pairs: List[tuple[str, _RWLock]]):
-        self._pairs = ordered_pairs
+        self._pairs = _dedupe_lock_pairs(ordered_pairs)
 
     def __enter__(self):
         for name, lk in self._pairs:
@@ -365,6 +395,25 @@ class _WorkerWarmupState:
 # executed under the device’s read lock; GC acquires the writer lock to keep
 # memory management steps from interleaving with tasks.
 
+def split_intraop_threads(worker_count: int, total: Optional[int] = None) -> int:
+    """Return the Torch intra-op pool size for one pool worker.
+
+    ``worker_count`` is the number of pool threads that can run parallel
+    regions concurrently; ``total`` is the process-wide intra-op budget
+    (defaults to ``torch.get_num_threads()``). Splitting the budget keeps the
+    sum of the workers' OpenMP teams within the process pool instead of
+    multiplying it by the worker count (issue #4356).
+
+    A minimum of one thread is always returned: when the pool has more workers
+    than the budget, each worker still needs a valid team.
+    """
+
+    if total is None:
+        total = torch.get_num_threads()
+    count = max(1, int(worker_count))
+    return max(1, int(total) // count)
+
+
 class _DeviceWorker:
     """
     Single worker thread bound to one device.
@@ -384,6 +433,7 @@ class _DeviceWorker:
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
         warmup_plan: Optional[Tuple[_WorkerWarmupState, ...]] = None,
+        intraop_threads: Optional[int] = None,
         *,
         key_override: Optional[str] = None,
     ):
@@ -392,6 +442,14 @@ class _DeviceWorker:
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
         self._pending_warmups = warmup_plan or ()
+        # Torch/OpenMP intra-op budget for work executed on this thread.
+        # ``None`` leaves the spawning thread's pool untouched.
+        self._intraop_threads = intraop_threads
+        # A worker thread exists as soon as the pool is built, but the CUDA
+        # context is created only when the worker first activates its device.
+        # Keeping activation lazy lets the pool skip devices whose warmup was
+        # not requested (see `DeviceThreadPool(warmup_devices=...)`).
+        self._device_activated = False
 
         if key_override is not None:
             self.key = key_override
@@ -433,6 +491,38 @@ class _DeviceWorker:
         if DEBUG_ON: log.debug(f"{self.name}: joining thread")
         self._thread.join()
 
+    def _apply_intraop_threads(self) -> None:
+        """Give this worker thread its own Torch intra-op pool size.
+
+        libgomp creates one OpenMP team per pthread that enters a parallel
+        region, sized from that thread's intra-op count. Without a per-worker
+        value every pool worker duplicates the spawning thread's full team:
+        the default pool on a 320-CPU host held 2622 OS threads (issue #4356).
+
+        ``torch.set_num_threads`` is thread-local for the intra-op pool, so the
+        caller's pool is unchanged (see ``pytorch_gil_0_compat.md``). This runs
+        before the worker's first Torch call, including its warmup, because the
+        team is materialized on that first parallel region.
+        """
+
+        target = self._intraop_threads
+        if target is None or target <= 0:
+            return
+        try:
+            if torch.get_num_threads() == int(target):
+                return
+            torch.set_num_threads(int(target))
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn.once(
+                "Could not set intra-op threads to %s for %s (%s); the worker keeps the inherited pool.",
+                target,
+                self.name,
+                exc,
+            )
+            return
+        if DEBUG_ON:
+            log.debug(f"{self.name}: intra-op threads set to {target}")
+
     def _apply_cpu_affinity(self) -> None:
         if self._affinity_applied or self._target_cpu_core is None:
             return
@@ -473,6 +563,14 @@ class _DeviceWorker:
             warmup_state.run(device=self.device, rwlock=self.rwlock)
         self._pending_warmups = ()
 
+    def _ensure_device_activated(self) -> None:
+        """Activate this worker's device once, on first real work."""
+
+        if self._device_activated:
+            return
+        _activate_thread_device(self.device)
+        self._device_activated = True
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -483,20 +581,34 @@ class _DeviceWorker:
         may override via `inference_mode`.
         """
         self._apply_cpu_affinity()
-        _activate_thread_device(self.device)
-        while not self._stop.is_set():
+        self._apply_intraop_threads()
+        # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
+        # after every task the pool already accepted, so reaching the sentinel
+        # means the queue is drained and every accepted future is resolved.
+        # Breaking out as soon as `_stop` was set abandoned the queued work:
+        # its future stayed pending and its in-flight count never dropped.
+        while True:
             is_task, fn, args, kwargs, fut = self._q.get()
             try:
                 if not is_task:
-                    if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
+                    if DEBUG_ON: log.debug(f"{self.name}: sentinel received; queue drained, exiting")
                     break
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
                 try:
+                    self._ensure_device_activated()
                     self._run_warmup()
                 except BaseException as exc:
-                    self._abort_process(exc)
-                    return
+                    # Warmup runs on the worker thread before the task. Report
+                    # the failure through the pending future and keep the
+                    # worker alive so the caller can unwind normally; the
+                    # shared warmup state caches the error, so later tasks on
+                    # this worker fail with the same exception.
+                    self._on_task_finished(self.key)
+                    if not fut.cancelled():
+                        fut.set_exception(exc)
+                    if DEBUG_ON: log.debug(f"{self.name}: warmup exception: {exc!r}")
+                    continue
 
                 event = kwargs.pop("cuda_event", None)
                 override_inference = _pop_public_kwarg(
@@ -523,27 +635,19 @@ class _DeviceWorker:
                 if not fut.cancelled():
                     fut.set_exception(exc)
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
-                self._abort_process(exc)
             finally:
                 self._q.task_done()
+                # A worker frame outlives the task it just ran. Without this
+                # the last task's callable, arguments, result and future stay
+                # bound here until another task arrives; after `quantize()`
+                # none does, so the last data-parallel layer replica stays
+                # resident on every GPU for the life of the process. Dropping
+                # them here is a reference-count change only (no sync point).
+                fn = args = kwargs = fut = result = None
         try:
             self._on_worker_exit(self.key, self)
         finally:
             if DEBUG_ON: log.debug(f"{self.name}: exited")
-
-    def _abort_process(self, exc: BaseException) -> None:
-        """Dump the stack trace and terminate the interpreter without cleanup."""
-        try:
-            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
-            sys.stderr.flush()
-        except Exception:
-            pass
-        try:
-            os._exit(1)
-        except Exception:
-            # Last resort if os._exit is unavailable for some reason.
-            os.system("kill -9 %d" % os.getpid())
-
 
 class _SyncWorker:
     """Fallback worker that executes tasks synchronously when threads are unsafe."""
@@ -629,8 +733,10 @@ class DeviceThreadPool:
         include_cpu: bool = True,
         inference_mode: bool = False,
         warmups: Optional[Dict[str, WarmupTask]] = None,
+        warmup_devices: Optional[Iterable[DeviceLike]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
+        intraop_threads_per_worker: Optional[int] = None,
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
         gc_min_interval_seconds: float = 0.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
@@ -651,6 +757,13 @@ class DeviceThreadPool:
                 - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
                   (CUDA/NPU parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
+            intraop_threads_per_worker: Torch intra-op pool size applied to
+                every worker thread before it runs its first task or warmup.
+                ``None`` splits ``torch.get_num_threads()`` across this pool's
+                workers, so each worker owns a bounded OpenMP team instead of
+                duplicating the process-wide team; ``0`` keeps the pool
+                inherited from the spawning thread. See
+                `docs/device-thread-pool-intraop-budget.md`.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
             warmups: optional mapping from device family (e.g. 'cuda') to a
                 `WarmupTask`. Each warmup callable receives `(device, ctx)`,
@@ -659,6 +772,11 @@ class DeviceThreadPool:
                 physical device with `ctx=DEVICE`, then once per worker thread
                 with `ctx=THREAD`. A special key 'default' applies when no
                 family-specific warmup is found.
+            warmup_devices: optional device allow-list for the eager warmup
+                kicked at construction. Devices not listed still get worker
+                threads and can receive work, but their CUDA/XPU/NPU context is
+                not created and their warmup is deferred until the first task.
+                None warms every discovered accelerator (historical behavior).
             gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
@@ -691,7 +809,10 @@ class DeviceThreadPool:
         # Worker groups and RR dispatch bookkeeping.
         self._worker_groups: Dict[str, List[_DeviceWorker]] = {}
         self._dispatch_rr: Dict[str, int] = {}
-        self._dispatch_lock = threading.Lock()
+        # Reentrant: shutdown() issues worker stops while holding it, and a
+        # worker whose stop() re-enters _on_worker_exit (the _SyncWorker
+        # fallback does) would otherwise self-deadlock.
+        self._dispatch_lock = threading.RLock()
         self._serial_workers: Dict[str, _DeviceWorker] = {}
 
         # Stats / GC / inflight control
@@ -732,7 +853,19 @@ class DeviceThreadPool:
         self._device_smi_failures: Set[str] = set()
 
         self._inference_mode = bool(inference_mode)
+        # ``None`` asks for the process intra-op budget to be split across this
+        # pool's workers (resolved once the worker table is known); ``0`` keeps
+        # the spawning thread's pool on every worker.
+        self._intraop_threads_request = (
+            None if intraop_threads_per_worker is None else int(intraop_threads_per_worker)
+        )
+        self._intraop_threads_per_worker: Optional[int] = (
+            self._intraop_threads_request if (self._intraop_threads_request or 0) > 0 else None
+        )
         self._worker_warmups = self._normalize_worker_warmups(warmups)
+        self._warmup_device_keys: Optional[Set[str]] = None
+        if warmup_devices is not None:
+            self._warmup_device_keys = {self._key(_coerce_device(device)) for device in warmup_devices}
         self._device_warmup_lock = threading.Lock()
         self._device_warmup_states: Dict[str, _WorkerWarmupState] = {}
 
@@ -770,6 +903,21 @@ class DeviceThreadPool:
             pin_cpu_workers=pin_cpu_workers,
             pin_accelerator_workers=pin_accelerator_workers,
         )
+
+        if self._intraop_threads_request is None:
+            pool_workers = 0
+            seen_devices: Set[str] = set()
+            for raw_dev in devices:
+                dev = _coerce_device(raw_dev)
+                if dev.type not in ("cuda", "xpu", "npu", "mps", "cpu"):
+                    continue
+                key = self._key(dev)
+                if key in seen_devices:
+                    continue
+                seen_devices.add(key)
+                pool_workers += int(max(1, self._resolve_workers_for_device(dev, base_workers)))
+            pool_workers += sum(int(max(1, count)) for _, count in virtual_workers.values())
+            self._intraop_threads_per_worker = split_intraop_threads(max(1, pool_workers))
 
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
@@ -909,6 +1057,8 @@ class DeviceThreadPool:
             return
         for key in self._ordered_keys:
             if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
+                continue
+            if self._warmup_device_keys is not None and key not in self._warmup_device_keys:
                 continue
             for worker in self._worker_groups.get(key, ()):
                 # The no-op runs through the worker's normal completion path,
@@ -1090,6 +1240,7 @@ class DeviceThreadPool:
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
             warmup_plan=warmup_plan,
+            intraop_threads=self._intraop_threads_per_worker,
             key_override=key,
         )
         return w
@@ -1127,19 +1278,25 @@ class DeviceThreadPool:
         """
         key = self._resolve_device_key(device)
         dev = self._devices_by_key[key]
-        worker = self._pick_worker(key)
         if cuda_event is not None and dev.type != "cuda":
             raise ValueError("cuda_event is only valid for CUDA devices")
 
         if DEBUG_ON: log.debug(f"submit: device={key} fn={getattr(fn, '__name__', repr(fn))}")
-        # Mark in-flight before enqueue to avoid races with wait().
-        self._mark_scheduled(key)
-        try:
-            return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
-        except BaseException:
-            # Roll back inflight if enqueue fails (rare)
-            self._mark_finished(key)
-            raise
+        # Acceptance check, worker selection and enqueue all happen under the
+        # lock shutdown() takes to set `_stop_event` and queue its sentinels.
+        # A task is therefore either enqueued ahead of every sentinel (and
+        # drained) or rejected -- never queued behind a sentinel and stranded.
+        # In-flight is marked before enqueue so a racing wait() cannot miss it.
+        with self._dispatch_lock:
+            self._require_accepting_locked()
+            worker = self._pick_worker_locked(key)
+            self._mark_scheduled(key)
+            try:
+                return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
+            except BaseException:
+                # Roll back inflight if enqueue fails (rare)
+                self._mark_finished(key)
+                raise
 
     def submit_serial(
         self,
@@ -1160,6 +1317,7 @@ class DeviceThreadPool:
             raise ValueError("cuda_event is only valid for CUDA devices")
 
         with self._dispatch_lock:
+            self._require_accepting_locked()
             group = self._worker_groups.get(key)
             if group is None:
                 group = []
@@ -1173,16 +1331,16 @@ class DeviceThreadPool:
             self._refresh_serial_worker_locked(key)
             worker = self._serial_workers.get(key)
 
-        if worker is None:
-            raise ValueError(f"No serial worker available for device '{key}'")
+            if worker is None:
+                raise ValueError(f"No serial worker available for device '{key}'")
 
-        if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
-        self._mark_scheduled(key)
-        try:
-            return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
-        except BaseException:
-            self._mark_finished(key)
-            raise
+            if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
+            self._mark_scheduled(key)
+            try:
+                return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
+            except BaseException:
+                self._mark_finished(key)
+                raise
 
     def do(
         self,
@@ -1206,24 +1364,28 @@ class DeviceThreadPool:
         IMPORTANT: We snapshot groups before stopping/joining to avoid mutating
         the lists while iterating (workers remove themselves on exit).
         """
-        self._stop_event.set()
-        self._gc_event.set()  # wake janitor if waiting
-
-        # Take stable snapshots under the dispatch lock.
+        # Set the stop event and queue every worker sentinel under the same lock
+        # submit() accepts work under, so submission and shutdown are atomic with
+        # respect to each other. A concurrent submit either completes first --
+        # leaving its task ahead of every sentinel, where the worker drains it --
+        # or observes `_stop_event` and is rejected. It can never be enqueued
+        # behind a sentinel, where nothing would run it.
         with self._dispatch_lock:
+            self._stop_event.set()
             group_snapshots: Dict[str, List[_DeviceWorker]] = {
                 key: list(group) for key, group in self._worker_groups.items()
             }
+            # Issue stop to every worker from the snapshots (no mutation hazards).
+            for snapshot in group_snapshots.values():
+                for w in snapshot:
+                    w.stop()
+
+        self._gc_event.set()  # wake janitor if waiting
 
         # Stop janitor first so it won't grab locks while workers wind down.
         if self._janitor is not None and wait:
             if DEBUG_ON: log.debug("Joining DP-Janitor thread…")
             self._janitor.join()
-
-        # Issue stop to every worker from the snapshots (no mutation hazards).
-        for key, snapshot in group_snapshots.items():
-            for w in snapshot:
-                w.stop()
 
         # Join everyone if requested.
         if wait:
@@ -1431,29 +1593,45 @@ class DeviceThreadPool:
         idx = "" if dev.index is None else f":{dev.index}"
         return f"{dev.type}{idx}"
 
-    def _pick_worker(self, key: str) -> _DeviceWorker:
+    def _require_accepting_locked(self) -> None:
+        """
+        Refuse new work once shutdown has started. Caller holds `_dispatch_lock`.
+
+        Without this a task accepted after `shutdown()` could be enqueued behind
+        a worker's sentinel, where nothing would ever run it: the caller's future
+        would stay pending forever.
+        """
+        if self._stop_event.is_set():
+            raise RuntimeError(
+                "DeviceThreadPool is shutting down; no new work is accepted. "
+                "Create a new pool to submit more tasks."
+            )
+
+    def _pick_worker_locked(self, key: str) -> "_DeviceWorker | _SyncWorker":
         """
         Round-robin selection across available workers for a device key.
         If no workers exist (should not happen under normal init), we
         spawn one lazily for robustness.
-        """
-        with self._dispatch_lock:
-            group = self._worker_groups.get(key)
-            if not group:
-                dev = self._devices_by_key[key]
-                w = self._spawn_worker(dev, key, name=f"DPWorker-{key}#0")
-                group = [w]
-                self._worker_groups[key] = group
-                self._dispatch_rr[key] = 0
-                self._refresh_serial_worker_locked(key)
-                return w
 
-            n = len(group)
-            idx = self._dispatch_rr[key] % n
-            w = group[idx]
-            self._dispatch_rr[key] = (idx + 1) % n
+        Caller must hold `_dispatch_lock`, so lazy spawning cannot start a
+        thread after `shutdown()` has snapshotted the worker groups.
+        """
+        group = self._worker_groups.get(key)
+        if not group:
+            dev = self._devices_by_key[key]
+            w = self._spawn_worker(dev, key, name=f"DPWorker-{key}#0")
+            group = [w]
+            self._worker_groups[key] = group
+            self._dispatch_rr[key] = 0
             self._refresh_serial_worker_locked(key)
             return w
+
+        n = len(group)
+        idx = self._dispatch_rr[key] % n
+        w = group[idx]
+        self._dispatch_rr[key] = (idx + 1) % n
+        self._refresh_serial_worker_locked(key)
+        return w
 
     def _refresh_serial_worker_locked(self, key: str) -> None:
         """

@@ -1102,7 +1102,7 @@ def test_torch_ops_jit_extension_merges_visible_capability_into_compile_override
     )
 
     state = {"ready": False}
-    compile_arch_lists = []
+    compile_calls = []
     runtime = type("RuntimeNamespace", (), {"kernel": object()})()
 
     monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
@@ -1114,15 +1114,23 @@ def test_torch_ops_jit_extension_merges_visible_capability_into_compile_override
     monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", lambda: [os.environ["TORCH_CUDA_ARCH_LIST"]])
 
     def fake_compile(**kwargs):
-        del kwargs
-        compile_arch_lists.append(os.environ["TORCH_CUDA_ARCH_LIST"])
+        compile_calls.append(kwargs)
         state["ready"] = True
         monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
 
     monkeypatch.setattr(cpp_module, "load", fake_compile)
 
     assert loader.load() is True
-    assert compile_arch_lists == ["8.9+PTX;8.0"]
+    arch_flags = [
+        flag
+        for flag in compile_calls[0]["extra_cuda_cflags"]
+        if flag.startswith("-gencode=")
+    ]
+    assert arch_flags == [
+        "-gencode=arch=compute_89,code=sm_89",
+        "-gencode=arch=compute_89,code=compute_89",
+        "-gencode=arch=compute_80,code=sm_80",
+    ]
     assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9+PTX"
 
 
@@ -1136,7 +1144,7 @@ def test_torch_ops_jit_extension_can_skip_visible_capability_merge_when_requeste
     )
 
     state = {"ready": False}
-    compile_arch_lists = []
+    compile_calls = []
     runtime = type("RuntimeNamespace", (), {"kernel": object()})()
 
     monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
@@ -1148,16 +1156,61 @@ def test_torch_ops_jit_extension_can_skip_visible_capability_merge_when_requeste
     monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", lambda: [os.environ["TORCH_CUDA_ARCH_LIST"]])
 
     def fake_compile(**kwargs):
-        del kwargs
-        compile_arch_lists.append(os.environ["TORCH_CUDA_ARCH_LIST"])
+        compile_calls.append(kwargs)
         state["ready"] = True
         monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
 
     monkeypatch.setattr(cpp_module, "load", fake_compile)
 
     assert loader.load() is True
-    assert compile_arch_lists == ["9.0a"]
+    assert not any(
+        flag.startswith("-gencode=")
+        for flag in compile_calls[0].get("extra_cuda_cflags", ())
+    )
     assert os.environ["TORCH_CUDA_ARCH_LIST"] == "9.0a"
+
+
+def test_extension_load_forwards_explicit_verbose(monkeypatch):
+    from gptqmodel import extension as extension_api
+
+    calls = {}
+
+    def fake_load_one(name, **kwargs):
+        calls["name"] = name
+        calls.update(kwargs)
+
+    monkeypatch.setattr(extension_api, "_load_one", fake_load_one)
+    monkeypatch.setattr(extension_api, "_resolve_requested_extensions", lambda name: ("pack_block_cpu",))
+
+    assert extension_api.load(name="pack_block_cpu", verbose=True) == {"pack_block_cpu": True}
+    assert calls == {"name": "pack_block_cpu", "use_cache": True, "verbose": True}
+
+
+def test_pack_block_verbose_does_not_mutate_the_environment(monkeypatch, tmp_path):
+    from gptqmodel import extension as extension_api
+
+    source = tmp_path / "pack_block.cpp"
+    source.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cpp_module, "_pack_block_source_path", lambda: source)
+    monkeypatch.setattr(cpp_module, "_PACK_BLOCK_EXTENSION", None)
+    monkeypatch.setattr(cpp_module, "_PACK_BLOCK_EXTENSION_INITIALISED", False)
+    monkeypatch.setattr(
+        cpp_module.torch, "ops", SimpleNamespace(gptqmodel=SimpleNamespace())
+    )
+    monkeypatch.delenv("GPTQMODEL_EXT_VERBOSE", raising=False)
+
+    calls = {}
+
+    def fake_load(name, **kwargs):
+        calls["name"] = name
+        calls["kwargs"] = kwargs
+        return {"pack_block_cpu": object()}
+
+    monkeypatch.setattr(extension_api, "load", fake_load)
+
+    assert cpp_module.load_pack_block_extension(verbose=True) is not None
+    assert calls == {"name": "pack_block_cpu", "kwargs": {"verbose": True}}
+    assert "GPTQMODEL_EXT_VERBOSE" not in os.environ
 
 
 def test_torch_ops_jit_extension_uses_original_compile_paths(monkeypatch, tmp_path):
@@ -1366,16 +1419,16 @@ def test_resolved_cuda_arch_flags_appends_visible_capability_missing_from_overri
     monkeypatch.setattr(cpp_module.torch.cuda, "get_device_capability", lambda device_index=0: (7, 5))
     monkeypatch.setattr(cpp_module.torch.cuda, "get_arch_list", lambda: ["sm_75", "sm_80", "sm_86"])
 
-    seen = {}
+    def fail_if_env_is_consulted(*args, **kwargs):
+        raise AssertionError("resolved_cuda_arch_flags must not mutate or re-read the environment")
 
-    def fake_get_cuda_arch_flags():
-        seen["arch_list"] = os.environ["TORCH_CUDA_ARCH_LIST"]
-        return [seen["arch_list"]]
+    monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", fail_if_env_is_consulted)
 
-    monkeypatch.setattr(cpp_module, "_get_cuda_arch_flags", fake_get_cuda_arch_flags)
-
-    assert cpp_module.resolved_cuda_arch_flags() == ["8.0;8.6;7.5"]
-    assert seen["arch_list"] == "8.0;8.6;7.5"
+    assert cpp_module.resolved_cuda_arch_flags() == [
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_86,code=sm_86",
+        "-gencode=arch=compute_75,code=sm_75",
+    ]
     assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.0 8.6"
 
 

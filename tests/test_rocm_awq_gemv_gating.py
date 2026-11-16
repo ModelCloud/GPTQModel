@@ -199,3 +199,65 @@ def test_triton_gemv_declares_rocm_and_native_stays_cuda_only():
     assert AwqGEMVTritonLinear.SUPPORTS_FORMATS[FORMAT.GEMV] == 0
     for cls, _format in NATIVE_AWQ_GEMV_KERNELS:
         assert DEVICE.ROCM not in cls.SUPPORTS_DEVICES, cls.__name__
+
+
+def test_awq_gemv_auto_backend_resolves_triton_on_rocm():
+    # The quantize path used to hardcode BACKEND.AWQ_GEMV, a CUDA-only class,
+    # so AUTO aborted before calibration on ROCm.
+    from gptqmodel.utils.backend import BACKEND, awq_gemv_pack_backend
+
+    assert awq_gemv_pack_backend(is_rocm=True) is BACKEND.AWQ_GEMV_TRITON
+    assert awq_gemv_pack_backend(is_rocm=False) is BACKEND.AWQ_GEMV
+
+
+def test_awq_gemv_auto_quantize_selects_triton_on_rocm(monkeypatch):
+    # Quantize resolves AUTO through awq_gemv_pack_backend() and then validates
+    # that backend. On ROCm the resolved kernel must be the portable Triton
+    # GEMV; the native AwqGEMVLinear is CUDA-only.
+    from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVTritonLinear
+    from gptqmodel.quantization import METHOD
+    from gptqmodel.utils.backend import awq_gemv_pack_backend
+    from gptqmodel.utils.importer import select_quant_linear
+
+    monkeypatch.setattr("gptqmodel.models._const.IS_ROCM", True)
+    backend = awq_gemv_pack_backend(is_rocm=True)
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.ROCM,
+        backend=backend,
+        format=FORMAT.GEMV,
+        quant_method=METHOD.AWQ,
+        pack=True,
+        pack_dtype=torch.int32,
+    )
+    assert selected is AwqGEMVTritonLinear
+
+
+def test_torch_fused_rocm_rejection_names_its_real_families(monkeypatch):
+    # TorchFusedLinear/TorchFusedAwqLinear are CPU/XPU kernels. Reporting them
+    # as "CUDA-only" sent ROCm users looking for a CUDA build instead of the
+    # actual family mismatch.
+    from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
+    from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
+
+    monkeypatch.setattr(
+        "gptqmodel.nn_modules.qlinear._is_rocm_target", lambda device: True
+    )
+    for cls in (TorchFusedLinear, TorchFusedAwqLinear):
+        ok, error = cls.validate(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            in_features=128,
+            out_features=128,
+            pack_dtype=torch.int32,
+            device=DEVICE.ROCM,
+        )
+        assert ok is False, cls.__name__
+        message = str(error)
+        assert "CUDA-only" not in message, cls.__name__
+        assert "cpu" in message and "xpu" in message, cls.__name__

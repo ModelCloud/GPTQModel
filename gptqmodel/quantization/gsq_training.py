@@ -67,6 +67,18 @@ class _ScalarRelaxation(torch.autograd.Function):
     """Explicit author-order first derivative; draws are owned by the caller."""
 
     @staticmethod
+    def _compute_dtype(dtype):
+        """Widen half precision for the exponent and its gradient.
+
+        The sampling multiplier reaches hundreds. A float16 `logits * multiplier`
+        overflows to `inf` and softmax then returns NaN, which turns a finite
+        stage into a nonfinite update. Float32 and float64 keep their own dtype
+        so the exact-precision oracle is unchanged.
+        """
+
+        return torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
+
+    @staticmethod
     def forward(ctx, logits, scales, candidates, group_index, uniform, temperature, multiplier,
                 initial, contiguous_group_size=None):
         noise = -torch.log(-torch.log(uniform + 1e-8) + 1e-8)
@@ -75,7 +87,11 @@ class _ScalarRelaxation(torch.autograd.Function):
             effective_logits = logits.to(candidates.dtype)
         else:
             effective_logits = logits
-        probability = ((effective_logits*multiplier+noise)/temperature).softmax(0).to(candidates.dtype)
+        compute_dtype = _ScalarRelaxation._compute_dtype(effective_logits.dtype)
+        scaled = (
+            effective_logits.to(compute_dtype)*multiplier + noise.to(compute_dtype)
+        )/temperature
+        probability = scaled.softmax(0).to(candidates.dtype)
         expected = (probability*candidates).sum(0)
         if initial is not None:
             expected = initial+expected
@@ -97,8 +113,10 @@ class _ScalarRelaxation(torch.autograd.Function):
             scale_gradient = contribution.view(
                 contribution.shape[0], scales.shape[1], ctx.contiguous_group_size,
             ).sum(-1)
-        output_gradient = grad_output*scales[:, groups].to(expected.dtype)
-        categorical_gradient = output_gradient.unsqueeze(0)*candidates
+        compute_dtype = _ScalarRelaxation._compute_dtype(expected.dtype)
+        probability = probability.to(compute_dtype)
+        output_gradient = grad_output.to(compute_dtype)*scales[:, groups].to(compute_dtype)
+        categorical_gradient = output_gradient.unsqueeze(0)*candidates.to(compute_dtype)
         dot = (categorical_gradient*probability).sum(0, keepdim=True)
         logit_gradient = probability*(categorical_gradient-dot)
         logit_gradient = logit_gradient*ctx.multiplier/ctx.temperature
@@ -301,6 +319,18 @@ class GSQScalarTrainingModule(torch.nn.Module):
                 {'params': [self.scales], 'lr': scale_lr, 'weight_decay': 0.}]
 
 
+def _stage_mse_loss(student, teacher):
+    """Mean squared error reduced in FP32.
+
+    An FP16 residual of a few hundred already squares past the dtype maximum,
+    so a low-precision reduction turns a finite reconstruction into `inf` and
+    poisons the stage update. Only the reduction is widened; the forward stays
+    in the model dtype.
+    """
+
+    return torch.nn.functional.mse_loss(student.float(), teacher.float())
+
+
 def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_weights=None, output_select=None,
                               output_mask=None, activation_checkpointing=False):
     """Evaluate an actual stage with differentiable weight substitutions.
@@ -341,7 +371,7 @@ def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_
         # Select before subtraction: excluded padding cannot affect the loss
         # denominator or introduce nonfinite arithmetic into reconstruction.
         student, teacher = student[output_mask], teacher[output_mask]
-    return torch.nn.functional.mse_loss(student, teacher)
+    return _stage_mse_loss(student, teacher)
 
 
 def _student_forward(module, state, buffers, args, kwargs, activation_checkpointing):
@@ -382,7 +412,7 @@ def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
                 or not output_mask.any()):
             raise ValueError('GSQ output mask must select valid tokens with an aligned boolean tensor')
         student, teacher = student[output_mask], teacher[output_mask]
-    return torch.nn.functional.mse_loss(student, teacher)
+    return _stage_mse_loss(student, teacher)
 
 
 def reconstruction_cached_llama_mlp_loss(layer, batch, student_weights, *, activation_checkpointing=False):
@@ -418,7 +448,7 @@ def reconstruction_cached_llama_mlp_loss(layer, batch, student_weights, *, activ
         student = forward(norm_input, *weights)
     if student.shape != teacher.shape or student.device != teacher.device:
         raise ValueError('GSQ cached MLP target does not match the student')
-    return torch.nn.functional.mse_loss(student, teacher)
+    return _stage_mse_loss(student, teacher)
 
 
 def cache_llama_stage_targets(stage, batches, teacher_weights, *, mode, directory, cache_device='cpu'):
@@ -536,9 +566,13 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
         else:
             for gradient in gradients:
                 finite.logical_and_(torch.isfinite(gradient).all())
-        # Keep nonfinite detection on-device. Converting each check to a Python
-        # bool serializes the CUDA stream once per loss and trainable tensor.
-        torch._assert_async(finite, 'GSQ stage objective or gradient is nonfinite')
+        # A device-side assert poisons the CUDA context: every later operation
+        # on that device fails, so a bad training step becomes unrecoverable.
+        # Read the accumulated flag once and raise a Python error instead.
+        if distributed is not None:
+            distributed.check_finite(finite)
+        elif not bool(finite):
+            raise RuntimeError('GSQ stage objective or gradient is nonfinite')
         optimizer.step()
     except Exception:
         optimizer.zero_grad(set_to_none=True)
@@ -929,6 +963,12 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
 
     def quantizer(name):
         nbits = width[name]
+        # Training parameters stay in FP32 even when the model is FP16/BF16.
+        # The sampling multiplier reaches hundreds and the backward scales the
+        # logit gradient by `multiplier / temperature`; storing either in a
+        # half-precision dtype overflows to inf/NaN on real Llama stages.
+        # Q/K already used FP32 for this reason; every projection needs it for
+        # a half-precision model to finish staged training.
         if affine_initializers:
             codes, scales, zeros = initializers[name]
             weight = codes.to(scales.dtype)
@@ -941,9 +981,9 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             from .gsq_training_affine import GSQAffineTrainingModule
 
             return GSQAffineTrainingModule(codes, scales, zeros, group_size, bits=nbits, noise=noise,
-                                           logits_dtype=torch.float32 if name in attention_projections[:2] else weight.dtype)
+                                           logits_dtype=torch.float32)
         return GSQScalarTrainingModule(weight, scales, group_size, bits=nbits, noise=noise,
-                                       logits_dtype=torch.float32 if name in attention_projections[:2] else weight.dtype)
+                                       logits_dtype=torch.float32)
 
     def run(stage_name, stage, selected, stage_batches, teacher=None, validation_stage_batches=None):
         quantizers = {name+'.weight': quantizer(name) for name in selected}

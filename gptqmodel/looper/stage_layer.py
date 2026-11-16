@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from concurrent.futures import as_completed
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 from defuser.modeling.replace_modules import materialize_model
@@ -45,6 +45,7 @@ from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .extension import LoopPlan, LoopStep
 from .input_cache import TensorLifetimeDiagnostic
+from .loop_processor import prepare_layer_runtime_weights_for_forward
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 
@@ -73,6 +74,36 @@ def _step_progress_index(
     if step.kind in {"output_embeddings", "lm_head"}:
         return layer_count + layer_index_offset
     return step.index + layer_index_offset
+
+
+def _branch_replay_cache(
+    branch_caches: Optional[Dict[int, object]],
+    layer_index: int,
+) -> tuple[Optional[object], bool]:
+    """Resolve the concurrent-branch cache that owns ``layer_index``.
+
+    ``InputCache.branch_first_layer_inputs`` maps each branch's first flat
+    decoder-layer index to the cache captured by that branch's own calibration
+    forward.  A layer belongs to the branch with the largest first index that is
+    still ``<= layer_index``; that branch's replay kwargs, masks and positions
+    are valid for every one of its layers.  Only the branch's first layer also
+    restarts from the captured ``layer_inputs`` -- later layers consume the
+    previous layer's output.
+
+    Returns ``(cache, starts_branch)``.  ``(None, False)`` is the historical
+    single-stack path, where the top-level cache already is the only branch.
+    """
+
+    if not branch_caches:
+        return None, False
+    owner: Optional[int] = None
+    for first_index in sorted(branch_caches):
+        if first_index > layer_index:
+            break
+        owner = first_index
+    if owner is None:
+        return None, False
+    return branch_caches[owner], owner == layer_index
 
 
 def _log_cuda_memory_diagnostics(log, layer_index) -> None:
@@ -243,6 +274,31 @@ def _collect_hook_skip_modules(planning_layer_modules: List[List[str]]) -> set[s
     return skip_modules
 
 
+def _resolve_live_endpoint_module(
+    looper: "ModuleLooper",
+    *,
+    is_input_embeddings: bool,
+    is_output_embeddings: bool,
+    is_lm_head: bool,
+) -> Optional[torch.nn.Module]:
+    """Return the endpoint module currently installed in the model tree.
+
+    AUTO_NF12 and deferred dense-source materialization both replace the
+    endpoint object itself rather than one of its children. A local reference
+    captured before that swap points at a detached module that direct-state
+    materialization can no longer resolve by identity.
+    """
+
+    gptq_model = looper.gptq_model
+    if is_input_embeddings:
+        return gptq_model.get_input_embeddings()
+    if is_output_embeddings:
+        return gptq_model.get_output_embeddings()
+    if is_lm_head:
+        return get_module(gptq_model.model, key=gptq_model.lm_head)
+    return None
+
+
 def _replay_layer_outputs(
     looper: "ModuleLooper",
     *,
@@ -254,7 +310,7 @@ def _replay_layer_outputs(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_lm_head_module: bool,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     layer_index: int,
     layer_descriptor: str,
     full,
@@ -313,6 +369,15 @@ def _replay_layer_outputs(
     replay_pb.title(replay_msg).subtitle(
         f"Forward replay Row 0/{replay_total_rows}"
     ).draw()
+
+    # Replay runs the whole layer after the last subset's process() call, so
+    # every projection packed in this layer must be back in dense form even
+    # though only the final subset was prepared by its subset stage.
+    prepare_layer_runtime_weights_for_forward(
+        processors=getattr(looper, "processors", ()),
+        full=full,
+        fallback_device=cur_layer_device,
+    )
 
     replay_prev_devices: Dict[str, torch.device] = {}
     if replay_modules is not None and replay_forward_device_map:
@@ -385,7 +450,7 @@ def _capture_pristine_group_context(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_lm_head_module: bool,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     layer_index: int,
     layer_descriptor: str,
     full,
@@ -454,7 +519,7 @@ def run_layer_stage(
     planning_layer_modules: List[List[str]],
     layer_names: Optional[List[str]],
     fallback,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     pb,
     layer_count: int,
     region_timer,
@@ -622,6 +687,11 @@ def run_layer_stage(
             pristine_group_module = None
             layer_name = get_layer_name(layer_names, layer_index)
 
+        layer_hook_skip_modules = hook_skip_modules
+        branch_planning_modules = looper.layer_modules_for_prefix(layer_name, planning=True)
+        if branch_planning_modules is not None:
+            layer_hook_skip_modules = _collect_hook_skip_modules(branch_planning_modules)
+
         pb.title(layer_title).subtitle("").draw()
         if durable_progress_logs:
             log.info(
@@ -703,7 +773,7 @@ def run_layer_stage(
             replace_module_with_hooked_legacy(
                 module,
                 quant_lm_head=looper.gptq_model.quantize_config.lm_head,
-                skip_module_paths=hook_skip_modules,
+                skip_module_paths=layer_hook_skip_modules,
             )
 
             layers[layer_index] = module
@@ -734,10 +804,26 @@ def run_layer_stage(
             processor.log_call_count = 0
             processor.collect_memory_info(layer_index)
             cache = processor.inputs_cache
-            layer_inputs = cache.layer_inputs
-            layer_input_kwargs = cache.layer_input_kwargs
-            position_ids = cache.position_ids
-            attention_masks = cache.attention_masks
+            branch_caches = getattr(cache, "branch_first_layer_inputs", None)
+            branch_cache, starts_branch = _branch_replay_cache(
+                branch_caches, model_layer_index
+            )
+            if branch_cache is not None:
+                # A catch-up replay of a later branch layer continues from the
+                # restored boundary; only the branch's first layer restarts
+                # from the captured inputs.  Every layer still takes its own
+                # branch's masks, positions and replay kwargs.
+                layer_inputs = (
+                    branch_cache.layer_inputs if starts_branch else cache.layer_inputs
+                )
+                layer_input_kwargs = branch_cache.layer_input_kwargs
+                position_ids = branch_cache.position_ids
+                attention_masks = branch_cache.attention_masks
+            else:
+                layer_inputs = cache.layer_inputs
+                layer_input_kwargs = cache.layer_input_kwargs
+                position_ids = cache.position_ids
+                attention_masks = cache.attention_masks
             looper._prepare_layer_direct_state_for_forward(
                 module,
                 cur_layer_device,
@@ -868,10 +954,36 @@ def run_layer_stage(
             # one forward config instead of a group of unrelated flags.
             forward = processor.forward
 
-            if is_input_embeddings_module:
-                layer_inputs = processor.inputs_cache.src_inputs
+            branch_caches = getattr(
+                processor.inputs_cache, "branch_first_layer_inputs", None
+            )
+            branch_cache, starts_branch = (
+                _branch_replay_cache(branch_caches, model_layer_index)
+                if not is_embeddings_module and not is_lm_head_module
+                else (None, False)
+            )
+            if branch_cache is not None:
+                # A concurrent module-tree branch owns every one of its layers.
+                # Only its first layer restarts from the captured inputs
+                # instead of the previous branch's final hidden state; later
+                # layers consume the previous layer's output but must keep
+                # replaying with this branch's masks, positions and kwargs.
+                layer_inputs = (
+                    branch_cache.layer_inputs
+                    if starts_branch
+                    else processor.inputs_cache.layer_inputs
+                )
+                layer_input_kwargs = branch_cache.layer_input_kwargs
+                position_ids = branch_cache.position_ids
+                attention_masks = branch_cache.attention_masks
             else:
-                layer_inputs = processor.inputs_cache.layer_inputs
+                if is_input_embeddings_module:
+                    layer_inputs = processor.inputs_cache.src_inputs
+                else:
+                    layer_inputs = processor.inputs_cache.layer_inputs
+                layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
+                position_ids = processor.inputs_cache.position_ids
+                attention_masks = processor.inputs_cache.attention_masks
             input_lifetime_diagnostic = getattr(
                 layer_inputs, "lifetime_diagnostic", None
             )
@@ -881,9 +993,6 @@ def run_layer_stage(
                 ).lifetime_diagnostic
             if (is_output_embeddings_module or is_lm_head_module) and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
-            layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
-            position_ids = processor.inputs_cache.position_ids
-            attention_masks = processor.inputs_cache.attention_masks
             output_requirement = getattr(
                 looper.gptq_model, "quantization_layer_output_required", None
             )
@@ -932,6 +1041,31 @@ def run_layer_stage(
                     fallback=fallback,
                     embedding_module_name=embedding_module_name,
                 )
+            if is_embeddings_module:
+                # Subset planning may have swapped the live endpoint (input
+                # embedding, output embedding, or lm_head) for the
+                # auto-dtype-cast forward wrapper. That replacement swaps the
+                # module object itself rather than one of its children, so the
+                # local `module` still points at the detached dense source.
+                # Re-read the endpoint from the model tree: direct-state
+                # materialization resolves modules by identity inside that
+                # tree and cannot find the replaced object
+                # (`utils/structure.py:542`).
+                live_endpoint = _resolve_live_endpoint_module(
+                    looper,
+                    is_input_embeddings=is_input_embeddings_module,
+                    is_output_embeddings=is_output_embeddings_module,
+                    is_lm_head=is_lm_head_module,
+                )
+                if live_endpoint is not None and live_endpoint is not module:
+                    module = live_endpoint
+                    if is_lm_head_module:
+                        full = find_modules(module, name=looper.gptq_model.lm_head)
+                    cur_layer_device = get_device(module)
+                    if getattr(cur_layer_device, "type", None) == "meta":
+                        cur_layer_device = normalize_device_like(
+                            looper.gptq_model.quantize_config.device
+                        ) or CPU
             if durable_progress_logs:
                 log.info(
                     "StageLayer: layer=%s processor=%s begin subsets=%s",
@@ -1041,6 +1175,27 @@ def run_layer_stage(
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
 
+            if is_embeddings_module:
+                # Quantization replaces the endpoint object a second time when
+                # the deferred dense source is materialized for the quantizer
+                # (`shell_module_materialize(role="quant_source")`). Re-read
+                # the live endpoint before replay: the detached AUTO_NF12
+                # wrapper has had its packed buffers released, so forwarding
+                # it would either fail or run on empty storage.
+                live_endpoint = _resolve_live_endpoint_module(
+                    looper,
+                    is_input_embeddings=is_input_embeddings_module,
+                    is_output_embeddings=is_output_embeddings_module,
+                    is_lm_head=is_lm_head_module,
+                )
+                if live_endpoint is not None and live_endpoint is not module:
+                    module = live_endpoint
+                    cur_layer_device = get_device(module)
+                    if getattr(cur_layer_device, "type", None) == "meta":
+                        cur_layer_device = normalize_device_like(
+                            looper.gptq_model.quantize_config.device
+                        ) or CPU
+
             # A processor may need one layer-wide decision after all individual
             # modules have finished but before the only authoritative replay.
             # Inline EXL3 mixed-bitrate selection uses this boundary to replace
@@ -1096,6 +1251,13 @@ def run_layer_stage(
                             full_name=full_name,
                             layer_index=layer_index,
                         )
+                    # This replay only exists to advance calibration inputs past
+                    # an excluded layer, so its projections must stay in their
+                    # native dense form. A fully excluded layer never reaches
+                    # the `quant_source` role that restores a packed AUTO_NF12
+                    # source, so casting here would leave `nf12_*` buffers in
+                    # the model tree and serialize them in place of `weight`.
+                    named_native.state["auto_dtype_cast_forward_disabled"] = True
                     prepared_native = looper._prepare_named_module_for_forward(
                         named_module=named_native,
                         fallback_device=cur_layer_device,
@@ -1328,6 +1490,12 @@ def run_layer_stage(
                     raise_in_place=True,
                 )
 
+                # A layer is only a durable resume point when every finalize
+                # task completed. The async branch has no checkpoint (see
+                # ``_should_drain_finalize_futures_synchronously``), so it
+                # cannot gate a boundary commit here.
+                finalize_ok = True
+
                 if finalize_futures_snapshot:
                     known_layers = sorted(
                         {
@@ -1426,7 +1594,7 @@ def run_layer_stage(
                     if drain_sync:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
-                        _drain_finalize_futures(
+                        finalize_ok = _drain_finalize_futures(
                             [future for future, *_ in finalize_futures_snapshot],
                             finalize_pb,
                             finalize_count,
@@ -1471,7 +1639,25 @@ def run_layer_stage(
                             layer_index if not is_lm_head_module else "lm_head",
                         )
 
-                if layer_boundary_checkpoint is not None and not is_embeddings_module:
+                if (
+                    layer_boundary_checkpoint is not None
+                    and not is_embeddings_module
+                    and not finalize_ok
+                ):
+                    # `_drain_finalize_futures` already requested the loop stop
+                    # with the original failure. Do not publish a boundary that
+                    # claims modules were packed/offloaded when they were not.
+                    log.warning(
+                        "StageLayer: layer=%s finalize incomplete; "
+                        "skipping durable boundary commit",
+                        layer_index,
+                    )
+
+                if (
+                    layer_boundary_checkpoint is not None
+                    and not is_embeddings_module
+                    and finalize_ok
+                ):
                     if callable(input_lifetime_diagnostic):
                         log.info(
                             "StageLayer: input lifetime diagnostic layer=%s result=%s",
@@ -1515,12 +1701,18 @@ def run_layer_stage(
             )
 
         # `layer_index - 1`'s cached output (e.g. this model's DSA-style
-        # indexer top-k indices, threaded via reuse_kv) is only ever read
-        # during layer_index's own forward/quantize/replay work above, which
-        # has just finished. Evict it now -- otherwise shared_kv_cache_dict
-        # grows by one entry per layer for the whole run and is never
-        # reclaimed (harmless per-entry, but unbounded over many layers).
-        shared_kv_cache_dict.pop(layer_index - 1, None)
+        # indexer top-k indices or Hymba's cross-layer KV, threaded via
+        # reuse_kv) is only ever read during layer_index's own
+        # forward/quantize/replay work above, which has just finished. The
+        # cache is keyed by (layer, batch), so evict every batch of that
+        # layer -- otherwise shared_kv_cache_dict grows by one entry per
+        # (layer, batch) for the whole run and is never reclaimed (harmless
+        # per-entry, but unbounded over many layers).
+        stale_layer = layer_index - 1
+        for key in list(shared_kv_cache_dict):
+            key_layer = key[0] if isinstance(key, tuple) and key else key
+            if key_layer == stale_layer:
+                shared_kv_cache_dict.pop(key, None)
 
     if planned_steps is not None:
         pb.close()

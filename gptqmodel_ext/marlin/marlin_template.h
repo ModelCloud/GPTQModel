@@ -1444,20 +1444,24 @@ __global__ void Marlin(
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
-      scalar_t2 res =
-          Dtype::nums2num2(Dtype::float2num(c0), Dtype::float2num(c1));
-
-      // For per-column quantization we finally apply the scale here (only for
-      // 4-bit)
+      // Keep the epilogue in FP32 until the single output cast. Rounding the
+      // partial sum first would turn a finite biased result into inf whenever
+      // the pre-bias sum exceeded the output dtype's range.
       if constexpr (!has_act_order && group_blocks == -1 &&
                     w_type.size_bits() == 4 &&
                     (has_zp && dequant_skip_flop || !has_zp)) {
-        scalar_t2 tmp_scale = s[0];
+        // For per-column quantization we finally apply the scale here (only
+        // for 4-bit).
         if constexpr (m_block_size_8) {
-          tmp_scale = Dtype::num2num2(
-              reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4]);
+          const scalar_t* scale_ptr = reinterpret_cast<scalar_t*>(&s[0]);
+          const float scale =
+              Dtype::num2float(scale_ptr[(threadIdx.x % 8) / 4]);
+          c0 *= scale;
+          c1 *= scale;
+        } else {
+          c0 *= Dtype::num2float(s[0].x);
+          c1 *= Dtype::num2float(s[0].y);
         }
-        res = __hmul2(res, tmp_scale);
       }
 
       if constexpr (w_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
@@ -1465,13 +1469,19 @@ __global__ void Marlin(
         c1 *= global_scale_f32;
       }
       if (has_bias && last) {
-        scalar_t2 tmp_bias = b_bias[0];
         if constexpr (m_block_size_8) {
-          tmp_bias = Dtype::num2num2(
-              reinterpret_cast<scalar_t*>(&b_bias[0])[(threadIdx.x % 8) / 4]);
+          const scalar_t* bias_ptr = reinterpret_cast<scalar_t*>(&b_bias[0]);
+          const float bias = Dtype::num2float(bias_ptr[(threadIdx.x % 8) / 4]);
+          c0 += bias;
+          c1 += bias;
+        } else {
+          c0 += Dtype::num2float(b_bias[0].x);
+          c1 += Dtype::num2float(b_bias[0].y);
         }
-        res = __hadd2(res, tmp_bias);
       }
+
+      scalar_t2 res =
+          Dtype::nums2num2(Dtype::float2num(c0), Dtype::float2num(c1));
 
       if constexpr (m_block_size_8) {
         ((scalar_t*)sh_red)[idx] = res.x;

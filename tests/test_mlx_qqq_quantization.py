@@ -28,7 +28,7 @@ def _params(group, group_size):
     minimum = torch.minimum(group.amin(dim=1), torch.zeros(group.shape[0]))
     maximum = torch.maximum(group.amax(dim=1), torch.zeros(group.shape[0]))
     maximum = torch.maximum(minimum.abs(), maximum)
-    minimum = torch.where(minimum < 0, -maximum, minimum)
+    minimum = -maximum
     empty = (minimum == 0) & (maximum == 0)
     minimum = torch.where(empty, -1, minimum)
     maximum = torch.where(empty, 1, maximum)
@@ -42,14 +42,6 @@ def _torch_oracle(source, factor, group_size, *, return_loss=False):
     hinv = torch.from_numpy(factor.copy())
     rows, columns = weight.shape
     result = torch.empty_like(weight)
-    scale_extra = (
-        torch.where(
-            weight.abs().amax(dim=1) == 0,
-            1,
-            weight.abs().amax(dim=1),
-        )[:, None]
-        / 127
-    )
     fixed = _params(weight, -1) if group_size == -1 else None
     scales, zeros = [], []
     loss = torch.zeros((), dtype=torch.float32)
@@ -83,7 +75,9 @@ def _torch_oracle(source, factor, group_size, *, return_loss=False):
         quantized_out = result.numpy()
         scales_out = torch.cat(scales, axis=1).numpy()
         zeros_out = torch.cat(zeros, axis=1).numpy()
-        scale_extra_out = scale_extra.numpy()
+        # The INT8 export range is fitted to the reconstructed weights.
+        bound = result.abs().amax(dim=1, keepdim=True)
+        scale_extra_out = (torch.where(bound == 0, 1, bound) / 127).numpy()
     loss_out = loss.numpy() if return_loss else None
     return quantized_out, scales_out, zeros_out, scale_extra_out, loss_out
 
@@ -182,16 +176,25 @@ def test_qqq_loss_matches_torch(group_size):
     np.testing.assert_allclose(actual[4], expected[4], atol=1e-6, rtol=1e-6)
 
 
-def test_qqq_dynamic_fused_extrema_rows():
-    source = np.zeros((4, 128), dtype=np.float32)
-    source[1] = np.linspace(0.25, 2.0, 128, dtype=np.float32)
-    source[2] = np.linspace(-3.0, -0.5, 128, dtype=np.float32)
-    source[3] = np.linspace(-2.0, 1.5, 128, dtype=np.float32)
-    factor = np.eye(128, dtype=np.float32)
-    expected = _torch_oracle(source, factor, 128)
-    actual = _observe(mx.array(source), factor, 128)
+@pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16])
+def test_qqq_fused_extrema_rows(group_size, dtype):
+    source = np.zeros((7, 256), dtype=np.float32)
+    source[1] = np.linspace(0.25, 2.0, 256, dtype=np.float32)
+    source[2] = np.linspace(-3.0, -0.5, 256, dtype=np.float32)
+    source[3] = np.linspace(-2.0, 1.5, 256, dtype=np.float32)
+    source[4] = 1
+    source[5] = np.linspace(0, 1, 256, dtype=np.float32)
+    source[6] = -0.0
+    weight = mx.array(source).astype(dtype)
+    resident = np.asarray(weight.astype(mx.float32))
+    factor = np.eye(256, dtype=np.float32)
+    expected = _torch_oracle(resident, factor, group_size)
+    actual = _observe(weight, factor, group_size)
+    np.testing.assert_array_equal(_codes(actual, group_size), _codes(expected, group_size))
     for index in range(4):
-        np.testing.assert_array_equal(actual[index], expected[index])
+        if expected[index] is not None:
+            np.testing.assert_array_equal(actual[index], expected[index])
 
 
 def _torch_banded_oracle(source, group_size, *, return_loss=False):
@@ -200,14 +203,6 @@ def _torch_banded_oracle(source, group_size, *, return_loss=False):
     columns = weight.shape[1]
     output = torch.empty_like(weight)
     fixed = _params(weight, -1) if group_size == -1 else None
-    scale_extra = (
-        torch.where(
-            weight.abs().amax(dim=1) == 0,
-            1,
-            weight.abs().amax(dim=1),
-        )[:, None]
-        / 127
-    )
     scales, zeros = [], []
     loss = torch.zeros((), dtype=torch.float32)
     for start in range(0, columns, 128):
@@ -238,7 +233,9 @@ def _torch_banded_oracle(source, group_size, *, return_loss=False):
         quantized_out = output.numpy()
         scales_out = torch.cat(scales, dim=1).numpy()
         zeros_out = torch.cat(zeros, dim=1).numpy()
-        scale_extra_out = scale_extra.numpy()
+        # The INT8 export range is fitted to the reconstructed weights.
+        bound = output.abs().amax(dim=1, keepdim=True)
+        scale_extra_out = (torch.where(bound == 0, 1, bound) / 127).numpy()
     loss_out = loss.numpy() if return_loss else None
     return quantized_out, scales_out, zeros_out, scale_extra_out, loss_out
 

@@ -16,6 +16,7 @@ regression guard for the MoE lifecycle:
 4. every expert gate/up/down projection is exported as a quantized linear
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -32,7 +33,9 @@ from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 from gptqmodel.utils.tensor_layout import assert_model_tensors_contiguous
 
@@ -69,7 +72,13 @@ def _build_local_tokenizer(model_dir: Path) -> PreTrainedTokenizerFast:
     return fast_tokenizer
 
 
-def _build_tiny_qwen3_moe_fixture(model_dir: Path) -> tuple[Qwen3MoeConfig, PreTrainedTokenizerFast]:
+def _build_tiny_qwen3_moe_fixture(
+    model_dir: Path,
+    *,
+    num_experts: int = 4,
+    num_experts_per_tok: int = 2,
+    moe_intermediate_size: int = 32,
+) -> tuple[Qwen3MoeConfig, PreTrainedTokenizerFast]:
     """Save a tiny native HF MoE checkpoint that still exercises the real qwen3_moe path.
 
     Qwen3Moe is the lightest native MoE family available in this repo's test
@@ -81,11 +90,11 @@ def _build_tiny_qwen3_moe_fixture(model_dir: Path) -> tuple[Qwen3MoeConfig, PreT
         num_hidden_layers=1,
         hidden_size=64,
         intermediate_size=128,
-        moe_intermediate_size=32,
+        moe_intermediate_size=moe_intermediate_size,
         num_attention_heads=4,
         num_key_value_heads=4,
-        num_experts=4,
-        num_experts_per_tok=2,
+        num_experts=num_experts,
+        num_experts_per_tok=num_experts_per_tok,
         vocab_size=128,
         pad_token_id=0,
         bos_token_id=1,
@@ -170,3 +179,71 @@ def test_tiny_qwen3_moe_quantization_smoke(tmp_path: Path):
 
     assert len(quantized_expert_modules) == expected_quantized
     assert quantized_model.quantize_config.meta_get("moe")["routing"]["class"] == "ExpertsRoutingOverride"
+
+
+def test_tiny_qwen3_moe_awq_routing_override_scales_every_expert(tmp_path: Path, monkeypatch, caplog):
+    """#4151: all-expert calibration must keep AWQ scaling on expert gate/up groups."""
+
+    model_dir = tmp_path / "native"
+    config, tokenizer = _build_tiny_qwen3_moe_fixture(
+        model_dir,
+        num_experts=32,
+        num_experts_per_tok=1,
+        moe_intermediate_size=64,
+    )
+    calibration = _build_calibration_dataset(tokenizer)
+    # Native top-1 over these few tokens cannot route to all 32 experts; the
+    # override is what makes every expert feature observable.
+    assert config.num_experts == 32
+    assert config.num_experts_per_tok == 1
+
+    raised = []
+    original_search = AWQProcessor._search_best_scale
+
+    def record_group_errors(self, *args, **kwargs):
+        try:
+            return original_search(self, *args, **kwargs)
+        except _AWQScaleGroupError as exc:
+            raised.append(str(exc))
+            raise
+
+    monkeypatch.setattr(AWQProcessor, "_search_best_scale", record_group_errors)
+
+    quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        device="cpu",
+        method=METHOD.AWQ,
+        format=FORMAT.GEMM,
+        moe=MoEConfig(routing=ExpertsRoutingOverride()),
+    )
+    model = GPTQModel.load(
+        str(model_dir),
+        quantize_config=quantize_config,
+        backend=BACKEND.TORCH,
+    )
+    with caplog.at_level(logging.WARNING):
+        model.quantize(
+            calibration,
+            batch_size=1,
+            backend=BACKEND.TORCH,
+            calibration_data_min_length=1,
+        )
+
+    assert raised == []
+    rows = {str(row["module"]): row for row in model.quant_log}
+    for expert_index in range(config.num_experts):
+        for suffix in ("gate_proj", "up_proj"):
+            module_name = f"mlp.experts.{expert_index}.{suffix}"
+            assert module_name in rows
+            # A plain-quantization fallback records "not applicable"; a real
+            # AWQ scale search records the winning reconstruction loss.
+            assert rows[module_name]["loss"] != "not applicable", module_name
+
+    fallback_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "plain-quantization fallback" in record.getMessage()
+    ]
+    assert fallback_messages == []

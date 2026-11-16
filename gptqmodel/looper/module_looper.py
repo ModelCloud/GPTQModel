@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,7 @@ from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import LoopProcessor, record_quant_log
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -47,6 +47,7 @@ from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.disk import estimate_disk_io_speed
+from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
@@ -67,7 +68,12 @@ from ..utils.model import (
     set_moe_topk,
     untie_word_embeddings,
 )
-from ..utils.offload import offload_to_disk
+from ..utils.offload import (
+    bind_private_offload_root,
+    capture_offloaded_base_modules,
+    offload_to_disk,
+    restore_offloaded_modules,
+)
 from ..utils.p2p import (
     configure_p2p,
     enable_for_devices,
@@ -178,6 +184,27 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
+def _config_declares_tied_embeddings(config) -> bool:
+    """Return whether ``config`` or its text sub-config ties embeddings."""
+
+    seen: set[int] = set()
+    current = config
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if bool(getattr(current, "tie_word_embeddings", False)):
+            return True
+        text_config = getattr(current, "text_config", None)
+        if text_config is None:
+            get_text_config = getattr(current, "get_text_config", None)
+            if callable(get_text_config):
+                try:
+                    text_config = get_text_config()
+                except TypeError:
+                    text_config = None
+        current = text_config
+    return False
+
+
 class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
@@ -213,6 +240,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.execution_stages = self.processor_fusion_plan.stages
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        # Base modules offloaded at the start of the run are restored when the
+        # loop exits so the model stays usable in-session.
+        self._offloaded_base_modules: List[Tuple[str, nn.Module, torch.device]] = []
+        self._bind_private_offload_namespace()
+        # Concurrent module-tree branches can declare different quantizable
+        # leaves.  Cache each branch's leaf blocks so a layer is never asked to
+        # resolve a sibling branch's modules.
+        self._layer_modules_by_prefix: Dict[tuple[str, bool], Optional[List[List[str]]]] = {}
         self.layer_module_coverage = LayerModuleCoverageTracker()
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -368,6 +403,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config, use_process_default=False))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 
@@ -844,6 +880,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if torch.is_tensor(mask) and mask.ndim == 2
             else None
         )
+        # Routed-expert hooks need to know whether this batch contains padding
+        # before they scan a `[routed_rows, H]` activation for all-zero rows.
+        # Resolve it here, once per batch, instead of synchronizing per expert.
+        tls.mask_has_padding = (
+            not bool(mask.all())
+            if torch.is_tensor(mask) and mask.ndim == 2
+            else None
+        )
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
@@ -1257,7 +1301,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             except Exception:
                 pass
 
-        tensor_attrs = ("H", "module_copy")
+        # GPTAQ/FOEM keep an auxiliary Hessian companion (`dXXT`) beside
+        # `H`. Rehome every per-module tensor the task owns so quantization
+        # cannot mix devices (issue #4312).
+        tensor_attrs = ("H", "module_copy", "dXXT")
         for attr_name in tensor_attrs:
             tensor_value = getattr(task, attr_name, None)
             if isinstance(tensor_value, torch.Tensor):
@@ -1317,6 +1364,54 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
         return prepared
+
+    def _lm_head_is_tied(self) -> bool:
+        """Return whether `lm_head` shares its source weight with another module.
+
+        `find_tied_parameters` only compares materialized parameters. A lazily
+        loaded shell keeps both sides as independent META parameters until the
+        loader ties them, so identity never matches and quantization continues
+        until the source reload fails with a misleading "missing checkpoint
+        tensors" error. Detect that shape from the checkpoint instead: a tied
+        HF checkpoint omits `lm_head.weight`, so the head has no independent
+        source tensor to quantize.
+        """
+
+        model = self.gptq_model.model
+        lm_head_name = self.gptq_model.lm_head
+        if any(
+            f"{lm_head_name}.weight" in names
+            for names in find_tied_parameters(model)
+        ):
+            return True
+        if not _config_declares_tied_embeddings(getattr(model, "config", None)):
+            return False
+        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
+        # even though the head is tied). The checkpoint tensor is not evidence
+        # of an independent head: the model's declared tied-weight keys and the
+        # config decide, and the loader ties the tensors after materialization.
+        tied_keys = getattr(model, "_tied_weights_keys", None)
+        tied_head = f"{lm_head_name}.weight"
+        if isinstance(tied_keys, dict):
+            declared_tied = tied_head in tied_keys
+        elif tied_keys:
+            declared_tied = tied_head in set(tied_keys)
+        else:
+            declared_tied = False
+        if declared_tied:
+            return True
+        lm_head_module = get_module(model, key=lm_head_name)
+        if lm_head_module is None:
+            return False
+        weight = getattr(lm_head_module, "weight", None)
+        if not torch.is_tensor(weight) or not getattr(weight, "is_meta", False):
+            # A materialized head either has its own storage or shares it; the
+            # identity check above already covered the shared case.
+            return False
+        checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
+        if not callable(checker):
+            return False
+        return not checker(target_model=model, target_submodule=lm_head_module)
 
     def _prepare_layer_direct_state_for_forward(
         self,
@@ -1730,6 +1825,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 layer_names=layer_names,
             )
             if lazy_cache is not None:
+                # A looped/recurrent decoder captures several invocations per
+                # calibration sample. The replay stage bounds itself by
+                # `processor.num_batches` (normally the calibration batch
+                # count), which would truncate the capture back to loop 0.
+                captured_batches = getattr(lazy_cache, "captured_batch_count", None)
+                if captured_batches:
+                    for processor in getattr(self, "processors", ()) or ():
+                        processor.num_batches = int(captured_batches)
                 return lazy_cache
 
         capture_stage = StageInputsCapture(self, logger=log)
@@ -1741,11 +1844,42 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             layer_names=layer_names,
         )
 
+    def _bind_private_offload_namespace(self) -> None:
+        """Give this run a private offload root under the configured path."""
+
+        config = getattr(self.gptq_model, "quantize_config", None)
+        if config is None:
+            return
+        run_root = bind_private_offload_root(self.gptq_model)
+        if run_root is None:
+            return
+        private_config = self.gptq_model.quantize_config
+        # Processors are built before the looper and may hold the shared config
+        # object; point them at the private copy so every offload write during
+        # this run lands in the same namespace the model saves from.
+        for processor in self.processors:
+            if getattr(processor, "qcfg", None) is config:
+                processor.qcfg = private_config
+
+    def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
+        entries = getattr(self, "_offloaded_base_modules", None)
+        if not entries:
+            return
+        self._offloaded_base_modules = []
+        restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
         with tf32_high_precision_guard():
-            return self._loop_impl(fallback=fallback, **kwargs)
+            try:
+                result = self._loop_impl(fallback=fallback, **kwargs)
+            except BaseException:
+                # A failed run must not leave the base modules stranded on meta.
+                self._restore_offloaded_base_modules(strict=False)
+                raise
+            self._restore_offloaded_base_modules(strict=True)
+            return result
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""
@@ -1805,10 +1939,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if self.gptq_model.quantize_config.lm_head:
             # Composite models can keep both the head and tying configuration
             # below the root. Check actual sharing by the fully qualified name.
-            if any(
-                f"{self.gptq_model.lm_head}.weight" in names
-                for names in find_tied_parameters(self.gptq_model.model)
-            ):
+            if self._lm_head_is_tied():
                 raise NotImplementedError(
                     "quantization of `lm_head` layer with tied weights is not supported. "
                     "Untie the model weights before quantization."
@@ -1876,6 +2007,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if name
                 }
                 base_modules = [name for name in base_modules if name not in endpoint_names]
+            self._offloaded_base_modules = capture_offloaded_base_modules(
+                self.gptq_model.model, base_modules
+            )
             offload_to_disk(
                 model=self.gptq_model.model,
                 module=base_modules,
@@ -2063,8 +2197,6 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     len(reverse_p.log),
                 )
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptaq", "awq", "exl3"]:
-                    self.gptq_model.quant_log = reverse_p.log
 
                 if emit_finalize_records:
                     for module_log in reverse_p.log:
@@ -2093,7 +2225,85 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
+        # Publish one row per module from the primary quantizer. Auxiliary
+        # processors (EoRA) opt out via ``owns_quant_log``, so an adapter pass
+        # cannot duplicate rows or replace the primary log (#4367). Reading the
+        # processor objects directly also covers a processor whose dynamic name
+        # changed mid-run.
+        record_quant_log(self.gptq_model, self.processors)
+
         return total_log
+
+    def layer_modules_for_prefix(self, prefix: Optional[str], *, planning: bool = False):
+        """Return the leaf blocks declared by the tree branch that owns ``prefix``.
+
+        A module tree may contain several complete variants for concurrent
+        decoder stacks (text, vision, audio, ...).  Their quantizable leaves can
+        differ, so the flat union returned by ``simple_layer_modules()`` must not
+        be applied to every layer.  Resolve the variant whose decoder prefix
+        contains the layer instead.  ``None`` means the layer is outside every
+        declared branch (for example an embedding endpoint or ``lm_head``) and
+        the caller keeps its existing global declaration.
+        """
+
+        if not prefix:
+            return None
+
+        cache_key = (prefix, planning)
+        if cache_key in self._layer_modules_by_prefix:
+            return self._layer_modules_by_prefix[cache_key]
+
+        tree = getattr(self.gptq_model, "effective_module_tree", None)
+        if tree is None:
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+
+        definition = type(self.gptq_model)
+        matches = []
+        for variant in definition._iter_module_tree_variants(tree):
+            for variant_prefix in definition._expand_module_tree_prefixes(variant):
+                if prefix == variant_prefix or prefix.startswith(f"{variant_prefix}."):
+                    matches.append((len(variant_prefix), variant_prefix, variant))
+
+        if not matches:
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+
+        longest = max(match[0] for match in matches)
+        best = [match for match in matches if match[0] == longest]
+        if len(best) > 1:
+            # Several variants declare the same decoder prefix (alternative
+            # layer types).  Keep the historical merged declaration instead of
+            # silently selecting one alternative.
+            self._layer_modules_by_prefix[cache_key] = None
+            return None
+        best_variant = best[0][2]
+
+        is_awq_quantize = any(
+            isinstance(proc, (AWQProcessor, ParoQuantProcessor))
+            for proc in self.processors
+        )
+        include_capture_only = any(
+            getattr(getattr(proc, "forward", None), "activation_capture", False)
+            for proc in self.processors
+        )
+        with definition._module_tree_context(best_variant):
+            if planning:
+                modules = definition.full_layer_modules(
+                    self.gptq_model.model.config,
+                    is_awq_quantize=is_awq_quantize,
+                    include_capture_only=include_capture_only,
+                )
+            else:
+                modules = definition.simple_layer_modules(
+                    self.gptq_model.model.config,
+                    self.gptq_model.quantize_config,
+                    is_awq_quantize=is_awq_quantize,
+                    include_capture_only=include_capture_only,
+                )
+
+        self._layer_modules_by_prefix[cache_key] = modules
+        return modules
 
     def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None, inline_processors=()) -> Dict[str, NamedModule]:
         """Build the named-module subset a processor will quantize for one layer."""
@@ -2122,6 +2332,25 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             if capture_only:
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
+        # The plan is layer-relative, so a concrete leaf is identified by its
+        # relative `name` (e.g. `mlp.experts.3.gate_proj`). Routed experts need
+        # this mark because their native-pass inputs cannot be paired with the
+        # quantized-path inputs by call order (see `GPTAQ`/`FOEM`).
+        plan = _model_module_plan(self.gptq_model)
+        if plan is not None and not is_lm_head_module:
+            # A quantizable leaf that no spec declares is invisible to the
+            # declared-spec coverage report: every declared spec can match while
+            # the leaf silently stays in the source dtype. TeleChat2's
+            # `query`/`key_value` were exactly this (issue #4093 item 3).
+            for candidate_name, candidate in list(full.items()):
+                if isinstance(candidate, NamedModule):
+                    continue
+                if not isinstance(candidate, (nn.Linear, nn.Conv1d, nn.Conv2d)):
+                    continue
+                if plan.find(candidate_name) is None:
+                    self.layer_module_coverage.record_undeclared(
+                        candidate_name, layer_index
+                    )
         for name in subset:
             if name in (self.input_embeddings_name, self.output_embeddings_name):
                 layer_name = name
@@ -2146,6 +2375,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             elif capture_only_flags.get(name, False):
                 subset[name].state["capture_only"] = True
 
+            if plan is not None and plan.is_expert(name):
+                subset[name].state["is_routed_expert"] = True
+
             if isinstance(processor, GPTQProcessor):
                 processor.preprocess(subset[name], fallback=fallback, region_timer=region_timer)
             else:
@@ -2160,6 +2392,15 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if inline is processor:
                         continue
                     inline.preprocess(subset[name], fallback=fallback)
+
+                forward_policy = getattr(processor, "forward", None)
+                if forward_policy is not None and not getattr(
+                    forward_policy, "allow_auto_dtype_cast", True
+                ):
+                    # Forward-only capture: nothing restores a packed
+                    # AUTO_NF12 source afterwards, so the model tree keeps the
+                    # dense module the next processor will quantize.
+                    subset[name].state["auto_dtype_cast_forward_disabled"] = True
                 source_module = subset[name].module
                 # EoRA runs after quantization: its forward must consume the
                 # quantized module in the model tree, not a freshly packed

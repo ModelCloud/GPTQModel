@@ -123,7 +123,9 @@ def test_fp8_pack_rejects_invalid_source_before_state_changes(monkeypatch, inval
         monkeypatch.setattr(fp8_module, "_quantize_fp8_weight_mlx_to_torch",
                             lambda *args, **kwargs: pytest.fail("invalid source reached MLX quantization"))
     elif path == "smoother":
-        monkeypatch.setattr(fp8_module, "_apply_optional_smoother",
+        from gptqmodel.nn_modules.qlinear import gguf as gguf_module
+
+        monkeypatch.setattr(gguf_module, "_apply_optional_smoother",
                             lambda *args, **kwargs: pytest.fail("invalid source reached smoother"))
     else:
         monkeypatch.setattr(fp8_module, "_mlx_quantization_available", lambda: False)

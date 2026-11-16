@@ -21,6 +21,7 @@ codebooks with explicit element indexing.
 """
 
 import math
+import threading
 from pathlib import Path
 
 import pytest
@@ -245,6 +246,25 @@ def oracle_assign(data, centroids):
     return best_index, best_distance + (data * data).sum(dim=1)
 
 
+def oracle_assign_with_gap(data, centroids):
+    """Return nearest-centroid assignments plus the best/second-best gap.
+
+    The gap lets the parity test distinguish a real assignment bug from two
+    centroids that are numerically tied under the expanded squared-distance
+    form used by both the production quantizer and this oracle.
+    """
+
+    centroids_norm = (centroids * centroids).sum(dim=1)
+    distance = centroids_norm.unsqueeze(0) - 2.0 * (data @ centroids.t())
+    best_distance, best_index = distance.min(dim=1)
+    if distance.shape[1] < 2:
+        gap = torch.full_like(best_distance, float("inf"))
+    else:
+        top2 = distance.topk(2, dim=1, largest=False).values
+        gap = top2[:, 1] - top2[:, 0]
+    return best_index, best_distance + (data * data).sum(dim=1), gap
+
+
 def oracle_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
     """Independent Lloyd implementation with the production initialization order."""
 
@@ -319,22 +339,31 @@ def oracle_vptq_pass(
     device = weight.device
     index_tensors = {}
     res_index_tensors = {}
+    index_gaps = {}
+    res_index_gaps = {}
     for cidx, (start, end) in enumerate(group_bounds):
         codebook = centroids.get(cidx)
         if codebook is None or end <= start:
             index_tensors[cidx] = None
             res_index_tensors[cidx] = None
+            index_gaps[cidx] = None
+            res_index_gaps[cidx] = None
             continue
         vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
         num_indices = math.ceil(rows / vector_len)
         index_tensors[cidx] = torch.zeros(
             (num_indices, end - start), dtype=torch.int64, device=device
         )
+        index_gaps[cidx] = torch.full(
+            (num_indices, end - start), float("inf"), dtype=torch.float32, device=device
+        )
         res_codebook = None if res_centroids is None else res_centroids.get(cidx)
         if enable_residual and res_codebook is not None:
             res_index_tensors[cidx] = torch.zeros_like(index_tensors[cidx])
+            res_index_gaps[cidx] = torch.full_like(index_gaps[cidx], float("inf"))
         else:
             res_index_tensors[cidx] = None
+            res_index_gaps[cidx] = None
 
     inv_hessian = oracle_inverse_hessian_cholesky(hessian, percdamp).to(torch.float32)
     inv_scale = 1.0 / torch.diagonal(inv_hessian)
@@ -368,7 +397,7 @@ def oracle_vptq_pass(
                 codebook = codebook.to(dtype=column.dtype)
                 vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
                 vectors, padded_rows = oracle_matrix_to_vectors(column, vector_len)
-                assignment, _ = oracle_assign(vectors, codebook)
+                assignment, _, assignment_gap = oracle_assign_with_gap(vectors, codebook)
                 selected = codebook[assignment]
 
                 res_assignment = None
@@ -377,7 +406,9 @@ def oracle_vptq_pass(
                 )
                 if res_codebook is not None:
                     res_codebook = res_codebook.to(dtype=column.dtype)
-                    res_assignment, _ = oracle_assign(vectors - selected, res_codebook)
+                    res_assignment, _, res_assignment_gap = oracle_assign_with_gap(
+                        vectors - selected, res_codebook
+                    )
                     selected = selected + res_codebook[res_assignment]
 
                 q_column = oracle_vectors_to_matrix(selected, 1, padded_rows, rows)
@@ -386,9 +417,11 @@ def oracle_vptq_pass(
             if assignment is not None and index_tensors.get(cidx) is not None:
                 group_start = group_bounds[cidx][0]
                 index_tensors[cidx][:, column_index - group_start] = assignment
+                index_gaps[cidx][:, column_index - group_start] = assignment_gap
             if res_assignment is not None and res_index_tensors.get(cidx) is not None:
                 group_start = group_bounds[cidx][0]
                 res_index_tensors[cidx][:, column_index - group_start] = res_assignment
+                res_index_gaps[cidx][:, column_index - group_start] = res_assignment_gap
 
             error = (column - q_column) * inv_scale[column_index]
             if k + 1 < block_end - block_start:
@@ -402,7 +435,7 @@ def oracle_vptq_pass(
                 block_error @ inv_hessian[block_start:block_end, block_end:]
             )
 
-    return quantized, qerror, index_tensors, res_index_tensors
+    return quantized, qerror, index_tensors, res_index_tensors, index_gaps, res_index_gaps
 
 
 def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
@@ -464,6 +497,12 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
         if kmeans_weight is not None:
             kmeans_weight = kmeans_weight[:, perm]
 
+    pass_hessian = hessian
+    if qcfg.enable_norm and int(qcfg.norm_dim) == 0 and weight_scale is not None:
+        channel_scale = weight_scale[perm] if perm is not None else weight_scale
+        channel_scale = channel_scale.to(dtype=hessian.dtype, device=hessian.device)
+        pass_hessian = hessian * channel_scale.unsqueeze(0) * channel_scale.unsqueeze(1)
+
     group_bounds = [(0, outlier_size)] + [
         (
             outlier_size + index * group_size,
@@ -504,9 +543,9 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
     working_res_centroids = dict.fromkeys(centroids)
     enable_residual = num_res_centroids[1] > 1
 
-    quantized, qerror, indices, res_indices = oracle_vptq_pass(
+    quantized, qerror, indices, res_indices, index_gaps, res_index_gaps = oracle_vptq_pass(
         weight=weight,
-        hessian=hessian,
+        hessian=pass_hessian,
         group_bounds=group_bounds,
         vector_lens=vector_lens,
         centroids=working_centroids,
@@ -545,9 +584,9 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
             res_centroids[cidx] = group_res_centroids.to(dtype=target_dtype)
             working_res_centroids[cidx] = res_centroids[cidx].to(dtype=torch.float32)
 
-        quantized, qerror, indices, res_indices = oracle_vptq_pass(
+        quantized, qerror, indices, res_indices, index_gaps, res_index_gaps = oracle_vptq_pass(
             weight=weight,
-            hessian=hessian,
+            hessian=pass_hessian,
             group_bounds=group_bounds,
             vector_lens=vector_lens,
             centroids=working_centroids,
@@ -574,8 +613,10 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
     return {
         "centroids": centroids,
         "indices": indices,
+        "index_gaps": index_gaps,
         "res_centroids": res_centroids,
         "res_indices": res_indices,
+        "res_index_gaps": res_index_gaps,
         "weight_scale": weight_scale,
         "weight_bias": weight_bias,
         "perm": perm,
@@ -1375,7 +1416,7 @@ def test_vptq_quantizer_matches_independent_oracle(variant, overrides):
                     actual_tensor, expected_tensor, rtol=1e-6, atol=1e-6
                 ), f"{field}[{cidx}] drift {float((actual_tensor - expected_tensor).abs().max())}"
 
-    for field in ("indices", "res_indices"):
+    for field, gap_field in (("indices", "index_gaps"), ("res_indices", "res_index_gaps")):
         actual_map = getattr(result, field)
         expected_map = expected[field]
         assert set(actual_map) == set(expected_map)
@@ -1385,7 +1426,16 @@ def test_vptq_quantizer_matches_independent_oracle(variant, overrides):
                 assert actual_tensor is None
             else:
                 assert actual_tensor is not None
-                assert torch.equal(actual_tensor, expected_tensor), f"{field}[{cidx}] mismatch"
+                mismatch = actual_tensor != expected_tensor
+                if bool(mismatch.any()):
+                    # Two centroids whose squared distances differ only by
+                    # float32 round-off can resolve either way. Accept a
+                    # mismatch only at such a tie.
+                    gaps = expected[gap_field][cidx]
+                    assert torch.all(gaps[mismatch] <= 1e-6), (
+                        f"{field}[{cidx}] mismatch at a non-tie position: "
+                        f"max gap {float(gaps[mismatch].max())}"
+                    )
 
     for field in ("weight_scale", "weight_bias", "perm"):
         actual_tensor = getattr(result, field)
@@ -1627,8 +1677,60 @@ def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
     assert centroids.shape == (8, 4)
     assert assignment.shape == (32,)
     inertia_read = ops.index("aten._local_scalar_dense.default")
-    centroid_update = ops.index("aten.index_add_.default")
+    # The centroid update ends by scattering the segment sums into the result;
+    # the deterministic reduction no longer uses ``index_add_``.
+    centroid_update = ops.index("aten.index_put_.default")
     assert inertia_read > centroid_update
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
+def test_vptq_weighted_kmeans_gpu_deterministic():
+    """GPU _weighted_kmeans must produce bit-identical centroids across runs (#4137)."""
+
+    device = torch.device("cuda:0")
+    generator = torch.Generator(device=device).manual_seed(42)
+    data = torch.randn(5000, 8, generator=generator, device=device, dtype=torch.float32)
+    weights = torch.rand(5000, generator=generator, device=device, dtype=torch.float32)
+
+    c1, a1 = _weighted_kmeans(data, 64, weights, iters=10, tol=1e-5, seed=0)
+    c2, a2 = _weighted_kmeans(data, 64, weights, iters=10, tol=1e-5, seed=0)
+
+    assert torch.equal(c1, c2)
+    assert torch.equal(a1, a2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
+def test_vptq_gpu_quantization_is_deterministic():
+    """Quantizing the same layer twice on GPU must yield identical results (#4137)."""
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=42)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=12,
+        enable_norm=True,
+        enable_perm=True,
+    )
+
+    quantizer1 = build_quantizer(weight, qcfg, dtype=torch.float16)
+    quantizer1.layer.to(device)
+    res1, _ = quantizer1.quantize_weight(
+        weight.to(device=device, dtype=torch.float16), hessian.to(device), target_dtype=torch.float16
+    )
+
+    quantizer2 = build_quantizer(weight, qcfg, dtype=torch.float16)
+    quantizer2.layer.to(device)
+    res2, _ = quantizer2.quantize_weight(
+        weight.to(device=device, dtype=torch.float16), hessian.to(device), target_dtype=torch.float16
+    )
+
+    assert torch.equal(res1.indices[1], res2.indices[1])
+    assert torch.equal(res1.res_indices[1], res2.res_indices[1])
+    assert torch.equal(res1.centroids[1], res2.centroids[1])
+    assert torch.equal(res1.res_centroids[1], res2.res_centroids[1])
+    assert torch.equal(res1.quantized_weight, res2.quantized_weight)
 
 
 def test_vptq_partial_dead_hessian_matches_oracle():
@@ -1808,6 +1910,80 @@ def test_vptq_quantizer_accumulates_calibration_hessian(shape):
         quantizer.add_batch(torch.tensor(1.0))
     with pytest.raises(ValueError, match="expected 6 input features"):
         quantizer.add_batch(torch.randn(5))
+
+
+def test_vptq_materialize_hessian_is_idempotent_and_accumulates_later_batches():
+    """Repeated materialization must not erase the capture (#3869).
+
+    `materialize_hessian` used to pop the per-device partials and clear the
+    sample counts, so a second call returned zeros with `nsamples == 0` and a
+    batch added after a materialization replaced the earlier statistics.
+    """
+
+    qcfg = VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    quantizer = build_quantizer(torch.zeros(8, 6), qcfg)
+
+    generator = torch.Generator().manual_seed(11)
+    # `add_batch` expects `[..., columns]`; H is the mean of `x^T x`.
+    first = torch.randn(4, 6, generator=generator, dtype=torch.float64)
+    second = torch.randn(3, 6, generator=generator, dtype=torch.float64)
+
+    quantizer.add_batch(first)
+    first_hessian = quantizer.materialize_hessian()
+    first_samples = quantizer.nsamples
+    expected_first = (first.t() @ first) / first.shape[0]
+    torch.testing.assert_close(first_hessian, expected_first, rtol=1e-12, atol=1e-12)
+    assert first_samples == first.shape[0]
+
+    repeated = quantizer.materialize_hessian()
+    torch.testing.assert_close(repeated, first_hessian, rtol=0.0, atol=0.0)
+    assert quantizer.nsamples == first_samples
+
+    quantizer.add_batch(second)
+    merged = quantizer.materialize_hessian()
+    tokens = torch.cat([first, second], dim=0)
+    expected_merged = (tokens.t() @ tokens) / tokens.shape[0]
+    torch.testing.assert_close(merged, expected_merged, rtol=1e-12, atol=1e-12)
+    assert quantizer.nsamples == tokens.shape[0]
+
+    # A third call with no new batches still returns the merged statistics.
+    torch.testing.assert_close(quantizer.materialize_hessian(), merged, rtol=0.0, atol=0.0)
+    assert quantizer.nsamples == tokens.shape[0]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA/HIP device")
+def test_vptq_repeat_materialization_honours_a_changed_target_device():
+    """A cached Hessian must move to an explicitly requested device (#3916).
+
+    Inspecting on CPU and then quantizing on GPU used to return the CPU tensor
+    from the repeat-materialization fast path, so the GPU pass received host
+    data. The cached statistics themselves must stay untouched.
+    """
+
+    qcfg = VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    quantizer = build_quantizer(torch.zeros(8, 6), qcfg)
+
+    generator = torch.Generator().manual_seed(17)
+    rows = torch.randn(4, 6, generator=generator, dtype=torch.float64)
+    quantizer.add_batch(rows)
+
+    cpu_hessian = quantizer.materialize_hessian(torch.device("cpu"))
+    samples = quantizer.nsamples
+    assert cpu_hessian.device.type == "cpu"
+
+    gpu_hessian = quantizer.materialize_hessian(torch.device("cuda:0"))
+    assert gpu_hessian.device.type == "cuda"
+    assert quantizer.nsamples == samples
+    torch.testing.assert_close(gpu_hessian.cpu(), cpu_hessian, rtol=0.0, atol=0.0)
+
+    # The cached statistics stay on their original device and are still correct.
+    again = quantizer.materialize_hessian(torch.device("cpu"))
+    assert again.device.type == "cpu"
+    torch.testing.assert_close(again, cpu_hessian, rtol=0.0, atol=0.0)
+    assert quantizer.nsamples == samples
+
+    # A same-device request still returns the cached tensor itself.
+    assert quantizer.materialize_hessian(torch.device("cpu")) is again
 
 
 def test_vptq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
@@ -2885,3 +3061,154 @@ def test_vptq_inplace_bias_write_reenables_the_wide_epilogue(dtype):
 
     assert promoted.dtype is torch.float32
     assert torch.equal(promoted, torch.full_like(promoted, inexact))
+
+
+def test_vptq_deterministic_segment_sum_matches_reference():
+    """The sorted reduction must agree with a float64 ``index_add_`` oracle."""
+
+    torch.manual_seed(0)
+    source = torch.randn(4096, 8)
+    weights = torch.rand(4096)
+    index = torch.randint(0, 257, (4096,))
+
+    # The 1-D case is the ``counts`` reduction; the 2-D case is ``sums``.
+    for value in (source, weights):
+        reference = torch.zeros(257, *value.shape[1:], dtype=torch.float64).index_add_(
+            0, index, value.double()
+        )
+        actual = vptq_module._deterministic_segment_sum(257, index, value)
+
+        assert actual.shape == reference.shape
+        relative = (actual.double() - reference).norm() / reference.norm()
+        assert relative.item() < 1e-6
+        used = torch.bincount(index, minlength=257) > 0
+        assert torch.equal(actual[~used], torch.zeros_like(actual[~used]))
+        assert torch.equal(
+            actual, vptq_module._deterministic_segment_sum(257, index, value)
+        )
+
+
+def test_vptq_weighted_kmeans_does_not_toggle_global_determinism_across_threads():
+    """Concurrent k-means must not leak ``torch.use_deterministic_algorithms``.
+
+    The switch is process-global, not thread-local. #4142 wrapped the atomic
+    ``index_add_`` reduction in a save/set/restore pair, but ``_weighted_kmeans``
+    runs on ``DEVICE_THREAD_POOL`` workers, so interleaved restores could leave
+    the flag enabled for the rest of the process. A thread that runs no k-means
+    must never observe it enabled, and the caller's value must survive.
+    """
+
+    initial = torch.are_deterministic_algorithms_enabled()
+    if initial:
+        torch.use_deterministic_algorithms(False)
+
+    generator = torch.Generator().manual_seed(0)
+    data = torch.randn(4096, 8, generator=generator)
+    weights = torch.rand(4096, generator=generator)
+
+    stop = threading.Event()
+    observed_true = []
+    errors = []
+    barrier = threading.Barrier(6)
+
+    def observer():
+        barrier.wait()
+        seen = 0
+        while not stop.is_set():
+            seen += int(torch.are_deterministic_algorithms_enabled())
+        observed_true.append(seen)
+
+    def kmeans_worker():
+        barrier.wait()
+        try:
+            for _ in range(20):
+                _weighted_kmeans(data, 128, weights, iters=4, tol=0.0, seed=0)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def matmul_worker():
+        barrier.wait()
+        try:
+            left = torch.randn(128, 128)
+            right = torch.randn(128, 128)
+            for _ in range(400):
+                left @ right
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    workers = [threading.Thread(target=kmeans_worker) for _ in range(4)]
+    workers.append(threading.Thread(target=matmul_worker))
+    watcher = threading.Thread(target=observer)
+    try:
+        for thread in [watcher, *workers]:
+            thread.start()
+        for thread in workers:
+            thread.join(timeout=120)
+        assert not any(thread.is_alive() for thread in workers), "worker threads hung"
+        stop.set()
+        watcher.join(timeout=30)
+        assert not watcher.is_alive(), "observer thread hung"
+
+        assert not errors, errors
+        assert observed_true == [0], (
+            "a thread running no k-means observed deterministic algorithms enabled"
+        )
+        assert torch.are_deterministic_algorithms_enabled() is False
+    finally:
+        stop.set()
+        for thread in [watcher, *workers]:
+            if thread.is_alive():
+                thread.join(timeout=5)
+        torch.use_deterministic_algorithms(initial)
+
+
+def test_norm_dim0_error_feedback_uses_channel_scaled_hessian(monkeypatch):
+    """Per-column normalization needs ``D H D`` for error compensation.
+
+    With ``norm_dim=0`` the weight is divided by one scale per input channel, so
+    the reconstruction error in the original space is ``D * e``. The GPTQ
+    compensation pass must therefore consume ``D H D`` while the reported loss
+    still uses the original Hessian.
+    """
+
+    torch.manual_seed(7)
+    rows, columns = 8, 32
+    weight = torch.randn(rows, columns)
+    basis = torch.randn(columns, columns)
+    hessian = basis @ basis.T + torch.eye(columns) * 0.5
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 8],
+        num_res_centroids=[-1, -1],
+        group_size=-1,
+        group_num=-1,
+        kmeans_iters=2,
+        block_size=16,
+        enable_norm=True,
+        norm_dim=0,
+        enable_perm=False,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    captured = []
+    original_pass = quantizer._vptq_pass
+
+    def spy(**kwargs):
+        captured.append(kwargs["hessian"].detach().clone())
+        return original_pass(**kwargs)
+
+    monkeypatch.setattr(quantizer, "_vptq_pass", spy)
+    quantizer.quantize_weight(weight, hessian)
+
+    assert captured, "the quantizer never ran the error-feedback pass"
+    weight_min = weight.amin(dim=0)
+    weight_max = weight.amax(dim=0)
+    channel_scale = (weight_max - weight_min).clamp_min(1e-12)
+    normalized_hessian = (hessian / torch.diagonal(hessian).mean()).to(torch.float64)
+    channel_scale = channel_scale.to(dtype=normalized_hessian.dtype)
+    expected = (
+        normalized_hessian
+        * channel_scale.unsqueeze(0)
+        * channel_scale.unsqueeze(1)
+    )
+    assert torch.allclose(captured[0], expected, rtol=1e-5, atol=1e-6)

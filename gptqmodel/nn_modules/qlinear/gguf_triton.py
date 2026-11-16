@@ -15,7 +15,7 @@ from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from ...utils.rocm import IS_ROCM
 from ._runtime_cache import tensor_cache_key
-from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch
+from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch, gguf_tensor_qtype
 
 
 log = setup_logger()
@@ -47,7 +47,9 @@ if _TRITON_AVAILABLE:
     def _gguf_cast_wide_input_kernel(
         x_ptr, half_ptr, scale_ptr, K: tl.constexpr, BLOCK_K: tl.constexpr,
     ):
-        row = tl.program_id(0)
+        # rows * K can exceed 2^31 for a very large prefill batch; compute
+        # the row offset in 64-bit so the load/store addresses do not wrap.
+        row = tl.program_id(0).to(tl.int64)
         columns = tl.arange(0, BLOCK_K)
         values = tl.load(x_ptr + row * K + columns, columns < K, other=0).to(tl.float32)
         maximum = tl.max(tl.abs(values), 0)
@@ -63,13 +65,16 @@ if _TRITON_AVAILABLE:
         tl.store(half_ptr + row * K + columns, values / scale, columns < K)
         tl.store(scale_ptr + row, scale)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["N", "ELEMENTS"])
     def _gguf_restore_wide_output_kernel(
         output_ptr, scale_ptr, bias_ptr, result_ptr,
-        N: tl.constexpr, ELEMENTS: tl.constexpr, HAS_BIAS: tl.constexpr,
+        N, ELEMENTS, HAS_BIAS: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
-        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        # `N` and `ELEMENTS` depend on the token count. Keeping them as
+        # `tl.constexpr` forced a full recompile for every new M; as runtime
+        # ints the same binary serves every batch size.
+        offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
         mask = offsets < ELEMENTS
         result = tl.load(output_ptr + offsets, mask, other=0).to(tl.float32)
         scale = tl.load(scale_ptr + offsets // N, mask, other=1)
@@ -408,7 +413,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -477,7 +482,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -542,7 +547,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -610,7 +615,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -712,7 +717,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -806,7 +811,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -904,7 +909,7 @@ if _TRITON_AVAILABLE:
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        offs_m = pid_m.to(tl.int64) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         m_mask = offs_m < M
         n_mask = offs_n < N
@@ -993,7 +998,11 @@ def _launch(
             triton.cdiv(output.shape[1], meta["BLOCK_SIZE_N"]),
         )
 
-    kernel[grid](*args)
+    # Triton launches into the current CUDA context. A layer placed on cuda:1
+    # by `device_map` must enter that device first or Triton raises
+    # "Pointer argument cannot be accessed from Triton" while cuda:0 is current.
+    with torch.cuda.device(x.device):
+        kernel[grid](*args)
     return output
 
 
@@ -1015,7 +1024,8 @@ def _launch_with_meta(
             triton.cdiv(output.shape[1], meta_args["BLOCK_SIZE_N"]),
         )
 
-    kernel[grid](*args, **meta)
+    with torch.cuda.device(x.device):
+        kernel[grid](*args, **meta)
     return output
 
 
@@ -1177,7 +1187,8 @@ def _cuda_device_capability(device: torch.device) -> tuple[int, int] | None:
         # skipped; the generic Triton kernels and GGUF_TORCH remain available.
         log.debug.once(
             "GGUF Triton: ROCm host detected; CUDA capability specializations disabled "
-            "(generic launch configs only). The automatic backend is GGUF_TORCH."
+            "(generic launch configs only). AUTO still selects GGUFTritonKernel; "
+            "GGUF_TORCH remains available as a fallback."
         )
         return None
 
@@ -1723,6 +1734,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
     SUPPORTS_BITS = [1, 4, 5, 6]
+    # The fused Triton kernels only implement these ggml tensor layouts. The
+    # bit width is not enough to identify one (Q4_0 and Q4_K are both 4-bit),
+    # so AUTO selection must consult the resolved qtype.
+    SUPPORTS_GGUF_QTYPES = frozenset({"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"})
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -1773,13 +1788,17 @@ class GGUFTritonKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        if self.gguf_tensor_qtype not in {"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"}:
+        if self.gguf_tensor_qtype not in self.SUPPORTS_GGUF_QTYPES:
             raise NotImplementedError(
                 f"{self.__class__.__name__} only supports fused GGUF Triton formats "
                 f"(Q1_0, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
                 "Use BACKEND.GGUF_TORCH for unsupported GGUF formats."
             )
         self._gguf_triton_cache: dict[tuple[int, str, bool], dict[str, Any]] = {}
+
+    @classmethod
+    def supports_gguf_qtype(cls, bits) -> bool:
+        return gguf_tensor_qtype(bits) in cls.SUPPORTS_GGUF_QTYPES
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -2066,6 +2085,14 @@ class GGUFTritonKernel(GGUFTorchLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
+        # The fused Triton matmuls are raw launches with no backward. Use the
+        # differentiable GGUF torch path when autograd must flow through the
+        # activation or the bias (#4072).
+        if torch.is_grad_enabled() and (
+            x.requires_grad or (self.bias is not None and self.bias.requires_grad)
+        ):
+            return super().forward(x)
+
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
 
@@ -2084,11 +2111,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             x_dense = x_flat.contiguous()
             x_work = torch.empty(x_dense.shape, device=x_dense.device, dtype=torch.float16)
             row_scales = torch.empty((x_dense.shape[0],), device=x_dense.device, dtype=torch.float32)
-            _gguf_cast_wide_input_kernel[(x_dense.shape[0],)](
-                x_dense, x_work, row_scales, x_dense.shape[-1],
-                triton.next_power_of_2(x_dense.shape[-1]),
-                num_warps=4 if x_dense.shape[-1] <= 4096 else 8,
-            )
+            with torch.cuda.device(x_dense.device):
+                _gguf_cast_wide_input_kernel[(x_dense.shape[0],)](
+                    x_dense, x_work, row_scales, x_dense.shape[-1],
+                    triton.next_power_of_2(x_dense.shape[-1]),
+                    num_warps=4 if x_dense.shape[-1] <= 4096 else 8,
+                )
         else:
             x_work = x_flat
 
@@ -2100,10 +2128,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
         if row_scales is not None:
             result = torch.empty(output.shape, device=output.device, dtype=input_dtype)
             bias = None if self.bias is None else self.bias.to(device=output.device, dtype=torch.float32).contiguous()
-            _gguf_restore_wide_output_kernel[(triton.cdiv(output.numel(), 256),)](
-                output, row_scales, output if bias is None else bias, result,
-                output.shape[-1], output.numel(), bias is not None, 256,
-            )
+            with torch.cuda.device(output.device):
+                _gguf_restore_wide_output_kernel[(triton.cdiv(output.numel(), 256),)](
+                    output, row_scales, output if bias is None else bias, result,
+                    output.shape[-1], output.numel(), bias is not None, 256,
+                )
             output = result
         elif self.bias is not None:
             bias = self.bias.to(device=output.device, dtype=torch.float32)

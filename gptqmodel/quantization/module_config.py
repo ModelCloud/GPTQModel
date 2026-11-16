@@ -18,6 +18,7 @@ import torch
 from .config import (
     FORMAT,
     FORMAT_FIELD_CODE,
+    _gguf_bits_implies_format,
     _normalize_bitsandbytes_block_size,
     _normalize_bitsandbytes_format,
     _normalize_fp8_fmt,
@@ -132,8 +133,13 @@ def resolve_module_constructor_config(
             overrides.get("bits", bits), format_value=format
         )
         tmp_group_size = overrides.get("group_size", group_size)
-        tmp_desc_act = overrides.get("desc_act", desc_act)
-        tmp_sym = overrides.get("sym", sym)
+        # `None` means "inherit the global value"; anything else is passed
+        # through unchanged so `ModuleConstructorConfig` rejects a non-bool
+        # instead of silently coercing `"False"` to `True`.
+        desc_act_override = overrides.get("desc_act")
+        tmp_desc_act = desc_act if desc_act_override is None else desc_act_override
+        sym_override = overrides.get("sym")
+        tmp_sym = sym if sym_override is None else sym_override
         tmp_pack_dtype = _normalize_pack_dtype(
             overrides.get("pack_dtype", pack_dtype)
         )
@@ -144,33 +150,52 @@ def resolve_module_constructor_config(
             )
             if fp8_format_override is not None:
                 options["format"] = _normalize_fp8_fmt(fp8_format_override)
-            block_size_override = overrides.get(
-                "weight_block_size", options.get("weight_block_size")
-            )
-            normalized_block_size = _normalize_fp8_weight_block_size(
-                block_size_override
-            )
-            if "weight_scale_method" in overrides or block_size_override is not None:
+            method_override = overrides.get("weight_scale_method")
+            block_size_present = "weight_block_size" in overrides
+            if block_size_present:
+                normalized_block_size = _normalize_fp8_weight_block_size(
+                    overrides["weight_block_size"]
+                )
+            elif method_override is not None and str(method_override).strip().lower() != "block":
+                # A `row`/`tensor` override must not inherit the global block
+                # size: the merged pair would be invalid.
+                normalized_block_size = None
+            else:
+                normalized_block_size = _normalize_fp8_weight_block_size(
+                    options.get("weight_block_size")
+                )
+            if method_override is not None or block_size_present:
                 options["weight_scale_method"] = _normalize_fp8_weight_scale_method(
-                    overrides.get(
-                        "weight_scale_method", options.get("weight_scale_method")
-                    ),
+                    method_override if method_override is not None else options.get("weight_scale_method"),
                     weight_block_size=normalized_block_size,
+                )
+                options["weight_block_size"] = (
+                    list(normalized_block_size) if normalized_block_size is not None else None
                 )
             if "weight_scale_semantics" in overrides:
                 options["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
                     overrides["weight_scale_semantics"]
                 )
-            if "weight_block_size" in overrides:
-                options["weight_block_size"] = normalized_block_size
         elif format == FORMAT.BITSANDBYTES:
+            effective_bits = quant_bits_width(tmp_bits)
             raw_format = overrides.get(
                 FORMAT_FIELD_CODE, overrides.get("bnb_quant_type")
             )
             if raw_format is not None:
                 options["format"] = _normalize_bitsandbytes_format(
-                    raw_format, bits=quant_bits_width(tmp_bits)
+                    raw_format, bits=effective_bits
                 )
+            elif "format" in options:
+                # The inherited subtype may not exist at the overridden width
+                # (`nf4` has no 8-bit form); 8-bit resolves to `int8`.
+                try:
+                    options["format"] = _normalize_bitsandbytes_format(
+                        options["format"], bits=effective_bits
+                    )
+                except ValueError:
+                    options["format"] = _normalize_bitsandbytes_format(
+                        None, bits=effective_bits
+                    )
             if "block_size" in overrides or "bnb_block_size" in overrides:
                 options["block_size"] = _normalize_bitsandbytes_block_size(
                     overrides.get("block_size", overrides.get("bnb_block_size"))
@@ -190,16 +215,24 @@ def resolve_module_constructor_config(
             # to quantize this module. Width-only overrides inherit the base
             # subtype; format-only overrides inherit only its width.
             base_width, base_format, _ = _normalize_gguf_config(bits, None)
-            _, _, tmp_bits = _normalize_gguf_config(
-                overrides.get("bits", base_width),
-                overrides.get(FORMAT_FIELD_CODE, base_format),
-            )
+            raw_bits = overrides.get("bits", base_width)
+            if FORMAT_FIELD_CODE in overrides:
+                raw_format = overrides[FORMAT_FIELD_CODE]
+            elif "bits" in overrides and _gguf_bits_implies_format(raw_bits):
+                raw_format = None
+            else:
+                raw_format = base_format
+            _, _, tmp_bits = _normalize_gguf_config(raw_bits, raw_format)
+        elif format in (FORMAT.MXFP4_MACAQ, FORMAT.MXFP4):
+            for key in ("had_block", "activation_precision", "pre_mode", "pre_alpha", "rotation"):
+                if key in overrides:
+                    options[key] = overrides[key]
 
     return ModuleConstructorConfig(
         bits=tmp_bits,
         group_size=tmp_group_size,
-        desc_act=bool(tmp_desc_act),
-        sym=bool(tmp_sym),
+        desc_act=tmp_desc_act,
+        sym=tmp_sym,
         pack_dtype=tmp_pack_dtype,
         format=format,
         options=tuple(options.items()),
@@ -259,6 +292,18 @@ def module_constructor_config(
         }
     if quant_type == "qqq":
         kind = "qqq"
+    if quant_type == "macaq":
+        kind = "macaq"
+        options = {
+            key: getattr(module, key)
+            for key in (
+                "block_size",
+                "had_block",
+                "activation_precision",
+                "pre_mode",
+                "pre_alpha",
+            )
+        }
 
     return ModuleConstructorConfig(
         bits=getattr(module, "bits", config.runtime_bits),

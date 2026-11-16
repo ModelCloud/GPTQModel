@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+from types import SimpleNamespace
 from typing import Dict, Optional
 
 import torch
@@ -17,6 +18,11 @@ from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_mode
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 
 
 _THINKER_LAYER_MODULES = {
@@ -82,10 +88,39 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     ATTENTION_MASKS_DTYPE = torch.long
     require_monkeypatch = True
 
+    # Transformers 5.22 registers the checkpoint -> runtime renames for the
+    # Qwen2.5-Omni thinker (``thinker.visual`` -> ``thinker.model.visual``, and
+    # likewise for the audio tower and ``language_model``) under the nested
+    # ``qwen2_5_omni_thinker`` model type, not the top-level ``qwen2_5_omni``.
+    # Resolving the top-level type therefore finds no conversion map, and the
+    # lazy disk loader leaves the towers and ``embed_tokens`` on META. Declare
+    # the runtime -> checkpoint aliases explicitly so both layouts resolve.
+    HF_CONVERSION_MAP_REVERSED = (
+        SimpleNamespace(
+            source_patterns=[r"^thinker\.model\.visual\.(.+)$"],
+            target_patterns=[r"^thinker.visual.\1"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"^thinker\.model\.audio_tower\.(.+)$"],
+            target_patterns=[r"^thinker.audio_tower.\1"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"^thinker\.model\.language_model\.(.+)$"],
+            target_patterns=[r"^thinker.model.\1"],
+            operations=[],
+        ),
+    )
+
     loader = AutoModelForTextToWaveform
 
     lm_head = "thinker.lm_head"
-    pre_lm_head_norm_module = "thinker.model.norm"
+    # transformers 5.22 nests the thinker decoder under `language_model`.
+    pre_lm_head_norm_module = [
+        "thinker.model.language_model.norm",
+        "thinker.model.norm",
+    ]
 
     require_pkgs = ["audioread>=3.1.0", "librosa>=0.11.0", "av>=16.0.1"]
 
@@ -256,9 +291,21 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         return AutoProcessor.from_pretrained(self.model_local_path)
 
     def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1, **kwargs):
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(
+                pretokenized,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                batch_size=batch_size,
+                **kwargs,
+            )
+
+        kwargs["calibration_dataset_concat_size"] = calibration_dataset_concat_size
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )
@@ -274,4 +321,6 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
             )
             calib_data.append(inputs)
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )

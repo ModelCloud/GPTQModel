@@ -92,6 +92,12 @@ inline int64_t clamped_threads(int64_t requested) {
   return std::max<int64_t>(1, std::min<int64_t>(at::get_num_threads(), limit));
 }
 
+// SIMD path selection travels as an op argument (0 = scalar, 1 = AVX2/F16C,
+// 2 = AVX512 core and above). No process-wide switch decides the numerics.
+constexpr int kFloatxSimdScalar = 0;
+constexpr int kFloatxSimdAvx2 = 1;
+constexpr int kFloatxSimdAvx512 = 2;
+
 template <typename SrcT, typename DstT>
 std::array<float, 256> build_fp8_table() {
   std::array<float, 256> table{};
@@ -198,6 +204,7 @@ ScaleSpec1D make_scale_spec_1d(
 
   TORCH_CHECK(scale.ndimension() == 1, "1D dequantization only supports scalar or 1D scale tensors");
   spec.length = scale.numel();
+  TORCH_CHECK(spec.length > 0, "scale tensor must not be empty");
   if (spec.length == result_len) {
     spec.layout = ScaleLayout1D::kVector;
     return spec;
@@ -232,6 +239,7 @@ ScaleSpec2D make_scale_spec_2d(
 
   if (scale.ndimension() == 1) {
     const int64_t count = scale.size(0);
+    TORCH_CHECK(count > 0, "scale tensor must not be empty");
     const int64_t resolved_axis = axis_is_none ? 0 : axis;
     if (resolved_axis == 0) {
       TORCH_CHECK(rows % count == 0, "row scale tensor shape incompatible with output");
@@ -251,6 +259,7 @@ ScaleSpec2D make_scale_spec_2d(
   TORCH_CHECK(scale.ndimension() == 2, "2D dequantization only supports scale tensors up to rank 2");
   spec.scale_rows = scale.size(0);
   spec.scale_cols = scale.size(1);
+  TORCH_CHECK(spec.scale_rows > 0 && spec.scale_cols > 0, "scale tensor must not be empty");
   if (spec.scale_rows == rows && spec.scale_cols == cols) {
     spec.layout = ScaleLayout2D::kFull;
     spec.cols = cols;
@@ -346,41 +355,22 @@ inline void apply_scale_and_store_scalar_1d(
 }
 
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
-inline bool env_flag_enabled(const char* name) {
-  // Allow tests and compatibility debugging to force the scalar fallback.
-  const char* value = std::getenv(name);
-  if (value == nullptr || value[0] == '\0') {
-    return false;
-  }
-  switch (value[0]) {
-    case '1':
-    case 'Y':
-    case 'y':
-    case 'T':
-    case 't':
-      return true;
-    default:
-      return false;
-  }
-}
-
-inline bool cpu_supports_avx2() {
-  if (env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2")) {
+inline bool cpu_supports_avx2(int simd_level) {
+  if (simd_level < kFloatxSimdAvx2) {
     return false;
   }
   return __builtin_cpu_supports("avx2");
 }
 
-inline bool cpu_supports_f16c() {
-  if (env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2")) {
+inline bool cpu_supports_f16c(int simd_level) {
+  if (simd_level < kFloatxSimdAvx2) {
     return false;
   }
   return __builtin_cpu_supports("f16c");
 }
 
-inline bool cpu_supports_avx512_core() {
-  if (env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX2") ||
-      env_flag_enabled("GPTQMODEL_FLOATX_CPU_DISABLE_AVX512")) {
+inline bool cpu_supports_avx512_core(int simd_level) {
+  if (simd_level < kFloatxSimdAvx512) {
     return false;
   }
   return __builtin_cpu_supports("avx512f") &&
@@ -388,12 +378,12 @@ inline bool cpu_supports_avx512_core() {
       __builtin_cpu_supports("avx512vl");
 }
 
-inline bool cpu_supports_avx512bf16() {
-  return cpu_supports_avx512_core() && __builtin_cpu_supports("avx512bf16");
+inline bool cpu_supports_avx512bf16(int simd_level) {
+  return cpu_supports_avx512_core(simd_level) && __builtin_cpu_supports("avx512bf16");
 }
 
-inline bool cpu_supports_avx512fp16() {
-  return cpu_supports_avx512_core() && __builtin_cpu_supports("avx512fp16");
+inline bool cpu_supports_avx512fp16(int simd_level) {
+  return cpu_supports_avx512_core(simd_level) && __builtin_cpu_supports("avx512fp16");
 }
 
 inline bool cpu_prefers_avx2_fp8_bf16() {
@@ -1704,19 +1694,19 @@ void dequantize_fp4_row_avx512_fp16_block_scale(
   }
 }
 #else
-inline bool cpu_supports_avx2() {
+inline bool cpu_supports_avx2(int) {
   return false;
 }
 
-inline bool cpu_supports_f16c() {
+inline bool cpu_supports_f16c(int) {
   return false;
 }
 
-inline bool cpu_supports_avx512bf16() {
+inline bool cpu_supports_avx512bf16(int) {
   return false;
 }
 
-inline bool cpu_supports_avx512fp16() {
+inline bool cpu_supports_avx512fp16(int) {
   return false;
 }
 #endif
@@ -1750,7 +1740,8 @@ void dequantize_fp8_2d(
     const std::array<float, 256>& table,
     const ScaleSpec2D& spec,
     ScaleMode scale_mode,
-    int64_t threads) {
+    int64_t threads,
+    int simd_level) {
   const int64_t rows = source.size(0);
   const int64_t cols = source.size(1);
   const uint8_t* src = reinterpret_cast<const uint8_t*>(source.const_data_ptr());
@@ -1759,7 +1750,7 @@ void dequantize_fp8_2d(
     c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
     const bool prefer_avx2_bf16_fp8 = cpu_prefers_avx2_fp8_bf16();
-    if (cpu_supports_avx512bf16() && !prefer_avx2_bf16_fp8) {
+    if (cpu_supports_avx512bf16(simd_level) && !prefer_avx2_bf16_fp8) {
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
       at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
         for (int64_t row = begin; row < end; ++row) {
@@ -1798,7 +1789,7 @@ void dequantize_fp8_2d(
       });
       return;
     }
-    if (cpu_supports_avx2()) {
+    if (cpu_supports_avx2(simd_level)) {
       // Some AMD AVX-512 parts still retire the FP8 BF16 gather-heavy loop faster
       // with AVX2, so let the runtime quirk above steer this path on those hosts.
       const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
@@ -1872,7 +1863,7 @@ void dequantize_fp8_2d(
 
   c10::Half* dst = output.data_ptr<c10::Half>();
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
-  if (cpu_supports_avx512fp16()) {
+  if (cpu_supports_avx512fp16(simd_level)) {
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
       for (int64_t row = begin; row < end; ++row) {
@@ -1911,7 +1902,7 @@ void dequantize_fp8_2d(
     });
     return;
   }
-  if (cpu_supports_avx2() && cpu_supports_f16c()) {
+  if (cpu_supports_avx2(simd_level) && cpu_supports_f16c(simd_level)) {
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
       for (int64_t row = begin; row < end; ++row) {
@@ -2018,9 +2009,10 @@ void dequantize_fp4_vectorized(
     const std::array<float, 16>& table,
     const ScaleSpec2D& spec,
     ScaleMode scale_mode,
-    int64_t threads) {
+    int64_t threads,
+    int simd_level) {
 #if GPTQMODEL_FLOATX_X86 && (defined(__GNUC__) || defined(__clang__))
-  if (cpu_supports_avx512bf16()) {
+  if (cpu_supports_avx512bf16(simd_level)) {
     const int64_t cols = packed_cols * 2;
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     if constexpr (std::is_same_v<T, c10::BFloat16>) {
@@ -2050,7 +2042,7 @@ void dequantize_fp4_vectorized(
       return;
     }
   }
-  if (cpu_supports_avx512fp16()) {
+  if (cpu_supports_avx512fp16(simd_level)) {
     const int64_t cols = packed_cols * 2;
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     if constexpr (std::is_same_v<T, c10::Half>) {
@@ -2080,7 +2072,7 @@ void dequantize_fp4_vectorized(
       return;
     }
   }
-  if (cpu_supports_avx2()) {
+  if (cpu_supports_avx2(simd_level)) {
     const int64_t cols = packed_cols * 2;
     const int64_t grain = std::max<int64_t>(1, rows / clamped_threads(threads));
     if constexpr (std::is_same_v<T, c10::BFloat16>) {
@@ -2110,7 +2102,7 @@ void dequantize_fp4_vectorized(
       return;
     }
     if constexpr (std::is_same_v<T, c10::Half>) {
-      if (cpu_supports_f16c()) {
+      if (cpu_supports_f16c(simd_level)) {
         at::parallel_for(0, rows, grain, [&](int64_t begin, int64_t end) {
           for (int64_t row = begin; row < end; ++row) {
             if (scale_mode != ScaleMode::kNone && spec.layout == ScaleLayout2D::kBlock && spec.col_repeat >= 8) {
@@ -2167,7 +2159,8 @@ at::Tensor dequantize_fp8_cpu(
     bool axis_is_none,
     int64_t target_dtype_value,
     int64_t format_value,
-    int64_t threads) {
+    int64_t threads,
+    int64_t simd_level) {
   TORCH_CHECK(source.device().is_cpu(), "FP8 source tensor must reside on CPU");
   TORCH_CHECK(source.ndimension() == 1 || source.ndimension() == 2, "FP8 fast path only supports 1D or 2D tensors");
   TORCH_CHECK(source.element_size() == 1, "FP8 fast path expects one byte per source element");
@@ -2175,6 +2168,7 @@ at::Tensor dequantize_fp8_cpu(
   const ScaleMode scale_mode = static_cast<ScaleMode>(scale_mode_value);
   const TargetKind target_kind = static_cast<TargetKind>(target_dtype_value);
   const Fp8Format format = static_cast<Fp8Format>(format_value);
+  const int simd = static_cast<int>(simd_level);
 
   at::Tensor src = source.contiguous();
   at::Tensor output = empty_target_like(src, target_kind);
@@ -2215,7 +2209,7 @@ at::Tensor dequantize_fp8_cpu(
   }
 
   const ScaleSpec2D spec = make_scale_spec_2d(scale, src.size(0), src.size(1), axis, axis_is_none);
-  dequantize_fp8_2d(src, output, table, spec, scale_mode, threads);
+  dequantize_fp8_2d(src, output, table, spec, scale_mode, threads, simd);
   return output;
 }
 
@@ -2226,13 +2220,15 @@ at::Tensor dequantize_fp4_cpu(
     int64_t axis,
     bool axis_is_none,
     int64_t target_dtype_value,
-    int64_t threads) {
+    int64_t threads,
+    int64_t simd_level) {
   TORCH_CHECK(source.device().is_cpu(), "FP4 source tensor must reside on CPU");
   TORCH_CHECK(source.ndimension() == 1 || source.ndimension() == 2, "FP4 fast path only supports 1D or 2D tensors");
   TORCH_CHECK(source.element_size() == 1, "FP4 fast path expects packed one-byte storage");
 
   const ScaleMode scale_mode = static_cast<ScaleMode>(scale_mode_value);
   const TargetKind target_kind = static_cast<TargetKind>(target_dtype_value);
+  const int simd = static_cast<int>(simd_level);
 
   at::Tensor src = source.contiguous();
   at::Tensor output = empty_target_for_fp4(src, target_kind);
@@ -2273,10 +2269,12 @@ at::Tensor dequantize_fp4_cpu(
   const uint8_t* src_ptr = reinterpret_cast<const uint8_t*>(src.const_data_ptr());
   if (output.scalar_type() == at::kBFloat16) {
     c10::BFloat16* dst = output.data_ptr<c10::BFloat16>();
-    dequantize_fp4_vectorized(src_ptr, dst, rows, packed_cols, table, spec, scale_mode, threads);
+    dequantize_fp4_vectorized(
+        src_ptr, dst, rows, packed_cols, table, spec, scale_mode, threads, simd);
   } else {
     c10::Half* dst = output.data_ptr<c10::Half>();
-    dequantize_fp4_vectorized(src_ptr, dst, rows, packed_cols, table, spec, scale_mode, threads);
+    dequantize_fp4_vectorized(
+        src_ptr, dst, rows, packed_cols, table, spec, scale_mode, threads, simd);
   }
   return output;
 }
@@ -2285,9 +2283,9 @@ at::Tensor dequantize_fp4_cpu(
 
 TORCH_LIBRARY(gptqmodel_floatx, m) {
   m.def(
-      "dequantize_fp8_cpu(Tensor src, Tensor? scale, int scale_mode, int axis, bool axis_is_none, int target_dtype, int format_code, int threads) -> Tensor");
+      "dequantize_fp8_cpu(Tensor src, Tensor? scale, int scale_mode, int axis, bool axis_is_none, int target_dtype, int format_code, int threads, int simd_level=2) -> Tensor");
   m.def(
-      "dequantize_fp4_cpu(Tensor src, Tensor? scale, int scale_mode, int axis, bool axis_is_none, int target_dtype, int threads) -> Tensor");
+      "dequantize_fp4_cpu(Tensor src, Tensor? scale, int scale_mode, int axis, bool axis_is_none, int target_dtype, int threads, int simd_level=2) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_floatx, CPU, m) {

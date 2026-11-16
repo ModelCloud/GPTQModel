@@ -147,11 +147,18 @@ def clone_gptq_config_for_module(
 
     apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
 
+    # The processor-level fallback is the *default* for this run: a per-module
+    # `dynamic` override outranks it. Applying it after the override (as this
+    # function used to) silently discarded the override in every real run,
+    # because the looper always passes `quantize_config.fallback`.
+    base_fallback = normalize_fallback(fallback, qcfg.fallback)
+    qcfg_clone.fallback = base_fallback
+
     # Method-specific dynamic fields stay with GPTQ.
     if qcfg.dynamic is not None:
         fallback_override = resolved_cfg.get("fallback", None)
         if fallback_override is not None:
-            qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
+            qcfg_clone.fallback = normalize_fallback(fallback_override, base_fallback)
         hessian_override = resolved_cfg.get("hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
@@ -180,7 +187,6 @@ def clone_gptq_config_for_module(
 
         qcfg_clone.validate_gsq()
 
-    qcfg_clone.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
     return qcfg_clone
 
 class GPTQProcessor(LoopProcessor):
@@ -627,10 +633,129 @@ class GPTQProcessor(LoopProcessor):
                     else:
                         sample_out = out
                     g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+            elif (
+                torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() == 2
+                and keep_mask.ndim == 2
+                and inp_tensor.shape[0] == keep_mask.numel()
+            ):
+                # Routed experts reached through the MoE bypass and HF qwen2_moe's
+                # shared expert are called on flattened `[B*S, H]` rows, so the
+                # padded positions are not a separate batch dimension and the
+                # `dim() >= 3` branch above never sees them. Filter the rows with
+                # the same keep mask, one `add_batch` per sample, so a batched run
+                # accumulates exactly the rows (and the same summation order) as
+                # `batch_size=1`.
+                out_tensor = out if torch.is_tensor(out) else None
+                out_rows = (
+                    out_tensor
+                    if (
+                        out_tensor is not None
+                        and out_tensor.dim() >= 2
+                        and out_tensor.shape[0] == inp_tensor.shape[0]
+                    )
+                    else None
+                )
+                mask_tls = getattr(self, "_mask_tls", None)
+                sample_has_tokens = getattr(mask_tls, "sample_has_tokens", None)
+                if sample_has_tokens is None:
+                    sample_has_tokens = keep_mask.any(dim=1).tolist()
+                seq_len = int(keep_mask.shape[1])
+                for sample_index, has_tokens in enumerate(sample_has_tokens):
+                    if not has_tokens:
+                        continue
+                    start = sample_index * seq_len
+                    sample_keep = keep_mask[sample_index].to(device=inp_tensor.device, dtype=torch.bool)
+                    sample_inp = inp_tensor[start:start + seq_len][sample_keep].contiguous()
+                    if out_rows is not None:
+                        sample_out = out_rows[start:start + seq_len][sample_keep].contiguous()
+                    else:
+                        sample_out = out
+                    g.add_batch(
+                        sample_inp.data,
+                        sample_out.data if torch.is_tensor(sample_out) else sample_out,
+                        batch_index=batch_idx,
+                    )  # noqa: F821
+            elif (
+                torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() == 2
+                and keep_mask.ndim == 2
+                and inp_tensor.shape[0] != keep_mask.numel()
+            ):
+                # Natively routed experts are called on `[routed_rows, H]`
+                # rows: the router selected a subset of the batch, so the row
+                # count is unrelated to the keep mask. ``register_moe_root_capture_hook``
+                # zeroed the padded rows before routing, but the router still
+                # routed and counted them. Drop every all-zero row here so a
+                # padding-only expert never reaches GPTQ with a zero Hessian
+                # (which would let ``_neutralize_dead_columns`` zero its whole
+                # weight), and so `nsamples` counts only real calibration rows.
+                mask_tls = getattr(self, "_mask_tls", None)
+                padding_present = getattr(mask_tls, "mask_has_padding", None)
+                if padding_present is None:
+                    padding_present = not bool(keep_mask.all())
+                if padding_present:
+                    keep_rows = (inp_tensor != 0).any(dim=-1)
+                    kept_inp = inp_tensor[keep_rows].contiguous()
+                    if (
+                        torch.is_tensor(out)
+                        and out.dim() >= 2
+                        and out.shape[0] == inp_tensor.shape[0]
+                    ):
+                        kept_out = out[keep_rows.to(device=out.device)].contiguous()
+                    else:
+                        kept_out = out
+                    g.add_batch(
+                        kept_inp.data,
+                        kept_out.data if torch.is_tensor(kept_out) else kept_out,
+                        batch_index=batch_idx,
+                    )  # noqa: F821
+                else:
+                    g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
             else:
                 g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
+
+    def register_moe_root_capture_hook(self, moe_block: Module, moe_block_name: str, handles: List[Any]) -> bool:
+        """Zero calibration padding rows on the MoE block input.
+
+        Natively routed experts run through the model's own router, so their
+        forward hooks see `[routed_rows, H]` rows whose count is unrelated to the
+        calibration keep mask and the padding cannot be filtered there. Zeroing
+        the padded rows of the MoE input makes them contribute exactly nothing to
+        every expert Hessian while leaving real rows untouched.
+        """
+
+        if not getattr(self, "preserve_batch_keep_mask", False):
+            return False
+
+        def zero_masked_rows(_module, args, kwargs):
+            keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+            if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+                return None
+
+            hidden_states = kwargs.get("hidden_states") if kwargs else None
+            from_kwargs = hidden_states is not None
+            if hidden_states is None:
+                if not args or not torch.is_tensor(args[0]):
+                    return None
+                hidden_states = args[0]
+            if hidden_states.dim() != 3 or tuple(hidden_states.shape[:2]) != tuple(keep_mask.shape):
+                return None
+
+            row_mask = keep_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
+            masked = hidden_states * row_mask
+            if from_kwargs:
+                kwargs = dict(kwargs)
+                kwargs["hidden_states"] = masked
+                return args, kwargs
+            return (masked,) + tuple(args[1:]), kwargs
+
+        handles.append(moe_block.register_forward_pre_hook(zero_masked_rows, with_kwargs=True))
+        return True
 
     def process(
         self,

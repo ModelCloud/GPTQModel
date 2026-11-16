@@ -82,13 +82,53 @@ class ForwardExecutor:
         put = getattr(collection, "put", None)
         if callable(put):
             put(index, value)
-        else:
+            return
+        # List-backed collections append, so a skipped batch would shift every
+        # later batch onto the wrong input kwargs/mask/position ids. Pad the
+        # missing slots before storing at the batch's own index.
+        while len(collection) < index:
+            collection.append([])
+        if len(collection) == index:
             collection.append(value)
+        else:
+            collection[index] = value
+
+    @staticmethod
+    def _store_missing_output(collection, index: int) -> None:
+        """Keep the batch's slot when its forward legitimately produced nothing."""
+
+        if callable(getattr(collection, "put", None)):
+            # Indexed writers already keep positional slots; they have no
+            # representation for an empty batch and stay sparse.
+            return
+        while len(collection) <= index:
+            collection.append([])
+
+    @staticmethod
+    def _pad_output_slots(collection, expected_batches: int) -> None:
+        """Pad trailing early-stopped batches so every input batch keeps a slot."""
+
+        if callable(getattr(collection, "put", None)):
+            return
+        while len(collection) < expected_batches:
+            collection.append([])
 
     @staticmethod
     def _finish_outputs(collection):
         finalize = getattr(collection, "finalize", None)
         return finalize() if callable(finalize) else collection
+
+    @staticmethod
+    def _shared_kv_key(layer_index: int, batch_idx: int) -> Tuple[int, int]:
+        """Identity of one batch's cross-layer KV inside the shared cache.
+
+        A layer's KV is per calibration batch: batch ``b`` of the consuming
+        layer may only observe the KV that batch ``b`` produced. Keying by
+        layer alone serves batch 0's tensors to every later batch (and fails
+        outright when their shapes differ).
+        """
+
+        return (layer_index, batch_idx)
 
     def _filter_forward_devices(self, devices: List[torch.device]) -> List[torch.device]:
         """Apply `compute_device_filter` to the forward device pool, preserving order."""
@@ -178,7 +218,7 @@ class ForwardExecutor:
         attention_masks: List[torch.Tensor],
         cur_layer_device: torch.device,
         is_lm_head_module: bool,
-        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        shared_kv_cache_dict: Dict[Tuple[int, int], torch.Tensor],
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
@@ -297,7 +337,7 @@ class ForwardExecutor:
         attention_masks: List[torch.Tensor],
         cur_layer_device: torch.device,
         is_lm_head_module: bool,
-        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        shared_kv_cache_dict: Dict[Tuple[int, int], torch.Tensor],
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
@@ -321,7 +361,6 @@ class ForwardExecutor:
             apply_moe_config=apply_moe_config,
         )
         write_shared_kv_cache = bool(getattr(self.looper.gptq_model, "write_shared_kv_cache", False))
-        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
         total_batches, batch_row_counts, total_rows = self._resolve_batch_progress(
             processor,
             layer_inputs,
@@ -348,8 +387,32 @@ class ForwardExecutor:
                     processed_rows + max(rows_for_batch, 1), total_rows
                 )
                 continue
+            cached_layer_inputs = layer_inputs[batch_idx]
+            if not cached_layer_inputs:
+                # A previous pass legitimately produced no activation for this
+                # batch (MoE early stop). Keep the slot for downstream
+                # alignment, but there is nothing to forward.
+                rows_for_batch = (
+                    batch_row_counts[batch_idx]
+                    if batch_idx < len(batch_row_counts)
+                    else 0
+                )
+                processed_rows = min(
+                    processed_rows + max(rows_for_batch, 1), total_rows
+                )
+                continue
             processor._set_current_batch_index(batch_idx)
             try:
+                # Each batch consumes the KV its own batch produced in the
+                # previous layer. Reading this outside the loop handed batch
+                # 0's KV to every batch of the consuming layer.
+                prev_kv = (
+                    shared_kv_cache_dict.get(
+                        self._shared_kv_key(layer_index - 1, batch_idx)
+                    )
+                    if reuse_kv
+                    else None
+                )
                 exec_device = cur_layer_device
                 if preserve_module_devices:
                     module_target = getattr(module, "target_device", None)
@@ -357,7 +420,6 @@ class ForwardExecutor:
                         exec_device = module_target
 
                 # Capture input device before moving - used for output placement
-                cached_layer_inputs = layer_inputs[batch_idx]
                 cached_layer_kwargs = layer_input_kwargs[batch_idx]
                 input_device = cached_layer_inputs[0].device if cached_layer_inputs else cur_layer_device
 
@@ -444,9 +506,15 @@ class ForwardExecutor:
                     and module_output is not None
                     and isinstance(module_output, tuple)
                     and len(module_output) > 0
-                    and shared_kv_cache_dict.get(layer_index) is None
                 ):
-                    shared_kv_cache_dict[layer_index] = module_output[-1]
+                    # Always overwrite. The pre-quant (FP) forward publishes
+                    # its KV first, then the post-quant replay republishes the
+                    # KV for the same batch; only the replay's KV matches the
+                    # quantized hidden states that feed the next layer. An
+                    # `is None` guard would pin the stale FP capture forever.
+                    shared_kv_cache_dict[
+                        self._shared_kv_key(layer_index, batch_idx)
+                    ] = module_output[-1]
 
                 if module_output is not None:
                     calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
@@ -464,14 +532,20 @@ class ForwardExecutor:
                             target_device=target_device,
                         )
 
-                if need_outputs and module_output is not None:
-                    primary = module_output[0] if isinstance(module_output, tuple) else module_output
-                    # Move output back to the same device where input was stored
-                    # This preserves calibration data placement when calibration_data_device is set
-                    calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
-                    target_device = input_device if calib_device_cfg is not None else cur_layer_device
-                    primary = move_to(primary, device=target_device)
-                    self._store_output(outputs, batch_idx, primary)
+                if need_outputs:
+                    if module_output is not None:
+                        primary = module_output[0] if isinstance(module_output, tuple) else module_output
+                        # Move output back to the same device where input was stored
+                        # This preserves calibration data placement when calibration_data_device is set
+                        calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
+                        target_device = input_device if calib_device_cfg is not None else cur_layer_device
+                        primary = move_to(primary, device=target_device)
+                        self._store_output(outputs, batch_idx, primary)
+                    else:
+                        # StopForward is a normal MoE early-stop outcome. Keep
+                        # the batch's slot so later batches stay aligned with
+                        # their own kwargs, mask, and position ids.
+                        self._store_missing_output(outputs, batch_idx)
 
                 if module_output is not None:
                     del module_output
@@ -494,6 +568,7 @@ class ForwardExecutor:
             finally:
                 processor._set_current_batch_index(None)
 
+        self._pad_output_slots(outputs, total_batches)
         return self._finish_outputs(outputs)
 
     def run_parallel(
@@ -509,7 +584,7 @@ class ForwardExecutor:
         attention_masks: List[torch.Tensor],
         cur_layer_device: torch.device,
         is_lm_head_module: bool,
-        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        shared_kv_cache_dict: Dict[Tuple[int, int], torch.Tensor],
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
@@ -621,7 +696,6 @@ class ForwardExecutor:
                     moe_contexts.append(ctx)
 
             write_shared_kv_cache = bool(getattr(self.looper.gptq_model, "write_shared_kv_cache", False))
-            prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
             results: Dict[int, torch.Tensor | None] = {}
             input_devices: Dict[int, torch.device] = {}
             processed_rows = 0
@@ -656,7 +730,7 @@ class ForwardExecutor:
                 pending_indices = [
                     index
                     for index in range(total_batches)
-                    if index not in committed_indices
+                    if index not in committed_indices and layer_inputs[index]
                 ]
                 pending_start = 0
                 for index, device in enumerate(forward_devices):
@@ -710,6 +784,13 @@ class ForwardExecutor:
                         if device.type in ("cuda", "xpu", "npu", "mps")
                         else device_thread_pool.submit
                     )
+                    prev_kv = (
+                        shared_kv_cache_dict.get(
+                            self._shared_kv_key(layer_index - 1, batch_idx)
+                        )
+                        if reuse_kv
+                        else None
+                    )
 
                     futures.append(
                         submitter(
@@ -732,8 +813,22 @@ class ForwardExecutor:
                         )
                     )
 
+                resolved = []
+                worker_error = None
                 for fut in futures:
-                    batch_idx, module_output, kv_next = fut.result()
+                    try:
+                        resolved.append(fut.result())
+                    except BaseException as exc:
+                        # Drain every already-submitted worker before
+                        # propagating the first failure; leaving futures
+                        # running would let a failed layer keep mutating
+                        # replicas while the next layer stages.
+                        if worker_error is None:
+                            worker_error = exc
+                if worker_error is not None:
+                    raise worker_error
+
+                for batch_idx, module_output, kv_next in resolved:
                     if need_outputs and module_output is not None:
                         input_device = input_devices.pop(batch_idx, cur_layer_device)
                         target_device = input_device if calib_device_cfg is not None else cur_layer_device
@@ -746,8 +841,12 @@ class ForwardExecutor:
                         else:
                             results[batch_idx] = primary
                         del module_output
-                    if (reuse_kv or write_shared_kv_cache) and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
-                        shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
+                    if (reuse_kv or write_shared_kv_cache) and kv_next is not None:
+                        # Overwrite so the replay pass replaces the FP KV of
+                        # the same (layer, batch) slot instead of keeping it.
+                        shared_kv_cache_dict[
+                            self._shared_kv_key(layer_index, batch_idx)
+                        ] = nested_move_to(kv_next, device=cur_layer_device)
 
                     batch_complete = getattr(
                         processor, "forward_batch_completed", None
@@ -791,10 +890,10 @@ class ForwardExecutor:
             primary = results.get(idx)
             if primary is None:
                 # `StopForward` (MoE early-stop) is a normal outcome and yields no
-                # output; `run_single` already tolerates it by skipping the batch.
-                # Mirror that contract instead of failing the whole data-parallel
-                # forward, otherwise multi-device quantization crashes as soon as
-                # an early-stopping subset is reached.
+                # output. Keep the slot (like `run_single`) so batches that did
+                # produce output stay aligned with their input kwargs, mask, and
+                # position ids.
+                ordered_outputs.append([])
                 continue
             ordered_outputs.append([primary])
 

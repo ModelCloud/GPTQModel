@@ -22,9 +22,58 @@ from ....util.tensor import save_tensor_image
 # Constant
 had_k, had_n = 128, 128
 
+# EXL3 applies a 128-wide signed Hadamard transform to the weight and to the
+# captured Hessian, and the runtime reconstructs in 128-wide output blocks.
+# Logical output columns are zero-padded up to that block; input channels are
+# not padded because the runtime has no activation-padding boundary.
+EXL3_FEATURE_BLOCK = had_k
+
 EXL3_HESSIAN_NUMERICAL_CONTRACT = "signed-block-hadamard-congruence-fp64-v1"
 EXL3_HESSIAN_SYMMETRY_CONTRACT = "mean-with-transpose-fp64"
 codebook_scale = 1.24371088
+
+
+def exl3_stored_output_features(out_features: int) -> int:
+    """Return the 128-aligned stored output width for a logical projection."""
+
+    if (
+        isinstance(out_features, bool)
+        or not isinstance(out_features, int)
+        or out_features <= 0
+    ):
+        raise ValueError("EXL3 projection out_features must be a positive integer")
+    return math.ceil(out_features / EXL3_FEATURE_BLOCK) * EXL3_FEATURE_BLOCK
+
+
+def validate_exl3_quantization_geometry(
+    in_features: int,
+    out_features: int,
+    *,
+    label: str = "EXL3 projection",
+) -> int:
+    """Validate EXL3's fixed 128-channel geometry and return the stored width.
+
+    EXL3's Hadamard congruence and packed kernels operate on 128-wide input and
+    output blocks. Output columns can be zero-padded in storage because the
+    runtime crops them back to the logical width; input channels cannot,
+    because the runtime reconstructs exactly ``in_features`` rows and has no
+    boundary for padding the activation. Reject an unaligned input here, before
+    capture, instead of failing an assertion after a full calibration pass.
+    """
+
+    if (
+        isinstance(in_features, bool)
+        or not isinstance(in_features, int)
+        or in_features <= 0
+    ):
+        raise ValueError(f"{label} in_features must be a positive integer")
+    if in_features % EXL3_FEATURE_BLOCK:
+        raise ValueError(
+            f"{label} has in_features={in_features}, which is not a multiple of "
+            f"{EXL3_FEATURE_BLOCK}; EXL3 requires 128-aligned input features "
+            "(pad the model width or exclude the projection)."
+        )
+    return exl3_stored_output_features(out_features)
 
 codebook_mcg_mult = 0xCBAC1FED
 codebook_mul1_mult = 0x83DCD12D
@@ -84,17 +133,14 @@ def _tile_batch_size() -> int:
     The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
     at the default batch of 256. That is allocated once per CUDA stream, and the
     quantization pool runs one stream per worker thread, so a wide run can hold
-    several GiB of pure scratch per device. ``GPTQMODEL_EXL3_TILE_BATCH`` lowers
+    several GiB of pure scratch per device. ``KernelConfig.exl3_tile_batch`` lowers
     the slot count for memory-constrained hosts; tiles are quantized
     independently, so a smaller batch only means more launches.
     """
 
-    import os
+    from .....utils.kernel import get_kernel_config
 
-    try:
-        batch = int(os.environ.get("GPTQMODEL_EXL3_TILE_BATCH", _DEFAULT_TILE_BATCH))
-    except ValueError:
-        batch = _DEFAULT_TILE_BATCH
+    batch = get_kernel_config().exl3_tile_batch
     return max(1, min(_DEFAULT_TILE_BATCH, batch))
 
 
@@ -1325,6 +1371,14 @@ def quantize_exl3(
           - proxy error: trace(err @ H @ err.T) / (W @ H @ W.T)
           - quantized and packed tensors
     """
+
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+        raise ValueError("EXL3 quantization requires a 2-D weight tensor")
+    validate_exl3_quantization_geometry(
+        int(weight.shape[0]),
+        int(weight.shape[1]),
+        label="EXL3 weight",
+    )
 
     device = torch.device(quant_args["devices"][0])
     quant_stream = get_quant_stream(device)

@@ -226,3 +226,103 @@ def test_forward_batch_worker_only_returns_primary_tensor_for_tuple_outputs():
     torch.testing.assert_close(module_output, hidden_states + 1)
     torch.testing.assert_close(kv_next, hidden_states + 2)
     assert processor.current_batch_index is None
+
+
+def test_clone_module_for_devices_reuses_the_module_on_its_own_device():
+    """Issue #4183: the module's own device must not get a redundant copy.
+
+    ``clone_module_for_devices`` used to deep-copy the layer for every target,
+    including the device it was already staged on, so a 2-GPU forward paid a
+    full extra layer copy (and a layer of VRAM) for a replica that was never
+    needed. The module itself is the replica for its own device; other devices
+    still get a detached deep copy.
+    """
+
+    module = torch.nn.Linear(4, 4)
+    cpu = torch.device("cpu")
+    other = torch.device("cpu:0")
+
+    clones = looper_helpers.clone_module_for_devices(module, [cpu, other])
+
+    assert clones[cpu] is module
+    assert clones[other] is not module
+    torch.testing.assert_close(clones[other].weight, module.weight)
+    torch.testing.assert_close(clones[other].bias, module.bias)
+
+
+def test_forward_batch_worker_skips_rehome_for_a_resident_replica(monkeypatch):
+    """Issue #4183: a resident replica needs no per-batch rehome scan.
+
+    ``forward_batch_worker`` rehomed the module on every batch. Staging already
+    placed the replica on its device, so the call was a no-op that still took a
+    process-wide lock and walked every parameter and buffer, serializing the
+    device workers of a data-parallel forward.
+    """
+
+    rehome_calls = []
+    monkeypatch.setattr(
+        looper_helpers,
+        "rehome_module_to_device",
+        lambda *args, **kwargs: rehome_calls.append((args, kwargs)),
+    )
+    processor = _DummyProcessor()
+    module = _IgnoresAttentionMask()
+    hidden_states = torch.randn(1, 2, 4)
+
+    _, module_output, _ = looper_helpers.forward_batch_worker(
+        module=module,
+        processor=processor,
+        batch_index=0,
+        layer_input=[hidden_states],
+        layer_input_kwargs={},
+        attention_mask=None,
+        position_ids=None,
+        support_batch_quantize=True,
+        is_lm_head_module=False,
+        need_output=True,
+        reuse_kv=False,
+        prev_kv=None,
+    )
+
+    assert rehome_calls == []
+    torch.testing.assert_close(module_output, hidden_states + 1)
+
+
+def test_forward_batch_worker_rehomes_a_replica_with_foreign_tensors(monkeypatch):
+    """A replica that is not fully resident still gets the repair path."""
+
+    rehome_calls = []
+    monkeypatch.setattr(
+        looper_helpers,
+        "rehome_module_to_device",
+        lambda *args, **kwargs: rehome_calls.append((args, kwargs)),
+    )
+
+    class _ForeignTensor(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1, device="meta"))
+            self._gptqmodule_device_hint = torch.device("cpu")
+
+        def forward(self, hidden_states, use_cache=False):
+            return hidden_states + 1
+
+    processor = _DummyProcessor()
+    hidden_states = torch.randn(1, 2, 4)
+
+    looper_helpers.forward_batch_worker(
+        module=_ForeignTensor(),
+        processor=processor,
+        batch_index=0,
+        layer_input=[hidden_states],
+        layer_input_kwargs={},
+        attention_mask=None,
+        position_ids=None,
+        support_batch_quantize=True,
+        is_lm_head_module=False,
+        need_output=True,
+        reuse_kv=False,
+        prev_kv=None,
+    )
+
+    assert len(rehome_calls) == 1

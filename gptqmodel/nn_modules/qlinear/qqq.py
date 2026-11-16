@@ -63,6 +63,20 @@ def _qqq_cpu_kernel():
         return None
 
 
+def _workspace_numel(out_features: int, max_par: int) -> int:
+    """Number of int32 slots ``qqq_gemm.cu`` indexes in the zeroed ``workspace``.
+
+    The kernel uses ``workspace`` as its ``locks`` array and indexes it by
+    output tile (``locks[slice_col]``), one tile per ``min_thread_n`` = 64
+    output columns, for each of the ``max_par`` parallel batch-64 problems it
+    may run. 128 is *not* the minimum tile width: a 64-column problem selects
+    the ``thread_n = 64`` config, so ``n = 64`` needs one lock and ``n = 192``
+    needs three.
+    """
+
+    return (out_features + 63) // 64 * max_par
+
+
 def _invert_permutation(values) -> torch.Tensor:
     inverse = [0] * len(values)
     for index, value in enumerate(values):
@@ -92,7 +106,7 @@ def mul(
     @s1: `torch.float32` activation per-token quantization scales of shape `(m, 1)`
     @s2: `torch.float32` weight per-channel quantization scales of shape `(1, n)`
     @s3: `torch.float16` weight per-group quantization scales of shape `(m / groupsize, n)`, it should be empty when group_size != -1
-    @workspace: `torch.int32` tensor with at least `n / 128 * max_par` entries that are all zero
+    @workspace: `torch.int32` tensor with at least `ceil(n / 64) * max_par` entries that are all zero
     @thread_k: `k` size of a thread_tile in `B` (can usually be left as auto -1)
     @thread_n: `n` size of a thread_tile in `B` (can usually be left as auto -1)
     @sms: number of SMs to use for the kernel (can usually be left as auto -1)
@@ -122,7 +136,10 @@ class QQQLinear(GroupedQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    # The native Marlin-derived W4A8 kernel is FP16-only. BF16 checkpoints use
+    # the portable ``QQQTorchLinear`` (BACKEND.QQQ_TORCH), which computes in
+    # FP32 and is what AUTO selects for BF16.
+    SUPPORTS_DTYPES = [torch.float16]
 
     #: Whether the native Marlin kernel's device restrictions apply: SM80 or
     #: newer on NVIDIA, and no ROCm. The portable FP32 kernel clears this.
@@ -202,10 +219,11 @@ class QQQLinear(GroupedQuantLinear):
                     "s_group",
                     torch.tensor([], dtype=torch.float16),
                 )
-            # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
             self.register_buffer(
                 "workspace",
-                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32),
+                torch.zeros(
+                    _workspace_numel(self.out_features, self.max_par), dtype=torch.int32
+                ),
                 persistent=False,
             )
             self.register_buffer(
@@ -492,7 +510,11 @@ class QQQLinear(GroupedQuantLinear):
         if not hasattr(self, "workspace"):
             self.register_buffer(
                 "workspace",
-                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32, device=packed_weight.device),
+                torch.zeros(
+                    _workspace_numel(self.out_features, self.max_par),
+                    dtype=torch.int32,
+                    device=packed_weight.device,
+                ),
                 persistent=False,
             )
         if not hasattr(self, "reduce_buffer"):
@@ -531,12 +553,16 @@ class QQQLinear(GroupedQuantLinear):
             return self.empty_linear_output(A)
 
         A_dtype = A.dtype
-        # qqq is float16 kernel only
-        if A.dtype != torch.float16:
-            A = A.to(dtype=torch.float16)
+        # qqq is float16 kernel only. Do not narrow BF16/FP32 here: an
+        # activation above 65504 would become inf before dynamic_quant.
+        if A_dtype != torch.float16:
+            raise NotImplementedError(
+                f"{type(self).__name__} is an FP16 kernel; use BACKEND.QQQ_TORCH "
+                f"for {A_dtype} activations."
+            )
 
         out_shape = A.shape[:-1] + (self.out_features,)
-        A = A.reshape(-1, A.shape[-1]) # .to(dtype=torch.float16)
+        A = A.reshape(-1, A.shape[-1])
         quant_A, s1 = self.dynamic_quant(A)
         D = torch.empty(A.shape[0], self.out_features, dtype=A.dtype, device=A.device)
         mul(
@@ -555,7 +581,9 @@ class QQQLinear(GroupedQuantLinear):
         D = D.reshape(out_shape)
 
         if self.bias is not None:
-            D.add_(self.bias)
+            # The kernel output is FP16; add the stored bias in FP32 so the
+            # visible cast is the only rounding after the reduction.
+            D = (D.float() + self.bias.float()).to(dtype=A_dtype)
 
         if self.adapter:
             D = self.adapter.apply(x=A, out=D)

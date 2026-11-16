@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <type_traits>
 
 namespace {
@@ -517,7 +518,7 @@ __global__ __launch_bounds__(kGemvThreads)
 void gemv_kernel(const T* __restrict__ x,
                  const uint8_t* __restrict__ codes,
                  const int8_t* __restrict__ exponents,
-                 const T* __restrict__ bias,
+                 const float* __restrict__ bias,
                  T* __restrict__ out,
                  int64_t n, int64_t k) {
     using G = Grid<BITS>;
@@ -612,7 +613,7 @@ void gemv_kernel(const T* __restrict__ x,
             if (row[r] < n) {
                 float v = acc[r];
                 if (bias != nullptr) {
-                    v += ttbf_load<T>(bias + row[r]);
+                    v += bias[row[r]];
                 }
                 out[row[r]] = ttbf_cast<T>(v);
             }
@@ -641,7 +642,7 @@ __global__ __launch_bounds__(kGemmThreads)
 void gemm_kernel(const T* __restrict__ x,
                  const uint8_t* __restrict__ codes,
                  const int8_t* __restrict__ exponents,
-                 const T* __restrict__ bias,
+                 const float* __restrict__ bias,
                  T* __restrict__ out,
                  int64_t m, int64_t n, int64_t k) {
     using G = Grid<BITS>;
@@ -764,7 +765,7 @@ void gemm_kernel(const T* __restrict__ x,
             }
             float v = acc[i][j];
             if (bias != nullptr) {
-                v += ttbf_load<T>(bias + gn);
+                v += bias[gn];
             }
             out[gm * n + gn] = ttbf_cast<T>(v);
         }
@@ -838,7 +839,7 @@ __global__ __launch_bounds__(32 * (MTILE / WTM) * (NTILE / WTN))
 void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
                       const uint8_t* __restrict__ codes,
                       const int8_t* __restrict__ exponents,
-                      const __hip_bfloat16* __restrict__ bias,
+                      const float* __restrict__ bias,
                       __hip_bfloat16* __restrict__ out,
                       int64_t m, int64_t n, int64_t k) {
     using G = Grid<BITS>;
@@ -1139,7 +1140,7 @@ void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
                     v += acc[q][1][i];
                 }
                 if (bias != nullptr) {
-                    v += __bfloat162float(bias[gn]);
+                    v += bias[gn];
                 }
                 out[gm * n + gn] = __float2bfloat16(v);
             }
@@ -1155,21 +1156,29 @@ void gemm_wmma_kernel(const __hip_bfloat16* __restrict__ x,
 // ---------------------------------------------------------------------------
 
 // True when the current device exposes the gfx12 WMMA instruction.
+//
+// The architecture probe is cached per device because hipGetDeviceProperties is
+// a driver call, but the cache is process-wide while the BF16 linear path can be
+// entered from several Python threads at once on a GIL-disabled build.  A plain
+// `bool initialised[]` guard is a data race there: two threads can both observe
+// the flag as unset and write `cache[device]` concurrently, which is undefined
+// behaviour and leaves the dispatch decision without a publication order.
+// `std::call_once` gives each device one synchronized initialization, and its
+// happens-before edge publishes `cache[device]` to every later caller.
 bool ttbf_wmma_device() {
-    static int cache[64];
-    static bool initialised[64] = {false};
+    static int cache[64] = {0};
+    static std::once_flag initialised[64];
     int device = 0;
     if (hipGetDevice(&device) != hipSuccess || device < 0 || device >= 64) {
         return false;
     }
-    if (!initialised[device]) {
+    std::call_once(initialised[device], [device]() {
         hipDeviceProp_t props{};
         const bool ok = hipGetDeviceProperties(&props, device) == hipSuccess &&
                         (std::strncmp(props.gcnArchName, "gfx1200", 7) == 0 ||
                          std::strncmp(props.gcnArchName, "gfx1201", 7) == 0);
         cache[device] = ok ? 1 : 0;
-        initialised[device] = true;
-    }
+    });
     return cache[device] != 0;
 }
 
@@ -1267,7 +1276,7 @@ hipError_t linear_impl(const void* x, const uint8_t* codes,
                        int64_t k, const void* bias, void* out,
                        hipStream_t stream) {
     const T* xp = static_cast<const T*>(x);
-    const T* bp = static_cast<const T*>(bias);
+    const float* bp = static_cast<const float*>(bias);
     T* op = static_cast<T*>(out);
     if (m == 1) {
         const int blocks =
@@ -1288,7 +1297,7 @@ hipError_t linear_impl(const void* x, const uint8_t* codes,
             // changes only the fp32 accumulation order.
             if (ttbf_wmma_device()) {
                 const auto* xb = static_cast<const __hip_bfloat16*>(x);
-                const auto* bb = static_cast<const __hip_bfloat16*>(bias);
+                const auto* bb = static_cast<const float*>(bias);
                 auto* ob = static_cast<__hip_bfloat16*>(out);
                 // Tile choice, all measured rather than assumed.  Two things
                 // move the large-M shapes: the M block sets how many times the

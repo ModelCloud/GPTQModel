@@ -69,10 +69,9 @@ def _block_run(native, inputs, bits):
 
 
 def _full_run(native, weight, inputs, group_size, bits):
-    if native:
-        os.environ.pop("GPTQMODEL_DISABLE_GPTQ_CUDA", None)
-    else:
-        os.environ["GPTQMODEL_DISABLE_GPTQ_CUDA"] = "1"
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    configure_kernel(KernelConfig(gptq_fused_block_update=native))
     rows, columns = weight.shape
     layer = torch.nn.Linear(columns, rows, bias=False, device="cuda")
     layer.weight.data.copy_(weight)

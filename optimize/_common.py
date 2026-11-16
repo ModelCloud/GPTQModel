@@ -24,6 +24,9 @@ def set_env() -> None:
         "PYTORCH_ALLOC_CONF",
         "expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5",
     )
+    # Kept inline rather than imported from gptqmodel.utils.threads: importing
+    # the package helper here would load torch before these defaults exist, and
+    # the OpenMP/MKL runtimes read them at load time.
     os.environ.setdefault("OMP_NUM_THREADS", "8")
     os.environ.setdefault("MKL_NUM_THREADS", "8")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
@@ -34,10 +37,12 @@ def set_env() -> None:
 
 def set_torch_threads() -> None:
     """Cap PyTorch thread pools used by the command-line tools."""
-    import torch
+    from gptqmodel.utils.threads import cap_torch_threads
 
-    torch.set_num_threads(8)
-    torch.set_num_interop_threads(2)
+    # No explicit count: set_env() above already defaults OMP_NUM_THREADS to 8,
+    # so an unset environment still yields 8 while an explicit OMP_NUM_THREADS
+    # (for example a smaller value on a shared host) wins.
+    cap_torch_threads(interop=2)
 
 
 def parse_gpus(gpu_arg: str) -> list[int]:

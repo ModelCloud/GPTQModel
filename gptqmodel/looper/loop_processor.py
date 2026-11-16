@@ -38,6 +38,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import QuantizeConfig
+from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
@@ -64,6 +65,60 @@ def remove_processor_log(log_path: Optional[str], *, keep: bool = True) -> bool:
         log.debug("Failed to remove processor log file %s", log_path, exc_info=True)
         return False
 
+
+def _calibration_dataset_length(dataset) -> Optional[int]:
+    """Return the calibration row count when the input exposes a size.
+
+    ``datasets.IterableDataset`` and plain generators are valid calibration
+    inputs (``prepare_calibration_dataset`` materialises them), but they do not
+    implement ``__len__``. Callers must treat ``None`` as "unknown" instead of
+    forcing a length the input cannot provide.
+
+    A columnar mapping (``{"input_ids": [...], "attention_mask": [...]}``) has
+    one entry per column, so ``len(mapping)`` is the column count, not the row
+    count. ``calibration_input_row_count`` resolves that case to the primary
+    column's length.
+    """
+
+    return calibration_input_row_count(dataset)
+
+
+def _sized_calibration_dataset(dataset):
+    """Return a re-iterable calibration dataset that supports ``len()``.
+
+    Model-specific ``prepare_dataset`` overrides may return a one-shot
+    iterable. The processor replays the prepared batches once per layer, so an
+    unsized result is materialised here rather than failing later on ``len()``.
+    """
+
+    if _calibration_dataset_length(dataset) is None:
+        return list(dataset)
+    return dataset
+
+
+def _reusable_calibration_dataset(dataset):
+    """Return a calibration input that more than one processor can prepare.
+
+    ``quantize()`` builds separate calibration configs for the native and EoRA
+    steps, and every ``LoopProcessor`` prepares its dataset again. A plain
+    iterator (for example a generator expression) is exhausted by the first
+    preparation, so the second processor would receive an empty dataset and
+    fail with "calibration dataset is empty". Materialise such an input once,
+    before it is shared. Sized containers are returned unchanged, and
+    ``datasets.IterableDataset`` stays lazy because it yields a fresh iterator.
+    """
+
+    if dataset is None:
+        return None
+    try:
+        iterator = iter(dataset)
+    except TypeError:
+        return dataset
+    if iterator is dataset:
+        return list(dataset)
+    return dataset
+
+
 _PROJECT_LOG_DIR = Path("logs")
 
 # Device-SMI handles are process-scoped diagnostic helpers. Once the vendor tool
@@ -88,6 +143,49 @@ DEFAULT_LOG_COLUMNS: List[str] = [
     PROCESS_USED_MEMORY,
     "dynamic",
 ]
+
+
+def prepare_layer_runtime_weights_for_forward(
+    *,
+    processors,
+    full: Dict[str, object],
+    fallback_device: torch.device,
+) -> int:
+    """Materialize deferred dense replay weights for every module in one layer.
+
+    A processor may pack a projection and replace its dense weight with a META
+    placeholder until the layer's next full forward. Subset execution prepares
+    only the modules in the current subset, so projections packed by earlier
+    subsets still hold META when the layer forward runs for every module.
+    Offer the whole layer inventory to the processors before each forward.
+
+    Returns the number of modules that a processor materialized.
+    """
+
+    prepared = 0
+    for named_module in full.values():
+        # Deferred replay state lives on the NamedModule wrapper. A raw module
+        # in the inventory is either untouched native state or already packed.
+        if not isinstance(named_module, NamedModule):
+            continue
+        for processor in processors:
+            prepare_runtime = getattr(
+                processor, "prepare_runtime_weight_for_forward", None
+            )
+            if not callable(prepare_runtime):
+                continue
+            materialized = prepare_runtime(
+                module=named_module,
+                target_device=fallback_device,
+            )
+            if materialized is None:
+                continue
+            named_module.module = materialized
+            setattr(named_module, "target_device", fallback_device)
+            setattr(materialized, "target_device", fallback_device)
+            prepared += 1
+            break
+    return prepared
 
 
 def _format_gib(value: float) -> str:
@@ -213,6 +311,9 @@ class ForwardConfig:
     | Native        | yes      | no                     | yes                       | no         | no                 |
     | WeightOnly    | no       | no                     | no/default                | no/default | no                 |
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
+
+    ``Native`` is a forward-only capture: it never materializes a quantization
+    source, so it also disables ``allow_auto_dtype_cast``.
     """
 
     required: bool = True
@@ -227,6 +328,11 @@ class ForwardConfig:
     # forward, even when the authoritative next-layer cache is produced by a
     # later replay-after-process step.
     capture_layer_context: bool = False
+    # Whether the forward role may replace the dense module in the model tree
+    # with a packed AUTO_NF12 wrapper. Only a processor with a follow-up
+    # quantization task restores that dense source; a forward-only capture must
+    # keep the module in the tree so the next processor can wrap it.
+    allow_auto_dtype_cast: bool = True
 
 
 @dataclass(frozen=True)
@@ -263,6 +369,37 @@ def checkpoint_chain_supported(roles) -> bool:
         (CheckpointSupport.PRIMARY,),
         (CheckpointSupport.PRIMARY, CheckpointSupport.SECONDARY),
     }
+
+
+def record_quant_log(model, processors) -> list:
+    """Publish one row per module from the run's primary quantization processor.
+
+    ``processors`` is the loop's processor chain in run-plan order. The earliest
+    processor that recorded per-module rows and owns the quantization log
+    supplies ``model.quant_log``. Auxiliary processors such as EoRA set
+    ``owns_quant_log = False`` because their rows carry adapter timing, not
+    quantization loss/samples/damp; concatenating them produced a second, blank
+    row for every module (#4367).
+
+    Selecting the first owning log rather than a hard-coded processor name keeps
+    every quantizer's rows publishable (FOEM, QQQ, VPTQ, ParoQuant, FP8-GSQ, RTN,
+    ...; issue #4321). When no owning processor recorded rows, an existing
+    ``model.quant_log`` is preserved: the standalone EoRA-generation loop has no
+    primary quantizer, so it cannot replace a restored quantization log with
+    adapter rows.
+    """
+
+    for processor in processors:
+        if not getattr(processor, "owns_quant_log", True):
+            continue
+        entries = getattr(processor, "log", None)
+        if entries:
+            model.quant_log = list(entries)
+            return model.quant_log
+
+    if getattr(model, "quant_log", None) is None:
+        model.quant_log = []
+    return model.quant_log
 
 
 @dataclass
@@ -312,6 +449,11 @@ class LoopProcessor:
     stages: Tuple[ProcessorStages, ...] = ()
     inline: Optional[InlineConfig] = None
     inline_processors: Tuple["LoopProcessor", ...] = ()
+
+    # Auxiliary processors (EoRA) record their own per-module timing rows but do
+    # not own the quantization log. ``record_quant_log`` skips them so they
+    # neither duplicate nor replace the primary quantizer's rows.
+    owns_quant_log: bool = True
 
     @property
     def forward(self) -> ForwardConfig:
@@ -394,14 +536,20 @@ class LoopProcessor:
         # prepare dataset
         calibration_dataset = self.calibration.dataset
         if calibration_dataset is not None:
-            if len(calibration_dataset) == 0:
-                raise ValueError("Calibration dataset must not be empty.")
-
             min_calibration_dataset_size = 256
             min_calibration_dataset_input_ids_avg_length = 256
-            if len(calibration_dataset) < min_calibration_dataset_size:
+
+            # ``datasets.IterableDataset`` and plain generators are valid
+            # calibration inputs but do not implement ``__len__``. Only run the
+            # pre-prepare checks when the caller supplied a sized container;
+            # emptiness is verified again on the prepared result below.
+            raw_calibration_size = _calibration_dataset_length(calibration_dataset)
+            if raw_calibration_size == 0:
+                raise ValueError("Calibration dataset must not be empty.")
+
+            if raw_calibration_size is not None and raw_calibration_size < min_calibration_dataset_size:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                               f"Current: {len(calibration_dataset)}.")
+                               f"Current: {raw_calibration_size}.")
 
             if self.calibration.prepare_dataset is None:
                 raise ValueError("CalibrationConfig.prepare_dataset must be provided when calibration data is supplied.")
@@ -414,13 +562,24 @@ class LoopProcessor:
                 calibration_concat_separator=self.calibration.concat_separator,
             )
 
-            if len(calibration_dataset) == 0:
+            # A model-specific ``prepare_dataset`` override may return a
+            # one-shot iterable; normalise it before the checks below and
+            # before the per-layer replay, which needs a reusable dataset.
+            calibration_dataset = _sized_calibration_dataset(calibration_dataset)
+            prepared_calibration_size = len(calibration_dataset)
+
+            if prepared_calibration_size == 0:
                 raise ValueError(
                     "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
                     "all samples (for example, every input_ids was shorter than "
                     "calibration_data_min_length). Lower calibration_data_min_length "
                     "or provide longer calibration samples."
                 )
+
+            # The size is only knowable after preparation for unsized inputs.
+            if raw_calibration_size is None and prepared_calibration_size < min_calibration_dataset_size:
+                log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                               f"Current: {prepared_calibration_size}.")
 
             # A disk-backed calibration sequence can provide exact scalar
             # accounting without being traversed merely for a warning.  This
@@ -578,7 +737,17 @@ class LoopProcessor:
         """Schedules asynchronous log persistence on the serial CPU worker."""
 
         # Serialize writes on the CPU-bound worker to avoid interleaved JSON output.
-        DEVICE_THREAD_POOL.submit_serial(CPU, self._async_log_writer, stat)
+        future = DEVICE_THREAD_POOL.submit_serial(CPU, self._async_log_writer, stat)
+        # This future is fire-and-forget, but a worker exception must not vanish:
+        # the pool now reports task errors through the future instead of
+        # terminating the interpreter.
+        future.add_done_callback(self._on_async_log_failure)
+
+    @staticmethod
+    def _on_async_log_failure(future):
+        error = future.exception()
+        if error is not None:
+            log.error("Async processor log write failed: %s", error)
 
     def log_new_row(self, stat):
         """Prints a formatted log row and queues it for async persistence."""
@@ -1283,6 +1452,11 @@ class LoopProcessor:
         """Releases shared processor resources after the full quantization loop."""
 
         self._close_device_smi_handles()
+        # The Hessian workspace pool is process-wide and outlives the model, so
+        # release it with the rest of the run's shared state.
+        from ..quantization.gptq import release_workspace_cache
+
+        release_workspace_cache()
         del self.inputs_cache
         del self._results
 

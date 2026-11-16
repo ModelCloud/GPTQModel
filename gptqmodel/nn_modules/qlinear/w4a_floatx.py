@@ -435,7 +435,13 @@ class W4AFP8Linear(PackableQuantLinear):
             )
         return self._centered_int4_codes().to(torch.float8_e4m3fn)
 
+    @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The Gluon FP8 GEMM is emitted as a Triton kernel that Inductor
+        # codegens without its `gl` namespace, so compiling this module fails
+        # with `NameError: name 'gl' is not defined`. The layout revalidation
+        # below also compares data pointers, which Dynamo cannot trace. Run the
+        # launch eagerly and let the surrounding graph break instead.
         if not getattr(self, "_w4a_weights_ready", False):
             raise RuntimeError("W4AFP8 weights are not initialized; call post_init() after loading or packing.")
         if not self._weights_are_current():
