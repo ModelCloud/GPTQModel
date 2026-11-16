@@ -3003,7 +3003,11 @@ def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]):
             regex_patterns = []
             all_exact = True
             if dynamic is not None:
-                for index, (pattern, overrides) in enumerate(dynamic.items()):
+                ordered_items = [
+                    *((p, o) for p, o in dynamic.items() if p.startswith("-:")),
+                    *((p, o) for p, o in dynamic.items() if not p.startswith("-:")),
+                ]
+                for index, (pattern, overrides) in enumerate(ordered_items):
                     # Cache entries own snapshots, so later edits cannot change them.
                     override_snapshot = copy.deepcopy(dict(overrides))
                     is_negative = pattern.startswith("-:")
@@ -3053,7 +3057,10 @@ def _match_dynamic_rule(
     module_name: str,
 ) -> Tuple[Optional[str], Union[Dict[str, Any], bool, None]]:
     """Return the first rule and its cached payload while the caller holds the dynamic lock."""
-    patterns = list(dynamic.keys())
+    patterns = [
+        *[p for p in dynamic.keys() if p.startswith("-:")],
+        *[p for p in dynamic.keys() if not p.startswith("-:")],
+    ]
     exact_lookup, all_exact, regex_patterns = _get_dynamic_patterns(dynamic)
     exact_entry = exact_lookup.get(module_name)
     if all_exact:
@@ -5406,7 +5413,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         dynamic = out["dynamic"]
         if dynamic:
-            dynamic = copy.deepcopy(dynamic)
+            dynamic = {
+                **{k: copy.deepcopy(v) for k, v in dynamic.items() if k.startswith("-:")},
+                **{k: copy.deepcopy(v) for k, v in dynamic.items() if not k.startswith("-:")},
+            }
             for _, v in dynamic.items():
                 v.pop("adapter", None)
                 if "bits" in v:
