@@ -183,27 +183,6 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-def _config_declares_tied_embeddings(config) -> bool:
-    """Return whether ``config`` or its text sub-config ties embeddings."""
-
-    seen: set[int] = set()
-    current = config
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if bool(getattr(current, "tie_word_embeddings", False)):
-            return True
-        text_config = getattr(current, "text_config", None)
-        if text_config is None:
-            get_text_config = getattr(current, "get_text_config", None)
-            if callable(get_text_config):
-                try:
-                    text_config = get_text_config()
-                except TypeError:
-                    text_config = None
-        current = text_config
-    return False
-
-
 class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
@@ -1356,38 +1335,62 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _lm_head_is_tied(self) -> bool:
         """Return whether `lm_head` shares its source weight with another module.
 
+        Real storage identity is authoritative. Composite/VLM configs commonly
+        leave a nested ``text_config.tie_word_embeddings=True`` while the loaded
+        model keeps independent input and output embeddings (for example
+        Qwen3-VL), so nested config flags must not be treated as proof of tying
+        (issue #4369).
+
         `find_tied_parameters` only compares materialized parameters. A lazily
         loaded shell keeps both sides as independent META parameters until the
         loader ties them, so identity never matches and quantization continues
         until the source reload fails with a misleading "missing checkpoint
         tensors" error. Detect that shape from the checkpoint instead: a tied
         HF checkpoint omits `lm_head.weight`, so the head has no independent
-        source tensor to quantize.
+        source tensor to quantize. The declared tied key at the root config is
+        the final fallback for checkpoints that do store `lm_head.weight`
+        (Qwen3) while the loader still ties it.
         """
 
         model = self.gptq_model.model
         lm_head_name = self.gptq_model.lm_head
+
+        # 1. Actual storage identity: the input embedding and output head are
+        #    the same parameter (or share materialized storage).
+        try:
+            input_embeddings = model.get_input_embeddings()
+            output_embeddings = model.get_output_embeddings()
+        except (AttributeError, TypeError):
+            input_embeddings = output_embeddings = None
+        input_weight = getattr(input_embeddings, "weight", None)
+        output_weight = getattr(output_embeddings, "weight", None)
+        if torch.is_tensor(input_weight) and torch.is_tensor(output_weight):
+            if output_weight is input_weight:
+                return True
+            # Meta tensors all report data_ptr() == 0, so only compare storage
+            # for materialized parameters.
+            if not (
+                getattr(input_weight, "is_meta", False)
+                or getattr(output_weight, "is_meta", False)
+            ):
+                try:
+                    same_storage = (
+                        input_weight.untyped_storage().data_ptr()
+                        == output_weight.untyped_storage().data_ptr()
+                        and input_weight.data_ptr() == output_weight.data_ptr()
+                    )
+                except Exception:  # pragma: no cover - backend without untyped_storage
+                    same_storage = False
+                if same_storage:
+                    return True
+
+        # 2. Accelerate's tied-parameter report (materialized parameters only).
         if any(
             f"{lm_head_name}.weight" in names
             for names in find_tied_parameters(model)
         ):
             return True
-        if not _config_declares_tied_embeddings(getattr(model, "config", None)):
-            return False
-        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
-        # even though the head is tied). The checkpoint tensor is not evidence
-        # of an independent head: the model's declared tied-weight keys and the
-        # config decide, and the loader ties the tensors after materialization.
-        tied_keys = getattr(model, "_tied_weights_keys", None)
-        tied_head = f"{lm_head_name}.weight"
-        if isinstance(tied_keys, dict):
-            declared_tied = tied_head in tied_keys
-        elif tied_keys:
-            declared_tied = tied_head in set(tied_keys)
-        else:
-            declared_tied = False
-        if declared_tied:
-            return True
+
         lm_head_module = get_module(model, key=lm_head_name)
         if lm_head_module is None:
             return False
@@ -1399,7 +1402,23 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
         if not callable(checker):
             return False
-        return not checker(target_model=model, target_submodule=lm_head_module)
+        if not checker(target_model=model, target_submodule=lm_head_module):
+            return True
+
+        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
+        # even though the head is tied). Only the *root* config flag is trusted
+        # here; a nested text_config flag does not describe the loaded model's
+        # actual storage (issue #4369).
+        config = getattr(model, "config", None)
+        if not bool(getattr(config, "tie_word_embeddings", False)):
+            return False
+        tied_keys = getattr(model, "_tied_weights_keys", None)
+        tied_head = f"{lm_head_name}.weight"
+        if isinstance(tied_keys, dict):
+            return tied_head in tied_keys
+        if tied_keys:
+            return tied_head in set(tied_keys)
+        return False
 
     def _prepare_layer_direct_state_for_forward(
         self,
