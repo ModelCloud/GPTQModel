@@ -196,11 +196,20 @@ def apply_paroquant_rotation_reference(
     hidden = x2d.shape[-1]
     group_size = _normalize_group_size(group_size, hidden)
 
+    # A bf16 rotation cannot absorb a rounding after every Givens stage: the
+    # krot stages each round the activation and cos/sin, which is about three
+    # times the error of rounding the fp32 result once. Accumulate in fp32 for
+    # bf16 and round once at the end; fp16 keeps the historical per-stage
+    # arithmetic (its 11-bit significand is already fine).
+    input_dtype = x2d.dtype
+    accumulate_fp32 = input_dtype == torch.bfloat16
+    work_dtype = torch.float32 if accumulate_fp32 else input_dtype
+
     if scales is not None:
-        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=x2d.dtype)
-        out = x2d * scale_tensor
+        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=work_dtype)
+        out = x2d.to(dtype=work_dtype) * scale_tensor
     else:
-        out = x2d.clone()
+        out = x2d.to(dtype=work_dtype).clone()
 
     num_groups = hidden // group_size
     half_group = group_size // 2
@@ -215,15 +224,15 @@ def apply_paroquant_rotation_reference(
             group_offset = group_idx * group_size
             idx_i = group_offset + pair_row[group_idx, :, 0]
             idx_j = group_offset + pair_row[group_idx, :, 1]
-            cos_t = torch.cos(theta_row[group_idx]).to(dtype=out.dtype)
-            sin_t = torch.sin(theta_row[group_idx]).to(dtype=out.dtype)
+            cos_t = torch.cos(theta_row[group_idx]).to(dtype=work_dtype)
+            sin_t = torch.sin(theta_row[group_idx]).to(dtype=work_dtype)
             xi = out[:, idx_i]
             xj = out[:, idx_j]
             next_out[:, idx_i] = xi * cos_t + xj * sin_t
             next_out[:, idx_j] = -xi * sin_t + xj * cos_t
         out = next_out
 
-    return out.reshape(orig_shape)
+    return out.to(dtype=input_dtype).reshape(orig_shape)
 
 
 def apply_paroquant_rotation_vectorized(
@@ -253,11 +262,17 @@ def apply_paroquant_rotation_vectorized(
     num_groups = hidden // group_size
     half_group = group_size // 2
 
+    # Same single-rounding contract as the reference path: bf16 accumulates in
+    # fp32 and is narrowed once below, while fp16 keeps its per-stage rounding.
+    input_dtype = x2d.dtype
+    accumulate_fp32 = input_dtype == torch.bfloat16
+    work_dtype = torch.float32 if accumulate_fp32 else input_dtype
+
     if scales is not None:
-        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=x2d.dtype)
-        out = x2d * scale_tensor
+        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=work_dtype)
+        out = x2d.to(dtype=work_dtype) * scale_tensor
     else:
-        out = x2d.clone()
+        out = x2d.to(dtype=work_dtype).clone()
 
     pairs = pairs.to(device=x2d.device, dtype=torch.int64)
     theta = theta.to(device=x2d.device, dtype=torch.float32)
@@ -287,8 +302,8 @@ def apply_paroquant_rotation_vectorized(
         xi = out.gather(2, gather_i)
         xj = out.gather(2, gather_j)
         angles = theta[rotation_index].reshape(num_groups, half_group)
-        cos_t = angles.cos().to(dtype=out.dtype).view(1, num_groups, half_group)
-        sin_t = angles.sin().to(dtype=out.dtype).view(1, num_groups, half_group)
+        cos_t = angles.cos().to(dtype=work_dtype).view(1, num_groups, half_group)
+        sin_t = angles.sin().to(dtype=work_dtype).view(1, num_groups, half_group)
         valid_mask = valid.view(1, num_groups, half_group)
 
         next_out = out.clone()
@@ -304,7 +319,7 @@ def apply_paroquant_rotation_vectorized(
         )
         out = next_out
 
-    return out.reshape(orig_shape)
+    return out.to(dtype=input_dtype).reshape(orig_shape)
 
 
 def _rotation_sources() -> list[str]:
