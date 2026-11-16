@@ -49,7 +49,18 @@ import os
 import site
 import threading
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import (
+    asdict,
+    dataclass,
+    field,
+    is_dataclass,
+)
+from dataclasses import (
+    fields as dataclass_fields,
+)
+from dataclasses import (
+    replace as dataclass_replace,
+)
 from typing import Any, Iterable, Sequence
 
 import torch
@@ -2006,6 +2017,34 @@ _P2P_NOT_APPLICABLE = object()
 P2P_NOT_APPLICABLE = _P2P_NOT_APPLICABLE
 
 
+def _p2p_container_children(node: Any) -> list[Any] | None:
+    """Return the tensor-carrying children of ``node``, or ``None``.
+
+    Beyond mappings and sequences this recognizes dataclasses and the
+    Transformers-style cache objects (``DynamicCache``, ``StaticCache`` and
+    remote-code caches such as Hymba's) that expose per-layer K/V lists. Those
+    objects used to hide every tensor they own from the peer-copy walk, so a
+    caller that passed one fell back to a full ``.to()`` without being told.
+    """
+
+    if isinstance(node, Mapping):
+        return list(node.values())
+    if isinstance(node, (list, tuple)):
+        return list(node)
+    if is_dataclass(node) and not isinstance(node, type):
+        return [getattr(node, item.name) for item in dataclass_fields(node)]
+    key_cache = getattr(node, "key_cache", None)
+    value_cache = getattr(node, "value_cache", None)
+    if key_cache is None and value_cache is None:
+        key_cache = getattr(node, "_key_cache", None)
+        value_cache = getattr(node, "_value_cache", None)
+    if isinstance(key_cache, (list, tuple)) and isinstance(
+        value_cache, (list, tuple)
+    ):
+        return [*key_cache, *value_cache]
+    return None
+
+
 def _p2p_walk_tensors(item: Any, out: list[torch.Tensor]) -> None:
     """Append every tensor leaf of ``item`` to ``out`` in depth-first order.
 
@@ -2022,10 +2061,10 @@ def _p2p_walk_tensors(item: Any, out: list[torch.Tensor]) -> None:
         node = stack.pop()
         if isinstance(node, torch.Tensor):
             out.append(node)
-        elif isinstance(node, dict):
-            stack.extend(reversed(list(node.values())))
-        elif isinstance(node, (list, tuple)):
-            stack.extend(reversed(node))
+            continue
+        children = _p2p_container_children(node)
+        if children:
+            stack.extend(reversed(children))
 
 
 def _p2p_rebuild(item: Any, replacements: dict[int, torch.Tensor]) -> Any:
@@ -2038,10 +2077,49 @@ def _p2p_rebuild(item: Any, replacements: dict[int, torch.Tensor]) -> Any:
 
     if isinstance(item, torch.Tensor):
         return replacements.get(id(item), item)
-    if isinstance(item, dict):
+    if isinstance(item, Mapping):
         return {key: _p2p_rebuild(child, replacements) for key, child in item.items()}
     if isinstance(item, (list, tuple)):
-        return type(item)(_p2p_rebuild(child, replacements) for child in item)
+        rebuilt = [_p2p_rebuild(child, replacements) for child in item]
+        if isinstance(item, list):
+            try:
+                return type(item)(rebuilt)
+            except TypeError:
+                return rebuilt
+        # ``type(item)(iterable)`` breaks namedtuples, whose constructor takes
+        # one positional argument per field. Unpack those explicitly.
+        if hasattr(item, "_fields"):
+            return type(item)(*rebuilt)
+        try:
+            return type(item)(rebuilt)
+        except TypeError:
+            return tuple(rebuilt)
+    if is_dataclass(item) and not isinstance(item, type):
+        changes = {}
+        for dataclass_field in dataclass_fields(item):
+            value = getattr(item, dataclass_field.name)
+            rebuilt = _p2p_rebuild(value, replacements)
+            if rebuilt is not value:
+                changes[dataclass_field.name] = rebuilt
+        if not changes:
+            return item
+        try:
+            return dataclass_replace(item, **changes)
+        except (TypeError, ValueError):
+            # Frozen/init=False fields cannot go through ``replace``; mutating
+            # the instance keeps the caller's reference valid.
+            for name, value in changes.items():
+                object.__setattr__(item, name, value)
+            return item
+    for attr in ("key_cache", "value_cache", "_key_cache", "_value_cache"):
+        cache = getattr(item, attr, None)
+        if not isinstance(cache, (list, tuple)):
+            continue
+        rebuilt = [_p2p_rebuild(child, replacements) for child in cache]
+        if isinstance(cache, list):
+            cache[:] = rebuilt
+        else:
+            setattr(item, attr, type(cache)(rebuilt))
     return item
 
 
@@ -2057,11 +2135,9 @@ def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 *
     """
 
     target = device if isinstance(device, torch.device) else torch.device(str(device))
-    if (
-        target.type != "cuda"
-        or target.index is None
-        or not isinstance(value, (torch.Tensor, dict, list, tuple))
-    ):
+    if target.type != "cuda" or target.index is None:
+        return _P2P_NOT_APPLICABLE
+    if not isinstance(value, torch.Tensor) and _p2p_container_children(value) is None:
         return _P2P_NOT_APPLICABLE
 
     if _rocm_nested_peer_disabled():

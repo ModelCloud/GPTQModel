@@ -382,3 +382,20 @@ def test_gsq_summary_counts_map_each_block_to_a_layer():
     # Ordinary results and unexpected shapes pass through untouched.
     assert base._quantize_summary_counts({"model.layers.0": [{}]}) == {"model.layers.0": [{}]}
     assert base._quantize_summary_counts(None) is None
+
+
+def test_summary_counts_decoder_layers_when_result_is_keyed_by_processor():
+    """A 28-layer run must not report one layer because it has one processor."""
+
+    result = {
+        "gptq": [
+            {"layer": 0, "module": "self_attn.q_proj"},
+            {"layer": 0, "module": "mlp.down_proj"},
+            {"layer": 1, "module": "self_attn.q_proj"},
+            {"layer": 2, "module": "self_attn.q_proj"},
+        ]
+    }
+
+    line = format_quantize_summary(result, elapsed_s=42.0)
+
+    assert "3 layer(s), 4 module(s)" in line

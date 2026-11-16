@@ -154,6 +154,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Hugging Face interoperability](hf-interop.md)
 - [Lazy checkpoint materialization](lazy-checkpoint-materialization.md)
 - [Looper checkpoint/resume](looper-checkpoint-redesign.md)
+- [Cross-layer shared KV cache](looper-shared-kv-cache.md)
 - [Offload index resolution](offload-index-resolution.md)
 - [Quantized checkpoint subfolder resolution](quantized-checkpoint-subfolder-resolution.md)
 - [Reshard source selection](reshard-source-selection.md)
