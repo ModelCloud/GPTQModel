@@ -464,6 +464,17 @@ class TorchInt8Linear(GPTQQuantLinear):
         )
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
+        # The packed layout pads the input-channel axis up to the pack factor
+        # (K=17 stores 20 rows). Only the real channels are logical, matching
+        # the crop `transform_cpu` applies when it builds the runtime view, so a
+        # cold source decode must crop before indexing the per-channel groups.
+        if weight.shape[0] < self.in_features:
+            raise RuntimeError(
+                "TorchInt8Linear GPTQ buffers decode fewer channels than "
+                f"in_features: got {weight.shape[0]} rows for in_features={self.in_features}."
+            )
+        weight = weight[: self.in_features]
+
         groups = _normalize_g_idx(self.g_idx, int(self.scales.shape[0]))
         return self.scales[groups] * (weight - zeros[groups])
 
