@@ -28,6 +28,7 @@ Notes:
 import atexit
 import copy
 import gc
+import hashlib
 import inspect
 import json
 import os
@@ -35,6 +36,7 @@ import re
 import shutil
 import tempfile
 import threading
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
@@ -974,6 +976,156 @@ def restore_init_owned_rotary_buffers(model: nn.Module) -> int:
     return restored
 
 
+# ---------------------------------------------------------------------------
+# LazyTurtle pickle-checkpoint conversion cache
+# ---------------------------------------------------------------------------
+#
+# Converting a `.bin`/`.pt` checkpoint to safetensors materializes a full model
+# copy on disk.  That copy must live at least as long as every LazyTurtle that
+# reads from it, be shared by concurrent turtles for the same source, and be
+# removed as soon as the last one is released (issue #4205).  The cache below
+# owns those directories; turtles hold a refcounted lease backed by a
+# `weakref.finalize` callback so garbage collection releases the directory even
+# when callers never call `close()`.
+
+_CONVERSION_COMPLETE_MARKER = ".lazyturtle-complete"
+_CONVERSION_CACHE: Dict[tuple, "_ConvertedCheckpoint"] = {}
+_CONVERSION_CACHE_LOCK = threading.Lock()
+_CONVERSION_PATH_LOCKS: Dict[str, threading.RLock] = {}
+# Only these model-init kwargs select the conversion output location.  The
+# configured GPTQModel offload path arrives as `offload_to_disk_path`; the
+# transformers spelling is accepted for callers that reuse HF kwargs.
+_CONVERSION_OFFLOAD_KWARGS = ("offload_to_disk_path", "offload_folder")
+
+
+@dataclass
+class _ConvertedCheckpoint:
+    path: str
+    refcount: int = 0
+
+
+def _normalize_conversion_root(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        value = os.fspath(value)
+    except TypeError:
+        return None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or value == "auto":
+        return None
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def _conversion_stable_json(value: Any) -> str:
+    def _default(obj: Any) -> str:
+        if isinstance(obj, torch.dtype):
+            return str(obj)
+        if isinstance(obj, bytes):
+            return obj.hex()
+        if isinstance(obj, type):
+            return f"{obj.__module__}.{obj.__qualname__}"
+        if callable(obj):
+            return f"{getattr(obj, '__module__', '')}.{getattr(obj, '__qualname__', type(obj).__qualname__)}"
+        return repr(obj)
+
+    try:
+        return json.dumps(value, sort_keys=True, default=_default)
+    except Exception:
+        return repr(value)
+
+
+def _conversion_path_lock(path: str) -> threading.RLock:
+    with _CONVERSION_CACHE_LOCK:
+        lock = _CONVERSION_PATH_LOCKS.get(path)
+        if lock is None:
+            lock = threading.RLock()
+            _CONVERSION_PATH_LOCKS[path] = lock
+        return lock
+
+
+def _conversion_is_complete(path: str) -> bool:
+    if os.path.islink(path) or not os.path.isdir(path):
+        return False
+    return os.path.isfile(os.path.join(path, _CONVERSION_COMPLETE_MARKER))
+
+
+def _perform_conversion(path: str, convert) -> None:
+    root = os.path.dirname(path)
+    os.makedirs(root, exist_ok=True)
+    if os.path.islink(path):
+        raise RuntimeError(f"LazyTurtle: conversion target `{path}` is a symlink")
+    staging = tempfile.mkdtemp(
+        prefix=f".{os.path.basename(path)}.tmp-",
+        dir=root,
+    )
+    try:
+        convert(staging)
+        # The marker is written inside the staging directory and published by
+        # the atomic rename, so a directory without it is always partial.
+        marker = os.path.join(staging, _CONVERSION_COMPLETE_MARKER)
+        with open(marker, "w", encoding="utf-8") as fp:
+            fp.write("ok\n")
+            fp.flush()
+            os.fsync(fp.fileno())
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise RuntimeError(f"LazyTurtle: conversion target `{path}` is unsafe")
+            shutil.rmtree(path)
+        os.replace(staging, path)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _acquire_conversion(*, key: tuple, path: str, convert) -> None:
+    """Ensure `path` holds a complete conversion, holding one cache refcount."""
+
+    lock = _conversion_path_lock(path)
+    with lock:
+        with _CONVERSION_CACHE_LOCK:
+            entry = _CONVERSION_CACHE.get(key)
+            if entry is None:
+                entry = _ConvertedCheckpoint(path=path)
+                _CONVERSION_CACHE[key] = entry
+            elif entry.path != path:
+                raise RuntimeError("LazyTurtle: conversion cache path changed")
+            entry.refcount += 1
+        try:
+            if not _conversion_is_complete(path):
+                _perform_conversion(path, convert)
+        except BaseException:
+            _release_conversion(key, path)
+            raise
+
+
+def _release_conversion(key: tuple, path: str) -> None:
+    lock = _conversion_path_lock(path)
+    with lock:
+        with _CONVERSION_CACHE_LOCK:
+            entry = _CONVERSION_CACHE.get(key)
+            if entry is None:
+                return
+            entry.refcount -= 1
+            if entry.refcount > 0:
+                return
+            _CONVERSION_CACHE.pop(key, None)
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _cleanup_all_conversions() -> None:
+    with _CONVERSION_CACHE_LOCK:
+        paths = [entry.path for entry in _CONVERSION_CACHE.values()]
+        _CONVERSION_CACHE.clear()
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_cleanup_all_conversions)
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -985,8 +1137,9 @@ class LazyTurtle:
     This source keeps only the checkpoint index in memory and materializes the
     requested shell submodule directly from the relevant safetensors shards. If
     a local checkpoint only provides PyTorch pickle weights (`.bin`, `.pt`,
-    `.pth`, `.ckpt`), LazyTurtle converts them into temporary safetensors once
-    and then reads from that converted directory.
+    `.pth`, `.ckpt`), LazyTurtle converts them into safetensors once, caches the
+    result per source/config for as long as any turtle needs it, and reads from
+    that converted directory.
     """
 
     supports_reload = False
@@ -1003,6 +1156,7 @@ class LazyTurtle:
         module_tree: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
+        offload_path: Optional[str] = None,
     ) -> None:
         self.config = copy.deepcopy(config)
         # Some tests and lightweight loaders pass a minimal config object.
@@ -1011,6 +1165,13 @@ class LazyTurtle:
         if self._model_type is None:
             self._model_type = getattr(getattr(target_model, "config", None), "model_type", None)
         self._model_init_kwargs = dict(model_init_kwargs or {})
+        # Pickle-checkpoint conversions belong under the configured offload root,
+        # not the system TMPDIR.  `_resolve_checkpoint_source` runs before the
+        # rest of the shell is built, so resolve this first.
+        self._conversion_root = _normalize_conversion_root(offload_path) or self._infer_conversion_root(
+            target_model
+        )
+        self._conversion_leases: Dict[tuple, Any] = {}
         self.model_local_path, self._weight_map = self._resolve_checkpoint_source(
             model_local_path=model_local_path,
             target_model=target_model,
@@ -1039,6 +1200,100 @@ class LazyTurtle:
         self._lock = threading.RLock()
         self._active_source_root: Optional[str] = None
         self._active_source_provenance: Optional[Dict[str, Any]] = None
+
+    def close(self) -> None:
+        """Release the converted checkpoint directory held by this turtle.
+
+        The directory is shared with every other live turtle that reads the same
+        source/config and is removed only when the last lease is released.
+        """
+
+        leases = getattr(self, "_conversion_leases", None)
+        if not leases:
+            return
+        self._conversion_leases = {}
+        for finalizer in leases.values():
+            finalizer()
+
+    def __enter__(self) -> "LazyTurtle":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def _infer_conversion_root(self, target_model: Optional[nn.Module]) -> Optional[str]:
+        """Resolve the configured offload root from the turtle's load settings."""
+
+        for key in _CONVERSION_OFFLOAD_KWARGS:
+            value = (self._model_init_kwargs or {}).get(key)
+            root = _normalize_conversion_root(value)
+            if root is not None:
+                return root
+        if target_model is not None:
+            for attr in ("quantize_config", "_quantize_config"):
+                quantize_config = getattr(target_model, attr, None)
+                if quantize_config is None:
+                    continue
+                root = _normalize_conversion_root(
+                    getattr(quantize_config, "offload_to_disk_path", None)
+                )
+                if root is not None:
+                    return root
+        return None
+
+    def _conversion_root_for(self, target_model: Optional[nn.Module]) -> str:
+        return (
+            getattr(self, "_conversion_root", None)
+            or self._infer_conversion_root(target_model)
+            or os.path.abspath(tempfile.gettempdir())
+        )
+
+    def _conversion_cache_digest(
+        self,
+        *,
+        model_local_path: str,
+        resolved_archive_file: str,
+        target_model: Optional[nn.Module],
+    ) -> str:
+        model_cls = type(target_model) if target_model is not None else None
+        config = getattr(self, "config", None)
+        to_dict = getattr(config, "to_dict", None)
+        if callable(to_dict):
+            try:
+                config_payload = to_dict()
+            except Exception:
+                config_payload = repr(config)
+        else:
+            config_payload = repr(config)
+        load_kwargs = dict(getattr(self, "_model_init_kwargs", {}) or {})
+        load_kwargs.pop("device_map", None)
+        source_stat = None
+        try:
+            stat = os.stat(resolved_archive_file)
+            source_stat = [stat.st_size, stat.st_mtime_ns]
+        except OSError:
+            pass
+        payload = {
+            "source": os.path.realpath(model_local_path),
+            "archive": [os.path.realpath(resolved_archive_file), source_stat],
+            "class": (
+                f"{model_cls.__module__}.{model_cls.__qualname__}"
+                if model_cls is not None
+                else None
+            ),
+            "config": config_payload,
+            "load_kwargs": load_kwargs,
+        }
+        return hashlib.sha256(_conversion_stable_json(payload).encode("utf-8")).hexdigest()[:16]
+
+    def _register_conversion_lease(self, *, key: tuple, path: str) -> None:
+        leases = getattr(self, "_conversion_leases", None)
+        if leases is None:
+            leases = {}
+            self._conversion_leases = leases
+        if key in leases:
+            return
+        leases[key] = weakref.finalize(self, _release_conversion, key, path)
 
     def configure_active_source_staging(
         self,
@@ -1194,6 +1449,7 @@ class LazyTurtle:
         module_tree: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
+        offload_path: Optional[str] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -1206,6 +1462,7 @@ class LazyTurtle:
                 module_tree=module_tree,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
+                offload_path=offload_path,
             )
         except Exception as exc:
             # Every caller treats `None` as a hard failure ("can't open model
@@ -1286,18 +1543,45 @@ class LazyTurtle:
             extensions=list(self._FALLBACK_CHECKPOINT_EXTENSIONS),
             possible_model_basenames=["model", "pytorch_model"],
         )
-        tempdir = tempfile.mkdtemp(prefix=self._TEMPDIR_PREFIX)
-        # CI jobs only guarantee writes under a temp root, so register best-effort
-        # cleanup for the converted checkpoint directory at interpreter exit.
-        atexit.register(shutil.rmtree, tempdir, ignore_errors=True)
-
-        log.info(
-            "LazyTurtle: no safetensors found under `%s`; converting `%s` into temporary safetensors at `%s`.",
-            model_local_path,
-            resolved_archive_file,
-            tempdir,
+        root = self._conversion_root_for(target_model)
+        digest = self._conversion_cache_digest(
+            model_local_path=model_local_path,
+            resolved_archive_file=resolved_archive_file,
+            target_model=target_model,
         )
+        key = (root, digest)
+        # Keep the process id in the name so two processes loading the same
+        # source never share a directory that one of them may delete.
+        path = os.path.join(root, f"{self._TEMPDIR_PREFIX}{os.getpid()}-{digest}")
 
+        def _convert(staging_dir: str) -> None:
+            # Keep a last-resort interpreter-exit cleanup in addition to the
+            # refcounted lease, so a crash in an unrelated finalizer cannot
+            # strand a model-sized directory.
+            atexit.register(shutil.rmtree, path, ignore_errors=True)
+            log.info(
+                "LazyTurtle: no safetensors found under `%s`; converting `%s` into cached safetensors at `%s`.",
+                model_local_path,
+                resolved_archive_file,
+                path,
+            )
+            self._export_checkpoint_to_safetensors(
+                model_local_path=model_local_path,
+                target_model=target_model,
+                output_dir=staging_dir,
+            )
+
+        _acquire_conversion(key=key, path=path, convert=_convert)
+        self._register_conversion_lease(key=key, path=path)
+        return path
+
+    def _export_checkpoint_to_safetensors(
+        self,
+        *,
+        model_local_path: str,
+        target_model: Optional[nn.Module],
+        output_dir: str,
+    ) -> None:
         model_cls = type(target_model) if target_model is not None else None
         if model_cls is None or not callable(getattr(model_cls, "from_pretrained", None)):
             raise TypeError("LazyTurtle: transformers-based fallback requires a target model class with from_pretrained().")
@@ -1335,13 +1619,7 @@ class LazyTurtle:
             from .hf import _normalize_legacy_tied_weights_keys
 
             _normalize_legacy_tied_weights_keys(loaded_model)
-            loaded_model.save_pretrained(tempdir, safe_serialization=True)
-            return tempdir
-        except Exception:
-            # If transformers reload/export fails, do not leave behind a partial
-            # temp directory because LazyTurtle will be disabled for this model.
-            shutil.rmtree(tempdir, ignore_errors=True)
-            raise
+            loaded_model.save_pretrained(output_dir, safe_serialization=True)
         finally:
             if loaded_model is not None:
                 del loaded_model
