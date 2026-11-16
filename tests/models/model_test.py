@@ -148,6 +148,7 @@ from tests.eval import (  # noqa: E402
     evaluate,
     format_eval_result_table,
     get_eval_task_results,
+    resolve_eval_batch_size,
     resolve_eval_metric_alias,
 )
 
@@ -1928,6 +1929,14 @@ class ModelTest(unittest.TestCase):
                     if eval_target is None:
                         raise ValueError("Model evaluation target could not be determined.")
 
+                    resolved_batch_size = resolve_eval_batch_size(
+                        task_batch_size,
+                        model_or_id_or_path=eval_target,
+                        model_args=task_model_args,
+                        suite_kwargs=task_suite_kwargs,
+                    )
+                    self._last_eval_batch_size = resolved_batch_size
+
                     results = evaluate(
                         model_or_id_or_path=eval_target,
                         model_args=task_model_args,
@@ -1936,7 +1945,7 @@ class ModelTest(unittest.TestCase):
                         tasks=[normalized_name],
                         apply_chat_template=apply_chat_template,
                         trust_remote_code=trust_remote_code,
-                        batch_size=task_batch_size,
+                        batch_size=resolved_batch_size,
                         gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
                         suite_kwargs=task_suite_kwargs,
                     )
@@ -1959,16 +1968,25 @@ class ModelTest(unittest.TestCase):
                 return aggregated_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):
-                old_batch = self.EVAL_BATCH_SIZE
-                if self.EVAL_BATCH_SIZE == "auto":
-                    self.EVAL_BATCH_SIZE = "8"
+                # The auto chooser can already return a value below the old
+                # fixed retry size, so halve whatever was actually attempted
+                # instead of jumping to 8 and possibly increasing the batch.
+                last_batch = getattr(self, "_last_eval_batch_size", None)
+                old_batch = self.EVAL_BATCH_SIZE if last_batch is None else last_batch
+                if last_batch is not None:
+                    next_batch = int(last_batch) // 2
+                    if self.EVAL_BATCH_SIZE != "auto":
+                        self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
+                elif self.EVAL_BATCH_SIZE == "auto":
+                    next_batch = 8
                 else:
-                    self.EVAL_BATCH_SIZE = f"{int(int(self.EVAL_BATCH_SIZE) / 2)}"
+                    next_batch = int(int(self.EVAL_BATCH_SIZE) / 2)
                     self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
+                self.EVAL_BATCH_SIZE = str(next_batch)
 
                 print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
-                if int(self.EVAL_BATCH_SIZE) > 0:
+                if next_batch > 0:
                     results = self.evaluate_model(model=model,
                                            trust_remote_code=trust_remote_code,
                                            delete_quantized_model=delete_quantized_model,

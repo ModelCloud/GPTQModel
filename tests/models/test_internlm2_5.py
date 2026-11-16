@@ -5,9 +5,10 @@
 
 import unittest
 
-import transformers
 from model_test import ModelTest
-from packaging.version import Version
+
+from gptqmodel.models.definitions.internlm2 import InternLM2QModel
+from gptqmodel.models.loader import check_versions
 
 
 class TestInternlm2_5(ModelTest):
@@ -33,12 +34,16 @@ class TestInternlm2_5(ModelTest):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        if Version(transformers.__version__) > Version("4.44.2"):
-            raise unittest.SkipTest(
-                "InternLM2.5 requires transformers<=4.44.2 in this test environment"
-            )
+        # InternLM2.5 ships remote modeling code that the definition pins to
+        # transformers<=4.44.2. Gate the test through the same requirement the
+        # loader enforces so the skip reason always names the installed and
+        # required versions, and the test runs automatically once the pin is
+        # lifted.
+        try:
+            check_versions(InternLM2QModel, InternLM2QModel.require_pkgs)
+        except ValueError as exc:
+            raise unittest.SkipTest(f"InternLM2.5 is gated by its model definition: {exc}") from None
 
     def test_internlm2_5(self):
-        # transformers<=4.44.2 run normal
         self.quantize_and_evaluate()
 
