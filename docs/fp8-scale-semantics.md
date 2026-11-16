@@ -73,7 +73,9 @@ flowchart TD
 
 `TorchFP8Linear` now executes both conventions in every arithmetic path:
 `_dequantize_native`, `_dequantize_cpu`, `dequantize_weight`, and the
-`torch._scaled_mm` weight scale. `FP8Config` still emits only GPT-QModel's own
+`torch._scaled_mm` weight scale. The `_scaled_mm` path is only used by the
+explicit per-token W8A8 opt-in; see
+[FP8 weight-only dispatch](fp8-weight-only-dispatch.md). `FP8Config` still emits only GPT-QModel's own
 inverse scales; the multiplier spelling is accepted for loaded checkpoints.
 
 ## Before / after

@@ -39,6 +39,29 @@ log = setup_logger()
 _MLX_FP8_MIN_ELEMENTS = 60 * 1024 * 1024
 
 
+_FP8_ACTIVATION_QUANT_METHODS = ("none", "per_token")
+
+
+def _normalize_fp8_activation_quant_method(value: Optional[str]) -> str:
+    """Normalize the activation-quantization policy of a Torch FP8 layer.
+
+    ``none`` keeps the layer weight-only (W8A16): the packed FP8 weight is
+    dequantized for the current matmul and activations stay in FP16/BF16.
+    ``per_token`` explicitly opts into W8A8 with one activation scale per
+    token. There is deliberately no per-tensor activation mode: a per-tensor
+    amax makes a row's output depend on its batch neighbours.
+    """
+
+    normalized = "none" if value is None else str(value).strip().lower()
+    if normalized not in _FP8_ACTIVATION_QUANT_METHODS:
+        raise ValueError(
+            "FP8 activation quantization must be one of "
+            f"{{{', '.join(repr(method) for method in _FP8_ACTIVATION_QUANT_METHODS)}}}, "
+            f"got `{value}`."
+        )
+    return normalized
+
+
 def _normalize_linear_scale_semantics(value: Optional[str]) -> str:
     """Normalize a loaded checkpoint's ``weight_scale_inv`` convention.
 
@@ -227,6 +250,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight_scale_method: str = "row",
         weight_block_size: Optional[Tuple[int, int]] = None,
         weight_scale_semantics: str = "inverse",
+        activation_quant_method: str = "none",
         **kwargs,
     ):
         self.fp8_format = _normalize_fp8_fmt(format)
@@ -238,6 +262,11 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         )
         self.weight_block_size = block_size
         self.weight_scale_semantics = _normalize_linear_scale_semantics(weight_scale_semantics)
+        # Weight-only by default. ``per_token`` is the only supported W8A8
+        # opt-in; see ``set_activation_quant_method``.
+        self.activation_quant_method = _normalize_fp8_activation_quant_method(
+            activation_quant_method
+        )
         self._scaled_mm_hard_disabled = False
         # Set when a HIP build cannot cast this format natively, so later forwards
         # go straight to the validated CPU path instead of retrying the GPU cast.
@@ -331,8 +360,22 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, format={self.fp8_format}, "
-            f"weight_scale_method={self.weight_scale_method}"
+            f"weight_scale_method={self.weight_scale_method}, "
+            f"activation_quant_method={self.activation_quant_method}"
         )
+
+    def set_activation_quant_method(self, method: str) -> "TorchFP8Linear":
+        """Select the activation arithmetic explicitly.
+
+        ``"none"`` (the default) runs W8A16: the FP8 weight tile is dequantized
+        for the current matmul and activations keep their input dtype.
+        ``"per_token"`` opts into W8A8, quantizing each token to FP8 with its
+        own scale before ``torch._scaled_mm``.
+        """
+
+        self.activation_quant_method = _normalize_fp8_activation_quant_method(method)
+        self._scaled_mm_hard_disabled = False
+        return self
 
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return _weight_to_matrix(linear)
@@ -597,18 +640,20 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if self.weight_scale_semantics == "inverse":
             scale = torch.reciprocal(scale)
         if self.weight_scale_method == "tensor":
-            return scale
+            # Rowwise ``_scaled_mm`` scaling requires a per-column scale_b even
+            # when the weight scale itself is per-tensor.
+            return scale.reshape(1, 1).expand(1, self.out_features).contiguous()
         if self.weight_scale_method == "row":
-            return scale.view(1, -1)
+            return scale.view(1, -1).contiguous()
         raise NotImplementedError("scaled_mm is only used for tensorwise or rowwise FP8 scales.")
 
     def _quantize_input_for_scaled_mm(self, x_flat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         fp8_max = torch.finfo(self.fp8_dtype).max
         x_work = x_flat.to(torch.float32)
-        if self.weight_scale_method == "tensor":
-            scale_inv = _compute_scale_inv(x_work.abs().amax(), fp8_max)
-        else:
-            scale_inv = _compute_scale_inv(x_work.abs().amax(dim=1, keepdim=True), fp8_max)
+        # W8A8 always uses one activation scale per token. A per-tensor amax
+        # would couple every row's output to the largest activation in the
+        # batch, so it is never used here.
+        scale_inv = _compute_scale_inv(x_work.abs().amax(dim=1, keepdim=True), fp8_max)
         x_q = torch.clamp(x_work * scale_inv, min=-fp8_max, max=fp8_max).to(self.fp8_dtype)
         return x_q, torch.reciprocal(scale_inv).to(torch.float32)
 
@@ -627,12 +672,19 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             and x_flat.device.type == "cuda"
             # Tensorwise amax on an empty input would disable this path permanently.
             and x_flat.numel() > 0
-            and self.weight_scale_method == "tensor"
+            # ``torch._scaled_mm`` quantizes activations. It is only correct
+            # for this weight-only layer when W8A8 was explicitly requested.
+            and self.activation_quant_method == "per_token"
+            and self.weight_scale_method in {"tensor", "row"}
             and self.fp8_format != "float8_e8m0fnu"
             and x_flat.dtype in {torch.float16, torch.bfloat16}
             and x_flat.shape[-1] == self.in_features
             and self.in_features % 16 == 0
             and self.out_features % 16 == 0
+            # hipBLASLt's rowwise kernel emits BF16 only, so the FP32 bias
+            # epilogue used on CUDA is unavailable. Biased HIP modules stay on
+            # the W8A16 path instead of rounding the reduction early.
+            and not (IS_ROCM and self.bias is not None)
             and not (
                 torch.is_grad_enabled()
                 and (x_flat.requires_grad or self.weight.requires_grad or self.weight_scale_inv.requires_grad)
@@ -724,17 +776,22 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight = self.weight if self.weight.device == x_flat.device else self.weight.to(device=x_flat.device)
         x_q, scale_a = self._quantize_input_for_scaled_mm(x_flat)
         scale_b = self._scaled_mm_weight_scale(device=x_flat.device)
-        return torch._scaled_mm(
+        # Rowwise scaling is the W8A8 contract: scale_a is (tokens, 1) and
+        # scale_b is (1, out_features). HIP only emits BF16 from that kernel;
+        # CUDA can keep FP32 so a bias is added before the final rounding.
+        out_dtype = torch.bfloat16 if IS_ROCM else (
+            torch.float32 if self.bias is not None else x_flat.dtype
+        )
+        output = torch._scaled_mm(
             x_q,
             weight.t(),
             scale_a=scale_a,
             scale_b=scale_b,
-            # Keep the bias addition ahead of the output rounding on every
-            # accelerator. HIP keeps the wide FP32 request CUDA-only, so gating
-            # this on `_wants_fp32_reduce` rounded (and overflowed) before the
-            # bias could cancel the partial sum there.
-            out_dtype=torch.float32 if self.bias is not None else x_flat.dtype,
+            out_dtype=out_dtype,
         )
+        if self.bias is None:
+            output = output.to(x_flat.dtype)
+        return output
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)

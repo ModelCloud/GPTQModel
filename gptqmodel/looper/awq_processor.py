@@ -76,6 +76,13 @@ class _AWQScaleGroupError(ValueError):
     """A declared group cannot be evaluated safely with its current replay."""
 
 
+# Carries the retained rows' real positions past `_sanitize_kwargs` for the
+# rotary rebuild. Attention modules that take `position_embeddings` do not
+# accept `position_ids`, so the ordinary key is dropped before
+# `_prepare_module_forward` would otherwise fall back to `arange`.
+_AWQ_ROTARY_POSITION_IDS = "_awq_rotary_position_ids"
+
+
 def _resolve_module_exec_device(module: nn.Module) -> torch.device:
     """Prefer a module's planned target device, then fall back to its current device."""
 
@@ -1361,6 +1368,7 @@ class AWQProcessor(LoopProcessor):
             merged_pos = self._concat_batch_metadata(selected_pos)
             if merged_pos is not None:
                 feature_kwargs["position_ids"] = merged_pos
+                feature_kwargs[_AWQ_ROTARY_POSITION_IDS] = merged_pos
 
         input_kwargs = getattr(cache, "layer_input_kwargs", None) or []
         if input_kwargs:
@@ -1568,12 +1576,57 @@ class AWQProcessor(LoopProcessor):
             allowed = positions.unsqueeze(1) >= positions.unsqueeze(0)
         return documents, positions, allowed, form
 
+    def _token_row_layer_type_masks(
+        self,
+        cache,
+        batch_indices: List[Optional[int]],
+        layer: Optional[nn.Module],
+    ) -> Dict[int, Optional[torch.Tensor]]:
+        """Return each capture batch's mask for ``layer``'s attention type.
+
+        ``transformers`` 5 builds one mask per declared layer type and the
+        capture hook stores every type under
+        ``_gptqmodel_layer_type_replay_kwargs``. Replay must select the entry
+        that matches the layer being quantized; reusing layer 0's sliding mask
+        for a full-attention layer hides every long-range pair.
+        """
+
+        if layer is None:
+            return {}
+        from ..models.base import _LAYER_TYPE_REPLAY_KWARGS_KEY
+
+        resolver = getattr(self.gptq_model, "_resolve_layer_replay_type", None)
+        if not callable(resolver):
+            return {}
+        layer_input_kwargs = getattr(cache, "layer_input_kwargs", None) or []
+        masks: Dict[int, Optional[torch.Tensor]] = {}
+        for batch_index in batch_indices:
+            if batch_index is None:
+                continue
+            batch_index = int(batch_index)
+            if not (0 <= batch_index < len(layer_input_kwargs)):
+                continue
+            entry = layer_input_kwargs[batch_index] or {}
+            layer_type_kwargs = entry.get(_LAYER_TYPE_REPLAY_KWARGS_KEY)
+            if not layer_type_kwargs:
+                continue
+            layer_types = layer_type_kwargs.get("layer_types") or ()
+            by_type = layer_type_kwargs.get("by_type") or {}
+            layer_type = resolver(layer, layer_types)
+            if layer_type is None:
+                continue
+            type_entry = by_type.get(layer_type) or {}
+            if "attention_mask" in type_entry:
+                masks[batch_index] = type_entry["attention_mask"]
+        return masks
+
     def _token_row_replay_kwargs(
         self,
         tensors: List[torch.Tensor],
         batch_indices: List[Optional[int]],
         provenance: List[Tuple[int, int]],
         dtype: torch.dtype,
+        mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
     ) -> Dict[str, Any]:
         """Rebuild the attention mask and positions for packed ``token_rows``.
 
@@ -1595,7 +1648,8 @@ class AWQProcessor(LoopProcessor):
 
         cache = getattr(self, "inputs_cache", None)
         masks = getattr(cache, "attention_masks", None) or []
-        if cache is None or not provenance or not masks:
+        mask_overrides = mask_overrides or {}
+        if cache is None or not provenance or (not masks and not mask_overrides):
             # Without a captured mask there is no document structure to replay;
             # keep the previous kwargs rather than invent one.
             return {}
@@ -1623,8 +1677,11 @@ class AWQProcessor(LoopProcessor):
                 batch_indices[source_index] if source_index < len(batch_indices) else None
             )
             mask = None
-            if batch_index is not None and 0 <= int(batch_index) < len(masks):
-                mask = masks[int(batch_index)]
+            if batch_index is not None:
+                if int(batch_index) in mask_overrides:
+                    mask = mask_overrides[int(batch_index)]
+                elif 0 <= int(batch_index) < len(masks):
+                    mask = masks[int(batch_index)]
             if torch.is_tensor(mask):
                 if mask.dim() >= 3:
                     grid_mask = True
@@ -1701,6 +1758,7 @@ class AWQProcessor(LoopProcessor):
         return {
             "attention_mask": attention_mask,
             "position_ids": positions.unsqueeze(0),
+            _AWQ_ROTARY_POSITION_IDS: positions.unsqueeze(0),
         }
 
     def _align_module_kwargs_to_input(
@@ -1930,6 +1988,11 @@ class AWQProcessor(LoopProcessor):
                             batch_indices,
                             provenance,
                             features[name].dtype,
+                            mask_overrides=self._token_row_layer_type_masks(
+                                getattr(self, "inputs_cache", None),
+                                batch_indices,
+                                state.layer_module,
+                            ),
                         )
                         token_row_kwargs_cache[cache_key] = replay_kwargs
                 feature_kwargs[name] = replay_kwargs
@@ -3425,7 +3488,13 @@ class AWQProcessor(LoopProcessor):
         best_error_value = best_error.item()
         if best_error_value == float("inf"):
             log.debug([loss.item() for loss in history])
-            raise Exception
+            module_name = type(module2inspect).__name__
+            width = int(linears2scale[0].weight.shape[1]) if linears2scale else 0
+            raise _AWQScaleGroupError(
+                f"AWQ: scale search for {module_name} (input width {width}) produced "
+                f"no finite reconstruction loss across {len(history)} candidates; "
+                "every replay output was NaN or infinite."
+            )
 
         return best_scales.detach().cpu(), best_error_value
 
@@ -3495,6 +3564,7 @@ class AWQProcessor(LoopProcessor):
         them once and replays the result for every ratio in the grid.
         """
 
+        module_kwargs = dict(module_kwargs)
         replay_inputs = getattr(self.gptq_model, "awq_module_replay_inputs", None)
         if callable(replay_inputs):
             try:
@@ -3502,6 +3572,7 @@ class AWQProcessor(LoopProcessor):
             except NotImplementedError as exc:
                 raise _AWQScaleGroupError(f"AWQ: unsupported replay for {type(module).__name__}: {exc}") from exc
         module_kwargs = dict(module_kwargs)
+        rotary_position_ids = module_kwargs.pop(_AWQ_ROTARY_POSITION_IDS, None)
 
         target_device = None
         try:
@@ -3593,10 +3664,17 @@ class AWQProcessor(LoopProcessor):
             if self._get_root_rotary() is not None:
                 rotary = self._get_rotary_for_device(target_device or x.device)
             rotary_device = self._get_rotary_device(rotary, target_device or x.device)
-            pos_ids = module_kwargs.get("position_ids") if supports_position_ids else None
-            if not supports_position_ids:
-                pos_ids = None
-            if pos_ids is None or pos_ids.shape[-1] != seq_len:
+            # Attention modules that take `position_embeddings` (HF Llama,
+            # Qwen3, Gemma) do not accept `position_ids`; the retained rows'
+            # real positions arrive under the private key instead.
+            pos_ids = module_kwargs.get("position_ids")
+            if not torch.is_tensor(pos_ids) or pos_ids.shape[-1] != seq_len:
+                pos_ids = rotary_position_ids
+            if (
+                pos_ids is None
+                or not torch.is_tensor(pos_ids)
+                or pos_ids.shape[-1] != seq_len
+            ):
                 pos_values = torch.arange(seq_len, device=rotary_device or x.device, dtype=torch.long)
                 if x.dim() >= 2:
                     pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
@@ -4034,7 +4112,7 @@ class AWQProcessor(LoopProcessor):
         module_signature = inspect.signature(module.forward).parameters
         sanitized_kwargs = {}
         for k, v in inputs_kwargs.items():
-            if k in module_signature:
+            if k in module_signature or k == _AWQ_ROTARY_POSITION_IDS:
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 

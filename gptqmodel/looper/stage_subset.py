@@ -20,7 +20,7 @@ import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre
 import torch
@@ -34,7 +34,13 @@ from ..looper.loop_processor import (
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..models.module_plan import _model_module_plan
-from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy, normalize_bypass_batch_size
+from ..quantization.config import (
+    ExpertsRoutingBypass,
+    GcMode,
+    VramStrategy,
+    _dynamic_lock_for,
+    normalize_bypass_batch_size,
+)
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
@@ -170,6 +176,36 @@ def _collect_worker_results(futures, prior_error: Optional[BaseException] = None
     if worker_error is not None:
         raise worker_error
     return results
+
+
+def _record_dynamic_exclusion(qcfg, full_name: str) -> None:
+    """Record one runtime-pruned module under the config's dynamic lock.
+
+    The uncovered-MoE prune path mutates the same tracked mapping that the
+    previous layer's async finalizers may be iterating under GIL=0. Every other
+    writer in ``quantization.config`` serializes through
+    ``_dynamic_lock_for``; this path must do the same.
+    """
+
+    if qcfg.dynamic is None:
+        qcfg.dynamic = {}
+    with _dynamic_lock_for(qcfg.dynamic):
+        pattern = f"-:{pcre.escape(full_name)}"
+        if pattern not in qcfg.dynamic:
+            qcfg.dynamic[pattern] = {}
+            runtime_exclusions = getattr(
+                qcfg,
+                "_runtime_dynamic_exclusions",
+                None,
+            )
+            if runtime_exclusions is None:
+                runtime_exclusions = set()
+                setattr(
+                    qcfg,
+                    "_runtime_dynamic_exclusions",
+                    runtime_exclusions,
+                )
+            runtime_exclusions.add(pattern)
 
 
 def _resolve_cache_flush_device(
@@ -859,7 +895,7 @@ def _run_single_subset_pass(
     layer_index: int,
     full,
     fallback,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     pb,
     logger,
     is_awq_processor: bool,
@@ -1416,24 +1452,9 @@ def _run_single_subset_pass(
                 # No calibration data was routed to these MoE expert modules.
                 # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
                 if calibration_coverage_policy.record_dynamic_exclusions:
-                    if processor.qcfg.dynamic is None:
-                        processor.qcfg.dynamic = {}
-                    pattern = f"-:{pcre.escape(skipped_module.full_name)}"
-                    if pattern not in processor.qcfg.dynamic:
-                        processor.qcfg.dynamic[pattern] = {}
-                        runtime_exclusions = getattr(
-                            processor.qcfg,
-                            "_runtime_dynamic_exclusions",
-                            None,
-                        )
-                        if runtime_exclusions is None:
-                            runtime_exclusions = set()
-                            setattr(
-                                processor.qcfg,
-                                "_runtime_dynamic_exclusions",
-                                runtime_exclusions,
-                            )
-                        runtime_exclusions.add(pattern)
+                    _record_dynamic_exclusion(
+                        processor.qcfg, skipped_module.full_name
+                    )
 
     quant_target_devices: Dict[str, torch.device] = {}
     active_subset_names = [name for name in subset_names if name in subset]
@@ -1631,7 +1652,7 @@ def run_subset_stage(
     layer_index: int,
     full,
     fallback: bool,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     pb,
     log=None,
     region_timer=None,

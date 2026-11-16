@@ -27,6 +27,9 @@ _LAYER_MODULES = {
         "g_b_proj:1:in=g_a",
         "forget_gate.f_a_proj:0:in=x",
         "forget_gate.f_b_proj:1:in=f_a",
+        # Linear-attention short convolution (checkpoint-owned, not a
+        # quantizable projection).
+        "conv1d:!",
         # Full-attention (MLA) projections.
         "q_a_proj:0:in=x",
         "q_b_proj:1:in=q_a",
@@ -58,7 +61,6 @@ class KimiLinearNativeQModel(BaseQModel):
     layer_modules_strict = False  # first decoder layer is dense
 
     pre_lm_head_norm_module = "model.norm"
-    rotary_embedding = "model.rotary_emb"
 
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 

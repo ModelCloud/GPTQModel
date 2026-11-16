@@ -308,8 +308,10 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.g_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.forget_gate.f_proj", "self_attn.b_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.g_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.forget_gate.f_proj", "self_attn.b_proj", "self_attn.conv1d:!"],
         ["self_attn.o_proj", "self_attn.kv_b_proj"],
+        ["attention.query_key_value"],
+        ["attention.dense"],
         ["post_attention_layernorm:!"],
         ["mlp.gate:!"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj", "mlp.shared_experts.down_proj"],
@@ -373,7 +375,6 @@
         ["post_feedforward_layernorm:!"]
       ]
     },
-
     "LlamaQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
@@ -705,7 +706,7 @@
         ["input_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
-        ["mamba.in_proj"],
+        ["mamba.in_proj", "mamba.conv1d:!"],
         ["mamba.out_proj"],
         ["pre_ff_layernorm:!"],
         ["feed_forward.gate_proj", "feed_forward.up_proj"],
@@ -829,7 +830,15 @@
         ["post_feedforward_layernorm:!"],
         ["per_layer_input_gate"],
         ["post_per_layer_input_norm:!"],
-        ["per_layer_projection"]
+        ["per_layer_projection"],
+        ["router.proj:!"],
+        ["router.scale:!"],
+        ["router.per_expert_scale:!"],
+        ["experts.{expert_index}.gate_proj", "experts.{expert_index}.up_proj"],
+        ["experts.{expert_index}.down_proj"],
+        ["pre_feedforward_layernorm_2:!"],
+        ["post_feedforward_layernorm_1:!"],
+        ["post_feedforward_layernorm_2:!"]
       ]
     },
     "Gemma4TextQModel/gptq": {
@@ -845,7 +854,15 @@
         ["post_feedforward_layernorm:!"],
         ["per_layer_input_gate"],
         ["post_per_layer_input_norm:!"],
-        ["per_layer_projection"]
+        ["per_layer_projection"],
+        ["router.proj:!"],
+        ["router.scale:!"],
+        ["router.per_expert_scale:!"],
+        ["experts.{expert_index}.gate_proj", "experts.{expert_index}.up_proj"],
+        ["experts.{expert_index}.down_proj"],
+        ["pre_feedforward_layernorm_2:!"],
+        ["post_feedforward_layernorm_1:!"],
+        ["post_feedforward_layernorm_2:!"]
       ]
     },
     "Gemma4UnifiedForConditionalGenerationGPTQ/gptq": {
@@ -1164,6 +1181,7 @@
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
+        ["block_sparse_moe.gate:!"],
         ["block_sparse_moe.experts.{expert_index}.w1", "block_sparse_moe.experts.{expert_index}.w3"],
         ["block_sparse_moe.experts.{expert_index}.w2"]
       ]
@@ -1350,7 +1368,7 @@
         ["input_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
-        ["mamba.in_proj"],
+        ["mamba.in_proj", "mamba.conv1d:!", "mamba.dt_proj:!"],
         ["mamba.x_proj"],
         ["mamba.out_proj"],
         ["pre_ff_layernorm:!"],
@@ -1540,7 +1558,9 @@
         ["post_attention_layernorm:!"],
         ["feed_forward.router:!"],
         ["feed_forward.experts.{expert_index}.gate_proj", "feed_forward.experts.{expert_index}.up_proj", "feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj"],
-        ["feed_forward.experts.{expert_index}.down_proj", "feed_forward.shared_expert.down_proj"]
+        ["feed_forward.experts.{expert_index}.down_proj", "feed_forward.shared_expert.down_proj"],
+        ["feed_forward.gate_proj", "feed_forward.up_proj"],
+        ["feed_forward.down_proj"]
       ]
     },
     "Llama4TextQModel/gptq": {
@@ -1552,7 +1572,9 @@
         ["post_attention_layernorm:!"],
         ["feed_forward.router:!"],
         ["feed_forward.experts.{expert_index}.gate_proj", "feed_forward.experts.{expert_index}.up_proj", "feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj"],
-        ["feed_forward.experts.{expert_index}.down_proj", "feed_forward.shared_expert.down_proj"]
+        ["feed_forward.experts.{expert_index}.down_proj", "feed_forward.shared_expert.down_proj"],
+        ["feed_forward.gate_proj", "feed_forward.up_proj"],
+        ["feed_forward.down_proj"]
       ]
     },
     "LlavaQModel/gptq": {
@@ -1891,7 +1913,13 @@
         ["mixer.o_proj"],
         ["mixer.in_proj", "mixer.out_proj"],
         ["mixer.gate_proj", "mixer.up_proj"],
-        ["mixer.down_proj"]
+        ["mixer.down_proj"],
+        ["mixer.conv1d:!"],
+        ["mixer.gate:!"],
+        ["mixer.shared_experts.up_proj"],
+        ["mixer.shared_experts.down_proj"],
+        ["mixer.experts.{expert_index}.up_proj"],
+        ["mixer.experts.{expert_index}.down_proj"]
       ]
     },
     "NemotronHPuzzleQModel/gptq": {
@@ -2514,7 +2542,7 @@
       ]
     },
     "VoxtralGPTQ/gptq": {
-      "layers": ["language_model.model.layers"],
+      "layers": ["model.language_model.layers"],
       "blocks": [
         ["input_layernorm:!"],
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
@@ -2560,24 +2588,26 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["mamba.in_proj"],
+        ["mamba.in_proj", "mamba.conv1d:!"],
         ["mamba.out_proj"],
         ["linear"],
         ["mamba_decoder.input_layernorm:!"],
-        ["mamba_decoder.mamba.in_proj"],
-        ["mamba_decoder.mamba.out_proj"]
+        ["mamba_decoder.mamba.in_proj", "mamba_decoder.mamba.conv1d:!"],
+        ["mamba_decoder.mamba.out_proj"],
+        ["shared_transf:!"]
       ]
     },
     "Zamba2QModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["mamba.in_proj"],
+        ["mamba.in_proj", "mamba.conv1d:!"],
         ["mamba.out_proj"],
         ["linear"],
         ["mamba_decoder.input_layernorm:!"],
-        ["mamba_decoder.mamba.in_proj"],
-        ["mamba_decoder.mamba.out_proj"]
+        ["mamba_decoder.mamba.in_proj", "mamba_decoder.mamba.conv1d:!"],
+        ["mamba_decoder.mamba.out_proj"],
+        ["shared_transformer:!"]
       ]
     },
     "ZDTaichu5QModel/gptq": {

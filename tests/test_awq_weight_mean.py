@@ -17,6 +17,7 @@ from gptqmodel.looper.awq_processor import (
     AWQProcessor,
     _accumulate_awq_weight_mean,
     _AWQLayerState,
+    _AWQScaleGroupError,
     _compute_awq_weight_mean,
 )
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -2198,3 +2199,102 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         f"Streaming mean slower than legacy for {param_name}: "
         f"{fast_time*1e3:.3f} ms vs {legacy_time*1e3:.3f} ms"
     )
+
+
+def test_awq_token_rows_replay_rotary_uses_the_retained_rows_positions():
+    """Rotary must be rebuilt from the retained rows' real positions (#4176 item 4).
+
+    Attention modules that take ``position_embeddings`` do not accept
+    ``position_ids``, so ``_sanitize_kwargs`` drops the replay positions and
+    ``_prepare_module_forward`` rebuilt rotary from ``arange(N)``. The retained
+    rows' positions were ``[0, 51, 102, ...]``, so rotary was evaluated at
+    synthetic offsets and contradicted ``docs/awq-calibration-aggregation.md``.
+    """
+
+    class _RecordingRotary(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("inv_freq", torch.zeros(1))
+            self.seen = []
+
+        def forward(self, x, position_ids, **kwargs):
+            self.seen.append(position_ids.detach().clone())
+            return (torch.zeros_like(x), torch.zeros_like(x))
+
+    class _Attention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(4, 4))
+
+        def forward(self, x, position_embeddings=None, attention_mask=None):
+            return x
+
+    class _Root(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rotary_emb = _RecordingRotary()
+
+    root = _Root()
+    attention = _Attention()
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=AWQConfig(format=FORMAT.GEMM, group_size=4, bits=4),
+        calibration=CalibrationConfig(),
+        gptq_model=types.SimpleNamespace(rotary_embedding="rotary_emb"),
+        model=root,
+    )
+    doc_len = 1024
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[None],
+        position_ids=[torch.arange(doc_len).unsqueeze(0)],
+        layer_input_kwargs=[{}],
+    )
+
+    # Rows 0, 51 and 102 of one long document were retained.
+    retained = [0, 51, 102]
+    replay = processor._token_row_replay_kwargs(
+        [torch.zeros(1, len(retained), 4)],
+        [0],
+        [(0, row) for row in retained],
+        torch.float32,
+    )
+    assert replay["position_ids"].tolist() == [retained]
+
+    sanitized = processor._sanitize_kwargs(replay, attention)
+    assert "position_ids" not in sanitized
+    processor._prepare_module_forward(
+        torch.zeros(1, len(retained), 4), attention, sanitized
+    )
+
+    assert root.rotary_emb.seen, "rotary was never called"
+    assert root.rotary_emb.seen[-1].tolist() == [retained], (
+        "rotary was rebuilt from synthetic arange positions instead of the "
+        "retained rows' real positions"
+    )
+
+
+def test_awq_best_scale_all_nan_losses_raise_scale_group_error():
+    """An all-NaN grid must take the fallback contract, not a bare Exception (#4176 item 5)."""
+
+    processor = _make_scale_search_processor(sym=True, chunked=True)
+    linear = _NaNLinear(8, 4, bias=False, dtype=torch.float32)
+    linear.weight.requires_grad_(False)
+    x = torch.randn(5, 8, dtype=torch.float32)
+    fp16_output = torch.zeros(5, 4, dtype=torch.float32)
+
+    with pytest.raises(_AWQScaleGroupError) as excinfo:
+        processor._compute_best_scale(
+            x,
+            torch.linspace(0.2, 1.4, 8),
+            torch.linspace(1.6, 0.3, 8),
+            linear,
+            [linear],
+            fp16_output,
+            {},
+            replay_batch_size=2,
+            prepared_forward=(x, {}),
+        )
+
+    message = str(excinfo.value)
+    assert "_NaNLinear" in message
+    assert "no finite reconstruction loss" in message

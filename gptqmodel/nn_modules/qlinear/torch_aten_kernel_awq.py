@@ -166,10 +166,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
         if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             target_dtype = torch.bfloat16
         compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros, self.bits, target_dtype)
-        self.scales = self.scales.to(compute_dtype).contiguous()
+        # Packed runtime metadata only: ``self.scales`` keeps the checkpoint
+        # dtype so a later forward or save cannot persist a narrowed scale
+        # (issue #4178).
+        compute_scales = self.scales.to(compute_dtype).contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
-        self.qzeros = _cpu_int4pack_zero_offsets(izeros, self.scales, self.bits).to(compute_dtype).contiguous()
-        self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+        self.qzeros = _cpu_int4pack_zero_offsets(izeros, compute_scales, self.bits).to(compute_dtype).contiguous()
+        self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
 
@@ -208,7 +211,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
             self.scales_and_zeros,
             out_dtype=(
                 torch.float32
-                if self.bias is not None and x.dtype == torch.float16
+                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
                 else None
             ),
         )
@@ -232,16 +235,21 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
         scales = getattr(self, "scales", None)
         transformed = getattr(self, "_cpu_transformed", False) and isinstance(scales, torch.Tensor)
-        scale_dtype = scales.dtype if transformed else None
+        # The packed layout is keyed by the activation dtype it was built for,
+        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
+        # loaded dtype while the affine metadata follows the activation dtype.
+        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
+        if runtime_dtype is None and transformed:
+            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        if refinalize_fused_state_after_apply(self, scale_dtype, device):
+        if refinalize_fused_state_after_apply(self, runtime_dtype, device):
             return result
         scales = getattr(self, "scales", None)
         if (
             transformed
             and isinstance(scales, torch.Tensor)
-            and scales.dtype != scale_dtype
+            and scales.dtype != runtime_dtype
             and scales.dtype in (torch.float16, torch.bfloat16)
         ):
             # No exportable snapshot: keep the live layout usable at the new

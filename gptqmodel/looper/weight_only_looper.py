@@ -635,10 +635,21 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 ): named
                 for named, active_qcfg, target_device in finalize_tasks
             }
+            worker_error = None
             for future in as_completed(future_map):
                 named = future_map[future]
-                module_label = future.result()
+                try:
+                    module_label = future.result()
+                except BaseException as exc:
+                    # Drain every submitted finalizer before propagating the
+                    # first failure; an abandoned future would keep packing or
+                    # offloading modules after the layer is reported failed.
+                    if worker_error is None:
+                        worker_error = exc
+                    continue
                 _advance_finalize_progress(named, module_label)
+            if worker_error is not None:
+                raise worker_error
         finally:
             finalize_pb.close()
 
@@ -682,10 +693,21 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 ): named
                 for named, target_device in task_specs
             }
+            worker_error = None
             for future in as_completed(future_map):
-                quantized, active_qcfg = future.result()
+                try:
+                    quantized, active_qcfg = future.result()
+                except BaseException as exc:
+                    # Mirror ``stage_subset._collect_worker_results``: resolve
+                    # every worker before raising so no quantization task keeps
+                    # mutating a module after the subset failed.
+                    if worker_error is None:
+                        worker_error = exc
+                    continue
                 if active_qcfg is not None:
                     results_by_name[quantized.full_name] = (quantized, active_qcfg)
+            if worker_error is not None:
+                raise worker_error
 
         return [
             results_by_name[named.full_name]

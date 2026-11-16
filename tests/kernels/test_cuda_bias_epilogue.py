@@ -94,6 +94,7 @@ def _fp8(dtype, scaled):
         bits=8, group_size=-1, desc_act=False, sym=True,
         in_features=k, out_features=n, bias=True, format="float8_e4m3fn",
         weight_scale_method="tensor" if scaled else "row",
+        activation_quant_method="per_token" if scaled else "none",
     )
     linear = torch.nn.Linear(k, n, bias=True)
     linear.weight.data.fill_(41.25)
