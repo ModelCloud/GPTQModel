@@ -74,4 +74,4 @@ switches torch to the rocBLAS backend for the quantization phase and restores th
 previous selection afterwards. `GPTQModel.quantize()` wraps its quantize call in
 it. The switch is skipped on non-ROCm hosts, when the platform lacks
 `torch.backends.cuda.preferred_blas_library`, when the user already selected a
-different backend, and when `GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` is set.
+different backend, and when `KernelConfig(rocm_quant_blas="hipblaslt")` is set.

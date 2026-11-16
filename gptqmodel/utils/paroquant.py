@@ -26,7 +26,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
-from .env import env_flag
+from .kernel import get_kernel_config
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -61,7 +61,6 @@ _ROTATION_EXTENSION_READY = False
 # persisted per device/torch/HIP fingerprint. Bump the format whenever the
 # native candidate set or its scoring changes so stale picks are discarded.
 _ROTATION_AUTOTUNE_CACHE_FORMAT = 1
-_ROTATION_AUTOTUNE_CACHE_ENV = "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE"
 _ROTATION_AUTOTUNE_DISK_LOCK = threading.Lock()
 # device index -> loaded flag, so the on-disk cache is read at most once.
 _ROTATION_AUTOTUNE_DISK_LOADED: set[int] = set()
@@ -444,29 +443,9 @@ def _load_rotation_extension() -> bool:
     return loaded
 
 
-def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
-    """Parse a bounded integer environment override."""
-    raw = os.getenv(name)
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    return value if value in allowed else None
-
-
-def _rotation_env_flag(name: str, default: bool) -> bool:
-    """Parse a boolean environment flag used by rotation autotune."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
 def _rotation_autotune_enabled() -> bool:
     """Report whether fused rotation launch autotune is enabled for this process."""
-    return _rotation_env_flag("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE", True)
+    return get_kernel_config().paroquant_rotate_autotune
 
 
 def _rotation_native_op_if_loaded(op_name: str):
@@ -483,15 +462,21 @@ def _rotation_native_op_if_loaded(op_name: str):
 
 
 def _rotation_requested_launch() -> tuple[int, int]:
-    """Resolve the requested fused launch policy from env overrides or autotune."""
+    """Resolve the requested fused launch policy from config overrides or autotune."""
     global _ROTATION_LAUNCH_POLICY_CACHE
 
+    kernel = get_kernel_config()
+    config_key = (
+        kernel.paroquant_rotate_autotune,
+        kernel.paroquant_rotate_cta_m,
+        kernel.paroquant_rotate_row_pad,
+    )
     cached = _ROTATION_LAUNCH_POLICY_CACHE
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == config_key:
+        return cached[1]
 
-    cta_m_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", {4, 8, 16})
-    row_pad_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", {0, 2})
+    cta_m_override = kernel.paroquant_rotate_cta_m
+    row_pad_override = kernel.paroquant_rotate_row_pad
     if cta_m_override is not None or row_pad_override is not None:
         resolved = (
             -1 if cta_m_override is None else int(cta_m_override),
@@ -501,7 +486,7 @@ def _rotation_requested_launch() -> tuple[int, int]:
         resolved = (-2, -2)
     else:
         resolved = (-1, -1)
-    _ROTATION_LAUNCH_POLICY_CACHE = resolved
+    _ROTATION_LAUNCH_POLICY_CACHE = (config_key, resolved)
     return resolved
 
 
@@ -696,7 +681,7 @@ def _apply_fused_rotation_pair_grad(
 
 
 def _rotation_autotune_cache_enabled() -> bool:
-    return env_flag(_ROTATION_AUTOTUNE_CACHE_ENV, default=True)
+    return get_kernel_config().paroquant_autotune_cache
 
 
 def _rotation_autotune_cache_dir() -> Path:

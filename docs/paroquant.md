@@ -66,7 +66,7 @@ intermediate exceeds the FP16 range. The dense plan uses
 rotated input or trainable bias uses the dense plan so autograd can return
 its gradient. An unbiased fused call
 keeps its existing accumulation setting, while a biased call uses FP32
-accumulation even when `GPTQMODEL_FP32_ACCUM=0`. On NVIDIA CUDA, the dense plan
+accumulation even when `KernelConfig(fp32_accum=False)`. On NVIDIA CUDA, the dense plan
 keeps the stored bias precision until the FP32 epilogue instead of casting it
 to the activation dtype first.
 

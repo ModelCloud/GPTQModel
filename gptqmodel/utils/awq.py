@@ -133,19 +133,41 @@ def _awq_runtime_namespace():
     return _extension_api().namespace("awq")
 
 
-def awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool):
-    return _awq_op("gemm_forward")(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
+def awq_gemm_forward(
+    input,
+    qweight,
+    scales,
+    qzeros,
+    split_k_iters,
+    fp32_accum: bool,
+    fused_splitk_reduce: bool = True,
+):
+    return _awq_op("gemm_forward")(
+        input, qweight, scales, qzeros, split_k_iters, fp32_accum, fused_splitk_reduce
+    )
 
 
-def awq_gemm_forward_fp32_reduce(input, qweight, scales, qzeros, split_k_iters, fp32_output: bool = True):
+def awq_gemm_forward_fp32_reduce(
+    input,
+    qweight,
+    scales,
+    qzeros,
+    split_k_iters,
+    fp32_output: bool = True,
+    fused_splitk_reduce: bool = True,
+):
     """Split-K GEMM whose result stays float32 when ``fp32_output`` is set.
 
     Callers that add a stored bias in float32 before the visible cast use this
     to avoid rounding a finite sum that overflows the activation dtype.
+
+    ``fused_splitk_reduce`` selects the fused reduce kernel over the eager
+    ``sum(0)`` reduction. It is a kernel choice that comes from
+    ``KernelConfig``, so the same shape never changes numerics between runs.
     """
 
     return _awq_op("gemm_forward_fp32_reduce")(
-        input, qweight, scales, qzeros, split_k_iters, fp32_output
+        input, qweight, scales, qzeros, split_k_iters, fp32_output, fused_splitk_reduce
     )
 
 

@@ -21,6 +21,7 @@ from gptqmodel.quantization.gsq_training import (
     sampling_schedule,
     train_stage_update,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def _cuda_relaxation_available():
@@ -77,7 +78,7 @@ def test_cuda_gsq_relaxation_matches_eager_forward_and_gradients(
 
 
 def test_cuda_gsq_relaxation_keeps_eager_fallback(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", "1")
+    configure_kernel(KernelConfig(gsq_disable_cuda_relaxation=True))
     initial = torch.zeros(2, 32)
     logits = torch.zeros(5, 2, 32)
     scales = torch.ones(2, 1)
@@ -159,10 +160,7 @@ def test_cuda_gsq_30_update_trajectory_matches_eager(bits, logits_dtype, monkeyp
         for module, optimizer, generator, disabled in zip(
             (eager, fused), optimizers, generators, (True, False)
         ):
-            if disabled:
-                monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", "1")
-            else:
-                monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+            configure_kernel(KernelConfig(gsq_disable_cuda_relaxation=disabled))
             loss = train_stage_update(
                 {"weight": module}, optimizer, [(None, 1)], objective,
                 generator=generator, temperature=temperature, multiplier=multiplier,
@@ -292,10 +290,7 @@ def test_cuda_and_eager_staged_llama_agree_after_packed_training(tmp_path, monke
     validation = [{"input_ids": list(range(49, 65))}]
     results = []
     for disabled, label in ((True, "eager"), (False, "cuda")):
-        if disabled:
-            monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", "1")
-        else:
-            monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+        configure_kernel(KernelConfig(gsq_disable_cuda_relaxation=disabled))
         model = copy.deepcopy(original)
         run = quantize_llama_gsq_model(
             model, train, initialization_documents=initialization,
@@ -347,8 +342,12 @@ def test_hip_escape_hatch_forces_eager_path(monkeypatch):
 
     device = torch.cuda.current_device()
     fast_module._FAILED.discard(device)
-    monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION", "1")
-    monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+    configure_kernel(
+        KernelConfig(
+            gsq_disable_hip_relaxation=True,
+            gsq_disable_cuda_relaxation=False,
+        )
+    )
     logits = torch.zeros((5, 2, 32), device="cuda", dtype=torch.bfloat16)
     scales = torch.ones((2, 1), device="cuda", dtype=torch.float32)
     initial = torch.zeros((2, 32), device="cuda", dtype=torch.float32)

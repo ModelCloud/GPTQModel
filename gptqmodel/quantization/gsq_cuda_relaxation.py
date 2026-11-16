@@ -21,8 +21,8 @@ probabilities, matching the eager candidate and gradient precision.
 five-choice ``logits`` tensor and a non-None ``initial`` offset, while ``initial``
 is None for W2. W2 therefore always uses the eager path.
 
-Set ``GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION=1`` to force the eager path, or
-``GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION=1`` to skip only the HIPRTC backend.
+``KernelConfig.gsq_disable_cuda_relaxation`` forces the eager path, and
+``KernelConfig.gsq_disable_hip_relaxation`` skips only the HIPRTC backend.
 """
 
 import ctypes
@@ -30,6 +30,8 @@ import logging
 import os
 
 import torch
+
+from ..utils.kernel import get_kernel_config
 
 
 # A single source of truth for both backends. Warp-level intrinsics are written
@@ -397,10 +399,10 @@ def _cuda_backend(device):
 
 def _disabled():
     """Escape hatches are checked before any cached module so they always apply."""
-    if os.environ.get('GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION') == '1':
+    kernel = get_kernel_config()
+    if kernel.gsq_disable_cuda_relaxation:
         return True
-    return (torch.version.hip is not None
-            and os.environ.get('GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION') == '1')
+    return torch.version.hip is not None and kernel.gsq_disable_hip_relaxation
 
 
 def _functions(device):

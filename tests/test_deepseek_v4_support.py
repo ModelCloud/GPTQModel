@@ -18,6 +18,7 @@ from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models import auto
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.models.definitions.deepseek_v4 import (
     MTP_CAPTURE_ATTENTION_MASK,
     MTP_CAPTURE_DECODE_MASK,
@@ -1529,7 +1530,7 @@ def test_deepseek_v4_mtp_output_boundary_prunes_superseded_capture(
         )
     layer_zero = next(capture_root.glob("layer-000000-*"))
     layer_one = next(capture_root.glob("layer-000001-*"))
-    monkeypatch.setenv("GPTQMODEL_EXL3_CAPTURE_FRONTIER", str(capture_root))
+    configure_kernel(KernelConfig(exl3_capture_frontier=str(capture_root)))
 
     harness = object.__new__(DeepSeekV4MTPQuantizationModel)
     harness.configure_mtp_activation_store(

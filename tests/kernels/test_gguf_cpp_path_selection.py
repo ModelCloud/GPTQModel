@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def _kernel() -> GGUFCppKernel:
@@ -42,16 +43,16 @@ def test_cpu_path_choice_is_capability_based_not_timed(monkeypatch):
     assert module._use_ggml_cpu_matmul(x) is True
     assert module._use_ggml_cpu_matmul(x) is True
 
-    # The env override stays the explicit escape hatch in both directions.
-    monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "0")
+    # The explicit override still applies in both directions.
+    configure_kernel(KernelConfig(gguf_cpp_native_matmul=False))
     assert module._use_ggml_cpu_matmul(x) is False
-    monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "1")
+    configure_kernel(KernelConfig(gguf_cpp_native_matmul=True))
     assert module._use_ggml_cpu_matmul(x) is True
 
 
 def test_cpu_path_choice_is_stable_across_repeated_calls(monkeypatch):
     module = _kernel()
-    monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
+    configure_kernel(KernelConfig())
     x = torch.zeros(4, 32)
     choices = {module._use_ggml_cpu_matmul(x) for _ in range(5)}
     assert choices == {True}

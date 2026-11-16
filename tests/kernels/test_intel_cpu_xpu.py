@@ -18,7 +18,9 @@ from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
 from gptqmodel.utils.model import find_modules
 
 
-os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+configure_kernel(KernelConfig(disable_bitblas=True))
 
 log = LogBar.shared()
 device_compare_cols = log.columns(

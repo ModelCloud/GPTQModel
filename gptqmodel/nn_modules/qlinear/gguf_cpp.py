@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ctypes
-import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -18,6 +17,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.kernel import get_kernel_config
 from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
@@ -442,12 +442,9 @@ class _GGMLBridge:
 
     @staticmethod
     def _cpu_threads() -> int:
-        override = os.environ.get("GPTQMODEL_GGUF_CPP_THREADS")
+        override = get_kernel_config().gguf_cpp_threads
         if override is not None:
-            try:
-                return max(1, int(override))
-            except ValueError:
-                pass
+            return max(1, int(override))
         return max(1, torch.get_num_threads())
 
     def cpu_available(self) -> Tuple[bool, Optional[Exception]]:
@@ -1176,20 +1173,19 @@ class GGUFCppKernel(GGUFTorchLinear):
         does not) depend on the machine and on the run (#4219).
 
         An explicit ``exact_matmul`` constructor argument selects the path for
-        one layer (``True`` = exact torch path, ``False`` = native), and the
-        process-wide ``GPTQMODEL_GGUF_CPP_NATIVE_MATMUL`` environment variable
-        still overrides the default when no argument is given. A layout that
-        fails at compute time is recorded as unusable so the following calls
-        take the exact torch path.
+        one layer (``True`` = exact torch path, ``False`` = native). Without it,
+        ``KernelConfig.gguf_cpp_native_matmul`` selects the path; ``None`` keeps
+        the capability default. A layout that fails at compute time is recorded
+        as unusable so the following calls take the exact torch path.
         """
 
         if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
             return False
         if self.exact_matmul is not None:
             return not self.exact_matmul
-        override = os.environ.get("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL")
+        override = get_kernel_config().gguf_cpp_native_matmul
         if override is not None:
-            return override.strip().lower() not in {"0", "false", "off"}
+            return override
         return self._gguf_cpu_autotune_cache.get(self._ggml_cpu_matmul_key(x_flat), True)
 
     def clear_autotune(self):

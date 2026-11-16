@@ -14,6 +14,7 @@ from gptqmodel import _build_device_thread_pool
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.env import env_flag
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.logger import QuantizationRegionTimer, log_time_block, setup_logger
 from gptqmodel.utils.threadx import DeviceThreadPool
 
@@ -45,38 +46,28 @@ class TestQuantTelemetry(unittest.TestCase):
         self.assertLessEqual(cpu, 12)
         self.assertEqual(workers["model_loader:cpu"], 2)
 
-    def test_device_thread_pool_cpu_workers_env_override(self):
+    def test_device_thread_pool_cpu_workers_config_override(self):
+        configure_kernel(KernelConfig(cpu_workers=4))
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch.dict(os.environ, {"GPTQMODEL_CPU_WORKERS": "4"}, clear=False):
-                with patch("gptqmodel.has_gil_disabled", return_value=True):
-                    _build_device_thread_pool()
+            with patch("gptqmodel.has_gil_disabled", return_value=True):
+                _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
         self.assertEqual(workers["cpu"], 4)
         self.assertEqual(workers["model_loader:cpu"], 2)
 
-    def test_device_thread_pool_cpu_workers_env_override_invalid_ignored(self):
-        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch.dict(os.environ, {"GPTQMODEL_CPU_WORKERS": "not-a-number"}, clear=False):
-                with patch("gptqmodel.has_gil_disabled", return_value=True):
-                    _build_device_thread_pool()
-        workers = mock_init.call_args.kwargs["workers"]
-        self.assertGreaterEqual(workers["cpu"], 2)
-        self.assertLessEqual(workers["cpu"], 8)
+    def test_device_thread_pool_cpu_workers_invalid_config_rejected(self):
+        with self.assertRaises(ValueError):
+            KernelConfig(cpu_workers=0)
 
-    def test_device_thread_pool_cuda_workers_env_override(self):
+    def test_device_thread_pool_cuda_workers_config_override(self):
+        configure_kernel(KernelConfig(cuda_workers=5))
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch.dict(os.environ, {"GPTQMODEL_CUDA_WORKERS": "5"}, clear=False):
-                _build_device_thread_pool()
+            _build_device_thread_pool()
         self.assertEqual(mock_init.call_args.kwargs["workers"]["cuda:per"], 5)
 
-    def test_device_thread_pool_cuda_workers_invalid_override_is_ignored(self):
+    def test_device_thread_pool_default_cuda_workers(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch.dict(
-                os.environ,
-                {"GPTQMODEL_CUDA_WORKERS": "not-a-number"},
-                clear=False,
-            ):
-                _build_device_thread_pool()
+            _build_device_thread_pool()
         self.assertEqual(mock_init.call_args.kwargs["workers"]["cuda:per"], 4)
 
     def test_log_time_block_is_silent_by_default(self):

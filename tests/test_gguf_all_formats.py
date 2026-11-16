@@ -42,6 +42,7 @@ from gptqmodel.quantization.config import (
     _normalize_gguf_public_format,
 )
 from gptqmodel.utils import internal_gguf as ig
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 # llama-cpp-python is imported on demand by the kernel now, so load it here
@@ -373,10 +374,11 @@ def test_q8_pack_boundaries_match_torch_and_ggml(qtype, dtype):
 @pytest.mark.parametrize("override", ["1", "0", None])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_cpp_unsupported_native_types_always_fall_back(alias, override, dtype, monkeypatch):
-    if override is None:
-        monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
-    else:
-        monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", override)
+    configure_kernel(
+        KernelConfig(
+            gguf_cpp_native_matmul=None if override is None else override == "1"
+        )
+    )
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
     width = _GGUF_TYPE_INFO[qtype]["block_size"] + 3
     lin, x = _lin_and_x(width)
@@ -461,7 +463,7 @@ def test_gguf_kernel_independent_packed_oracle(alias, dtype, path, monkeypatch):
     x = (x / 128).to(dtype)
     if path == "native":
         module = _cpp_from_torch(module)
-        monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "1")
+        configure_kernel(KernelConfig(gguf_cpp_native_matmul=True))
         expected = (x.float() @ weight.T).to(dtype)
     elif path == "dense":
         monkeypatch.setattr(module, "_should_use_fused_k_forward", lambda _: False)

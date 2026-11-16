@@ -58,6 +58,7 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
+from ..utils.kernel import configure_kernel
 from ..utils.model import (
     MoETopKState,
     get_layers_with_prefixes,
@@ -409,6 +410,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        configure_kernel(getattr(self.gptq_model.quantize_config, "kernel", None))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 
