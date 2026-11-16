@@ -120,7 +120,7 @@ def _convert_checkpoint_state_dict_keys(state_dict: Dict[str, Any], key_converte
 # SUPPORTED_SPLIT_BY = {None, "layer"}
 SUPPORTED_SPLIT_BY = {None}
 _MAX_SHARD_SIZE_RE = pcre.compile(
-    r"\s*(\d+)([KMGTP]?B?)\s*",
+    r"\s*(\d+)\s*([KMGTP]?i?B?)\s*",
     flags=pcre.Flag.CASELESS,
 )
 
@@ -143,7 +143,10 @@ def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
     """Resolve a ``max_shard_size`` argument to bytes.
 
     Module level so every export path -- including formats that publish their
-    own packed state -- honours the same shard limit.
+    own packed state -- honours the same shard limit. Units follow Hugging
+    Face's convention: ``KB``/``MB``/``GB`` are decimal and
+    ``KiB``/``MiB``/``GiB`` are binary. A bare ``K``/``M``/``G`` keeps the
+    historical binary meaning so existing callers do not change size.
     """
 
     if value is None:
@@ -155,17 +158,13 @@ def _parse_max_shard_size(value: Optional[Union[int, str]]) -> Optional[int]:
         raise ValueError(f"Invalid max_shard_size value: {value}")
     base = int(match.group(1))
     suffix = match.group(2).upper()
-    multiplier = 1
-    if suffix.startswith("K"):
-        multiplier = 1024
-    elif suffix.startswith("M"):
-        multiplier = 1024 ** 2
-    elif suffix.startswith("G"):
-        multiplier = 1024 ** 3
-    elif suffix.startswith("T"):
-        multiplier = 1024 ** 4
-    elif suffix.startswith("P"):
-        multiplier = 1024 ** 5
+    if suffix.startswith("I"):
+        raise ValueError(f"Invalid max_shard_size value: {value}")
+    exponent = {"K": 1, "M": 2, "G": 3, "T": 4, "P": 5}.get(suffix[:1], 0)
+    if exponent == 0:
+        return base
+    binary = suffix.endswith("IB") or not suffix.endswith("B")
+    multiplier = (1024 if binary else 1000) ** exponent
     return base * multiplier
 
 

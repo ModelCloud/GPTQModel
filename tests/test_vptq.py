@@ -465,6 +465,12 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
         if kmeans_weight is not None:
             kmeans_weight = kmeans_weight[:, perm]
 
+    pass_hessian = hessian
+    if qcfg.enable_norm and int(qcfg.norm_dim) == 0 and weight_scale is not None:
+        channel_scale = weight_scale[perm] if perm is not None else weight_scale
+        channel_scale = channel_scale.to(dtype=hessian.dtype, device=hessian.device)
+        pass_hessian = hessian * channel_scale.unsqueeze(0) * channel_scale.unsqueeze(1)
+
     group_bounds = [(0, outlier_size)] + [
         (
             outlier_size + index * group_size,
@@ -507,7 +513,7 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
 
     quantized, qerror, indices, res_indices = oracle_vptq_pass(
         weight=weight,
-        hessian=hessian,
+        hessian=pass_hessian,
         group_bounds=group_bounds,
         vector_lens=vector_lens,
         centroids=working_centroids,
@@ -548,7 +554,7 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
 
         quantized, qerror, indices, res_indices = oracle_vptq_pass(
             weight=weight,
-            hessian=hessian,
+            hessian=pass_hessian,
             group_bounds=group_bounds,
             vector_lens=vector_lens,
             centroids=working_centroids,
@@ -3111,3 +3117,55 @@ def test_vptq_weighted_kmeans_does_not_toggle_global_determinism_across_threads(
             if thread.is_alive():
                 thread.join(timeout=5)
         torch.use_deterministic_algorithms(initial)
+
+
+def test_norm_dim0_error_feedback_uses_channel_scaled_hessian(monkeypatch):
+    """Per-column normalization needs ``D H D`` for error compensation.
+
+    With ``norm_dim=0`` the weight is divided by one scale per input channel, so
+    the reconstruction error in the original space is ``D * e``. The GPTQ
+    compensation pass must therefore consume ``D H D`` while the reported loss
+    still uses the original Hessian.
+    """
+
+    torch.manual_seed(7)
+    rows, columns = 8, 32
+    weight = torch.randn(rows, columns)
+    basis = torch.randn(columns, columns)
+    hessian = basis @ basis.T + torch.eye(columns) * 0.5
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 8],
+        num_res_centroids=[-1, -1],
+        group_size=-1,
+        group_num=-1,
+        kmeans_iters=2,
+        block_size=16,
+        enable_norm=True,
+        norm_dim=0,
+        enable_perm=False,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    captured = []
+    original_pass = quantizer._vptq_pass
+
+    def spy(**kwargs):
+        captured.append(kwargs["hessian"].detach().clone())
+        return original_pass(**kwargs)
+
+    monkeypatch.setattr(quantizer, "_vptq_pass", spy)
+    quantizer.quantize_weight(weight, hessian)
+
+    assert captured, "the quantizer never ran the error-feedback pass"
+    weight_min = weight.amin(dim=0)
+    weight_max = weight.amax(dim=0)
+    channel_scale = (weight_max - weight_min).clamp_min(1e-12)
+    normalized_hessian = (hessian / torch.diagonal(hessian).mean()).to(torch.float64)
+    channel_scale = channel_scale.to(dtype=normalized_hessian.dtype)
+    expected = (
+        normalized_hessian
+        * channel_scale.unsqueeze(0)
+        * channel_scale.unsqueeze(1)
+    )
+    assert torch.allclose(captured[0], expected, rtol=1e-5, atol=1e-6)

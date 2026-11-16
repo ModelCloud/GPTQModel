@@ -90,6 +90,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [AWQ runtime dtype precision](awq-runtime-dtype-precision.md)
 - [AWQ pack-time scale representability](awq-pack-scale-representability.md)
 - [CUDA quantized linear epilogue](cuda-quantized-bias-epilogue.md)
+- [Checkpoint metadata and runtime decision contracts](checkpoint-and-runtime-contracts.md)
 - [EXL3 runtime weight lifecycle](exl3-runtime-weights.md)
 - [EXL3 wide activation dispatch](exl3-wide-activation-dispatch.md)
 - [External runtime device mapping](external-runtime-device-mapping.md)

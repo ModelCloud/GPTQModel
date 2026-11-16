@@ -522,6 +522,17 @@ class VPTQ:
             if kmeans_weight is not None:
                 kmeans_weight = kmeans_weight[:, perm]
 
+        # ``norm_dim=0`` divides each input channel by its own scale, so the
+        # error in the original weight space is ``D * e`` with
+        # ``D = diag(scale)``. Error feedback must minimize
+        # ``e^T (D H D) e``; using the raw Hessian biases the compensation
+        # toward channels whose normalization happened to be large.
+        pass_hessian = hessian
+        if qcfg.enable_norm and int(qcfg.norm_dim) == 0 and weight_scale is not None:
+            channel_scale = weight_scale[perm] if perm is not None else weight_scale
+            channel_scale = channel_scale.to(dtype=hessian.dtype, device=hessian.device)
+            pass_hessian = hessian * channel_scale.unsqueeze(0) * channel_scale.unsqueeze(1)
+
         group_bounds = [(0, outlier_size)] + [
             (
                 outlier_size + index * group_size,
@@ -564,7 +575,7 @@ class VPTQ:
 
         quantized, qerror, indices, res_indices = self._vptq_pass(
             weight=weight,
-            hessian=hessian,
+            hessian=pass_hessian,
             group_bounds=group_bounds,
             vector_lens=vector_lens,
             centroids=working_centroids,
@@ -596,7 +607,7 @@ class VPTQ:
 
             quantized, qerror, indices, res_indices = self._vptq_pass(
                 weight=weight,
-                hessian=hessian,
+                hessian=pass_hessian,
                 group_bounds=group_bounds,
                 vector_lens=vector_lens,
                 centroids=working_centroids,

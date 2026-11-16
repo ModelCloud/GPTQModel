@@ -347,14 +347,14 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     without ``fullgraph``: ``fullgraph=True`` is an explicit single-graph
     contract and must still fail closed.
 
-    Any other exception is only treated as a compiler failure when it was
-    raised inside PyTorch's compiler packages. Otherwise it belongs to the
+    The remaining fallback is deliberately narrow: only a ``RuntimeError``
+    raised inside PyTorch's compiler packages, or dynamo's guard-check
+    ``AssertionError`` (``Guard failed on the same frame it was created ...
+    GLOBAL_STATE changed``) which fires when another thread changes a
+    process-global setting, such as ``torch.set_default_dtype``, during a
+    concurrent first compile (issue #4094). Everything else belongs to the
     traced user code; retrying eagerly would run that code twice and hide the
-    original error. This includes dynamo's guard-check ``AssertionError``
-    (``Guard failed on the same frame it was created ... GLOBAL_STATE changed``)
-    which fires when another thread changes a process-global setting, such as
-    ``torch.set_default_dtype``, during a concurrent first compile
-    (issue #4094). The innermost frame is what matters: user code raising the
+    original error. The innermost frame is what matters: user code raising the
     same exception type has its own frame at the origin.
     """
     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -376,10 +376,16 @@ def _is_compiler_failure(exc: BaseException, *, fullgraph: bool = False) -> bool
     # compile workers and guard checks raise outside the traced frame.
     frames = traceback.extract_tb(exc.__traceback__)
     origin = (frames[-1].filename or "") if frames else ""
-    return any(
+    if not any(
         token in origin
         for token in ("/torch/_dynamo/", "/torch/_inductor/", "/torch/_functorch/")
-    )
+    ):
+        return False
+    if isinstance(exc, RuntimeError):
+        # Inductor compile workers raise RuntimeError outside the traced frame
+        # (for example ``Attempting to use a closed pool``).
+        return True
+    return isinstance(exc, AssertionError) and "Guard failed on the same frame it was created" in str(exc)
 
 
 def _compile_label(target) -> str:

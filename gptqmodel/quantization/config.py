@@ -5393,7 +5393,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["telemetry"] = asdict(self.telemetry)
         meta_payload["p2p"] = self.p2p.to_dict() if self.p2p is not None else None
-        meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
+        # ``offload_to_disk_path`` is a local scratch directory chosen for this
+        # process (often an auto-created ``/tmp/gptqmodel_*``). Publishing it in
+        # a checkpoint makes the artifact machine-specific and leaks the
+        # quantizer's temporary path; a loader must choose its own directory.
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
