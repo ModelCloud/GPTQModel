@@ -28,6 +28,7 @@ pip install --disable-pip-version-check --quiet ruff==0.14.2
 # `ruff_status=$?` and therefore always exited 0.
 ruff check \
   gptqmodel \
+  gptqmodel_compiler \
   docs/eora \
   tests \
   setup.py \

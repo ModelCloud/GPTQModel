@@ -11,6 +11,9 @@ requirements, including an explicit empty set. A compiler must expand every
 reused body, layer record, parameter binding and resource-use record before
 execution; an abbreviated example is never an executable fallback.
 
+The [first Python compiler](../model-dsl-compiler.md) separately implements
+Llama execution; the textual sketches here do not become executable inputs.
+
 Selections were checked on 2026-11-16. "Latest" is resolved to the IDs below,
 not a moving alias inside a compiled artifact. Kimi's published model list has
 no model named Flash; K3.1 Pro is the selected open-weight model. Its high-speed

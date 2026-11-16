@@ -3,11 +3,13 @@
 
 # Model computation DSL
 
-**Status: design proposal.** This document specifies a replacement for the
-tree/tag model definition, with one executable computation graph consumed by
-both quantization and inference. No DSL parser, compiler, executor, or model
-migration ships in this draft. All DSL snippets and proposed API names below
-are design notation, not runnable Python or existing package APIs.
+**Status: design proposal with an initial executable subset.** This document
+specifies a replacement for the tree/tag model definition, with one executable
+computation graph consumed by both quantization and inference. The standalone
+[Python compiler](model-dsl-compiler.md) now emits eager and optimized PyTorch
+2.15 code for Llama 3.2 1B. The textual snippets and broader APIs below remain
+design notation; full quantizer integration and the other architectures are
+not implemented.
 
 The central decision is to declare **the model's computation**, including its
 structure, parameters, tensor edges, state, and numerical semantics. Compile
@@ -71,8 +73,9 @@ the inventory.
 
 ## One semantic program, several compiled plans
 
-The following is the **proposed flow**. Every compiler type and pass in this
-diagram is proposed work; none is an assertion about shipped runtime behavior.
+The following is the **proposed complete flow**. The implemented first subset
+has its own [code-derived flow and limits](model-dsl-compiler.md); this diagram
+does not imply that all passes below have shipped.
 
 ```mermaid
 flowchart TD

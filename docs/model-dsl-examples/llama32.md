@@ -100,6 +100,9 @@ different values. AWQ must also preserve residual uses and parameter aliases;
 quantizing a tied head independently requires an explicit alias-breaking
 transformation/policy, never silently replacing one of two names.
 
-Remaining qualification: gated config/checkpoint reconciliation, complete
-numeric/storage records and independent prefill/decode/chunk/state parity.
-This sample does not implement or validate a Llama executor.
+The [initial executable compiler](../model-dsl-compiler.md) separately expands
+this architecture as a typed Python program and validates pure-Torch inference
+against an independent oracle using the pinned public mirror's weights.
+The abbreviated textual sample above remains design notation. Gated official
+checkpoint reconciliation, padded batches and the broader resource ABI remain
+outside that implementation.
