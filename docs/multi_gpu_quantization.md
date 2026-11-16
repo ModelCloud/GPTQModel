@@ -241,7 +241,8 @@ H        = sum over devices of (count_device / count_total) * H_device
 
 `dXXT` uses the same weight, so the reduced matrices equal the single-device
 recurrence over all batches in capture order, independent of the order in which
-the device workers finish.
+the device workers finish. The split was introduced in PR #4284 (issue #4237);
+plain GPTQ has used per-device partials since earlier releases.
 
 Native calibration inputs are captured per sample and tagged with the
 calibration batch they came from. The quantizer consumes the entry whose key
