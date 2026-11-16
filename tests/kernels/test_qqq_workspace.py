@@ -27,6 +27,13 @@ def _build(out_features: int, monkeypatch, *, register_buffers: bool = True) -> 
     monkeypatch.setattr(
         QQQLinear, "validate_device", classmethod(lambda cls, device: None)
     )
+    # `validate()` consults the once-gate before `_validate`, and on ROCm that
+    # gate returns QQQ_ROCM_UNSUPPORTED before either stub above is reached.
+    # The workspace sizing under test is pure Python and backend-independent, so
+    # stub the gate rather than skipping this file on ROCm.
+    monkeypatch.setattr(
+        QQQLinear, "validate_once", classmethod(lambda cls: (True, None))
+    )
     return QQQLinear(
         bits=4,
         group_size=-1,
