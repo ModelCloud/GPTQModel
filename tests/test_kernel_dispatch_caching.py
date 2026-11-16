@@ -9,6 +9,8 @@ memoised fast paths, their invalidation, the ExLlamaV2 handle lifecycle, and
 the single-kernel FP16 bias epilogue.
 """
 
+import threading
+import time
 import types
 
 import pytest
@@ -239,6 +241,46 @@ def test_exllamav2_fast_path_detects_in_place_write(monkeypatch):
     assert len(made) == 2
     assert freed == [1]
     assert made[1].eq(0).all()
+
+
+def test_exllamav2_concurrent_first_forward_builds_one_handle(monkeypatch):
+    """Issue #4184: serialize the cold native q-matrix rebuild.
+
+    Eight free-threaded workers forwarding after a cache clear used to each
+    build (and leak) their own native q-matrix. The double-checked rebuild lock
+    must collapse them onto one handle.
+    """
+
+    layer, made = _exllamav2_layer()
+    real_make = layer.ext_make_q_matrix
+    barrier = threading.Barrier(8)
+
+    def slow_make(tensors, **kwargs):
+        # Keep the rebuild in flight long enough for an unsynchronized peer to
+        # enter the same slow path.
+        time.sleep(0.05)
+        return real_make(tensors, **kwargs)
+
+    layer.ext_make_q_matrix = slow_make
+    handles = []
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait(timeout=10)
+            handles.append(exllamav2.ExllamaV2Linear._ensure_q_handle(layer))
+        except BaseException as exc:  # pragma: no cover - surfaced by assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert len(made) == 1
+    assert handles == [1] * 8
 
 
 # ---------------------------------------------------------------------------

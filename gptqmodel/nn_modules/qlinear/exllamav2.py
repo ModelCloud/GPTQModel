@@ -5,6 +5,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
+import threading
 from typing import List, Optional, Tuple
 
 import torch
@@ -30,6 +31,12 @@ from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+# A post-load first forward can run from several free-threaded workers after
+# `clear_weight_cache()`. Without serialization each worker built (and leaked)
+# its own native q-matrix. Only the cold rebuild takes the lock; the fast path
+# in `_ensure_q_handle` stays lock-free.
+_Q_HANDLE_REBUILD_LOCK = threading.Lock()
 
 
 def _torch_device(idx):
@@ -199,8 +206,11 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def clear_weight_cache(self) -> None:
         """Release native pointers derived from the current packed buffers."""
 
-        self._release_q_handle()
-        self.q_tensors = None
+        # Pair with the rebuild lock so a forward cannot publish a handle
+        # while another thread is releasing the packed tensor mapping.
+        with _Q_HANDLE_REBUILD_LOCK:
+            self._release_q_handle()
+            self.q_tensors = None
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         if getattr(self, "_native_shuffled", False):
@@ -261,42 +271,56 @@ class ExllamaV2Linear(GPTQQuantLinear):
                 _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
             ):
                 return self.q_handle
-        if self.scales.dtype != torch.float16:
-            self.scales = self.scales.to(dtype=torch.float16)
-        tensors = {
-            "qweight": self.qweight,
-            "qzeros": self.qzeros,
-            "scales": self.scales,
-            "g_idx": self.g_idx,
-        }
-        if self.q_tensors is None:
-            self.q_tensors = tensors
-        else:
-            self.q_tensors.update(tensors)
-        key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
-        if (
-            self.q_handle is not None
-            and self._q_handle_key is not None
-            and self._q_handle_key != key
-        ):
-            self._release_q_handle()
-        if self.q_handle is None:
-            already_shuffled = getattr(self, "_native_shuffled", False)
-            if already_shuffled:
-                self.q_handle = self.ext_make_q_matrix(self.q_tensors, already_shuffled=True)
+        # A post-load first forward can run from several free-threaded workers.
+        # Serialize only this cold rebuild; steady-state forwards stay
+        # lock-free. Re-check under the lock so the workers that queued behind
+        # the first builder reuse its handle instead of building and leaking
+        # another native q-matrix.
+        with _Q_HANDLE_REBUILD_LOCK:
+            fast = getattr(self, "_q_fast", None)
+            if fast is not None and self.q_handle is not None:
+                tensors, signatures = fast
+                live = (self.qweight, self.qzeros, self.scales, self.g_idx)
+                if len(tensors) >= len(live) and all(t is l for t, l in zip(tensors, live)) and all(
+                    _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
+                ):
+                    return self.q_handle
+            if self.scales.dtype != torch.float16:
+                self.scales = self.scales.to(dtype=torch.float16)
+            tensors = {
+                "qweight": self.qweight,
+                "qzeros": self.qzeros,
+                "scales": self.scales,
+                "g_idx": self.g_idx,
+            }
+            if self.q_tensors is None:
+                self.q_tensors = tensors
             else:
-                self.q_handle = self.ext_make_q_matrix(self.q_tensors)
-            self._native_shuffled = True
-            # Act-order matrix creation adds/fills q_perm and q_invperm in
-            # ``q_tensors``. Key the completed dictionary so the next forward
-            # does not mistake those newly inserted tensors for a replacement
-            # and rebuild the native matrix every call.
-            self._q_handle_key = tuple(
-                tensor_cache_key(tensor) for tensor in self.q_tensors.values()
-            )
-        tensors = tuple(self.q_tensors.values())
-        self._q_fast = (tensors, tuple(_q_fast_signature(tensor) for tensor in tensors))
-        return self.q_handle
+                self.q_tensors.update(tensors)
+            key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
+            if (
+                self.q_handle is not None
+                and self._q_handle_key is not None
+                and self._q_handle_key != key
+            ):
+                self._release_q_handle()
+            if self.q_handle is None:
+                already_shuffled = getattr(self, "_native_shuffled", False)
+                if already_shuffled:
+                    self.q_handle = self.ext_make_q_matrix(self.q_tensors, already_shuffled=True)
+                else:
+                    self.q_handle = self.ext_make_q_matrix(self.q_tensors)
+                self._native_shuffled = True
+                # Act-order matrix creation adds/fills q_perm and q_invperm in
+                # ``q_tensors``. Key the completed dictionary so the next forward
+                # does not mistake those newly inserted tensors for a replacement
+                # and rebuild the native matrix every call.
+                self._q_handle_key = tuple(
+                    tensor_cache_key(tensor) for tensor in self.q_tensors.values()
+                )
+            tensors = tuple(self.q_tensors.values())
+            self._q_fast = (tensors, tuple(_q_fast_signature(tensor) for tensor in tensors))
+            return self.q_handle
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
