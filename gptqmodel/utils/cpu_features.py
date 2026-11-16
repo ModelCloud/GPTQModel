@@ -93,9 +93,14 @@ def has_cpu_bf16x3_precision() -> bool:
     return True
 
 
-@lru_cache(maxsize=1)
 def has_cpu_bf16x3_matmul() -> bool:
-    """Return whether this process may run FP32 matmul as BF16x3."""
+    """Return whether this process may run FP32 matmul as BF16x3.
+
+    The policy is deliberately *not* cached: callers may install a different
+    ``KernelConfig`` between runs and expect the next matmul to observe it.
+    Only the host capability probes (``has_avx512_bf16`` and
+    ``has_cpu_bf16x3_precision``) are process constants and stay cached.
+    """
 
     if not get_kernel_config().cpu_bf16x3_matmul:
         return False

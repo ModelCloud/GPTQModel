@@ -38,16 +38,31 @@ _EXL3_OUTPUT_TILES_PER_CHUNK = 32
 
 
 @lru_cache(maxsize=1)
+def _cpu_bf16x3_capable() -> bool:
+    """Return whether the host itself can run oneDNN BF16x3 FP32 matmul."""
+
+    return has_avx512_bf16() and has_cpu_bf16x3_precision()
+
+
 def _cpu_bf16x3_support() -> bool:
-    """Return whether oneDNN BF16x3 FP32 matmul is usable on this host."""
+    """Return whether the active kernel policy enables BF16x3 on this host.
+
+    The policy read stays outside the cache so toggling
+    ``KernelConfig.cpu_bf16x3_matmul`` between runs is observed by the next
+    forward. Only the hardware capability probe is cached.
+    """
 
     from ..utils.kernel import get_kernel_config
 
     if not get_kernel_config().cpu_bf16x3_matmul:
         return False
-    if not has_avx512_bf16():
-        return False
-    return has_cpu_bf16x3_precision()
+    return _cpu_bf16x3_capable()
+
+
+# Keep the documented re-arm knob on the capability probe. Callers (and tests)
+# that used to clear the old cached predicate now clear only the hardware
+# capability, which is exactly what the name promises.
+_cpu_bf16x3_support.cache_clear = _cpu_bf16x3_capable.cache_clear
 
 
 def _cpu_bf16x3_should_use(rows: int, in_features: int, out_features: int) -> bool:

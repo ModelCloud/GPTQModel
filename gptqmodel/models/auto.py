@@ -782,13 +782,18 @@ def _prebuild_device_thread_pool(device=None) -> None:
     device, but the excluded ones keep no CUDA context and no linalg warmup
     allocations until work is actually submitted to them.
     """
-    if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
-        return
-
-    from .. import get_device_thread_pool
+    from .. import resize_device_thread_pool
 
     explicit_devices = _explicit_requested_devices(device)
-    get_device_thread_pool(warmup_devices=explicit_devices)
+    if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
+        # Do not build eagerly, but still retune a pool an earlier load created.
+        resize_device_thread_pool(warmup_devices=explicit_devices, create=False)
+        return
+
+    # Resize the singleton to the policy installed for *this* run. A later load
+    # that asks for a different ``cpu_workers`` must not inherit the first
+    # load's worker count (issue #4396).
+    resize_device_thread_pool(warmup_devices=explicit_devices)
 
 
 class GPTQModel:
@@ -952,6 +957,7 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
                 kernel=kernel,
+                p2p=p2p,
                 module_tree=module_tree,
                 **kwargs,
             )
@@ -988,6 +994,17 @@ class GPTQModel:
             quantize_config.kernel = (
                 KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
             )
+
+        # Install the policy before the thread-pool prebuild reads it. The pool
+        # is a per-process singleton, so a policy installed after the prebuild
+        # would only affect the next process (issue #4396).
+        configure_kernel(kernel)
+        if quantize_config is None:
+            # Dense inference loads do not prebuild the pool, but an earlier
+            # load may have left one at a different worker count.
+            from .. import resize_device_thread_pool
+
+            resize_device_thread_pool(create=False)
 
         if quantize_config is not None:
             _kick_quantize_prewarms(
@@ -1088,6 +1105,8 @@ class GPTQModel:
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             module_tree=module_tree,
+            p2p=p2p,
+            kernel=kernel,
             **model_init_kwargs,
         )
 
@@ -1110,6 +1129,13 @@ class GPTQModel:
             **kwargs,
     ) -> BaseQModel:
         backend, kernel = resolve_backend_config(backend, kernel, runtime)
+        configure_kernel(kernel)
+        # Retune an existing singleton pool before any module is built. A
+        # post-quantized load may be the second load in the process and must
+        # honour its own ``cpu_workers`` (issue #4396).
+        from .. import resize_device_thread_pool
+
+        resize_device_thread_pool(create=False)
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,

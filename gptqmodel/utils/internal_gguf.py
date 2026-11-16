@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from collections import OrderedDict
@@ -710,6 +711,23 @@ class GGUFReader:
 
 
 def install_runtime():
+    """Expose this module as ``gguf`` only when no real package is installed.
+
+    The shim exists for hosts without the optional ``gguf`` extra. Installing
+    it over an installed package hides every architecture the real reader
+    supports and loses the real module process-wide (issue #4396).
+    """
+
+    existing = sys.modules.get("gguf")
+    if existing is not None and existing is not sys.modules[__name__]:
+        return existing
+    if existing is None:
+        try:
+            available = importlib.util.find_spec("gguf") is not None
+        except (ImportError, ValueError):
+            available = False
+        if available:
+            return None
     sys.modules["gguf"] = sys.modules[__name__]
     return sys.modules["gguf"]
 
