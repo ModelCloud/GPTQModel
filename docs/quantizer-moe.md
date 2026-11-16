@@ -83,6 +83,36 @@ native rows can be gathered with the quantized-path routing. That follow-up is
 not implemented here; routed experts are quantized as plain GPTQ (GPTAQ) or
 FOEM without the alpha term.
 
+### Hessian and loss normalization (GPTAQ vs FOEM)
+
+The two quantizers keep different Hessian denominators, and the difference is
+intentional:
+
+| Quantizer | `H` denominator | `nsamples` | Reported `avg_loss` denominator |
+| --- | --- | --- | --- |
+| GPTAQ (`gptaq.py` `process_batch`) | calibration requests (`inp.shape[0]`, one per sample) | tokens | tokens, via `_token_normalized_avg_loss` |
+| FOEM (`foem.py` `process_batch`) | calibration tokens (`inp.shape[1]`) | tokens | tokens |
+| GPTQ (`gptq.py` `add_batch` + reduction) | calibration tokens (`2 / total_samples`) | tokens | tokens |
+
+GPTAQ keeps its upstream per-request Hessian normalization and converts only
+the reported loss to a token mean. FOEM normalizes the Hessian itself by token
+count so that `FOEM(alpha=0, beta=0)` matches GPTQ: `H` and `avg_loss` agree to
+float32 accumulation (measured relative error 9.6e-8 and 5.5e-7), `nsamples`
+is identical, and the quantized weights are bit-identical. Token
+normalization also makes FOEM's Hessian independent of how the calibration rows
+are grouped into forward batches; a request denominator would scale with the
+number of sequences instead.
+
+`H`'s absolute scale does not change the quantized output. For GPTQ and every
+FOEM `alpha`/`beta` combination, multiplying `H` and `dXXT` by a constant
+produced bit-identical `Q` (measured on CPU: 0 of 2048 dequantized values
+changed for a 3x scale), because `hessian_inverse` returns the Cholesky factor
+of the damped inverse and the damping is relative to the diagonal mean. The
+scale is observable only in `H` itself and in the reported loss, so tests that
+assert `H` must encode the per-quantizer denominator above
+(`tests/test_gptaq_foem_batch.py::test_hessian_normalisation_matches_documented_contract`
+and `test_foem_token_normalisation_matches_gptq_hessian_and_loss`).
+
 ## 2. GGUF `q*_k_s` / `q*_k_m` / `q*_k_l` quality aliases
 
 llama.cpp's `_s`/`_m`/`_l` suffixes select a per-tensor mixture, for example
