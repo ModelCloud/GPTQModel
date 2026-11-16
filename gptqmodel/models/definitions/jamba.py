@@ -44,7 +44,9 @@ class JambaQModel(BaseQModel):
             # consumes the SSM output built from `x_proj`. Declaring `x_proj`
             # keeps it inside the quantization plan instead of silently
             # leaving a called `nn.Linear` unquantized.
-            "mamba": ("in_proj:0", "x_proj:1", "out_proj:2"),
+            # `conv1d` and `dt_proj` are checkpoint-owned but are not part of
+            # the quantizable projection plan.
+            "mamba": ("in_proj:0", "x_proj:1", "out_proj:2", "conv1d:!", "dt_proj:!"),
             "pre_ff_layernorm": ("pre_ff_layernorm:!",),
             # Expert layers route through `feed_forward.experts`, while dense
             # layers keep the projections directly on `feed_forward`. The
