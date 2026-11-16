@@ -22,7 +22,6 @@ from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
-from ..utils.env import env_flag
 from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode

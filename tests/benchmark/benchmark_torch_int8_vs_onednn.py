@@ -16,11 +16,10 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
-from gptqmodel.utils.logger import render_table
-
-
 # Keep this CPU benchmark isolated from optional GPU backend import side effects.
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.logger import render_table
+
 
 configure_kernel(KernelConfig(disable_bitblas=True))
 

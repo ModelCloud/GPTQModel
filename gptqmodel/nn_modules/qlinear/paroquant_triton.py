@@ -24,6 +24,7 @@ from ...quantization.paroquant.modules.triton.gemm import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ...utils.kernel import resolve_kernel_config
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paroquant import ParoLinear
 

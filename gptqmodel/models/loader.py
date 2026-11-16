@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 import torch
 import transformers
 
-from ..utils.modelscope import ensure_modelscope_available
 from ..utils.kernel import KernelConfig, configure_kernel
+from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree

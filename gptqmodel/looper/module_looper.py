@@ -47,6 +47,7 @@ from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.disk import estimate_disk_io_speed
+from ..utils.kernel import configure_kernel
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
@@ -58,7 +59,6 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.kernel import configure_kernel
 from ..utils.model import (
     MoETopKState,
     get_layers_with_prefixes,
