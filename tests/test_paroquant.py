@@ -359,8 +359,8 @@ def test_paroquant_quantize_config_preserves_explicit_gradient_checkpointing_ove
     assert compute_block_cfg.opt_gradient_checkpointing is True
 
 
-def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
-    """Guard that the config-backed fused toggle overrides the legacy env fallback."""
+def test_paroquant_rotation_toggle_uses_explicit_argument(monkeypatch):
+    """Guard that the config-backed fused toggle controls the rotation path."""
     x = torch.randn(4, 8, dtype=torch.float32)
     pairs, theta, channel_scales = build_identity_rotation_buffers(
         in_features=8,
@@ -378,7 +378,6 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
         return x + 123.0
 
     monkeypatch.setattr(paroquant_optimization, "apply_paroquant_rotation_autograd", fake_fused_rotation)
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION", "1")
 
     reference_out = _apply_rotation(
         x,
@@ -401,6 +400,9 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
     )
     assert calls == ["fused"]
     torch.testing.assert_close(fused_out, x + 123.0)
+    default_out = _apply_rotation(x, pairs, theta, scales=channel_scales, group_size=8)
+    assert calls == ["fused", "fused"]
+    torch.testing.assert_close(default_out, fused_out)
 
 
 def test_paroquant_fused_rotation_uses_forward_only_path_without_grad_inputs(monkeypatch):
@@ -1893,7 +1895,6 @@ def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
             return self._numel
 
     monkeypatch.setattr(paroquant_optimization, "_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
-    monkeypatch.setattr(paroquant_optimization, "env_flag", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(paroquant_optimization, "_get_large_train_quant_compile", lambda: lambda *_args, **_kwargs: "compiled")
     monkeypatch.setattr(paroquant_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
 
@@ -1934,6 +1935,13 @@ def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
         == "eager"
     )
 
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32), bits=4, group_size=8, sym=False, compile_quant=False,
+        )
+        == "eager"
+    )
+
 
 def test_paroquant_large_train_quant_compile_falls_back_on_failure(monkeypatch):
     """A rejected compiled call must degrade to eager instead of aborting the lifecycle."""
@@ -1950,7 +1958,6 @@ def test_paroquant_large_train_quant_compile_falls_back_on_failure(monkeypatch):
 
     monkeypatch.setattr(paroquant_optimization, "_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
     monkeypatch.setattr(paroquant_optimization, "_LARGE_TRAIN_QUANT_COMPILE_DISABLED", False)
-    monkeypatch.setattr(paroquant_optimization, "env_flag", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(paroquant_optimization, "_get_large_train_quant_compile", lambda: _boom)
     monkeypatch.setattr(paroquant_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
 
@@ -1977,7 +1984,7 @@ def test_paroquant_large_train_quant_compile_falls_back_on_failure(monkeypatch):
     )
 
 
-def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
+def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor():
     """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
     class _DummyModel(torch.nn.Module):
         def __init__(self):
@@ -1990,8 +1997,6 @@ def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
             self.shape = (2048, 4)
             self.device = SimpleNamespace(type=device_type, index=0 if device_type == "cuda" else None)
 
-    monkeypatch.delenv("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", raising=False)
-
     model = _DummyModel()
     real_cpu_rows = torch.ones((2048, 4), dtype=torch.float32)
     fake_cuda_rows = _FakeRows("cuda")
@@ -2001,7 +2006,8 @@ def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant ROCm capture gate needs a real CUDA tensor.")
-def test_paroquant_stage_cudagraph_gate_skips_rocm_capture(monkeypatch):
+@pytest.mark.parametrize("stage_cudagraph", [None, True, False])
+def test_paroquant_stage_cudagraph_gate_skips_rocm_capture(monkeypatch, stage_cudagraph):
     """Guard that ROCm hosts never capture: hipBLASLt deadlocks instead of raising."""
     class _DummyModel(torch.nn.Module):
         def __init__(self):
@@ -2017,15 +2023,15 @@ def test_paroquant_stage_cudagraph_gate_skips_rocm_capture(monkeypatch):
     monkeypatch.setattr(paroquant_optimization, "IS_ROCM", False)
     assert (
         paroquant_optimization._should_use_paroquant_stage_cudagraph(
-            model, inputs_train=rows, batch_size=64, stage_cudagraph=True
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=stage_cudagraph
         )
-        is True
+        is (stage_cudagraph is not False)
     )
 
     monkeypatch.setattr(paroquant_optimization, "IS_ROCM", True)
     assert (
         paroquant_optimization._should_use_paroquant_stage_cudagraph(
-            model, inputs_train=rows, batch_size=64, stage_cudagraph=True
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=stage_cudagraph
         )
         is False
     )
@@ -6608,11 +6614,16 @@ def test_paroquant_reference_quantizer_exports_affine_qzeros():
     assert not torch.all(result.q_zeros == midpoint)
 
 
-def _reference_affine_quantize(weight: torch.Tensor, *, bits: int, group_size: int) -> torch.Tensor:
-    """Independent float64 oracle for the joint affine fit and quantization."""
+def _reference_affine_quantize(
+    weight: torch.Tensor, *, bits: int, group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Independent float64 oracle, including the discrete grid and every code."""
     qmax = 2**bits - 1
-    groups = weight.reshape(-1, group_size)
-    quantized = torch.empty(weight.numel(), dtype=torch.float64)
+    groups = weight.detach().cpu().double().reshape(-1, group_size)
+    scales = torch.empty((groups.shape[0], 1), dtype=torch.float64)
+    zeros = torch.empty((groups.shape[0], 1), dtype=torch.int64)
+    codes = torch.empty(groups.shape, dtype=torch.int64)
+    quantized = torch.empty_like(groups)
     for group_index, group in enumerate(groups):
         low = min(float(group.min()), 0.0)
         high = max(float(group.max()), 0.0)
@@ -6621,11 +6632,99 @@ def _reference_affine_quantize(weight: torch.Tensor, *, bits: int, group_size: i
         negative_scale = -low / zero_point if zero_point > 0 else 0.0
         positive_scale = high / (qmax - zero_point) if zero_point < qmax else 0.0
         scale = min(max(max(negative_scale, positive_scale), 1e-5), 1e5)
-        offset = group_index * group_size
+        scales[group_index] = scale
+        zeros[group_index] = zero_point
         for value_index, value in enumerate(group.tolist()):
             code = min(max(round(value / scale) + zero_point, 0), qmax)
-            quantized[offset + value_index] = (code - zero_point) * scale
-    return quantized.reshape_as(weight)
+            codes[group_index, value_index] = code
+            quantized[group_index, value_index] = (code - zero_point) * scale
+    return scales, zeros, codes.reshape_as(weight), quantized.reshape_as(weight)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_paroquant_affine_low_precision_grid_matches_float64_oracle(device, dtype):
+    """Fitting and export must not inherit model-dtype overflow or rounding."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The accelerator oracle requires an available Torch GPU runtime.")
+    group_size = 128
+    endpoints = [
+        [1.0, 1.0], [-1.0, -1.0], [0.0, -0.0],
+        [0.125, 2.0], [-2.0, -0.125], [-1.0, 1.0],
+        [-65504.0, 65504.0],
+        [-0.5126953125, 0.669921875],
+        [-0.26171875, 0.1982421875],
+        [-0.01, 1.0], [-1.0, 0.01],
+        [1e-7, 1e-7], [-1e-7, -1e-7],
+    ]
+    weight = torch.tensor(endpoints, dtype=dtype).repeat(1, group_size // 2).to(device)
+    expected_scale, expected_zero, expected_codes, expected = _reference_affine_quantize(
+        weight, bits=4, group_size=group_size,
+    )
+    quantizer = GroupLinearQuantizer(weight, bits=4, group_size=group_size, sym=False)
+    assert quantizer.scale.dtype == torch.float32
+    assert quantizer.zero_point_float.dtype == torch.float32
+    torch.testing.assert_close(quantizer.scale.detach().cpu().double(), expected_scale, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(-quantizer.zero_point_float.detach().cpu().long(), expected_zero, rtol=0, atol=0)
+
+    pack_scales, pack_zeros = quantizer.pack_params(weight)
+    codes = (weight.float() / pack_scales.reshape(-1, 1)).round().add(pack_zeros.reshape(-1, 1)).clamp(0, 15)
+    torch.testing.assert_close(codes.cpu().long(), expected_codes, rtol=0, atol=0)
+    # Check arithmetic error independently of mandatory model-dtype output rounding.
+    arithmetic = (codes.double() - pack_zeros.reshape(-1, 1).double()) * pack_scales.reshape(-1, 1).double()
+    torch.testing.assert_close(arithmetic.cpu(), expected, rtol=1e-6, atol=1e-6)
+    # Independently round the oracle's scales to their specified storage dtype
+    # before multiplying, then apply the model's visible-output rounding.
+    stored_expected = (
+        (expected_codes - expected_zero).float() * expected_scale.float()
+    ).to(dtype)
+    for use_ste in (False, True):
+        output = pseudo_quantize_dequant(weight, bits=4, group_size=group_size, sym=False, use_ste=use_ste)
+        assert output.dtype == dtype
+        assert torch.isfinite(output).all()
+        torch.testing.assert_close(output.cpu(), stored_expected, rtol=0, atol=0)
+
+    fallback = paroquant_optimization._identity_result(
+        weight=weight, bias=None, bits=4, group_size=group_size, quantizer_sym=False, krot=2,
+    )
+    torch.testing.assert_close(fallback.q_scales.cpu().double(), expected_scale, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(fallback.q_zeros.cpu().long(), expected_zero, rtol=0, atol=0)
+    torch.testing.assert_close(fallback.pack_weight.cpu(), stored_expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_paroquant_affine_threshold_neighbors_match_oracle(device, dtype):
+    """Check exact ties and adjacent input values for both signs and zero selection."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("The accelerator oracle requires an available Torch GPU runtime.")
+    group_size = 128
+    ties = torch.arange(-13, 14, 2).to(dtype)
+    below = torch.nextafter(ties, torch.full_like(ties, -torch.inf))
+    above = torch.nextafter(ties, torch.full_like(ties, torch.inf))
+    # Endpoints give the exactly representable scale 2 and integer zero point 8.
+    weight = torch.zeros((4, group_size), dtype=dtype)
+    weight[0, :2] = torch.tensor([-16.0, 14.0], dtype=dtype)
+    weight[0, 2:2 + ties.numel() * 3] = torch.stack((below, ties, above), dim=1).flatten()
+    zero_tie = torch.tensor(-7.0, dtype=dtype)
+    for row, low in enumerate((
+        torch.nextafter(zero_tie, torch.tensor(-torch.inf, dtype=dtype)),
+        zero_tie,
+        torch.nextafter(zero_tie, torch.tensor(torch.inf, dtype=dtype)),
+    ), start=1):
+        weight[row, 0], weight[row, 1] = low, 23.0
+    weight = weight.to(device)
+    expected_scale, expected_zero, expected_codes, _ = _reference_affine_quantize(
+        weight, bits=4, group_size=group_size,
+    )
+    scale, negative_zero = paroquant_optimization._calc_affine_qparams(weight, bits=4, group_size=group_size)
+    codes = (weight.float() / scale).round().sub(negative_zero).clamp(0, 15)
+    torch.testing.assert_close(codes.cpu().long(), expected_codes, rtol=0, atol=0)
+    torch.testing.assert_close(-negative_zero.cpu().long(), expected_zero, rtol=0, atol=0)
+    torch.testing.assert_close(scale.cpu().double(), expected_scale, rtol=1e-6, atol=1e-6)
+    actual = pseudo_quantize_dequant(weight, bits=4, group_size=group_size, sym=False, use_ste=False)
+    stored_expected = ((expected_codes - expected_zero).float() * expected_scale.float()).to(dtype)
+    torch.testing.assert_close(actual.cpu(), stored_expected, rtol=0, atol=0)
 
 
 def test_paroquant_affine_qparams_fit_one_sided_and_constant_groups():
@@ -6678,7 +6777,7 @@ def test_paroquant_affine_qparams_fit_one_sided_and_constant_groups():
         use_ste=False,
     )
     torch.testing.assert_close(default_fit, quantized, atol=0, rtol=0)
-    expected = _reference_affine_quantize(weight, bits=bits, group_size=group_size)
+    _, _, _, expected = _reference_affine_quantize(weight, bits=bits, group_size=group_size)
     torch.testing.assert_close(quantized.double(), expected, atol=1e-6, rtol=1e-6)
     # No group may be clipped to a boundary: every element stays within half a
     # quantization step of the original value.
@@ -6783,7 +6882,8 @@ def test_paroquant_reference_optimizer_keeps_one_sided_groups_representable():
     assert torch.all((result.q_zeros >= 0) & (result.q_zeros <= 15))
 
 
-def test_paroquant_optimizer_export_qparams_reproduce_quantized_weight():
+@pytest.mark.parametrize("learned_scale", [None, 0.0, 1e-8, 1e-5, 1e5, 1e6])
+def test_paroquant_optimizer_export_qparams_reproduce_quantized_weight(learned_scale):
     """Guard that exported affine qparams reproduce the packed pseudo weight."""
     group_size = 128
     bits = 4
@@ -6808,8 +6908,14 @@ def test_paroquant_optimizer_export_qparams_reproduce_quantized_weight():
         fused_rotation=False,
     )
     model.init_quantizer()
+    if learned_scale is not None:
+        with torch.no_grad():
+            model.quantizer.scale.fill_(learned_scale)
     quantized, q_scales, q_zeros, _theta, _runtime_scales = model.export_pack_state()
 
+    if learned_scale is not None:
+        expected_scale = torch.full_like(q_scales, min(max(learned_scale, 1e-5), 1e5))
+        torch.testing.assert_close(q_scales, expected_scale, atol=0, rtol=0)
     assert torch.all(q_scales > 0)
     assert torch.all((q_zeros >= 0) & (q_zeros <= qmax))
     transformed = model.transformed_weight(use_ste=False).detach()
@@ -6818,7 +6924,8 @@ def test_paroquant_optimizer_export_qparams_reproduce_quantized_weight():
     codes = ((transformed.reshape(-1, group_size) / scale).round() + zeros).clamp(0, qmax)
     reconstructed = ((codes - zeros) * scale).reshape_as(transformed)
     torch.testing.assert_close(reconstructed, quantized, atol=0, rtol=0)
-    torch.testing.assert_close(quantized, weight, atol=1.0 / qmax, rtol=0)
+    if learned_scale is None:
+        torch.testing.assert_close(quantized, weight, atol=1.0 / qmax, rtol=0)
 
 
 def test_rotation_autotune_entry_serialization_round_trip():
