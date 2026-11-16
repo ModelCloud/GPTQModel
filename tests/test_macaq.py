@@ -17,9 +17,12 @@ calling the production helpers, so a packer/rotation regression cannot hide
 behind the implementation it is checking.
 """
 
+import base64
 import copy
+import gc
 import math
 import sys
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -102,6 +105,81 @@ def test_macaq_weight_quantizer_requests_compiled_flips_by_default():
     with patch.object(macaq, "flip_refine_levels", wraps=macaq.flip_refine_levels) as sweep:
         macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=1)
     assert sweep.call_args.kwargs["compile_flip"] is True
+
+
+# Packed codes and E8M0 exponents for the seed-0 8x64 matrix below, captured
+# from the implementation before the dead-reference release.  The lifetime fix
+# only drops locals, so every code and exponent must stay bit-identical.
+_MACAQ_PRE_FIX_GOLDEN_PACKED_B64 = (
+    "QAudLq4toeobwwBKGsaqTLPa1BowKh2juTctCwEuuSTwyakEJQCRHcHcYB7DoQWQQC1BKw1QQzEqGqdGoK1SFL0Z7mEm3eA/bNnds5mr3nBQSssJFjEeJSIBJTQ5CzLNphIGHtTqcyxJH+/p8TSs5CDg2joqMwrdygOlW8TBFbQq/gWXrlVBT1N9v+ZdVdo7GxPwwEsaRTMEkAIjGaRbslMC6QTmITPNAs7RHlAjLmqWCkOhxyrDmQXAQ5KhwgwrZtySliwh29yzsxbCxH4TSyUC8knBVREzuq3hLJurGjUiC8zNIEA80KYbav1MwdrgLdS7BikqDCml4FtNatHsQA=="
+)
+_MACAQ_PRE_FIX_GOLDEN_SCALES_B64 = "fn5+fn1+fX59fn5+fn5+fg=="
+
+
+def test_macaq_weight_quantizer_lifetime_fix_preserves_packed_bytes():
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64)
+    activations = torch.randn(64, 64)
+    hessian = activations.T @ activations
+
+    result = macaq.macaq_quantize_weight(
+        weight, hessian, activations.shape[0], n_flip_iters=8, compile_flip=False
+    )
+
+    assert result.W_packed.shape == (8, 32)
+    assert result.W_scales.shape == (8, 2)
+    assert result.W_packed.contiguous().numpy().tobytes() == base64.b64decode(
+        _MACAQ_PRE_FIX_GOLDEN_PACKED_B64
+    )
+    assert result.W_scales.view(torch.uint8).contiguous().numpy().tobytes() == base64.b64decode(
+        _MACAQ_PRE_FIX_GOLDEN_SCALES_B64
+    )
+
+
+def test_macaq_weight_quantizer_releases_rotation_scratch_before_flip():
+    """Pre-scaled weight/Hessian and rotated Hessian are dead by the sweep.
+
+    Without the explicit releases all three stay referenced for the whole flip
+    sweep: two extra C^2 fp32 Hessian copies and a C^2 weight copy per module,
+    while every module of a layer runs concurrently.
+    """
+
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64)
+    activations = torch.randn(64, 64)
+    hessian = activations.T @ activations
+
+    real_rotate = macaq.rotate_blocks
+    rotations = []
+
+    def tracked_rotate(x, bh):
+        # Detach from rotate_blocks' internal reshape view chain so the weakref
+        # to the returned tensor follows the object `rotated_hessian` views.
+        out = real_rotate(x, bh).clone()
+        rotations.append((weakref.ref(x), weakref.ref(out)))
+        return out
+
+    real_flip = macaq.flip_refine_levels
+    alive_at_flip = {}
+
+    def probe_flip(*args, **kwargs):
+        gc.collect()
+        alive_at_flip["pre_scaled_weight"] = rotations[0][0]() is not None
+        alive_at_flip["pre_scaled_hessian"] = rotations[1][0]() is not None
+        alive_at_flip["rotated_hessian"] = rotations[2][1]() is not None
+        return real_flip(*args, **kwargs)
+
+    with patch.object(macaq, "rotate_blocks", tracked_rotate), patch.object(
+        macaq, "flip_refine_levels", probe_flip
+    ):
+        macaq.macaq_quantize_weight(weight, hessian, 64, n_flip_iters=4, compile_flip=False)
+
+    assert len(rotations) == 3
+    assert alive_at_flip == {
+        "pre_scaled_weight": False,
+        "pre_scaled_hessian": False,
+        "rotated_hessian": False,
+    }
 
 
 # ---------------------------------------------------------------------------

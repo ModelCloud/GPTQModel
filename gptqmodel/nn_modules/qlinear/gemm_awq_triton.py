@@ -239,8 +239,6 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         schedule = kwargs.pop(
             "schedule", kwargs.pop("awq_triton_schedule", None)
         )
-        if schedule_mode is None and schedule is None:
-            schedule = kernel.awq_triton_schedule
         super().__init__(
             bits=bits,
             group_size=group_size,

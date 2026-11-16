@@ -48,8 +48,30 @@ class BailingMoeQModel(BaseQModel):
                 "conv1d:!",
             ),
             "attention": (
+                # Remote-code Ling-2.6-flash (`bailing_hybrid` + `auto_map`)
+                # owns the same `attention.*` namespace as the Ling 2.0
+                # `bailing_moe` layout, but adds MLA projections when
+                # `q_lora_rank` is set. `query_key_value`/`g_proj` belong to
+                # linear-attention layers; the MLA q/kv low-rank pairs belong
+                # to the full-attention layers. Both are declared here because
+                # `layer_modules_strict=False` resolves only the branch a
+                # layer owns. Keep `dense` after the MLA `q_b`/`kv_b` stages
+                # so it is calibrated against their quantized outputs.
                 "query_key_value:0",
-                "dense:1",
+                "q_a_proj:0",
+                "kv_a_proj_with_mqa:0",
+                "g_proj:0",
+                "q_b_proj:1",
+                "kv_b_proj:1",
+                "dense:2",
+                # Remote-code attention norms are checkpoint-owned but never
+                # quantized. Linear-attention layers own the q/k/g norms;
+                # MLA layers own the q_a/kv_a norms.
+                "query_layernorm:!",
+                "key_layernorm:!",
+                "g_norm:!",
+                "q_a_layernorm:!",
+                "kv_a_layernorm:!",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {

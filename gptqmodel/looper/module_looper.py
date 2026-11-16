@@ -1876,6 +1876,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._offloaded_base_modules = []
         restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
 
+    def _release_run_workspace(self) -> None:
+        """Release processor-owned scratch shared across the whole run."""
+
+        for processor in getattr(self, "processors", ()) or ():
+            processor.release_run_workspace()
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
@@ -1891,6 +1897,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     # bundles are no longer reachable (issue #4368).
                     release_private_offload_root(self.gptq_model)
                 raise
+            finally:
+                # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
+                # outlives the model unless the run releases it, and a failed
+                # run must release it too.
+                self._release_run_workspace()
             self._restore_offloaded_base_modules(strict=True)
             return result
 

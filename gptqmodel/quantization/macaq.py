@@ -552,11 +552,20 @@ def macaq_quantize_weight(
         rotated_weight = weight
         rotated_hessian = hessian
 
+    # `weight` and `hessian` are only read above: the rotated copies are what
+    # the rest of the recipe consumes. Drop the pre-scaled temporaries now so
+    # they do not overlap the flip sweep (one C^2 fp32 Hessian copy per module,
+    # with every module of a layer running concurrently).
+    del hessian, weight
+
     flip_hessian = None
     if do_flip or exp_screen:
         flip_hessian = rotated_hessian.clone()
         if ridge > 0:
             flip_hessian.diagonal().add_(ridge * flip_hessian.diagonal().mean())
+    # `rotated_hessian` only seeds the flip metric; release it after the clone
+    # so the sweep holds a single C^2 Hessian copy.
+    del rotated_hessian
 
     if exp_screen and flip_hessian is not None and len(exp_offsets) > 1:
         signed_index, log2_scale, scale_element = screen_block_exponents(

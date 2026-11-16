@@ -1401,6 +1401,16 @@ class LoopProcessor:
         pass
         #self.offload_to_disk(module=module)
 
+    def release_run_workspace(self) -> None:
+        """Release process-wide scratch that outlives individual modules.
+
+        The looper calls this from its end-of-run cleanup on both success and
+        failure, after every worker stream has drained. Processors that cache
+        shared scratch tensors override it.
+        """
+
+        pass
+
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
     def finalize(self, model: BaseQModel, **kwargs):
