@@ -6608,6 +6608,219 @@ def test_paroquant_reference_quantizer_exports_affine_qzeros():
     assert not torch.all(result.q_zeros == midpoint)
 
 
+def _reference_affine_quantize(weight: torch.Tensor, *, bits: int, group_size: int) -> torch.Tensor:
+    """Independent float64 oracle for the joint affine fit and quantization."""
+    qmax = 2**bits - 1
+    groups = weight.reshape(-1, group_size)
+    quantized = torch.empty(weight.numel(), dtype=torch.float64)
+    for group_index, group in enumerate(groups):
+        low = min(float(group.min()), 0.0)
+        high = max(float(group.max()), 0.0)
+        base_scale = max(high - low, 1e-5) / qmax
+        zero_point = min(max(round(-low / base_scale), 0), qmax)
+        negative_scale = -low / zero_point if zero_point > 0 else 0.0
+        positive_scale = high / (qmax - zero_point) if zero_point < qmax else 0.0
+        scale = min(max(max(negative_scale, positive_scale), 1e-5), 1e5)
+        offset = group_index * group_size
+        for value_index, value in enumerate(group.tolist()):
+            code = min(max(round(value / scale) + zero_point, 0), qmax)
+            quantized[offset + value_index] = (code - zero_point) * scale
+    return quantized.reshape_as(weight)
+
+
+def test_paroquant_affine_qparams_fit_one_sided_and_constant_groups():
+    """Guard that every group's fitted affine grid contains its values."""
+    group_size = 128
+    bits = 4
+    qmax = 2**bits - 1
+    threshold_row = torch.linspace(-1.0, 1.0, group_size)
+    threshold_row[10] = 1.5 / 7 - 1e-6
+    threshold_row[11] = 1.5 / 7 + 1e-6
+    weight = torch.stack(
+        [
+            torch.full((group_size,), 1.0),
+            torch.full((group_size,), -1.0),
+            torch.full((group_size,), 0.5),
+            torch.full((group_size,), -0.5),
+            torch.zeros(group_size),
+            torch.cat([torch.ones(group_size // 2), -torch.ones(group_size // 2)]),
+            torch.linspace(-1.0, 1.0, group_size),
+            torch.linspace(0.1, 1.0, group_size),
+            torch.linspace(-1.0, -0.1, group_size),
+            threshold_row,
+        ],
+    )
+
+    scale, zero_point_float = paroquant_optimization._calc_affine_qparams(
+        weight,
+        group_size=group_size,
+        bits=bits,
+    )
+    zero_point = (-zero_point_float).round()
+    assert torch.all(scale > 0)
+    assert torch.all((zero_point >= 0) & (zero_point <= qmax))
+
+    quantized = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=False,
+        scale=scale,
+        zero_point_float=zero_point_float,
+        use_ste=False,
+    )
+    # The no-qparams entry point must fit the same grid.
+    default_fit = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=False,
+        use_ste=False,
+    )
+    torch.testing.assert_close(default_fit, quantized, atol=0, rtol=0)
+    expected = _reference_affine_quantize(weight, bits=bits, group_size=group_size)
+    torch.testing.assert_close(quantized.double(), expected, atol=1e-6, rtol=1e-6)
+    # No group may be clipped to a boundary: every element stays within half a
+    # quantization step of the original value.
+    error = (quantized - weight).abs().amax(dim=1)
+    assert torch.all(error <= scale.flatten() / 2 + 1e-6)
+    # Constant one-sided groups must round-trip instead of collapsing toward zero.
+    torch.testing.assert_close(quantized[:5], weight[:5], atol=1e-6, rtol=0)
+
+
+def test_paroquant_identity_fallback_quantizes_one_sided_groups():
+    """Guard the no-calibration fallback against one-sided range collapse."""
+    group_size = 128
+    weight = torch.stack(
+        [torch.full((group_size,), 1.0), torch.full((group_size,), -1.0)]
+    )
+
+    direct = paroquant_optimization._identity_result(
+        weight=weight,
+        bias=None,
+        bits=4,
+        group_size=group_size,
+        quantizer_sym=False,
+        krot=2,
+    )
+    assert direct.used_identity is True
+    torch.testing.assert_close(direct.pseudo_weight, weight, atol=1e-6, rtol=0)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=torch.empty(0, group_size),
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        krot=2,
+        pair_ratio=2.0 / group_size,
+        train_rows=8,
+        val_rows=8,
+        batch_size=8,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        quantizer_impl="reference",
+    )
+    assert result.used_identity is True
+    torch.testing.assert_close(result.pseudo_weight, weight, atol=1e-6, rtol=0)
+    assert torch.all((result.q_zeros >= 0) & (result.q_zeros <= 15))
+
+
+def test_paroquant_identity_fallback_preserves_one_sided_groups_in_bfloat16():
+    """Guard the fallback fit under the bfloat16 model dtype."""
+    group_size = 128
+    weight = torch.stack(
+        [torch.full((group_size,), 1.0), torch.full((group_size,), -1.0)]
+    ).to(torch.bfloat16)
+
+    result = paroquant_optimization._identity_result(
+        weight=weight,
+        bias=None,
+        bits=4,
+        group_size=group_size,
+        quantizer_sym=False,
+        krot=2,
+    )
+    assert result.pseudo_weight.dtype == torch.bfloat16
+    torch.testing.assert_close(result.pseudo_weight.float(), weight.float(), atol=1e-2, rtol=0)
+
+
+def test_paroquant_reference_optimizer_keeps_one_sided_groups_representable():
+    """Guard quantizer initialization and export for one-sided groups."""
+    group_size = 128
+    weight = torch.stack(
+        [torch.full((group_size,), 1.0), torch.full((group_size,), -1.0)]
+    )
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=torch.randn(8, group_size),
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        krot=2,
+        pair_ratio=2.0 / group_size,
+        train_rows=4,
+        val_rows=4,
+        batch_size=4,
+        rotation_epochs=0,
+        finetune_epochs=0,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        quantizer_impl="reference",
+    )
+    assert result.used_identity is False
+    torch.testing.assert_close(result.pseudo_weight, weight, atol=1e-6, rtol=0)
+    torch.testing.assert_close(result.pack_weight, result.pseudo_weight, atol=1e-5, rtol=0)
+    assert torch.all(result.q_scales > 0)
+    assert torch.all((result.q_zeros >= 0) & (result.q_zeros <= 15))
+
+
+def test_paroquant_optimizer_export_qparams_reproduce_quantized_weight():
+    """Guard that exported affine qparams reproduce the packed pseudo weight."""
+    group_size = 128
+    bits = 4
+    qmax = 2**bits - 1
+    weight = torch.stack(
+        [torch.full((group_size,), 2.0), torch.full((group_size,), -2.0)]
+    )
+    pairs, _theta, _channel_scales = build_identity_rotation_buffers(
+        in_features=group_size,
+        group_size=group_size,
+        krot=2,
+    )
+    theta_mask = torch.zeros((pairs.shape[0], group_size // 2), dtype=torch.bool)
+    model = _ParoQuantOptimLinear(
+        weight,
+        None,
+        bits=bits,
+        group_size=group_size,
+        quantizer_sym=False,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    model.init_quantizer()
+    quantized, q_scales, q_zeros, _theta, _runtime_scales = model.export_pack_state()
+
+    assert torch.all(q_scales > 0)
+    assert torch.all((q_zeros >= 0) & (q_zeros <= qmax))
+    transformed = model.transformed_weight(use_ste=False).detach()
+    scale = q_scales.reshape(-1, 1)
+    zeros = q_zeros.reshape(-1, 1)
+    codes = ((transformed.reshape(-1, group_size) / scale).round() + zeros).clamp(0, qmax)
+    reconstructed = ((codes - zeros) * scale).reshape_as(transformed)
+    torch.testing.assert_close(reconstructed, quantized, atol=0, rtol=0)
+    torch.testing.assert_close(quantized, weight, atol=1.0 / qmax, rtol=0)
+
+
 def test_rotation_autotune_entry_serialization_round_trip():
     """A persisted launch entry must rebuild the exact in-process cache key."""
     utils = paroquant_utils_module
