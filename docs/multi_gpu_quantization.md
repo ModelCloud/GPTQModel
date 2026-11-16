@@ -221,6 +221,89 @@ accumulation), not from using two GPUs. Use
 `auto_forward_data_parallel=False` when a checkpoint must be bit-identical to
 the single-GPU result.
 
+## GPTAQ/FOEM per-device Hessian reduction
+
+`GPTAQ` and `FOEM` (with `alpha > 0`) accumulate a Hessian `H` and a native
+delta matrix `dXXT` during the pre-quant forward. `run_parallel` fans the same
+module's batches across every forward device, so the accumulators see batches
+from more than one device. They are therefore kept per input device: each
+partial uses that device's own request count (GPTAQ) or token count (FOEM), and
+`quantize()` reduces the partials in device order with weight
+`count_device / count_total`.
+
+The reduction is exact, not an approximation. For `R` requests and tokens `x`:
+
+```text
+H_device = (2 / count_device) * sum over that device's batches of X X^T
+H        = sum over devices of (count_device / count_total) * H_device
+         = (2 / count_total) * sum over every batch of X X^T
+```
+
+`dXXT` uses the same weight, so the reduced matrices equal the single-device
+recurrence over all batches in capture order, independent of the order in which
+the device workers finish.
+
+Native calibration inputs are captured per sample and tagged with the
+calibration batch they came from. The quantizer consumes the entry whose key
+matches the batch being replayed, so a data-parallel completion order cannot
+pair a sample with another batch's native activation. The tag is the pairing
+key because a routed expert or a different batch length makes position-based
+pairing ambiguous.
+
+```mermaid
+flowchart TD
+    A["ForwardExecutor.run_parallel<br/>one batch_idx per worker"] --> B["NativeProcessor.pre_process_fwd_hook<br/>batch_index = current_batch_index()"]
+    B --> C["native_inp_caches[name] += (batch_index, sample)"]
+    C --> D["module.state[NATIVE_INPUTS_STATE_KEY]"]
+    D --> E["_take_native_input(batch_index)<br/>scan by key, not pop 0"]
+    F["GPTQProcessor hook<br/>add_batch(inp, batch_index)"] --> G["process_batch(inp, batch_index)"]
+    E --> G
+    G --> H["_accumulate_device_batch<br/>one partial per inp.device"]
+    H --> I["quantize() -> _finalize_gptaq_hessian<br/>or _finalize_foem_hessian"]
+    I --> J["sorted(partials, key=_device_reduction_key)<br/>H = sum weight * H_device"]
+    J --> K["self.H / self.dXXT on module.target_device"]
+    E -. "no entry for batch_index" .-> X["RuntimeError: no native<br/>calibration input for batch N"]
+    style X fill:#f8d7da,stroke:#c82333
+```
+
+### Before / after
+
+The pre-fix flow, with `file:line` evidence from the `main` branch at the time
+of the fix:
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Accumulator allocation | `self.H`/`self.dXXT` allocated once on the first batch's device (`gptqmodel/quantization/gptaq.py:131`, `gptqmodel/quantization/foem.py:213`) | One partial per input device, `GPTAQ._accumulate_device_batch` / `FOEM._accumulate_device_batch` |
+| Second device | `self.H += inp.matmul(inp.t())` raised a device mismatch (`gptaq.py:148`, `foem.py:226`) | Batches on the second device accumulate their own partial; the live buffers are demoted into the partial map on the first device switch |
+| Normalization | Global request/token count (`gptaq.py:140`, `foem.py:219`) | Each device's own count, then a `count_device / count_total` weighted reduction |
+| Reduction order | None: one live accumulator | `sorted(partials, key=_device_reduction_key)`, the same key plain GPTQ uses (`gptq.py:190`, `gptq.py:1288`) |
+| Native pairing | `self.native_inps.pop(0)` by arrival order (`gptaq.py:99`, `foem.py:178`) | `(batch_index, tensor)` entries, consumed by key |
+| Missing native entry | `IndexError: pop from empty list`, or a silently mismatched pair | `RuntimeError` naming the module and the batch |
+
+### Failure and ambiguity contract
+
+| Situation | Before | After |
+| --- | --- | --- |
+| Batch arrives on a second device | `RuntimeError: Expected all tensors to be on the same device` | Accumulated in that device's partial |
+| Batches complete out of capture order | Native input from the wrong batch: shape error, or a silently corrupted `dXXT` when shapes match | Keyed lookup pairs the right sample |
+| Batch index has no captured entry | Wrong sample or `IndexError` | Fail closed with the module and batch in the message |
+| Single device | One live accumulator | Unchanged: the first device keeps the live `self.H`/`self.dXXT`, and `_finalize_*` is a no-op when no partial was split off |
+| Routed expert | Native capture skipped (`dXXT = 0`) | Unchanged |
+
+### Measured
+
+On 2x RTX 4090 (PCIe, no NVLink, CUDA 13), Qwen2.5-0.5B-Instruct, 16
+variable-length calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`:
+
+| Run | Before | After |
+| --- | --- | --- |
+| GPTAQ, 2 GPUs | `RuntimeError` at `gptaq.py:148`, two devices `cuda:0` and `cuda:1` | `quantize()` completes, `qweight` shape `[112, 896]` |
+| FOEM, 2 GPUs | `RuntimeError` at `foem.py:226`, two devices `cuda:0` and `cuda:1` | `quantize()` completes, `qweight` shape `[112, 896]` |
+
+`tests/test_gptaq_foem_multigpu.py` pins the float64 oracle for both the CPU
+out-of-order case and the two-device case; the two-device tests skip when fewer
+than two CUDA devices are visible.
+
 ## GPU peer access (P2P)
 
 PyTorch already enables peer access lazily inside its own copy path
