@@ -12,9 +12,13 @@ call and both defer to a value the caller already set:
 | `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:256,garbage_collection_threshold:0.7` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
 | `ROCBLAS_USE_HIPBLASLT` | `0` | rocBLAS forwards GEMMs to hipBLASLt, which selects a different kernel per process for the same shape; identical quantization runs then save different checkpoints |
 
-CUDA keeps the historical allocator default
-(`expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7`)
-and never has `ROCBLAS_USE_HIPBLASLT` set by GPT-QModel.
+CUDA installs `expandable_segments:True` only, and never has
+`ROCBLAS_USE_HIPBLASLT` set by GPT-QModel. `max_split_size_mb` is deliberately
+left unset on CUDA: pinning it to 256 MiB stops the allocator from splitting and
+reusing 256 MiB blocks, so GPTQ's per-layer churn grows reserved VRAM while
+active memory stays flat (#4389). `garbage_collection_threshold` is omitted too:
+without a memory fraction it only fires above a fraction of the whole device,
+which a quantization run never reaches.
 
 ## The import-time flow
 

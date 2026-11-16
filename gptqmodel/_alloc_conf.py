@@ -20,8 +20,14 @@ On ROCm 10.1 / gfx1201 ``expandable_segments:True`` combined with
 ``torch.cuda.empty_cache()`` corrupts ordinary Torch results (wrong rows, or
 ``hipErrorIllegalAddress``) while the VMM segments are released and remapped.
 GPT-QModel empties the cache throughout quantization, so ROCm gets a default
-without ``expandable_segments``; the other two knobs are unchanged. CUDA keeps
-the historical value.
+without ``expandable_segments``; the other two knobs are unchanged.
+
+On CUDA ``expandable_segments`` is the knob that removes the fragmentation
+cliff, and it is the only one that survives: pinning ``max_split_size_mb`` to
+256 MiB caps the block size the allocator may split, so a freed 256 MiB block
+cannot serve the next layer's slightly smaller request and GPTQ's per-layer
+Hessian/workspace churn maps new pages instead of reusing the cache. See
+``DEFAULT_ALLOC_CONF`` for the measurements.
 """
 
 from __future__ import annotations
@@ -32,19 +38,38 @@ import warnings
 from ._rocm_env import running_on_rocm
 
 
-DEFAULT_ALLOC_CONF = (
-    "expandable_segments:True,"
-    "max_split_size_mb:256,"
-    "garbage_collection_threshold:0.7"
-)
+#: CUDA default: expandable segments alone.
+#:
+#: ``max_split_size_mb:256`` used to be pinned here too, on top of
+#: ``expandable_segments:True``. That caps the largest block the allocator is
+#: willing to split, so the per-layer Hessian/workspace churn during GPTQ keeps
+#: mapping new pages instead of reusing the cache: *reserved* memory grows per
+#: layer while *active* memory stays flat. Measured on an RTX 4090 (issue
+#: #4389), Llama-3.2-1B GPTQ 4-bit, same calibration, peak allocated 1.23 GiB:
+#:
+#:   default (expandable + 256 MiB split cap + gc)  peak reserved 5.40 GiB
+#:   expandable_segments:True only                  peak reserved 1.67 GiB
+#:   no expandable segments                         peak reserved 2.55 GiB
+#:
+#: ``garbage_collection_threshold`` is dropped instead of paired with a memory
+#: fraction: it is a ratio of the device's *total* memory, so 0.7 only starts a
+#: collection above ~33 GiB on a 48 GiB card. A GPTQ run never approaches that,
+#: and capping the process with a memory fraction would trade the reservation
+#: for OOMs.
+DEFAULT_ALLOC_CONF = "expandable_segments:True"
 
-#: ROCm default: same fragmentation knobs, but never ``expandable_segments``.
+#: ROCm default: the historical fragmentation knobs, but never
+#: ``expandable_segments``.
 #:
 #: The ROCm/Torch VMM path releases and remaps segments on ``empty_cache()``,
 #: and a subsequent kernel can read stale/incorrect pages. Measured on a
 #: R9700 (gfx1201, torch 2.16.0.dev+rocm10.1): a 2097152x16 matmul recomputed
 #: with ``empty_cache()`` between reps returned up to 4.5M wrong rows with
 #: ``expandable_segments:True`` and 0 with ``False``.
+#:
+#: Kept as-is for #4389: #4313's regression tests pin this exact value and the
+#: ROCm path already mitigates the 256 MiB split cap with a per-layer
+#: ``empty_cache()``. Changing it is a separate ROCm decision.
 ROCM_DEFAULT_ALLOC_CONF = "max_split_size_mb:256,garbage_collection_threshold:0.7"
 
 # ``PYTORCH_CUDA_ALLOC_CONF`` is the historical name; ``PYTORCH_ALLOC_CONF`` is
@@ -68,10 +93,21 @@ HIP_ALLOC_CONF_ENV_VAR = "PYTORCH_HIP_ALLOC_CONF"
 LARGE_HESSIAN_ALLOC_CONF = "backend:cudaMallocAsync"
 
 
-def default_alloc_conf() -> str:
-    """Return the default allocator configuration for the running Torch build."""
+def default_alloc_conf(backend: str | None = None) -> str:
+    """Return the default allocator configuration for *backend*.
 
-    return ROCM_DEFAULT_ALLOC_CONF if running_on_rocm() else DEFAULT_ALLOC_CONF
+    ``backend`` is ``"cuda"`` or ``"rocm"``. ``None`` (the default) detects the
+    running Torch build, which is what the import-time hook uses; passing a
+    name makes the policy testable without a device.
+    """
+
+    if backend is None:
+        backend = "rocm" if running_on_rocm() else "cuda"
+    if backend == "rocm":
+        return ROCM_DEFAULT_ALLOC_CONF
+    if backend == "cuda":
+        return DEFAULT_ALLOC_CONF
+    raise ValueError(f"unknown allocator backend: {backend!r}")
 
 
 def alloc_conf_env_vars() -> tuple[str, ...]:
