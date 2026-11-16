@@ -10,6 +10,11 @@ conversations. Vision-language processors only understand conversations, so
 definitions that override ``prepare_dataset`` use these helpers to keep the
 base text path for pre-tokenized rows instead of handing token ids to
 ``processor.apply_chat_template`` (issue #4228).
+
+The base text path keeps only ``input_ids``/``attention_mask``. A row that also
+carries multimodal tensors (``pixel_values``, ``image_grid_thw``, ...) cannot use
+that path without silently dropping them, so the splitter rejects it with an
+actionable error instead of routing it to either path (issue #4371).
 """
 
 from __future__ import annotations
@@ -35,18 +40,54 @@ log = setup_logger()
 
 _MISSING = object()
 
+# Columns the base text path can consume or safely ignore. Anything else may
+# carry multimodal model inputs and must not be dropped silently.
+_TEXT_ONLY_COLUMNS = frozenset(
+    {
+        "input_ids",
+        "attention_mask",
+        "text",
+        "messages",
+        "token_type_ids",
+        "labels",
+        "special_tokens_mask",
+        "position_ids",
+        "offset_mapping",
+        "overflow_to_sample_mapping",
+        "num_truncated_tokens",
+    }
+)
+
+
+def _non_text_columns(sample: Mapping) -> list[str]:
+    """Return mapping columns the text calibration path cannot consume."""
+
+    return [str(name) for name in sample if name not in _TEXT_ONLY_COLUMNS]
+
+
+def _raise_non_text_columns(columns: list[str], *, label: str) -> None:
+    raise ValueError(
+        f"{label}: calibration row provides non-text column(s) {columns}. The VLM "
+        "text calibration path keeps only `input_ids`/`attention_mask`, so these "
+        "values would be silently dropped. Pass the source conversations and let "
+        "the model processor build the multimodal inputs, or remove the extra "
+        "columns for text-only calibration."
+    )
+
 
 def is_pretokenized_sample(sample: Any) -> bool:
     """Return whether ``sample`` is a token-id row the base text path accepts.
 
     The base path keeps only ``input_ids``/``attention_mask`` from a mapping, so
-    extra tokenizer columns (``token_type_ids``, ...) must not divert the row to
-    the processor path, where it would be wrapped as a chat message. NumPy
-    arrays and rows built from NumPy/0-D-tensor token ids are token ids too.
+    extra text-only tokenizer columns (``token_type_ids``, ``labels``, ...) must
+    not divert the row to the processor path, where it would be wrapped as a
+    chat message. Rows with multimodal columns are not pre-tokenized text: the
+    splitter rejects them so their tensors are never dropped. NumPy arrays and
+    rows built from NumPy/0-D-tensor token ids are token ids too.
     """
 
     if isinstance(sample, Mapping):
-        return "input_ids" in sample
+        return "input_ids" in sample and not _non_text_columns(sample)
     if isinstance(sample, (list, tuple)):
         return bool(sample) and _is_integer_sequence(sample)
     if isinstance(sample, np.ndarray):
@@ -60,6 +101,10 @@ def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
     if len(calibration_dataset) == 0:
         return []
     if _is_columnar_mapping(calibration_dataset):
+        if "input_ids" in calibration_dataset:
+            columns = _non_text_columns(calibration_dataset)
+            if columns:
+                _raise_non_text_columns(columns, label=label)
         return _columnar_mapping_examples(calibration_dataset)
     if _is_dataset_split_mapping(calibration_dataset):
         splits = ", ".join(repr(key) for key in calibration_dataset.keys())
@@ -75,6 +120,16 @@ def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
     )
 
 
+def _reject_non_text_row(sample: Any, *, label: str) -> None:
+    """Reject a token-id row whose extra columns may hold multimodal tensors."""
+
+    if not isinstance(sample, Mapping) or "input_ids" not in sample:
+        return
+    columns = _non_text_columns(sample)
+    if columns:
+        _raise_non_text_columns(columns, label=label)
+
+
 def split_calibration_dataset(
     calibration_dataset: Iterable[Any],
     *,
@@ -85,7 +140,9 @@ def split_calibration_dataset(
     Returns ``(pretokenized_rows, conversations)``; exactly one of the two is
     ``None``. Mixing both row kinds in one dataset is rejected because the
     processor path cannot consume token ids and silently dropping them would
-    change the calibration set.
+    change the calibration set. A row that carries multimodal tensors is
+    rejected outright: neither path can forward them, and the text path would
+    drop them silently.
     """
 
     if isinstance(calibration_dataset, Mapping):
@@ -96,11 +153,13 @@ def split_calibration_dataset(
     if first is _MISSING:
         # Let the base text path report the empty dataset.
         return [], None
+    _reject_non_text_row(first, label=label)
     if not is_pretokenized_sample(first):
         return None, itertools.chain((first,), iterator)
 
     rows = [first]
     for sample in iterator:
+        _reject_non_text_row(sample, label=label)
         if not is_pretokenized_sample(sample):
             raise ValueError(
                 f"{label}: calibration dataset mixes pre-tokenized rows with chat "
