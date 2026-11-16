@@ -430,6 +430,25 @@ def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
     return _uniform_column_group_cached(count, device, _uniform_column_group_stream(device))
 
 
+def _move_static_groups(groups, device: torch.device):
+    """Move static-group quantizers to ``device`` and return their parameters.
+
+    Static groups measure ``scale``/``zero`` once, before activation ordering
+    and the block pass. A CPU fallback that moves ``W``/``H`` must carry those
+    quantizers along, otherwise the block pass mixes host weights with
+    accelerator parameters (issue #4464). The returned lists replace the
+    caller's ``scale``/``zero`` lists, whose entries still point at the old
+    device tensors.
+    """
+
+    for group_quantizer in groups:
+        group_quantizer.to(device=device)
+    return (
+        [group_quantizer.scale for group_quantizer in groups],
+        [group_quantizer.zero for group_quantizer in groups],
+    )
+
+
 class GPTQ:
     @property
     def H(self) -> Optional[torch.Tensor]:
@@ -2421,7 +2440,13 @@ class GPTQ:
             # Use simplified hessian inverse (identity matrix)
             self.hessian_inverse = self.mock_hessian_inverse
 
-        if self.module_copy is None:
+        # The block-pass CPU retry must restart from the pre-pass weight; the
+        # failed pass error-propagates into ``W`` in place. A module-sourced
+        # ``W`` is rebuilt from the untouched module weight on retry, so the
+        # common path keeps no extra copy. An explicit ``module_copy`` has no
+        # such source and is snapshotted to the host before the block pass.
+        weight_from_module = self.module_copy is None
+        if weight_from_module:
             # log.info("copy W to cuda_1")
             W = self.clone_module(device=self.H.device)
         else:
@@ -2442,8 +2467,9 @@ class GPTQ:
             else None
         )
 
+        dead_columns = None
         if use_hessian:
-            _neutralize_dead_columns(self.H, W)
+            dead_columns = _neutralize_dead_columns(self.H, W)
 
         # g_idx = []
         scale = []
@@ -2486,6 +2512,8 @@ class GPTQ:
                 W = W.to(device=cpu_device)[:, perm]
                 self.H = self.H.to(device=cpu_device)[perm][:, perm]
                 self.quantizer.find_params(W, weight=True)
+                if self.qcfg.static_groups:
+                    scale, zero = _move_static_groups(groups, cpu_device)
             else:
                 W = W_permuted
                 self.H = H_permuted
@@ -2522,16 +2550,20 @@ class GPTQ:
                 W = W.to(device=cpu_device)[:, final_perm]
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
                 self.quantizer.find_params(W, weight=True)
+                if self.qcfg.static_groups:
+                    scale, zero = _move_static_groups(groups, cpu_device)
             else:
                 W = W_permuted
                 self.H = H_permuted
 
-        static_group_perm = None
-        if self.qcfg.static_groups:
-            if self.qcfg.desc_act and use_hessian:
-                static_group_perm = perm
-            elif self.qcfg.act_group_aware and use_hessian:
-                static_group_perm = final_perm
+        # Column order the block pass sees, for rebuilding ``W`` on retry.
+        block_column_perm = None
+        if self.qcfg.desc_act and use_hessian:
+            block_column_perm = perm
+        elif self.qcfg.act_group_aware and use_hessian:
+            block_column_perm = final_perm
+
+        static_group_perm = block_column_perm if self.qcfg.static_groups else None
 
         if use_hessian:
             try:
@@ -2566,6 +2598,8 @@ class GPTQ:
                 self.H = self.H.to(device=cpu_device)
                 W = W.to(device=cpu_device)
                 self.quantizer.find_params(W, weight=True)
+                if self.qcfg.static_groups:
+                    scale, zero = _move_static_groups(groups, cpu_device)
                 self._disable_shared_hessian_cache()
                 Hinv, damp = self.hessian_inverse(self.H)
         else:
@@ -2581,25 +2615,43 @@ class GPTQ:
         # The block update and its W-sized scratch run after the inverse
         # fallback decision, so a CUDA OOM here used to abort the module even
         # though the run could finish on the host. Retry the whole block pass
-        # on CPU. The first pass may have appended partial scale/zero entries
+        # on CPU. The failed pass has already error-propagated finished blocks
+        # into ``W[:, i2:]`` in place, so the retry must restart from the
+        # pre-pass weight rather than move the partially updated one
+        # (issue #4464). It may also have appended partial scale/zero entries
         # and advanced the quantizer, so reset that state before re-running.
+        block_input_host = None
+        if not weight_from_module and W.device.type == "cuda":
+            block_input_host = W.to(device="cpu")
         block_retry = False
         while True:
             if block_retry:
                 cpu_device = torch.device("cpu")
-                W = W.to(device=cpu_device)
+                del W
+                if weight_from_module:
+                    # Replay the pre-pass preparation on the host: clone,
+                    # natural-order quantizer measurement, dead-column
+                    # neutralization, then activation ordering. Each step is
+                    # exact, so this reproduces the pre-pass ``W`` bit for bit.
+                    W = self.clone_module(device=cpu_device)
+                    if not self.qcfg.static_groups:
+                        self.quantizer.find_params(W, weight=True)
+                    if dead_columns is not None:
+                        W.masked_fill_(dead_columns.to(device=cpu_device).unsqueeze(0), 0.0)
+                    if block_column_perm is not None:
+                        W = W[:, block_column_perm.to(device=cpu_device)]
+                else:
+                    W = block_input_host
+                    block_input_host = None
+                    if not self.qcfg.static_groups:
+                        self.quantizer.find_params(W, weight=True)
                 if Hinv is not None:
                     Hinv = Hinv.to(device=cpu_device)
                 if self.qcfg.static_groups:
-                    for group_quantizer in groups:
-                        group_quantizer.scale = group_quantizer.scale.to(device=cpu_device)
-                        group_quantizer.zero = group_quantizer.zero.to(device=cpu_device)
                     # Static groups measured their parameters before the block
                     # pass; keep those entries but on the retry device.
-                    scale = [group_quantizer.scale for group_quantizer in groups]
-                    zero = [group_quantizer.zero for group_quantizer in groups]
+                    scale, zero = _move_static_groups(groups, cpu_device)
                 else:
-                    self.quantizer.find_params(W, weight=True)
                     scale = []
                     zero = []
                 now_idx = 1
