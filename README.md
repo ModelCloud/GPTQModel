@@ -80,6 +80,10 @@ compatible deployment engine.
 - **Choose where to spend precision.** Mix bit widths, keep sensitive modules
   unquantized, and use activation-quantization or preprocessing policies where
   supported. Quantization protocols let you organize multi-stage recipes.
+- **Keep floating activation searches finite.** NVFP4 block-scale ranking
+  normalizes candidate error by an exact power of two so large finite
+  activations cannot overflow the comparison and silently return zeros; see
+  [NVFP4 candidate ranking](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gptq-w4a-gb10.md#candidate-ranking-and-the-finite-scale-contract).
 - **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
   execution help manage memory and recover interrupted jobs. Distributed EXL3
   workflows support durable replay and resume.
