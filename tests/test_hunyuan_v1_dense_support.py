@@ -25,9 +25,9 @@ def test_hunyuan_v1_dense_model_type_selects_definition(monkeypatch):
 def test_hunyuan_v1_dense_module_tree_skips_qk_norms():
     attn_modules = HunYuanDenseV1QModel.module_tree[-1]["self_attn"]
 
-    assert "q_proj:0" in attn_modules
-    assert "k_proj:0" in attn_modules
-    assert "v_proj:0" in attn_modules
+    assert "q_proj:0:in=x" in attn_modules
+    assert "k_proj:0:in=x" in attn_modules
+    assert "v_proj:0:in=x" in attn_modules
     assert "o_proj:1" in attn_modules
     assert "query_layernorm:!" in attn_modules
     assert "key_layernorm:!" in attn_modules

@@ -246,6 +246,25 @@ def oracle_assign(data, centroids):
     return best_index, best_distance + (data * data).sum(dim=1)
 
 
+def oracle_assign_with_gap(data, centroids):
+    """Return nearest-centroid assignments plus the best/second-best gap.
+
+    The gap lets the parity test distinguish a real assignment bug from two
+    centroids that are numerically tied under the expanded squared-distance
+    form used by both the production quantizer and this oracle.
+    """
+
+    centroids_norm = (centroids * centroids).sum(dim=1)
+    distance = centroids_norm.unsqueeze(0) - 2.0 * (data @ centroids.t())
+    best_distance, best_index = distance.min(dim=1)
+    if distance.shape[1] < 2:
+        gap = torch.full_like(best_distance, float("inf"))
+    else:
+        top2 = distance.topk(2, dim=1, largest=False).values
+        gap = top2[:, 1] - top2[:, 0]
+    return best_index, best_distance + (data * data).sum(dim=1), gap
+
+
 def oracle_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
     """Independent Lloyd implementation with the production initialization order."""
 
@@ -320,22 +339,31 @@ def oracle_vptq_pass(
     device = weight.device
     index_tensors = {}
     res_index_tensors = {}
+    index_gaps = {}
+    res_index_gaps = {}
     for cidx, (start, end) in enumerate(group_bounds):
         codebook = centroids.get(cidx)
         if codebook is None or end <= start:
             index_tensors[cidx] = None
             res_index_tensors[cidx] = None
+            index_gaps[cidx] = None
+            res_index_gaps[cidx] = None
             continue
         vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
         num_indices = math.ceil(rows / vector_len)
         index_tensors[cidx] = torch.zeros(
             (num_indices, end - start), dtype=torch.int64, device=device
         )
+        index_gaps[cidx] = torch.full(
+            (num_indices, end - start), float("inf"), dtype=torch.float32, device=device
+        )
         res_codebook = None if res_centroids is None else res_centroids.get(cidx)
         if enable_residual and res_codebook is not None:
             res_index_tensors[cidx] = torch.zeros_like(index_tensors[cidx])
+            res_index_gaps[cidx] = torch.full_like(index_gaps[cidx], float("inf"))
         else:
             res_index_tensors[cidx] = None
+            res_index_gaps[cidx] = None
 
     inv_hessian = oracle_inverse_hessian_cholesky(hessian, percdamp).to(torch.float32)
     inv_scale = 1.0 / torch.diagonal(inv_hessian)
@@ -369,7 +397,7 @@ def oracle_vptq_pass(
                 codebook = codebook.to(dtype=column.dtype)
                 vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
                 vectors, padded_rows = oracle_matrix_to_vectors(column, vector_len)
-                assignment, _ = oracle_assign(vectors, codebook)
+                assignment, _, assignment_gap = oracle_assign_with_gap(vectors, codebook)
                 selected = codebook[assignment]
 
                 res_assignment = None
@@ -378,7 +406,9 @@ def oracle_vptq_pass(
                 )
                 if res_codebook is not None:
                     res_codebook = res_codebook.to(dtype=column.dtype)
-                    res_assignment, _ = oracle_assign(vectors - selected, res_codebook)
+                    res_assignment, _, res_assignment_gap = oracle_assign_with_gap(
+                        vectors - selected, res_codebook
+                    )
                     selected = selected + res_codebook[res_assignment]
 
                 q_column = oracle_vectors_to_matrix(selected, 1, padded_rows, rows)
@@ -387,9 +417,11 @@ def oracle_vptq_pass(
             if assignment is not None and index_tensors.get(cidx) is not None:
                 group_start = group_bounds[cidx][0]
                 index_tensors[cidx][:, column_index - group_start] = assignment
+                index_gaps[cidx][:, column_index - group_start] = assignment_gap
             if res_assignment is not None and res_index_tensors.get(cidx) is not None:
                 group_start = group_bounds[cidx][0]
                 res_index_tensors[cidx][:, column_index - group_start] = res_assignment
+                res_index_gaps[cidx][:, column_index - group_start] = res_assignment_gap
 
             error = (column - q_column) * inv_scale[column_index]
             if k + 1 < block_end - block_start:
@@ -403,7 +435,7 @@ def oracle_vptq_pass(
                 block_error @ inv_hessian[block_start:block_end, block_end:]
             )
 
-    return quantized, qerror, index_tensors, res_index_tensors
+    return quantized, qerror, index_tensors, res_index_tensors, index_gaps, res_index_gaps
 
 
 def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
@@ -505,7 +537,7 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
     working_res_centroids = dict.fromkeys(centroids)
     enable_residual = num_res_centroids[1] > 1
 
-    quantized, qerror, indices, res_indices = oracle_vptq_pass(
+    quantized, qerror, indices, res_indices, index_gaps, res_index_gaps = oracle_vptq_pass(
         weight=weight,
         hessian=hessian,
         group_bounds=group_bounds,
@@ -546,7 +578,7 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
             res_centroids[cidx] = group_res_centroids.to(dtype=target_dtype)
             working_res_centroids[cidx] = res_centroids[cidx].to(dtype=torch.float32)
 
-        quantized, qerror, indices, res_indices = oracle_vptq_pass(
+        quantized, qerror, indices, res_indices, index_gaps, res_index_gaps = oracle_vptq_pass(
             weight=weight,
             hessian=hessian,
             group_bounds=group_bounds,
@@ -575,8 +607,10 @@ def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
     return {
         "centroids": centroids,
         "indices": indices,
+        "index_gaps": index_gaps,
         "res_centroids": res_centroids,
         "res_indices": res_indices,
+        "res_index_gaps": res_index_gaps,
         "weight_scale": weight_scale,
         "weight_bias": weight_bias,
         "perm": perm,
@@ -1376,7 +1410,7 @@ def test_vptq_quantizer_matches_independent_oracle(variant, overrides):
                     actual_tensor, expected_tensor, rtol=1e-6, atol=1e-6
                 ), f"{field}[{cidx}] drift {float((actual_tensor - expected_tensor).abs().max())}"
 
-    for field in ("indices", "res_indices"):
+    for field, gap_field in (("indices", "index_gaps"), ("res_indices", "res_index_gaps")):
         actual_map = getattr(result, field)
         expected_map = expected[field]
         assert set(actual_map) == set(expected_map)
@@ -1386,7 +1420,16 @@ def test_vptq_quantizer_matches_independent_oracle(variant, overrides):
                 assert actual_tensor is None
             else:
                 assert actual_tensor is not None
-                assert torch.equal(actual_tensor, expected_tensor), f"{field}[{cidx}] mismatch"
+                mismatch = actual_tensor != expected_tensor
+                if bool(mismatch.any()):
+                    # Two centroids whose squared distances differ only by
+                    # float32 round-off can resolve either way. Accept a
+                    # mismatch only at such a tie.
+                    gaps = expected[gap_field][cidx]
+                    assert torch.all(gaps[mismatch] <= 1e-6), (
+                        f"{field}[{cidx}] mismatch at a non-tie position: "
+                        f"max gap {float(gaps[mismatch].max())}"
+                    )
 
     for field in ("weight_scale", "weight_bias", "perm"):
         actual_tensor = getattr(result, field)
