@@ -1278,6 +1278,71 @@ def _scales_for_storage(scales: t.Tensor, *, name: str) -> t.Tensor:
     return stored
 
 
+def _own_float_dtype(module: nn.Module) -> Optional[t.dtype]:
+    """Return the dtype of ``module``'s own floating parameters/persistent buffers."""
+
+    for tensor in module._parameters.values():
+        if isinstance(tensor, t.Tensor) and tensor.is_floating_point():
+            return tensor.dtype
+    for name, tensor in module._buffers.items():
+        if name in module._non_persistent_buffers_set:
+            continue
+        if isinstance(tensor, t.Tensor) and tensor.is_floating_point():
+            return tensor.dtype
+    return None
+
+
+def resolve_dequantize_dtype(
+    model: nn.Module,
+    module: nn.Module,
+    dtype: Optional[t.dtype] = None,
+) -> t.dtype:
+    """Resolve the dense dtype that ``dequantize_model`` must materialize.
+
+    Quantized checkpoints store their scales in the checkpoint's storage dtype
+    (GPTQ always writes FP16 scales), independently of the dtype the model was
+    loaded with. Deriving the dense dtype from ``scales.dtype`` therefore
+    turned a BF16 model into FP16 dense layers whose forward mixed dtypes.
+
+    Prefer an explicit request, then the dtype of the surrounding non-quantized
+    parameters/persistent buffers (embeddings, norms, lm_head), which describe
+    the model's compute dtype. Only when the model owns no such tensors (a bare
+    quantized layer) fall back to the layer's bias/scales storage dtype.
+    """
+
+    if dtype is not None:
+        return dtype
+
+    quantized_subtree = {
+        id(submodule)
+        for quantized in model.modules()
+        if isinstance(quantized, BaseQuantLinear)
+        for submodule in quantized.modules()
+    }
+    candidates = []
+    for candidate in model.modules():
+        if id(candidate) in quantized_subtree:
+            continue
+        candidate_dtype = _own_float_dtype(candidate)
+        if candidate_dtype is not None:
+            candidates.append(candidate_dtype)
+    # Prefer a low-precision compute dtype over an incidental FP32 buffer
+    # (e.g. a norm kept in FP32) so the dense layers match the activations.
+    for candidate_dtype in candidates:
+        if candidate_dtype in (t.float16, t.bfloat16):
+            return candidate_dtype
+    if candidates:
+        return candidates[0]
+
+    bias = getattr(module, "bias", None)
+    if isinstance(bias, t.Tensor) and bias.is_floating_point():
+        return bias.dtype
+    scales = getattr(module, "scales", None)
+    if isinstance(scales, t.Tensor) and scales.is_floating_point():
+        return scales.dtype
+    return t.float16
+
+
 class WeightOnlyQuantLinear(BaseQuantLinear):
     def __init__(self,
                  bits: int,

@@ -12,7 +12,11 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import (
+    BaseQuantLinear,
+    PackableQuantLinear,
+    resolve_dequantize_dtype,
+)
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -510,9 +514,10 @@ class TorchAtenLinear(PackableQuantLinear):
         self.scales = None
 
 
-def dequantize_model(model: PreTrainedModel):
-    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
-    # bf16 checkpoints and their exported config.
+def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None):
+    # Use the model's compute dtype, not the checkpoint storage dtype: GPTQ
+    # restores fp16 scales even for a bf16 model, so ``scales.dtype`` would
+    # turn a bf16 model into fp16 dense layers that fail in forward.
     target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchAtenLinear):
@@ -523,12 +528,7 @@ def dequantize_model(model: PreTrainedModel):
 
         if isinstance(module, TorchAtenLinear):
             if target_dtype is None:
-                scales = getattr(module, "scales", None)
-                target_dtype = (
-                    scales.dtype
-                    if scales is not None and scales.is_floating_point()
-                    else torch.float16
-                )
+                target_dtype = resolve_dequantize_dtype(model, module, dtype)
             new_module = nn.Linear(
                 module.in_features,
                 module.out_features,
