@@ -10,7 +10,7 @@ model behind.
 | GPTQ `dynamic` `-:` exclusions | `save_quantized` / `GPTQModel.load` | The saved checkpoint declares the exact quantized module set so Optimum does not build uninitialized layers for excluded modules. |
 | Endpoint requantize | `GPTQModel.requantize(embed_quant_mode=...)` | The endpoint module is re-resolved from the model tree before its forward and before replay; no detached META source is materialized. |
 | Post-quant EoRA | `GPTQModel.adapter.generate` | The generator runs on dense native weights; checkpoint `-:` rules are honored by the dequantize stage. |
-| Rotation | `GPTQModel.quantize(rotation=...)` | Unsupported widths fail with a `ValueError` before any weight is rotated. |
+| Rotation | `GPTQModel.quantize(rotation=...)` | Only `llama` and `qwen2` opt in; every other definition fails with a `ValueError` before any weight is rotated, as do unsupported widths. |
 | Staged GSQ | `train_stage_update` | Losses reduce in FP32 and a nonfinite step raises a Python error instead of a device-side assert. |
 
 ## 1. GPTQ `dynamic` `-:` exclusions and plain HF loading
@@ -113,17 +113,26 @@ half-rotated model.
 
 ```mermaid
 flowchart TD
-    A["quantize(rotation=...)"] --> B["validate_rotation_dimensions"]
+    A["quantize(rotation=...)"] --> M["validate_rotation_model_support"]
+    M -- "not opted in" --> N["ValueError naming the model and supported model types<br/>no weights modified"]
+    M -- "opted in" --> B["validate_rotation_dimensions"]
     B --> C{"hadamard_supported(hidden_size)<br/>and hadamard_supported(intermediate_size)"}
     C -- no --> D["ValueError naming the dimension<br/>no weights modified"]
     C -- yes --> E["fuse_layer_norms"]
     E --> F["rotate_model"]
+    style N fill:#fde2e1,stroke:#dc2626
 ```
 
 `hadamard_supported` asks the same `get_hadK` contract used by the transform,
 so the predicate cannot drift from the code it guards. A supported width is a
 power of two, or a power-of-two multiple of one of 172, 156, 140, 108, 60, 52,
 36, 28, 40, 20, or 12.
+
+Model support is a separate, earlier gate: a definition opts in with
+`supports_rotation` and the lookup is non-inheriting, so `Gemma2QModel`,
+`Gemma3QModel`, and the other `LlamaQModel` subclasses are rejected instead of
+being silently corrupted. See [rotation model support](rotation-model-support.md)
+for the exact model list and the audit of every definition.
 
 ## 5. Staged GSQ precision and failure mode
 

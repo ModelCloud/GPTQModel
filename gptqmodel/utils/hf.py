@@ -7,6 +7,7 @@ import inspect
 import json
 import ntpath
 import os
+import re
 import shutil
 import sys
 import threading
@@ -383,6 +384,56 @@ def suspend_hf_weight_init():
                 _restore_init_suspension(originals)
 
 
+_KEEP_IN_FP32_ATTRS = ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
+
+
+def _iter_keep_in_fp32_declarations(model):
+    """Yield the keep-in-fp32 patterns a model declares on itself or a child.
+
+    ``PreTrainedModel.post_init`` already unions child declarations onto the
+    top-level model, but walking submodules keeps the guard correct for models
+    built without that step.
+    """
+
+    seen = set()
+    modules = getattr(model, "modules", None)
+    for module in (modules() if callable(modules) else (model,)):
+        for attr in _KEEP_IN_FP32_ATTRS:
+            declared = getattr(module, attr, None)
+            if not declared:
+                continue
+            if isinstance(declared, str):
+                declared = (declared,)
+            for name in declared:
+                if isinstance(name, str) and name not in seen:
+                    seen.add(name)
+                    yield name
+
+
+def _compile_keep_in_fp32_matcher(model):
+    """Compile the model's fp32-pinned parameter patterns, transformers-style.
+
+    transformers 5.22 matches every ``_keep_in_fp32_modules`` and
+    ``_keep_in_fp32_modules_strict`` entry with ``re.search`` against the full
+    parameter key, expanding ``*`` to ``.*``
+    (``core_model_loading.build_glob_alternation``). In practice those entries
+    are module substrings such as ``gate.weight`` or ``wo``; the regex/glob
+    behaviour is preserved for wildcard declarations.
+    """
+
+    patterns = [
+        re.compile(name.replace("*", ".*"))
+        for name in _iter_keep_in_fp32_declarations(model)
+    ]
+    if not patterns:
+        return None
+
+    def matches(name: str) -> bool:
+        return any(pattern.search(name) is not None for pattern in patterns)
+
+    return matches
+
+
 def assert_loaded_model_state(
     model,
     *,
@@ -407,6 +458,14 @@ def assert_loaded_model_state(
     ``LazyTurtle`` materializes each layer. Objects without
     ``named_parameters`` (the MLX runtime model) only get the default-dtype
     check.
+
+    transformers deliberately keeps the modules listed in
+    ``_keep_in_fp32_modules`` / ``_keep_in_fp32_modules_strict`` in float32
+    inside a half-precision model, so parameters matched by those declarations
+    are excluded from both dtype checks *while they are float32*: that is the
+    dtype transformers' ``_get_dtype_plan`` pins them to. A declared module left
+    in any other dtype is still reported. Pinned parameters are still checked
+    for materialization, and undeclared mixed dtypes still fail (issue #4170).
     """
 
     problems = []
@@ -423,6 +482,7 @@ def assert_loaded_model_state(
     if named_parameters is not None and (
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
+        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
@@ -430,6 +490,12 @@ def assert_loaded_model_state(
                 continue
             if parameter.is_meta:
                 meta.append(name)
+                continue
+            if (
+                parameter.dtype is torch.float32
+                and keep_in_fp32 is not None
+                and keep_in_fp32(name)
+            ):
                 continue
             dtypes[parameter.dtype] += 1
 

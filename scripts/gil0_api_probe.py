@@ -860,6 +860,67 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                     raise AssertionError("concurrent affine fit changed codes or rounded outputs")
         return True
 
+    vptq_segment_thread = threading.local()
+    vptq_segment_lock = threading.Lock()
+    vptq_segment_next_device = [0]
+    vptq_segment_state = {}
+
+    def vptq_segment_sum() -> bool:
+        """Qualify the local VPTQ k-means segment reduction under concurrency."""
+        from gptqmodel.quantization.vptq import _deterministic_segment_sum
+
+        with vptq_segment_lock:
+            if not vptq_segment_state:
+                generator = torch.Generator().manual_seed(4172)
+                num_buckets, num_rows, vector_len = 64, 4096, 8
+                # Leave the last 16 buckets empty so the probe also covers the
+                # ``result[nonzero] = totals`` path.
+                index = torch.randint(0, num_buckets - 16, (num_rows,), generator=generator)
+                source = torch.randn((num_rows, vector_len), generator=generator)
+                weights = torch.randn((num_rows,), generator=generator)
+                vptq_segment_state.update(
+                    index=index,
+                    source=source,
+                    weights=weights,
+                    reference_sums=torch.zeros(
+                        (num_buckets, vector_len), dtype=torch.float64
+                    ).index_add_(0, index, source.double()),
+                    reference_counts=torch.zeros(
+                        num_buckets, dtype=torch.float64
+                    ).index_add_(0, index, weights.double()),
+                    used=torch.bincount(index, minlength=num_buckets) > 0,
+                )
+            if not hasattr(vptq_segment_thread, 'device'):
+                vptq_segment_thread.device = vptq_segment_next_device[0] % 2
+                vptq_segment_next_device[0] += 1
+        device = vptq_segment_thread.device
+        torch.cuda.set_device(device)
+        if not hasattr(vptq_segment_thread, 'stream'):
+            vptq_segment_thread.stream = torch.cuda.Stream(device=device)
+        stream = vptq_segment_thread.stream
+        with torch.cuda.stream(stream):
+            index = vptq_segment_state['index'].to(device)
+            source = vptq_segment_state['source'].to(device)
+            weights = vptq_segment_state['weights'].to(device)
+            sums = _deterministic_segment_sum(64, index, source)
+            counts = _deterministic_segment_sum(64, index, weights)
+            repeated = _deterministic_segment_sum(64, index, source)
+            stream.synchronize()
+        reference_sums = vptq_segment_state['reference_sums'].to(device)
+        reference_counts = vptq_segment_state['reference_counts'].to(device)
+        used = vptq_segment_state['used'].to(device)
+        if not torch.equal(sums, repeated):
+            raise AssertionError('concurrent VPTQ segment sum is not repeatable')
+        if torch.are_deterministic_algorithms_enabled():
+            raise AssertionError('VPTQ segment sum enabled global deterministic algorithms')
+        for actual, reference in ((sums, reference_sums), (counts, reference_counts)):
+            relative = (actual.double() - reference).norm() / reference.norm()
+            if relative.item() >= 1e-6:
+                raise AssertionError('concurrent VPTQ segment sum changed its reduction')
+            if not torch.equal(actual[~used], torch.zeros_like(actual[~used])):
+                raise AssertionError('concurrent VPTQ segment sum filled an empty bucket')
+        return True
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -911,6 +972,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "GPTQ weight scale floor": gptq_weight_scale_floor,
         "ParoQuant affine fit": paroquant_affine_fit,
+        "VPTQ deterministic segment sum": vptq_segment_sum,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
@@ -1010,6 +1072,7 @@ def _requires_two_gpus(name: str) -> bool:
                 "GPTQ FP16 scale storage guard",
                 "GPTQ weight scale floor",
                 "ParoQuant affine fit",
+                "VPTQ deterministic segment sum",
             ))
 
 
@@ -1029,6 +1092,9 @@ def run_child(name: str) -> int:
         return 0
     if name == "MACaQ compiled flips ROCm" and torch.version.hip is None:
         print(json.dumps({"status": "SKIP", "detail": "ROCm compiled flip probe is AMD-only"}))
+        return 0
+    if name == "VPTQ deterministic segment sum" and getattr(sys, "_is_gil_enabled", lambda: True)():
+        print(json.dumps({"status": "SKIP", "detail": "needs PYTHON_GIL=0"}))
         return 0
     try:
         if name in SINGLE_SHOT:
