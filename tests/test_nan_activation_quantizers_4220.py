@@ -11,6 +11,8 @@ poison the row scale so the NaN reaches the caller (the Torch reference
 import pytest
 import torch
 
+from gptqmodel.utils.rocm import IS_ROCM
+
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton quantizers are CUDA-only")
 
@@ -35,8 +37,8 @@ def test_qqq_triton_quantizer_propagates_nan():
 
 
 @pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() < (8, 9),
-    reason="Triton E4M3 needs Ada Lovelace (SM 8.9) or newer",
+    IS_ROCM or (torch.cuda.is_available() and torch.cuda.get_device_capability() < (8, 9)),
+    reason="W4A Triton E4M3 kernels are CUDA-only (SM 8.9+) and raise on ROCm",
 )
 def test_fp8_triton_quantizer_propagates_nan():
     from gptqmodel.nn_modules.qlinear.w4a_triton import fp8_pack

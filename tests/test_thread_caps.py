@@ -58,13 +58,32 @@ def test_pytest_process_uses_capped_intraop_pool():
 
 
 def test_process_thread_count_does_not_scale_with_cpu_count():
-    # Force the OpenMP region to materialize before counting.
-    matrix = torch.randn(256, 256)
-    matrix @ matrix
+    """A fresh pytest process must not spawn a thread per advertised CPU.
 
-    cpu_count = os.cpu_count() or 1
-    task_count = len(os.listdir("/proc/self/task"))
+    Measured in a subprocess on purpose. Once any test has run ``quantize()``
+    the parent process owns ``DeviceThreadPool`` workers (each with its own
+    OpenMP team) and the tokenizer's rayon pool, so a process-wide count here
+    depends on test order: 399 threads against the 80 limit after
+    ``test_paro_branch_replay_masks``, while this file passes 5/5 alone. The
+    contract under test is that a process which loads ``conftest.py`` and enters
+    a parallel region stays bounded by the cap instead of by ``os.cpu_count()``.
+    """
+    code = (
+        "import os, runpy, sys\n"
+        "runpy.run_path(sys.argv[1])\n"
+        "import torch\n"
+        "matrix = torch.randn(256, 256)\n"
+        "matrix @ matrix\n"
+        "print(len(os.listdir('/proc/self/task')))\n"
+        "print(os.cpu_count())\n"
+        "print(torch.get_num_threads())\n"
+    )
+    result = _run_python(code, {}, (str(_REPO_ROOT / "tests" / "conftest.py"),))
 
+    task_count, cpu_count, pool = (
+        int(value) for value in result.stdout.strip().splitlines()[-3:]
+    )
+    assert pool == _expected_cap()
     assert task_count <= max(32, cpu_count // 4), (task_count, cpu_count)
 
 
