@@ -251,6 +251,14 @@ pair a sample with another batch's native activation. The tag is the pairing
 key because a routed expert or a different batch length makes position-based
 pairing ambiguous.
 
+Sibling modules fed by one source activation (`q`/`k`/`v`, `gate`/`up`) share
+one masked copy instead of each storing a bitwise-identical copy; see
+[Native calibration batch split](native-calibration-batch-split.md#sibling-input-sharing).
+That share cache is thread-local, and `NativeProcessor.process()` bumps its
+epoch after the layer's forward pass so a worker that replays the same batch
+index and keep-mask object in a later layer cannot reuse a recycled source
+address.
+
 ```mermaid
 flowchart TD
     A["ForwardExecutor.run_parallel<br/>one batch_idx per worker"] --> B["NativeProcessor.pre_process_fwd_hook<br/>batch_index = current_batch_index()"]
