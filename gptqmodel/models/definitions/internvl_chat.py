@@ -204,7 +204,14 @@ class InternVLChatQModel(BaseQModel):
     def _extract_history_and_question(
         cls,
         conversation: list[Dict[str, Any]],
-    ) -> tuple[Optional[list[tuple[str, str]]], str]:
+    ) -> tuple[Optional[list[tuple[str, str]]], str, Optional[str]]:
+        """Split ``conversation`` into history, query, and the query's answer.
+
+        A conversation that ends with an assistant message keeps that message as
+        the ``answer`` so the calibration text still contains the response the
+        model is meant to predict (issue #4227). ``answer`` is ``None`` when the
+        conversation ends with a user turn.
+        """
         turns: list[tuple[str, str]] = []
         pending_user: Optional[str] = None
 
@@ -224,14 +231,14 @@ class InternVLChatQModel(BaseQModel):
                 pending_user = content
 
         if pending_user is not None:
-            return turns or None, pending_user
+            return turns or None, pending_user, None
 
         if not turns:
             raise ValueError("InternVL calibration conversation must contain at least one user prompt.")
 
         history = turns[:-1] or None
-        question, _ = turns[-1]
-        return history, question
+        question, answer = turns[-1]
+        return history, question, answer
 
     @classmethod
     def process_vision_info(
@@ -283,6 +290,7 @@ class InternVLChatQModel(BaseQModel):
         question: str,
         history: Optional[list[tuple[str, str]]],
         num_patches_list: Optional[list[int]],
+        answer: Optional[str] = None,
     ) -> tuple[str, int, int]:
         tokenizer = self._get_tokenizer()
         template = self.model.conv_template.copy() if hasattr(self.model.conv_template, "copy") else deepcopy(self.model.conv_template)
@@ -296,7 +304,7 @@ class InternVLChatQModel(BaseQModel):
             template.append_message(template.roles[0], old_question)
             template.append_message(template.roles[1], old_answer)
         template.append_message(template.roles[0], question)
-        template.append_message(template.roles[1], None)
+        template.append_message(template.roles[1], answer)
 
         query = template.get_prompt()
         for num_patches in num_patches_list or []:
@@ -324,7 +332,7 @@ class InternVLChatQModel(BaseQModel):
         max_num = int(getattr(config, "max_dynamic_patch", 12))
         use_thumbnail = bool(getattr(config, "use_thumbnail", True))
 
-        history, question = self._extract_history_and_question(conversation)
+        history, question, answer = self._extract_history_and_question(conversation)
         pixel_values, num_patches_list = self.process_vision_info(
             conversation,
             input_size=input_size,
@@ -338,6 +346,7 @@ class InternVLChatQModel(BaseQModel):
             question=question,
             history=history,
             num_patches_list=num_patches_list,
+            answer=answer,
         )
         tokenized = tokenizer(query, return_tensors="pt")
         tokenized["pixel_values"] = pixel_values
