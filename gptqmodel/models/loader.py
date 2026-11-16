@@ -3224,6 +3224,11 @@ def ModelLoader(cls):
                 keep_in_fp32_modules=keep_in_fp32_modules or None,
                 fp32_bf16_buffer_names=fp32_bf16_buffer_names,
                 packed_fp8_buffer_dtypes=packed_fp8_buffer_dtypes,
+                # EXL3 stores ``suh``/``svh`` as fp16 because its Hadamard
+                # kernels require that dtype. ``from_config(dtype=...)`` and
+                # accelerate's cast would otherwise rewrite them in the model
+                # dtype (issue #4379).
+                restore_checkpoint_buffer_dtypes=(format_code == FORMAT.EXL3),
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
