@@ -1210,7 +1210,13 @@ def _compile_negative_match_dynamic(matchers: tuple[MatchSpec, ...]) -> Optional
     excludes = tuple(selector for selector in matchers if not selector.include)
     if not excludes:
         return None
-    return {f"-:{selector.pattern}": {} for selector in excludes}
+    compiled: dict[str, dict[str, Any]] = {}
+    for selector in excludes:
+        pattern = selector.pattern
+        if not pattern.startswith(("^", ".*")):
+            pattern = f".*(?:{pattern})"
+        compiled[f"-:{pattern}"] = {}
+    return compiled
 
 
 def _resolve_export_format(method: METHOD, export: Optional[ExportSpec]) -> FORMAT:

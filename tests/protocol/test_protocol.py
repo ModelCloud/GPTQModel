@@ -317,3 +317,29 @@ def test_negative_match_awq_protocol_compiles_to_dynamic_skip_config():
     assert yaml_cfg.sym is True
     assert python_cfg.dynamic == {r"-:.*layers\.2.*": {}}
     assert yaml_cfg.dynamic == {r"-:.*layers\.2.*": {}}
+
+
+def test_negative_match_unanchored_selector_matches_search_semantics():
+    from gptqmodel.quantization.protocol import compile_protocol, compile_protocol_to_quantize_config
+
+    src = {
+        "version": 2,
+        "stages": [
+            {
+                "name": "ptq",
+                "rules": [
+                    {
+                        "match": ["*", "-:down_proj", "-:mlp\\.gate$"],
+                        "weight": {"quantize": {"method": "gptq", "bits": 4, "group_size": 128}},
+                    }
+                ],
+            }
+        ],
+    }
+    rule = compile_protocol(src).stages[0].rules[0]
+    cfg = compile_protocol_to_quantize_config(src)
+    for name in ("model.layers.0.mlp.down_proj", "model.layers.0.mlp.gate"):
+        assert rule.matches(name) is False
+        assert cfg.dynamic_get(name) is False
+    assert rule.matches("model.layers.0.mlp.up_proj") is True
+    assert cfg.dynamic_get("model.layers.0.mlp.up_proj") is None
