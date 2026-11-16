@@ -44,6 +44,11 @@ class Llama4QModel(BaseQModel):
                     "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
                 "shared_expert:0": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+                # Maverick interleaves dense and sparse layers
+                # (`interleave_moe_layer_step=2`), so the dense fallback is a
+                # real branch. Without this entry its gate/up/down projections
+                # never resolve and stay in the source dtype.
+                "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         }
     ]
@@ -56,6 +61,9 @@ class Llama4TextQModel(Llama4QModel):
 
     loader = AutoModelForCausalLM
 
+    # `Llama4ForCausalLM` owns the head at the top level; the multimodal
+    # wrapper above keeps it on `language_model`.
+    lm_head = "lm_head"
     pre_lm_head_norm_module = "model.norm"
     rotary_embedding = "model.rotary_emb"
 
@@ -73,6 +81,7 @@ class Llama4TextQModel(Llama4QModel):
                     "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
                 "shared_expert:0": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+                "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         },
     ]
