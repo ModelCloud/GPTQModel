@@ -5,6 +5,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
+import threading
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
@@ -33,7 +34,40 @@ def _qqq_gpu_quantizer():
     return dynamic_quant
 
 
-_INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
+# ``qqq_gemm`` uses its ``C`` argument only as the per-call INT32 global
+# reduce scratch.  A buffer per module made a Llama-3-8B QQQ model retain
+# ~5.25 GiB of zeroed scratch (issue #4387), so all modules on a device share
+# one lazily grown flat buffer instead.  The flat layout lets each caller take
+# a *contiguous* ``(max_par * 64, out_features)`` view even when the shared
+# allocation was grown for a wider layer; slicing columns of a 2-D buffer would
+# hand the kernel a stride it does not understand.
+_REDUCE_SCRATCH_LOCK = threading.Lock()
+_REDUCE_SCRATCH: dict[torch.device, torch.Tensor] = {}
+
+
+def _shared_reduce_scratch(
+    device: torch.device, out_features: int, max_par: int = 16
+) -> torch.Tensor:
+    """Return one per-device INT32 reduce scratch, grown to ``max_par * 64 x N``."""
+
+    device = torch.device(device)
+    rows = max_par * 64
+    required = rows * out_features
+    with _REDUCE_SCRATCH_LOCK:
+        scratch = _REDUCE_SCRATCH.get(device)
+        if scratch is None or scratch.numel() < required:
+            # The kernel writes before it reads this scratch, but zeroing keeps
+            # the shared buffer indistinguishable from the old per-module one.
+            scratch = torch.zeros(required, dtype=torch.int32, device=device)
+            _REDUCE_SCRATCH[device] = scratch
+    return scratch[:required].view(rows, out_features)
+
+
+def _clear_reduce_scratch() -> None:
+    """Drop the process-wide scratch cache (tests and teardown only)."""
+
+    with _REDUCE_SCRATCH_LOCK:
+        _REDUCE_SCRATCH.clear()
 
 # The Marlin-derived QQQ W4A8 kernel (``gptqmodel_ext/qqq/qqq_gemm.cu``) is
 # written against CUDA inline PTX: ``cp.async``, ``mma.sync``, ``ldmatrix``,
@@ -87,12 +121,24 @@ def _invert_permutation(values) -> torch.Tensor:
 
 
 def _unpack_uint4(packed: torch.Tensor) -> torch.Tensor:
-    packed_i64 = packed.to(torch.int64)
-    packed_u32 = torch.where(packed_i64 < 0, packed_i64 + (1 << 32), packed_i64)
-    divisors = torch.tensor(_INT4_DIVISORS, dtype=torch.int64, device=packed.device)
-    quotients = torch.floor_divide(packed_u32.unsqueeze(-1), divisors)
-    lanes = quotients - torch.floor_divide(quotients, 16) * 16
-    return lanes.reshape(packed.shape[0], packed.shape[1] * 8)
+    """Unpack eight unsigned 4-bit lanes per INT32 with INT32/INT8 temporaries.
+
+    The previous implementation widened the packed tensor to INT64 and divided
+    by eight INT64 divisors, materialising several ``8 * in_features *
+    out_features`` byte temporaries per forward (issue #4387 item 4).  Shifting
+    and masking in INT32 needs one packed-sized INT32 temporary and a
+    ``packed.numel() * 8`` UINT8 result, and returns the same codes bit for bit.
+    """
+
+    rows, columns = packed.shape
+    lanes = torch.empty((rows, columns * 8), dtype=torch.uint8, device=packed.device)
+    shifted = torch.empty_like(packed)
+    for lane in range(8):
+        shifted.copy_(packed)
+        shifted.bitwise_right_shift_(4 * lane)
+        shifted.bitwise_and_(0xF)
+        lanes[:, lane::8] = shifted
+    return lanes
 
 
 def mul(
@@ -224,11 +270,6 @@ class QQQLinear(GroupedQuantLinear):
                 torch.zeros(
                     _workspace_numel(self.out_features, self.max_par), dtype=torch.int32
                 ),
-                persistent=False,
-            )
-            self.register_buffer(
-                "reduce_buffer",
-                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
                 persistent=False,
             )
         # Quantization builds this module with `register_buffers=False`, so the
@@ -375,9 +416,26 @@ class QQQLinear(GroupedQuantLinear):
             buf.append(self.s_group)
         if hasattr(self, "workspace") and self.workspace is not None:
             buf.append(self.workspace)
-        if hasattr(self, "reduce_buffer") and self.reduce_buffer is not None:
-            buf.append(self.reduce_buffer)
         return buf
+
+    def _reduce_scratch(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        """Return the shared per-device INT32 reduce scratch for this layer.
+
+        The native kernel consumes ``C`` only for the duration of one call, so
+        every ``QQQLinear`` on a device uses the same allocation.  Inside
+        ``torch.compile`` a process-wide mutable cache would be captured as a
+        graph constant, so the compiled path gets a per-call allocation.
+        """
+
+        if device is None:
+            device = self.B.device if hasattr(self, "B") else torch.device("cpu")
+        if torch.compiler.is_compiling():
+            return torch.zeros(
+                (self.max_par * 64, self.out_features),
+                dtype=torch.int32,
+                device=device,
+            )
+        return _shared_reduce_scratch(device, self.out_features, self.max_par)
 
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
         """Pack a fake-quantized linear layer into the Marlin representation."""
@@ -517,12 +575,6 @@ class QQQLinear(GroupedQuantLinear):
                 ),
                 persistent=False,
             )
-        if not hasattr(self, "reduce_buffer"):
-            self.register_buffer(
-                "reduce_buffer",
-                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int, device=packed_weight.device),
-                persistent=False,
-            )
         if linear.bias is not None:
             bias = linear.bias.detach().to(device=packed_weight.device, dtype=torch.float16)
             if "bias" in self._buffers:
@@ -568,7 +620,7 @@ class QQQLinear(GroupedQuantLinear):
         mul(
             quant_A, # A
             self.B, # B
-            self.reduce_buffer, # C
+            self._reduce_scratch(A.device), # C
             D, # D
             s1, # s1
             self.s_channel, # s2
@@ -667,17 +719,60 @@ class QQQTorchLinear(QQQLinear):
 
         if self.group_size != self.in_features:
             s_group = self._unpermute_scales(self.s_group, self._scale_perm_i).to(torch.float32)
+            weight = self._grouped_weight_fp32(codes, s_group)
+        else:
+            signed = codes.to(torch.int8)
+            signed.bitwise_xor_(8)
+            signed.sub_(8)
+            weight = signed.to(torch.float32)
+            weight.mul_(16.0)
+
+        return weight, s_channel
+
+    def _grouped_weight_fp32(self, codes: torch.Tensor, s_group: torch.Tensor) -> torch.Tensor:
+        """Expand grouped QQQ codes to the FP32 INT8-valued weight plane.
+
+        ``codes`` is the UINT8 nibble plane.  When the group size divides
+        ``in_features`` the scale broadcast is a view, so no ``in_features *
+        out_features`` gather temporary is created; the odd tail keeps the
+        index-select fallback.
+        """
+
+        weight = codes.to(torch.float32)
+        weight.sub_(8.0)
+        if self.group_size > 0 and self.in_features % self.group_size == 0:
+            groups = self.in_features // self.group_size
+            weight = weight.reshape(groups, self.group_size, self.out_features)
+            weight.mul_(s_group.reshape(groups, 1, self.out_features))
+            weight = weight.reshape(self.in_features, self.out_features)
+        else:
             group_idx = torch.floor_divide(
                 torch.arange(self.in_features, dtype=torch.int64, device=codes.device),
                 self.group_size,
             )
-            weight = (codes.to(torch.float32) - 8.0) * s_group[group_idx]
-            weight = weight.round().clamp(-128, 127)
-        else:
-            signed = torch.where(codes >= 8, codes - 16, codes)
-            weight = signed.to(torch.float32) * 16.0
+            weight.mul_(s_group[group_idx])
+        weight.round_()
+        weight.clamp_(-128.0, 127.0)
+        return weight
 
-        return weight, s_channel
+    def _int8_weight_for_forward(self) -> torch.Tensor:
+        """Build the transient INT8 weight plane for one forward.
+
+        This is deliberately not cached: an INT4-to-INT8 expansion is an
+        expanded weight cache under ``AGENTS.md``.  Channel-wise codes are
+        signed nibbles scaled by 16, so they convert directly to INT8 without
+        an FP32 plane; grouped codes need the rounded FP32 product.
+        """
+
+        codes = self._unpack_weight_codes()
+        if self.group_size != self.in_features:
+            s_group = self._unpermute_scales(self.s_group, self._scale_perm_i).to(torch.float32)
+            return self._grouped_weight_fp32(codes, s_group).to(torch.int8)
+        signed = codes.to(torch.int8)
+        signed.bitwise_xor_(8)
+        signed.sub_(8)
+        signed.mul_(16)
+        return signed
 
     def _torch_weight_state_key(self):
         return (
@@ -761,8 +856,10 @@ class QQQTorchLinear(QQQLinear):
         if packed_result is not None:
             accum, s_channel = packed_result
         else:
-            weight, s_channel = self._dequantize_weight_for_torch()
-            weight = weight.to(torch.int8).contiguous()
+            weight = self._int8_weight_for_forward()
+            s_channel = self._unpermute_scales(
+                self.s_channel, self._scale_perm_single_i
+            ).to(torch.float32)
             accum = self._int8_matmul(quant_A, weight)
             if accum is None:
                 accum = torch.matmul(

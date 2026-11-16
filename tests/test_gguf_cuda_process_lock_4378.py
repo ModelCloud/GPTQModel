@@ -87,6 +87,7 @@ def _make_bare_bridge() -> _GGMLBridge:
     bridge._cuda_backend_locks = {}
     bridge._cuda_backend_locks_guard = threading.Lock()
     bridge._cuda_backend_lock = threading.RLock()
+    bridge.cuda_scratch_generation = lambda device_index: 0
     return bridge
 
 
@@ -100,6 +101,7 @@ def _make_layer(in_features: int, out_features: int) -> GGUFCudaKernel:
     object.__setattr__(layer, "_ggml_cuda_plans", OrderedDict())
     object.__setattr__(layer, "_ggml_cuda_weight", None)
     object.__setattr__(layer, "_ggml_cuda_weight_key", None)
+    object.__setattr__(layer, "_ggml_cuda_plan_generation", -1)
     return layer
 
 

@@ -83,6 +83,7 @@ def _make_layer(in_features: int, out_features: int) -> GGUFCudaKernel:
     object.__setattr__(layer, "_ggml_cuda_plans", OrderedDict())
     object.__setattr__(layer, "_ggml_cuda_weight", None)
     object.__setattr__(layer, "_ggml_cuda_weight_key", None)
+    object.__setattr__(layer, "_ggml_cuda_plan_generation", -1)
     return layer
 
 
@@ -103,6 +104,7 @@ def _install_bridge(
 ) -> _GGMLBridge:
     bridge = object.__new__(_GGMLBridge)
     bridge._cuda_backend_lock = threading.RLock()
+    bridge.cuda_scratch_generation = lambda device_index: 0
 
     def fake_run(*, x, gguf_tensor_qtype, padded_in_features, out_features, plan=None, weight=None):
         with tracker.track():
