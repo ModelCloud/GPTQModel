@@ -258,9 +258,13 @@ the last-level-cache back-port for torch.
 | `cpu_workers` | `None` | CPU worker count. |
 | `cuda_workers` | `None` | Per-device worker count on CUDA/ROCm. |
 | `max_packers` | `None` | Threads that pack completed modules after quantization. |
+| `pool_intraop_threads` | `None` | Torch intra-op pool per device-pool worker. `None` splits the process pool across the pool's workers; `0` keeps the inherited pool. |
 
 `None` keeps the platform-derived defaults. `max_packers` is the number of
 threads that pack completed modules after quantization.
+`pool_intraop_threads` bounds each worker's OpenMP team, because libgomp gives
+every pthread its own team: see
+[Device thread pool intra-op budget](device-thread-pool-intraop-budget.md).
 
 ## Validation
 

@@ -416,6 +416,7 @@ def _build_device_thread_pool(warmup_devices=None):
     return DeviceThreadPool(
         inference_mode=True,
         warmup_devices=warmup_devices,
+        intraop_threads_per_worker=get_kernel_config().pool_intraop_threads,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),

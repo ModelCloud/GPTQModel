@@ -185,6 +185,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [AMD RDNA4 (gfx1200 / gfx1201 / gfx1250) support](rocm-rdna4.md)
 - [Device thread pool error propagation](thread-pool-error-contract.md)
 - [Torch thread caps](thread-caps.md)
+- [Device thread pool intra-op budget](device-thread-pool-intraop-budget.md)
 
 ### Adapters and accuracy recovery
 
