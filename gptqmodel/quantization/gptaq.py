@@ -19,6 +19,13 @@ from ..quantization import QuantizeConfig
 from ..utils.fallback import resolve_fallback_strategy
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
+from .gar import (
+    compose_final_perm,
+    compute_global_perm,
+    compute_local_perms,
+    extend_perm_with_tail,
+    invert_perm,
+)
 from .gptq import GPTQ
 from .quantizer import _neutralize_dead_columns
 
@@ -231,11 +238,41 @@ class GPTAQ(GPTQ):
             if self._use_native_delta:
                 self.dXXT = self.dXXT[perm][:, perm]
             invperm = torch.argsort(perm)
+        elif self.qcfg.act_group_aware:
+            diag_h = torch.diag(H)
+            local_perms, local_values = compute_local_perms(
+                diag_h, self.qcfg.group_size, return_values=True
+            )
+            global_perm = compute_global_perm(
+                diag_h,
+                self.qcfg.group_size,
+                precomputed_values=local_values,
+            )
+            del local_values
+            final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
+            final_perm = extend_perm_with_tail(final_perm, self.columns)
+            W = W[:, final_perm]
+            H = H[final_perm][:, final_perm]
+            if self._use_native_delta:
+                self.dXXT = self.dXXT[final_perm][:, final_perm]
+
+        static_group_perm = None
+        if self.qcfg.static_groups:
+            if self.qcfg.desc_act:
+                static_group_perm = perm
+            elif self.qcfg.act_group_aware:
+                static_group_perm = final_perm
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
         Hinv, damp = self.hessian_inverse(H)
+        if Hinv is None:
+            # Share GPTQ's data-independent RTN fallback instead of
+            # dereferencing the missing inverse.
+            self.H = None
+            self.dXXT = None
+            return self._rtn_fallback_after_hessian_failure(blocksize)
         if self.qcfg.gptaq is None:
             raise ValueError("GPTAQ requires `gptaq` configuration.")
         if self._use_native_delta:
@@ -270,8 +307,8 @@ class GPTAQ(GPTQ):
                             now_idx += 1
                     else:
                         idx = i1 + i
-                        if self.qcfg.desc_act:
-                            idx = perm[idx]
+                        if static_group_perm is not None:
+                            idx = static_group_perm[idx]
 
                         self.quantizer = groups[idx // self.qcfg.group_size]
 
@@ -320,8 +357,29 @@ class GPTAQ(GPTQ):
             g_idx = torch.arange(self.columns, dtype=torch.int32, device=Q.device) // group_size
 
         if self.qcfg.desc_act:
+            invperm = invperm.to(device=Q.device)
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
+        elif self.qcfg.act_group_aware:
+            inv_final = invert_perm(final_perm).to(device=Q.device)
+            Q = Q[:, inv_final]
+            if not self.qcfg.static_groups:
+                # Dynamic parameters were measured in reordered group order;
+                # restore them to the natural group order the packer expects.
+                inv_global_perm = invert_perm(global_perm)
+                inv_global_perm_list = inv_global_perm.tolist()
+                reordered_group_count = len(inv_global_perm_list)
+                temp_scale = [scale[i] for i in inv_global_perm_list]
+                temp_scale.extend(scale[reordered_group_count:])
+                scale = temp_scale
+                temp_zero = [zero[i] for i in inv_global_perm_list]
+                temp_zero.extend(zero[reordered_group_count:])
+                zero = temp_zero
+
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            Q = Q[:, :valid_cols]
+            g_idx = g_idx[:valid_cols]
 
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
@@ -339,6 +397,12 @@ class GPTAQ(GPTQ):
 
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            scale = self.truncate_last_dim(scale, valid_cols)
+            zero = self.truncate_last_dim(zero, valid_cols)
+
         scale, zero = self._sanitize_scale_and_log(scale, zero)
 
         duration = time.time() - start

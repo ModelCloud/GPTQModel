@@ -42,6 +42,27 @@ Thus multiplying by that factor after code selection preserves a packable
 scale in the original weight domain. `Quantizer.find_params` accepts this
 per-row bound through `scale_min` for RTN, including RTN's optional MSE search.
 
+`RTN.quantize` follows the same contract as `GPTQ._fallback_quantize`: its
+`SmoothMSE` branch passes `eps=SCALE_STORAGE_FLOOR`, and its `SmoothRowCol`
+branch passes `scale_min = SCALE_STORAGE_FLOOR / scale_factor` to
+`Quantizer.find_params`. The previous RTN path used the `1e-8` default, which
+underflows to zero when the restored scale is stored as FP16.
+
+```mermaid
+flowchart TD
+    R["RTN.quantize"] --> M{"SmoothMSE?"}
+    M -- yes --> E["mse_optimal_quant(eps=SCALE_STORAGE_FLOOR)"]
+    M -- no --> S["smooth_block"]
+    S --> F{"scale_factor restored?"}
+    F -- yes --> D["scale_min = SCALE_STORAGE_FLOOR / scale_factor"]
+    F -- no --> U["scale_min = SCALE_STORAGE_FLOOR"]
+    D --> P["find_params(..., scale_min=...)"]
+    U --> P
+    P --> O["scale * scale_factor is FP16-representable"]
+    E --> O
+    style O fill:#d1e7dd,stroke:#0f5132,color:#0f5132
+```
+
 ## Asymmetric SmoothMSE zero points
 
 An affine code range only represents zero points in `[0, maxq]`. The MSE search

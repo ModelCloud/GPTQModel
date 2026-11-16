@@ -1754,6 +1754,25 @@ class GPTQ:
         self.H = None
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
+    def _rtn_fallback_after_hessian_failure(self, blocksize: int):
+        """Quantize with GPTQ's data-independent RTN grid.
+
+        ``hessian_inverse`` returns ``(None, 1.0)`` when every damp and
+        diagonal-floor attempt fails. GPTAQ and FOEM call this helper so a
+        non-invertible Hessian degrades to the same weight-only grid GPTQ uses
+        for low-sample modules instead of dereferencing the missing inverse.
+        It delegates to ``_fallback_quantize``; there is no second fallback
+        implementation.
+        """
+
+        log.warn(
+            "Quantization: Module `%s` -> Hessian inverse unavailable; using `%s` fallback quantization.",
+            self.name,
+            FallbackStrategy.RTN.value,
+        )
+        self.H = None
+        return self._fallback_quantize(FallbackStrategy.RTN, blocksize)
+
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
             self,
@@ -2215,8 +2234,15 @@ class GPTQ:
         cpu_fallback_used = False
         from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
 
+        zero_samples = self.nsamples == 0
         resolved_strategy = resolve_fallback_strategy(self.fallback)
-        fallback_requested = should_use_fallback(
+        if zero_samples:
+            # A zero Hessian makes every column look calibration-dead, and
+            # ``_neutralize_dead_columns`` would then zero the entire weight.
+            # RTN is the only data-independent grid, so use it even when the
+            # threshold fallback is disabled rather than ship an all-zero module.
+            resolved_strategy = FallbackStrategy.RTN
+        fallback_requested = zero_samples or should_use_fallback(
             self.fallback,
             float(self.nsamples),
             self.expected_nsamples,
@@ -2227,6 +2253,13 @@ class GPTQ:
         if fallback_requested:
             use_hessian = False
             self._disable_shared_hessian_cache()
+            if zero_samples:
+                log.warn(
+                    "Quantization: Module `%s` -> no calibration samples reached this module; "
+                    "forcing `%s` fallback quantization instead of quantizing a zero Hessian.",
+                    self.name,
+                    FallbackStrategy.RTN.value,
+                )
             threshold_text = str(getattr(self.fallback, "threshold", None))
             threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
             log.warn(
@@ -2271,6 +2304,16 @@ class GPTQ:
         self.quantizer.find_params(W, weight=True)
 
         # H = self.H.to(device=self.H.device)
+
+        # Capture the NaN-retry diagonal before any activation ordering. The
+        # retry clones ``W`` in natural column order, so a diagonal captured
+        # after desc_act/act_group_aware permutation would make ``argsort`` the
+        # identity and silently drop act-order from the retried ``g_idx``.
+        retry_hessian_diag = (
+            self.H.diagonal().clone()
+            if use_hessian and fallback_configured and not self.qcfg.mock_quantization
+            else None
+        )
 
         if use_hessian:
             _neutralize_dead_columns(self.H, W)
@@ -2401,15 +2444,10 @@ class GPTQ:
         else:
             Hinv, damp = None, 0.0
 
-        # The block update uses Hinv, but never reads the Hessian again. Keep
-        # only its diagonal for the optional NaN -> mock-quantization retry:
-        # that path uses an identity inverse and reads H only for dead columns
-        # and activation ordering. Rebuild the diagonal matrix if it retries.
-        retry_hessian_diag = (
-            self.H.diagonal().clone()
-            if Hinv is not None and fallback_configured and not self.qcfg.mock_quantization
-            else None
-        )
+        # The block update uses Hinv, but never reads the Hessian again. The
+        # NaN -> mock-quantization retry rebuilds a diagonal matrix from the
+        # natural-order snapshot captured above, then re-runs neutralization and
+        # activation ordering so it reproduces the primary column order.
         if Hinv is not None:
             self.H = None
 
