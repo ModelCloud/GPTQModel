@@ -729,7 +729,7 @@ def test_weight_only_quantize_subset_drains_workers_after_a_failure(monkeypatch)
     looper._quantize_named_module = fake_quantize
     monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
     monkeypatch.setattr(
-        weight_only_looper_module, "as_completed", lambda mapping: list(mapping)
+        weight_only_looper_module, "as_completed", list
     )
 
     with pytest.raises(RuntimeError, match="quantize failed"):
@@ -767,7 +767,7 @@ def test_weight_only_finalize_subset_drains_workers_after_a_failure(monkeypatch)
     monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
     monkeypatch.setattr(weight_only_looper_module.DEVICE_THREAD_POOL, "submit", fake_submit)
     monkeypatch.setattr(
-        weight_only_looper_module, "as_completed", lambda mapping: list(mapping)
+        weight_only_looper_module, "as_completed", list
     )
 
     with pytest.raises(RuntimeError, match="finalize failed"):
