@@ -2021,6 +2021,11 @@ def ModelLoader(cls):
                             cls.resolve_hf_conversion_map_reversed(target_model=model)
                         ),
                         target_model=model,
+                        # A `.bin`/`.pt` source is converted to a full safetensors
+                        # copy.  Put that copy under the configured offload root
+                        # instead of the system TMPDIR; the turtle only falls back
+                        # to `tempfile.gettempdir()` when no path is configured.
+                        offload_path=getattr(quantize_config, "offload_to_disk_path", None),
                     )
 
                     if turtle_model is None:
