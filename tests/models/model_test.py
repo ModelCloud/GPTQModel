@@ -270,6 +270,9 @@ class ModelTest(unittest.TestCase):
     MSE = 0.0
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
+    # GPTQ-only opt-in (#4393/#4440): drop each calibration row's position-0 attention-sink token
+    # from the Hessian. Left unset by default so other methods never receive the field.
+    EXCLUDE_ATTENTION_SINKS = False
     WEIGHT_ONLY = None
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
@@ -1625,6 +1628,7 @@ class ModelTest(unittest.TestCase):
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             moe=self.MOE_CONFIG,
             offload_to_disk=self._mode_specific_test_setting("OFFLOAD_TO_DISK"),
+            **({"exclude_attention_sinks": True} if self.EXCLUDE_ATTENTION_SINKS else {}),
         )
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, reload_after_save: bool = True, **kwargs):
