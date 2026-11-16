@@ -85,8 +85,10 @@ compatible deployment engine.
   activations cannot overflow the comparison and silently return zeros; see
   [NVFP4 candidate ranking](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gptq-w4a-gb10.md#candidate-ranking-and-the-finite-scale-contract).
 - **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
-  execution help manage memory and recover interrupted jobs. Distributed EXL3
-  workflows support durable replay and resume.
+  execution help manage memory and recover interrupted jobs. [Disk-offload run
+  directories](https://github.com/ModelCloud/GPTQModel/blob/main/docs/offload-run-directories.md)
+  are per-run scratch space and are removed at teardown or failure. Distributed
+  EXL3 workflows support durable replay and resume.
 - **Recover accuracy.** Use [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) refinement, [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) low-rank compensation, [rotation](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#rotations),
   [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) training and adapter
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
