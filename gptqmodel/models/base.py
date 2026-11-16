@@ -168,6 +168,50 @@ def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
     return not _HESSIAN_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
 
 
+# Model types whose definition class declares `supports_rotation`. This is the
+# set named by the rotation gate's error message and documented in
+# docs/rotation-model-support.md. tests/test_rotation_opt_in.py fails if it
+# drifts from the declarations on the definition classes.
+ROTATION_SUPPORTED_MODEL_TYPES = frozenset({"llama", "qwen2"})
+
+
+def rotation_supported(model_def) -> bool:
+    """Whether this exact definition class opted into model-wide rotation.
+
+    The lookup is deliberately non-inheriting: ``LlamaQModel`` is the base of
+    Gemma2/Gemma3/Qwen3/Olmo2 and of every other Llama-shaped definition, so an
+    inherited opt-in would re-admit exactly the layouts the rotation math
+    cannot preserve. A subclass must declare its own ``supports_rotation``.
+
+    The declaration is a frozenset of verified ``model_type`` values. One class
+    can serve several model types with different norm semantics (``LlamaQModel``
+    covers ``llama``, ``mistral``, ``gemma``, ...), so the opt-in names the
+    model types it covers instead of claiming the whole class.
+    """
+
+    declared = type(model_def).__dict__.get("supports_rotation", False)
+    if not isinstance(declared, frozenset):
+        return False
+    config = getattr(getattr(model_def, "model", None), "config", None)
+    return getattr(config, "model_type", None) in declared
+
+
+def validate_rotation_model_support(model_def) -> None:
+    """Fail before any weight is touched when rotation is not opted in."""
+
+    if rotation_supported(model_def):
+        return
+
+    config = getattr(getattr(model_def, "model", None), "config", None)
+    model_type = getattr(config, "model_type", None)
+    supported = ", ".join(sorted(ROTATION_SUPPORTED_MODEL_TYPES))
+    raise ValueError(
+        f"rotation is not supported for model {type(model_def).__name__} "
+        f"(model_type={model_type!r}); supported model types: {supported}. "
+        "No weights were modified."
+    )
+
+
 def _torch_cuda_device(value: object) -> Optional[torch.device]:
     """Resolve one pool entry to a concrete CUDA device, or None."""
 
@@ -2122,11 +2166,7 @@ class BaseQModel(nn.Module):
 
         # rotate model
         if resolve_model_rotation(self.quantize_config):
-            from gptqmodel.models.definitions.llama import LlamaQModel
-            from gptqmodel.models.definitions.qwen2 import Qwen2QModel
-            if not isinstance(self, (LlamaQModel, Qwen2QModel)):
-                raise ValueError(f"rotation only supports: llama/qwen2 model, "
-                                    f"current model is {self.__class__.__name__}")
+            validate_rotation_model_support(self)
 
             # Validate every width rotation will transform before
             # `fuse_layer_norms` mutates the model in place. A width without an
