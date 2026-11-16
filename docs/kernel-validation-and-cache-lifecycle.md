@@ -33,6 +33,55 @@ requires group size 128 and output widths divisible by its 128-column prefill
 tile. The current flow fails during selection, so AUTO can continue to the next
 compatible backend.
 
+### Cached validation failures hold text, not exceptions
+
+`cached_validate_once` caches a kernel's runtime probe for the process. It used
+to cache the exception object `validate_once` returned and call
+`with_traceback(None)` on it (`gptqmodel/nn_modules/qlinear/__init__.py:592-601`
+before #4465). That cleared only the outer traceback. The chained `__cause__`
+kept its frames, and each frame's `f_back` kept every caller, including the
+loader frames that held the model being loaded. A caller that later ran
+`raise err` (`make_quant`, `BaseQuantLinear.__init__`) attached a new traceback
+to the cached object. GGUF had a second root: `gguf_cpp._LLAMA_CPP_IMPORT_ERROR`
+kept the `ModuleNotFoundError` from `import llama_cpp` in a module global
+(`gguf_cpp.py:73`), and `_GGMLBridge._ggml_cuda_error` kept the `ggml-cuda`
+load failure on the bridge singleton (`gguf_cpp.py:289`).
+
+```mermaid
+flowchart TD
+    A["make_quant / validate_quant_linear"] --> B["BaseQuantLinear.validate"]
+    B --> C["cached_validate_once<br/>(_cache_validation_status wrapper)"]
+    C --> D{"status lru_cache hit?"}
+    D -- "no" --> E["cls.validate_once()"]
+    E --> F{"ok?"}
+    F -- "yes" --> G["cache (True, None, None)"]
+    F -- "no: exception" --> H["cache (False, type(exc), str(exc))<br/>exception and its frames are dropped"]
+    D -- "yes" --> I["new_validation_error(type, message)"]
+    G --> I
+    H --> I
+    I --> J["fresh exception per caller,<br/>no __traceback__ / __cause__ / __context__"]
+    E -. "GGUF: _require_llama_cpp" .-> K["_LLAMA_CPP_IMPORT_ERROR = 'ModuleNotFoundError: ...' (text)"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class H,K failure;
+```
+
+`new_validation_error` is the same rebuild `validate_quant_linear` already used
+for its device-aware cache; a type whose constructor rejects one message
+argument becomes `ValueError(message)`. The error text survives, but the chained
+cause does not: the GGUF message now includes the import failure inline
+("GGUFCppKernel requires `llama-cpp-python` to be installed (import failed with
+ModuleNotFoundError: No module named 'llama_cpp').").
+
+| Case | Before | After |
+| --- | --- | --- |
+| Qwen2.5-0.5B GGUF `q4_k_m` load without llama-cpp-python, `del` + `gc.collect()` | 471.2 MiB CUDA still allocated | 0.0 MiB |
+| Raising the returned error, then calling again | same object, now carrying the raiser's traceback | new object without traceback |
+
+`tests/test_cached_validate_once_lifetime_4465.py` holds a weak reference to a
+model in the validating frame and requires it to be collectable after a
+chained failure, after raising the returned error, and after a GGUF probe with
+`llama_cpp` unavailable.
+
 ## Fused CPU training transition
 
 ```mermaid
