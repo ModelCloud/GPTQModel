@@ -352,14 +352,31 @@ def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.
     w = torch.ops.gptqmodel_allspark_hip.allspark_hip_unpack(
         b_qweight, b_scales, n, k, b_qzeros
     )
-    if bias is None:
+    path = _prefill_bias_path(bias, a.dtype)
+    if path == "plain":
         return torch.matmul(a, w)
-    if bias.dtype == a.dtype:
-        # HIP addmm keeps the reduction and the bias in one FP32 epilogue.
+    if path == "addmm":
+        # HIP addmm keeps the reduction and the bias in one FP32 epilogue, so an
+        # activation-dtype bias stays on the half-precision operands.
         return torch.addmm(bias, a, w)
     # A bias wider than the activation dtype must not be narrowed first.
     out = torch.matmul(a.float(), w.float())
     return (out + bias.float()).to(a.dtype)
+
+
+def _prefill_bias_path(bias: torch.Tensor | None, dtype: torch.dtype) -> str:
+    """Bias route for the ``M > ALLSPARK_HIP_MAX_M`` prefill fallback.
+
+    ``"addmm"`` is the half-precision path: the bias already has the activation
+    dtype, so the operands are not widened. ``"fp32"`` is the correctness
+    fallback for a bias that does not fit the activation dtype.
+    """
+
+    if bias is None:
+        return "plain"
+    if bias.dtype == dtype:
+        return "addmm"
+    return "fp32"
 
 
 def allspark_hip_gemm_f32(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor,

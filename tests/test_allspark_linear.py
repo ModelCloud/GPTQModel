@@ -109,7 +109,11 @@ def _fp32_bias_module(dtype: torch.dtype, *, k: int = 4096, n: int = 128,
         bits=8, group_size=-1, desc_act=False, sym=True,
         in_features=k, out_features=n, bias=True, dtype=dtype,
     ).cuda()
-    mod.bias.data.fill_(bias_value)
+    # An FP32 checkpoint bias: post_init() narrows it only when the value is
+    # exactly representable in the activation dtype.
+    mod.register_buffer(
+        "bias", torch.full((n,), bias_value, dtype=torch.float32, device="cuda")
+    )
     mod.to(dtype)
     mod.qweight.data.copy_(qweight.contiguous())
     mod.scales.data.copy_(scale)

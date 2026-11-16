@@ -41,9 +41,14 @@ signature. The kernel reads either an activation-dtype buffer or an FP32 buffer;
 `bias32` selects the latter. The CUDA and HIP packed layouts are otherwise
 unchanged, so no checkpoint or repack bytes change.
 
-An FP32 checkpoint bias also stays FP32 when the module moves to FP16 or BF16:
-each module's `_apply` moves the bias storage without casting its values. The
-loader preserves the same width when it loads a low-precision checkpoint.
+Because the addition happens in FP32, the stored width only has to hold the
+bias exactly. `AllSparkLinear` narrows a checkpoint bias to the activation dtype
+once the values are known (`post_init()` after an accelerate load, or the
+`load_state_dict` hook for a direct load) when the value is exactly representable
+there; that keeps an ordinary biased layer on the half-precision GEMM path. A
+value that is not representable (for example an FP32 `-65536`, which is `-inf`
+as FP16) stays FP32 and takes the FP32 fallback. `_apply` still preserves that
+FP32 width through a dtype move. `AllSparkAwqLinear` keeps the checkpoint width.
 
 ## Where the bias is applied
 
@@ -54,7 +59,7 @@ loader preserves the same width when it loads a low-precision checkpoint.
 | HIP prefill (`M > 16`) | unpack + `torch.matmul`, bias added by the module | unpack + `torch.addmm`, or an FP32 product for a wider stored bias |
 | CUDA fused MMA | `stg` narrowed `C_frag` to `FType`, then the module added the bias | the bias is added to `C_frag` in `stg`, then narrowed once |
 | CUDA non-fused split-K | `f16_gemm_splitk_reduce` narrowed the FP32 sum | the bias is added to the FP32 sum before the cast |
-| CUDA cuBLAS fallback (`M > 1024`) | dequant + `cublasGemmEx` straight into the FP16/BF16 output | biased calls write an FP32 `cublasGemmEx` result and `add_bias_cast_kernel` adds the bias before the cast |
+| CUDA cuBLAS fallback (`M > 1024`) | dequant + `cublasGemmEx` straight into the FP16/BF16 output | an activation-dtype bias uses the cuBLASLt bias epilogue and writes the output once; an FP32 bias keeps the FP32 `cublasGemmEx` result and `add_bias_cast_kernel` before the cast |
 
 The split-K paths keep the per-slice partials unbiased and apply the bias
 exactly once, in the reduction. `C32_ptr` (the diagnostic/test FP32 output)

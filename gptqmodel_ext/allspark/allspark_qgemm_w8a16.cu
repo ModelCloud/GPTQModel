@@ -1,6 +1,7 @@
 #include "allspark_utils.cuh"
 #include <torch/all.h>
 #include <cublas_v2.h>
+#include <cublasLt.h>
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -915,6 +916,64 @@ __global__ void add_bias_cast_kernel(const float* __restrict__ src,
   out[idx] = static_cast<FType>(v);
 }
 
+// cuBLASLt can add the per-column bias in the GEMM epilogue. That keeps the
+// output in the activation dtype and drops the FP32 scratch buffer the plain
+// cuBLAS path needs to preserve the single-rounding guarantee. Returns false
+// when the light API cannot express or run the call, so the caller keeps the
+// FP32 fallback.
+template <typename FT>
+bool w8a16_gemm_dq_cublaslt_bias(const FT* in, const FT* rhs_fdata_ptr,
+                                 const void* bias, FT* out, const int M,
+                                 const int N, const int K,
+                                 cudaStream_t stream) {
+  cublasLtMatmulDesc_t op_desc = nullptr;
+  cublasLtMatrixLayout_t a_desc = nullptr;
+  cublasLtMatrixLayout_t b_desc = nullptr;
+  cublasLtMatrixLayout_t c_desc = nullptr;
+  const cudaDataType_t cuda_type =
+      std::is_same<FT, half>::value ? CUDA_R_16F : CUDA_R_16BF;
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  bool ok = false;
+  do {
+    if (cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F) !=
+        CUBLAS_STATUS_SUCCESS) {
+      break;
+    }
+    const uint32_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+    if (cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_EPILOGUE,
+                                       &epilogue, sizeof(epilogue)) !=
+        CUBLAS_STATUS_SUCCESS) {
+      break;
+    }
+    // Bias type is the output dtype: one value per D row (output channel).
+    if (cublasLtMatmulDescSetAttribute(
+            op_desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(bias)) !=
+        CUBLAS_STATUS_SUCCESS) {
+      break;
+    }
+    // Same column-major view as the cublasGemmEx call below: A = (N, K),
+    // B = (K, M), C = D = (N, M).
+    if (cublasLtMatrixLayoutCreate(&a_desc, cuda_type, N, K, N) !=
+            CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutCreate(&b_desc, cuda_type, K, M, K) !=
+            CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutCreate(&c_desc, cuda_type, N, M, N) !=
+            CUBLAS_STATUS_SUCCESS) {
+      break;
+    }
+    ok = cublasLtMatmul(at::cuda::getCurrentCUDABlasLtHandle(), op_desc, &alpha,
+                        rhs_fdata_ptr, a_desc, in, b_desc, &beta, out, c_desc,
+                        out, c_desc, nullptr, nullptr, 0, stream) ==
+         CUBLAS_STATUS_SUCCESS;
+  } while (false);
+  if (c_desc != nullptr) cublasLtMatrixLayoutDestroy(c_desc);
+  if (b_desc != nullptr) cublasLtMatrixLayoutDestroy(b_desc);
+  if (a_desc != nullptr) cublasLtMatrixLayoutDestroy(a_desc);
+  if (op_desc != nullptr) cublasLtMatmulDescDestroy(op_desc);
+  return ok;
+}
+
 template <typename FT, typename QT>
 void w8a16_gemm_dq_cublas(const FT* in, const QT* rhs_qdata_ptr,
                           const FT* rhs_scales_ptr, const FT* rhs_zeros_ptr,
@@ -950,7 +1009,15 @@ void w8a16_gemm_dq_cublas(const FT* in, const QT* rhs_qdata_ptr,
                               CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     return;
   }
-  // Biased: keep the cuBLAS result in FP32, add the bias there, cast once.
+  // A bias in the activation dtype keeps the whole call in that dtype: the
+  // light API adds it to the FP32 epilogue and rounds the output once.
+  if (bias32 == 0 &&
+      w8a16_gemm_dq_cublaslt_bias<FT>(in, rhs_fdata_ptr, bias, out, M, N, K,
+                                      stream)) {
+    return;
+  }
+  // FP32 bias (or a light-API miss): keep the cuBLAS result in FP32, add the
+  // bias there, cast once.
   auto wide = torch::empty(
       {static_cast<int64_t>(M), static_cast<int64_t>(N)},
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));

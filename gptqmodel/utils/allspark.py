@@ -75,7 +75,8 @@ _ALLSPARK_EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("allspark"),
     display_name="AllSpark W8A16",
     extra_cuda_cflags=_allspark_cuda_cflags,
-    extra_ldflags=lambda: ["-lcublas"],
+    # cuBLASLt supplies the fused bias epilogue used by the large-M fallback.
+    extra_ldflags=lambda: ["-lcublas", "-lcublasLt"],
     force_rebuild_env="GPTQMODEL_ALLSPARK_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,

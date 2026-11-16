@@ -47,10 +47,31 @@ from ...utils.allspark_hip import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._numerics import bias_narrows_losslessly
 from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+def _bias_storage_dtype(bias: torch.Tensor, dtype: torch.dtype) -> torch.dtype:
+    """Storage dtype for a bias the fused GEMM adds in its FP32 epilogue.
+
+    The kernel adds the bias to the FP32 accumulator before the single cast to
+    the activation dtype, so the *storage* dtype only has to hold the bias
+    exactly. A bias that round-trips through ``dtype`` unchanged stays in the
+    activation dtype and keeps the layer on the half-precision GEMM path; one
+    that does not (for example an FP32 -65536, which is -inf as FP16) stays
+    FP32 and takes the FP32 fallback instead of being narrowed.
+    """
+
+    if bias.dtype == dtype:
+        return dtype
+    if bias.device.type == "meta":
+        return torch.float32
+    if bias.is_floating_point() and bias_narrows_losslessly(bias, dtype):
+        return dtype
+    return torch.float32
 
 
 class AllSparkLinear(GPTQQuantLinear):
@@ -156,12 +177,12 @@ class AllSparkLinear(GPTQQuantLinear):
             ),
         )
         if bias:
-            # Keep the checkpoint width. The kernel adds the bias to its FP32
-            # accumulator, so a value outside the activation dtype's finite
-            # range (an FP32 -65536 is -inf as FP16) must not be narrowed here;
-            # the loader preserves this buffer through an FP16/BF16 load.
+            # The zero bias is exact in the activation dtype, so start on the
+            # half-precision path. A checkpoint value that is not exactly
+            # representable there is widened to FP32 by the load hook below (or
+            # by post_init for a loader that bypasses ``load_state_dict``).
             self.register_buffer(
-                "bias", torch.zeros((out_features), dtype=torch.float32)
+                "bias", torch.zeros((out_features), dtype=self.compute_dtype)
             )
         else:
             self.bias = None
@@ -170,7 +191,7 @@ class AllSparkLinear(GPTQQuantLinear):
         self._packed_key = None
 
     def _apply(self, fn, recurse=True):
-        """Move an FP32 checkpoint bias without narrowing its stored values."""
+        """Move an FP32 fallback bias without narrowing its stored values."""
         bias = self.bias
         if bias is None or bias.dtype != torch.float32:
             return super()._apply(fn, recurse=recurse)
@@ -182,9 +203,49 @@ class AllSparkLinear(GPTQQuantLinear):
 
         return super()._apply(preserve_bias_width, recurse=recurse)
 
+    def _adopt_bias_storage_dtype(self, incoming: torch.Tensor) -> None:
+        """Resize the bias buffer to the width the incoming values need.
+
+        Runs before ``_load_from_state_dict`` copies, so a non-representable
+        checkpoint bias is widened to FP32 instead of being silently narrowed
+        to infinity by the copy.
+        """
+        current = self._buffers.get("bias")
+        if current is None:
+            return
+        target = _bias_storage_dtype(incoming, self.compute_dtype)
+        if current.dtype == target:
+            return
+        device = incoming.device if current.device.type == "meta" else current.device
+        self.register_buffer("bias", torch.empty(incoming.shape, dtype=target, device=device))
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        state_dict = args[0] if args else kwargs.get("state_dict")
+        prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
+        if state_dict is not None:
+            incoming = state_dict.get(f"{prefix}bias")
+            if isinstance(incoming, torch.Tensor):
+                self._adopt_bias_storage_dtype(incoming)
+        super()._load_from_state_dict(*args, **kwargs)
+
+    @torch.no_grad()
+    def _narrow_bias_if_lossless(self) -> None:
+        """Move an exactly-representable FP32 bias back onto the half path.
+
+        A model loader may keep every checkpoint bias FP32 while it casts the
+        model dtype. This narrows that buffer once the values are known, which
+        is what keeps an ordinary biased layer on the half-precision GEMM path.
+        """
+        bias = self.bias
+        if bias is None or bias.dtype == self.compute_dtype:
+            return
+        if _bias_storage_dtype(bias, self.compute_dtype) == self.compute_dtype:
+            self.register_buffer("bias", bias.to(self.compute_dtype))
+
     @torch.no_grad()
     def post_init(self):
         """Build (or refresh) the kernel-layout cache from the checkpoint tensors."""
+        self._narrow_bias_if_lossless()
         self._ensure_repacked()
 
     def _source_key(self):
@@ -218,6 +279,10 @@ class AllSparkLinear(GPTQQuantLinear):
         key = self._source_key()
         if self._repacked and self._packed_key == key:
             return
+        # A loader that assigns buffers directly (accelerate) never calls
+        # ``load_state_dict``; normalize the bias width on the first repack so
+        # those layers also leave the FP32 fallback.
+        self._narrow_bias_if_lossless()
         self._repack(key)
 
     @torch.no_grad()
