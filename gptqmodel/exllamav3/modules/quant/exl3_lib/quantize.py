@@ -456,7 +456,13 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
 
     # Fall back on CPU factorization
     except Exception as e:
-        if e.__class__.__name__ == "OutOfMemoryError" or "CUDA out of memory" in str(e) or "HIP out of memory" in str(e):
+        # Reuse GPTQ's allocation classifier so cuSOLVER/hipSOLVER
+        # ``*SOLVER_STATUS_ALLOC_FAILED`` errors (a failed workspace/handle
+        # allocation, not an "out of memory" phrase) also retry on CPU instead
+        # of aborting the run (issue #4400).
+        from .....quantization.gptq import _is_memory_allocation_failure
+
+        if _is_memory_allocation_failure(e):
             retry_cpu = True
         else:
             raise e
@@ -478,7 +484,16 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
     # D = DL @ DL.transpose(1, 2)
 
     # Invert each diagonal block
-    DL = torch.linalg.inv(DL)
+    try:
+        DL = torch.linalg.inv(DL)
+    except Exception as e:
+        from .....quantization.gptq import _is_memory_allocation_failure
+
+        if not _is_memory_allocation_failure(e):
+            raise
+        # The diagonal blocks are tiny; a solver handle allocation failure
+        # here should not abort the run either.
+        DL = torch.linalg.inv(DL.cpu()).to(device=DL.device)
 
     # Multiply each block's column with its inverse
     L = L.view(n, m, b)
