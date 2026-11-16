@@ -67,6 +67,7 @@ from ..utils.model import (
 from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
+    is_meta_module,
     offload_to_disk,
     release_private_offload_root,
     restore_offloaded_modules,
@@ -892,6 +893,53 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._offloaded_base_modules = []
         restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
 
+    def _materialize_meta_base_modules(self, *, strict: bool) -> None:
+        """Fill base modules that the lazy shell never materialized.
+
+        Weight-only methods load the model as a checkpoint-backed meta shell.
+        ``embed_tokens``/``norm``/``rotary_emb`` are already on meta before the
+        offload step, so ``capture_offloaded_base_modules`` records nothing for
+        them and the restore path cannot bring them back. Materialize those
+        modules from the turtle source after the loop, or fail with the
+        reload-the-checkpoint guidance instead of returning an unusable model.
+        """
+
+        model = self.gptq_model.model
+        get_base_modules = getattr(self.gptq_model, "get_base_modules", None)
+        if not callable(get_base_modules):
+            return
+        unresolved: List[str] = []
+        for name in get_base_modules(model=model):
+            module = get_module(model, name)
+            if module is None or not is_meta_module(module):
+                continue
+            if getattr(module, "QUANT_TYPE", None) is not None:
+                # Packed modules own their quantized payload; never overwrite
+                # it with the dense checkpoint tensor.
+                continue
+            try:
+                self.gptq_model.shell_module_materialize(
+                    target_submodule=module,
+                    device=CPU,
+                    module_path=name,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warn("Weight-only: failed to materialize base module `%s`: %s", name, exc)
+            if is_meta_module(module):
+                unresolved.append(name)
+
+        if not unresolved:
+            return
+
+        message = (
+            "Weight-only quantization: base modules remain on the meta device after "
+            f"quantization ({', '.join(unresolved)}). The in-session model cannot run "
+            "inference; reload the saved checkpoint before using it."
+        )
+        if strict:
+            raise RuntimeError(message)
+        log.error(message)
+
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
 
@@ -907,6 +955,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 release_private_offload_root(self.gptq_model)
             raise
         self._restore_offloaded_base_modules(strict=True)
+        self._materialize_meta_base_modules(strict=True)
         return result
 
     def _loop_impl(self, **kwargs):
