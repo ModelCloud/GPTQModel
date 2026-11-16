@@ -338,7 +338,7 @@ graph. All of them are now in `FAMILY_MODEL_TYPES`:
 | `gpt_pangu` | `mlp: ("c_fc:0", "c_proj:1")`; the last block's `ln_1` group contained `attn.q_proj` | `c_fc:0:nosrc`; `awq_get_modules_for_scaling` drops the top-query block's `q_proj` | GELU fold 4.5e-2 -> dropped; `ln_1 -> q_proj` 3.4e-3 -> `q_proj` excluded, remaining k/v group 1.2e-8 |
 | `olmo_hybrid` | one static tree; `post_attention_layernorm` was a gain source on every layer | `awq_post_norm_modules(layer)` adds it on the full-attention layer only | 3.6e-1 -> group dropped on attention layers; linear-attention fold stays exact (1.6e-8) |
 | `gemma4`, `gemma4_unified` | composite/unified trees kept `v_proj:0` and `post_feedforward_layernorm:!` | copied `v_proj:0:in=x:nosrc` and `:postnorm` from the text tree; `post_per_layer_input_norm` is `:postnorm` too | `v_proj -> o_proj` 1.9e-1 -> dropped; `post_feedforward_layernorm -> per_layer_input_gate` 2.4e-1 -> dropped; `post_per_layer_input_norm -> per_layer_projection` 2.2e-1 -> dropped |
-| `nemotron_h` | `mixer.up_proj` fed `down_proj` | `up_proj:3:nosrc` | `relu(x)^2` fold 2.2e-2 -> dropped |
+| `nemotron_h`, `nemotronh_nano_omni_reasoning_v3` | `mixer.up_proj` fed `down_proj`; the routed and shared expert MLPs repeated the same fold | `up_proj:3:nosrc`, plus `mixer.shared_experts.up_proj:nosrc` and `mixer.experts.#.up_proj:nosrc` | `relu(x)^2` folds measured up to 8.7e-3 per expert -> dropped; the block input norm remains the only source, and only one gain norm feeds routed + shared experts |
 
 Every family listed in `FAMILY_MODEL_TYPES` is covered by the
 output-preservation invariant: folding a random scale into each group must
@@ -575,6 +575,7 @@ Issue #4121 item coverage:
 | Test | Invariant |
 | --- | --- |
 | `tests/test_awq_scaling_groups.py` (`gpt_pangu`, `olmo_hybrid`, `gemma4`, `gemma4_unified`, `nemotron_h`) | fold preserves the decoder layer's logits to `1e-5` relative |
+| `tests/module_tree/test_nemotron_h_model_tree.py` | the Omni definition shares the Nemotron-H declaration, and its fold preserves the real remote decoder layer to `1e-5` relative |
 | `tests/test_awq_vl_rotary_resolution.py` | `_get_root_rotary` finds `model.language_model.rotary_emb`, never the vision tower, ignores per-layer rotaries, and `_prepare_module_forward` rebuilds cos/sin for a nested rotary; tiny Qwen2-VL quantizes with AWQ and GPTQ |
 
 ### Real-checkpoint CPU CI

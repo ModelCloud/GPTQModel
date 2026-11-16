@@ -548,10 +548,12 @@ def test_routed_and_shared_experts_share_one_group(family):
         # nonlinearity. `olmo_hybrid` is absent on purpose: its
         # `post_attention_layernorm` is a valid source on linear-attention
         # layers, so only the per-layer fold invariant can pin it.
+        # Issue #4355: the routed and shared expert MLPs are the same `relu2`
+        # network as `mixer.up_proj`, so neither may be a fold source.
         ("gemma4", ["self_attn.v_proj", "post_feedforward_layernorm", "post_per_layer_input_norm"]),
         ("gemma4_unified", ["self_attn.v_proj", "post_feedforward_layernorm"]),
         ("gpt_pangu", ["mlp.c_fc"]),
-        ("nemotron_h", ["mixer.up_proj"]),
+        ("nemotron_h", ["mixer.up_proj", "mixer.shared_experts.up_proj", "mixer.experts.0.up_proj"]),
         ("falcon", ["mlp.dense_h_to_4h"]),
         ("falcon_h1", ["mamba.in_proj"]),
     ],
