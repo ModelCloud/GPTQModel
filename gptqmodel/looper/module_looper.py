@@ -203,6 +203,25 @@ def _config_declares_tied_embeddings(config) -> bool:
     return False
 
 
+def publish_quant_log(model: BaseQModel, processors: List[LoopProcessor]) -> None:
+    """Publish the per-module log recorded by the processor chain.
+
+    Every processor owns a ``log`` list. The primary quantization processor is
+    the earliest one in the chain that recorded rows; auxiliary processors
+    (native capture, preprocessors, EoRA) may append their own rows after it.
+    Selecting the first non-empty log keeps the primary method's rows
+    authoritative, and an empty log never clobbers a populated one.
+
+    This is structural rather than an allow-list: any present or future method
+    that records per-module rows (FOEM, QQQ, VPTQ, ParoQuant, FP8-GSQ, RTN, ...)
+    is exported without editing a hardcoded processor-name list.
+    """
+    for processor in processors:
+        if processor.log:
+            model.quant_log = processor.log
+            return
+
+
 class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
@@ -2151,6 +2170,11 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # torch_sync()
         # torch_sync(device=CPU)
 
+        # Publish whichever processor recorded per-module rows. This replaced a
+        # hardcoded processor-name allow-list that silently skipped methods such
+        # as FOEM, QQQ, VPTQ, ParoQuant and FP8-GSQ (#4321).
+        publish_quant_log(self.gptq_model, self.processors)
+
         total_log = {}
         reversed_processors = list(reversed(self.processors))
 
@@ -2179,8 +2203,6 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     len(reverse_p.log),
                 )
                 total_log[processor_name] = reverse_p.log
-                if processor_name in ["gptq", "gptaq", "awq", "exl3", "macaq"]:
-                    self.gptq_model.quant_log = reverse_p.log
 
                 if emit_finalize_records:
                     for module_log in reverse_p.log:
