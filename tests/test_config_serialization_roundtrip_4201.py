@@ -156,6 +156,29 @@ def test_factory_lifts_meta_calibration_settings():
     assert restored.gptaq.alpha == pytest.approx(0.5)
 
 
+def test_true_sequential_false_round_trips_through_both_reload_paths():
+    """#4382: `true_sequential=False` must not reload as the class default."""
+
+    config = GPTQConfig(bits=4, true_sequential=False)
+
+    payload = config.to_dict()
+
+    assert payload["meta"]["true_sequential"] is False
+    assert QuantizeConfig(**payload).true_sequential is False
+    assert QuantizeConfig.from_quant_config(payload).true_sequential is False
+
+
+def test_true_sequential_default_true_round_trips_through_both_reload_paths():
+    config = GPTQConfig(bits=4)
+    assert config.true_sequential is True
+
+    payload = config.to_dict()
+
+    assert payload["meta"]["true_sequential"] is True
+    assert QuantizeConfig(**payload).true_sequential is True
+    assert QuantizeConfig.from_quant_config(payload).true_sequential is True
+
+
 def test_factory_keeps_an_explicitly_disabled_fallback():
     restored = QuantizeConfig(**AWQConfig(bits=4, fallback=None).to_dict())
 
