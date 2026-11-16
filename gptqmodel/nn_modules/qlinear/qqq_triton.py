@@ -15,10 +15,15 @@ def _quantize_rows(X, Q, S, K: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, BLOCK)
     values = tl.load(X + row * K + columns, columns < K, other=0).to(tl.float32)
+    # `tl.max` ignores NaN, so a NaN element leaves the scale finite and the
+    # clamp below folds the NaN code into a finite int8. Poison the row scale
+    # instead: int8 codes cannot hold NaN, and the scale reaches the output.
+    row_has_nan = tl.max((values != values).to(tl.int32), 0) > 0
     # Match Torch's scalar division: multiply by the FP32 reciprocal of 127.
     # Replacing this with div.rn changes codes at exact half-step boundaries.
     scale = tl.max(tl.abs(values), 0) * (1.0 / 127.0)
     scale = tl.where(scale == 0, 1.0, scale)
+    scale = tl.where(row_has_nan, float("nan"), scale)
     codes = libdevice.nearbyint(tl.div_rn(values, scale))
     codes = tl.minimum(tl.maximum(codes, -128.0), 127.0).to(tl.int8)
     tl.store(Q + row * K + columns, codes, columns < K)
