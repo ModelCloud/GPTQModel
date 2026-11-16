@@ -89,6 +89,7 @@ _OPTIONAL_MIN_INT_FIELDS = {
     "cpu_workers": 1,
     "cuda_workers": 1,
     "max_packers": 1,
+    "pool_intraop_threads": 0,
 }
 
 _MIN_FLOAT_FIELDS = {
@@ -242,6 +243,9 @@ class KernelConfig:
     cpu_workers: Optional[int] = None
     cuda_workers: Optional[int] = None
     max_packers: Optional[int] = None
+    # Torch intra-op pool size for each device-pool worker. ``None`` splits the
+    # process pool across the pool's workers; ``0`` keeps the inherited pool.
+    pool_intraop_threads: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name in _BOOL_FIELDS:

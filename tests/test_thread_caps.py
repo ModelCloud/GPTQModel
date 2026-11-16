@@ -131,3 +131,116 @@ def test_helper_explicit_argument_wins_without_overwriting_environment():
     result = _run_python(code, {"OMP_NUM_THREADS": "5"})
 
     assert result.stdout.strip().splitlines()[-3:] == ["2", "2", "5"]
+
+
+# The device pool multiplies Torch's intra-op pool by its worker count unless
+# every worker is told its own budget: 12 CPU workers on a 320-CPU host held
+# 2538 OS threads (#4356). These tests pin the pool contract, not the host's
+# CPU count.
+
+
+def test_pool_workers_get_split_intraop_budget():
+    from gptqmodel.utils.threadx import split_intraop_threads
+
+    assert split_intraop_threads(1, 8) == 8
+    assert split_intraop_threads(8, 8) == 1
+    # More workers than the budget still yields a usable team per worker.
+    assert split_intraop_threads(64, 8) == 1
+    assert split_intraop_threads(3, 8) == 2
+
+
+def test_device_thread_pool_workers_cap_their_own_intraop_team():
+    code = (
+        "import torch\n"
+        "from gptqmodel.utils.threadx import DeviceThreadPool\n"
+        "torch.set_num_threads(8)\n"
+        "pool = DeviceThreadPool(\n"
+        "    devices=[torch.device('cpu')], include_cuda=False, include_xpu=False,\n"
+        "    include_npu=False, include_mps=False, workers={'cpu': 4},\n"
+        "    empty_cache_every_n=0,\n"
+        ")\n"
+        "seen = []\n"
+        "futures = [\n"
+        "    pool.submit(torch.device('cpu'), lambda: seen.append(torch.get_num_threads()))\n"
+        "    for _ in range(8)\n"
+        "]\n"
+        "[future.result(timeout=60) for future in futures]\n"
+        "pool.shutdown(wait=True)\n"
+        "print(f'RESULT workers {min(seen)} {max(seen)}')\n"
+        "print(f'RESULT caller {torch.get_num_threads()}')\n"
+    )
+    result = _run_python(code, {})
+    values = {
+        line.split()[1]: tuple(int(part) for part in line.split()[2:])
+        for line in result.stdout.splitlines()
+        if line.startswith("RESULT ")
+    }
+
+    # 8 threads split over 4 workers.
+    assert values["workers"] == (2, 2)
+    # The worker's thread-local change must not touch the caller's pool.
+    assert values["caller"] == (8,)
+
+
+def test_device_thread_pool_explicit_worker_intraop_override():
+    code = (
+        "import torch\n"
+        "from gptqmodel.utils.threadx import DeviceThreadPool\n"
+        "torch.set_num_threads(8)\n"
+        "pool = DeviceThreadPool(\n"
+        "    devices=[torch.device('cpu')], include_cuda=False, include_xpu=False,\n"
+        "    include_npu=False, include_mps=False, workers={'cpu': 2},\n"
+        "    intraop_threads_per_worker=1, empty_cache_every_n=0,\n"
+        ")\n"
+        "seen = []\n"
+        "future = pool.submit(torch.device('cpu'), lambda: seen.append(torch.get_num_threads()))\n"
+        "future.result(timeout=60)\n"
+        "pool.shutdown(wait=True)\n"
+        "print(f'RESULT {seen[0]}')\n"
+    )
+    result = _run_python(code, {})
+
+    assert "RESULT 1" in result.stdout.splitlines()
+
+
+def test_kernel_config_pool_intraop_threads_drives_the_default_pool():
+    from gptqmodel import _build_device_thread_pool
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel, reset_kernel_config
+
+    try:
+        configure_kernel(KernelConfig(pool_intraop_threads=3))
+        pool = _build_device_thread_pool(warmup_devices=[])
+        try:
+            assert pool._intraop_threads_per_worker == 3
+        finally:
+            pool.shutdown(wait=True)
+
+        configure_kernel(KernelConfig(pool_intraop_threads=0))
+        pool = _build_device_thread_pool(warmup_devices=[])
+        try:
+            assert pool._intraop_threads_per_worker is None
+        finally:
+            pool.shutdown(wait=True)
+    finally:
+        reset_kernel_config()
+
+
+def test_device_thread_pool_can_keep_the_caller_intraop_pool():
+    code = (
+        "import torch\n"
+        "from gptqmodel.utils.threadx import DeviceThreadPool\n"
+        "torch.set_num_threads(3)\n"
+        "pool = DeviceThreadPool(\n"
+        "    devices=[torch.device('cpu')], include_cuda=False, include_xpu=False,\n"
+        "    include_npu=False, include_mps=False, workers={'cpu': 2},\n"
+        "    intraop_threads_per_worker=0, empty_cache_every_n=0,\n"
+        ")\n"
+        "seen = []\n"
+        "future = pool.submit(torch.device('cpu'), lambda: seen.append(torch.get_num_threads()))\n"
+        "future.result(timeout=60)\n"
+        "pool.shutdown(wait=True)\n"
+        "print(f'RESULT {seen[0]}')\n"
+    )
+    result = _run_python(code, {})
+
+    assert "RESULT 3" in result.stdout.splitlines()
