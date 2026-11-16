@@ -5608,6 +5608,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
+        # Calibration ordering is a real config field. Without it a serialized
+        # payload reloads with the class default (`True`), silently changing
+        # quantization order; the writer records the same key in `meta`.
+        meta_payload[META_FIELD_TRUE_SEQUENTIAL] = self.true_sequential
         meta_payload["dense_vram_strategy"] = (
             self.dense_vram_strategy.value
             if isinstance(self.dense_vram_strategy, VramStrategy)
