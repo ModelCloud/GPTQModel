@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-import gptqmodel.nn_modules.qlinear as qlinear_module
+from gptqmodel.nn_modules import qlinear as qlinear_module
 from gptqmodel.nn_modules.qlinear import _pack_gpu_block_in
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.packing import _normalize_pack_impl
