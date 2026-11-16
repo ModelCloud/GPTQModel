@@ -585,18 +585,22 @@ def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None
             if target_dtype is None:
                 target_dtype = resolve_dequantize_dtype(model, module, dtype)
             # Create a new Linear layer with dequantized weights
+            # Keep the quantized module's device; the shell is built on meta
+            # because both parameters are replaced below.
+            device = module.qweight.device
             new_module = nn.Linear(
                 module.in_features,
                 module.out_features,
                 bias=module.bias is not None,
+                device="meta",
             )
             new_module.weight = nn.Parameter(
-                module.dequantize_weight().T.detach().to("cpu", target_dtype)
+                module.dequantize_weight().T.detach().to(device, target_dtype)
             )
             # ``nn.Parameter(None)`` is a shape-[0] tensor, not an absent
             # bias. Every bias-less layer then failed in forward.
             new_module.bias = (
-                nn.Parameter(module.bias.detach().to("cpu", target_dtype))
+                nn.Parameter(module.bias.detach().to(device, target_dtype))
                 if module.bias is not None
                 else None
             )

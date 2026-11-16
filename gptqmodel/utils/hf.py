@@ -961,48 +961,51 @@ def _checkpoint_config_payload(model_id_or_path: str) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
-@lru_cache(maxsize=None)
-def _checkpoint_remote_layout_overrides_native(
-    model_id_or_path: str,
-    native_model_cls_name: Optional[str],
-) -> tuple[bool, Optional[str]]:
-    """Whether a checkpoint's own model code declares a non-native layout.
+# Config fields that select a model layout the installed native Transformers
+# class cannot represent, keyed by checkpoint ``model_type``. A remote
+# ``auto_map`` class name is not a layout signal: remote and native classes for
+# the same architecture are routinely spelled differently (``PhiMoEForCausalLM``
+# vs ``PhimoeForCausalLM``, ``MPTForCausalLM`` vs ``MptForCausalLM``,
+# ``MiniMaxM2ForCausalLM`` vs ``MiniMaxForCausalLM``) and native conversion
+# mappings rename checkpoint keys such as ``attention.*`` -> ``self_attn.*``.
+_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS: dict[str, tuple[str, ...]] = {
+    # Ling-2.6-flash (#4373): the remote MLA branch owns `q_a_proj` /
+    # `q_a_layernorm` / `q_b_proj`. Native `BailingHybridAttention` only has a
+    # dense `q_proj`, and `BailingHybridConfig` deletes `q_lora_rank`.
+    "bailing_hybrid": ("q_lora_rank",),
+}
 
-    ``model_type`` alone cannot distinguish two checkpoints that share a
-    native config type. Ling-2.6-flash declares ``bailing_hybrid`` but ships
-    its own ``BailingMoeV2_5ForCausalLM`` (``attention.query_key_value`` /
-    ``attention.g_proj`` and, when ``q_lora_rank`` is set, MLA projections),
-    while the installed transformers ``BailingHybridForCausalLM`` keeps
-    ``self_attn`` and has no ``q_lora_rank``. Honour the caller's explicit
-    trust only when the checkpoint's ``auto_map`` names a different model class
-    (or carries the remote-only MLA marker); a checkpoint whose ``auto_map``
-    points at the installed native class still loads natively.
+
+@lru_cache(maxsize=None)
+def _checkpoint_remote_layout_marker(model_id_or_path: str) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(marker, remote_class_name)`` for a checkpoint's remote model code.
+
+    ``marker`` is the ``config.json`` field from
+    ``_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS`` that the checkpoint sets, or ``None``
+    when the installed native class can load the checkpoint. A marker counts
+    only when the checkpoint also ships ``auto_map.AutoModelForCausalLM``;
+    without remote model code there is nothing to keep trust for.
     """
 
     payload = _checkpoint_config_payload(model_id_or_path)
     if payload is None:
-        return False, None
+        return None, None
 
     auto_map = payload.get("auto_map")
     if not isinstance(auto_map, dict):
-        return False, None
+        return None, None
 
     remote_class_ref = auto_map.get("AutoModelForCausalLM")
     if not isinstance(remote_class_ref, str) or not remote_class_ref:
-        return False, None
+        return None, None
 
     remote_class_name = remote_class_ref.rsplit(".", 1)[-1]
-    if native_model_cls_name is not None and remote_class_name != native_model_cls_name:
-        return True, remote_class_name
-
-    # A same-named remote class can still own a different layout. The remote
-    # `bailing_hybrid` MLA branch is the case this guard exists for; the native
-    # config has no `q_lora_rank` field at all.
     model_type = str(payload.get("model_type") or "").lower()
-    if model_type == "bailing_hybrid" and payload.get("q_lora_rank"):
-        return True, remote_class_name
+    for marker in _REMOTE_ONLY_LAYOUT_CONFIG_MARKERS.get(model_type, ()):
+        if payload.get(marker):
+            return marker, remote_class_name
 
-    return False, remote_class_name
+    return None, remote_class_name
 
 
 def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
@@ -1017,15 +1020,14 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
     if not native_supported:
         return True
 
-    remote_layout, remote_model_cls_name = _checkpoint_remote_layout_overrides_native(
-        str(model_id_or_path), model_cls_name
-    )
-    if remote_layout:
+    remote_layout_marker, remote_model_cls_name = _checkpoint_remote_layout_marker(str(model_id_or_path))
+    if remote_layout_marker is not None:
         log_key = (str(model_id_or_path), remote_model_cls_name or "unknown", model_cls_name or "unknown")
         if log_key not in _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED:
             log.info(
-                "HF: keeping trust_remote_code=True for `%s` because the checkpoint ships remote model code `%s` whose layout differs from native `%s`.",
+                "HF: keeping trust_remote_code=True for `%s` because config field `%s` selects a layout of remote model code `%s` that native `%s` cannot load.",
                 model_id_or_path,
+                remote_layout_marker,
                 remote_model_cls_name or "unknown",
                 model_cls_name or "unknown",
             )

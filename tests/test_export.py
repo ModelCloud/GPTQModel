@@ -175,8 +175,8 @@ def test_export_hf_quantized_embeddings_and_dynamic_bits(tmp_path, bits, lm_head
 
     with safe_open(str(out / "model.safetensors"), framework="pt") as reader:
         for key, oracle in expected.items():
-            # Export writes the model dtype (bf16 by default), so compare at
-            # bf16 rounding precision rather than fp64 bit equality.
+            # Export writes the checkpoint dtype (float32 for this fixture);
+            # keep the tolerance loose enough for half-precision checkpoints.
             torch.testing.assert_close(
                 reader.get_tensor(key).to(torch.float64), oracle, rtol=1e-2, atol=2e-2
             )

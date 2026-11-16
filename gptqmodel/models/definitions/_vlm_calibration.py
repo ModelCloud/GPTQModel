@@ -12,14 +12,18 @@ base text path for pre-tokenized rows instead of handing token ids to
 ``processor.apply_chat_template`` (issue #4228).
 
 The base text path keeps only ``input_ids``/``attention_mask``. A row that also
-carries multimodal tensors (``pixel_values``, ``image_grid_thw``, ...) cannot use
+carries multimodal inputs (``pixel_values``, ``image_grid_thw``, ...) cannot use
 that path without silently dropping them, so the splitter rejects it with an
-actionable error instead of routing it to either path (issue #4371).
+actionable error instead of routing it to either path (issue #4371). Scalar or
+string metadata columns that ``datasets.map(tokenize)`` keeps (``id``, ``url``,
+``source``, ...) are not model inputs, so they do not block the text path
+(issue #4455).
 """
 
 from __future__ import annotations
 
 import itertools
+import numbers
 import random
 from collections.abc import Mapping
 from typing import Any, Iterable, Optional
@@ -40,8 +44,9 @@ log = setup_logger()
 
 _MISSING = object()
 
-# Columns the base text path can consume or safely ignore. Anything else may
-# carry multimodal model inputs and must not be dropped silently.
+# Columns the base text path can consume or safely ignore. Any other column must
+# hold plain metadata (see `_is_metadata_value`); it may otherwise carry
+# multimodal model inputs that must not be dropped silently.
 _TEXT_ONLY_COLUMNS = frozenset(
     {
         "input_ids",
@@ -59,10 +64,73 @@ _TEXT_ONLY_COLUMNS = frozenset(
 )
 
 
-def _non_text_columns(sample: Mapping) -> list[str]:
-    """Return mapping columns the text calibration path cannot consume."""
+# Column-name parts that identify multimodal model inputs or references to
+# them (``pixel_values``, ``image_grid_thw``, ``video_grid_thw``, ``image_url``,
+# ``input_features``, ...). Such a column is rejected even when it holds a
+# string or scalar: a path, URL or size for an image is still an image input.
+_MULTIMODAL_COLUMN_NAME_PARTS = frozenset(
+    {
+        "pixel",
+        "pixels",
+        "image",
+        "images",
+        "img",
+        "video",
+        "videos",
+        "audio",
+        "audios",
+        "vision",
+        "visual",
+        "thw",
+        "features",
+    }
+)
 
-    return [str(name) for name in sample if name not in _TEXT_ONLY_COLUMNS]
+
+def _is_multimodal_column_name(name: Any) -> bool:
+    parts = str(name).lower().replace("-", "_").split("_")
+    return any(part in _MULTIMODAL_COLUMN_NAME_PARTS for part in parts)
+
+
+def _is_metadata_value(value: Any) -> bool:
+    """Return whether ``value`` is plain row metadata, not a model input.
+
+    Scalars (``None``, bool, numbers, strings) and flat string lists are
+    metadata. Tensors, arrays, numeric sequences, bytes, mappings and any other
+    object may hold multimodal inputs and are not.
+    """
+
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, np.generic):
+        return value.ndim == 0
+    if isinstance(value, numbers.Number):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(item, str) for item in value)
+    return False
+
+
+def _non_text_columns(sample: Mapping, *, columnar: bool = False) -> list[str]:
+    """Return mapping columns the text calibration path would drop as model inputs.
+
+    ``columnar`` checks every row value of a column-major mapping.
+    """
+
+    columns = []
+    for name, value in sample.items():
+        if name in _TEXT_ONLY_COLUMNS:
+            continue
+        if _is_multimodal_column_name(name):
+            columns.append(str(name))
+            continue
+        if columnar and isinstance(value, (list, tuple)):
+            is_metadata = all(_is_metadata_value(item) for item in value)
+        else:
+            is_metadata = _is_metadata_value(value)
+        if not is_metadata:
+            columns.append(str(name))
+    return columns
 
 
 def _raise_non_text_columns(columns: list[str], *, label: str) -> None:
@@ -102,7 +170,7 @@ def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
         return []
     if _is_columnar_mapping(calibration_dataset):
         if "input_ids" in calibration_dataset:
-            columns = _non_text_columns(calibration_dataset)
+            columns = _non_text_columns(calibration_dataset, columnar=True)
             if columns:
                 _raise_non_text_columns(columns, label=label)
         return _columnar_mapping_examples(calibration_dataset)

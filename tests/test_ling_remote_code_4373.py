@@ -30,7 +30,7 @@ def _clear_layout_caches() -> None:
     for name in (
         "_detect_native_transformers_causallm_support",
         "_checkpoint_config_payload",
-        "_checkpoint_remote_layout_overrides_native",
+        "_checkpoint_remote_layout_marker",
     ):
         cached = getattr(hf_utils, name, None)
         if cached is not None and hasattr(cached, "cache_clear"):
@@ -118,6 +118,8 @@ def test_bailing_hybrid_remote_code_layout_respects_explicit_trust(tmp_path):
             "num_hidden_layers": 1,
             "num_attention_heads": 1,
             "num_key_value_heads": 1,
+            # Ling-2.6-flash sets `q_lora_rank=1536`: the remote MLA layout.
+            "q_lora_rank": 8,
             "vocab_size": 8,
         },
     )
@@ -136,7 +138,7 @@ def test_bailing_hybrid_remote_code_layout_stays_off_without_trust(tmp_path):
                 "AutoModelForCausalLM": "modeling_bailing_moe_v2_5.BailingMoeV2_5ForCausalLM",
             },
             "hidden_size": 8,
-            # No `q_lora_rank`: the remote class name is the layout signal here.
+            "q_lora_rank": 8,
             "vocab_size": 8,
         },
     )

@@ -41,6 +41,50 @@ Both loader entry points pass the caller's value: `from_quantized` at
 (`gptqmodel/utils/hf.py:1723`) now returns after the RoPE backfill when trust is
 off, instead of enabling remote-code shims because `auto_map` exists.
 
+## Native override of explicit trust
+
+Explicit `trust_remote_code=True` is still overridden to `False` when the
+installed Transformers implements the checkpoint's `model_type`: the GPT-QModel
+definitions are written for the native module tree, and stale remote modeling
+files often fail to import. `resolve_trust_remote_code()`
+(`gptqmodel/utils/hf.py:1011`) keeps the caller's trust only when the
+checkpoint config sets a declared remote-only layout marker.
+`_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS` (`gptqmodel/utils/hf.py:971`) holds those
+markers per `model_type`; `_checkpoint_remote_layout_marker()`
+(`gptqmodel/utils/hf.py:980`) reads the raw `config.json` without importing
+snapshot code and requires `auto_map.AutoModelForCausalLM`.
+
+```mermaid
+flowchart TD
+    A["resolve_trust_remote_code(path, trust_remote_code)"] --> B{"trust_remote_code?"}
+    B -- "False" --> F["False"]
+    B -- "True" --> C{"_detect_native_transformers_causallm_support:<br/>native AutoModelForCausalLM class?"}
+    C -- "no" --> T["True: remote code"]
+    C -- "yes" --> D{"_checkpoint_remote_layout_marker:<br/>auto_map.AutoModelForCausalLM present?"}
+    D -- "no / config unreadable" --> N["False: native class<br/>(warn once)"]
+    D -- "yes" --> E{"config sets a field in<br/>_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS[model_type]?"}
+    E -- "no" --> N
+    E -- "yes (bailing_hybrid q_lora_rank)" --> T
+    style N fill:#d1e7dd,stroke:#146c43
+    style T fill:#ffe0b2,stroke:#e65100
+```
+
+The failure/ambiguity path is the native branch: a checkpoint whose remote code
+owns a layout that no declared marker describes loads natively, and its module
+tree must then be declared in the model definition or added to the marker
+table with a regression test.
+
+| Mechanism | Before (#4373 fix, `d01e8fd`) | After (#4453) |
+| --- | --- | --- |
+| Layout signal | Any `auto_map` class-name difference from the native class (`gptqmodel/utils/hf.py:995` at `d01e8fd`) | A declared config marker per `model_type` (`gptqmodel/utils/hf.py:971`, `1004`) |
+| `PhiMoEForCausalLM` vs `PhimoeForCausalLM`, `MPTForCausalLM` vs `MptForCausalLM`, `MiniMaxM2ForCausalLM` vs `MiniMaxForCausalLM` | Remote code (import/rope failures) | Native class |
+| Ling-2.6-flash (`bailing_hybrid`, `q_lora_rank=1536`) | Remote code | Remote code |
+| `bailing_hybrid` remote class without `q_lora_rank` | Remote code | Native class (its conversion mapping renames `attention.*` to `self_attn.*`) |
+
+Measured over every local checkpoint with an `auto_map` (226 `config.json`
+files under the model store), the decision for `trust_remote_code=True` differs
+from the pre-#4373 resolver (`def6e61`) only for Ling-2.6-flash.
+
 ## Save
 
 Re-saving a loaded quantized checkpoint rebuilds the shell model with

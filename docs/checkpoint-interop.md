@@ -336,6 +336,13 @@ The old path loaded the model with a runtime backend and called
 (shape error on forward), and hard-coded fp16. The new path never selects a
 runtime kernel for `hf`.
 
+The dense dtype is the checkpoint's own: with no explicit `target_dtype`,
+`dequantize_model()` calls `resolve_dense_target_dtype(config)`, which reads
+`dtype`, legacy `torch_dtype`, or `text_config` and accepts float16, bfloat16
+and float32. Only a checkpoint that declares none of them falls back to
+bfloat16. An fp16 GPTQ checkpoint therefore exports `dtype=float16` with F16
+tensors instead of being rewritten as bf16 (#4455).
+
 ## 8. `dequantize_model` resolves per-module bits
 
 `convert_gptq_file()` resolves each module's width through
