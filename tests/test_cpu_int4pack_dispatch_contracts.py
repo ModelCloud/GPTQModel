@@ -41,14 +41,14 @@ def _aten_available() -> bool:
 
 
 def _validate(cls, **kwargs):
-    params = dict(
-        bits=4,
-        group_size=128,
-        desc_act=False,
-        sym=True,
-        pack_dtype=torch.int32,
-        device=DEVICE.CPU,
-    )
+    params = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "pack_dtype": torch.int32,
+        "device": DEVICE.CPU,
+    }
     params.update(kwargs)
     return validate_quant_linear(cls, **params)
 
