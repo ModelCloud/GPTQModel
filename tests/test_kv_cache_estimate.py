@@ -8,15 +8,15 @@ Weight quantization does not change the cache, so the question after a run is
 layout: gqa keeps K and V per head, MLA keeps one compressed latent plus a
 decoupled RoPE key shared across heads, linear-attention layers keep a
 constant-size state, and sliding layers stop growing at their window. These
-tests pin each layout, the mixed stacks that combine them, and the cases the
-estimator refuses rather than guessing.
+tests pin each layout, the per-layer arithmetic that mixes them, and the cases
+the estimator refuses rather than guessing.
 """
 
 from types import SimpleNamespace
 
 import torch
 
-from gptqmodel.utils.kv_cache import KVCacheEstimate, estimate_kv_cache
+from gptqmodel.utils.kv_cache import KVCacheEstimate, LayerCache, estimate_kv_cache
 
 
 def _gqa(**overrides):
@@ -37,12 +37,16 @@ def _mla(**overrides):
     return SimpleNamespace(**base)
 
 
+def _dims(estimate):
+    return [layer.dims for layer in estimate.layers]
+
+
 def test_grouped_query_attention_matches_the_arithmetic():
     estimate = estimate_kv_cache(_gqa(), dtype=torch.float16)
     # 32 layers * 2 (K and V) * 8 heads * 128 head_dim * 2 bytes
     assert estimate.layer_type == "gqa"
     assert estimate.growing_layers == 32
-    assert estimate.dims_per_layer_token == 2 * 8 * 128
+    assert set(_dims(estimate)) == {2 * 8 * 128}
     assert estimate.bytes_per_token == 32 * 2 * 8 * 128 * 2
     assert estimate.bytes_for(8192) == estimate.bytes_per_token * 8192
     assert estimate.bytes_for(8192, batch_size=4) == estimate.bytes_per_token * 8192 * 4
@@ -50,17 +54,17 @@ def test_grouped_query_attention_matches_the_arithmetic():
 
 def test_multi_query_attention_uses_one_kv_head():
     estimate = estimate_kv_cache(_gqa(num_key_value_heads=1), dtype=torch.bfloat16)
-    assert estimate.dims_per_layer_token == 2 * 1 * 128
+    assert set(_dims(estimate)) == {2 * 1 * 128}
 
 
 def test_head_dim_defaults_to_hidden_over_heads():
     estimate = estimate_kv_cache(_gqa(hidden_size=2048, num_attention_heads=16), dtype=torch.float16)
-    assert estimate.dims_per_layer_token == 2 * 8 * 128
+    assert set(_dims(estimate)) == {2 * 8 * 128}
 
 
 def test_explicit_head_dim_wins():
     estimate = estimate_kv_cache(_gqa(head_dim=64), dtype=torch.float16)
-    assert estimate.dims_per_layer_token == 2 * 8 * 64
+    assert set(_dims(estimate)) == {2 * 8 * 64}
 
 
 def test_fp32_doubles_the_footprint():
@@ -73,7 +77,7 @@ def test_mla_caches_the_latent_and_rope_key_not_per_head_kv():
     """512 latent + 64 rope, shared across heads, and no factor of two."""
     estimate = estimate_kv_cache(_mla(), dtype=torch.float16)
     assert estimate.layer_type == "mla"
-    assert estimate.dims_per_layer_token == 512 + 64
+    assert set(_dims(estimate)) == {512 + 64}
     assert estimate.bytes_per_token == 4 * (512 + 64) * 2
     # A per-head reading of the same config would be far larger.
     naive = 4 * 2 * 8 * 128 * 2
@@ -82,12 +86,18 @@ def test_mla_caches_the_latent_and_rope_key_not_per_head_kv():
 
 def test_mla_without_a_rope_key_still_counts_the_latent():
     estimate = estimate_kv_cache(_mla(qk_rope_head_dim=0), dtype=torch.float16)
-    assert estimate.dims_per_layer_token == 512
+    assert set(_dims(estimate)) == {512}
 
 
-def test_config_without_latent_rank_uses_the_gqa_path():
-    estimate = estimate_kv_cache(_gqa(), dtype=torch.float16)
-    assert estimate.layer_type == "gqa"
+def test_per_layer_head_dims_are_summed_not_assumed_uniform():
+    """Heterogeneous stacks declare different head_dim per layer."""
+    config = _gqa(num_hidden_layers=2)
+    config.per_layer_config = [
+        SimpleNamespace(num_attention_heads=8, num_key_value_heads=2, head_dim=64),
+        SimpleNamespace(num_attention_heads=8, num_key_value_heads=4, head_dim=128),
+    ]
+    estimate = estimate_kv_cache(config, dtype=torch.float16)
+    assert _dims(estimate) == [2 * 2 * 64, 2 * 4 * 128]
 
 
 def test_linear_attention_layers_are_reported_but_not_counted_per_token():
@@ -122,26 +132,31 @@ def test_sliding_layers_stop_growing_at_their_window():
     estimate = estimate_kv_cache(config, dtype=torch.float16)
     per_layer = 2 * 8 * 128 * 2
     assert estimate.sliding_layers == 1
-    assert estimate.full_layers == 1
+    assert estimate.window == 4096
     assert estimate.bytes_for(1024) == 2 * 1024 * per_layer
     assert estimate.bytes_for(4096) == 2 * 4096 * per_layer
-    # Past the window only the full layer keeps growing.
+    # Past the window only the full layer keeps growing: that is the slope.
     assert estimate.bytes_for(8192) == (8192 + 4096) * per_layer
+    assert estimate.bytes_per_token == per_layer  # only the full layer grows forever
     assert "capped at 4k" in estimate.format()
 
 
 def test_tokens_for_inverts_bytes_for_without_a_window():
-    estimate = KVCacheEstimate(layer_type="gqa", growing_layers=4,
-                               dims_per_layer_token=2 * 2 * 64, dtype=torch.float16)
+    estimate = KVCacheEstimate(
+        layers=(LayerCache(kind="gqa", dims=2 * 2 * 64),) * 4,
+        dtype=torch.float16,
+    )
     budget = estimate.bytes_for(1000)
     assert estimate.tokens_for(budget) == 1000
     assert estimate.tokens_for(budget, batch_size=2) == 500
 
 
 def test_tokens_for_handles_the_window_boundary():
-    estimate = KVCacheEstimate(layer_type="gqa", growing_layers=2,
-                               dims_per_layer_token=1024, dtype=torch.float16,
-                               sliding_layers=1, sliding_window=4096)
+    estimate = KVCacheEstimate(
+        layers=(LayerCache(kind="gqa", dims=1024),
+                LayerCache(kind="gqa", dims=1024, window=4096)),
+        dtype=torch.float16,
+    )
     per_layer = 1024 * 2
     assert estimate.tokens_for(2 * 1024 * per_layer) == 1024
     assert estimate.tokens_for((4096 + 4096) * per_layer) == 4096
@@ -153,11 +168,12 @@ def test_all_recurrent_layers_have_no_per_token_cache():
     assert estimate_kv_cache(config, dtype=torch.float16) is None
 
 
-def test_multimodal_text_config_is_unwrapped():
-    text = _gqa()
-    config = SimpleNamespace(text_config=text, vision_config=SimpleNamespace(hidden_size=1024))
+def test_multimodal_stacks_are_summed():
+    thinker = _gqa(num_hidden_layers=2)
+    talker = _gqa(num_hidden_layers=3)
+    config = SimpleNamespace(thinker_config=thinker, talker_config=talker)
     estimate = estimate_kv_cache(config, dtype=torch.float16)
-    assert estimate.growing_layers == 32
+    assert estimate.growing_layers == 5
 
 
 def test_missing_shapes_return_none():
@@ -179,8 +195,8 @@ def test_config_without_dtype_falls_back_to_float16():
 
 
 def test_zero_and_negative_inputs_are_clamped():
-    estimate = KVCacheEstimate(layer_type="gqa", growing_layers=4,
-                               dims_per_layer_token=2 * 2 * 64, dtype=torch.float16)
+    estimate = KVCacheEstimate(layers=(LayerCache(kind="gqa", dims=2 * 2 * 64),) * 4,
+                               dtype=torch.float16)
     assert estimate.bytes_for(0) == 0
     assert estimate.bytes_for(-8) == 0
     assert estimate.tokens_for(0) == 0
@@ -196,9 +212,37 @@ def test_format_names_the_layout_and_contexts():
 
 
 def test_format_scales_units():
-    small = KVCacheEstimate(layer_type="gqa", growing_layers=2,
-                            dims_per_layer_token=2 * 1 * 8, dtype=torch.float16)
+    small = KVCacheEstimate(layers=(LayerCache(kind="gqa", dims=2 * 1 * 8),) * 2,
+                            dtype=torch.float16)
     assert any(unit in small.format() for unit in ("B", "KiB"))
-    large = KVCacheEstimate(layer_type="gqa", growing_layers=80,
-                            dims_per_layer_token=2 * 8 * 128, dtype=torch.float16)
+    large = KVCacheEstimate(layers=(LayerCache(kind="gqa", dims=2 * 8 * 128),) * 80,
+                            dtype=torch.float16)
     assert "GiB" in large.format()
+
+
+def test_compressed_attention_counts_sliding_branch_plus_pooled_entries():
+    """DeepSeek V4-style: bounded sliding K/V plus one entry per compress_rate."""
+    config = SimpleNamespace(
+        hidden_size=4096, num_hidden_layers=4, num_attention_heads=64,
+        num_key_value_heads=1, head_dim=512, sliding_window=128,
+        layer_types=["heavily_compressed_attention", "heavily_compressed_attention",
+                     "compressed_sparse_attention", "compressed_sparse_attention"],
+        compress_rates={"heavily_compressed_attention": 128, "compressed_sparse_attention": 4},
+    )
+    estimate = estimate_kv_cache(config, dtype=torch.float16)
+    assert estimate is not None
+    assert estimate.layer_type == "compressed"
+    assert estimate.growing_layers == 4
+    assert estimate.exact is True
+
+    # Two HCA layers (rate 128) plus two CSA layers (rate 4), each storing one
+    # shared K=V tensor of head_dim elements, capped at the 128-token window.
+    def expected(tokens):
+        hca = 2 * 512 * min(tokens, 128) + 2 * 512 * ((tokens + 127) // 128)
+        csa = 2 * 512 * min(tokens, 128) + 2 * 512 * ((tokens + 3) // 4)
+        return (hca + csa) * 2
+
+    assert estimate.bytes_for(128) == expected(128)
+    assert estimate.bytes_for(8192) == expected(8192)
+    # The compressed slope dominates long contexts and is far below per-head K/V.
+    assert estimate.bytes_for(32768) < 32768 * 2 * 64 * 512

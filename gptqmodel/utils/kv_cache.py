@@ -6,24 +6,22 @@ Weight quantization decides how big the checkpoint is; the KV cache decides how
 much context fits next to it, and the two are independent - 4-bit weights on a
 32k context can still need more VRAM for the cache than for the model.
 
-The arithmetic depends on how a model stores attention state, and recent model
-families no longer agree on one layout:
+One formula does not cover the current model landscape, so the estimate is built
+per layer:
 
-``gqa``/``mqa``  every layer keeps one K and one V per KV head, so the cache is
-                 ``2 * kv_heads * head_dim`` per token per layer.
-``mla``          DeepSeek-style attention keeps a compressed latent
-                 (``kv_lora_rank``) plus one decoupled RoPE key
-                 (``qk_rope_head_dim``) per token, shared across heads. There is
-                 no per-head K/V pair and no factor of two; summing per-head
-                 shapes here would overstate the cache by an order of magnitude.
-``linear``       recurrent layers (``linear_attention`` and friends) keep a
-                 constant-size state. They do not grow with context, so they are
-                 reported separately and never counted in the per-token slope.
-``sliding``      layers with a window cap growth at ``min(context, window)``.
+``gqa``/``mqa``  one K and one V per KV head: ``2 * kv_heads * head_dim``.
+``mla``          a compressed latent (``kv_lora_rank``) plus one decoupled RoPE
+                 key (``qk_rope_head_dim``), shared across heads, with no factor
+                 of two. Reading per-head shapes here overstates by ~60x.
+``linear``       recurrent layers keep a constant-size state. They do not grow
+                 with context and are reported separately, never in the slope.
+``sliding``      growth capped at ``min(context, window)``.
 
-Mixed stacks (GLM5, DeepSeek V4.1 Flash and similar) declare their layout in
-``layer_types``; the estimator resolves per layer and reports what it could not
-classify instead of folding it into a total that looks authoritative.
+Stacks that mix those (GLM5, DeepSeek V4.1 Flash, Gemma4 and similar) declare the
+mix either through ``layer_types`` or through a heterogeneous
+``per_layer_config`` where per-layer attributes refuse global reads. Both are
+resolved layer by layer; anything unclassifiable is named instead of being folded
+into a total that looks authoritative.
 """
 
 from dataclasses import dataclass, field
@@ -39,15 +37,20 @@ _DTYPE_ITEMSIZE = {
     torch.float64: 8,
 }
 
-# Layer types whose cache grows with the number of tokens.
 _FULL_ATTENTION_TYPES = frozenset({
     "full_attention", "attention", "self_attention", "indexed_attention",
     "deepseek_sparse_attention", "sparse_attention", "mla", "multi_latent_attention",
+    # A layer that mixes a recurrent branch with an attention branch still keeps
+    # standard K/V for the attention half; the recurrent half is constant state.
+    "hybrid",
 })
 _SLIDING_ATTENTION_TYPES = frozenset({
     "sliding_attention", "sliding_window_attention", "window_attention",
+    "hybrid_sliding",
 })
-# Layer types that keep a constant-size recurrent state.
+_COMPRESSED_ATTENTION_TYPES = frozenset({
+    "heavily_compressed_attention", "compressed_sparse_attention", "compressed_attention",
+})
 _LINEAR_ATTENTION_TYPES = frozenset({
     "linear_attention", "gated_deltanet", "deltanet", "gla", "recurrent",
     "mamba", "mamba2", "ssm", "lightning_attention",
@@ -56,18 +59,41 @@ _LINEAR_ATTENTION_TYPES = frozenset({
 _LAYER_TYPE_FIELDS = ("layer_types", "attention_layer_types", "attn_layer_types")
 
 
+def _safe_get(obj: Any, name: str, default: Any = None) -> Any:
+    """Read a config attribute without letting heterogeneity guards escape.
+
+    Transformers raises ``AmbiguousGlobalPerLayerAttributeError`` when a field
+    varies per layer; that is a signal to read the layer configs, not an error
+    the caller should see.
+    """
+
+    try:
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+
+@dataclass(frozen=True)
+class LayerCache:
+    """What one decoder layer contributes to the cache.
+
+    ``dims`` is the sliding/full branch: ``window`` tokens at most. Compressed
+    attention (DeepSeek V4 and friends) additionally emits one pooled entry per
+    ``compress_rate`` source tokens, which is the part that grows unbounded.
+    """
+
+    kind: str                       # "gqa" | "mla" | "linear" | "unknown"
+    dims: int = 0                   # elements cached per token (0 when not growing)
+    window: Optional[int] = None    # cap for sliding layers
+    compressed_dims: int = 0        # elements per compressed entry
+    compress_rate: int = 0          # source tokens per compressed entry
+
+
 @dataclass(frozen=True)
 class KVCacheEstimate:
-    """Per-token KV-cache cost implied by a config, for one batch element."""
-
-    layer_type: str                      # "gqa" | "mla"
-    growing_layers: int                  # attention layers whose cache grows
-    dims_per_layer_token: int            # elements per token per growing layer
+    layers: Tuple[LayerCache, ...]
     dtype: torch.dtype
-    sliding_layers: int = 0
-    sliding_window: Optional[int] = None
-    linear_layers: int = 0               # constant-state layers, not counted
-    mtp_layers: int = 0                  # next-token-prediction layers, counted
+    mtp_layers: int = 0
     unclassified: Tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -76,66 +102,82 @@ class KVCacheEstimate:
 
     @property
     def exact(self) -> bool:
-        """False when some layer type could not be classified."""
-
-        return not self.unclassified
+        return not self.unclassified and all(layer.kind != "unknown" for layer in self.layers)
 
     @property
-    def full_layers(self) -> int:
-        return self.growing_layers - self.sliding_layers
+    def growing_layers(self) -> int:
+        return sum(1 for layer in self.layers if layer.dims > 0)
 
-    def _bytes_per_layer_token(self) -> int:
-        return self.dims_per_layer_token * self.itemsize
+    @property
+    def sliding_layers(self) -> int:
+        return sum(1 for layer in self.layers if layer.dims > 0 and layer.window)
+
+    @property
+    def window(self) -> Optional[int]:
+        windows = {layer.window for layer in self.layers if layer.window}
+        return max(windows) if windows else None
+
+    @property
+    def linear_layers(self) -> int:
+        return sum(1 for layer in self.layers if layer.kind == "linear")
+
+    @property
+    def layer_type(self) -> str:
+        kinds = {layer.kind for layer in self.layers if layer.kind in ("gqa", "mla", "compressed")}
+        if not kinds:
+            return "unknown"
+        return kinds.pop() if len(kinds) == 1 else "mixed"
 
     @property
     def bytes_per_token(self) -> int:
-        """Asymptotic growth per token: sliding layers do not grow past the window."""
+        """Asymptotic growth: the sliding branch stops, the compressed one does not."""
 
-        return self.full_layers * self._bytes_per_layer_token()
+        elements = 0.0
+        for layer in self.layers:
+            if not layer.window:
+                elements += layer.dims
+            if layer.compress_rate and layer.compressed_dims:
+                elements += layer.compressed_dims / layer.compress_rate
+        return int(round(elements)) * self.itemsize
 
     def bytes_for(self, tokens: int, *, batch_size: int = 1) -> int:
         tokens = max(0, int(tokens))
         batch = max(1, int(batch_size))
-        window = self.sliding_window or tokens
-        sliding_tokens = min(tokens, window)
-        growing = self.full_layers * tokens + self.sliding_layers * sliding_tokens
-        return growing * self._bytes_per_layer_token() * batch
+        elements = 0
+        for layer in self.layers:
+            if layer.dims > 0:
+                span = min(tokens, layer.window) if layer.window else tokens
+                elements += layer.dims * span
+            if layer.compress_rate and layer.compressed_dims:
+                entries = (tokens + layer.compress_rate - 1) // layer.compress_rate
+                elements += layer.compressed_dims * entries
+        return elements * self.itemsize * batch
 
     def tokens_for(self, budget_bytes: int, *, batch_size: int = 1) -> int:
-        """Largest context whose cache fits in ``budget_bytes``."""
+        """Largest context whose cache fits in ``budget_bytes`` (monotonic search)."""
 
         budget = max(0, int(budget_bytes)) // max(1, int(batch_size))
-        per_layer = self._bytes_per_layer_token()
-        if per_layer <= 0 or budget <= 0:
+        if budget <= 0 or not self.growing_layers:
             return 0
-
-        window = self.sliding_window or 0
-        # Up to the window every layer pays; past it only the full layers do.
-        first_stage = (self.full_layers + self.sliding_layers) * per_layer
-        if window and first_stage * window >= budget:
-            return budget // first_stage
-        if not window:
-            return budget // first_stage if first_stage else 0
-
-        remaining = budget - first_stage * window
-        slope = self.full_layers * per_layer
-        if slope <= 0:
-            return window
-        return window + remaining // slope
+        low, high = 0, 1 << 20
+        while low < high:
+            mid = (low + high + 1) // 2
+            if self.bytes_for(mid) <= budget:
+                low = mid
+            else:
+                high = mid - 1
+        return low
 
     def format(self, contexts: Sequence[int] = (8192, 32768)) -> str:
-        """One line: per-token cost, a few context sizes, and the assumptions."""
-
-        shape = (
-            f"{self.growing_layers}L x {self.dims_per_layer_token} elem/token, {self.layer_type}"
-        )
+        parts_of_shape = [f"{self.growing_layers} growing layer(s)"]
+        if self.sliding_layers:
+            parts_of_shape.append(f"{self.sliding_layers} sliding")
+        shape = ", ".join(parts_of_shape) + f", {self.layer_type}"
         parts = [f"KV cache: {_human(self.bytes_per_token)}/token ({shape}, {_dtype_name(self.dtype)})"]
         for context in contexts:
             parts.append(f"{_tokens_name(context)} ctx {_human(self.bytes_for(context))}")
-        if self.sliding_layers and self.sliding_window:
-            parts.append(
-                f"{self.sliding_layers} sliding layer(s) capped at {_tokens_name(self.sliding_window)}"
-            )
+        if self.sliding_layers and self.window:
+            parts.append(f"{self.sliding_layers} sliding layer(s) capped at {_tokens_name(self.window)}")
         if self.linear_layers:
             parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
         if self.mtp_layers:
@@ -164,39 +206,81 @@ def _human(num_bytes: int) -> str:
     return f"{value:.1f} TiB"
 
 
-def _text_config(config: Any) -> Any:
-    """Unwrap the language-model half of a multimodal config."""
-
-    text_config = getattr(config, "text_config", None)
-    return text_config if text_config is not None else config
+_STACK_FIELDS = ("text_config", "thinker_config", "talker_config", "llm_config")
 
 
-def _layer_types(source: Any, layers: int) -> Tuple[Optional[list], Tuple[str, ...]]:
-    """Return the declared per-layer types, or a single-type list of ``None``."""
+def _language_stacks(config: Any) -> list:
+    """Every nested config that owns a decoder stack.
 
+    Multimodal wrappers put the language model behind one or more of these
+    fields; omni models run a thinker and a talker, and both hold caches. A
+    wrapper without any of them is itself the language stack.
+    """
+
+    stacks = []
+    for field_name in _STACK_FIELDS:
+        nested = _safe_get(config, field_name)
+        if nested is None:
+            continue
+        if _safe_get(nested, "num_hidden_layers"):
+            stacks.append(nested)
+        else:
+            stacks.extend(_language_stacks(nested))
+    if not stacks and _safe_get(config, "num_hidden_layers"):
+        stacks.append(config)
+    return stacks
+
+
+def _declared_layer_types(source: Any, layers: int) -> Optional[list]:
     for field_name in _LAYER_TYPE_FIELDS:
-        declared = getattr(source, field_name, None)
+        declared = _safe_get(source, field_name)
         if isinstance(declared, (list, tuple)) and declared:
-            declared = [str(entry).lower() for entry in declared]
-            if len(declared) > layers:
-                return None, ()
-            # MTP layers reuse the last declared attention layer's layout.
-            mtp = int(getattr(source, "num_nextn_predict_layers", 0) or 0)
-            return declared + [declared[-1]] * mtp, ()
-    return [None] * layers, ()
+            return [str(entry).lower() for entry in declared]
+    return None
 
 
-def _is_mla(source: Any) -> Tuple[bool, Optional[int]]:
-    """MLA caches a compressed latent plus a decoupled RoPE key."""
+def _per_layer_configs(source: Any) -> Optional[list]:
+    """Per-layer configs for heterogeneous stacks, or None."""
 
-    latent = getattr(source, "kv_lora_rank", None)
+    per_layer = _safe_get(source, "per_layer_config")
+    if isinstance(per_layer, (list, tuple)) and per_layer:
+        return list(per_layer)
+    return None
+
+
+def _mla_dims(source: Any, layer_cfg: Any) -> Optional[int]:
+    latent = _safe_get(layer_cfg, "kv_lora_rank", _safe_get(source, "kv_lora_rank"))
     if not latent:
-        return False, None
-    rope = getattr(source, "qk_rope_head_dim", 0) or 0
+        return None
+    rope = _safe_get(layer_cfg, "qk_rope_head_dim", _safe_get(source, "qk_rope_head_dim", 0)) or 0
     try:
-        return True, int(latent) + int(rope)
+        return int(latent) + int(rope)
     except (TypeError, ValueError):
-        return False, None
+        return None
+
+
+def _gqa_dims(source: Any, layer_cfg: Any) -> Optional[int]:
+    heads = _safe_get(layer_cfg, "num_attention_heads", _safe_get(source, "num_attention_heads"))
+    hidden = _safe_get(layer_cfg, "hidden_size", _safe_get(source, "hidden_size"))
+    kv_heads = _safe_get(layer_cfg, "num_key_value_heads", _safe_get(source, "num_key_value_heads")) or heads
+    head_dim = _safe_get(layer_cfg, "head_dim", _safe_get(source, "head_dim"))
+    if not head_dim and heads and hidden:
+        head_dim = hidden // heads
+    if not (heads and kv_heads and head_dim):
+        return None
+    try:
+        return 2 * int(kv_heads) * int(head_dim)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_dtype(source: Any, dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
+    resolved = dtype or _safe_get(source, "torch_dtype") or _safe_get(source, "dtype")
+    if isinstance(resolved, str):
+        resolved = getattr(torch, resolved.replace("torch.", ""), None)
+    if not isinstance(resolved, torch.dtype) or resolved not in _DTYPE_ITEMSIZE:
+        return torch.float16 if dtype is None and resolved is None else None
+    return resolved
 
 
 def estimate_kv_cache(
@@ -208,66 +292,159 @@ def estimate_kv_cache(
 
     if config is None:
         return None
-    source = _text_config(config)
 
-    layers = getattr(source, "num_hidden_layers", None)
-    if not layers:
+    stacks = _language_stacks(config)
+    if not stacks:
         return None
 
-    mtp = int(getattr(source, "num_nextn_predict_layers", 0) or 0)
-    declared_types, unclassified_declared = _layer_types(source, int(layers))
+    all_layers: list[LayerCache] = []
+    unclassified_all: list[str] = []
+    mtp_total = 0
+    resolved_dtype = None
+    for source in stacks:
+        partial = _estimate_for_stack(source, dtype=dtype)
+        if partial is None:
+            continue
+        all_layers.extend(partial.layers)
+        unclassified_all.extend(partial.unclassified)
+        mtp_total += partial.mtp_layers
+        resolved_dtype = resolved_dtype or partial.dtype
 
-    is_mla, mla_dims = _is_mla(source)
-    if is_mla:
-        if not mla_dims:
-            return None
-        layer_type, dims = "mla", mla_dims
-    else:
-        heads = getattr(source, "num_attention_heads", None)
-        hidden = getattr(source, "hidden_size", None)
-        if not heads or not hidden:
-            return None
-        kv_heads = getattr(source, "num_key_value_heads", None) or heads
-        head_dim = getattr(source, "head_dim", None) or (hidden // heads)
-        if not kv_heads or not head_dim:
-            return None
-        layer_type, dims = "gqa", 2 * int(kv_heads) * int(head_dim)
+    if not all_layers:
+        return None
+    return KVCacheEstimate(
+        layers=tuple(all_layers),
+        dtype=resolved_dtype or torch.float16,
+        mtp_layers=mtp_total,
+        unclassified=tuple(dict.fromkeys(unclassified_all)),
+    )
 
-    resolved_dtype = dtype or getattr(source, "torch_dtype", None) or torch.float16
-    if not isinstance(resolved_dtype, torch.dtype) or resolved_dtype not in _DTYPE_ITEMSIZE:
+
+def _estimate_for_stack(
+        source: Any,
+        *,
+        dtype: Optional[torch.dtype] = None,
+) -> Optional[KVCacheEstimate]:
+    """Per-layer estimate for one decoder stack."""
+
+    layers = _safe_get(source, "num_hidden_layers")
+    per_layer_configs = _per_layer_configs(source)
+    layer_count = int(layers) if layers else (len(per_layer_configs) if per_layer_configs else 0)
+    if layer_count <= 0:
         return None
 
-    window = getattr(source, "sliding_window", None)
-    window = int(window) if isinstance(window, int) and window > 0 else None
+    resolved_dtype = _resolve_dtype(source, dtype)
+    if resolved_dtype is None:
+        return None
 
-    growing = sliding = linear = 0
-    unclassified = list(unclassified_declared)
-    for entry in declared_types:
-        if entry is None:
-            growing += 1
-        elif entry in _FULL_ATTENTION_TYPES:
-            growing += 1
-        elif entry in _SLIDING_ATTENTION_TYPES:
-            growing += 1
-            sliding += 1
-        elif entry in _LINEAR_ATTENTION_TYPES:
-            linear += 1
+    global_window = _safe_get(source, "sliding_window")
+    global_window = int(global_window) if isinstance(global_window, int) and global_window > 0 else None
+
+    declared_types = _declared_layer_types(source, layer_count)
+    mtp = int(_safe_get(source, "num_nextn_predict_layers", 0) or 0)
+
+    resolved: list[LayerCache] = []
+    unclassified: list[str] = []
+    for index in range(layer_count):
+        layer_cfg = per_layer_configs[index] if per_layer_configs and index < len(per_layer_configs) else source
+        layer_type = _safe_get(layer_cfg, "layer_type")
+        if layer_type is None and declared_types and index < len(declared_types):
+            layer_type = declared_types[index]
+        layer_type = str(layer_type).lower() if layer_type else None
+        window = _safe_get(layer_cfg, "sliding_window", global_window)
+        window = int(window) if isinstance(window, int) and window > 0 else None
+
+        if layer_type in _LINEAR_ATTENTION_TYPES:
+            resolved.append(LayerCache(kind="linear"))
+            continue
+
+        dims = _mla_dims(source, layer_cfg)
+        kind = "mla"
+        if dims is None:
+            dims = _gqa_dims(source, layer_cfg)
+            kind = "gqa"
+        if dims is None:
+            if layer_type is None:
+                resolved.append(LayerCache(kind="unknown"))
+            else:
+                unclassified.append(layer_type)
+                resolved.append(LayerCache(kind="unknown"))
+            continue
+
+        if layer_type in _COMPRESSED_ATTENTION_TYPES:
+            # DeepSeek V4-style: a bounded sliding branch plus pooled entries
+            # every `compress_rate` source tokens. Shared-KV MQA stores one
+            # tensor for keys and values, so there is no factor of two.
+            rates = _safe_get(source, "compress_rates") or {}
+            rate = rates.get(layer_type) if isinstance(rates, dict) else None
+            head_dim = _safe_get(layer_cfg, "head_dim", _safe_get(source, "head_dim"))
+            window = window or _safe_get(source, "sliding_window")
+            if rate and head_dim:
+                resolved.append(LayerCache(
+                    kind="compressed",
+                    dims=int(head_dim),
+                    window=int(window) if window else None,
+                    compressed_dims=int(head_dim),
+                    compress_rate=int(rate),
+                ))
+            else:
+                unclassified.append(layer_type)
+                resolved.append(LayerCache(kind="unknown"))
+            continue
+
+        known_attention = layer_type is None or layer_type in _FULL_ATTENTION_TYPES
+        if layer_type in _SLIDING_ATTENTION_TYPES:
+            resolved.append(LayerCache(kind=kind, dims=dims, window=window or 1024))
+        elif known_attention:
+            resolved.append(LayerCache(kind=kind, dims=dims))
         else:
-            if entry not in unclassified:
-                unclassified.append(entry)
+            # An unrecognized layer type may or may not grow; counting it as a
+            # full attention layer would produce a confident wrong number.
+            unclassified.append(layer_type)
+            resolved.append(LayerCache(kind="unknown"))
 
-    if growing == 0 and not unclassified:
+    resolved.extend(resolved[-1] for _ in range(mtp) if resolved)
+
+    if not any(layer.dims > 0 for layer in resolved) and not unclassified:
         # Every layer is recurrent: there is no per-token cache to report.
+        return None
+    if all(layer.kind == "unknown" for layer in resolved):
         return None
 
     return KVCacheEstimate(
-        layer_type=layer_type,
-        growing_layers=growing,
-        dims_per_layer_token=dims,
+        layers=tuple(resolved),
         dtype=resolved_dtype,
-        sliding_layers=sliding,
-        sliding_window=window if sliding else None,
-        linear_layers=linear,
         mtp_layers=mtp,
-        unclassified=tuple(unclassified),
+        unclassified=tuple(dict.fromkeys(unclassified)),
     )
+
+
+def kv_cache_unavailable_reason(config: Any) -> str:
+    """Why ``estimate_kv_cache`` returned None, in words.
+
+    Callers that report the estimate also need to explain its absence: a config
+    that hides its shapes is a different situation from one whose layers are all
+    recurrent, and both differ from a config with no decoder stack at all.
+    """
+
+    if config is None:
+        return "no config"
+    stacks = _language_stacks(config)
+    if not stacks:
+        return "no decoder stack"
+
+    reasons = []
+    for source in stacks:
+        layers = _safe_get(source, "num_hidden_layers")
+        if not layers:
+            reasons.append("layer count not declared")
+            continue
+        declared = _declared_layer_types(source, int(layers)) or []
+        if declared and all(entry in _LINEAR_ATTENTION_TYPES for entry in declared):
+            reasons.append("every layer is recurrent")
+            continue
+        if _mla_dims(source, source) is None and _gqa_dims(source, source) is None:
+            reasons.append("attention head shapes not declared")
+            continue
+        reasons.append("unresolved layer layout")
+    return ", ".join(dict.fromkeys(reasons)) or "unknown"

@@ -317,10 +317,24 @@ def _log_quantize_summary(
 
 
 def _log_kv_cache_estimate(model: object) -> None:
-    """State what context costs, since weight quantization does not change it."""
+    """State what context costs, since weight quantization does not change it.
 
-    config = getattr(getattr(model, "model", None), "config", None)
-    estimate = estimate_kv_cache(config)
+    The dtype comes from the weights that were just quantized, not from the
+    config: ``torch_dtype`` is often unset and a cache is only as small as the
+    activations that fill it.
+    """
+
+    inner = getattr(model, "model", None)
+    config = getattr(inner, "config", None)
+    dtype = None
+    try:
+        for parameter in inner.parameters():
+            if parameter.is_floating_point():
+                dtype = parameter.dtype
+                break
+    except Exception:  # pragma: no cover - exotic module trees
+        dtype = None
+    estimate = estimate_kv_cache(config, dtype=dtype)
     if estimate is not None:
         log.info(estimate.format())
 
