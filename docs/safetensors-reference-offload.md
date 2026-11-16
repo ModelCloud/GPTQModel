@@ -78,5 +78,60 @@ The export source guard was added in
 [PR #3620](https://github.com/ModelCloud/GPTQModel/pull/3620).
 Absent optional nonpersistent buffers were admitted in
 [PR #3626](https://github.com/ModelCloud/GPTQModel/pull/3626).
+
+## Quantization base-module references
+
+The quantization looper offloads the untouched base modules (`embed_tokens`,
+the final norm) while the layer loop runs. It used to re-serialize each module
+with `safetensors.save_file`, even when the source checkpoint already held the
+same bytes. `offload_to_disk(..., source_root=..., source_checkpoint=...)` now
+builds an Accelerate-compatible index that points at the source safetensors
+payload. Unlike `offload_to_safetensors_reference()`, this path installs the
+normal Accelerate disk-offload hook, so `undo_offload_to_disk()` still
+materializes the module in-session.
+
+The reference is fail-closed. Every module tensor must be present in the
+source, with the same dtype and shape, and its bytes must compare equal with
+`torch.equal`; otherwise the looper writes the old `module.safetensors`
+bundle. A source inside the target offload directory is also rejected. This
+covers fusion and rotation, which can rewrite a base module before the offload.
+
+```mermaid
+flowchart TD
+    A["offload_to_disk(base_modules, source_root, source_checkpoint)"] --> B["_source_checkpoint_tensor_map<br/>model.safetensors or index.json"]
+    B -- "not safetensors" --> E["_bundle_module_state_dict<br/>write module.safetensors"]
+    B -- "mapped" --> C["_module_source_reference_index"]
+    C --> D{"every tensor present,<br/>same dtype/shape,<br/>torch.equal bytes,<br/>outside offload dir?"}
+    D -- "no" --> E
+    D -- "yes" --> F["write index.json only"]
+    F --> G["disk_offload installs Accelerate hook"]
+    E --> G
+    G --> H["undo_offload_to_disk restores the module"]
+    classDef fallback fill:#fff4e5,stroke:#b36b00,color:#111;
+    class E,D fallback;
+```
+
+The offload directory for the Llama-3.2-1B `embed_tokens` tensor drops from
+525,336,576 B to a 367 B index; the restored tensor is bitwise identical.
+`tests/test_offload_reference_4395.py` covers single-file and sharded sources,
+the content-mismatch fallback, and an end-to-end quantize/save round trip.
+
+## Pinned host staging cache
+
+`move_module_to_cpu_pinned()` and Accelerate's checkpoint staging allocate
+non-swappable host blocks. Deleting the staging tensor only returns the block
+to PyTorch's process-wide pinned cache, so `RssShmem` stays resident.
+`gptqmodel.utils.torch.release_pinned_host_cache()` calls
+`torch._C._host_emptyCache()` and is invoked at the end of `quantize()` and in
+the checkpoint loader's `finally`. Blocks owned by live tensors are untouched.
+
+| Run | Before | After |
+| --- | --- | --- |
+| Llama-3.2-1B GPTQ quantize, pinned bytes at return | 115.70 MiB | 0.00 MiB |
+| Llama-3.2-1B GPTQ quantize, pinned bytes after `del` | 115.70 MiB | 0.00 MiB |
+| Llama-3.2-1B GPTQ checkpoint load on CUDA, pinned bytes at return | 554.87 MiB | ~0.00 MiB |
+
+`tests/test_pinned_host_cache_4395.py` pins the release helper, the loader call,
+and the `quantize()` call.
 FNUZ float8 serialization was added in
 [PR #3628](https://github.com/ModelCloud/GPTQModel/pull/3628).

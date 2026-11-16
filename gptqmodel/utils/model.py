@@ -83,7 +83,7 @@ from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_corre
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .tensor import tensor_buffer
-from .torch import HAS_CUDA, as_torch_device, torch_empty_cache
+from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
 
 
 log = setup_logger()
@@ -3332,6 +3332,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)
+        # Accelerate stages offloaded checkpoint tensors through pinned host
+        # memory. The staging copies are dead by now, but PyTorch keeps their
+        # blocks cached for the life of the process.
+        release_pinned_host_cache()
 
 
 # 32MB read/write i/o buffer

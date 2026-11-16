@@ -18,8 +18,15 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.kernel import get_kernel_config
+from ...utils.logger import setup_logger
 from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
+
+
+log = setup_logger()
+
+# ggml's CPU buffer-from-pointer requires this alignment.
+_GGML_CPU_WEIGHT_ALIGNMENT = 32
 
 
 # Imported lazily by ``_require_llama_cpp``: importing llama-cpp-python costs
@@ -345,6 +352,29 @@ class _GGMLBridge:
         self._bind(self._ggml_base, "ggml_get_next_tensor", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_void_p)
         self._bind(self._ggml_base, "ggml_backend_buffer_free", [ctypes.c_void_p], None)
         self._bind(self._ggml_base, "ggml_backend_free", [ctypes.c_void_p], None)
+        # Wrap caller-owned host storage instead of copying it into a fresh
+        # backend buffer. ``ggml_backend_tensor_alloc`` binds a tensor to an
+        # already-allocated address; ``ggml_backend_cpu_buffer_from_ptr``
+        # returns a non-owning CPU buffer over that address. Both live in
+        # ggml-base (``ggml-backend.cpp``).
+        # Optional zero-copy symbols. Older llama.cpp builds may not export
+        # them; the CPU matmul then keeps using the copied-buffer path.
+        self._cpu_buffer_from_ptr = getattr(
+            self._ggml_base, "ggml_backend_cpu_buffer_from_ptr", None
+        )
+        if self._cpu_buffer_from_ptr is not None:
+            self._cpu_buffer_from_ptr.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            self._cpu_buffer_from_ptr.restype = ctypes.c_void_p
+        self._cpu_tensor_alloc = getattr(
+            self._ggml_base, "ggml_backend_tensor_alloc", None
+        )
+        if self._cpu_tensor_alloc is not None:
+            self._cpu_tensor_alloc.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            self._cpu_tensor_alloc.restype = ctypes.c_int
         self._bind(
             self._ggml_base,
             "ggml_backend_tensor_set",
@@ -600,6 +630,24 @@ class _GGMLBridge:
             qweight_cpu = qweight_cpu.contiguous()
         return qweight_cpu
 
+    def _can_wrap_cpu_weight(self, qweight_cpu: torch.Tensor) -> bool:
+        """Whether the packed weight can be read in place by the CPU backend.
+
+        ``ggml_backend_cpu_buffer_from_ptr`` aborts (GGML_ASSERT) on a pointer
+        that is not 32-byte aligned, so alignment must be checked here, not
+        recovered from an exception.
+        """
+
+        return (
+            self._cpu_buffer_from_ptr is not None
+            and self._cpu_tensor_alloc is not None
+            and qweight_cpu.device.type == "cpu"
+            and qweight_cpu.dtype == torch.uint8
+            and qweight_cpu.numel() > 0
+            and qweight_cpu.is_contiguous()
+            and qweight_cpu.data_ptr() % _GGML_CPU_WEIGHT_ALIGNMENT == 0
+        )
+
     @staticmethod
     def _normalize_input_cpu(x: torch.Tensor, padded_in_features: int) -> torch.Tensor:
         x_cpu = x.detach().to(device="cpu", dtype=torch.float32)
@@ -664,6 +712,7 @@ class _GGMLBridge:
         padded_in_features: int,
         out_features: int,
         kernel_name: str,
+        zero_copy_weight: bool = False,
     ) -> torch.Tensor:
 
         ctx = self._ggml_base.ggml_init(
@@ -677,6 +726,7 @@ class _GGMLBridge:
             raise RuntimeError(f"{kernel_name} failed to initialize GGML metadata context.")
 
         buffer = None
+        weight_buffer = None
         try:
             weight_tensor = self._ggml_base.ggml_new_tensor_2d(
                 ctx,
@@ -684,6 +734,33 @@ class _GGMLBridge:
                 padded_in_features,
                 out_features,
             )
+            if zero_copy_weight:
+                if not weight_tensor:
+                    raise RuntimeError(f"{kernel_name} failed to create the GGML weight tensor.")
+                # The CPU backend can read the packed weight in place. Bind the
+                # caller's storage to the tensor instead of letting
+                # ``ggml_backend_alloc_ctx_tensors`` allocate and then copy the
+                # whole weight on every forward.
+                weight_nbytes = qweight_cpu.numel() * qweight_cpu.element_size()
+                weight_ptr = ctypes.c_void_p(qweight_cpu.data_ptr())
+                weight_buffer = self._cpu_buffer_from_ptr(
+                    weight_ptr,
+                    weight_nbytes,
+                )
+                if not weight_buffer:
+                    raise RuntimeError(
+                        f"{kernel_name} failed to wrap the packed weight storage."
+                    )
+                status = self._cpu_tensor_alloc(
+                    weight_buffer,
+                    weight_tensor,
+                    weight_ptr,
+                )
+                if status != 0:
+                    raise RuntimeError(
+                        f"{kernel_name} failed to bind the packed weight storage "
+                        f"(status={status})."
+                    )
             input_tensor = self._ggml_base.ggml_new_tensor_2d(
                 ctx,
                 self.ggml_type_f32,
@@ -707,12 +784,13 @@ class _GGMLBridge:
             if not buffer:
                 raise RuntimeError(f"{kernel_name} failed to allocate GGML backend tensors.")
 
-            self._ggml_base.ggml_backend_tensor_set(
-                weight_tensor,
-                ctypes.c_void_p(qweight_cpu.data_ptr()),
-                0,
-                qweight_cpu.numel() * qweight_cpu.element_size(),
-            )
+            if not zero_copy_weight:
+                self._ggml_base.ggml_backend_tensor_set(
+                    weight_tensor,
+                    ctypes.c_void_p(qweight_cpu.data_ptr()),
+                    0,
+                    qweight_cpu.numel() * qweight_cpu.element_size(),
+                )
             self._ggml_base.ggml_backend_tensor_set(
                 input_tensor,
                 ctypes.c_void_p(x_cpu.data_ptr()),
@@ -753,6 +831,8 @@ class _GGMLBridge:
         finally:
             if buffer:
                 self._ggml_base.ggml_backend_buffer_free(buffer)
+            if weight_buffer:
+                self._ggml_base.ggml_backend_buffer_free(weight_buffer)
             self._ggml_base.ggml_free(ctx)
 
     def build_cuda_weight(
@@ -1045,10 +1125,34 @@ class _GGMLBridge:
             self._ggml_cpu.ggml_backend_cpu_set_n_threads(
                 backend, self._cpu_threads() if threads is None else threads,
             )
+            qweight_cpu = self._normalize_qweight_cpu(qweight)
+            x_cpu = self._normalize_input_cpu(x, padded_in_features)
+            # ``ggml_backend_cpu_buffer_from_ptr`` asserts 32-byte alignment and
+            # the backend may still refuse a particular layout. Keep the copy
+            # path as the fallback so an unaligned or rejected weight stays
+            # correct instead of aborting.
+            if self._can_wrap_cpu_weight(qweight_cpu):
+                try:
+                    return self._run_quantized_matmul(
+                        backend=backend,
+                        qweight_cpu=qweight_cpu,
+                        x_cpu=x_cpu,
+                        gguf_tensor_qtype=gguf_tensor_qtype,
+                        padded_in_features=padded_in_features,
+                        out_features=out_features,
+                        kernel_name="GGUFCppKernel",
+                        zero_copy_weight=True,
+                    )
+                except Exception as exc:  # pragma: no cover - backend-specific
+                    log.debug(
+                        "GGUFCppKernel: zero-copy packed weight rejected (%s); "
+                        "falling back to a copied weight buffer.",
+                        exc,
+                    )
             return self._run_quantized_matmul(
                 backend=backend,
-                qweight_cpu=self._normalize_qweight_cpu(qweight),
-                x_cpu=self._normalize_input_cpu(x, padded_in_features),
+                qweight_cpu=qweight_cpu,
+                x_cpu=x_cpu,
                 gguf_tensor_qtype=gguf_tensor_qtype,
                 padded_in_features=padded_in_features,
                 out_features=out_features,
@@ -1292,6 +1396,41 @@ class GGUFCppKernel(GGUFTorchLinear):
         if self.kernel.gguf_cpp_threads is None:
             self.kernel.gguf_cpp_threads = torch.get_num_threads()
         self._gguf_cpu_autotune_cache: Dict[tuple, bool] = {}
+
+    def post_init(self):
+        super().post_init()
+        self._align_packed_weight()
+
+    def _align_packed_weight(self) -> None:
+        """Give ``qweight`` the 32-byte alignment the zero-copy CPU path needs.
+
+        Checkpoints loaded from safetensors are mmap views whose storage offset
+        is arbitrary, so the packed buffer can start on any byte. Copy it once
+        into a padded allocation during initialization; the forward path then
+        reads it in place instead of copying it every call.
+        """
+
+        qweight = getattr(self, "qweight", None)
+        if not isinstance(qweight, torch.Tensor):
+            return
+        if qweight.device.type != "cpu" or qweight.dtype != torch.uint8:
+            return
+        if qweight.numel() == 0 or not qweight.is_contiguous():
+            return
+        if qweight.data_ptr() % _GGML_CPU_WEIGHT_ALIGNMENT == 0:
+            return
+
+        nbytes = qweight.numel() * qweight.element_size()
+        storage = torch.empty(
+            nbytes + _GGML_CPU_WEIGHT_ALIGNMENT - 1,
+            dtype=torch.uint8,
+        )
+        offset = (-storage.data_ptr()) % _GGML_CPU_WEIGHT_ALIGNMENT
+        aligned = storage.narrow(0, offset, nbytes).view(qweight.shape)
+        aligned.copy_(qweight)
+        # ``aligned`` keeps ``storage`` alive, and the extra <32 bytes are not
+        # part of the buffer shape or the checkpoint payload.
+        self.qweight = aligned
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

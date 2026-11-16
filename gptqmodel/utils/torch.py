@@ -803,6 +803,26 @@ def torch_empty_cache_any(
 def torch_empty_cache(device: torch.device = None, gc: bool = True, sync: bool = False) -> bool:
     return torch_empty_cache_any(device=device, gc=gc, sync=sync)
 
+
+def release_pinned_host_cache() -> bool:
+    """Return PyTorch's cached pinned-host blocks to the operating system.
+
+    ``torch.empty(..., pin_memory=True)`` (used by layer offload) and
+    accelerate's checkpoint staging allocate non-swappable host memory. Deleting
+    the tensor only returns the block to PyTorch's process-wide pinned cache, so
+    ``RssShmem`` stays resident for the life of the process. Call this after the
+    staging copies are dead; blocks still owned by live tensors are untouched.
+
+    Returns ``False`` when the Torch build exposes no host cache to empty.
+    """
+
+    empty = getattr(torch._C, "_host_emptyCache", None)
+    if empty is None:
+        return False
+    empty()
+    return True
+
+
 def resolve_torch_device(device: Union[torch.device, str, int, None] = None):
     """Resolve ``auto`` or a concrete device without assuming CUDA exists."""
     if device is None or (isinstance(device, str) and device.lower() == "auto"):

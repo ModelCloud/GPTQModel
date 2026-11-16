@@ -68,7 +68,7 @@ compatible deployment engine.
 | **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paroquant-optimization.md). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
 | **[QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ)** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
-| **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. |
+| **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). |
 | **[FP8](https://github.com/ModelCloud/GPTQModel/wiki/FP8-and-NVFP4)** | Floating-point weight quantization with scaled E4M3/E5M2 formats. Native inference is weight-only W8A16; [W8A8 is an explicit per-token opt-in](docs/fp8-weight-only-dispatch.md). |
 | **[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)** | Variable-rate compression with target average bits per weight and mixed-tier allocation. |
 | **[VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ)** | Vector-codebook quantization for low-bit model compression. |
@@ -89,8 +89,11 @@ Quantized kernels keep only packed weights resident; shared per-device scratch a
 - **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
   execution help manage memory and recover interrupted jobs. [Disk-offload run
   directories](https://github.com/ModelCloud/GPTQModel/blob/main/docs/offload-run-directories.md)
-  are per-run scratch space and are removed at teardown or failure. Distributed
-  EXL3 workflows support durable replay and resume.
+  are per-run scratch space and are removed at teardown or failure;
+  [reference offload](https://github.com/ModelCloud/GPTQModel/blob/main/docs/safetensors-reference-offload.md)
+  keeps untouched base modules as source-checkpoint references instead of
+  second copies, and releases pinned staging memory. Distributed EXL3
+  workflows support durable replay and resume.
 - **Recover accuracy.** Use [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) refinement, [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) low-rank compensation, [rotation](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#rotations),
   [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) training and adapter
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
