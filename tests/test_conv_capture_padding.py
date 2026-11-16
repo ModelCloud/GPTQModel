@@ -179,6 +179,70 @@ def test_conv2d_same_and_padding_mode_match_the_convolution(quantizer, mode):
     torch.testing.assert_close(hessian, _reference_hessian(patches), rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize("quantizer", QUANTIZERS)
+@pytest.mark.parametrize(
+    "kernel_size,padding",
+    [
+        ((2, 3), (1, 0)),
+        ((3, 2), (0, 1)),
+        ((2, 4), (1, 2)),
+    ],
+    ids=["kh2kw3", "kh3kw2", "kh2kw4"],
+)
+def test_conv2d_rectangular_kernel_keeps_per_axis_padding(quantizer, kernel_size, padding):
+    """#4469: height and width padding must not be exchanged.
+
+    ``conv_padding_pairs`` reports pairs in the module's spatial order
+    (height, width), while ``F.pad`` takes the last dimension first. Reading the
+    first pair as the width padding captured a different operator: for
+    ``kernel=(2,3), padding=(1,0)`` the capture accumulated 10 rows instead of
+    the 12 the convolution actually consumes.
+    """
+
+    torch.manual_seed(23)
+    x = torch.randn(1, 2, 4, 6)
+    conv = nn.Conv2d(2, 3, kernel_size, padding=padding, bias=False)
+
+    hessian = _capture(quantizer, conv, x)
+    patches = _conv2d_patches(x, conv)
+
+    # 12 receptive fields for the issue's own case; the oracle row count is what
+    # the swapped capture silently lost.
+    assert patches.shape[0] == conv(x).numel() // conv.out_channels
+    torch.testing.assert_close(_conv2d_output(patches, conv, x), conv(x), rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(hessian, _reference_hessian(patches), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("quantizer", QUANTIZERS)
+def test_conv2d_rectangular_same_padding_keeps_per_axis_split(quantizer):
+    """``padding="same"`` splits each axis independently; the axes must not swap."""
+
+    torch.manual_seed(29)
+    x = torch.randn(1, 1, 3, 5)
+    conv = nn.Conv2d(1, 6, (2, 3), padding="same", bias=False)
+
+    # Height total = 1 -> (0, 1); width total = 2 -> (1, 1).
+    assert conv_padding_pairs(conv) == ((0, 1), (1, 1))
+
+    hessian = _capture(quantizer, conv, x)
+    patches = _conv2d_patches(x, conv)
+
+    assert patches.shape[0] == conv(x).numel() // conv.out_channels
+    torch.testing.assert_close(_conv2d_output(patches, conv, x), conv(x), rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(hessian, _reference_hessian(patches), rtol=1e-5, atol=1e-5)
+
+
+def test_conv2d_padding_pairs_are_in_spatial_order():
+    """The helper's contract: (height, width), not ``F.pad`` order."""
+
+    explicit = nn.Conv2d(1, 1, (2, 3), padding=(1, 0), bias=False)
+    assert conv_padding_pairs(explicit) == ((1, 1), (0, 0))
+
+    same = nn.Conv2d(1, 1, (3, 4), padding="same", bias=False)
+    # Height total = 2 -> (1, 1); width total = 3 -> (1, 2).
+    assert conv_padding_pairs(same) == ((1, 1), (1, 2))
+
+
 def test_conv1d_strided_same_padding_is_rejected_before_calibration():
     """PyTorch only defines ``same`` padding for stride 1."""
 
