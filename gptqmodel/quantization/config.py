@@ -4435,6 +4435,7 @@ _SERIALIZED_META_FIELD_NAMES = (
     "mse",
     "mock_quantization",
     "act_group_aware",
+    "exclude_attention_sinks",
     "true_sequential",
     "static_groups",
     "damp_percent",
@@ -5810,6 +5811,23 @@ class GPTQConfig(PreProcessorConfig):
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
     act_group_aware: Optional[bool] = field(default=None)
+    # Calibration-only: drop the first token of every calibration sequence
+    # before accumulating the input Hessian. Tokenizers that prepend a BOS
+    # token turn that position into an attention sink whose activation norm can
+    # exceed the rest of the sequence by orders of magnitude; a single such row
+    # then dominates ``X^T X`` and GPTQ stops optimizing for the text tokens
+    # (issue #4393). Off by default: the historical Hessian is unchanged, and
+    # only tokenizers/datasets whose rows begin with a special token benefit.
+    exclude_attention_sinks: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Skip the first token of each calibration sequence when accumulating "
+                "the GPTQ Hessian. Enable for calibration rows whose leading token is a "
+                "BOS/attention-sink special token. Default: False (unchanged behavior)."
+            )
+        },
+    )
     static_groups: bool = field(default=False)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
@@ -5843,6 +5861,18 @@ class GPTQConfig(PreProcessorConfig):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
+        if not isinstance(self.exclude_attention_sinks, bool):
+            raise TypeError(
+                "QuantizeConfig:: `exclude_attention_sinks` must be a bool, "
+                f"got {type(self.exclude_attention_sinks).__name__} "
+                f"({self.exclude_attention_sinks!r})."
+            )
+        if self.exclude_attention_sinks and (self.gptaq is not None or self.foem is not None):
+            raise ValueError(
+                "QuantizeConfig:: `exclude_attention_sinks` is only implemented for the "
+                "plain GPTQ Hessian path; GPTAQ/FOEM accumulate their own Hessian and "
+                "ignore it. Leave it False for those methods."
+            )
 
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
@@ -5950,6 +5980,7 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse.norm
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["exclude_attention_sinks"] = self.exclude_attention_sinks
         # Calibration controls do not take part in inference, so they live in
         # `meta` (the writer already records them there). `to_dict()` must
         # write the same values or a factory reload silently restores the
@@ -6376,6 +6407,11 @@ class QQQConfig(GPTQConfig):
             raise ValueError(
                 "QQQConfig: `desc_act=True` is not supported by the QQQ runtime; "
                 "use `desc_act=False`."
+            )
+        if self.exclude_attention_sinks:
+            raise ValueError(
+                "QQQConfig: `exclude_attention_sinks` is only implemented for the "
+                "GPTQ Hessian path; leave it False for QQQ."
             )
 
         for layer, override in (self.dynamic or {}).items():

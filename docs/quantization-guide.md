@@ -167,6 +167,22 @@ asymmetric weights where the chosen kernel supports them. `desc_act=True`
 enables GPTQ activation ordering and disables the default group-aware ordering;
 do not explicitly enable both `desc_act` and `act_group_aware`.
 
+Tokenizers that prepend a BOS token make that position an attention sink: its
+activation norm can exceed the rest of the sequence by hundreds of times, so a
+single calibration row dominates the input Hessian and GPTQ stops optimizing
+for text tokens (issue #4393). Set `exclude_attention_sinks=True` to drop the
+first token of every calibration sequence before the Hessian is accumulated:
+
+```python
+qcfg = GPTQConfig(bits=4, group_size=128, exclude_attention_sinks=True)
+```
+
+The default is `False`, which keeps the historical Hessian. Enable it only when
+calibration rows start with a special/BOS token; a flattened routed-expert batch
+has no sequence axis and is never masked. On Llama-3.2-1B this option lowered
+wikitext-2 perplexity from 23.21 to 19.51 at the same 4-bit/group-128 GPTQ
+settings.
+
 ### AWQ W4A16
 
 ```python
