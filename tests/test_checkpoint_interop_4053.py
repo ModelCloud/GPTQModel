@@ -157,6 +157,11 @@ def _build_gptq_v1_checkpoint(path):
         quant.pack_original(linear, scales, zeros)
         model.set_submodule(name, quant)
     convert_gptq_v2_to_v1_format(model, qcfg, TorchLinear)
+    # The module was constructed for the v2 export format; after the explicit
+    # conversion it holds v1 words and must emit them under the v1 label.
+    for module in model.modules():
+        if isinstance(module, TorchLinear):
+            module._checkpoint_format_on_disk = FORMAT.GPTQ
 
     state = {name: value.clone() for name, value in model.state_dict().items()}
     save_file(state, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})

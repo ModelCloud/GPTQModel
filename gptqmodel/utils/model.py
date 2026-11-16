@@ -1384,11 +1384,15 @@ def pack_module(
             else:
                 module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
+        target_format = (
+            resolve_quant_format(quantize_config.format, quantize_config.method)
+            if quantize_config is not None
+            else None
+        )
         if (
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
-            and resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ
-            and getattr(module_cls, "REQUIRES_FORMAT_V2", False)
+            and target_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
         ):
             with log_time_block(
                 "mark_checkpoint_qzero_format",
@@ -1402,7 +1406,8 @@ def pack_module(
                 # step low (issue #4063). ``checkpoint_layout_qzeros`` and the
                 # writer emit the converted copy from this marker.
                 module.qzero_format(format=2)
-                module._checkpoint_format_on_disk = FORMAT.GPTQ
+                if getattr(module_cls, "REQUIRES_FORMAT_V2", False):
+                    module._checkpoint_format_on_disk = target_format
 
         # TODO: why move it back to gpu?
         # start = time.time()
