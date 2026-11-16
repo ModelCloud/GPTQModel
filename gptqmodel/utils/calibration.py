@@ -156,11 +156,7 @@ def _is_integer_sequence(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return all(_is_integer_sequence(item) for item in value)
     if torch.is_tensor(value):
-        return (
-            value.dtype != torch.bool
-            and not value.is_floating_point()
-            and not value.is_complex()
-        )
+        return value.dtype != torch.bool and not value.is_floating_point() and not value.is_complex()
     return _is_integer_scalar(value)
 
 
@@ -266,8 +262,7 @@ def prepare_calibration_dataset(
 
         if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
             raise ValueError(
-                f"Quantize: `{name}` for calibration item {idx} must contain integers, "
-                f"got dtype {tensor.dtype}."
+                f"Quantize: `{name}` for calibration item {idx} must contain integers, got dtype {tensor.dtype}."
             )
         tensor = tensor.to(dtype=torch.long)
 
@@ -429,9 +424,7 @@ def prepare_calibration_dataset(
             if _is_integer_sequence(example):
                 processed_examples.append(_pack_ids(list(example), None, idx))
                 continue
-            raise ValueError(
-                f"Quantize: list-based calibration example at index {idx} must contain only integers."
-            )
+            raise ValueError(f"Quantize: list-based calibration example at index {idx} must contain only integers.")
 
         if torch.is_tensor(example):
             processed_examples.append(_pack_ids(example, None, idx))
@@ -518,9 +511,7 @@ def prepare_calibration_dataset(
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
         if len(input_ids) == 0:
-            raise ValueError(
-                f"Quantize: calibration item {example_index} has no token rows."
-            )
+            raise ValueError(f"Quantize: calibration item {example_index} has no token rows.")
         if len(input_ids) != len(attention_mask):
             raise ValueError(
                 f"Quantize: calibration item {example_index} has {len(input_ids)} input_ids "
@@ -601,13 +592,9 @@ def prepare_calibration_dataset(
                     if pad_len <= 0:
                         padded_rows.append((row_ids, row_mask))
                     elif padding_side == "left":
-                        padded_rows.append(
-                            ([pad_token_id] * pad_len + row_ids, [0] * pad_len + row_mask)
-                        )
+                        padded_rows.append(([pad_token_id] * pad_len + row_ids, [0] * pad_len + row_mask))
                     else:
-                        padded_rows.append(
-                            (row_ids + [pad_token_id] * pad_len, row_mask + [0] * pad_len)
-                        )
+                        padded_rows.append((row_ids + [pad_token_id] * pad_len, row_mask + [0] * pad_len))
                 prepared_rows = padded_rows
 
             input_ids = [row_ids for row_ids, _ in prepared_rows]

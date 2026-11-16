@@ -28,9 +28,7 @@ def _qmodel(*, support_batch_quantize: bool = True, max_positions: int = MAX_POS
     return SimpleNamespace(
         tokenizer=_Tokenizer(),
         support_batch_quantize=support_batch_quantize,
-        model=SimpleNamespace(
-            config=SimpleNamespace(max_position_embeddings=max_positions)
-        ),
+        model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=max_positions)),
     )
 
 
