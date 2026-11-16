@@ -49,10 +49,10 @@ def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> Non
     """Fail closed on adapter tensors this runtime cannot apply.
 
     The LoRA path consumes only `lora_A` / `lora_B`. A checkpoint that also
-    carries DoRA magnitude vectors, trained biases, or `modules_to_save`
-    parameters would have those tensors dropped, so the adapter would load and
-    run as a different (plain LoRA) model. Rejecting them keeps the load honest
-    instead of silently wrong.
+    carries DoRA magnitude vectors, `trainable_token_indices` deltas, trained
+    biases, or `modules_to_save` parameters would have those tensors dropped, so
+    the adapter would load and run as a different (plain LoRA) model. Rejecting
+    them keeps the load honest instead of silently wrong.
     """
 
     for key in weights:
@@ -62,6 +62,12 @@ def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> Non
             )
         if ".modules_to_save." in key:
             raise ValueError(f"Adapter: `modules_to_save` is not supported (`{key}`)")
+        if ".trainable_tokens_delta" in key:
+            raise ValueError(
+                "Adapter: `trainable_token_indices` is not supported "
+                f"(`trainable_tokens_delta` tensor found: `{key}`); "
+                "load a plain LoRA adapter or fold the trained token deltas into the base model"
+            )
         if key.endswith(".bias"):
             raise ValueError(f"Adapter: adapter bias tensors are not supported (`{key}`)")
 

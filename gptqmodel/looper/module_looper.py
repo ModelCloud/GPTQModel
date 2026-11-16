@@ -1287,7 +1287,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             except Exception:
                 pass
 
-        tensor_attrs = ("H", "module_copy")
+        # GPTAQ/FOEM keep an auxiliary Hessian companion (`dXXT`) beside
+        # `H`. Rehome every per-module tensor the task owns so quantization
+        # cannot mix devices (issue #4312).
+        tensor_attrs = ("H", "module_copy", "dXXT")
         for attr_name in tensor_attrs:
             tensor_value = getattr(task, attr_name, None)
             if isinstance(tensor_value, torch.Tensor):

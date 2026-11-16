@@ -297,9 +297,10 @@ class MacaqLinear(WeightOnlyQuantLinear):
         """Follow the activation dtype so a later ``.to()`` cannot go stale.
 
         ``compute_dtype`` is fixed when the module is built, while ``.to()``
-        moves ``BH``/``pre_scale``/``bias`` to a new dtype.  Deriving the Torch
-        fallback dtype from the input keeps the operands consistent and returns
-        the activation dtype, even when the module was moved after ``__init__``.
+        moves ``BH``/``pre_scale``/``bias`` to a new dtype.  Deriving the
+        forward dtype from the input keeps both the Torch fallback and the
+        Triton kernels' operands consistent and returns the activation dtype,
+        even when the module was moved after ``__init__``.
         """
 
         if x.dtype in (torch.float16, torch.bfloat16, torch.float32):
@@ -324,14 +325,17 @@ class MacaqLinear(WeightOnlyQuantLinear):
         return linear_fp32_reduce(xb, weight, bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
+        # Like `_forward_torch`, the Triton path must not trust the build-time
+        # `compute_dtype`: `.to(dtype)` moves the buffers but not the attribute.
+        dtype = self._forward_dtype(x_flat)
         if self.activation_precision == "w4a4":
             # The fused rotate+quantize kernel needs a BH: its unfused
             # `bh=None` fallback costs more than rotating by an identity.
             bh = self.BH
             if bh is None:
                 bh = self._kernel_identity_bh
-                if bh is None or bh.device != x_flat.device:
-                    bh = torch.eye(self.had_block, dtype=self.compute_dtype, device=x_flat.device)
+                if bh is None or bh.device != x_flat.device or bh.dtype != dtype:
+                    bh = torch.eye(self.had_block, dtype=dtype, device=x_flat.device)
                     self._kernel_identity_bh = bh
             return mxfp4_w4a4_linear(
                 x_flat,
@@ -348,7 +352,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
             pre_scale=self.pre_scale,
             bh=self.BH,
             bias=self.bias,
-            compute_dtype=self.compute_dtype,
+            compute_dtype=dtype,
         )
 
     def _can_use_triton(self, x: torch.Tensor) -> bool:

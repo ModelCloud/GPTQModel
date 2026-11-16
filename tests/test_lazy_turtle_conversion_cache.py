@@ -1,16 +1,20 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Regression tests for issue #4205: cache and release LazyTurtle conversions."""
+"""Regression tests for LazyTurtle conversion caching (#4205) and its offload root (#4319)."""
 
 import gc
+import tempfile
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 from torch import nn
 
+from gptqmodel.models import loader
+from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils.structure import LazyTurtle
 
 
@@ -188,3 +192,102 @@ def test_concurrent_loads_convert_once(tmp_path, monkeypatch):
     assert _FakeCheckpointModel.save_calls == 1
     for turtle in turtles:
         turtle.close()
+
+
+def test_loader_converts_bin_under_configured_offload_path_not_tmpdir(tmp_path, monkeypatch):
+    """Issue #4319: the loader must forward `offload_to_disk_path` to LazyTurtle."""
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _patch_bin_source(monkeypatch, source_dir)
+    offload = tmp_path / "configured-offload"
+    system_tmp = tmp_path / "system-tmp"
+    system_tmp.mkdir()
+    # Pin the fallback root so the assertion is about this conversion, not
+    # whatever the host's TMPDIR happens to contain.
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(system_tmp))
+
+    class _FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.model_type = "fake_lazy_turtle"
+            self.sub_configs = {}
+            self.dtype = None
+
+        def to_dict(self):
+            return {"max_position_embeddings": 128}
+
+    base_config = _FakeConfig()
+
+    def _fake_build_shell_model(_loader, config, **_kwargs):
+        model = _FakeCheckpointModel()
+        model.config = config
+        return model
+
+    def _fake_convert_model(model, cleanup_original=False):
+        assert cleanup_original is False
+        model.config._experts_implementation = "linear_loop"
+        return model
+
+    class _FakeInnerLoader:
+        @staticmethod
+        def from_pretrained(_path, config=None, **_kwargs):
+            raise AssertionError("legacy eager turtle load should not run")
+
+    @loader.ModelLoader
+    class _DummyQModel:
+        loader = _FakeInnerLoader
+        require_dtype = None
+        loader_requires_dtype = False
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = True
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def resolve_hf_conversion_map_reversed(*_args, **_kwargs):
+            return None
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.turtle_model = kwargs.get("turtle_model")
+            self.config = model.config
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: str(source_dir))
+    monkeypatch.setattr(loader, "auto_select_device", lambda *_args, **_kwargs: torch.device("cpu"))
+    monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
+    monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", _fake_build_shell_model)
+    monkeypatch.setattr(loader.defuser, "convert_model", _fake_convert_model)
+
+    instance = _DummyQModel.from_pretrained(
+        str(source_dir),
+        quantize_config=QuantizeConfig(
+            bits=4,
+            offload_to_disk=True,
+            offload_to_disk_path=str(offload),
+        ),
+        trust_remote_code=False,
+    )
+
+    turtle = instance.turtle_model
+    assert isinstance(turtle, LazyTurtle)
+    converted = Path(turtle.model_local_path)
+    assert converted.is_dir()
+    assert converted.parent == offload
+    # The system TMPDIR must stay free of the model-sized conversion.
+    assert not list(system_tmp.glob("lazyturtle-*"))
+
+    # The conversion is leased to the turtle and removed when it is released.
+    del turtle, instance
+    gc.collect()
+    assert not converted.exists()
