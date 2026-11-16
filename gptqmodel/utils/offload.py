@@ -249,6 +249,144 @@ def restore_offloaded_modules(
     log.error(message)
     return unresolved
 
+def _owns_offload_hook(module: nn.Module) -> bool:
+    """Whether ``module`` itself carries an accelerate disk-offload hook."""
+
+    pending = [getattr(module, "_hf_hook", None)]
+    while pending:
+        hook = pending.pop()
+        if hook is None:
+            continue
+        nested = getattr(hook, "hooks", None)
+        if isinstance(nested, (tuple, list)):
+            pending.extend(nested)
+        elif getattr(hook, "offload", False):
+            return True
+    return False
+
+
+def restore_disk_offloaded_modules(
+    model: nn.Module,
+    *,
+    device: torch.device = CPU,
+    strict: bool = False,
+) -> List[str]:
+    """Materialize every module still served by a disk-offload hook.
+
+    During quantization each finalized (packed) module is written to the run's
+    offload directory and replaced by meta tensors behind an accelerate hook,
+    which keeps peak host memory at one layer. Left in place after the loop,
+    those hooks re-read the bundles on every forward, make ``model.to()`` fail
+    on the meta tensors, and break once the run directory is removed at
+    teardown (issue #4450). Restore the modules into ordinary tensors on
+    ``device`` and drop the hooks, so the in-session model is the same model
+    ``offload_to_disk=False`` produces. The bundle's weights map hands GPTQ
+    modules their live qzero layout (issue #4380).
+
+    ``strict=True`` raises the reload-the-checkpoint error when a module keeps
+    meta tensors; otherwise the failure is only logged. Returns the names of
+    modules that could not be restored.
+    """
+
+    targets = [
+        (name, module)
+        for name, module in model.named_modules()
+        if _owns_offload_hook(module)
+    ]
+    unresolved: List[str] = []
+    for name, module in targets:
+        try:
+            undo_offload_to_disk(module, device=device)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn("Offload: failed to restore `%s`: %s", name, exc)
+            unresolved.append(name)
+            continue
+        if is_meta_module(module) or _owns_offload_hook(module):
+            unresolved.append(name)
+
+    if not unresolved:
+        return []
+
+    message = (
+        "Offload: quantized modules remain disk-offloaded after quantization "
+        f"({', '.join(unresolved[:8])}{', ...' if len(unresolved) > 8 else ''}). "
+        "The in-session model cannot run inference; reload the saved checkpoint "
+        "before using it."
+    )
+    if strict:
+        raise RuntimeError(message)
+    log.error(message)
+    return unresolved
+
+
+def _owns_meta_tensor(module: nn.Module) -> bool:
+    tensors = list(module.parameters(recurse=False)) + list(module.buffers(recurse=False))
+    return any(tensor.is_meta for tensor in tensors)
+
+
+@torch.inference_mode(False)
+def replace_inference_parameters(module: nn.Module) -> None:
+    """Rebind ``module``'s inference-mode parameters as ordinary parameters.
+
+    The lazy checkpoint source materializes under ``torch.inference_mode``.
+    ``nn.Module.to()`` updates parameters in place, which an inference tensor
+    refuses outside that mode ("Inference tensors do not track version
+    counter"), so a later ``model.to(device)`` on the in-session model failed.
+    Buffers are reassigned by ``to()`` and need no rebinding.
+    """
+
+    for submodule in module.modules():
+        for name, param in list(submodule.named_parameters(recurse=False)):
+            if param.is_inference():
+                setattr(submodule, name, nn.Parameter(param.clone(), requires_grad=param.requires_grad))
+
+
+def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:
+    """Fill non-quantized modules that the lazy shell never materialized.
+
+    With ``offload_to_disk=True`` the model is loaded as a checkpoint-backed
+    meta shell, and modules outside the layer loop and the base-module list
+    (an untied ``lm_head``, for example) stay on meta until ``save()`` reads
+    them. ``offload_to_disk=False`` loads them into memory up front, so copy
+    them from the source checkpoint here to give the in-session model the same
+    end state (issue #4450). Packed quantized modules are skipped: their
+    payload never comes from the dense checkpoint.
+
+    Returns the names of modules that still own meta tensors; they are logged,
+    not raised, because the saved checkpoint stays correct either way.
+    """
+
+    model = qmodel.model
+    materialize = getattr(qmodel, "shell_direct_meta_materialize", None)
+    quantized_prefixes: List[str] = []
+    unresolved: List[str] = []
+    for name, module in model.named_modules():
+        if any(name.startswith(prefix) for prefix in quantized_prefixes):
+            continue
+        if getattr(module, "QUANT_TYPE", None) is not None:
+            quantized_prefixes.append(f"{name}.")
+            continue
+        if not _owns_meta_tensor(module):
+            continue
+        if callable(materialize):
+            try:
+                materialize(target_submodule=module, device=device)
+                replace_inference_parameters(module)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warn("Offload: failed to materialize `%s` from the source checkpoint: %s", name, exc)
+        if _owns_meta_tensor(module):
+            unresolved.append(name)
+
+    if unresolved:
+        log.error(
+            "Offload: modules remain on the meta device after quantization (%s). "
+            "The in-session model cannot run inference; reload the saved checkpoint "
+            "before using it.",
+            ", ".join(unresolved[:8]) + (", ..." if len(unresolved) > 8 else ""),
+        )
+    return unresolved
+
+
 # Serialize access to module.state_dict(), which is not thread-safe under
 # concurrent calls that mutate the same parent module.
 def _prepare_offload_directory(target_dir: str) -> None:
@@ -1209,6 +1347,26 @@ def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype
     return True
 
 
+def _drop_restored_class_forward(module: nn.Module) -> None:
+    """Return ``forward`` dispatch to the module's class after hook removal.
+
+    ``remove_hook_from_module`` restores the pre-hook forward by assigning the
+    bound method to the instance (``module.forward = module._old_forward``).
+    That pins the class the module had when it was offloaded: a later
+    in-place kernel switch (``rehome_quantized_kernel`` swapping AWQ GEMM for
+    the portable Torch kernel) would keep running the old class's forward.
+    Drop the instance attribute when it is just the class's own forward.
+    """
+
+    bound = module.__dict__.get("forward")
+    if (
+        bound is not None
+        and getattr(bound, "__self__", None) is module
+        and getattr(bound, "__func__", None) is getattr(type(module), "forward", None)
+    ):
+        del module.__dict__["forward"]
+
+
 def undo_offload_to_disk(
     module: nn.Module,
     device: torch.device = CPU,
@@ -1288,6 +1446,8 @@ def undo_offload_to_disk(
         with torch.inference_mode(False), torch.no_grad():
             remove_hook_from_submodules(module)      # public API
             remove_hook_from_module(module, recurse=False)  # ensure root is also clean
+            for sub in module.modules():
+                _drop_restored_class_forward(sub)
 
             for sub, name, is_param, requires_grad in offloaded_leaves:
                 tensor = getattr(sub, name)
