@@ -534,7 +534,7 @@ def _convert_gptq_to_mlx_weights(
                             FORMAT.MARLIN, FORMAT.BITBLAS,
                             FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                             FORMAT.BITSANDBYTES, FORMAT.EXL3,
-                            FORMAT.MXFP4_MACAQ, FORMAT.NF12]:
+                            FORMAT.MXFP4_MACAQ, FORMAT.MXFP4, FORMAT.NF12]:
         raise ValueError("MLX conversion requires a supported GPT-QModel quantization format")
 
     dynamic = gptq_config.get("dynamic") or {}
@@ -564,7 +564,7 @@ def _convert_gptq_to_mlx_weights(
     if quant_format in (FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                         FORMAT.BITSANDBYTES, FORMAT.EXL3, FORMAT.GEMV,
                         FORMAT.GEMV_FAST, FORMAT.LLM_AWQ, FORMAT.MARLIN,
-                        FORMAT.BITBLAS, FORMAT.MXFP4_MACAQ, FORMAT.NF12):
+                        FORMAT.BITBLAS, FORMAT.MXFP4_MACAQ, FORMAT.MXFP4, FORMAT.NF12):
         raise ValueError(f"{quant_format} MLX inference requires transferable packed weights and runtime state")
 
     # Requantization needs an MLX-supported group size.

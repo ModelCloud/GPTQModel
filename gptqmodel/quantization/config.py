@@ -149,8 +149,12 @@ class FORMAT(str, Enum):
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
     PAROQUANT = "paroquant"
-    # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales.
+    # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales
+    # plus its activation transforms (block-Hadamard `BH`, D1 `pre_scale`).
     MXFP4_MACAQ = "mxfp4_macaq"
+    # Plain OCP MXFP4: nibble-packed E2M1 and E8M0 scales only. MACaQ writes
+    # it for `rotation="none"` with `pre_mode="none"`.
+    MXFP4 = "mxfp4"
 
 
 class AutoDtypeCast(str, Enum):
@@ -1034,6 +1038,8 @@ def resolve_quant_format(
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
     if method == METHOD.MACAQ:
+        if isinstance(format_value, (str, FORMAT)) and str(getattr(format_value, "value", format_value)).strip().lower() == FORMAT.MXFP4.value:
+            return FORMAT.MXFP4
         return FORMAT.MXFP4_MACAQ
     if method == METHOD.NF12:
         return FORMAT.NF12
@@ -2291,6 +2297,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     METHOD.MACAQ: {
         FORMAT.MXFP4_MACAQ,
+        FORMAT.MXFP4,
     },
     METHOD.NF12: {
         FORMAT.NF12,
@@ -2351,6 +2358,7 @@ MACAQ_ROTATIONS: Tuple[str, ...] = ("hadamard", "none")
 
 MACAQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.MXFP4_MACAQ,
+    FORMAT.MXFP4,
 )
 NF12_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.NF12,
@@ -2376,6 +2384,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
     FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
+    FORMAT.MXFP4: METHOD.MACAQ,
     FORMAT.NF12: METHOD.NF12,
     FORMAT.TT_BLOCKFLOAT: METHOD.TT_BLOCKFLOAT,
 }
@@ -4103,7 +4112,9 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
                 normalized[FORMAT_FIELD_CODE] = normalized_format
             except ValueError:
                 normalized_format = None
-        if normalized_format is not None and normalized_format != FORMAT.MXFP4_MACAQ:
+        # `MacaqConfig.__post_init__` derives the exact format from
+        # `rotation`/`pre_mode`; only foreign formats are corrected here.
+        if normalized_format is not None and normalized_format not in MACAQ_EXPORT_FORMATS:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.MXFP4_MACAQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.MXFP4_MACAQ
     elif target_cls is VPTQConfig:
@@ -6203,15 +6214,16 @@ class MacaqConfig(PreProcessorConfig):
     # fused rotate+quantize Triton kernel; larger powers of two are supported.
     had_block: int = field(default=32)
     # Per-layer rotation of weights and activations. `hadamard` (default)
-    # applies the `had_block`-wide block Hadamard. `none` trades accuracy for
-    # faster inference: quantization stays in the original frame (an identity
-    # `BH` is stored, so the checkpoint layout is unchanged) and, with
-    # `pre_mode="none"` and `w4a16`, the runtime has no online activation
-    # transform, so the layer is a plain MXFP4 matmul that also exports to
-    # stock MLX. Expect higher quantization error than with the rotation, most
-    # of all for W4A4 where it suppresses activation outliers. This replaces
-    # the inherited model-wide `rotation`, which MACaQ does not use (see
-    # `model_rotation`).
+    # applies the `had_block`-wide block Hadamard and stores `BH`. `none`
+    # trades accuracy for faster inference: quantization stays in the
+    # original frame and no `BH` is stored. With `pre_mode="none"` as well,
+    # layers hold only E2M1 nibbles and E8M0 scales, so the checkpoint format
+    # is plain `mxfp4` and the W4A16 forward is a plain MXFP4 matmul that
+    # also exports to stock MLX. Expect higher quantization error than with
+    # the rotation, most of all for W4A4 where it suppresses activation
+    # outliers. Layers read this from the quant config, not from tensors.
+    # This replaces the inherited model-wide `rotation`, which MACaQ does not
+    # use (see `model_rotation`).
     rotation: Optional[str] = field(default="hadamard", metadata={"choices": list(MACAQ_ROTATIONS)})
     # Greedy single-level flip refinement in the fixed Hessian metric.
     do_flip: bool = field(default=True)
@@ -6268,7 +6280,31 @@ class MacaqConfig(PreProcessorConfig):
             "activation_precision": self.activation_precision,
             "pre_mode": self.pre_mode,
             "pre_alpha": self.pre_alpha,
+            "rotation": self.rotation,
         }
+
+    def checkpoint_format_for_settings(self) -> FORMAT:
+        """`mxfp4` when no quantized module stores an activation transform.
+
+        A module with `rotation="none"` and `pre_mode="none"` holds only the
+        packed E2M1 nibbles and E8M0 scales, which is plain OCP MXFP4. If the
+        base settings or any `dynamic` override keep `BH` or `pre_scale`, the
+        checkpoint is `mxfp4_macaq`.
+        """
+
+        def plain(rotation, pre_mode) -> bool:
+            return (str(rotation).strip().lower() == "none"
+                    and str(pre_mode).strip().lower() == "none")
+
+        if not plain(self.rotation, self.pre_mode):
+            return FORMAT.MXFP4_MACAQ
+        for pattern, override in (self.dynamic or {}).items():
+            if isinstance(pattern, str) and pattern.startswith("-:"):
+                continue
+            override = override or {}
+            if not plain(override.get("rotation", self.rotation), override.get("pre_mode", self.pre_mode)):
+                return FORMAT.MXFP4_MACAQ
+        return FORMAT.MXFP4
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym
@@ -6356,6 +6392,7 @@ class MacaqConfig(PreProcessorConfig):
         self.bits = 4
         self.desc_act = False
         self.sym = True
+        self.format = self.checkpoint_format_for_settings()
         super().__post_init__()
 
 
@@ -7337,6 +7374,10 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
             "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports "
             "`rtn`, `gguf`, `fp8`, and `bitsandbytes`."
         )
+    # GGUF also has an `mxfp4` subtype; an explicit MACaQ method owns the
+    # plain `mxfp4` format, while a bare `mxfp4` stays GGUF.
+    if method == METHOD.MACAQ:
+        return MacaqConfig
     if (
         format_value == FORMAT.GGUF
         or method == METHOD.GGUF
@@ -7363,7 +7404,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig
-    if method == METHOD.MACAQ or format_value == FORMAT.MXFP4_MACAQ:
+    if format_value == FORMAT.MXFP4_MACAQ:
         return MacaqConfig
     if method == METHOD.NF12 or format_value == FORMAT.NF12:
         return NF12Config

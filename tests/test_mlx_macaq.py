@@ -33,9 +33,12 @@ def _quantized_layer(in_features=256, out_features=64, activation_precision="w4a
         linear.weight.detach().float(), hessian, calibration.shape[0],
         do_flip=True, n_flip_iters=8, **quant_kwargs,
     )
+    # The layer's transforms come from the same settings as the quantizer.
     source = MacaqLinear(
         bits=4, group_size=32, in_features=in_features, out_features=out_features,
         bias=bias, dtype=torch.bfloat16, activation_precision=activation_precision,
+        rotation=quant_kwargs.get("rotation", "hadamard"),
+        pre_mode=quant_kwargs.get("pre_mode", "balance"),
     )
     source.pack(linear, macaq_result=result)
     return source, result
@@ -195,6 +198,7 @@ def _plain_mxfp4_layer(in_features=256, out_features=64, bias=True):
 def test_macaq_mlx_plain_mxfp4_layer_is_a_stock_quantized_linear(monkeypatch):
     """No transform + W4A16 is exactly MLX's own MXFP4 QuantizedLinear."""
     source, _ = _plain_mxfp4_layer()
+    assert source.plain_mxfp4
     model, config = _transfer(monkeypatch, source)
     assert isinstance(model.proj, nn.QuantizedLinear)
     assert model.proj.mode == "mxfp4"
@@ -237,7 +241,7 @@ def test_macaq_plain_mxfp4_exports_to_stock_mlx_lm(tmp_path):
     source_dir.mkdir()
     (source_dir / "config.json").write_text(json.dumps(model.config.to_dict()))
     gptq_config = {"bits": 4, "group_size": 32, "desc_act": False, "sym": True,
-                   "format": "mxfp4_macaq", "method": "macaq", "dynamic": None}
+                   "format": "mxfp4", "method": "macaq", "dynamic": None}
 
     mlx_model, mlx_config = convert_gptq_to_mlx_weights(
         str(source_dir), model, dict(gptq_config), "lm_head", stock_compatible=True,

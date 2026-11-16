@@ -1070,7 +1070,7 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.MACAQ]
-    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 0}
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 0, FORMAT.MXFP4: 0}
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -1095,16 +1095,9 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
             module.block_size == 32
             and tuple(module.W_packed.shape) == (module.out_features, module.in_features // 2)
             and tuple(module.W_scales.view(torch.uint8).shape) == (module.out_features, groups)
-            and tuple(module.pre_scale.shape) == (module.in_features,)
-            and tuple(module.BH.shape) == (module.had_block, module.had_block)
+            and (module.pre_scale is None or tuple(module.pre_scale.shape) == (module.in_features,))
+            and (module.BH is None or tuple(module.BH.shape) == (module.had_block, module.had_block))
         )
-
-    @staticmethod
-    def _identity_transforms(module):
-        """``(identity BH, unit pre_scale)`` for a MACaQ layer."""
-        bh = module.BH.detach().to("cpu", torch.float32)
-        pre_scale = module.pre_scale.detach().to("cpu", torch.float32)
-        return torch.equal(bh, torch.eye(bh.shape[0])), bool((pre_scale == 1).all())
 
     @classmethod
     def stock_compatible(cls, module):
@@ -1116,10 +1109,11 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
         reconstructs. W4A4 layers keep the custom runtime: stock MLX-LM only
         builds weight-only ``QuantizedLinear``.
         """
-        if not cls.source_compatible(module) or module.activation_precision != "w4a16":
-            return False
-        identity_bh, unit_pre_scale = cls._identity_transforms(module)
-        return identity_bh and unit_pre_scale
+        return (
+            cls.source_compatible(module)
+            and module.activation_precision == "w4a16"
+            and module.plain_mxfp4
+        )
 
     @classmethod
     def mlx_params(cls, module):
@@ -1140,18 +1134,22 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
         if not cls.source_compatible(module):
             raise ValueError(f"MACaQ layer {module.name} cannot be transferred to MLX")
         words = np.ascontiguousarray(module.W_packed.detach().to("cpu").numpy())
-        bh = module.BH.detach().to("cpu", torch.float32)
-        pre_scale = module.pre_scale.detach().to("cpu", torch.float32)
-        identity_bh, unit_pre_scale = cls._identity_transforms(module)
+        # Absent transforms (`rotation="none"`, `pre_mode="none"`) travel as
+        # identities so the MLX layer keeps one parameter layout, and the
+        # flags let it skip their dispatch.
+        apply_rotation = module.BH is not None
+        apply_pre_scale = module.pre_scale is not None
+        bh = (module.BH.detach().to("cpu", torch.float32) if apply_rotation
+              else torch.eye(module.had_block, dtype=torch.float32))
+        pre_scale = (module.pre_scale.detach().to("cpu", torch.float32) if apply_pre_scale
+                     else torch.ones(module.in_features, dtype=torch.float32))
         return {
             "weight": words.view(np.uint32).reshape(module.out_features, module.in_features // 8),
             "scales": module.W_scales.detach().view(torch.uint8).to("cpu").numpy(),
             "pre_scale": pre_scale.numpy(),
             "BH": bh.numpy(),
-            # Identity transforms (`rotation="none"`, `pre_mode="none"`)
-            # let the MLX layer skip its pre-rotate dispatch.
-            "apply_rotation": not identity_bh,
-            "apply_pre_scale": not unit_pre_scale,
+            "apply_rotation": apply_rotation,
+            "apply_pre_scale": apply_pre_scale,
             "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
             "had_block": module.had_block,
             "activation_precision": module.activation_precision,

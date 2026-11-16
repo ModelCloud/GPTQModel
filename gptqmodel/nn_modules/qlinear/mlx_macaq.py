@@ -96,8 +96,8 @@ class MlxMACaQLinear(nn.Module):
         self.had_block = had_block
         self.activation_precision = activation_precision
         self.compute_dtype = compute_dtype
-        # The loaded BH / pre_scale are identities when these are False, so
-        # skipping them is exact.
+        # False when the source layer has no BH / pre_scale (`rotation="none"`,
+        # `pre_mode="none"`); the loaded arrays are then identities and unused.
         self.apply_rotation = bool(apply_rotation)
         self.apply_pre_scale = bool(apply_pre_scale)
         # Checkpoint bytes: [out, in / 8] uint32 nibbles and one E8M0 per group.

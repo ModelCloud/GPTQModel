@@ -68,6 +68,11 @@ packing, and transform metadata are part of this implementation's layout.
 A generic MXFP4 checkpoint cannot be loaded as `FORMAT.MXFP4_MACAQ` without
 converting that layout and supplying the required transform state.
 
+`FORMAT.MXFP4` (`"mxfp4"`) is the transform-free case: `rotation="none"` and
+`pre_mode="none"` leave only the MXFP4 weight codes and scales (plus an
+optional bias), so nothing MACaQ-specific is stored. See
+[Rotation-free weight-only MXFP4](#rotation-free-weight-only-mxfp4).
+
 ## Quantization and runtime flow
 
 The backend is resolved once during preflight. `MACAQ_TORCH` remains selected
@@ -446,12 +451,27 @@ that store `rotation: null` load as `"hadamard"`.
 `rotation="none"` trades accuracy for faster inference. It keeps the
 calibrated parts of the recipe — the Hessian-weighted exponent
 screen and flip refinement — and drops both online activation transforms. The
-quantizer works in the original weight frame and stores an identity `BH` and a
-unit `pre_scale`, so the checkpoint layout is unchanged. `MacaqLinear` (Torch and Triton W4A16) detects the
-identity transforms at load and skips them, which is exact, so the forward is
-a plain MXFP4 dequantize-matmul with no extra activation pass. Torch W4A4
-skips them too; Triton W4A4 keeps its fused rotate+quantize kernel, which is
-cheaper than the unfused path even with an identity `BH`.
+quantizer works in the original weight frame. `MacaqLinear` reads `rotation`
+and `pre_mode` from the quant config: it registers `BH` only for
+`rotation="hadamard"` and `pre_scale` only for `pre_mode="balance"`, so with
+both off a layer stores just `W_packed` (E2M1 nibbles), `W_scales` (E8M0
+bytes) and an optional `bias`. The W4A16 forward is then a plain MXFP4
+dequantize-matmul with no extra activation pass. Triton W4A4 rotates by an
+in-memory identity so it keeps its fused rotate+quantize kernel, which is
+cheaper than the unfused path.
+
+The checkpoint format follows the stored tensors:
+
+| Settings | `format` | Per-layer tensors |
+|---|---|---|
+| `rotation="none"`, `pre_mode="none"` | `mxfp4` | `W_packed`, `W_scales`, `bias` |
+| anything else (default) | `mxfp4_macaq` | adds `BH` and/or `pre_scale` |
+
+`mxfp4` is chosen only when every quantized module, including `dynamic`
+overrides, is plain; an explicit `format` never overrides this. Both formats
+save `method: "macaq"`, which is how the loader tells a MACaQ `mxfp4`
+checkpoint from GGUF's `mxfp4` subtype: a config without `method` and with
+`format: "mxfp4"` still loads as GGUF.
 
 On MLX such a W4A16 layer is exactly a stock
 `mlx.nn.QuantizedLinear(mode="mxfp4", group_size=32, bits=4)`: the packed
@@ -460,7 +480,7 @@ RTN. `GPTQModel.load(..., backend="mlx")` builds that stock layer, and
 `GPTQModel.export(..., format="mlx")` writes a checkpoint that stock
 `mlx_lm.load` reads, which rotated MACaQ checkpoints cannot do. Layers that
 keep the D1 pre-scale or use W4A4 stay on the custom `MlxMACaQLinear`, which
-skips the pre-rotate dispatch when `BH` is the identity.
+skips the rotate dispatch when the layer has no `BH`.
 
 Llama-3.2-1B-Instruct, W4A16, 128 Wikitext-2 training chunks of 1,024
 tokens for calibration, 256 flip sweeps, perplexity over 64 contiguous
@@ -489,7 +509,7 @@ diagonal pre-scale.
 | `bits` | 4 | MXFP4 only |
 | `block_size` / `group_size` | 32 | OCP MXFP4 scale group |
 | `had_block` | 32 | block-Hadamard width (power of two, >= 32) |
-| `rotation` | `"hadamard"` | per-layer rotation: `"hadamard"` (block Hadamard) or `"none"`, which stores an identity `BH` and trades accuracy for faster inference |
+| `rotation` | `"hadamard"` | per-layer rotation: `"hadamard"` (block Hadamard) or `"none"`, which stores no `BH` and trades accuracy for faster inference; with `pre_mode="none"` the format is `mxfp4` |
 | `do_flip` | `True` | enable greedy level refinement |
 | `n_flip_iters` | 256 | maximum flip sweeps |
 | `fast_flip` | `True` | active-set sweep (bit-identical to the dense sweep) |

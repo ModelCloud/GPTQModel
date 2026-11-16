@@ -505,11 +505,11 @@ def macaq_quantize_weight(
     """Quantize one ``[out, in]`` weight matrix with the MACaQ recipe.
 
     ``rotation="none"`` skips the block Hadamard and quantizes in the
-    original (optionally D1-scaled) frame. ``BH`` is then the identity, so the
-    packed layout is unchanged and runtimes can detect that no rotation is
-    needed. This trades accuracy for faster inference: no online activation
-    rotation is needed, but quantization error is higher than with
-    ``rotation="hadamard"`` (the default).
+    original (optionally D1-scaled) frame and returns an identity ``BH``; a
+    layer built with the same ``rotation`` stores no ``BH`` at all. This
+    trades accuracy for faster inference: no online activation rotation is
+    needed, but quantization error is higher than with ``rotation="hadamard"``
+    (the default).
     """
 
     device = weight.device
