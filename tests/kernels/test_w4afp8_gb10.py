@@ -312,7 +312,10 @@ def test_fp8_pack_is_bit_exact_with_fp8_token_qdq(rows, width, dtype):
 
     x32 = x.float()
     amax = x32.abs().amax(dim=-1, keepdim=True)
-    reference_scale = torch.where(amax > 0, amax / 448.0, torch.ones_like(amax))
+    reference_scale = amax / 448.0
+    reference_scale = torch.where(
+        reference_scale > 0, reference_scale, torch.ones_like(reference_scale)
+    )
     reference_codes = (x32 / reference_scale).clamp(-448, 448).to(torch.float8_e4m3fn)
 
     assert torch.equal(scales, reference_scale.reshape(-1))
@@ -321,6 +324,44 @@ def test_fp8_pack_is_bit_exact_with_fp8_token_qdq(rows, width, dtype):
 
     dequantized = (codes.float() * scales[:, None]).to(x.dtype)
     assert torch.equal(dequantized, fp8_token_qdq(x))
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+def test_fp8_pack_does_not_divide_by_an_underflowed_row_scale():
+    """A positive row maximum does not guarantee a positive `amax / 448`.
+
+    The smallest FP32 subnormals round that quotient to zero, and dividing by
+    it would turn the row's zeros into NaN and saturate the remaining values
+    into a wrong E4M3 code. The kernel must apply the same unscaled fallback as
+    `fp8_token_qdq` and stay bit-exact with it.
+    """
+    x = torch.tensor(
+        [
+            [0.0, 2.0**-149, -(2.0**-149)],
+            [0.0, 0.0, 0.0],
+            [0.0, 2.0**-141, -(2.0**-141)],
+            [0.0, 2.0**-140, -(2.0**-140)],
+        ],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    codes, scales = fp8_pack(x)
+    torch.cuda.synchronize()
+
+    x32 = x.float()
+    amax = x32.abs().amax(dim=-1, keepdim=True)
+    reference_scale = amax / 448.0
+    reference_scale = torch.where(
+        reference_scale > 0, reference_scale, torch.ones_like(reference_scale)
+    )
+    reference_codes = (x32 / reference_scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+
+    assert torch.isfinite(scales).all()
+    assert bool((scales > 0).all())
+    torch.testing.assert_close(scales, reference_scale.reshape(-1), rtol=0, atol=0)
+    assert torch.equal(codes.view(torch.uint8), reference_codes.view(torch.uint8))
+    assert torch.equal((codes.float() * scales[:, None]).to(x.dtype), fp8_token_qdq(x))
 
 
 @GLUON_FP8
