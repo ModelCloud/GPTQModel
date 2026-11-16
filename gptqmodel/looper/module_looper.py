@@ -29,7 +29,7 @@ from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import LoopProcessor, record_quant_log
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -2230,6 +2230,23 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             region_timer.flush()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+        # One model-level per-module log for every quantizer, assembled in run
+        # plan order. Recording only a hard-coded set of processor names left
+        # FOEM/QQQ/VPTQ/ParoQuant/FP8-GSQ runs without any `quant_log`, so the
+        # writer skipped `quant_log.csv` (issue #4321).
+        processor_logs = []
+        recorded = set()
+        for processor in self.processors:
+            processor_name = processor.name()
+            processor_logs.append((processor_name, total_log.get(processor_name)))
+            recorded.add(processor_name)
+        # A processor whose dynamic name changed mid-run must still be
+        # published: append every finalized log the plan order did not name.
+        processor_logs.extend(
+            (name, entries) for name, entries in total_log.items() if name not in recorded
+        )
+        record_quant_log(self.gptq_model, processor_logs)
 
         return total_log
 
