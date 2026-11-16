@@ -200,13 +200,22 @@ class MarlinLinear(GPTQQuantLinear):
             ),
         )
 
-        # Activation order
+        # Activation order. ``post_init()`` inspects ``g_idx`` to tell a real
+        # activation-order checkpoint from a plain ``desc_act=False`` layer, so
+        # the placeholder must never be uninitialised memory. Seed it with the
+        # canonical contiguous mapping (``arange(K) // group_size``) that the
+        # base class stores for ``desc_act=False``: it is the identity ordering,
+        # a valid shape for ``load_state_dict()``, and it keeps a checkpoint
+        # that omits ``g_idx`` on the contiguous fast path.
         self.register_parameter(
             "g_idx",
-            torch.nn.Parameter(data=torch.empty(
-                self.in_features,
-                dtype=torch.int32,
-            ), requires_grad=False),
+            torch.nn.Parameter(
+                data=torch.arange(
+                    self.in_features,
+                    dtype=torch.int32,
+                ) // self.group_size,
+                requires_grad=False,
+            ),
         )
 
         # Scales
