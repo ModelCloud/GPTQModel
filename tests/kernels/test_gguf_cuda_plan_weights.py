@@ -10,6 +10,7 @@ per-device buffer that every plan's graph references.
 """
 
 import ctypes
+import threading
 
 import numpy as np
 import pytest
@@ -154,6 +155,12 @@ class _FakeBridge:
         self.weight_builds = []
         self.plan_weights = []
         self.plans = []
+        # The kernel serializes every ggml-cuda entry through the bridge's
+        # process-wide lock (#4378), so the fake must expose it.
+        self._cuda_backend_lock = threading.RLock()
+
+    def cuda_backend_lock(self, device_index):
+        return self._cuda_backend_lock
 
     def cuda_available(self):
         return True, None

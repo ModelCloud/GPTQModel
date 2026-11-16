@@ -236,11 +236,10 @@ class _GGMLBridge:
         self._cpu_backend: Optional[int] = None
         self._cpu_backend_lock = threading.RLock()
         self._cuda_backends: Dict[int, int] = {}
-        # One lock per CUDA device. Every layer on a device shares the same
-        # ggml CUDA backend (and its stream, graph-capture state and memory
-        # pool), so calls that touch it must serialize across layers too.
-        self._cuda_backend_locks: Dict[int, threading.RLock] = {}
-        self._cuda_backend_locks_guard = threading.Lock()
+        # ggml-cuda keeps process-global state (cuBLAS handles, memory pools)
+        # that is shared across devices, so entry must serialize process-wide,
+        # not per device (#4378). One re-entrant lock covers every device.
+        self._cuda_backend_lock = threading.RLock()
         self._quantize_initialized: set[int] = set()
         self._quantize_init_lock = threading.Lock()
         self._dequantize_fns: Dict[str, object] = {}
@@ -479,15 +478,16 @@ class _GGMLBridge:
             return self._cpu_backend
 
     def cuda_backend_lock(self, device_index: int) -> threading.RLock:
-        """Return the lock serializing the shared ggml CUDA backend on a device."""
-        if device_index < 0:
-            device_index = 0
-        with self._cuda_backend_locks_guard:
-            lock = self._cuda_backend_locks.get(device_index)
-            if lock is None:
-                lock = threading.RLock()
-                self._cuda_backend_locks[device_index] = lock
-            return lock
+        """Return the process-wide lock serializing entry into ggml-cuda.
+
+        ggml-cuda shares cuBLAS handles and memory pools across devices, so a
+        per-device lock still lets cuda:0 and cuda:1 run inside the backend
+        together and abort the process (#4378). ``device_index`` is accepted
+        for call-site clarity; every device takes the same re-entrant lock.
+        """
+
+        del device_index
+        return self._cuda_backend_lock
 
     def _get_cuda_backend(self, device_index: int) -> int:
         if self._ggml_cuda is None:
@@ -500,7 +500,8 @@ class _GGMLBridge:
                 f"GGML CUDA backend device index `{device_index}` is out of range for `{device_count}` devices."
             )
         # The dict is shared by every layer; initializing a device backend is
-        # also not safe to race (it allocates the backend memory pool).
+        # also not safe to race (it allocates the backend memory pool) and
+        # ggml-cuda state is process-wide (#4378).
         with self.cuda_backend_lock(device_index):
             backend = self._cuda_backends.get(device_index)
             if backend is None:
@@ -1343,8 +1344,9 @@ class GGUFCudaKernel(GGUFTorchLinear):
         device_index = 0 if x_flat.device.index is None else x_flat.device.index
         key = (device_index, tensor_cache_key(self.qweight))
         # Closing plans and freeing the shared weight is only safe while no
-        # other thread is computing with it; forwards on this device take the
-        # same (re-entrant) lock.
+        # other thread is computing with it; every forward takes the same
+        # process-wide (re-entrant) lock, because ggml-cuda state is shared
+        # across devices (#4378).
         with self._cuda_lock_for_device(device_index):
             weight = self._ggml_cuda_weight
             if weight is not None and self._ggml_cuda_weight_key == key:
@@ -1413,10 +1415,10 @@ class GGUFCudaKernel(GGUFTorchLinear):
 
         plan_key = self._cuda_plan_key(x_flat)
         device_index = 0 if x_flat.device.index is None else x_flat.device.index
-        # The ggml CUDA backend is shared by every layer on a device and owns a
-        # single stream, graph-capture state and memory pool, so weight/plan
-        # cache mutation and the backend call must not interleave with another
-        # forward on the same device. The lock is re-entrant: `_cuda_weight`
+        # ggml-cuda keeps cuBLAS handles and memory pools in process-global
+        # state shared by every device, so weight/plan cache mutation and the
+        # backend call must not interleave with any other forward, not just one
+        # on the same device (#4378). The lock is re-entrant: `_cuda_weight`
         # takes it again for the swap itself.
         with self._cuda_lock_for_device(device_index):
             # Resolve the shared weight first: it may drop plans built against

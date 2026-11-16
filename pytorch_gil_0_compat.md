@@ -467,6 +467,27 @@ rejects a mixed-dtype, meta or stuck-default-dtype result. Do not call
 Regression: `tests/test_concurrent_load.py` (two threads, six rounds, both GIL
 modes) and `tests/test_load_state_assertions.py`.
 
+### 12. ggml-cuda entry is serialized process-wide (#4378)
+
+`_GGMLBridge.cuda_backend_lock` handed out one `RLock` per CUDA device, and
+`GGUFCudaKernel.forward` held it across the ggml-cuda graph compute. ggml-cuda
+keeps cuBLAS handles and memory pools in process-global state, so forwards on
+cuda:0 and cuda:1 could be inside it together. On 2x RTX 4090 at `def6e61`
+with `PYTHON_GIL=0`, 4 threads x 200 forwards aborted 5 of 20 runs with
+`CUDA error: an internal operation failed ... cublasGemmEx` on device 1.
+Monkeypatching the lock to a single process-wide `RLock` gave 0 of 20 aborts.
+
+`cuda_backend_lock` now returns one re-entrant process-wide lock; the
+per-device backend-handle map (`_cuda_backends`) is unchanged. Single-thread
+latency is unchanged (~57 µs/call) because a forward already took one lock.
+
+Regression: `tests/test_gguf_cuda_process_lock_4378.py` drives the real lock
+through a mocked bridge, since CPU CI has no ggml CUDA extension. It asserts
+that cuda:0 and cuda:1 share one lock object and that concurrent forwards and
+lock entries on two devices never overlap inside the backend critical section.
+All three tests fail on the pre-fix code (`max_active == 2`) and pass after the
+fix.
+
 ## Adding a probe
 
 1. Add the callable to `build_probes()` in `scripts/gil0_api_probe.py`.
