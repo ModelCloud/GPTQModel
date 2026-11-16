@@ -1773,6 +1773,34 @@ def _stream_state_dict_to_layer_dirs(
 
     return expected_files, tensor_to_filename, total_size
 
+def _export_shell_device(qcfg) -> Optional[DEVICE]:
+    """Device constraint the re-save export shell asks the kernel selector for.
+
+    The shell only materializes the checkpoint's packed buffer layout and then
+    loads the checkpoint into it; it never runs a forward pass. Some formats
+    (AWQ GEMV / GEMV_FAST) only have accelerator kernels, so pinning AUTO to
+    CPU rejects every candidate and fails the whole re-save with "No valid
+    quant linear" (issue #4305). For those formats the shell drops the device
+    constraint so the selector can still return the layout class.
+
+    Formats that do have a CPU kernel keep asking for CPU: on an accelerator
+    host, an unconstrained AUTO could otherwise pick a faster accelerator
+    kernel whose in-memory buffer layout differs from the checkpoint's.
+    """
+
+    from ..utils.importer import get_auto_backend_kernel_mapping
+
+    fmt = resolve_quant_format(qcfg.format, qcfg.method)
+    method = qcfg.export_quant_method()
+    candidates = get_auto_backend_kernel_mapping().get(method, {}).get(fmt, {})
+    if any(
+        DEVICE.ALL in cls.SUPPORTS_DEVICES or DEVICE.CPU in cls.SUPPORTS_DEVICES
+        for cls in candidates.values()
+    ):
+        return DEVICE.CPU
+    return None
+
+
 def ModelWriter(cls):
     def save_pretrained(
             self,
@@ -2536,7 +2564,8 @@ def ModelWriter(cls):
                 backend=BACKEND.AUTO,
                 lm_head_name=self.lm_head,
                 pack=True,
-                device=DEVICE.CPU,
+                # Layout-only selection: see ``_export_shell_device``.
+                device=_export_shell_device(qcfg),
                 # Register quantized-module biases at the checkpoint/model width
                 # so a bf16/fp32 bias cannot overflow an fp16 placeholder
                 # before ``load_checkpoint_in_model`` copies it in.
