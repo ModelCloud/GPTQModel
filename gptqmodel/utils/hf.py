@@ -1205,7 +1205,11 @@ def _patch_transformers_remote_code_compat() -> None:
             cache_utils.HybridCache = cache_utils.StaticCache
 
         cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
-        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
+        # transformers 5.22 moved the length query down to the cache *layers*
+        # and no longer exposes a cache-level `get_max_cache_shape`, so the
+        # shim must not require that method to exist. It reads the layer API
+        # first and only falls back to a cache-level shape query when present.
+        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length"):
             # Older remote decoders expect `get_max_length()`, while newer
             # transformers renamed that API to `get_max_cache_shape()`. In
             # transformers 5.14, the deprecated cache-level method delegates
@@ -1228,7 +1232,11 @@ def _patch_transformers_remote_code_compat() -> None:
                         max_length = -1
 
                 if max_length is missing:
-                    max_length = self.get_max_cache_shape(layer_idx)
+                    shape_getter = getattr(self, "get_max_cache_shape", None)
+                    if callable(shape_getter):
+                        max_length = shape_getter(layer_idx)
+                if max_length is missing:
+                    return None
                 return None if max_length is None or max_length < 0 else max_length
 
             cache_base_cls.get_max_length = get_max_length

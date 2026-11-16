@@ -96,7 +96,11 @@ def test_exact_fp8_weight_operand_and_native_checkpoint():
     assert not hasattr(module, "_weight_e4m3")
     operand = module.fp8_weight_operand()
     torch.testing.assert_close(operand.float()[:, 0], expected, rtol=0, atol=0)
-    assert set(module.state_dict()) == {"qweight", "qzeros", "scales", "g_idx"}
+    # ``qzeros_format`` is the in-process layout marker every GPTQ kernel
+    # carries in ``state_dict()``; a checkpoint write strips it (#4152).
+    assert set(module.state_dict()) == {
+        "qweight", "qzeros", "scales", "g_idx", "qzeros_format",
+    }
     assert module.qweight.dtype == torch.int32
     # Re-staging is deterministic and leaves no cache behind.
     module.post_init()

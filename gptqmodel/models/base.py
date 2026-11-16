@@ -6247,7 +6247,13 @@ class BaseQModel(nn.Module):
         except Exception as exc:  # torch Modules raise AttributeError here
             model = self.__dict__.get("model")
             if model is None:
-                model = self._modules.get("model") if hasattr(self, "_modules") else None
+                # ``self._modules`` must be read from ``__dict__``: during
+                # ``__init__`` (and for instances built with ``object.__new__``
+                # in tests) it does not exist yet, and ``hasattr(self,
+                # "_modules")`` re-enters this hook forever instead of
+                # returning False.
+                modules = self.__dict__.get("_modules")
+                model = modules.get("model") if modules is not None else None
             if model is not None and item != "model":
                 return getattr(model, item)
             raise exc
