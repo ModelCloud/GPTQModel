@@ -18,7 +18,7 @@ import torch
 from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
-from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear, new_validation_error
 from ..quantization import FORMAT, METHOD
 from ..quantization.config import _normalize_quant_bits, quant_bits_width
 from ..utils.env import env_flag
@@ -228,15 +228,6 @@ def _validation_method_identity(cls, name: str):
     return None
 
 
-def _new_validation_error(error_type, message):
-    if error_type is None:
-        return None
-    try:
-        return error_type(message)
-    except Exception:
-        return ValueError(message)
-
-
 def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
     """Validate one kernel contract with a bounded, device-aware cache.
 
@@ -272,7 +263,7 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
         if cached is not None:
             _VALIDATION_CACHE.move_to_end(key)
             ok, error_type, error_message = cached
-            return ok, _new_validation_error(error_type, error_message)
+            return ok, new_validation_error(error_type, error_message)
         generation = _VALIDATION_CACHE_GENERATION
 
     try:
@@ -293,12 +284,12 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
             class_cache_clear = getattr(cls.cached_validate_once, "cache_clear", None)
             if class_cache_clear is not None:
                 class_cache_clear()
-            return bool(ok), _new_validation_error(error_type, error_message)
+            return bool(ok), new_validation_error(error_type, error_message)
         _VALIDATION_CACHE[key] = cached
         _VALIDATION_CACHE.move_to_end(key)
         while len(_VALIDATION_CACHE) > _VALIDATION_CACHE_MAXSIZE:
             _VALIDATION_CACHE.popitem(last=False)
-    return bool(ok), _new_validation_error(error_type, error_message)
+    return bool(ok), new_validation_error(error_type, error_message)
 
 
 def clear_validation_cache() -> None:

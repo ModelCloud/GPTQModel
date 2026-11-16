@@ -36,7 +36,10 @@ _GGML_CPU_WEIGHT_ALIGNMENT = 32
 _llama_cpp_pkg = None
 _llama_cpp_lib = None
 _llama_cpp_load_shared_library = None
-_LLAMA_CPP_IMPORT_ERROR = None
+# The failure is kept as text, not as the exception: its traceback frames chain
+# through ``f_back`` to whichever caller first probed the backend (for example a
+# model loader), and a process-lifetime global would keep that model alive.
+_LLAMA_CPP_IMPORT_ERROR: Optional[str] = None
 _LLAMA_CPP_LOADED = False
 _LLAMA_CPP_LOCK = threading.Lock()
 
@@ -70,7 +73,7 @@ def _require_llama_cpp():
                 _llama_cpp_load_shared_library = llama_cpp_load_shared_library
                 _LLAMA_CPP_IMPORT_ERROR = None
             except Exception as exc:  # pragma: no cover - optional dependency
-                _LLAMA_CPP_IMPORT_ERROR = exc
+                _LLAMA_CPP_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
             _LLAMA_CPP_LOADED = True
 
     return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
@@ -275,18 +278,21 @@ class _GGMLBridge:
         llama_cpp_pkg, llama_cpp_lib, load_shared_library = _require_llama_cpp()
         if _LLAMA_CPP_IMPORT_ERROR is not None:
             raise ModuleNotFoundError(
-                "GGUFCppKernel requires `llama-cpp-python` to be installed."
-            ) from _LLAMA_CPP_IMPORT_ERROR
+                "GGUFCppKernel requires `llama-cpp-python` to be installed "
+                f"(import failed with {_LLAMA_CPP_IMPORT_ERROR})."
+            )
 
         lib_dir = Path(llama_cpp_pkg.__file__).resolve().parent / "lib"
         self._ggml_base = load_shared_library("ggml-base", lib_dir)
         self._ggml_cpu = load_shared_library("ggml-cpu", lib_dir)
         self._ggml_cuda = None
-        self._ggml_cuda_error: Optional[Exception] = None
+        # Text only: the bridge is a process-lifetime singleton, so a stored
+        # exception would pin the frames of the first caller that built it.
+        self._ggml_cuda_error: Optional[str] = None
         try:
             self._ggml_cuda = load_shared_library("ggml-cuda", lib_dir)
         except Exception as exc:  # pragma: no cover - optional shared library
-            self._ggml_cuda_error = exc
+            self._ggml_cuda_error = f"{type(exc).__name__}: {exc}"
         self._bind_functions()
 
         self.ggml_type_f32 = int(llama_cpp_lib.GGML_TYPE_F32)
@@ -599,7 +605,10 @@ class _GGMLBridge:
 
     def _get_cuda_backend(self, device_index: int) -> int:
         if self._ggml_cuda is None:
-            raise RuntimeError("llama-cpp-python was built without GGML CUDA support.") from self._ggml_cuda_error
+            raise RuntimeError(
+                "llama-cpp-python was built without GGML CUDA support "
+                f"(loading ggml-cuda failed with {self._ggml_cuda_error})."
+            )
         if device_index < 0:
             device_index = 0
         device_count = int(self._ggml_cuda.ggml_backend_cuda_get_device_count())
