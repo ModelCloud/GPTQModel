@@ -1286,12 +1286,17 @@ def test_macaq_config_rotation_roundtrip_and_legacy_default():
 
     config = MacaqConfig(rotation="none", activation_precision="w4a16", offload_to_disk=False)
     payload = config.to_dict()
-    assert payload["rotation"] == "none"
+    # MACaQ's per-layer transform has its own key; the shared model-wide
+    # `rotation` key stays empty so earlier releases keep loading (#4225).
+    assert payload.get("rotation") is None
+    assert payload["macaq_rotation"] == "none"
     assert QuantizeConfig.from_quant_config(payload).rotation == "none"
 
     # Checkpoints written before the field was configurable store the
     # inherited `null` and were always rotated.
-    legacy = dict(payload, rotation=None)
+    legacy = dict(payload)
+    legacy.pop("macaq_rotation")
+    legacy["rotation"] = None
     assert QuantizeConfig.from_quant_config(legacy).rotation == "hadamard"
     legacy.pop("rotation")
     assert QuantizeConfig.from_quant_config(legacy).rotation == "hadamard"

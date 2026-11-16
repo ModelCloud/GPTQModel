@@ -2355,6 +2355,9 @@ VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 )
 # Per-layer rotations MACaQ supports: the block Hadamard, or none.
 MACAQ_ROTATIONS: Tuple[str, ...] = ("hadamard", "none")
+# MACaQ reuses `rotation` for its per-layer transform, so checkpoints carry
+# it under its own key and leave the shared model-wide `rotation` null.
+MACAQ_ROTATION_FIELD = "macaq_rotation"
 
 MACAQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.MXFP4_MACAQ,
@@ -4104,6 +4107,10 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
     elif target_cls is MacaqConfig:
         expected_method = METHOD.MACAQ
+        # MACaQ checkpoints store their per-layer transform under
+        # `macaq_rotation`; the shared `rotation` key is model-wide (#4225).
+        if MACAQ_ROTATION_FIELD in normalized:
+            normalized["rotation"] = normalized.pop(MACAQ_ROTATION_FIELD)
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
         if format_value is not None:
@@ -4304,6 +4311,10 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
             raise TypeError("QuantizeConfig: `zero_point` must be a bool")
         if SYMMETRIC_FIELD_CODE not in normalized:
             normalized[SYMMETRIC_FIELD_CODE] = not zero_point
+
+    if MACAQ_ROTATION_FIELD in normalized:
+        # Factory round-trip of a MACaQ `to_dict()` payload (#4225).
+        normalized["rotation"] = normalized.pop(MACAQ_ROTATION_FIELD)
     return normalized
 
 
@@ -5008,6 +5019,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     checkpoint_format_hint = legacy_checkpoint_format
                 continue
 
+            if key == MACAQ_ROTATION_FIELD:
+                # MACaQ's per-layer transform lives under its own key so the
+                # shared model-wide `rotation` stays null (#4225).
+                normalized[MACAQ_ROTATION_FIELD] = val
+                continue
+
             if key in _EXTERNAL_EXCLUSION_KEYS:
                 external_exclusions.extend(_external_string_list(val))
                 if key == "ignore":
@@ -5303,7 +5320,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
-            "rotation": self.rotation,
+            # The shared key is model-wide rotation only. Methods that reuse
+            # `rotation` for their own per-layer transform override
+            # `model_rotation` (MacaqConfig) and serialise it separately.
+            "rotation": resolve_model_rotation(self),
             META_FIELD: meta_payload,
         }
         self._update_output_payload(out)
@@ -6320,6 +6340,11 @@ class MacaqConfig(PreProcessorConfig):
         out["exp_screen"] = self.exp_screen
         out["exp_offsets"] = list(self.exp_offsets)
         out["activation_precision"] = self.activation_precision
+        # MACaQ's `rotation` is its own per-layer transform, not the
+        # model-wide one. Keep the shared `rotation` key null so earlier
+        # releases (which treat it as model-wide) keep loading new
+        # checkpoints (#4225).
+        out[MACAQ_ROTATION_FIELD] = self.rotation
 
     def __post_init__(self):
         if self.dynamic is not None:
