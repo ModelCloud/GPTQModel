@@ -2113,6 +2113,8 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         scale_consumers=None,
     ):
         assert group_sizes == [self.qcfg.group_size] * len(layers_arg)
+        # Per-layer symmetry is resolved and forwarded alongside bits/group_sizes.
+        assert syms == [self.qcfg.sym] * len(layers_arg)
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
             _compute_legacy_w_mean(layers_arg, self.qcfg.group_size).detach().to(torch.float32).cpu()
