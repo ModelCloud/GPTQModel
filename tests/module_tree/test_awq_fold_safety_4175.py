@@ -33,7 +33,7 @@ from gptqmodel.quantization.awq.quantize.scale import apply_scale
 from gptqmodel.quantization.awq.utils.module import get_op_name
 
 
-TOLERANCE = 1e-5
+TOLERANCE = 1e-5  # measured folds are ~1e-7; 1e-5 covers dtype noise
 _INTERN_REVISION = "4f57cab513689b089019fce4ad24e26520df183c"
 
 
