@@ -16,6 +16,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ._dequant_dtype import resolve_dequant_dtype
 from ._fused_train_state import (
     capture_fused_train_state,
     refinalize_fused_state_after_apply,
@@ -511,8 +512,10 @@ class TorchAtenLinear(PackableQuantLinear):
 
 
 def dequantize_model(model: PreTrainedModel):
-    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
-    # bf16 checkpoints and their exported config.
+    # Dense weights must match the model's compute dtype.  The checkpoint
+    # scale dtype is not a compute-dtype signal: GPTQ checkpoints store FP16
+    # scales even for BF16 models, so using it produced FP16 layers inside a
+    # BF16 model and crashed the first matmul.
     target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchAtenLinear):
@@ -524,10 +527,13 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, TorchAtenLinear):
             if target_dtype is None:
                 scales = getattr(module, "scales", None)
-                target_dtype = (
-                    scales.dtype
-                    if scales is not None and scales.is_floating_point()
-                    else torch.float16
+                target_dtype = resolve_dequant_dtype(
+                    model,
+                    fallback=(
+                        scales.dtype
+                        if scales is not None and scales.is_floating_point()
+                        else torch.float16
+                    ),
                 )
             new_module = nn.Linear(
                 module.in_features,

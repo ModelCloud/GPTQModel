@@ -29,6 +29,7 @@ from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._dequant_dtype import resolve_dequant_dtype
 from ._g_idx import validate_g_idx_bounds
 from ._numerics import (
     _wants_fp32_reduce,
@@ -1071,8 +1072,10 @@ class TorchLinear(PackableQuantLinear):
         return torch.cat(weights, dim=1)
 
 def dequantize_model(model: PreTrainedModel):
-    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
-    # bf16 checkpoints and their exported config.
+    # Dense weights must match the model's compute dtype.  The checkpoint
+    # scale dtype is not a compute-dtype signal: GPTQ checkpoints store FP16
+    # scales even for BF16 models, so using it produced FP16 layers inside a
+    # BF16 model and crashed the first matmul.
     target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchLinear):
@@ -1084,10 +1087,13 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, TorchLinear):
             if target_dtype is None:
                 scales_dtype = getattr(module, "scales", None)
-                target_dtype = (
-                    scales_dtype.dtype
-                    if scales_dtype is not None and scales_dtype.is_floating_point()
-                    else torch.float16
+                target_dtype = resolve_dequant_dtype(
+                    model,
+                    fallback=(
+                        scales_dtype.dtype
+                        if scales_dtype is not None and scales_dtype.is_floating_point()
+                        else torch.float16
+                    ),
                 )
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(
