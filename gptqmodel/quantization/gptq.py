@@ -53,6 +53,50 @@ from .quantizer import (
 log = setup_logger()
 
 
+# Accelerator solver/allocator status codes that mean "allocation failed" even
+# though the message does not contain the legacy "out of memory" phrase.
+_MEMORY_ALLOCATION_ERROR_MARKERS = (
+    "cusolver_status_alloc_failed",
+    "hipsolver_status_alloc_failed",
+    "cublas_status_alloc_failed",
+    "hipblas_status_alloc_failed",
+    "cudnn_status_alloc_failed",
+    "miopen_status_out_of_resources",
+    "cuda_error_out_of_memory",
+    "cudaerroroutofmemory",
+    "cudaerrormemoryallocation",
+    "cuda_error_memory_allocation",
+    "cudaerror_memoryallocation",
+    "hiperroroutofmemory",
+    "hiperrormemoryallocation",
+    "hiperror_out_of_memory",
+)
+
+
+def _is_memory_allocation_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` is an accelerator memory/allocation failure.
+
+    The GPTQ CPU fallbacks used to match only ``"out of memory"``. cuSOLVER and
+    hipSOLVER report a failed workspace allocation as
+    ``CUSOLVER_STATUS_ALLOC_FAILED`` / ``HIPSOLVER_STATUS_ALLOC_FAILED``, so the
+    exception type and solver status code are the primary discriminator and the
+    historical phrase is only a last-resort supplement (issue #4350).
+
+    A non-positive-definite factorization is a numerical failure, not a memory
+    failure. ``torch._C._LinAlgError`` is excluded first so it can never be
+    downgraded to the CPU retry.
+    """
+
+    if isinstance(exc, torch._C._LinAlgError):
+        return False
+    if isinstance(exc, (torch.OutOfMemoryError, MemoryError)):
+        return True
+    text = str(exc).lower()
+    if any(marker in text for marker in _MEMORY_ALLOCATION_ERROR_MARKERS):
+        return True
+    return "out of memory" in text
+
+
 def _log_hessian_verbose() -> bool:
     """Verbose per-module hessian-inverse markers are opt-in.
 
@@ -1111,7 +1155,7 @@ class GPTQ:
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
-                and "out of memory" in str(exc).lower()
+                and _is_memory_allocation_failure(exc)
             ):
                 log.warn(
                     "GPTQ module '%s' fell back to CPU Hessian accumulation due to GPU OOM during batch processing.",
@@ -1442,9 +1486,9 @@ class GPTQ:
                 producer,
             )
         except RuntimeError as exc:
-            # CUDA OOM/CPU fallback paths must not leave a partially computed
+            # Memory/CPU fallback paths must not leave a partially computed
             # artifact visible to sibling tasks.
-            if "out of memory" in str(exc).lower():
+            if _is_memory_allocation_failure(exc):
                 self._shared_hessian_cache_disabled = True
             raise
 
@@ -2372,7 +2416,7 @@ class GPTQ:
                 H_permuted = self.H[perm][:, perm]
                 W_permuted = W[:, perm]
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                if self.H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
                     raise
 
                 self.log_cpu_fallback("Hessian permutation", self.H.device)
@@ -2408,7 +2452,7 @@ class GPTQ:
                 H_permuted = self.H[final_perm][:, final_perm]
                 W_permuted = W[:, final_perm]
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                if self.H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
                     raise
 
                 self.log_cpu_fallback("act-group Hessian permutation", self.H.device)
@@ -2452,7 +2496,7 @@ class GPTQ:
                         # retry/mock snapshot so NaN recovery remains exact.
                         self.H.diagonal().copy_(effective_diag)
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                if self.H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
                     raise
 
                 # Full-attention blocks on very large models can exceed GPU memory during the
