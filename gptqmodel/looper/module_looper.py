@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -67,7 +67,11 @@ from ..utils.model import (
     set_moe_topk,
     untie_word_embeddings,
 )
-from ..utils.offload import offload_to_disk
+from ..utils.offload import (
+    capture_offloaded_base_modules,
+    offload_to_disk,
+    restore_offloaded_modules,
+)
 from ..utils.p2p import (
     configure_p2p,
     enable_for_devices,
@@ -201,6 +205,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        # Base modules offloaded at the start of the run are restored when the
+        # loop exits so the model stays usable in-session.
+        self._offloaded_base_modules: List[Tuple[str, nn.Module, torch.device]] = []
         # Concurrent module-tree branches can declare different quantizable
         # leaves.  Cache each branch's leaf blocks so a layer is never asked to
         # resolve a sibling branch's modules.
@@ -1783,11 +1790,25 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             layer_names=layer_names,
         )
 
+    def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
+        entries = getattr(self, "_offloaded_base_modules", None)
+        if not entries:
+            return
+        self._offloaded_base_modules = []
+        restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
         with tf32_high_precision_guard():
-            return self._loop_impl(fallback=fallback, **kwargs)
+            try:
+                result = self._loop_impl(fallback=fallback, **kwargs)
+            except BaseException:
+                # A failed run must not leave the base modules stranded on meta.
+                self._restore_offloaded_base_modules(strict=False)
+                raise
+            self._restore_offloaded_base_modules(strict=True)
+            return result
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
         """Install a recovered packed prefix only when publication needs it."""
@@ -1911,6 +1932,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     if name
                 }
                 base_modules = [name for name in base_modules if name not in endpoint_names]
+            self._offloaded_base_modules = capture_offloaded_base_modules(
+                self.gptq_model.model, base_modules
+            )
             offload_to_disk(
                 model=self.gptq_model.model,
                 module=base_modules,

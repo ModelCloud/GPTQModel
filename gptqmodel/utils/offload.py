@@ -23,12 +23,15 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .device import get_device
+from .logger import setup_logger
 from .module_locks import parent_module_lock
 from .tensor import tensor_buffer
 from .torch import CPU, META
 
 
 _SMALL_MODULE_OFFLOAD_BYTES = 4 * 1024  # Skip disk writes for <4KB payloads
+
+log = setup_logger()
 
 
 # Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
@@ -69,6 +72,82 @@ def is_meta_module(m: nn.Module) -> bool:
         if b.is_meta:
             return True
     return False
+
+
+def capture_offloaded_base_modules(
+    model: nn.Module,
+    module_names: Iterable[str],
+) -> List[Tuple[str, nn.Module, torch.device]]:
+    """Snapshot base modules before they are offloaded.
+
+    Only modules that still hold real tensors are recorded: a module that is
+    already on meta was not offloaded by this run and has no bundle to restore
+    from.
+    """
+    entries: List[Tuple[str, nn.Module, torch.device]] = []
+    for name in module_names:
+        try:
+            module = get_submodule(model, name)
+        except AttributeError:
+            continue
+        if isinstance(module, NamedModule):
+            module = module.module
+        device = get_device(module)
+        if device.type == "meta":
+            continue
+        entries.append((name, module, device))
+    return entries
+
+
+def restore_offloaded_modules(
+    model: nn.Module,
+    entries: Iterable[Tuple[str, nn.Module, torch.device]],
+    *,
+    strict: bool = False,
+) -> List[str]:
+    """Materialize modules offloaded during quantization back into memory.
+
+    Quantization offloads the embedding/lm_head base modules so the layer loop
+    has more host memory. They are never needed on disk afterwards, and leaving
+    them on meta makes the in-session model unusable: ``tie_weights()`` points
+    ``lm_head.weight`` at the meta embedding parameter, which has no offload
+    hook. Restore the recorded modules and re-tie shared weights.
+
+    ``strict=True`` raises a clear reload-the-checkpoint error when a module
+    cannot be restored; otherwise the failure is only logged.
+    """
+    unresolved: List[str] = []
+    for name, module, device in entries:
+        try:
+            undo_offload_to_disk(module, device=device)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn("Offload: failed to restore `%s`: %s", name, exc)
+            unresolved.append(name)
+            continue
+        if is_meta_module(module):
+            unresolved.append(name)
+
+    config = getattr(model, "config", None)
+    tie_weights = getattr(model, "tie_weights", None)
+    if callable(tie_weights) and getattr(config, "tie_word_embeddings", False):
+        try:
+            tie_weights()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warn("Offload: tie_weights() after restore failed: %s", exc)
+            unresolved.append("<tie_weights>")
+
+    if not unresolved:
+        return []
+
+    message = (
+        "Offload: base modules remain on the meta device after quantization "
+        f"({', '.join(unresolved)}). The in-session model cannot run inference; "
+        "reload the saved checkpoint before using it."
+    )
+    if strict:
+        raise RuntimeError(message)
+    log.error(message)
+    return unresolved
 
 # Serialize access to module.state_dict(), which is not thread-safe under
 # concurrent calls that mutate the same parent module.
@@ -631,8 +710,15 @@ def undo_offload_to_disk(
                 setattr(sub, name, restored)
 
             # 3) Tie embedding if module is model and enabled/tied
-            if hasattr(module, "config") and getattr(module.config, "tie_word_embeddings", False):
-                module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
+            tie_weights = getattr(module, "tie_weights", None)
+            if (
+                callable(tie_weights)
+                and hasattr(module, "config")
+                and getattr(module.config, "tie_word_embeddings", False)
+            ):
+                # Submodules such as rotary embeddings expose `config` but are
+                # not models; calling tie_weights() on them raises.
+                tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
 
         # 4) Optionally delete offload folders.
         if delete_offload_folders:
