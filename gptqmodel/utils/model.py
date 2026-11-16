@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import collections
+import copy
 import functools
 import hashlib
 import json
@@ -37,7 +38,7 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from ..adapter.adapter import Adapter
+from ..adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (
     CPU,
@@ -699,6 +700,19 @@ def create_quant_module(
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
 
 ):
+    # An adapter only covers the modules named by its PEFT target list and
+    # actually present in its tensor file. Passing it to every quantized module
+    # made a standard partial LoRA (q_proj/v_proj only) assert on the modules it
+    # does not cover (issue #4210).
+    if adapter is not None:
+        if not adapter.targets_module(name):
+            adapter = None
+        elif not adapter.has_weights(name):
+            log.warn(
+                f"Adapter: no LoRA tensors for targeted module `{name}`; skipping."
+            )
+            adapter = None
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -1743,6 +1757,64 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     storage.update(updated)
 
 
+def _dense_adapter_forward_hook(adapter: Adapter):
+    """Return a forward hook that adds the adapter update to a dense module."""
+
+    def hook(module, args, output):
+        if not args or not isinstance(output, torch.Tensor):
+            return output
+        return adapter.apply(x=args[0], out=output)
+
+    return hook
+
+
+def apply_dense_module_adapters(model, adapter: Optional[Adapter]) -> int:
+    """Attach a LoRA adapter to targeted modules that stayed dense.
+
+    Quantized modules carry their adapter inside the kernel, but a module the
+    checkpoint does not quantize (an unquantized ``lm_head``, a dynamic
+    exclusion) stayed a plain ``nn.Linear`` and its adapter weights were
+    silently dropped (issue #4210). Attach one forward hook per targeted dense
+    module so the adapter contribution is added to the base output.
+
+    Returns the number of modules that received an adapter.
+    """
+
+    if adapter is None:
+        return 0
+    if not getattr(adapter, "path", None) or adapter.path in LORA_MERGED_WEIGHT_PATHS:
+        # Merged/EoRA adapters have no separate weights to apply here.
+        return 0
+
+    applied = 0
+    for name, module in model.named_modules():
+        if isinstance(module, BaseQuantLinear):
+            continue
+        if not isinstance(module, (nn.Linear, transformers.Conv1D)):
+            continue
+        if getattr(module, "_gptqmodel_dense_adapter", None) is not None:
+            continue
+        if not adapter.targets_module(name):
+            continue
+        if not adapter.has_weights(name):
+            log.warn(
+                f"Adapter: no LoRA tensors for targeted dense module `{name}`; skipping."
+            )
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.device.type == "meta":
+            continue
+        dense_adapter = copy.deepcopy(adapter)
+        dense_adapter.post_init(weight_key=name, device=weight.device)
+        module._gptqmodel_dense_adapter = dense_adapter
+        module.register_forward_hook(_dense_adapter_forward_hook(dense_adapter))
+        applied += 1
+
+    if applied:
+        log.info(f"Adapter: applied to `{applied}` dense module(s).")
+    return applied
+
+
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None,
                         awq_batch_size: Optional[int] = None):
@@ -1823,6 +1895,9 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
             fused_norms=bool(resolve_model_rotation(quantize_config)),
         )
+
+    if quantize_config is not None:
+        apply_dense_module_adapters(model, getattr(quantize_config, "adapter", None))
 
     torch_empty_cache()
 
