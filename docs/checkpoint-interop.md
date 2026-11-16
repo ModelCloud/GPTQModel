@@ -11,6 +11,13 @@ Two rules run through every flow: the checkpoint's stored metadata and tensors
 are authoritative, and a layout that cannot be reproduced exactly fails closed
 instead of silently writing different tensors under the same names.
 
+For GPTQ zero points the contract is: the live `qzeros` buffer stays in the
+kernel's runtime layout (recorded by `_qzeros_format`), the checkpoint marker
+records only the emitted layout, and the v1/v2 conversion runs only when a
+state dict crosses a serialization boundary. It is idempotent and driven by the
+layout marker that travels with that same state dict. Checkpoints never persist
+the marker itself.
+
 ## 1. Producer-declared module filters
 
 Third-party producers describe unquantized modules outside GPT-QModel's
@@ -92,12 +99,56 @@ live module buffers. Some kernels keep a converted runtime layout:
 | --- | --- | --- |
 | Torch / Triton v2 | v2 qzeros | emits v1 qzeros when the checkpoint is v1 |
 | Marlin / AWQ Marlin | repacked `qweight`, empty `qzeros`/`g_idx` | raises on a checkpoint write; read-only `state_dict()` returns the runtime tensors |
+| Machete | prepacked `qweight`, sorted `g_idx`, float `qzeros` offsets | raises on a checkpoint write; read-only `state_dict()` returns the runtime tensors |
+| Swordfish / AWQ Swordfish | prepacked `qweight`, float `qzeros` offsets | raises on a checkpoint write; read-only `state_dict()` returns the runtime tensors |
+| BitBLAS (repacked from GPTQ/AWQ) | BitBLAS-compressed `qweight`/`qzeros` | raises on a checkpoint write; a natively loaded BitBLAS checkpoint still round-trips |
 | ExLlamaV2 / AWQ ExLlamaV2 | shuffled `qweight` | raises on a checkpoint write; read-only `state_dict()` returns the runtime tensors |
 | TorchAten / TorchFused / AVX512, GPTQ and AWQ | int4pack `qweight`, float affine offsets | emits the captured checkpoint snapshot |
+| AllSpark / AWQ AllSpark | checkpoint tensors authoritative; the kernel layout lives in non-persistent `*_packed` buffers | emits the checkpoint tensors |
 
 `GPTQQuantLinear._save_to_state_dict` compares `_qzeros_format` with
 `_checkpoint_format_on_disk` and writes a converted copy into the destination;
 it never mutates the live module.
+
+### 3.1 Incoming layout and idempotent load conversion
+
+The live `qzeros` buffer holds zero points in the kernel's runtime convention.
+`_qzeros_format` records that convention, and `_checkpoint_format_on_disk`
+records the convention the next checkpoint write emits. The v1 convention
+stores `zero_point - 1`; the v2 convention stores the logical zero point.
+Conversion happens only at the two serialization boundaries: incoming state
+dict to live (`_load_from_state_dict`) and live to emitted
+(`checkpoint_layout_qzeros`).
+
+The incoming layout is taken from the marker that belongs to the same state
+dict, never from the module's default buffer. When the words and their marker
+already match the live layout, the load is a no-op. That matters because
+`accelerate` with `device_map=None` loads a sharded checkpoint by calling
+`set_model_state_dict` once per shard and refilling every missing key from the
+module's own buffers. Converting those refilled words again shifted every zero
+point once per shard (issue #4166). The export shell used by `save()` also
+declares the source layout before loading and passes `device_map={"": "cpu"}`
+so each tensor is loaded exactly once.
+
+```mermaid
+flowchart TD
+    A["state_dict shard"] --> B{"prefix + qzeros present?"}
+    B -- no --> Z["leave live buffers alone"]
+    B -- yes --> C{"marker or metadata in this state dict?"}
+    C -- yes --> D{"marker == live _qzeros_format?"}
+    D -- yes --> Z
+    D -- no --> E["_restore_qzeros_format(marker)"]
+    C -- no --> F{"incoming tensor is the live buffer?"}
+    F -- yes --> Z
+    F -- no --> G["_incoming_qzeros_format()<br/>on-disk format or module format"]
+    G --> H["_restore_qzeros_format(incoming)"]
+    E --> I["_clear_runtime_weight_cache()"]
+    H --> I
+    Z --> I
+    style Z fill:#d9f2d9,stroke:#2e7d32
+    style E fill:#fff4cc,stroke:#b8860b
+    style H fill:#fff4cc,stroke:#b8860b
+```
 
 Kernels whose weight permutation has no inverse raise from their own
 `_save_to_state_dict`, but only while a checkpoint is actually being written.
