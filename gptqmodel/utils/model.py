@@ -3316,7 +3316,12 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 if name in restore_dtypes:
                     continue
                 module_name, _, buffer_name = name.rpartition(".")
-                module = model.get_submodule(module_name) if module_name else model
+                try:
+                    module = model.get_submodule(module_name) if module_name else model
+                except AttributeError:
+                    # Older checkpoints can contain buffers from modules that
+                    # no longer exist in the current Transformers model class.
+                    continue
                 current = module._buffers.get(buffer_name)
                 if (
                     isinstance(current, torch.Tensor)
