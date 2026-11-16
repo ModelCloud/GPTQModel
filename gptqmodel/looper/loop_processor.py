@@ -362,6 +362,26 @@ def checkpoint_chain_supported(roles) -> bool:
     }
 
 
+def record_quant_log(model, processor_logs) -> list:
+    """Publish the run's per-module log on ``model.quant_log`` (issue #4321).
+
+    ``processor_logs`` yields ``(processor_name, entries)`` pairs in run-plan
+    order. Every processor that recorded per-module statistics contributes, so a
+    quantization method cannot lose its log because its processor name is
+    missing from a hard-coded allow-list. This is the single place the model-level
+    log is assembled: both the calibrated and the weight-only loopers call it, and
+    the writer only has to look at ``model.quant_log`` to decide whether to emit
+    ``quant_log.csv``.
+    """
+
+    entries = []
+    for _name, processor_log in processor_logs:
+        if processor_log:
+            entries.extend(processor_log)
+    model.quant_log = entries
+    return entries
+
+
 @dataclass
 class ProcessorLifecycleConfig:
     """Mutable processor configuration consumed by the looper and checkpoint adapter."""
