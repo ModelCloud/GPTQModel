@@ -6398,6 +6398,60 @@ def test_paroquant_pair_grad_sweep_is_race_free(cta_m, row_pad):
         assert torch.equal(theta_grad, first_theta_grad)
 
 
+@pytest.mark.parametrize("rows", [1, 1000, 1001])
+def test_paroquant_pair_grad_is_launch_plan_invariant(rows):
+    """Guard the rotation gradient against the autotuned launch plan (#4460).
+
+    ``cta_m``/``row_pad`` are picked by a timing-based autotune, so two runs can
+    launch the same shape with different tiles. The gradient partials use a
+    fixed row granule, so every plan must return bit-identical results; the
+    row counts cover a tail CTA with granules past the end and a partial
+    granule.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant fused rotation backward.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 256
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(11)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    rotated = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    grad_out = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    pair_grad = paroquant_utils_module._paroquant_rotation_op("rotate_pair_grad")
+
+    results = {
+        (cta_m, row_pad): pair_grad(rotated, grad_out, pairs, theta, group_size, cta_m, row_pad)
+        for cta_m in (4, 8, 16)
+        for row_pad in (0, 2)
+    }
+    reference = results[(4, 0)]
+    for plan, outputs in results.items():
+        for name, actual, expected in zip(("x", "grad", "theta_grad"), outputs, reference):
+            assert torch.equal(actual, expected), f"{name} differs for launch plan {plan}"
+
+
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     """Guard that cached BF16 rotation metadata preserves the runtime dtype and values."""
     if not torch.cuda.is_available():

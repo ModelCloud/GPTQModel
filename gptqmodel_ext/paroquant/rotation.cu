@@ -373,7 +373,15 @@ std::tuple<at::Tensor, at::Tensor> dispatch_rotate_pair_variant(at::Tensor x, at
 //
 // This kernel folds the whole sweep into a single launch. The running rotated
 // state is kept in shared memory, every rotation's gradient contribution is
-// accumulated in registers, and only the cross-tile reduction is left over.
+// accumulated in registers, and only the cross-granule reduction is left over.
+//
+// Launch-plan invariance. CTA_M (and ROW_PAD) come from a timing-based
+// autotune, so two runs can pick different tiles for the same shape. The
+// gradient must not depend on that choice (#4460): each CTA therefore sums its
+// rows in fixed kRotatePairGradRowGranule-row granules and writes one partial
+// per granule, and the reduce folds the granules in ascending order. The
+// rounding sequence is the same for every CTA_M, so the gradient is
+// bit-identical across launch plans, not only across repeated launches.
 //
 // Shared-memory ordering. Each thread owns exactly one (i, j) column pair per
 // rotation, so the readback after `apply_one` only touches columns the calling
@@ -384,6 +392,8 @@ std::tuple<at::Tensor, at::Tensor> dispatch_rotate_pair_variant(at::Tensor x, at
 // rotation r (write after read). The single barrier therefore sits after the
 // readback, which orders both: every write and every read of rotation r
 // completes before any thread starts rotation r-1 (#4461).
+constexpr int kRotatePairGradRowGranule = 4;
+
 template <typename scalar_t, int CTA_M, int GROUP_SIZE, int KROT, int ROW_PAD>
 __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                         const scalar_t *__restrict__ g,
@@ -392,9 +402,11 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                         const int16_t *__restrict__ idx_ij,
                                         const scalar_t *__restrict__ theta,
                                         float *__restrict__ partials, int s, int h,
-                                        int row_tiles) {
+                                        int granules) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   constexpr int HALF_GROUP = GROUP_SIZE / 2;
+  constexpr int GRANULE = kRotatePairGradRowGranule;
+  static_assert(CTA_M % GRANULE == 0, "CTA_M must be a multiple of the gradient row granule");
   __shared__ scalar_t x_grp[ROW_STRIDE * GROUP_SIZE];
   __shared__ scalar_t g_grp[ROW_STRIDE * GROUP_SIZE];
 
@@ -425,22 +437,31 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
     // this thread just rotated.
     const int i = static_cast<uint16_t>(reg_idx[r] & 0xFFFF) % GROUP_SIZE;
     const int j = static_cast<uint16_t>((reg_idx[r] >> 16) & 0xFFFF) % GROUP_SIZE;
-    float sum_a = 0.0f;
-    float sum_b = 0.0f;
-#pragma unroll
-    for (int m = 0; m < CTA_M; m++) {
-      if (base_row + m < s) {
-        const float xi = RotateAccess<scalar_t>::to_float(x_grp[i * ROW_STRIDE + m]);
-        const float xj = RotateAccess<scalar_t>::to_float(x_grp[j * ROW_STRIDE + m]);
-        const float gi = RotateAccess<scalar_t>::to_float(g_grp[i * ROW_STRIDE + m]);
-        const float gj = RotateAccess<scalar_t>::to_float(g_grp[j * ROW_STRIDE + m]);
-        sum_a += gi * xj - gj * xi;
-        sum_b += gi * xi + gj * xj;
-      }
-    }
     float sn, cs;
     __sincosf(tr, &sn, &cs);
-    partials[r * row_tiles * hh + tile * hh + grp * HALF_GROUP + t] = sum_a * cs - sum_b * sn;
+#pragma unroll
+    for (int q = 0; q < CTA_M / GRANULE; q++) {
+      // Uniform across the block: the tail CTA may own granules past the end.
+      const int granule = tile * (CTA_M / GRANULE) + q;
+      if (granule < granules) {
+        float sum_a = 0.0f;
+        float sum_b = 0.0f;
+#pragma unroll
+        for (int mm = 0; mm < GRANULE; mm++) {
+          const int m = q * GRANULE + mm;
+          if (base_row + m < s) {
+            const float xi = RotateAccess<scalar_t>::to_float(x_grp[i * ROW_STRIDE + m]);
+            const float xj = RotateAccess<scalar_t>::to_float(x_grp[j * ROW_STRIDE + m]);
+            const float gi = RotateAccess<scalar_t>::to_float(g_grp[i * ROW_STRIDE + m]);
+            const float gj = RotateAccess<scalar_t>::to_float(g_grp[j * ROW_STRIDE + m]);
+            sum_a += gi * xj - gj * xi;
+            sum_b += gi * xi + gj * xj;
+          }
+        }
+        partials[static_cast<int64_t>(r) * granules * hh + static_cast<int64_t>(granule) * hh +
+                 grp * HALF_GROUP + t] = sum_a * cs - sum_b * sn;
+      }
+    }
     // Orders this rotation's readback before the next rotation's apply_one
     // writes, and this rotation's writes before the next rotation's reads
     // (and before store_group after the last rotation).
@@ -453,9 +474,11 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                                                               tile, grp, t);
 }
 
-// Collapse the per-row-tile partials into one rotation-gradient tensor. The
-// reduction stays deterministic: a fixed tile order per output element, with no
-// atomics, so repeated runs produce identical results.
+// Collapse the per-granule partials into one rotation-gradient tensor. The
+// reduction stays deterministic: a fixed granule order per output element, with
+// no atomics, so repeated runs produce identical results. The "tile" axis below
+// is the fixed-size granule axis written by rotate_pair_grad_kernel, which does
+// not depend on the launch plan.
 //
 // Each output element walks the tile axis with a stride of `hh` floats, so the
 // loop trip count is a runtime value and the compiler cannot unroll it. That
@@ -525,10 +548,12 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   constexpr int pn = GROUP_SIZE / 2;
   const int seq_len = static_cast<int>(x.numel() / x.size(-1));
   const int row_tiles = std::max(1, (seq_len + CTA_M - 1) / CTA_M);
+  constexpr int GRANULE = kRotatePairGradRowGranule;
+  const int granules = std::max(1, (seq_len + GRANULE - 1) / GRANULE);
   auto options = torch::TensorOptions().dtype(x.dtype()).device(x.device());
   at::Tensor out_x = torch::empty(x.sizes(), options);
   at::Tensor out_g = torch::empty(x.sizes(), options);
-  at::Tensor partials = at::empty({KROT, row_tiles, h / 2}, x.options().dtype(at::kFloat));
+  at::Tensor partials = at::empty({KROT, granules, h / 2}, x.options().dtype(at::kFloat));
   at::Tensor grad = at::empty({KROT, h / 2}, x.options().dtype(at::kFloat));
 
   const at::ScalarType dtype = x.scalar_type();
@@ -543,7 +568,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
     rotate_pair_grad_kernel<float, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
         x.data_ptr<float>(), g.data_ptr<float>(), out_x.data_ptr<float>(), out_g.data_ptr<float>(),
         idx_ij.data_ptr<int16_t>(), theta_cast.data_ptr<float>(), partials.data_ptr<float>(),
-        seq_len, h, row_tiles);
+        seq_len, h, granules);
     break;
   case at::kHalf:
     rotate_pair_grad_kernel<__half, CTA_M, GROUP_SIZE, KROT, ROW_PAD><<<grid, block, 0, stream>>>(
@@ -552,7 +577,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
         reinterpret_cast<__half *>(out_x.data_ptr<c10::Half>()),
         reinterpret_cast<__half *>(out_g.data_ptr<c10::Half>()), idx_ij.data_ptr<int16_t>(),
         reinterpret_cast<const __half *>(theta_cast.data_ptr<c10::Half>()),
-        partials.data_ptr<float>(), seq_len, h, row_tiles);
+        partials.data_ptr<float>(), seq_len, h, granules);
     break;
   default:
     TORCH_CHECK(false, "rotate_pair_grad supports Float and Half, got ", dtype);
@@ -563,7 +588,7 @@ rotate_pair_grad_launcher(at::Tensor x, at::Tensor g, at::Tensor idx_ij, at::Ten
   const int reduce_block = 256;
   const int reduce_grid = static_cast<int>((total + reduce_block - 1) / reduce_block);
   rotate_grad_reduce_kernel<<<reduce_grid, reduce_block, 0, stream>>>(
-      partials.data_ptr<float>(), grad.data_ptr<float>(), row_tiles, h / 2, total);
+      partials.data_ptr<float>(), grad.data_ptr<float>(), granules, h / 2, total);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return {out_x, out_g, grad};
