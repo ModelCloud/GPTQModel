@@ -820,6 +820,46 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
                     raise AssertionError("concurrent bounded MSE quantization changed codes")
         return True
 
+    affine_fit_thread = threading.local()
+    affine_fit_lock = threading.Lock()
+    affine_fit_next_device = [0]
+
+    def paroquant_affine_fit() -> bool:
+        """Qualify reduced-precision extrema, grid fitting and pseudo quantization."""
+        from gptqmodel.quantization.paroquant.optimization import _calc_affine_qparams, pseudo_quantize_dequant
+
+        with affine_fit_lock:
+            if not hasattr(affine_fit_thread, "device"):
+                affine_fit_thread.device = affine_fit_next_device[0] % 2
+                affine_fit_next_device[0] += 1
+        torch.cuda.set_device(affine_fit_thread.device)
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            # These exact source values give unambiguous integer zero points.
+            expected_zero = torch.tensor([[8], [9], [8], [0], [15], [0]], device="cuda")
+            oracle_scale = torch.tensor(
+                [[2.0], [0.1982421875 / 6], [32768.0 / 7], [1.0 / 15], [1.0 / 15], [1e-5]],
+                dtype=torch.float64, device="cuda",
+            )
+            for dtype in (torch.float16, torch.bfloat16, torch.float32):
+                weight = torch.tensor(
+                    [[-16.0, 14.0], [-0.26171875, 0.1982421875], [-32768.0, 32768.0],
+                     [1.0, 1.0], [-1.0, -1.0], [0.0, 0.0]],
+                    dtype=dtype, device="cuda",
+                ).repeat(1, 64)
+                scale, negative_zero = _calc_affine_qparams(weight, bits=4, group_size=128)
+                expected_codes = (weight.double() / oracle_scale).round().add(expected_zero).clamp(0, 15)
+                codes = (weight.float() / scale).round().sub(negative_zero).clamp(0, 15)
+                expected = ((expected_codes.float() - expected_zero) * oracle_scale.float()).to(dtype)
+                actual = pseudo_quantize_dequant(weight, bits=4, group_size=128, sym=False, use_ste=False)
+                stream.synchronize()
+                if scale.dtype != torch.float32 or not torch.equal(-negative_zero, expected_zero):
+                    raise AssertionError("concurrent affine fit changed qparam precision or integer zero points")
+                torch.testing.assert_close(scale.double(), oracle_scale, rtol=1e-6, atol=1e-6)
+                if not torch.equal(codes, expected_codes) or not torch.equal(actual, expected):
+                    raise AssertionError("concurrent affine fit changed codes or rounded outputs")
+        return True
+
     nf12_prefill_ready = [False]
     nf12_prefill_weights = {}
 
@@ -870,6 +910,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "AWQ tiled dequantize_gemm": awq_tiled_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "GPTQ weight scale floor": gptq_weight_scale_floor,
+        "ParoQuant affine fit": paroquant_affine_fit,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
         "torch.cuda.Stream": lambda: str(torch.cuda.Stream()),
@@ -968,6 +1009,7 @@ def _requires_two_gpus(name: str) -> bool:
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
                 "GPTQ weight scale floor",
+                "ParoQuant affine fit",
             ))
 
 
