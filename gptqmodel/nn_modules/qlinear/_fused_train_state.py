@@ -12,6 +12,18 @@ import torch.nn as nn
 _STATE_NAMES = ("qweight", "qzeros", "scales")
 _STATE_BUFFER_PREFIX = "_fused_train_state_"
 
+#: ``qweight`` is still snapshotted, unlike the byte-identical ``scales`` and
+#: the ``qzeros`` column of ``scales_and_zeros``.
+#:
+#: The CPU int4pack transform hands ``qweight`` to
+#: ``aten::_convert_weight_to_int4pack_for_cpu``, whose nibble layout is an
+#: internal, shape-dependent PyTorch ABI with no inverse op. Rebuilding the
+#: checkpoint words on demand would have to unpack that layout and re-apply
+#: the GPTQ int32 packing, and ``TorchFusedLinear`` also has a distinct XPU
+#: packing. An inverse that is wrong on one PyTorch build silently corrupts
+#: every saved checkpoint, so the snapshot stays until PyTorch exposes a
+#: stable unpack contract.
+
 #: Persistent buffer that records the qzero word layout a state dict carries.
 #:
 #: ``state_dict._metadata`` is not a tensor, so a safetensors round trip
@@ -29,12 +41,22 @@ def capture_fused_train_state(module: nn.Module, *, names=None) -> None:
     captured from inside an inference forward, but the snapshot is later
     restored as the checkpoint tensor: ``load_state_dict`` copies into it in
     place outside ``inference_mode``, which Torch rejects for inference tensors.
+
+    A kernel whose CPU transform leaves an operand byte-identical to the live
+    tensor does not need a second copy of it. Such a kernel declares its
+    snapshot names through ``_fused_train_state_names`` (or
+    ``_FUSED_TRAIN_STATE_NAMES``), and the untouched operand is emitted
+    directly from the live buffer by ``state_dict()``.
     """
 
     if getattr(module, "_fused_train_state", None) is not None:
         return
     if names is None:
-        names = getattr(module, "_FUSED_TRAIN_STATE_NAMES", _STATE_NAMES)
+        resolver = getattr(module, "_fused_train_state_names", None)
+        if callable(resolver):
+            names = resolver()
+        else:
+            names = getattr(module, "_FUSED_TRAIN_STATE_NAMES", _STATE_NAMES)
     snapshot = {}
     with torch.inference_mode(False):
         for name in names:
@@ -49,6 +71,32 @@ def capture_fused_train_state(module: nn.Module, *, names=None) -> None:
                 snapshot[name] = buffer_name
         module._fused_train_state = snapshot
         module._fused_train_state_exportable = True
+
+
+def bind_runtime_qzeros(module: nn.Module) -> bool:
+    """Point ``qzeros`` at the zero column of the packed affine metadata.
+
+    The CPU int4pack transform stores ``scales_and_zeros`` as
+    ``[out_features, groups, 2]`` with the zero offsets in the second column and
+    then keeps a standalone ``qzeros`` tensor holding the same offsets. Reusing
+    that column removes the duplicate storage without changing any value: the
+    affine metadata already owns those bytes. Returns whether ``qzeros`` is now
+    a view of ``scales_and_zeros``.
+
+    A fused source owns no storage of its own: ``_share_operands`` rebinds its
+    operands to views of the fused allocation, so re-pointing ``qzeros`` at a
+    private ``scales_and_zeros`` would break that alias and reintroduce a copy.
+    """
+
+    if getattr(module, "_fused_operands_shared", False):
+        return False
+    packed = getattr(module, "scales_and_zeros", None)
+    if not isinstance(packed, torch.Tensor):
+        return False
+    if packed.dim() != 3 or tuple(packed.shape[-1:]) != (2,):
+        return False
+    module.qzeros = packed[..., 1]
+    return True
 
 
 def _replace_tensor(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
@@ -294,6 +342,7 @@ def state_dict_matches_runtime_layout(module: nn.Module, state_dict, prefix: str
 
 __all__ = [
     "QZEROS_FORMAT_BUFFER",
+    "bind_runtime_qzeros",
     "capture_fused_train_state",
     "checkpoint_layout_tensor",
     "classify_fused_state_layout",

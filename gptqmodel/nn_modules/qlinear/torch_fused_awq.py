@@ -22,6 +22,7 @@ from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
@@ -173,6 +174,19 @@ class TorchFusedAwqLinear(AWQuantLinear):
         super().post_init()
         self.optimize()
 
+    def _fused_train_state_names(self):
+        """Checkpoint operands the current fused transform rewrites.
+
+        ``transform_cpu_awq`` keeps ``scales`` in the checkpoint dtype and
+        layout, so the live buffer is the checkpoint tensor and a snapshot
+        clone would only be a byte-identical second copy. The XPU transform
+        narrows ``scales`` in place, so it still needs the snapshot.
+        """
+
+        if getattr(self, "qweight", None) is not None and self.qweight.device.type == "cpu":
+            return ("qweight", "qzeros")
+        return ("qweight", "qzeros", "scales")
+
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
@@ -260,6 +274,7 @@ class TorchFusedAwqLinear(AWQuantLinear):
         zeros = (zero_offset - izeros.reshape_as(compute_scales).float()) * compute_scales.float()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = dtype
 
     def transform_xpu_awq(self, dtype):
@@ -353,6 +368,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
         dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
         dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
         self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        # ``qzeros`` is byte-identical to the packed metadata's zero column.
+        # Keep it as a view instead of a second allocation, then key the cache
+        # on the view that is actually installed.
+        if bind_runtime_qzeros(self):
+            key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, self.qzeros))
         self.torch_fused_op = Int4PackedOp(
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()

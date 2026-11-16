@@ -536,9 +536,17 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
         for x, baseline in zip(xs, before):
             torch.testing.assert_close(invoke(x), baseline, rtol=2e-3, atol=2e-3)
     for module, snapshot in zip(modules, snapshots):
+        packed_metadata = getattr(module, "scales_and_zeros", None)
         for name, expected in snapshot.items():
             actual = getattr(module, name)
-            assert actual.is_contiguous()
+            if name == "qzeros" and isinstance(packed_metadata, torch.Tensor):
+                # The CPU int4pack runtime keeps ``qzeros`` as a view of the
+                # zero column of the packed affine metadata instead of a
+                # second copy. It is still independent of the released fused
+                # allocation.
+                assert actual.untyped_storage().data_ptr() == packed_metadata.untyped_storage().data_ptr()
+            else:
+                assert actual.is_contiguous()
             assert torch.equal(actual, expected), name
     record_property("family", family.value)
     record_property("kernel", cls.__name__)

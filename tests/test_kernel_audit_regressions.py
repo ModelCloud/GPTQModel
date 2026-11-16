@@ -789,9 +789,17 @@ def test_transformed_cpu_layer_round_trips_its_own_state_dict(class_name, module
     live_qweight = tuple(layer.qweight.shape)
     snapshot_qweight = tuple(layer._buffers[layer._fused_train_state["qweight"]].shape)
     assert live_qweight != snapshot_qweight
-    assert tuple(layer.scales.shape) == tuple(
-        layer._buffers[layer._fused_train_state["scales"]].shape
-    )
+    if class_name.startswith("TorchCpuAvx512"):
+        # The AVX512 transform widens ``scales`` in place, so it remains a
+        # rewritten checkpoint operand and needs a snapshot.
+        assert tuple(layer.scales.shape) == tuple(
+            layer._buffers[layer._fused_train_state["scales"]].shape
+        )
+    else:
+        # The int4pack transform leaves ``scales`` in the checkpoint layout, so
+        # the live tensor *is* the checkpoint tensor; a second copy would be a
+        # byte-identical duplicate.
+        assert "scales" not in layer._fused_train_state
 
     state = {name: value.clone() for name, value in layer.state_dict().items()}
     layer.load_state_dict(state, assign=assign)
