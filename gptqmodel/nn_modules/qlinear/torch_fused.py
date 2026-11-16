@@ -301,10 +301,15 @@ class TorchFusedLinear(PackableQuantLinear):
 
         scales = getattr(self, "scales", None)
         transformed = self.linear_mode == LinearMode.INFERENCE and isinstance(scales, torch.Tensor)
-        scale_dtype = scales.dtype if transformed else None
+        # The packed layout is keyed by the activation dtype it was built for,
+        # not by ``scales.dtype``: the checkpoint scale buffer now keeps its
+        # loaded dtype while the affine metadata follows the activation dtype.
+        runtime_dtype = getattr(self, "_cpu_transform_dtype", None) if transformed else None
+        if runtime_dtype is None and transformed:
+            runtime_dtype = scales.dtype
         device = scales.device if transformed else None
         result = super()._apply(fn, recurse=recurse)
-        refinalize_fused_state_after_apply(self, scale_dtype, device)
+        refinalize_fused_state_after_apply(self, runtime_dtype, device)
         return result
 
     def _build_ret_idx(self) -> torch.Tensor:
@@ -405,7 +410,10 @@ class TorchFusedLinear(PackableQuantLinear):
             compute_dtype = _cpu_int4pack_scale_dtype(self.scales, zero_codes, self.bits, dtype)
         else:
             compute_dtype = dtype
-        self.scales = self.scales.to(compute_dtype).contiguous()
+        # ``compute_scales`` is the packed runtime metadata; ``self.scales``
+        # keeps the checkpoint dtype so a later forward or save cannot persist
+        # a narrowed scale (issue #4178).
+        compute_scales = self.scales.to(compute_dtype).contiguous()
         # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -419,8 +427,9 @@ class TorchFusedLinear(PackableQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
         if do_scales_and_zeros:
-            self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, self.scales, self.bits).to(compute_dtype).contiguous()
-            self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+            self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, compute_scales, self.bits).to(compute_dtype).contiguous()
+            self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        self._cpu_transform_dtype = dtype
 
     def transform(self, dtype, device):
         if device == "xpu":
@@ -511,7 +520,7 @@ class TorchFusedLinear(PackableQuantLinear):
             # added, then casts once; BF16 already has FP32's range.
             self.torch_fused_op.out_dtype = (
                 torch.float32
-                if self.bias is not None and x.dtype == torch.float16
+                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
                 else None
             )
             out = self.torch_fused_op(x)

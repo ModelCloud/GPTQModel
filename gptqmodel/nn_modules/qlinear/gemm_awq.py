@@ -260,18 +260,38 @@ class AwqGEMMLinear(AWQuantLinear):
             **kwargs)
         self.fp32_accum = bool(fp32_accum)
 
-    def _ensure_runtime_dtype(self, dtype: torch.dtype):
-        if self.scales is not None and self.scales.dtype != dtype:
-            self.scales = self.scales.to(dtype=dtype).contiguous()
-        if self.bias is not None and (self.bias.dtype != dtype or not self.bias.is_contiguous()):
-            self.bias = self.bias.to(dtype=dtype).contiguous()
+    def _scales_for_compute(self, dtype: torch.dtype) -> torch.Tensor:
+        """Return the stored scales converted for this computation only.
+
+        ``self.scales`` keeps the checkpoint dtype. The native kernel needs a
+        half-precision operand matching the activation, but rewriting the
+        registered buffer in place (the previous ``_ensure_runtime_dtype``
+        behavior) permanently narrowed the stored precision: one BF16 forward
+        on an FP16 checkpoint changed 87% of the scales, so every later FP16
+        forward and any re-saved checkpoint used the rounded values.
+        """
+
+        scales = self.scales
+        if scales is not None and (scales.dtype != dtype or not scales.is_contiguous()):
+            scales = scales.to(dtype=dtype).contiguous()
+        return scales
+
+    def _bias_for_compute(self, dtype: torch.dtype) -> Optional[torch.Tensor]:
+        """Return the stored bias converted for this computation only.
+
+        Like :meth:`_scales_for_compute`, the conversion is a temporary
+        operand; the checkpoint bias keeps its original dtype.
+        """
+
+        bias = self.bias
+        if bias is not None and (bias.dtype != dtype or not bias.is_contiguous()):
+            bias = bias.to(dtype=dtype).contiguous()
+        return bias
 
     def post_init(self):
-        if self.scales is not None and self.scales.dtype not in (torch.float16, torch.bfloat16):
-            self.scales = self.scales.to(dtype=torch.float16)
-        if self.bias is not None and self.bias.dtype not in (torch.float16, torch.bfloat16):
-            self.bias = self.bias.to(dtype=torch.float16)
-
+        # Scales and bias keep the dtype they were loaded with; forward casts
+        # temporary operands to the activation dtype. The native kernel only
+        # sees those temporaries, so post_init must not rewrite the checkpoint.
         super().post_init()
 
     def forward(self, x: torch.Tensor):
@@ -294,7 +314,8 @@ class AwqGEMMLinear(AWQuantLinear):
         if not x.is_contiguous():
             x = x.contiguous()
 
-        self._ensure_runtime_dtype(compute_dtype)
+        compute_scales = self._scales_for_compute(compute_dtype)
+        compute_bias = self._bias_for_compute(compute_dtype)
 
         # Keep eval-mode autograd and in-place adapter application viable;
         # only ordinary no-grad inference needs an inference tensor here.
@@ -307,10 +328,10 @@ class AwqGEMMLinear(AWQuantLinear):
                 x,
                 self.qweight,
                 self.qzeros,
-                self.scales,
+                compute_scales,
                 self.bits,
                 self.group_size,
-                self.bias,
+                compute_bias,
                 self.out_features,
                 "cuda",
                 self.fp32_accum,

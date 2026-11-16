@@ -155,7 +155,10 @@ def test_fused_cpu_promotes_large_affine_offset_before_fp16_rounding():
 
     layer.eval()
     actual = layer(x)
-    assert layer.scales.dtype == torch.float32
+    # The checkpoint buffers keep their loaded dtype; the packed affine
+    # metadata is the operand that widens to FP32.
+    assert layer.scales.dtype == torch.float16
+    assert layer.scales_and_zeros.dtype == torch.float32
     assert layer.qzeros.dtype == torch.float32
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected.to(x.dtype), rtol=0, atol=0)
