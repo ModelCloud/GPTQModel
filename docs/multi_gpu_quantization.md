@@ -142,6 +142,85 @@ The failure path is an empty filtered list, which `_filter_forward_devices`
 already resolves by keeping the unfiltered pool; `run` then falls back to
 `cur_layer_device`.
 
+## Data-parallel forward copies
+
+With `auto_forward_data_parallel=True` (the default), `ForwardExecutor.run_parallel`
+fans each subset forward across every visible device of the layer's family, and
+the same fan-out runs again for the post-quant replay. Every one of those rounds
+materializes a forwardable module per device before the batches are dispatched.
+For a decoder layer that is one round per quantization subset (four for Qwen3)
+plus one per replay.
+
+`clone_module_for_devices()` used to deep-copy the layer for **every** target,
+including the device it was already staged on. The base device's replica was a
+full copy of a module already resident there, so a two-GPU round paid two
+device-local layer deep copies plus one cross-device transfer, and a second
+layer's worth of VRAM for a replica the forward never used. Since #4183 the
+module itself is the replica for the device it already lives on; only the other
+devices get a detached deep copy. `forward_batch_worker()` also skips its
+per-batch `rehome_module_to_device()` scan when the replica is fully resident.
+That scan took a process-wide lock and walked every parameter and buffer on
+every batch, so it also serialized the device workers.
+
+Measured on 2x RTX 4090 (PCIe, no NVLink), Qwen3-0.6B, 64 wikitext-2
+calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`, CUDA 13, Python 3.14t
+with the GIL disabled. One run makes 139 clone rounds:
+
+| Per run | Before | After |
+| --- | --- | --- |
+| layer copies | 278 (2 per round) | 139 (1 per round) |
+| bytes copied | 7.64 GB | 3.82 GB |
+| copies on the module's own device | 139 | 0 |
+| deep-copy time | 0.48 s | 0.25 s |
+
+Median of three runs each (wall clock / pre-quant forward / replay):
+
+| Config | Before | After |
+| --- | --- | --- |
+| 1 GPU | 11.30 s / 4.65 s / 0.94 s | 11.45 s / 4.70 s / 0.96 s |
+| 2 GPU, `auto_forward_data_parallel=True` | 11.65 s / 4.43 s / 0.94 s | 11.16 s / 3.93 s / 0.82 s |
+| 2 GPU, `auto_forward_data_parallel=False` | 11.93 s / 4.69 s / 0.96 s | 11.95 s / 4.84 s / 0.99 s |
+
+The 1-GPU and serial rows are the untouched paths, so their before/after
+difference is run-to-run noise. Before the change the data-parallel default was
+0.35 s slower than 1 GPU; after it is 0.14 s faster and the fastest
+configuration measured.
+
+With the GIL enabled (median of two runs) the data-parallel default measured
+13.49 s / 5.51 s / 1.14 s before and 13.04 s / 5.22 s / 1.11 s after, against
+12.42 s / 4.73 s / 0.96 s and 12.21 s / 4.69 s / 0.97 s for the serial
+two-GPU forward. Device workers are Python threads, so with the GIL enabled the
+forward gains no parallelism and only pays the copies. On a GIL-enabled build
+prefer `auto_forward_data_parallel=False`.
+
+The copy is charged per subset round, not per layer, and it scales with the
+layer size while the compute it saves scales with the calibration tokens in the
+round. A model-size threshold is therefore not the right gate: a larger model
+has both a larger layer and proportionally more compute per token. The lever is
+the number of tokens per round. On the hardware above, a 24 MB layer copy costs
+about 2.5 ms per round after this change, and the second device's share of the
+round's compute is smaller than that for short calibration samples. If a run
+spends most of its time in data-parallel forward copies, set
+`auto_forward_data_parallel=False`; the serial forward then makes no layer
+copies at all.
+
+Reusing one resident replica across the subsets of a layer is not possible
+without reworking module replacement. GPTQ replaces each quantized projection
+with a new module instance, so the layer's module topology changes at every
+subset boundary (measured: 0 of 138 consecutive same-layer clone rounds kept
+the topology). A cached replica would have to rebuild its module tree, tensors
+and forward hooks for every subset, which is the deep copy it was meant to
+avoid.
+
+Data-parallel forward is also not bit-identical to the serial path: on the run
+above the two-GPU data-parallel checkpoint was deterministic run to run but
+differed from the 1-GPU checkpoint in 392 of 898 tensors, while the two-GPU
+serial forward was bit-identical to 1 GPU (0 of 898). The difference therefore
+comes from the data-parallel forward (per-device batch assignment and Hessian
+accumulation), not from using two GPUs. Use
+`auto_forward_data_parallel=False` when a checkpoint must be bit-identical to
+the single-GPU result.
+
 ## GPU peer access (P2P)
 
 PyTorch already enables peer access lazily inside its own copy path
