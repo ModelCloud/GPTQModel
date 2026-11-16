@@ -68,6 +68,7 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     offload_to_disk,
+    release_private_offload_root,
     restore_offloaded_modules,
 )
 from ..utils.p2p import configure_p2p, enable_for_devices
@@ -898,7 +899,12 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             result = self._loop_impl(**kwargs)
         except BaseException:
             # A failed run must not leave the base modules stranded on meta.
-            self._restore_offloaded_base_modules(strict=False)
+            try:
+                self._restore_offloaded_base_modules(strict=False)
+            finally:
+                # A failed run cannot be saved, so its per-run offload bundles
+                # are no longer reachable (issue #4368).
+                release_private_offload_root(self.gptq_model)
             raise
         self._restore_offloaded_base_modules(strict=True)
         return result

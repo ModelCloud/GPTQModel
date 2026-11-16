@@ -11,6 +11,7 @@ import os
 import shutil
 import struct
 import uuid
+import weakref
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -89,24 +90,83 @@ def bind_private_offload_root(model: nn.Module) -> Optional[str]:
 
     Give the run its own subdirectory under the configured root and keep a
     private config copy on the model, so a later run on another model cannot
-    move this model's save-time bundle lookup.
+    move this model's save-time bundle lookup. The directory is registered on
+    the model so :func:`release_private_offload_root` can remove it after save,
+    after a failed run, or when the model is garbage collected (issue #4368).
     """
     config = getattr(model, "quantize_config", None)
     if config is None or not getattr(config, "offload_to_disk", False):
         return None
 
-    configured = getattr(config, "offload_to_disk_path", None)
-    if not configured:
-        return None
+    base = getattr(model, "_private_offload_base_root", None)
+    if not base:
+        configured = getattr(config, "offload_to_disk_path", None)
+        if not configured:
+            return None
+        base = os.path.abspath(os.path.expanduser(os.fspath(configured)))
 
-    base = os.path.abspath(os.path.expanduser(os.fspath(configured)))
+    # Re-quantizing the same model replaces its run state; release the previous
+    # run directory instead of overwriting the only handle to it.
+    if getattr(model, "_private_offload_run_root", None):
+        release_private_offload_root(model)
+
     run_root = os.path.join(base, f"run-{uuid.uuid4().hex[:16]}")
     os.makedirs(run_root, exist_ok=True)
 
     private_config = copy.copy(config)
     private_config.offload_to_disk_path = run_root
     model.quantize_config = private_config
+    model._private_offload_base_root = base
+    model._private_offload_run_root = run_root
+    try:
+        model._private_offload_run_finalizer = weakref.finalize(
+            model, _remove_private_offload_root, run_root
+        )
+    except TypeError:
+        # Lightweight test doubles (for example ``SimpleNamespace``) are not
+        # weak-referenceable; they can still call the explicit release helper.
+        model._private_offload_run_finalizer = None
     log.debug("Offload: bound private run directory `%s`.", run_root)
+    return run_root
+
+
+def _remove_private_offload_root(run_root: str) -> None:
+    """Remove one per-run offload directory without touching its siblings."""
+
+    try:
+        shutil.rmtree(run_root, ignore_errors=True)
+    except Exception:  # pragma: no cover - defensive
+        log.debug("Offload: failed to remove run directory `%s`.", run_root, exc_info=True)
+
+
+def release_private_offload_root(model: nn.Module) -> Optional[str]:
+    """Remove the private offload directory bound to ``model``, if any.
+
+    The directory is only deleted after the caller has finished reading its
+    bundles (save) or after the run failed. Keeping the explicit path's parent
+    intact means other runs and the caller's own files are untouched.
+    """
+
+    finalizer = getattr(model, "_private_offload_run_finalizer", None)
+    if finalizer is not None:
+        try:
+            finalizer.detach()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        try:
+            model._private_offload_run_finalizer = None
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    run_root = getattr(model, "_private_offload_run_root", None)
+    if not run_root:
+        return None
+    try:
+        model._private_offload_run_root = None
+    except Exception:  # pragma: no cover - defensive
+        pass
+    _remove_private_offload_root(run_root)
+    log.debug("Offload: released private run directory `%s`.", run_root)
     return run_root
 
 
