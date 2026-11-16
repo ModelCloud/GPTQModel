@@ -80,7 +80,10 @@ flowchart TD
 The snapshot is refreshed only on the slow path
 (`gptqmodel/nn_modules/qlinear/exllamav2.py:217`). `_release_q_handle` clears
 it, so state-dict loads, `clear_weight_cache()`, and device/dtype moves all
-rebuild.
+rebuild. Fusion also clears it once `_share_operands` has rebound the source
+storage, because a snapshot taken before fusion would keep the replaced
+standalone allocations alive (see
+[ExLlamaV2 descriptor lifecycle](exllamav2-descriptor-lifecycle.md)).
 
 Invalidation is unchanged: attribute replacement changes the object identity,
 in-place writes bump `_version`, `.data =` changes `data_ptr`, and

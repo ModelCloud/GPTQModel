@@ -356,6 +356,65 @@ def test_exllamav2_fused_checkpoint_reload(cls):
     torch.testing.assert_close(parent(x_bf16), bf16_output, rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav2_fusion_releases_operand_snapshots(dtype):
+    """#4240: a fused group must not retain the replaced standalone allocations.
+
+    The per-call descriptor snapshot keys the tensors that were bound into the
+    native matrix. Fusion rebinds sources to views of the concatenated packed
+    allocation, so a snapshot taken before fusion would keep the original
+    ``qweight``/``qzeros``/``scales`` alive for the lifetime of the group.
+    """
+    cls = ExllamaV2Linear
+    device = _available(cls, DEVICE.CUDA, dtype)
+    spec = SPECS[cls]
+    torch.manual_seed(43)
+    config = LlamaConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=1,
+                         num_attention_heads=8, num_key_value_heads=8, vocab_size=64,
+                         attention_bias=True, mlp_bias=True)
+    config._attn_implementation = "eager"
+    parent = LlamaForCausalLM(config).to(dtype).eval().model.layers[0].mlp
+    modules = []
+    for name in ("gate_proj", "up_proj"):
+        module, _, _, _ = _projection(cls, getattr(parent, name), dtype, device)
+        setattr(parent, name, module)
+        modules.append(module)
+    parent.to(device)
+    x = torch.randn(1, 8, 512, dtype=dtype, device=device)
+    with torch.inference_mode():
+        baseline = parent(x)
+    # Warm every source so each one holds a pre-fusion snapshot.
+    for module in modules:
+        assert module._q_fast is not None
+    refs = [weakref.ref(getattr(module, spec.weight_name)) for module in modules]
+    decision = FusionDecision("gate_up", "mlp", ("mlp.gate_proj", "mlp.up_proj"))
+    group = _FusionGroup(decision, parent, modules, activation_dtype=dtype)
+    try:
+        group.install()
+        assert all(ref() is None for ref in refs), "Original native weight allocations were retained"
+        for module in modules:
+            assert module._q_fast is None, "a source snapshot would retain its standalone storage"
+            assert module.q_handle, "sources keep their descriptor for direct calls"
+        assert group.packed._q_fast is None, "the fused executor inherited a source snapshot"
+        with torch.inference_mode():
+            torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+            # Direct source calls rebuild only their own snapshot, on fused views.
+            torch.testing.assert_close(torch.cat([m(x) for m in modules], -1),
+                                       group.packed(x), rtol=2e-3, atol=2e-3)
+            torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+        # Rebuilt snapshots alias the fused allocation; they add no storage.
+        for module in modules:
+            for name, _dim in spec.axes:
+                source, packed = getattr(module, name), getattr(group.packed, name)
+                if isinstance(source, torch.Tensor) and source.numel():
+                    assert source.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr()
+        assert group.packed is not None
+    finally:
+        group.remove()
+    with torch.inference_mode():
+        torch.testing.assert_close(parent(x), baseline, rtol=2e-3, atol=2e-3)
+
+
 @pytest.mark.parametrize("cls,family,dtype", list(_cases()))
 @pytest.mark.parametrize("profile", ["gate_up", "qkv_gqa", "qkv_mha"])
 def test_native_fusion_shapes_oracle_ownership_and_invalidation(cls, family, dtype, profile, record_property):

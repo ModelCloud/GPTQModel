@@ -436,6 +436,13 @@ values remain intact; their former separate allocations are released. The wider
 native kernel consumes the contiguous fused tensors directly, so source views
 add no projection work to the normal fused token path.
 
+A kernel that caches a change detector over its bound operands must also drop
+that cache when its storage is replaced. `FusionKernelSpec.release_operand_snapshots()`
+clears ExLlamaV2's `_q_fast` snapshot on every source and on the copied executor
+after the views are bound, so the standalone packed allocations are released
+rather than retained by a stale snapshot. The descriptors themselves stay live
+for direct source calls, whose cold path rebuilds a snapshot on the fused views.
+
 CPU sources are an exception while the group is installed: finalizing them
 replaces the checkpoint operands with int4pack storage, so the checkpoint shapes
 survive only in the `capture_fused_train_state` snapshot that
