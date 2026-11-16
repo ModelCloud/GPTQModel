@@ -4352,6 +4352,29 @@ class AWQProcessor(LoopProcessor):
             else:
                 entry.setdefault("inputs", [])
 
+    def prune_uncovered_module(self, module: NamedModule) -> None:
+        """Remove a coverage-pruned module from its AWQ layer state.
+
+        ``preprocess`` registered the module in ``_AWQLayerState.modules`` and
+        ``pending_modules``. Left there, it kept ``pending_in_scope`` non-empty,
+        so ``_quantize_layer`` never ran and every module of the layer reached
+        ``pack_module`` without zero points (#4456). Dropping it from the layer
+        state also keeps it out of ``_layer_input_features``: a scaling group
+        that contains it loses its missing member and is skipped like any other
+        group with missing features, so the dense module is never folded or
+        quantized while the rest of the layer is.
+        """
+
+        with self.lock:
+            super().prune_uncovered_module(module)
+        layer_index = getattr(module, "layer_index", None)
+        if layer_index is None:
+            return
+        state = self._get_layer_state(layer_index)
+        with state.lock:
+            state.modules.pop(module.name, None)
+            state.pending_modules.discard(module.name)
+
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing excluded this module from AWQ work."""
 

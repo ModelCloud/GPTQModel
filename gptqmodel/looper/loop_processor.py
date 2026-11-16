@@ -1326,6 +1326,22 @@ class LoopProcessor:
         del moe_block, moe_block_name, handles
         return False
 
+    def prune_uncovered_module(self, module: NamedModule) -> None:
+        """Forget a module the calibration-coverage policy removed from quantization.
+
+        ``fallback=None`` prunes modules that never received calibration input
+        (typically MoE experts no token was routed to). The subset executor
+        removes the module from the subset, restores its dense source and
+        records the dynamic exclusion; the processor must drop every per-module
+        record it created in ``preprocess`` so the module is never quantized,
+        never gates layer completion and never reaches ``submodule_finalize``.
+        Processors that track more than ``tasks`` extend this.
+        """
+
+        tasks = getattr(self, "tasks", None)
+        if tasks is not None:
+            tasks.pop(module.name, None)
+
     # do work and return processor.self state which will updated/merged
     def process(
             self,

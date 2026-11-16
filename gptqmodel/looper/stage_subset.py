@@ -1445,9 +1445,10 @@ def _run_single_subset_pass(
         if calibration_coverage_policy.prune_uncovered_modules:
             for name in moe_skip_modules:
                 skipped_module = subset.pop(name)
-                task_map = getattr(processor, "tasks", None)
-                if task_map is not None:
-                    task_map.pop(name, None)
+                # The processor owns every per-module record created in
+                # `preprocess` (GPTQ tasks, AWQ layer state); a record left
+                # behind keeps waiting for a module that will never be processed.
+                processor.prune_uncovered_module(skipped_module)
 
                 # AUTO_NF12 stores the calibration source in `nf12_*` buffers
                 # and only the quant-source step restores the dense module.
