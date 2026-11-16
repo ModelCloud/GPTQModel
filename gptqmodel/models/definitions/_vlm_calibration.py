@@ -19,8 +19,15 @@ import random
 from collections.abc import Mapping
 from typing import Any, Iterable, Optional
 
+import numpy as np
 import torch
 
+from ...utils.calibration import (
+    _columnar_mapping_examples,
+    _is_columnar_mapping,
+    _is_dataset_split_mapping,
+    _is_integer_sequence,
+)
 from ...utils.logger import setup_logger
 
 
@@ -30,13 +37,42 @@ _MISSING = object()
 
 
 def is_pretokenized_sample(sample: Any) -> bool:
-    """Return whether ``sample`` is a token-id row the base text path accepts."""
+    """Return whether ``sample`` is a token-id row the base text path accepts.
+
+    The base path keeps only ``input_ids``/``attention_mask`` from a mapping, so
+    extra tokenizer columns (``token_type_ids``, ...) must not divert the row to
+    the processor path, where it would be wrapped as a chat message. NumPy
+    arrays and rows built from NumPy/0-D-tensor token ids are token ids too.
+    """
 
     if isinstance(sample, Mapping):
-        return "input_ids" in sample and set(sample.keys()) <= {"input_ids", "attention_mask"}
+        return "input_ids" in sample
     if isinstance(sample, (list, tuple)):
-        return bool(sample) and all(isinstance(token, int) for token in sample)
+        return bool(sample) and _is_integer_sequence(sample)
+    if isinstance(sample, np.ndarray):
+        return True
     return torch.is_tensor(sample)
+
+
+def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
+    """Normalize a mapping calibration input the same way the base helper does."""
+
+    if len(calibration_dataset) == 0:
+        return []
+    if _is_columnar_mapping(calibration_dataset):
+        return _columnar_mapping_examples(calibration_dataset)
+    if _is_dataset_split_mapping(calibration_dataset):
+        splits = ", ".join(repr(key) for key in calibration_dataset.keys())
+        raise ValueError(
+            f"{label}: calibration dataset is a mapping of dataset splits "
+            f"({splits}); select one split, e.g. `calibration_dataset['train']`."
+        )
+    if any(name in calibration_dataset for name in ("input_ids", "text", "messages")):
+        return [calibration_dataset]
+    raise ValueError(
+        f"{label}: calibration dataset mapping must provide `input_ids`, `text`, "
+        f"or `messages` columns, got keys={list(calibration_dataset.keys())}."
+    )
 
 
 def split_calibration_dataset(
@@ -51,6 +87,9 @@ def split_calibration_dataset(
     processor path cannot consume token ids and silently dropping them would
     change the calibration set.
     """
+
+    if isinstance(calibration_dataset, Mapping):
+        calibration_dataset = _mapping_rows(calibration_dataset, label=label)
 
     iterator = iter(calibration_dataset)
     first = next(iterator, _MISSING)

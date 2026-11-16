@@ -3,12 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import itertools
-from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Dict
 
-import torch
 from transformers import AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched_conversations
@@ -22,6 +19,7 @@ from . import LlamaQModel
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
+    split_calibration_dataset,
 )
 
 
@@ -284,14 +282,6 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
 
-    @staticmethod
-    def _is_pretokenized_sample(sample) -> bool:
-        if isinstance(sample, Mapping):
-            return "input_ids" in sample and sample.keys() <= {"input_ids", "attention_mask"}
-        if isinstance(sample, (list, tuple)):
-            return bool(sample) and all(isinstance(token, int) for token in sample)
-        return torch.is_tensor(sample)
-
     @classmethod
     def prepare_inputs_for_conversations(
         cls,
@@ -307,22 +297,15 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        iterator = iter(calibration_dataset)
-        try:
-            first_sample = next(iterator)
-        except StopIteration:
-            return super().prepare_dataset([], batch_size=batch_size, **kwargs)
-
-        samples = itertools.chain((first_sample,), iterator)
-        if self._is_pretokenized_sample(first_sample):
-            samples = (dict(sample) if isinstance(sample, Mapping) else sample for sample in samples)
-            return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
-
         label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
         sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(samples, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
         del processor
         return finalize_conversation_batches(
