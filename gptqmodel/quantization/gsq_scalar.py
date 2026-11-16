@@ -464,6 +464,10 @@ def refine_affine_scalar(
                 selected = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
                 hard_codes = codes.gather(-1, selected).squeeze(-1)
                 hard_scales = (base_scales * scale_delta.exp()).to(scale_dtype).float()
+                if packing in ("awq_gemv", "awq_gemv_fast"):
+                    # Score the source scales we return: BF16 can round an
+                    # FP16 candidate again before the packer stores it.
+                    hard_scales = hard_scales.to(scales.dtype)
                 candidate = decode(hard_codes, hard_scales).to(weight.dtype)
                 candidate_codes = recover_codes(candidate, hard_scales)
                 score = float(loss(decode(candidate_codes, hard_scales)))
