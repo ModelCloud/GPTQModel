@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 import torch
 import transformers
 
-from ..utils.modelscope import ensure_modelscope_available
 from ..utils.kernel import KernelConfig, configure_kernel
+from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
@@ -64,6 +64,7 @@ from ..quantization.config import (
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
 from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -1697,7 +1698,7 @@ def ModelLoader(cls):
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
@@ -1707,8 +1708,10 @@ def ModelLoader(cls):
             p2p: Optional[Union[P2PConfig, Dict]] = None,
             kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ):
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
@@ -1844,6 +1847,7 @@ def ModelLoader(cls):
                         device_map=device_map,
                         device=device,
                         backend=backend,
+                        kernel=kernel,
                         dtype=dtype,
                         trust_remote_code=trust_remote_code,
                         tokenizer_trust_remote_code=tokenizer_trust_remote_code,
@@ -2126,7 +2130,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
@@ -2137,8 +2141,10 @@ def ModelLoader(cls):
             p2p: Optional[Union[P2PConfig, Dict]] = None,
             kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
         warn_unsupported_rocm()
 
         # Tenstorrent loads can leave the GDDR hot from the previous model. Pace
@@ -2331,6 +2337,10 @@ def ModelLoader(cls):
             )
         else:
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+
+        # Runtime policy belongs to this checkpoint's modules, not whichever
+        # model most recently installed a process policy.
+        qcfg.kernel = kernel
 
         if adapter is None:
             if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:

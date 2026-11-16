@@ -24,6 +24,7 @@ from ...quantization.paroquant.modules.triton.gemm import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ...utils.kernel import resolve_kernel_config
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paroquant import ParoLinear
 
@@ -97,7 +98,7 @@ class ParoQuantTritonLinear(ParoLinear):
         """Initialize Triton autotune settings and the per-shape plan cache."""
         kwargs.setdefault("backend", BACKEND.PAROQUANT_TRITON)
         super().__init__(*args, **kwargs)
-        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        kernel = resolve_kernel_config(self)
         self.paroquant_triton_autotune_enabled = kernel.paroquant_triton_autotune
         self.paroquant_triton_autotune_warmup = kernel.paroquant_triton_autotune_warmup
         self.paroquant_triton_autotune_iters = kernel.paroquant_triton_autotune_iters

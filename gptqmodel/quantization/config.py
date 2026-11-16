@@ -28,8 +28,9 @@ from packaging import version
 
 from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
 from ..adapter.adapter import Lora, normalize_adapter
+from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
-from ..utils.kernel import KernelConfig
+from ..utils.kernel import KernelConfig, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.p2p import P2PConfig
 from ..utils.vptq import vptq_index_bits
@@ -4767,6 +4768,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                   "Pass KernelConfig(...) or an equivalent dict. None uses the defaults."},
     )
 
+    runtime: Optional[RuntimeConfig] = field(
+        default=None,
+        metadata={"help": "Shared quantizer, worker and host settings. Runtime-only; not serialized."},
+    )
+
     # User-facing dense-pool strategy. The dense pool owns the serial path:
     # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
     dense_vram_strategy: VramStrategy = field(
@@ -5139,6 +5145,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.moe = _normalize_moe_config(self.moe)
         self.p2p = _normalize_p2p_config(self.p2p)
         self.kernel = _normalize_kernel_config(self.kernel)
+        self._normalize_runtime_config()
 
         # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
         if self.calibration_data_device is not None:
@@ -5684,7 +5691,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return not self.uses_weight_only_lifecycle()
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"compile": self.compile, "kernel": self.kernel}
+        return {"compile": self.compile, "kernel": resolve_kernel_config(self)}
+
+    def _normalize_runtime_config(self) -> None:
+        if self.runtime is not None:
+            if not isinstance(self.runtime, RuntimeConfig):
+                raise TypeError("runtime must be a RuntimeConfig or None")
+            if self.kernel is not None:
+                raise ValueError("runtime= and legacy kernel= cannot be supplied together")
 
 
 @dataclass
@@ -7469,6 +7483,7 @@ class EXL3Config(PreProcessorConfig):
         self.moe = _normalize_moe_config(self.moe)
         self.p2p = _normalize_p2p_config(self.p2p)
         self.kernel = _normalize_kernel_config(self.kernel)
+        self._normalize_runtime_config()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         # EXL3 matrices always have an integer trellis width. Keep that type in

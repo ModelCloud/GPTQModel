@@ -5,22 +5,21 @@
 
 GPT-QModel never reads an environment variable to decide which kernel runs,
 which numerical path is taken, or how many threads are used.  Those choices
-are made through :class:`KernelConfig`, supplied as
-``BaseQuantizeConfig.kernel`` for quantization or as ``GPTQModel.load(...,
-kernel=...)`` for inference, and installed with :func:`configure_kernel`.
+are selected with a typed ``BackendConfig`` passed to ``backend=`` and shared
+``RuntimeConfig`` settings. :class:`KernelConfig` is the legacy adapter,
+accepted through ``kernel=`` and installed with :func:`configure_kernel`.
 
-The policy is process-wide, matching the existing ``P2PConfig`` contract: a
-quantization or load installs it before any kernel is selected, so modules
-created deep inside the loader do not have to thread it through every call.
-Calling :func:`configure_kernel` again replaces the policy; ``None`` restores
-the documented defaults.
+Quantized modules own a policy snapshot. Shared quantizer and host utilities
+use the process-wide policy installed before a run. Calling
+:func:`configure_kernel` replaces that fallback; ``None`` restores defaults.
+It does not retune already constructed modules.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Optional
 
 
@@ -401,17 +400,33 @@ def get_kernel_config() -> KernelConfig:
     return _ACTIVE_CONFIG
 
 
-def resolve_kernel_config(owner: Any = None) -> KernelConfig:
+def resolve_kernel_config(owner: Any = None, *, use_process_default: bool = True) -> KernelConfig:
     """Return the policy that applies to ``owner`` (a quantize config).
 
     An explicit ``owner.kernel`` wins; otherwise the process-wide policy
-    installed by a looper or ``GPTQModel.load`` applies.
+    installed by a looper or ``GPTQModel.load`` applies. Run boundaries pass
+    ``use_process_default=False`` so an unset run resets to fresh defaults
+    rather than inheriting the previous run's process fallback.
     """
 
+    if isinstance(owner, KernelConfig):
+        return owner
+    from .backend_config import BackendConfig, RuntimeConfig
+
+    if isinstance(owner, (BackendConfig, RuntimeConfig)):
+        return owner.to_kernel_config()
     kernel = getattr(owner, "kernel", None) if owner is not None else None
     if isinstance(kernel, KernelConfig):
         return kernel
-    return get_kernel_config()
+    runtime = getattr(owner, "runtime", None) if owner is not None else None
+    if runtime is not None:
+        return runtime.to_kernel_config()
+    return get_kernel_config() if use_process_default else KernelConfig()
+
+
+def snapshot_kernel_config(owner: Any = None) -> KernelConfig:
+    """Own a policy copy so later loads and caller mutation cannot retune it."""
+    return replace(resolve_kernel_config(owner))
 
 
 def reset_kernel_config() -> KernelConfig:

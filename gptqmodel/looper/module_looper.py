@@ -47,6 +47,7 @@ from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.disk import estimate_disk_io_speed
+from ..utils.kernel import configure_kernel, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
@@ -58,7 +59,6 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.kernel import configure_kernel
 from ..utils.model import (
     MoETopKState,
     get_layers_with_prefixes,
@@ -410,7 +410,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
-        configure_kernel(getattr(self.gptq_model.quantize_config, "kernel", None))
+        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config, use_process_default=False))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 

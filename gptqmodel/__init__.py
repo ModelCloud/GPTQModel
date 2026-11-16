@@ -542,6 +542,23 @@ def exllama_set_max_input_length(model, max_input_length: int):
 import torch
 
 from . import extension
+from .backend import (  # noqa: F401
+    AwqGemmConfig,
+    AwqTorchConfig,
+    AwqTritonConfig,
+    BackendConfig,
+    BitsAndBytesConfig,
+    GGUFCPPConfig,
+    GGUFCUDAConfig,
+    GGUFTorchConfig,
+    MarlinConfig,
+    ParoQuantConfig,
+    ParoQuantTritonConfig,
+    RuntimeConfig,
+    SwordfishConfig,
+    TorchConfig,
+    TTBlockFloatConfig,
+)
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
 from .models import (

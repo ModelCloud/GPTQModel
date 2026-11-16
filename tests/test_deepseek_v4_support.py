@@ -18,7 +18,6 @@ from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models import auto
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.models.definitions.deepseek_v4 import (
     MTP_CAPTURE_ATTENTION_MASK,
     MTP_CAPTURE_DECODE_MASK,
@@ -43,6 +42,7 @@ from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureFrontierStore,
     EXL3CaptureState,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def _tiny_v4_config() -> DeepseekV4Config:

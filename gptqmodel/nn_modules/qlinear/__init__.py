@@ -19,7 +19,9 @@ from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.backend_config import resolve_backend_config
 from ...utils.checkpoint_state import is_checkpoint_serialization
+from ...utils.kernel import snapshot_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import (
     PLANAR_BITS,
@@ -285,7 +287,8 @@ class BaseQuantLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.bits = bits
-        self.backend = backend
+        self.backend, kernel = resolve_backend_config(backend, kwargs.get("kernel"))
+        self.kernel = snapshot_kernel_config(kernel)
         # Quantized checkpoints keep their non-quantized biases at the model
         # dtype. ``dtype`` is the activation dtype used for kernel validation
         # and may be unsupported for a storage-only rebuild (FP32), so a

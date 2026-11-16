@@ -222,6 +222,11 @@ def normalize_backend(
     *,
     quant_method: Optional[Union[str, Any]] = None,
 ) -> Optional[BACKEND]:
+    # Imported lazily: configs depend on the enum and normalization rules.
+    from .backend_config import BackendConfig
+
+    if isinstance(backend, BackendConfig):
+        backend = backend.backend
     if backend is None:
         return None
 

@@ -1,22 +1,31 @@
-# Kernel and thread selection
+# Backend configuration and thread selection
 
-`KernelConfig` is the single explicit control surface for choices that used to
-be made by `GPTQMODEL_*` / `GPTQ_TORCH_*` environment variables: which
-quantization and inference kernel runs, which numerical path it takes, and how
-many threads it may use.
+Use `backend=` for both execution selection and backend-specific settings.
+An enum/string selects defaults; a typed configuration selects its own backend
+with custom settings. See [Backend selection and configuration](backend-selection.md)
+for the complete API, available types, resolution diagrams and compatibility rules.
 
 ```python
+from gptqmodel import GPTQModel
+from gptqmodel.backend import BACKEND, MarlinConfig, RuntimeConfig
 from gptqmodel.quantization import QuantizeConfig
-from gptqmodel.utils.kernel import KernelConfig
 
 qcfg = QuantizeConfig(
     bits=4,
     group_size=128,
-    kernel=KernelConfig(fp32_accum=False, max_packers=2),
+    runtime=RuntimeConfig(max_packers=2),
 )
+model = GPTQModel.load("org/model", backend=BACKEND.MARLIN)  # Default settings
+model = GPTQModel.load("org/model", backend=MarlinConfig(fp32=False))
 ```
 
-For inference, pass the same object to the loader:
+`BackendConfig` is the abstract base for the concrete, immutable backend
+configurations. A caller cannot give `MarlinConfig` another backend identity.
+`RuntimeConfig` holds shared quantizer and host controls, and is accepted by
+loaders as `runtime=` or on `QuantizeConfig` as above.
+
+The remaining fields below describe the legacy `KernelConfig` adapter.
+Existing `kernel=` calls remain supported with enum/string backend selectors:
 
 ```python
 from gptqmodel import GPTQModel
@@ -24,17 +33,20 @@ from gptqmodel.utils.kernel import KernelConfig
 
 model = GPTQModel.load(
     "org/model",
+    backend=BACKEND.MARLIN,
     kernel=KernelConfig(marlin_fp32=False, torch_streaming=True),
 )
 ```
 
 A plain mapping with the same keys is accepted anywhere a `KernelConfig` is.
+Combining a typed backend configuration or `runtime=` with legacy `kernel=`
+raises `ValueError`; it would supply two competing policies.
 `configure_kernel(KernelConfig(...))` installs a process-wide policy directly,
 and `None` restores the documented defaults.
 
-## How a decision reaches the kernel
+## Legacy adapter flow
 
-Before this change, a decision was made by reading the process environment at
+Before the explicit-policy adapter, a decision was made by reading the process environment at
 the point of use: a worker thread could change it, a test could only reach it
 through `monkeypatch.setenv`, and the same checkpoint could take a different
 numerical path in a different process. `KernelConfig` moves the decision to a
@@ -45,14 +57,15 @@ flowchart TD
     A["QuantizeConfig(kernel=KernelConfig(...))"] --> B["BaseQuantizeConfig.__post_init__<br/>_normalize_kernel_config"]
     C["GPTQModel.load(..., kernel=KernelConfig(...))"] --> D["GPTQModel.load"]
     D --> E["configure_kernel(kernel)"]
-    B --> F["ModuleLooper.__init__<br/>configure_kernel(quantize_config.kernel)"]
-    B --> G["WeightOnlyLooper.__init__<br/>configure_kernel(quantize_config.kernel)"]
+    B --> F["ModuleLooper.__init__<br/>resolve_kernel_config(qcfg, use_process_default=False)"]
+    B --> G["WeightOnlyLooper.__init__<br/>resolve_kernel_config(qcfg, use_process_default=False)"]
     F --> E
     G --> E
     E --> H["_ACTIVE_CONFIG (process-wide, RLock)"]
     H --> I["resolve_kernel_config(owner)<br/>owner.kernel wins, else _ACTIVE_CONFIG"]
-    I --> J["Python kernel: TorchLinear, MarlinLinear,<br/>GGUF, ParoQuant, bitsandbytes, kernel.py"]
-    I --> K["Native op argument: awq_fused_splitk_reduce,<br/>blockfloat_cublas, swordfish_dense_m,<br/>swordfish_deterministic, floatx_cpu_simd_level"]
+    I --> M["BaseQuantLinear / make_quant<br/>snapshot_kernel_config"]
+    M --> J["Module-owned policy: TorchLinear, MarlinLinear,<br/>GGUF, ParoQuant, bitsandbytes"]
+    M --> K["Native op arguments: AWQ, block-float,<br/>Swordfish and GGUF CPU"]
     J --> L["run"]
     K --> L
 ```
@@ -107,12 +120,13 @@ it means a test can exercise both paths in one process.
 
 ## Lifetime and serialization
 
-The policy is process-wide, like `P2PConfig`. Quantization installs
-`BaseQuantizeConfig.kernel` before the loop starts; a load installs
-`GPTQModel.load(..., kernel=...)` before any quantized module is built.
-Calling `configure_kernel` again replaces the policy.
+Quantized linear modules own a snapshot of their execution policy. Later
+loads, `configure_kernel` calls and mutations to the original legacy object do
+not change those modules. Shared quantization and host utilities still use a
+process-wide fallback installed before the loop or load starts. Concurrent
+quantization runs with different shared runtime settings are not isolated.
 
-`kernel` is a runtime-only field. It is not written to the checkpoint, because
+`kernel` and `runtime` are runtime-only fields. Neither is written to the checkpoint, because
 the host that loads a checkpoint is not necessarily the host that produced it.
 The same applies to `compile`: a saved checkpoint carries the numerical
 representation, not another machine's kernel tuning.

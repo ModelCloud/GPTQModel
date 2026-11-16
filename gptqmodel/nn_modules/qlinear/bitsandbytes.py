@@ -22,7 +22,7 @@ from ...quantization.config import (
 )
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
-from ...utils.kernel import get_kernel_config
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -355,6 +355,7 @@ def _cpu_int8_dense_should_use(
     in_features: int,
     out_features: int,
     compute_dtype: torch.dtype,
+    kernel=None,
 ) -> bool:
     """Return whether a tiled FP32 recompute is accurate and faster than native INT8.
 
@@ -367,7 +368,7 @@ def _cpu_int8_dense_should_use(
     retains a dense weight.
     """
 
-    if not get_kernel_config().bitsandbytes_cpu_int8_dense:
+    if not resolve_kernel_config(kernel).bitsandbytes_cpu_int8_dense:
         return False
     if not has_avx512_bf16():
         return False
@@ -632,7 +633,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         return self.quant_state
 
     def _cpu_packing_supported(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if self._cpu_packing_disabled or not get_kernel_config().bitsandbytes_cpu_packed:
+        if self._cpu_packing_disabled or not self.kernel.bitsandbytes_cpu_packed:
             return False
         if not self.is_4bit or self.training or self.weight.device.type != "cpu":
             return False
@@ -991,6 +992,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 in_features=self.in_features,
                 out_features=self.out_features,
                 compute_dtype=compute_dtype,
+                kernel=self.kernel,
             )
         ):
             return self._cpu_int8_tiled_forward(x, bias)

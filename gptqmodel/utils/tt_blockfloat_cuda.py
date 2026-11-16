@@ -196,6 +196,8 @@ def linear(
     exponents: torch.Tensor,
     bits: int,
     bias: Optional[torch.Tensor] = None,
+    *,
+    cublas: Optional[bool] = None,
 ) -> torch.Tensor:
     """``x @ dequant(codes, exponents).T + bias`` without a dense weight.
 
@@ -221,7 +223,7 @@ def linear(
         int(bits),
         bias,
         out,
-        get_kernel_config().blockfloat_cublas,
+        get_kernel_config().blockfloat_cublas if cublas is None else cublas,
     )
     return out
 

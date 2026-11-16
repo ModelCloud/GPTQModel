@@ -20,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
+from gptqmodel.utils.kernel import KernelConfig
 
 
 def _fake_quant_tensors(in_features=32, out_features=8, group_size=32):
@@ -247,6 +248,7 @@ def test_representative_qlinear_empty_shape_without_native_extension(linear_cls)
     module.out_features = 11
     module.adapter = None
     module.training = True
+    module.kernel = KernelConfig()
     if linear_cls in (AwqGEMMLinear, AwqGEMMTritonLinear):
         module.bits = 4
         module.group_size = 8

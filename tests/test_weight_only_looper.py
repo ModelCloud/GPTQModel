@@ -14,6 +14,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
 from gptqmodel.quantization.config import QuantizeEmbed, QuantizeEmbedConfig, RTNConfig, VramStrategy
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
 
 class _FakeProgress:
@@ -238,6 +239,17 @@ def test_weight_only_extension_resumes_at_quiescent_boundary(monkeypatch, cursor
     assert processor.quantized == [f"layers.{index}.linear" for index in range(cursor, 2)]
     assert processor.finalize_called
     assert model.model.config.use_cache
+
+
+def test_weight_only_looper_unset_policy_resets_previous_run():
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    previous = get_kernel_config()
+    try:
+        configure_kernel(KernelConfig(marlin_fp32=False, max_packers=2))
+        WeightOnlyLooper(model=_FakeQModel(qcfg), processor=_FakeProcessor(qcfg))
+        assert get_kernel_config().to_dict() == KernelConfig().to_dict()
+    finally:
+        configure_kernel(previous)
 
 
 def test_weight_only_looper_reports_logbar_progress(monkeypatch):
