@@ -21,6 +21,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.fallback import resolve_fallback_strategy
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 from ..utils.torch import torch_sync
 from .gar import (
     compose_final_perm,
@@ -29,7 +30,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
-from .gptq import GPTQ
+from .gptq import GPTQ, _device_reduction_key
 from .quantizer import _neutralize_dead_columns
 
 
@@ -123,6 +124,11 @@ class FOEM(GPTQ):
 
         self.H = None
         self.dXXT = None
+        self._foem_device_hessian = {}
+        self._foem_device_dxxT = {}
+        self._foem_device_counts = {}
+        self._foem_active_device = None
+        self._foem_active_count = 0
 
 
         self._routed_expert = bool(module.state.get("is_routed_expert", False))
@@ -141,7 +147,42 @@ class FOEM(GPTQ):
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
-            self.process_batch(inp)
+            self.process_batch(inp, batch_index=batch_index)
+
+    def _take_native_input(self, batch_index: Optional[int]) -> torch.Tensor:
+        """Consume the native entry belonging to ``batch_index``.
+
+        ``NativeProcessor`` tags each per-sample entry with its calibration
+        batch. Scanning for that key makes pairing independent of the order in
+        which data-parallel batches complete. A plain list is still accepted
+        for direct callers and older captures.
+        """
+
+        entries = self.native_inps
+        if not entries:
+            raise RuntimeError(
+                f"Quantization: Module `{self.name}` -> no native calibration input "
+                f"remains for batch `{batch_index}`."
+            )
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                continue
+            entry_batch, tensor = entry
+            if batch_index is None or entry_batch == batch_index:
+                del entries[index]
+                return tensor
+
+        if batch_index is not None and not isinstance(entries[0], tuple):
+            # Legacy capture without batch keys: keep the historical pop order.
+            return entries.pop(0)
+        if batch_index is not None:
+            raise RuntimeError(
+                f"Quantization: Module `{self.name}` -> no native calibration input "
+                f"for batch `{batch_index}`."
+            )
+        entry = entries.pop(0)
+        return entry[1] if isinstance(entry, tuple) else entry
 
     # TODO FIXME: using v1 new process_batch kills v2 quantization quality, use original process_batch
     # sample counter based on batch request # instead of batched token #.
@@ -172,10 +213,13 @@ class FOEM(GPTQ):
     #     self.dXXT.addmm_((native_inp.T-reshaped_inp.T), reshaped_inp, beta=beta, alpha=alpha)
     #     del native_inp, reshaped_inp
 
-    def process_batch(self, inp):
+    def process_batch(self, inp, batch_index: Optional[int] = None):
         inp = inp.to(dtype=torch.float32)
+        native_inp = None
         if self.gptaq:
-            native_inp = self.native_inps.pop(0).to(device=inp.device, dtype=torch.float32)
+            native_inp = self._take_native_input(batch_index).to(
+                device=inp.device, dtype=torch.float32
+            )
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
             if self.gptaq:
@@ -209,30 +253,127 @@ class FOEM(GPTQ):
         # not the number of forward requests.
         token_count = inp.shape[1]
 
-        if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns),
-                                 dtype=torch.float32,
-                                 device=inp.device)
-            if self.gptaq:
-                self.dXXT = self.H.clone()
-        else:
-            self.H *= self.nsamples / (self.nsamples + token_count)
-            if self.gptaq:
-                self.dXXT *= self.nsamples / (self.nsamples + token_count)
-
+        self._accumulate_device_batch(inp, native_inp, token_count)
         self.nsamples += token_count
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
 
-        self.H += inp.matmul(inp.t())
-        if self.gptaq:
-            native_inp = math.sqrt(2 / self.nsamples) * native_inp
-            self.dXXT += (native_inp - inp).matmul(inp.t())
+    def _accumulate_device_batch(
+        self,
+        inp: torch.Tensor,
+        native_inp: Optional[torch.Tensor],
+        token_count: int,
+    ) -> None:
+        """Accumulate one batch into its own device's Hessian/dXXT partial."""
+
+        device = inp.device
+        use_native = self.gptaq
+
+        if self._foem_active_device is not None and device != self._foem_active_device:
+            self._foem_device_hessian[self._foem_active_device] = self.H
+            if use_native:
+                self._foem_device_dxxT[self._foem_active_device] = self.dXXT
+            self._foem_device_counts[self._foem_active_device] = self._foem_active_count
+            self._foem_active_device = None
+            self._foem_active_count = 0
+            self.H = None
+            self.dXXT = None
+
+        if self._foem_active_device is None and not self._foem_device_hessian:
+            self._foem_active_device = device
+            self._foem_active_count = 0
+            self.H = torch.zeros(
+                (self.columns, self.columns), dtype=torch.float32, device=device
+            )
+            if use_native:
+                self.dXXT = torch.zeros_like(self.H)
+
+        if self._foem_active_device is not None:
+            hessian = self.H
+            dxxT = self.dXXT
+            device_count = self._foem_active_count
+        else:
+            hessian = self._foem_device_hessian.get(device)
+            if hessian is None:
+                hessian = torch.zeros(
+                    (self.columns, self.columns), dtype=torch.float32, device=device
+                )
+            dxxT = self._foem_device_dxxT.get(device) if use_native else None
+            if use_native and dxxT is None:
+                dxxT = torch.zeros_like(hessian)
+            device_count = self._foem_device_counts.get(device, 0)
+
+        if device_count:
+            ratio = device_count / (device_count + token_count)
+            hessian.mul_(ratio)
+            if use_native:
+                dxxT.mul_(ratio)
+
+        device_count += token_count
+        scale = math.sqrt(2 / device_count)
+        scaled_inp = scale * inp.float()
+        hessian.add_(scaled_inp.matmul(scaled_inp.t()))
+        if use_native:
+            dxxT.add_((scale * native_inp - scaled_inp).matmul(scaled_inp.t()))
+
+        if self._foem_active_device is not None:
+            self._foem_active_count = device_count
+        else:
+            self._foem_device_hessian[device] = hessian
+            if use_native:
+                self._foem_device_dxxT[device] = dxxT
+            self._foem_device_counts[device] = device_count
+
+    def _finalize_foem_hessian(self, target_device: Optional[torch.device] = None) -> None:
+        """Reduce per-device Hessian/dXXT partials in device order."""
+
+        if not self._foem_device_hessian:
+            return
+
+        if target_device is None:
+            target_device = getattr(self.module, "target_device", None)
+        if target_device is None:
+            target_device = min(self._foem_device_hessian, key=_device_reduction_key)
+        target_device = torch.device(target_device)
+
+        total = sum(self._foem_device_counts.values())
+        if total <= 0:
+            return
+
+        hessian = torch.zeros(
+            (self.columns, self.columns), dtype=torch.float32, device=target_device
+        )
+        dxxT = torch.zeros_like(hessian) if self.gptaq else None
+        for device in sorted(self._foem_device_hessian, key=_device_reduction_key):
+            weight = self._foem_device_counts[device] / total
+            hessian.add_(
+                safe_move_to(
+                    self._foem_device_hessian[device],
+                    target_device,
+                    dtype=torch.float32,
+                ),
+                alpha=weight,
+            )
+            if dxxT is not None:
+                dxxT.add_(
+                    safe_move_to(
+                        self._foem_device_dxxT[device],
+                        target_device,
+                        dtype=torch.float32,
+                    ),
+                    alpha=weight,
+                )
+
+        self.H = hessian
+        self.dXXT = dxxT
+        self._foem_device_hessian.clear()
+        self._foem_device_dxxT.clear()
+        self._foem_device_counts.clear()
 
     @torch.inference_mode()
     def quantize(
             self,
             blocksize=128,
     ):
+        self._finalize_foem_hessian()
         if self.nsamples == 0 or self.H is None:
             # No calibration rows reached this module (for example an unrouted
             # expert). GPTQ falls back to data-independent quantization; mirror
@@ -519,6 +660,9 @@ class FOEM(GPTQ):
     def free(self):
         super().free()
 
+        self._foem_device_hessian.clear()
+        self._foem_device_dxxT.clear()
+        self._foem_device_counts.clear()
         if hasattr(self, 'dXXT'):
             del self.dXXT
 
