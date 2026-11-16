@@ -3350,11 +3350,46 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
     return _select_dynamic_value(overrides, key, default, sub_key)
 
 
+def _unescape_module_pattern(pattern: str) -> Optional[str]:
+    """Return `pattern` as a plain module name when it is a pure literal regex.
+
+    `pcre.escape` (used for runtime-pruned modules) escapes every module-name
+    character, so `model\\.layers\\.0\\.down_proj` names the module
+    `model.layers.0.down_proj`.  Patterns that use regex syntax (anchors,
+    quantifiers, alternation, character classes, or `\\d`-style escapes) are
+    not plain names and are returned as ``None``.
+    """
+
+    if any(character in pattern for character in "*+?[](){}|^$"):
+        return None
+    out: List[str] = []
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character != "\\":
+            out.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(pattern):
+            return None
+        escaped = pattern[index + 1]
+        if escaped.isalnum():
+            # Regex escape such as \d, \w, \1, \x, etc.
+            return None
+        if escaped not in "\\^$*+?{}[]()|.":
+            return None
+        out.append(escaped)
+        index += 2
+    return "".join(out)
+
+
 def _dynamic_exclusion_patterns(dynamic, extra=()) -> List[str]:
-    """Return the raw patterns of every `-:` dynamic rule, in declaration order.
+    """Return the patterns of every `-:` dynamic rule, in declaration order.
 
     The `-:` prefix is GPT-QModel's own exclusion marker; HF Transformers and
-    vLLM read a plain pattern list from `modules_to_not_convert`.
+    vLLM read a plain pattern list from `modules_to_not_convert`.  Runtime-pruned
+    modules are recorded as `pcre.escape(name)`; vLLM compares these entries as
+    substrings, so pure-literal regexes are unescaped back to module names.
     """
 
     patterns: List[str] = []
@@ -3362,8 +3397,12 @@ def _dynamic_exclusion_patterns(dynamic, extra=()) -> List[str]:
         if not isinstance(pattern, str) or not pattern.startswith("-:"):
             continue
         raw = pattern[2:]
-        if raw and raw not in patterns:
-            patterns.append(raw)
+        if not raw:
+            continue
+        literal = _unescape_module_pattern(raw)
+        exported = raw if literal is None else literal
+        if exported not in patterns:
+            patterns.append(exported)
     return patterns
 
 
@@ -3396,18 +3435,63 @@ def _external_string_list(value: Any) -> List[str]:
     return result
 
 
+_EXTERNAL_REGEX_PREFIX = "re:"
+_EXTERNAL_NAME_PREFIX = r"(?:^|.*\.)"
+
+
+def _external_exclusion_name_pattern(name: str) -> Optional[str]:
+    r"""Return a module-boundary regex that also matches `name`'s children.
+
+    Producer keys name modules (``visual``, ``model.layers.0.``); HF matches
+    them at module boundaries and AutoAWQ / vLLM as substrings, so a parent
+    name must exclude its descendants.  ``dynamic`` matching is start-anchored,
+    hence the leading ``(?:^|.*\.)``.
+    """
+
+    name = name.rstrip(".")
+    if not name:
+        return None
+    return _EXTERNAL_NAME_PREFIX + re.escape(name) + r"(?:\..*)?$"
+
+
+def _external_export_pattern(pattern: str) -> str:
+    """Return the spelling to publish in `modules_to_not_convert`.
+
+    llm-compressor's ``re:`` prefix is not part of the regex it protects, and
+    HF / vLLM consume this list as names/patterns, so drop it on export.  A
+    pure-literal regex (an escaped module name) becomes the plain name.
+    """
+
+    pattern = pattern.strip()
+    if pattern.startswith(_EXTERNAL_REGEX_PREFIX):
+        pattern = pattern[len(_EXTERNAL_REGEX_PREFIX):].strip()
+    literal = _unescape_module_pattern(pattern)
+    return pattern if literal is None else literal
+
+
 def _external_exclusion_dynamic_pattern(pattern: str) -> Optional[str]:
-    """Translate one producer exclusion into a `dynamic` matching pattern.
+    r"""Translate one producer exclusion into a `dynamic` matching pattern.
 
     AutoAWQ / HF / vLLM compare these entries as module-name substrings, while
     `dynamic` rules are exact literals or start-anchored regexes.  Plain names
-    become a suffix regex (``.*(?:^|\\.)down_proj$``); anything that already
-    contains regex metacharacters is kept verbatim.
+    become a module-boundary regex that covers children
+    (``(?:^|.*\.)visual(?:\..*)?$``); llm-compressor's ``re:`` prefix is
+    stripped and the regex kept verbatim; anything else that already contains
+    regex metacharacters is kept verbatim.
     """
 
     pattern = pattern.strip()
     if not pattern:
         return None
+    if pattern.startswith(_EXTERNAL_REGEX_PREFIX):
+        regex = pattern[len(_EXTERNAL_REGEX_PREFIX):].strip()
+        if not regex:
+            return None
+        try:
+            pcre.compile(regex)
+        except Exception:
+            return _external_exclusion_name_pattern(regex)
+        return regex
     # A dot is ambiguous: it is both a module separator and a regex wildcard.
     # Producer keys name modules, so treat dotted plain names as literals and
     # only keep patterns with explicit regex syntax.
@@ -3420,8 +3504,8 @@ def _external_exclusion_dynamic_pattern(pattern: str) -> Optional[str]:
             # Fall back to a glob-to-regex suffix instead of rejecting the
             # whole checkpoint over one unparsable pattern.
             glob_parts = pattern.split("*")
-            return r".*(?:^|\.)" + r".*".join(re.escape(part) for part in glob_parts) + "$"
-    return r".*(?:^|\.)" + re.escape(pattern) + "$"
+            return _EXTERNAL_NAME_PREFIX + r".*".join(re.escape(part) for part in glob_parts) + r"(?:\..*)?$"
+    return _external_exclusion_name_pattern(pattern)
 
 
 def _apply_external_checkpoint_module_filters(
@@ -3451,7 +3535,15 @@ def _apply_external_checkpoint_module_filters(
             for pattern, override in (config.dynamic or {}).items():
                 merged.setdefault(pattern, override)
             config.dynamic = merged
-        config._external_exclusion_patterns = tuple(patterns)
+        # Keep the producer's spelling (minus the `re:` marker) for export so
+        # `modules_to_not_convert` stays usable by HF / vLLM, while `dynamic`
+        # carries the derived module-boundary regex.
+        exported = list(dict.fromkeys(
+            value for value in (_external_export_pattern(pattern) for pattern in patterns) if value
+        ))
+        config._external_exclusion_patterns = tuple(exported)
+        if getattr(config, "modules_to_not_convert", None):
+            config.modules_to_not_convert = exported
     if inclusion_patterns is not None:
         config._external_module_inclusions = tuple(dict.fromkeys(inclusion_patterns))
 

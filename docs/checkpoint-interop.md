@@ -36,7 +36,7 @@ rules, and records the Optimum inclusion list for the loader:
 flowchart TD
     A["config.json quantization_config"] --> B["from_quant_config"]
     B --> C{"modules_to_not_convert or ignore"}
-    C -- yes --> D["suffix regex rule<br/>-:.*(?:^|\.)down_proj$"]
+    C -- yes --> D["module-boundary regex rule<br/>-:(?:^|.*\\.)down_proj(?:\\..*)?$"]
     C -- no --> E["keep declared dynamic"]
     D --> F["config.dynamic"]
     E --> F
@@ -54,8 +54,12 @@ flowchart TD
 ```
 
 `-:` rules are first-match and therefore inserted before any positive rule.
-Plain names become a dot-boundary suffix regex because `dynamic` matching is
-start-anchored while the producer keys are substring/suffix matches.
+Plain names become a module-boundary regex that also covers children because
+`dynamic` matching is start-anchored while the producer keys name modules
+(substrings / prefixes). llm-compressor's `re:` prefix is stripped and the
+regex kept verbatim. On export, `-:` exclusions are written to
+`modules_to_not_convert` as plain module names (not `pcre.escape`d regexes) so
+substring-matching consumers such as vLLM can skip them.
 
 `validate_checkpoint_qweights` now covers the AWQ formats (and shared
 Marlin/BitBLAS formats) as well as GPTQ. A module the loader decided to quantize
