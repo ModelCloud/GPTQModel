@@ -5989,6 +5989,52 @@ class AWQConfig(PreProcessorConfig):
                 raise ValueError("AWQConfig: staged GSQ requires W4 GEMM export")
             if self.gsq is not None and self.gsq.enabled:
                 raise ValueError("AWQConfig: choose staged gsq_training or per-linear gsq")
+        self._awq_declared_dynamic = self._derived_declared_exclusions()
+        self._awq_post_init_done = True
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if (
+            name == "modules_to_not_convert"
+            and getattr(self, "_awq_post_init_done", False)
+            and not getattr(self, "_awq_syncing", False)
+        ):
+            self._resync_declared_exclusions()
+
+    def _derived_declared_exclusions(self) -> Tuple[str, ...]:
+        derived: List[str] = []
+        for value in _external_string_list(self.modules_to_not_convert):
+            pattern = _external_exclusion_dynamic_pattern(value)
+            if pattern is not None and pattern not in derived:
+                derived.append(pattern)
+        return tuple(derived)
+
+    def _resync_declared_exclusions(self) -> None:
+        """Refold a post-construction `modules_to_not_convert` assignment (#4309)."""
+
+        object.__setattr__(self, "_awq_syncing", True)
+        try:
+            dynamic = dict(self.dynamic or {})
+            for pattern in tuple(getattr(self, "_awq_declared_dynamic", ()) or ()):
+                dynamic.pop(f"-:{pattern}", None)
+            derived: List[str] = []
+            exported: List[str] = []
+            for value in _external_string_list(self.modules_to_not_convert):
+                pattern = _external_exclusion_dynamic_pattern(value)
+                if pattern is None:
+                    continue
+                dynamic[f"-:{pattern}"] = {}
+                if pattern not in derived:
+                    derived.append(pattern)
+                spelling = _external_export_pattern(value)
+                if spelling and spelling not in exported:
+                    exported.append(spelling)
+            self._awq_declared_dynamic = tuple(derived)
+            self._external_exclusion_patterns = tuple(exported)
+            self.modules_to_not_convert = exported or None
+            self.dynamic = dynamic or None
+        finally:
+            object.__setattr__(self, "_awq_syncing", False)
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
@@ -6013,25 +6059,34 @@ class AWQConfig(PreProcessorConfig):
         # Producer-declared exclusions are mirrored into `dynamic` as regex
         # rules for the loader.  Emit the original spelling, not the derived
         # regex, so a round-trip does not rewrite `down_proj` into a pattern.
-        external = tuple(getattr(self, "_external_exclusion_patterns", ()) or ())
-        derived = {
-            _external_exclusion_dynamic_pattern(pattern)
-            for pattern in external
+        #
+        # `-:` rules are authoritative: publish a declared entry only while its
+        # derived rule is still present in `dynamic`.  If `dynamic` was
+        # reassigned without it, the module is quantized and claiming it as
+        # excluded would corrupt the reload (#4309).
+        dynamic = self.dynamic or {}
+        negative = {
+            pattern[2:]
+            for pattern in dynamic
+            if isinstance(pattern, str) and pattern.startswith("-:")
         }
+        external = tuple(getattr(self, "_external_exclusion_patterns", ()) or ())
+        derived: Dict[str, str] = {}
+        for pattern in external:
+            dynamic_pattern = _external_exclusion_dynamic_pattern(pattern)
+            if dynamic_pattern is not None:
+                derived.setdefault(dynamic_pattern, pattern)
         patterns = [
             pattern
             for pattern in _dynamic_exclusion_patterns(
-                self.dynamic,
+                dynamic,
                 sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
             )
             if pattern not in derived
         ]
-        for pattern in external:
-            if pattern not in patterns:
-                patterns.append(pattern)
-        for pattern in self.modules_to_not_convert or ():
-            if isinstance(pattern, str) and pattern and pattern not in patterns:
-                patterns.append(pattern)
+        for pattern, original in derived.items():
+            if pattern in negative and original not in patterns:
+                patterns.append(original)
         return patterns
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
