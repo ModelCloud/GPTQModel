@@ -65,7 +65,7 @@ jobs:
           esac
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: awq-cpu-${{ matrix.suite }}
           path: awq-cpu-results.xml
