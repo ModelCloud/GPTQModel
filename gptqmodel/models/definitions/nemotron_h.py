@@ -23,7 +23,10 @@ NEMOTRON_H_LAYER_MODULES = {
     # the default activation is `relu2`. `relu(x)^2` is not positively
     # homogeneous, so `up_proj`'s output is not `down_proj`'s input
     # scale source (fold error 2.2e-2).
-    "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:2", "gate_proj:3", "up_proj:3:nosrc", "down_proj:4"),
+    # `out_proj` consumes the SSM output produced from `in_proj`, so it must be
+    # a later subset. A layer has one mixer type, so sharing index 3 with the
+    # dense MLP gate/up (which never coexist with `out_proj`) is free.
+    "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:3", "gate_proj:3", "up_proj:3:nosrc", "down_proj:4"),
     # The SSM conv is checkpoint-owned but is not a quantizable Linear.
     "mixer.conv1d": ("conv1d:!",),
     # Routed top-k router keeps its checkpoint dtype.

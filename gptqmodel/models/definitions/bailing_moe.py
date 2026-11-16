@@ -34,7 +34,10 @@ class BailingMoeQModel(BaseQModel):
                 "q_proj:0",
                 "k_proj:0",
                 "v_proj:0",
-                "o_proj:1",
+                # `o_proj` consumes the gated attention output built from
+                # `kv_b_proj` (MLA) or q/k/v (linear attention), so it must be
+                # a later subset.
+                "o_proj:2",
                 "g_proj:0",
                 "kv_a_proj_with_mqa:0",
                 "kv_b_proj:1",
