@@ -18,7 +18,7 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.adapter.adapter import Lora, normalize_adapter
+from gptqmodel.adapter.adapter import Lora, _rank_pattern_matches, normalize_adapter
 from gptqmodel.adapter.peft import LoraConfig
 
 
@@ -108,7 +108,9 @@ class TestExtensionConfig(unittest.TestCase):
 
         assert payload["dynamic"] == {"model.layers.0.self_attn.q_proj": {"bits": 8}}
         assert qconfig.dynamic == expected_dynamic
-        assert qconfig.extract_adapter_rank_patterns() == {"model.layers.0.self_attn.q_proj": 16}
+        assert qconfig.extract_adapter_rank_patterns(
+            module_ranks={"model.layers.0.self_attn.q_proj": 16},
+        ) == {"model\\.layers\\.0\\.self_attn\\.q_proj": 16}
 
     def test_extension_embed(self):
         bits = 4
@@ -261,3 +263,99 @@ class TestExtensionConfig(unittest.TestCase):
         )
         assert adapter.rank == 8
 
+
+    def test_rank_pattern_export_uses_trained_rank_not_rule_text(self):
+        """Issue #4199: an earlier rule without an adapter rank must not shadow."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=64),
+            dynamic={
+                r".*\.layers\.0\..*": {"bits": 8},
+                r".*\.q_proj": {"adapter": {"rank": 16}},
+                r"model\.layers\.1\.self_attn": {"adapter": {"rank": 8}},
+            },
+        )
+        names = [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.1.self_attn.k_proj",
+        ]
+
+        # The quantizer resolved 64 and 8; a verbatim export claimed 16 and 64.
+        assert [
+            qconfig.dynamic_get(n, key="adapter", sub_key="rank", default=64)
+            for n in names
+        ] == [64, 8]
+
+        patterns = qconfig.extract_adapter_rank_patterns(
+            module_ranks={names[0]: 64, names[1]: 8},
+        )
+
+        assert patterns == {r"model\.layers\.1\.self_attn\.k_proj": 8}
+        assert next(
+            (v for k, v in patterns.items() if _rank_pattern_matches(k, names[0])),
+            64,
+        ) == 64
+
+    def test_rank_pattern_export_is_exact_for_prefix_rules(self):
+        """A prefix rule used to export a key that PEFT could never match."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=32),
+            dynamic={r"model\.layers\.1\.": {"adapter": {"rank": 64}}},
+        )
+        names = ["model.layers.1.self_attn.q_proj", "model.layers.11.mlp.down_proj"]
+
+        assert qconfig.dynamic_get(
+            names[0], key="adapter", sub_key="rank", default=32,
+        ) == 64
+        patterns = qconfig.extract_adapter_rank_patterns(
+            module_ranks={names[0]: 64, names[1]: 32},
+        )
+        assert patterns == {r"model\.layers\.1\.self_attn\.q_proj": 64}
+
+        assert _rank_pattern_matches(
+            r"model\.layers\.1\.self_attn\.q_proj", names[0],
+        )
+        # Exact keys cannot spill into layer 11 or into a longer name.
+        assert not _rank_pattern_matches(
+            r"model\.layers\.1\.self_attn\.q_proj", names[1],
+        )
+
+    def test_rank_pattern_export_requires_trained_ranks(self):
+        """Dynamic rules alone cannot say which ranks were trained."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={r".*q_proj": {"adapter": {"rank": 4}}},
+        )
+        with self.assertRaises(ValueError):
+            qconfig.extract_adapter_rank_patterns()
+
+        # No adapter rank rule: nothing to export, no ranks needed.
+        plain = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={r".*q_proj": {"bits": 8}},
+        )
+        assert plain.extract_adapter_rank_patterns() == {}
+
+    def test_rank_pattern_export_rejects_stale_resolution(self):
+        """Never export a pattern that `dynamic` would now resolve differently."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={r".*q_proj": {"adapter": {"rank": 4}}},
+        )
+        with self.assertRaises(ValueError):
+            qconfig.extract_adapter_rank_patterns(
+                module_ranks={"model.layers.0.self_attn.q_proj": 16},
+            )

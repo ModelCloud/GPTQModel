@@ -1815,10 +1815,18 @@ def ModelWriter(cls):
 
             weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
 
-            # dynamic rank
+            # Dynamic rank: export the ranks the adapters were actually built
+            # with, one exact key per module. `dynamic` is first-match while
+            # PEFT applies every `rank_pattern` key on its own, so copying the
+            # rules verbatim would export ranks that were never trained. See
+            # docs/adapter-rank-pattern-matching.md.
             rank_pattern = {}
-            if self.quantize_config.dynamic:
-                rank_pattern = self.quantize_config.extract_adapter_rank_patterns()
+            if getattr(self.quantize_config, "dynamic", None):
+                rank_pattern = self.quantize_config.extract_adapter_rank_patterns(
+                    module_ranks={
+                        key: adapter.rank for key, adapter in self.lora_results.items()
+                    },
+                )
 
             # EoRA's residual targets a unit-scale correction. PEFT resolves
             # alpha per module, so mirroring dynamic ranks keeps every module's

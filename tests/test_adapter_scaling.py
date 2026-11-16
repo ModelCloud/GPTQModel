@@ -151,7 +151,7 @@ def test_eora_dynamic_rank_export_round_trips_at_unit_scale(tmp_path):
         dynamic = {"+:model.layers.1.*": {"adapter": {"rank": module_rank}}}
 
         @staticmethod
-        def extract_adapter_rank_patterns():
+        def extract_adapter_rank_patterns(module_ranks=None):
             return pattern
 
     class _Writer:
@@ -200,7 +200,7 @@ def test_eora_export_alpha_pattern_matches_peft_module_scale(tmp_path):
         dynamic = {"+:model.layers.1.*": {"adapter": {"rank": module_rank}}}
 
         @staticmethod
-        def extract_adapter_rank_patterns():
+        def extract_adapter_rank_patterns(module_ranks=None):
             return pattern
 
     class _Writer:
@@ -345,3 +345,60 @@ def test_float_alpha_pattern_loads_with_peft_scale(tmp_path):
     )
     assert adapter.lora_scale == pytest.approx(float_alpha / base_rank)
     assert abs(adapter.lora_scale - peft_scale) <= 1e-7
+
+
+def test_eora_export_rank_pattern_reproduces_first_match_dynamic(tmp_path):
+    """Issue #4199: shadowed and prefix `dynamic` rules must not leak to PEFT."""
+
+    from gptqmodel.adapter.peft import LoraConfig as GptqLoraConfig
+    from gptqmodel.quantization.config import QuantizeConfig
+
+    base_rank = 64
+    qconfig = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        adapter=Lora(rank=base_rank),
+        dynamic={
+            r".*\.layers\.0\..*": {"bits": 8},
+            r".*\.q_proj": {"adapter": {"rank": 16}},
+            r"model\.layers\.1\.self_attn": {"adapter": {"rank": 8}},
+        },
+    )
+    trained = {
+        # Shadowed by the first rule, which carries no adapter override.
+        "model.layers.0.self_attn.q_proj": base_rank,
+        # Selected by a prefix rule that PEFT cannot express directly.
+        "model.layers.1.self_attn.k_proj": 8,
+        # Unmatched: stays at the base rank, so no pattern entry is needed.
+        "model.layers.2.mlp.down_proj": base_rank,
+    }
+
+    class _Writer:
+        pass
+
+    ModelWriter(_Writer)
+    writer = _Writer()
+    writer.quantize_config = qconfig
+    writer.lora_results = {
+        name: Lora(
+            rank=rank,
+            lora_A=torch.ones(rank, 3),
+            lora_B=torch.ones(2, rank),
+        )
+        for name, rank in trained.items()
+    }
+    writer.eora_save(save_dir=str(tmp_path), model_save_dir=str(tmp_path / "base"))
+
+    gptq_config = GptqLoraConfig.from_pretrained(
+        str(tmp_path), "adapter_config.json",
+    )
+    assert set(gptq_config.rank_pattern) == {
+        r"model\.layers\.1\.self_attn\.k_proj",
+    }
+    assert gptq_config.alpha_pattern == gptq_config.rank_pattern
+
+    for name, rank in trained.items():
+        AdapterCache.reset()
+        adapter = Lora(rank=base_rank, path=str(tmp_path))
+        adapter.post_init(name, CPU)
+        assert adapter.rank == rank, name
