@@ -12,7 +12,7 @@ temporaries.  Neither test needs the QQQ CUDA extension.
 import pytest
 import torch
 
-import gptqmodel.nn_modules.qlinear.qqq as qqq_module
+from gptqmodel.nn_modules.qlinear import qqq as qqq_module
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 
 
