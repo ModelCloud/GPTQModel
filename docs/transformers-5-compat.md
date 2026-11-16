@@ -353,6 +353,43 @@ module constructor; a remote rotary module whose constructor arguments are not
 stored as attributes is left untouched (LazyTurtle keeps its own
 materialization-time restore for the quantize path).
 
+### J.7 Legacy cache-length shim follows the layer API (transformers 5.22)
+
+Transformers 5 removed the deprecated cache-level `get_max_length()` and
+`get_usable_length()` helpers that older remote decoders call, so
+`_patch_transformers_remote_code_compat` reinstalls them. The reinstall was
+gated on the *replacement* name `Cache.get_max_cache_shape` existing. In
+transformers 5.22 that cache-level name is gone as well — the length query
+moved to `CacheLayerMixin.get_max_length()` — so the gate never fired and every
+remote decode that asks the cache for its limit still raised `AttributeError`.
+
+The shim now installs whenever `Cache.get_max_length` is missing, and resolves
+the value from the layer that owns it:
+
+```mermaid
+flowchart TD
+    A["_patch_transformers_remote_code_compat"] --> B{"Cache.get_max_length exists?"}
+    B -- Yes --> Z["leave the installed API alone"]
+    B -- No --> C["install get_max_length(self, layer_idx=0)"]
+    C --> D{"self.layers[layer_idx] defines<br/>get_max_length?"}
+    D -- Yes --> E["layer.get_max_length()"]
+    D -- No --> F{"layer defines<br/>get_max_cache_shape?"}
+    F -- Yes --> G["layer.get_max_cache_shape()"]
+    F -- No --> H["cache-level get_max_cache_shape,<br/>only when callable"]
+    H -- absent --> I["return None (unbounded)"]
+    E --> J["None if value is None or negative"]
+    G --> J
+    I --> J
+    J --> K["get_usable_length(new_seq_length, layer_idx)"]
+```
+
+| Area | Before | After |
+| --- | --- | --- |
+| Install gate | `not hasattr(Cache, "get_max_length") and hasattr(Cache, "get_max_cache_shape")` (`utils/hf.py:1208`) | `not hasattr(Cache, "get_max_length")` (`utils/hf.py:1208`) |
+| Value source | `self.get_max_cache_shape(layer_idx)` unconditionally (`utils/hf.py:1231`) | layer API first, cache-level shape only when callable, else `None` (`utils/hf.py:1233`) |
+| Behaviour on 5.22 | shim not installed, `AttributeError` | shim installed, dynamic layers report `None` |
+
+
 ## K. Native loads run the pre-load hook; one legacy `generate()` adapter (issue #4121 items 2-3)
 
 `GPTQModel.load(..., quantize_config=None)` (native evaluation) is a distinct
@@ -478,7 +515,7 @@ quality claims for full checkpoints.
 | `tests/test_falcon_h1_support.py` | `mup_vector` restoration and idempotence |
 | `tests/module_tree/test_registered_module_plans.py` | updated Nemotron-H registry plan |
 | `tests/test_remote_code_rotary_restore.py` | fp64 oracle for legacy `inv_freq`/cos/sin, meta-shell skip, native-style skip, idempotence |
-| `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim |
+| `tests/test_hf_config_compat.py` | legacy unscaled RoPE stays `None`, modern `rope_parameters` preserved, ChatGLM aliases, `OutputRecorder` shim, cache-length helpers restored from the layer API |
 | `tests/test_lazy_turtle_conversion_mapping.py` | chained `.bin` conversion error, legacy tied-key normalization before save |
 | `tests/test_spark2_5_support.py` | AUTO_NF12 source-weight dtype/shape/device contract |
 | `tests/models/test_chatglm.py` | native and tiny from-config `generate()` |

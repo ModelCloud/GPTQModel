@@ -11,6 +11,7 @@ native ggml CPU kernels without leaving the quantized representation.
 from __future__ import annotations
 
 import ctypes
+import functools
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -72,6 +73,83 @@ def _forward_rel_bound(alias: str) -> float:
     return 0.5
 
 
+def _visible_one_ulp(dtype: torch.dtype, expected: torch.Tensor) -> float:
+    """Largest one-step rounding error of ``expected`` at ``dtype``.
+
+    ``expected`` is already the once-rounded visible result, so the kernel is
+    allowed at most the adjacent representable step (which also covers the
+    FP16/BF16 subnormal range). Kernels may not accumulate in the activation
+    dtype and then round again.
+    """
+    upper = torch.nextafter(expected, torch.full_like(expected, float("inf")))
+    # ``nextafter`` runs in ``dtype``, so the step is that dtype's ulp (it also
+    # reports the fixed step of zero and subnormal values).
+    step = (upper.float() - expected.float()).abs()
+    return float(max(step.max().item(), torch.finfo(dtype).tiny))
+
+
+@functools.lru_cache(maxsize=None)
+def _cpp_kernel_unavailable_reason() -> str:
+    """Why the llama.cpp-backed CPU kernel cannot run on this host, if it cannot.
+
+    ``llama_cpp`` can import while its shared library still fails to load (for
+    example a wheel built against a different CUDA runtime). The bridge probe is
+    the honest check: a kernel that cannot construct is unavailable, not broken.
+    """
+
+    try:
+        _get_ggml_bridge()
+        GGUFCppKernel(
+            bits="q4_0", group_size=-1, sym=True, desc_act=False,
+            in_features=32, out_features=16,
+        )
+    except Exception as exc:  # noqa: BLE001 - optional native dependency
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+@functools.lru_cache(maxsize=None)
+def _quantizer_available(qtype: str) -> bool:
+    """Whether this host can *produce* ``qtype`` (not merely decode it).
+
+    ``_quantize_gguf_tensor_numpy`` prefers ``gguf``'s reference quantizer, then
+    the internal numpy fallback, then llama.cpp's ggml runtime. Formats outside
+    that coverage would otherwise fail with a dependency ``NotImplementedError``
+    instead of skipping, which hides real regressions behind an unrelated
+    environment gap.
+    """
+
+    block = _GGUF_TYPE_INFO[qtype]["block_size"]
+    probe = np.zeros((1, block), dtype=np.float32)
+    probe[0, 0] = 1.0
+    try:
+        _quantize_gguf_tensor_numpy(probe, qtype)
+    except NotImplementedError:
+        return False
+    return True
+
+
+def _dequantizer_unavailable(qtype: str) -> bool:
+    """Whether this host cannot decode ``qtype`` at all."""
+
+    type_size = _GGUF_TYPE_INFO[qtype]["type_size"]
+    try:
+        _dequantize_gguf_tensor_numpy(np.zeros((1, type_size), np.uint8), qtype)
+    except NotImplementedError:
+        return True
+    return False
+
+
+def _skip_without_quantizer(qtype: str) -> None:
+    if not _quantizer_available(qtype):
+        pytest.skip(
+            f"no quantizer for {qtype} on this host: the `gguf` reference package "
+            f"is {'installed' if _GGUF_AVAILABLE else 'missing'}, the numpy fallback "
+            "does not implement it, and llama.cpp's ggml runtime is "
+            f"{'available' if _llama_cpp_lib is not None else 'unavailable'}"
+        )
+
+
 def _weight_rows(qtype: str) -> int:
     return max(1, _GGUF_TYPE_INFO[qtype]["block_size"] // 64)
 
@@ -120,6 +198,7 @@ def _cpp_from_torch(module):
 def test_gguf_quantize_dequantize_roundtrip(alias):
     """Pack every alias and verify dequant stays inside its precision budget."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
     info = _GGUF_TYPE_INFO[qtype]
     rows = _weight_rows(qtype)
     rng = np.random.default_rng(0)
@@ -145,6 +224,7 @@ def test_gguf_quantize_dequantize_roundtrip(alias):
 def test_gguf_dequantize_matches_native_and_reference(alias):
     """Our dequantizer must agree bit-exactly with ggml and the `gguf` package."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
     info = _GGUF_TYPE_INFO[qtype]
     rng = np.random.default_rng(1)
     weight = rng.standard_normal((2, info["block_size"])).astype(np.float32)
@@ -175,6 +255,7 @@ def test_gguf_dequantize_matches_native_and_reference(alias):
 def test_gguf_torch_linear_forward(alias):
     """GGUFTorchLinear packs a Linear and stays close to the fp32 reference."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    _skip_without_quantizer(qtype)
     block = _GGUF_TYPE_INFO[qtype]["block_size"]
     lin, x = _lin_and_x(block)
 
@@ -300,6 +381,10 @@ def test_gguf_public_format_normalization():
 def test_internal_gguf_dequantize_and_torch(alias):
     """The shared internal_gguf helpers cover every alias in both numpy and torch."""
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    # The decode table is independent of the quantizer, but ``internal_gguf``
+    # delegates exotic types to the same llama.cpp/`gguf` chain.
+    if _dequantizer_unavailable(qtype):
+        pytest.skip(f"no dequantizer for {qtype} on this host")
     enum = getattr(ig.GGMLQuantizationType, qtype)
     block_size, type_size = ig.GGML_QUANT_SIZES[enum]
     data = np.zeros((2, type_size), dtype=np.uint8)
@@ -373,6 +458,9 @@ def test_q8_pack_boundaries_match_torch_and_ggml(qtype, dtype):
 @pytest.mark.parametrize("override", ["1", "0", None])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_cpp_unsupported_native_types_always_fall_back(alias, override, dtype, monkeypatch):
+    unavailable = _cpp_kernel_unavailable_reason()
+    if unavailable:
+        pytest.skip(f"GGUF C++ kernel unavailable: {unavailable}")
     if override is None:
         monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
     else:
@@ -417,6 +505,9 @@ def test_native_dequant_rejects_truncated_block():
 
 
 def test_cpp_rejects_wrong_input_width_and_clears_autotune():
+    unavailable = _cpp_kernel_unavailable_reason()
+    if unavailable:
+        pytest.skip(f"GGUF C++ kernel unavailable: {unavailable}")
     cpp = GGUFCppKernel(bits="q4_0", group_size=-1, sym=True, desc_act=False, in_features=33, out_features=16)
     with pytest.raises(ValueError, match="last dimension"):
         cpp(torch.zeros(1, 34))
@@ -442,6 +533,13 @@ def test_gguf_kernel_independent_packed_oracle(alias, dtype, path, monkeypatch):
     qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
     if path == "native" and (qtype in _GGML_MATMUL_SKIP_QTYPES or _llama_cpp_lib is None):
         pytest.skip("native ggml matmul unavailable for this format")
+    if not _quantizer_available(qtype):
+        pytest.skip(
+            f"no quantizer for {qtype} on this host: `gguf` is "
+            f"{'installed' if _GGUF_AVAILABLE else 'missing'}, the numpy fallback "
+            "does not implement it, and llama.cpp's ggml runtime is "
+            f"{'available' if _llama_cpp_lib is not None else 'unavailable'}"
+        )
     block = _GGUF_TYPE_INFO[qtype]["block_size"]
     width = block * 2 - 3
     lin, _ = _lin_and_x(width)
@@ -459,20 +557,35 @@ def test_gguf_kernel_independent_packed_oracle(alias, dtype, path, monkeypatch):
     x = torch.randint(-126, 127, (4, width), generator=generator).float()
     x[:, ::32] = 127
     x = (x / 128).to(dtype)
+    # Every path computes the exact FP32 product and rounds once, so compare
+    # against that single rounding. Rounding the reference weight to the
+    # activation dtype first (the old ``dense`` expectation) double-rounds:
+    # for wide block formats it differs from the kernel by more than the
+    # 2e-3 tolerance even though both are exact.
+    expected = (x.float() @ weight.T).to(dtype)
     if path == "native":
         module = _cpp_from_torch(module)
         monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "1")
-        expected = (x.float() @ weight.T).to(dtype)
     elif path == "dense":
         monkeypatch.setattr(module, "_should_use_fused_k_forward", lambda _: False)
-        expected = x @ weight.to(dtype).T
     else:
         monkeypatch.setattr(module, "_should_use_fused_k_forward", lambda _: True)
-        expected = (x.float() @ weight.T).to(dtype)
     for _ in range(2):
         result = module(x)
         assert result.dtype == dtype
-        torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+        # A single visible rounding step of the exact product is the tightest
+        # device-independent bound: the fused BF16/FP16 intermediate the dense
+        # path used before this assertion cost up to one extra output ulp. FP32
+        # output has no such cast, so it keeps the strict kernel tolerance.
+        if dtype == torch.float32:
+            torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+        else:
+            torch.testing.assert_close(
+                result.float(),
+                expected.float(),
+                rtol=0,
+                atol=_visible_one_ulp(dtype, expected),
+            )
         assert module.qweight.dtype == torch.uint8
         assert set(module._buffers) == {"qweight"}
         assert module._parameters == {}

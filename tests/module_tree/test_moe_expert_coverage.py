@@ -183,7 +183,23 @@ def _resolved_module_names(layers):
     return resolved
 
 
-def _missing_specs(specs, resolved):
+# Some definitions declare two mutually exclusive decoder layouts for one
+# model family. ``BailingMoeQModel`` serves remote-code ``bailing_moe``
+# (``attention.query_key_value``/``attention.dense``) and native
+# ``bailing_hybrid`` (``self_attn.*``), and ``layer_modules_strict = False``
+# lets each checkpoint resolve only the branch it owns. A spec under an
+# alternate branch may therefore match nothing, but only while the alternate
+# branch is absent from every layer *and* the primary branch does resolve.
+ALTERNATE_BRANCHES = {
+    "bailing_hybrid": {"attention": "self_attn"},
+}
+
+
+def _root(name: str) -> str:
+    return name.split(".", 1)[0]
+
+
+def _missing_specs(specs, resolved, *, model_type=None):
     missing = []
     for spec in specs:
         if "{expert_index}" in spec:
@@ -194,7 +210,19 @@ def _missing_specs(specs, resolved):
                 missing.append(spec)
         elif spec not in resolved:
             missing.append(spec)
-    return missing
+
+    alternates = ALTERNATE_BRANCHES.get(model_type, {})
+    unresolved = []
+    for spec in missing:
+        primary = alternates.get(_root(spec))
+        if primary is not None and not any(_root(name) == _root(spec) for name in resolved):
+            assert any(_root(name) == primary for name in resolved), (
+                f"{model_type}: neither the declared `{_root(spec)}` branch nor its "
+                f"primary `{primary}` branch resolved on any decoder layer"
+            )
+            continue
+        unresolved.append(spec)
+    return unresolved
 
 
 @pytest.mark.parametrize("model_type", FIXED_MODELS)
@@ -227,7 +255,7 @@ def test_fixed_moe_definitions_resolve_every_quantizable_spec(model_type):
     assert layers, f"{model_type}: no decoder layers resolved"
     specs = _quantizable_specs(definition, config)
     resolved = _resolved_module_names(layers)
-    missing = _missing_specs(specs, resolved)
+    missing = _missing_specs(specs, resolved, model_type=model_type)
 
     assert not missing, (
         f"{model_type}: {len(missing)} layer-module spec(s) matched no layer and "
@@ -244,7 +272,9 @@ def test_fixed_moe_definitions_resolve_routed_experts(model_type):
     expert_specs = [spec for spec in specs if ".experts." in spec]
     assert expert_specs, f"{model_type}: definition emits no routed-expert specs"
 
-    missing = _missing_specs(expert_specs, _resolved_module_names(layers))
+    missing = _missing_specs(
+        expert_specs, _resolved_module_names(layers), model_type=model_type
+    )
     assert not missing, (
         f"{model_type}: {len(missing)} routed-expert spec(s) never resolved "
         f"(experts left in the source dtype): {missing[:10]}"
@@ -282,7 +312,9 @@ def test_every_defined_model_type_resolves_routed_experts(model_type):
             "parameters"
         )
 
-    missing = _missing_specs(expert_specs, _resolved_module_names(layers))
+    missing = _missing_specs(
+        expert_specs, _resolved_module_names(layers), model_type=model_type
+    )
     assert not missing, (
         f"{model_type}: {len(missing)} routed-expert spec(s) never resolved "
         f"(experts left in the source dtype): {missing[:10]}"

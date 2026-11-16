@@ -688,7 +688,10 @@ def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtyp
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer._cpu_transform_dtype == dtype
-    assert layer.scales.dtype == torch.float32
+    # The checkpoint scale buffer keeps the dtype it was loaded with (#4178);
+    # the wider FP32 affine metadata is the packed runtime tensor.
+    assert layer.scales.dtype == checkpoint_scale_dtype
+    assert layer.scales_and_zeros.dtype == torch.float32
     torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
     normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
     assert normalized_error.item() < 2e-3
