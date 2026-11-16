@@ -13,7 +13,7 @@ TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."
 if TESTS_MODELS_ROOT not in sys.path:
     sys.path.insert(0, TESTS_MODELS_ROOT)
 
-from model_test import ModelTest
+from model_test import ModelTest, resolve_attn_implementation
 
 from gptqmodel import BACKEND
 from gptqmodel.quantization import AutoModuleDecoderConfig
@@ -65,7 +65,7 @@ class TestQwen3_8B_FP8_Gsm8kLast4(ModelTest):
             "evalution_batch_size": "auto",
             "evalution_model_args": {
                 "dtype": "bfloat16",
-                "attn_implementation": "paged|flash_attention_2",
+                "attn_implementation": resolve_attn_implementation(),
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {

@@ -5,6 +5,7 @@
 
 import os
 
+import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
@@ -27,6 +28,9 @@ class TestLlama3_2_QQQ(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     USE_FLASH_ATTN = False
+    # QQQ's Marlin-derived kernel is FP16-only (SUPPORTS_DTYPES = [torch.float16]);
+    # Llama-3.2-1B's config dtype is BF16, so pin the test to FP16.
+    TORCH_DTYPE = torch.float16
 
     METHOD = METHOD.QQQ
     FORMAT = FORMAT.QQQ
@@ -44,7 +48,7 @@ class TestLlama3_2_QQQ(ModelTest):
             "evalution_use_model_path": True,
             "evalution_batch_size": "auto",
             "evalution_model_args": {
-                "dtype": "bfloat16",
+                "dtype": "float16",
                 "attn_implementation": "eager",
                 "device": "cuda:0",
             },
