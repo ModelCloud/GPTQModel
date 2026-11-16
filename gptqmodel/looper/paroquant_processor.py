@@ -109,6 +109,10 @@ class _ParoQuantLayerState:
     layer_inputs: Optional[List[List[torch.Tensor]]] = None
     layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
+    # Masks and positions are resolved from the module-tree branch that owns
+    # this layer at capture time; see ``_branch_replay_cache``.
+    position_ids: Optional[List[Optional[torch.Tensor]]] = None
+    attention_masks: Optional[List[Optional[torch.Tensor]]] = None
     grouped_dataset: Optional[Any] = None
     grouped_dataset_by_device: Optional[Dict[str, Any]] = None
     replay_batches: Optional[Any] = None
@@ -1346,6 +1350,55 @@ class ParoQuantProcessor(LoopProcessor):
             return tuple(ParoQuantProcessor._normalize_group_runtime_metadata(inner) for inner in value)
         return value
 
+    def _branch_replay_cache(self, layer_index: int) -> Optional[Any]:
+        """Resolve the module-tree branch cache that owns ``layer_index``.
+
+        ``stage_layer`` already replays each concurrent branch with that
+        branch's masks and positions (#4153). The deferred ParoQuant replay only
+        receives the flat layer index, so it has to resolve the same owner here:
+        the top-level ``inputs_cache`` fields always describe the *first*
+        branch, and reading them directly would replay every vision layer with
+        the text decoder's mask (issue #4226).
+        """
+        cache = getattr(self, "inputs_cache", None)
+        if cache is None:
+            return None
+        branch_caches = getattr(cache, "branch_first_layer_inputs", None)
+        if not branch_caches:
+            return None
+        owner: Optional[int] = None
+        for first_index in sorted(branch_caches):
+            if first_index > layer_index:
+                break
+            owner = first_index
+        if owner is None:
+            return None
+        return branch_caches[owner]
+
+    def _state_replay_context(
+        self,
+        state: _ParoQuantLayerState,
+        batch_count: int,
+    ) -> tuple[list[Optional[torch.Tensor]], list[Optional[torch.Tensor]]]:
+        """Return the owning branch's masks/positions, padded to ``batch_count``."""
+        cached_positions = getattr(state, "position_ids", None)
+        cached_masks = getattr(state, "attention_masks", None)
+        position_ids = list(
+            cached_positions
+            if cached_positions is not None
+            else (self.inputs_cache.position_ids or [])
+        )
+        attention_masks = list(
+            cached_masks
+            if cached_masks is not None
+            else (self.inputs_cache.attention_masks or [])
+        )
+        if len(position_ids) < batch_count:
+            position_ids.extend([None] * (batch_count - len(position_ids)))
+        if len(attention_masks) < batch_count:
+            attention_masks.extend([None] * (batch_count - len(attention_masks)))
+        return position_ids, attention_masks
+
     def _replay_batches_from_state(
         self,
         state: _ParoQuantLayerState,
@@ -1368,12 +1421,7 @@ class ParoQuantProcessor(LoopProcessor):
         elif len(input_kwargs_batches) != len(input_batches):
             raise RuntimeError("ParoQuant layer optimization requires aligned layer-input kwargs.")
 
-        position_ids = list(self.inputs_cache.position_ids or [])
-        attention_masks = list(self.inputs_cache.attention_masks or [])
-        if len(position_ids) < len(input_batches):
-            position_ids.extend([None] * (len(input_batches) - len(position_ids)))
-        if len(attention_masks) < len(input_batches):
-            attention_masks.extend([None] * (len(input_batches) - len(attention_masks)))
+        position_ids, attention_masks = self._state_replay_context(state, len(input_batches))
 
         replay_batches: list[_ParoQuantReplayBatch] = []
         for input_batch, input_kwargs, output_batch, pos_ids, attn_mask in zip(
@@ -1514,12 +1562,7 @@ class ParoQuantProcessor(LoopProcessor):
         elif len(input_kwargs_batches) != len(input_batches):
             raise RuntimeError("ParoQuant grouped optimization requires aligned layer-input kwargs.")
 
-        position_ids = list(self.inputs_cache.position_ids or [])
-        attention_masks = list(self.inputs_cache.attention_masks or [])
-        if len(position_ids) < len(input_batches):
-            position_ids.extend([None] * (len(input_batches) - len(position_ids)))
-        if len(attention_masks) < len(input_batches):
-            attention_masks.extend([None] * (len(input_batches) - len(attention_masks)))
+        position_ids, attention_masks = self._state_replay_context(state, len(input_batches))
 
         train_batch_count = self._prefix_batch_count_for_rows(input_batches, int(self.qcfg.opt_train_samples))
         val_batch_count = self._suffix_batch_count_for_rows(input_batches, int(self.qcfg.opt_validation_samples))
@@ -2663,6 +2706,10 @@ class ParoQuantProcessor(LoopProcessor):
         """Preserve noisy grouped inputs plus clean float layer targets."""
         del subset_index
         state = self._get_layer_state(layer_index)
+        replay_cache = getattr(self, "inputs_cache", None)
+        branch_cache = self._branch_replay_cache(layer_index)
+        if branch_cache is not None:
+            replay_cache = branch_cache
         with state.lock:
             if state.layer_inputs is None:
                 state.layer_inputs = layer_inputs
@@ -2670,6 +2717,11 @@ class ParoQuantProcessor(LoopProcessor):
                 state.layer_input_kwargs = layer_input_kwargs
             if state.layer_outputs is None:
                 state.layer_outputs = layer_outputs
+            if replay_cache is not None:
+                if state.position_ids is None:
+                    state.position_ids = list(replay_cache.position_ids or [])
+                if state.attention_masks is None:
+                    state.attention_masks = list(replay_cache.attention_masks or [])
             if subset_total is not None and state.subset_total is None:
                 state.subset_total = subset_total
 
