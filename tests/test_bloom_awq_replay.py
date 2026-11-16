@@ -385,3 +385,120 @@ def test_bloom_awq_cpu_quantization_completes(tmp_path, post_layernorm):
     with torch.inference_mode():
         logits = model.model(**calibration[0], use_cache=False).logits
     assert torch.isfinite(logits).all()
+
+
+def test_bloom_awq_replay_rebuilds_alibi_for_packed_positions():
+    """Packed replay must rebuild ALiBi from the retained rows' positions (#4176 item 3).
+
+    ``BloomQModel.awq_module_replay_inputs`` accepted a captured alibi whose
+    shape happened to equal the packed replay's ``(batch*heads, 1, N)``. With
+    variable-length calibration the packed rows come from different documents
+    and offsets, so a shape-compatible alibi is *stale*: it encodes the captured
+    sample's ``0..N-1`` positions instead of the retained rows' real ones.
+    """
+
+    from transformers.models.bloom.modeling_bloom import _get_alibi_slopes
+
+    heads = 4
+
+    class _Attention(nn.Module):
+        num_heads = heads
+
+        def forward(self, hidden_states, residual, alibi, attention_mask):
+            return hidden_states, None
+
+    instance = BloomQModel.__new__(BloomQModel)
+    # Five packed rows sampled at positions 0, 2, 4, 6, 8 of one document.
+    positions = torch.tensor([[0, 2, 4, 6, 8]])
+    seq = int(positions.shape[-1])
+    x = torch.randn(1, seq, 32)
+    mask = torch.full((1, 1, seq, seq), torch.finfo(x.dtype).min, dtype=x.dtype).triu(1)
+    stale = build_alibi_tensor(torch.ones(1, seq, dtype=torch.long), heads, x.dtype)
+    # The stale alibi has the accepted shape, so the old check let it through.
+    assert stale.shape == (heads, 1, seq)
+
+    _, kwargs = BloomQModel.awq_module_replay_inputs(
+        instance,
+        _Attention(),
+        x,
+        {
+            "attention_mask": mask,
+            "alibi": stale,
+            "_awq_rotary_position_ids": positions,
+        },
+    )
+
+    slopes = _get_alibi_slopes(heads, positions.device).to(torch.float32)
+    expected = (
+        slopes.view(1, heads, 1, 1) * positions.to(torch.float32).view(1, 1, 1, -1)
+    ).reshape(heads, 1, seq).to(x.dtype)
+    torch.testing.assert_close(kwargs["alibi"], expected, rtol=0, atol=0)
+    assert not torch.equal(kwargs["alibi"], stale), "stale ALiBi was accepted unchanged"
+
+
+def test_bloom_awq_replay_rebuilds_alibi_matching_the_native_builder():
+    """A contiguous packed replay must reproduce `build_alibi_tensor` exactly.
+
+    The captured alibi comes from a padded sample, so it is stale even though
+    its shape matches the packed replay. The rebuild must replace it with the
+    tensor the native builder produces for the retained positions.
+    """
+
+    heads = 4
+
+    class _Attention(nn.Module):
+        num_heads = heads
+
+        def forward(self, hidden_states, residual, alibi, attention_mask):
+            return hidden_states, None
+
+    instance = BloomQModel.__new__(BloomQModel)
+    for dtype in (torch.float32, torch.float16, torch.bfloat16):
+        seq = 6
+        x = torch.randn(1, seq, 32, dtype=dtype)
+        mask = torch.full((1, 1, seq, seq), torch.finfo(dtype).min, dtype=dtype).triu(1)
+        positions = torch.arange(seq).unsqueeze(0)
+        native = build_alibi_tensor(torch.ones(1, seq, dtype=torch.long), heads, dtype)
+        # Leading padding shifts every captured position by one.
+        padded_mask = torch.tensor([[0, 1, 1, 1, 1, 1]], dtype=torch.long)
+        stale = build_alibi_tensor(padded_mask, heads, dtype)
+        assert stale.shape == native.shape and not torch.equal(stale, native)
+
+        _, kwargs = BloomQModel.awq_module_replay_inputs(
+            instance,
+            _Attention(),
+            x,
+            {
+                "attention_mask": mask,
+                "alibi": stale,
+                "_awq_rotary_position_ids": positions,
+            },
+        )
+
+        torch.testing.assert_close(kwargs["alibi"], native, rtol=0, atol=0)
+
+
+def test_bloom_awq_replay_refuses_a_mismatched_alibi_with_shape_context():
+    """A mismatched ALiBi must be refused with the expected and actual shapes."""
+
+    heads = 4
+
+    class _Attention(nn.Module):
+        num_heads = heads
+
+        def forward(self, hidden_states, residual, alibi, attention_mask):
+            return hidden_states, None
+
+    instance = BloomQModel.__new__(BloomQModel)
+    seq = 8
+    x = torch.randn(1, seq, 32)
+    kwargs = _context(x, heads)
+    # A stale alibi from a shorter sample: no position ids to rebuild from.
+    kwargs["alibi"] = kwargs["alibi"][..., :5]
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        BloomQModel.awq_module_replay_inputs(instance, _Attention(), x, kwargs)
+
+    message = str(excinfo.value)
+    assert "alibi" in message
+    assert "expected" in message and "got" in message

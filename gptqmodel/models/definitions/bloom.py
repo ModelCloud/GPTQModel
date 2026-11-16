@@ -64,9 +64,70 @@ class BloomQModel(BaseQModel):
         ):
             raise NotImplementedError("Bloom AWQ replay requires a captured, sequence-aligned attention_mask")
         alibi = kwargs.get("alibi")
-        if not torch.is_tensor(alibi) or alibi.shape != (batch_size * num_heads, 1, seq_len):
-            raise NotImplementedError("Bloom AWQ replay requires captured, batch/sequence-aligned alibi")
+        position_ids = kwargs.get("position_ids")
+        if not torch.is_tensor(position_ids):
+            position_ids = kwargs.get("_awq_rotary_position_ids")
+        expected_shape = (batch_size * num_heads, 1, seq_len)
+        if torch.is_tensor(position_ids):
+            positions = position_ids
+            if positions.dim() == 1:
+                positions = positions.unsqueeze(0)
+            if (
+                positions.dim() == 2
+                and positions.shape[-1] == seq_len
+                and positions.shape[0] in (1, batch_size)
+            ):
+                if positions.shape[0] == 1 and batch_size > 1:
+                    positions = positions.expand(batch_size, -1)
+                kwargs["alibi"] = self._awq_rebuild_alibi(
+                    alibi, positions, num_heads, x.dtype, x.device,
+                )
+                return x, kwargs
+        if not torch.is_tensor(alibi) or alibi.shape != expected_shape:
+            got = tuple(alibi.shape) if torch.is_tensor(alibi) else None
+            raise NotImplementedError(
+                "Bloom AWQ replay requires a captured, batch/sequence-aligned "
+                f"alibi (expected {expected_shape}, got {got}) or replay "
+                "position_ids to rebuild it"
+            )
         return x, kwargs
+
+    @staticmethod
+    def _awq_rebuild_alibi(alibi, position_ids, num_heads, dtype, device):
+        """Rebuild ALiBi for packed rows from their real positions.
+
+        ``build_alibi_tensor`` is ``slope * position`` per key and is
+        query-independent, so a packed replay uses the retained keys'
+        positions instead of the captured sample's ``0..S-1`` range.
+        """
+
+        try:
+            from transformers.models.bloom.modeling_bloom import _get_alibi_slopes
+
+            slopes = _get_alibi_slopes(num_heads, device)
+        except Exception:
+            # Derive from the captured tensor only when the helper is absent.
+            # Index 1 is the first key after BOS, so a padded sample would not
+            # give the slope; the helper above is the authoritative source.
+            if not (
+                torch.is_tensor(alibi)
+                and alibi.dim() == 3
+                and alibi.shape[-1] > 1
+                and alibi.shape[0] >= num_heads
+            ):
+                raise NotImplementedError(
+                    "Bloom AWQ replay cannot resolve ALiBi slopes to rebuild "
+                    "the packed alibi"
+                )
+            slopes = alibi.detach().reshape(-1, num_heads, 1, alibi.shape[-1])[0, :, 0, 1]
+        # `build_alibi_tensor` multiplies fp32 slopes by the integer position
+        # and only then casts to the activation dtype; match that order so the
+        # rebuilt tensor is bit-identical to the captured one.
+        slopes = slopes.to(device=device, dtype=torch.float32)
+        positions = position_ids.to(device=device, dtype=torch.float32)
+        batch = int(positions.shape[0])
+        packed = slopes.view(1, num_heads, 1, 1) * positions.view(batch, 1, 1, -1)
+        return packed.reshape(batch * num_heads, 1, int(positions.shape[-1])).to(dtype)
 
     def awq_module_replay_chunk_kwargs(self, module, module_kwargs, *, start, length, full_batch_size):
         alibi = module_kwargs.get("alibi")
