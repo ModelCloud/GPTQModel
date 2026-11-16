@@ -1957,19 +1957,25 @@ class BaseQModel(nn.Module):
             if self.quantize_config.method == METHOD.GPTQ:
                 from ..looper.gsq_training_model import quantize_llama_gsq_public
 
-                result = quantize_llama_gsq_public(
-                    self, calibration=calibration, tokenizer=tokenizer, backend=backend,
-                    calibration_concat_size=calibration_concat_size,
-                    calibration_sort=calibration_sort,
-                    calibration_data_min_length=calibration_data_min_length,
-                    calibration_concat_separator=calibration_concat_separator,
-                    unsupported={
-                        "adapter": adapter,
-                        "adapter_calibration_dataset": adapter_calibration_dataset,
-                        "embed_quant_config": embed_quant_config,
-                        "checkpoint": checkpoint,
-                    },
-                )
+                # Staged GSQ builds the same input Hessian as the regular GPTQ
+                # path, so its calibration forwards need the run-level
+                # deterministic pin too. This path returns before the shared
+                # `quant_blas_backend` scope below, which left it on hipBLASLt
+                # and made the checkpoint process-dependent (issue #4232).
+                with quant_blas_backend(deterministic=True):
+                    result = quantize_llama_gsq_public(
+                        self, calibration=calibration, tokenizer=tokenizer, backend=backend,
+                        calibration_concat_size=calibration_concat_size,
+                        calibration_sort=calibration_sort,
+                        calibration_data_min_length=calibration_data_min_length,
+                        calibration_concat_separator=calibration_concat_separator,
+                        unsupported={
+                            "adapter": adapter,
+                            "adapter_calibration_dataset": adapter_calibration_dataset,
+                            "embed_quant_config": embed_quant_config,
+                            "checkpoint": checkpoint,
+                        },
+                    )
                 self.after_quantize()
                 if self._auto_fusion:
                     self.fuse()
