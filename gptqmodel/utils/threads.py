@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import concurrent.futures as cf
+import os
 import queue
 import threading
 import time
@@ -11,6 +12,100 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from .device_telemetry import capture_device_telemetry
+
+
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def default_thread_count() -> int:
+    """Return the default intra-op pool size: ``min(8, cpu_count())``.
+
+    A container can advertise hundreds of CPUs while sharing a much smaller
+    physical host. Torch sizes its intra-op pool from that advertised count,
+    so an uncapped process creates a thread per CPU and spends its time in the
+    OpenMP barrier instead of doing work.
+    """
+
+    return min(8, os.cpu_count() or 1)
+
+
+def resolve_thread_count(n: int | None = None) -> int:
+    """Resolve the intra-op pool size, honouring an explicit ``OMP_NUM_THREADS``.
+
+    An explicit argument always wins. Otherwise a positive integer
+    ``OMP_NUM_THREADS`` is used, and the capped host default otherwise.
+    """
+
+    if n is not None:
+        return max(1, int(n))
+
+    explicit = os.environ.get("OMP_NUM_THREADS")
+    if explicit is not None:
+        try:
+            parsed = int(explicit)
+        except ValueError:
+            parsed = 0
+        if parsed > 0:
+            return parsed
+
+    return default_thread_count()
+
+
+def apply_thread_env(n: int) -> None:
+    """Set the numerical-library thread environment defaults for ``n``.
+
+    ``setdefault`` keeps a caller's explicit values: an explicit
+    ``OMP_NUM_THREADS`` (or ``MKL_NUM_THREADS`` and friends) is never
+    overwritten. The OpenMP/MKL/OpenBLAS runtimes read these variables when
+    they are loaded, so callers that need them to win must call this before
+    importing numpy or torch.
+    """
+
+    for name in _THREAD_ENV_VARS:
+        os.environ.setdefault(name, str(n))
+    os.environ.setdefault("OMP_NESTED", "FALSE")
+
+
+def cap_torch_threads(n: int | None = None, *, interop: int | None = None) -> int:
+    """Cap Torch's intra-op (and optionally inter-op) thread pools.
+
+    This is an opt-in helper for tests, CLI tools and scripts; importing
+    :mod:`gptqmodel` does not call it, because silently changing a user's
+    global thread count on import would change library numerics and
+    performance without consent.
+
+    ``n`` defaults to an explicit ``OMP_NUM_THREADS`` when set, otherwise
+    ``min(8, cpu_count())``. The environment defaults are applied with
+    ``setdefault`` so an explicit caller value is preserved.
+
+    Torch's own pool is set explicitly because the environment is not
+    authoritative once the runtime has loaded. ``torch.set_num_interop_threads``
+    raises if parallel work has already started, so it is best-effort; the
+    intra-op cap is always applied. Returns the applied intra-op count.
+    """
+
+    threads = resolve_thread_count(n)
+    apply_thread_env(threads)
+
+    import torch
+
+    torch.set_num_threads(threads)
+
+    if interop is None:
+        interop = min(2, threads)
+    try:
+        torch.set_num_interop_threads(max(1, int(interop)))
+    except RuntimeError:
+        # Inter-op threads cannot be changed after the first parallel region.
+        pass
+
+    return threads
 
 
 class AsyncManager:

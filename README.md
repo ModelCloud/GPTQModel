@@ -275,7 +275,7 @@ and [quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/doc
 | Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md) |
 | Add a model or inspect its plan | [Module-plan guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/module-plan-guide.md) · [Leaf coverage](https://github.com/ModelCloud/GPTQModel/blob/main/docs/module-tree-leaf-coverage.md) · [Developer guide](https://github.com/ModelCloud/GPTQModel/wiki/Developer-Guide) |
 | Load legacy remote-code models on Transformers 5 | [Transformers 5 compatibility](https://github.com/ModelCloud/GPTQModel/blob/main/docs/transformers-5-compat.md#k-native-loads-run-the-pre-load-hook-one-legacy-generate-adapter-issue-4121-items-2-3) |
-| Diagnose runtime issues | [Troubleshooting](https://github.com/ModelCloud/GPTQModel/wiki/Troubleshooting-and-FAQ) · [Concurrency](https://github.com/ModelCloud/GPTQModel/blob/main/docs/concurrency.md) |
+| Diagnose runtime issues | [Troubleshooting](https://github.com/ModelCloud/GPTQModel/wiki/Troubleshooting-and-FAQ) · [Concurrency](https://github.com/ModelCloud/GPTQModel/blob/main/docs/concurrency.md) · [Thread caps](https://github.com/ModelCloud/GPTQModel/blob/main/docs/thread-caps.md) |
 
 Kernel contracts, implementation flows, and focused technical notes are in the
 [documentation index](https://github.com/ModelCloud/GPTQModel/blob/main/docs/README.md), not repeated on this page.
