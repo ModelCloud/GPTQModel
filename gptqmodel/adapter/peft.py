@@ -16,7 +16,7 @@ log = setup_logger()
 
 # PEFT config keys that this runtime does not implement and whose values change the
 # adapter math. `from_pretrained` must reject these instead of dropping them: a
-# DoRA/aLoRA/QALoRA/CORDA checkpoint loaded as plain LoRA still runs, but produces
+# DoRA/aLoRA/QALoRA/CORDA/trainable-token checkpoint loaded as plain LoRA still runs, but produces
 # silently wrong outputs. Keys that only carry metadata (for example `peft_version`
 # or `inference_mode`) are warned about instead, because rejecting them would make
 # standard PEFT exports unloadable.
@@ -26,6 +26,7 @@ UNSUPPORTED_PEFT_CONFIG_KEYS = {
     "target_parameters": "`target_parameters`",
     "corda_config": "CORDA",
     "use_corda": "CORDA",
+    "trainable_token_indices": "`trainable_token_indices`",
 }
 
 
