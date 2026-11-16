@@ -1449,6 +1449,25 @@ def _run_single_subset_pass(
                 if task_map is not None:
                     task_map.pop(name, None)
 
+                # AUTO_NF12 stores the calibration source in `nf12_*` buffers
+                # and only the quant-source step restores the dense module.
+                # A pruned module never reaches that step below, so restore it
+                # here; otherwise the packed source survives into `save()` and
+                # the writer's NF12 ownership check aborts the export. Modules
+                # without a deferred source are already dense and stay as-is.
+                if (
+                    skipped_module.state.get("auto_dtype_cast_source_spec") is not None
+                    or isinstance(
+                        skipped_module.state.get("quant_source_module"), torch.nn.Module
+                    )
+                ):
+                    looper._prepare_named_module_for_quantization(
+                        processor=processor,
+                        named_module=skipped_module,
+                        fallback_device=cur_layer_device,
+                    )
+                    skipped_module.state.pop("auto_dtype_cast_was_applied", False)
+
                 # No calibration data was routed to these MoE expert modules.
                 # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
                 if calibration_coverage_policy.record_dynamic_exclusions:
