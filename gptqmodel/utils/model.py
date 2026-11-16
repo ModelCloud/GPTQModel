@@ -3199,15 +3199,24 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
         # Accelerate casts floating buffers to the requested model dtype even
         # when the quantized module's forward needs the checkpoint precision.
-        # Restore only Torch AWQ's stored operands; its forward makes temporary
-        # activation-dtype copies without rewriting these buffers.
+        # The scale buffer is part of the checkpoint contract, not an activation
+        # operand: narrowing an FP16 scale to BF16 changes the dequantized
+        # weight and makes a later `save_pretrained()` republish the narrowed
+        # value. Restore every quantized module's scales from the checkpoint.
+        # Torch AWQ additionally keeps its bias at the checkpoint dtype because
+        # its forward makes temporary activation-dtype copies.
         for name, module in model.named_modules():
-            if getattr(module, "QUANT_TYPE", None) != "awq_torch":
-                continue
             prefix = f"{name}." if name else ""
-            for buffer_name in ("scales", "bias"):
-                if isinstance(module._buffers.get(buffer_name), torch.Tensor):
-                    restore_dtypes[f"{prefix}{buffer_name}"] = None
+            if (
+                isinstance(module, BaseQuantLinear)
+                and isinstance(module._buffers.get("scales"), torch.Tensor)
+                and "scales" not in module._non_persistent_buffers_set
+            ):
+                restore_dtypes[f"{prefix}scales"] = None
+            if getattr(module, "QUANT_TYPE", None) == "awq_torch":
+                for buffer_name in ("scales", "bias"):
+                    if isinstance(module._buffers.get(buffer_name), torch.Tensor):
+                        restore_dtypes[f"{prefix}{buffer_name}"] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
                 model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
@@ -3551,11 +3560,13 @@ def streaming_state_dict_to_shards(
 
         path = os.path.join(save_dir, filename)
         if _existing_shard_matches(path, shard_entries, metadata):
-            size = os.path.getsize(path)
             log.info(f"Reusing authenticated safetensors shard: {filename}")
         else:
-            size = _write_shard_file(path, shard_entries, metadata)
-        total_size += size
+            _write_shard_file(path, shard_entries, metadata)
+        # Hugging Face's index describes the tensor payload, not the on-disk
+        # file size. The latter includes the safetensors header and padding and
+        # made `metadata.total_size` disagree with every other writer.
+        total_size += sum(entry.num_bytes for entry in shard_entries)
         filenames.append(filename)
         for entry in shard_entries:
             tensor_to_filename[entry.name] = filename

@@ -355,10 +355,34 @@ def get_number_of_rows_and_cols(layer: nn.Module):
         return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
-@lru_cache(maxsize=8)
+def _uniform_column_group_stream(device: torch.device):
+    """Identify the stream whose ordering makes a cached zero-fill visible.
+
+    The cached tensor's fill is queued on the stream that created it. A second
+    worker on another stream could otherwise observe the tensor before that
+    fill completes. Keying the cache by the stream object keeps one tensor per
+    stream and keeps the stream alive for as long as the entry is cached.
+    """
+
+    if device.type == "cuda":
+        return torch.cuda.current_stream(device)
+    return None
+
+
+@lru_cache(maxsize=32)
+def _uniform_column_group_cached(
+    count: int,
+    device: torch.device,
+    stream,
+) -> torch.Tensor:
+    del stream
+    return torch.zeros(count, device=device, dtype=torch.int32)
+
+
 def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
     """Constant group index for blocks whose columns share one quantizer group."""
-    return torch.zeros(count, device=device, dtype=torch.int32)
+
+    return _uniform_column_group_cached(count, device, _uniform_column_group_stream(device))
 
 
 class GPTQ:

@@ -182,6 +182,27 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
+def _config_declares_tied_embeddings(config) -> bool:
+    """Return whether ``config`` or its text sub-config ties embeddings."""
+
+    seen: set[int] = set()
+    current = config
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if bool(getattr(current, "tie_word_embeddings", False)):
+            return True
+        text_config = getattr(current, "text_config", None)
+        if text_config is None:
+            get_text_config = getattr(current, "get_text_config", None)
+            if callable(get_text_config):
+                try:
+                    text_config = get_text_config()
+                except TypeError:
+                    text_config = None
+        current = text_config
+    return False
+
+
 class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
@@ -1346,8 +1367,22 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             for names in find_tied_parameters(model)
         ):
             return True
-        if not bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False)):
+        if not _config_declares_tied_embeddings(getattr(model, "config", None)):
             return False
+        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
+        # even though the head is tied). The checkpoint tensor is not evidence
+        # of an independent head: the model's declared tied-weight keys and the
+        # config decide, and the loader ties the tensors after materialization.
+        tied_keys = getattr(model, "_tied_weights_keys", None)
+        tied_head = f"{lm_head_name}.weight"
+        if isinstance(tied_keys, dict):
+            declared_tied = tied_head in tied_keys
+        elif tied_keys:
+            declared_tied = tied_head in set(tied_keys)
+        else:
+            declared_tied = False
+        if declared_tied:
+            return True
         lm_head_module = get_module(model, key=lm_head_name)
         if lm_head_module is None:
             return False
