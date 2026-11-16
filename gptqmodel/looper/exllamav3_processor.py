@@ -24,6 +24,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_NUMERICAL_CONTRACT,
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
+    clear_tile_workspace,
     quantize_exl3,
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
@@ -4054,6 +4055,11 @@ class EXL3Processor(LoopProcessor):
         model.quantize_config.format = FORMAT.EXL3
         model.qlinear_kernel = ExllamaV3Linear
         super().finalize(model=model, **kwargs)
+
+    def release_run_workspace(self) -> None:
+        """Drop the per-stream EXL3 tile scratch cached for this run."""
+
+        clear_tile_workspace()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Ensures EXL3 received calibration data before the quantization loop starts."""
