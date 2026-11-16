@@ -1677,6 +1677,11 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         words, so converting them again would shift every zero point once per
         shard (issue #4166). A real checkpoint tensor always has its own
         storage.
+
+        Call this *before* ``super()._load_from_state_dict``. With
+        ``assign=True`` the copy rebinds ``self.qzeros`` to the incoming
+        tensor, after which every genuine checkpoint load aliases the live
+        buffer and would be mistaken for a refill (issue #4304).
         """
 
         incoming = state_dict.get(prefix + "qzeros") if state_dict is not None else None
@@ -1694,6 +1699,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 return False
             return (
                 incoming_ptr == live_ptr
+                and incoming.device == live.device
                 and tuple(incoming.shape) == tuple(live.shape)
                 and incoming.dtype == live.dtype
             )
@@ -1741,6 +1747,11 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
 
         layout_code = self._incoming_layout_code(state_dict, prefix, local_metadata)
+        # Decide before the copy whether the incoming words are the module's own
+        # live buffer. ``assign=True`` rebinds ``self.qzeros`` to the incoming
+        # tensor, so asking afterwards would label every genuine checkpoint
+        # load as an accelerate refill and skip the v1->v2 conversion (#4304).
+        incoming_qzeros_is_live = self._incoming_qzeros_is_live(state_dict, prefix)
         # ``PackedGroupedQuantLinear`` rejects a runtime-layout payload and
         # tolerates a missing layout marker before the copy.
         super()._load_from_state_dict(*args, **kwargs)
@@ -1759,7 +1770,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 # A runtime-layout payload; the receiver is in the same layout
                 # or ``PackedGroupedQuantLinear`` already refused it above.
                 pass
-            elif not self._incoming_qzeros_is_live(state_dict, prefix):
+            elif not incoming_qzeros_is_live:
                 incoming_format = self._incoming_qzeros_format(local_metadata)
                 if incoming_format is not None:
                     self._restore_qzeros_format(incoming_format)
