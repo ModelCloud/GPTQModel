@@ -120,6 +120,12 @@ or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
 native MLX quantization and packed inference. Optional projection fusion can
 combine supported attention and MLP operations without changing the saved format.
 
+The [model computation DSL design proposal](https://github.com/ModelCloud/GPTQModel/blob/main/docs/model-computation-dsl.md)
+describes a shared executable representation for quantization and inference,
+with typed tensor interfaces, exact per-layer computation and a path to JIT
+compilation independent of Transformers modeling code. This is a design draft;
+the compiler and executor are not implemented yet.
+
 [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA)/[LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) adapters, mixed-precision checkpoints, and external engines have their
 own compatibility limits; support for a method does not imply support in every engine.
 
