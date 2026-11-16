@@ -12,6 +12,7 @@ import shutil
 import struct
 import uuid
 import weakref
+from collections.abc import Mapping
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -309,6 +310,158 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Op
     return index
 
 
+def _qzero_layout_for_module(module: nn.Module) -> Optional[int]:
+    """Runtime qzero layout the restored module decodes, or ``None``.
+
+    Only GPTQ-style modules expose the layout contract; AWQ words have no
+    v1/v2 convention, so they are left untouched.
+    """
+
+    target = getattr(module, "_load_target_qzeros_format", None)
+    if not callable(target):
+        return None
+    return int(target())
+
+
+def _bundle_qzero_layout(module: nn.Module, weights_map: Mapping) -> Optional[int]:
+    """Layout of the ``qzeros`` words stored in an offload bundle.
+
+    The bundle is written from ``module.state_dict()``, so it holds the
+    checkpoint layout and its ``qzeros_format`` marker. A bundle written before
+    the marker existed falls back to the module's recorded checkpoint format,
+    which is the same fallback the checkpoint load hook uses.
+    """
+
+    try:
+        marker = weights_map[_qzeros_format_buffer()]
+    except (KeyError, TypeError, IndexError):
+        marker = None
+    if isinstance(marker, torch.Tensor) and marker.numel() == 1:
+        code = int(marker.reshape(-1)[0].item())
+        return code if code in (1, 2) else None
+
+    incoming = getattr(module, "_incoming_qzeros_format", None)
+    if callable(incoming):
+        code = incoming({})
+        if code in (1, 2):
+            return code
+    return None
+
+
+def _qzeros_format_buffer() -> str:
+    from ..nn_modules.qlinear._fused_train_state import QZEROS_FORMAT_BUFFER
+
+    return QZEROS_FORMAT_BUFFER
+
+
+def _convert_bundle_qzeros(
+    module: nn.Module,
+    qzeros: torch.Tensor,
+    source: int,
+    target: int,
+) -> torch.Tensor:
+    """Return ``qzeros`` converted from the bundle layout to the live layout."""
+
+    if not isinstance(qzeros, torch.Tensor) or qzeros.numel() == 0:
+        return qzeros
+    bits = getattr(module, "bits", None)
+    if bits is None:
+        return qzeros
+    planar = bool(getattr(module, "planar", False))
+    if source == 1 and target == 2:
+        from .model_dequant import _correct_gptq_v1_qzeros
+
+        return _correct_gptq_v1_qzeros(qzeros, bits, planar=planar)
+    if source == 2 and target == 1:
+        from .model_dequant import _revert_gptq_v1_qzeros_correction
+
+        return _revert_gptq_v1_qzeros_correction(qzeros, bits, planar=planar)
+    return qzeros
+
+
+class _LiveQzeroWeightsMap(Mapping):
+    """Restore ``qzeros`` in the live runtime layout from a disk bundle.
+
+    ``accelerate.disk_offload`` copies the bundle tensors straight into the
+    module; it never runs ``_load_from_state_dict``. A bundle written from
+    ``state_dict()`` therefore restores checkpoint-layout (v1) words into a
+    kernel that decodes v2, shifting every zero point by one (issue #4380).
+    Converting at the weights-map boundary fixes every restore consumer -- the
+    forward pre-hook, hook detach, and ``undo_offload_to_disk`` -- while the
+    on-disk bundle stays in checkpoint layout for saving.
+    """
+
+    def __init__(self, base: Mapping, module: nn.Module):
+        self._base = base
+        self._module = module
+        self._source = _bundle_qzero_layout(module, base)
+        self._target = _qzero_layout_for_module(module)
+
+    def __getitem__(self, key):
+        value = self._base[key]
+        if (
+            self._source is None
+            or self._target is None
+            or self._source == self._target
+        ):
+            return value
+        if key == "qzeros" or key.endswith(".qzeros"):
+            return _convert_bundle_qzeros(
+                self._module, value, self._source, self._target,
+            )
+        if key == _qzeros_format_buffer() or key.endswith(
+            f".{_qzeros_format_buffer()}"
+        ):
+            # Keep the restored marker consistent with the converted words so a
+            # later clone/load of the live buffers does not relabel them as v1.
+            if isinstance(value, torch.Tensor) and value.numel() == 1:
+                return value.clone().fill_(self._target)
+        return value
+
+    def __iter__(self):
+        return iter(self._base)
+
+    def __len__(self):
+        return len(self._base)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+def _iter_offload_hooks(module: nn.Module):
+    """Yield ``(owning_module, AlignDevicesHook)`` for installed offload hooks."""
+
+    for submodule in module.modules():
+        pending = [getattr(submodule, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if hook is None:
+                continue
+            nested = getattr(hook, "hooks", None)
+            if isinstance(nested, (tuple, list)):
+                pending.extend(nested)
+                continue
+            if getattr(hook, "offload", False):
+                yield submodule, hook
+
+
+def _install_live_qzero_restore(module: nn.Module) -> None:
+    """Make the accelerate restore path hand the module live-layout qzeros."""
+
+    target = _qzero_layout_for_module(module)
+    if target is not None and hasattr(module, "_qzeros_format"):
+        # A restore now materializes the runtime words, so the module's label
+        # must describe what will be put in its buffers.
+        module._qzeros_format = target
+        module._qzeros_format_established = True
+
+    for owner, hook in _iter_offload_hooks(module):
+        weights_map = getattr(hook, "weights_map", None)
+        if weights_map is None or isinstance(weights_map, _LiveQzeroWeightsMap):
+            continue
+        hook.weights_map = _LiveQzeroWeightsMap(weights_map, owner)
+
+
 def _safetensors_dtype(dtype: torch.dtype) -> str:
     """Resolve the safetensors header spelling through the canonical export map.
 
@@ -596,6 +749,11 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = ".", for
         offload_buffers=True,
         execution_device=m_device,
     )
+    # The bundle is checkpoint layout (v1 words for a GPTQ checkpoint), but the
+    # accelerate hook loads it without the module's load hook. Hand the hook
+    # live-layout qzeros so a v2 kernel does not decode every zero point off by
+    # one in-session (issue #4380).
+    _install_live_qzero_restore(module)
 
     # print("offload_disk: list item tree")
     # print_module_tree(module)
