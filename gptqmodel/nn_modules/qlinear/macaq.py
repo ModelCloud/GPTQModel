@@ -282,30 +282,45 @@ class MacaqLinear(WeightOnlyQuantLinear):
     # ------------------------------------------------------------------
     # forward
     # ------------------------------------------------------------------
-    def dequantize(self) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Decode the packed MXFP4 weight in the rotated frame (current call only)."""
 
         return macaq_core.dequantize_mxfp4(
             self.W_packed,
             self.W_scales,
             self.in_features,
-            dtype=self.compute_dtype,
+            dtype=self.compute_dtype if dtype is None else dtype,
         )
 
+    def _forward_dtype(self, x: torch.Tensor) -> torch.dtype:
+        """Follow the activation dtype so a later ``.to()`` cannot go stale.
+
+        ``compute_dtype`` is fixed when the module is built, while ``.to()``
+        moves ``BH``/``pre_scale``/``bias`` to a new dtype.  Deriving the Torch
+        fallback dtype from the input keeps the operands consistent and returns
+        the activation dtype, even when the module was moved after ``__init__``.
+        """
+
+        if x.dtype in (torch.float16, torch.bfloat16, torch.float32):
+            return x.dtype
+        return self.compute_dtype
+
     def _forward_torch(self, x_flat: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize()
+        dtype = self._forward_dtype(x_flat)
+        weight = self.dequantize(dtype=dtype)
         pre_scale, bh = self.pre_scale, self.BH
         if self.activation_precision == "w4a4":
             xb = macaq_core.macaq_quantize_activations(
                 x_flat, pre_scale, bh, self.block_size
-            ).to(self.compute_dtype)
+            ).to(dtype)
         else:
-            xb = x_flat.to(self.compute_dtype)
+            xb = x_flat.to(dtype)
             if pre_scale is not None:
-                xb = xb * pre_scale.to(xb.dtype)
+                xb = xb * pre_scale.to(dtype)
             if bh is not None:
                 xb = macaq_core.rotate_blocks(xb, bh)
-        return torch.nn.functional.linear(xb, weight, self.bias)
+        bias = None if self.bias is None else self.bias.to(dtype)
+        return torch.nn.functional.linear(xb, weight, bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         if self.activation_precision == "w4a4":
