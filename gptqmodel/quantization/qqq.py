@@ -181,8 +181,13 @@ class Quantizer(nn.Module):
         xmax = torch.maximum(x.max(1)[0], tmp)
 
         if self.sym:
+            # The symmetric zero point below is fixed at ``(maxq + 1) // 2``,
+            # so the range must be zero-centered for every group.  Mirroring
+            # only ``xmin < 0`` left all-positive groups fitted as ``[0, max]``
+            # and saturated the positive half of the grid at 7/15 of the
+            # maximum for INT4.
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            xmin = torch.where(xmin < 0, -xmax, xmin)
+            xmin = -xmax
         both_zero = (xmin == 0) & (xmax == 0)
         xmin = torch.where(both_zero, xmin - 1, xmin)
         xmax = torch.where(both_zero, xmax + 1, xmax)

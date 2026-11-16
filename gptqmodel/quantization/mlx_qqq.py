@@ -56,8 +56,10 @@ def _qqq_dynamic_group_kernel():
                 minimum = metal::min(minimum, values[k]);
                 maximum = metal::max(maximum, values[k]);
             }
+            // The stored zero point is fixed at 8, so the range is
+            // zero-centered even when the group never goes negative.
             maximum = metal::max(metal::abs(minimum), maximum);
-            if (minimum < 0.0f) minimum = -maximum;
+            minimum = -maximum;
             if (minimum == 0.0f && maximum == 0.0f) {
                 minimum = -1.0f;
                 maximum = 1.0f;
@@ -88,7 +90,7 @@ def _qqq_fixed_params(group):
     minimum = mx.minimum(mx.min(group, axis=1), 0)
     maximum = mx.maximum(mx.max(group, axis=1), 0)
     maximum = mx.maximum(mx.abs(minimum), maximum)
-    minimum = mx.where(minimum < 0, -maximum, minimum)
+    minimum = -maximum
     empty = (minimum == 0) & (maximum == 0)
     minimum = mx.where(empty, -1, minimum)
     maximum = mx.where(empty, 1, maximum)
