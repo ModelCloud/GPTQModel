@@ -5734,6 +5734,8 @@ class AWQConfig(PreProcessorConfig):
         if self.format not in self.supported_export_formats():
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
+        if self.modules_to_not_convert:
+            _apply_external_checkpoint_module_filters(self, [], None)
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled:
