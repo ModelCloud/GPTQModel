@@ -45,7 +45,7 @@ flowchart TD
 
 | Operation | Before | After |
 | --- | --- | --- |
-| FP16/BF16 checkpoint load (`gptqmodel/utils/model.py:3422`, `:3461`) | Accelerate read every FP8 `weight`, cast it to the requested model dtype, and staged the whole shard on the target device | `_remap_safetensors_checkpoint_keys` (`:3095`) writes a temporary checkpoint without the packed weights, so Accelerate never sees them |
+| FP16/BF16 checkpoint load (`gptqmodel/utils/model.py:3478`, `:3540`) | Accelerate read every FP8 `weight`, cast it to the requested model dtype, and staged the whole shard on the target device | `_remap_safetensors_checkpoint_keys` (`:3095`) writes a temporary checkpoint without the packed weights, so Accelerate never sees them |
 | Packed-weight restore (`gptqmodel/utils/model.py:3310`) | `_restore_checkpoint_buffers` reread the FP8 value after the widened copy existed | It reads the FP8 value from the source checkpoint (`name_map` applies key conversion) and assigns it on the `device_map` target |
 | Missing-key detection (`gptqmodel/utils/model.py:2862`) | Used the checkpoint Accelerate received | Adds the packed names the loader restored itself, so `tie_weights(missing_keys=...)` sees the full checkpoint |
 | Module dtype/device move (`gptqmodel/nn_modules/qlinear/fp8.py:747`) | `nn.Module._apply` cast FP8 codes and FP32 scale/bias to the requested dtype | `preserve_storage` applies the move to byte views, then restores the source dtype and shape |
