@@ -1081,8 +1081,14 @@ void qqq_gemm(
   int groupsize = (s3.numel() == 0) ? -1 : prob_k / s3.size(0);
   if (groupsize != -1 && groupsize * s3.size(0) != prob_k)
     AT_ERROR("k=", prob_k, " not compatible with ", s3.size(0), " groups.");
-  if (workspace.numel() < prob_n / 128 * max_par)
-    AT_ERROR("workspace must be of size at least ", prob_n / 128 * max_par, ".");
+  // `workspace` is the zeroed `locks` array: one int32 per output tile of
+  // `min_thread_n` (= 64) columns, for each of the `max_par` parallel problems
+  // (see `locks[slice_col]` and the `locks += n_tiles` advance in `qqq_cuda`).
+  // A 64-column problem selects the `thread_n = 64` config, so `n / 128` is
+  // neither the minimum nor a safe bound.
+  int workspace_required = ceildiv(prob_n, min_thread_n) * max_par;
+  if (workspace.numel() < workspace_required)
+    AT_ERROR("workspace must be of size at least ", workspace_required, ".");
   if (s1.dtype() != torch::kFloat32)
      AT_ERROR("s1 dtype must be float32, but got ", s1.dtype(), ".");
   if (s2.dtype() != torch::kFloat32)

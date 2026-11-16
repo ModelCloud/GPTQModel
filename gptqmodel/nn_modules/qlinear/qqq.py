@@ -63,6 +63,20 @@ def _qqq_cpu_kernel():
         return None
 
 
+def _workspace_numel(out_features: int, max_par: int) -> int:
+    """Number of int32 slots ``qqq_gemm.cu`` indexes in the zeroed ``workspace``.
+
+    The kernel uses ``workspace`` as its ``locks`` array and indexes it by
+    output tile (``locks[slice_col]``), one tile per ``min_thread_n`` = 64
+    output columns, for each of the ``max_par`` parallel batch-64 problems it
+    may run. 128 is *not* the minimum tile width: a 64-column problem selects
+    the ``thread_n = 64`` config, so ``n = 64`` needs one lock and ``n = 192``
+    needs three.
+    """
+
+    return (out_features + 63) // 64 * max_par
+
+
 def _invert_permutation(values) -> torch.Tensor:
     inverse = [0] * len(values)
     for index, value in enumerate(values):
@@ -92,7 +106,7 @@ def mul(
     @s1: `torch.float32` activation per-token quantization scales of shape `(m, 1)`
     @s2: `torch.float32` weight per-channel quantization scales of shape `(1, n)`
     @s3: `torch.float16` weight per-group quantization scales of shape `(m / groupsize, n)`, it should be empty when group_size != -1
-    @workspace: `torch.int32` tensor with at least `n / 128 * max_par` entries that are all zero
+    @workspace: `torch.int32` tensor with at least `ceil(n / 64) * max_par` entries that are all zero
     @thread_k: `k` size of a thread_tile in `B` (can usually be left as auto -1)
     @thread_n: `n` size of a thread_tile in `B` (can usually be left as auto -1)
     @sms: number of SMs to use for the kernel (can usually be left as auto -1)
@@ -205,10 +219,11 @@ class QQQLinear(GroupedQuantLinear):
                     "s_group",
                     torch.tensor([], dtype=torch.float16),
                 )
-            # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
             self.register_buffer(
                 "workspace",
-                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32),
+                torch.zeros(
+                    _workspace_numel(self.out_features, self.max_par), dtype=torch.int32
+                ),
                 persistent=False,
             )
             self.register_buffer(
@@ -495,7 +510,11 @@ class QQQLinear(GroupedQuantLinear):
         if not hasattr(self, "workspace"):
             self.register_buffer(
                 "workspace",
-                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32, device=packed_weight.device),
+                torch.zeros(
+                    _workspace_numel(self.out_features, self.max_par),
+                    dtype=torch.int32,
+                    device=packed_weight.device,
+                ),
                 persistent=False,
             )
         if not hasattr(self, "reduce_buffer"):
