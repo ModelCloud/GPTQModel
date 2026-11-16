@@ -1936,6 +1936,10 @@ class BaseQModel(nn.Module):
             dynamic_override_cache_stats(self.quantize_config.dynamic) if self.quantize_config.dynamic else None
         )
 
+        if os.environ.get("GPTQMODEL_RESUME") == "1":
+            raise ValueError(
+                "GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory"
+            )
         if checkpoint is not None:
             from ..looper.checkpoint_store import CheckpointConfig
             from ..looper.gptq_checkpoint import validate_checkpoint_support
