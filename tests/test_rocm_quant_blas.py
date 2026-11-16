@@ -213,10 +213,10 @@ def test_chunked_hessian_accumulation_enters_the_override_per_chunk(monkeypatch)
 
 @pytest.mark.parametrize(
     "step",
-    ["GPTQ", "QQQ", "VPTQ", "MACAQ", "EXL3", "FP8_GSQ"],
+    ["GPTQ", "QQQ", "VPTQ", "MACAQ", "EXL3", "FP8_GSQ", "PARO"],
 )
 def test_hessian_methods_need_the_deterministic_pin(step):
-    """Every Hessian/Gram builder must accumulate on rocBLAS (issue #4123)."""
+    """Every Hessian builder and ParoQuant must accumulate on rocBLAS (#4123, #4460)."""
 
     from types import SimpleNamespace
 
@@ -228,9 +228,9 @@ def test_hessian_methods_need_the_deterministic_pin(step):
     )
 
 
-@pytest.mark.parametrize("step", ["AWQ", "PARO", "WEIGHT_ONLY"])
+@pytest.mark.parametrize("step", ["AWQ", "WEIGHT_ONLY"])
 def test_methods_without_a_hessian_keep_hipblaslt(step):
-    """AWQ, ParoQuant and RTN must not pay the rocBLAS pin."""
+    """AWQ and RTN keep the faster hipBLASLt kernels."""
 
     from types import SimpleNamespace
 
@@ -376,4 +376,34 @@ def test_wait_timeout_adopts_the_active_backend(monkeypatch):
 
     assert observed == ["Cublas"], "the late run adopts the active backend"
     assert warnings and "waited" in warnings[0][0]
+    assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
+
+
+def test_paroquant_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
+    """ParoQuant's rotation-optimization GEMMs must run on rocBLAS (#4460).
+
+    hipBLASLt chooses GEMM kernels per process, so two identically seeded
+    ParoQuant runs produced different checkpoints. ROCm hardware is not needed
+    to validate the selection: mock the platform and assert the run plan maps
+    to a rocBLAS pin.
+    """
+
+    from types import SimpleNamespace
+
+    from gptqmodel.models.base import _needs_deterministic_hessian
+    from gptqmodel.models.quantization_run_plan import ProcessorStep
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    configure_kernel(KernelConfig())
+
+    run_plan = SimpleNamespace(processors=(ProcessorStep.PARO,))
+    assert _needs_deterministic_hessian(run_plan)
+
+    with rocm.quant_blas_backend(deterministic=_needs_deterministic_hessian(run_plan)):
+        assert fake.current.name == "Cublas", "ParoQuant must run on rocBLAS"
+
+    assert fake.calls == ["hipblas", "cublaslt"]
+    assert fake.current.name == "Cublaslt"
     assert rocm._QUANT_BLAS_GUARD_DEPTH == 0

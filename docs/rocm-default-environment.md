@@ -111,8 +111,8 @@ same-target runs share the refcount and different-target runs serialize.
 ```mermaid
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
-    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ" --> C["want rocBLAS"]
-    B -- "no: AWQ, ParoQuant, RTN" --> D["want hipBLASLt"]
+    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, ParoQuant" --> C["want rocBLAS"]
+    B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
     E -- "yes" --> F["wait for it to finish"]
@@ -127,10 +127,11 @@ flowchart TD
     class D fast
 ```
 
-| Mechanism | Before (#4079) | After (#4105 + #4123) |
+| Mechanism | Before (#4079) | After (#4105 + #4123 + #4460) |
 |---|---|---|
 | Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:158`) |
-| AWQ / RTN / ParoQuant | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
+| AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
+| ParoQuant | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
 | QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |
@@ -151,9 +152,11 @@ is torch's hipBLASLt backend, which methods without a Hessian now keep:
 | 8192x4096 `X^T X` | fp32 | 20.5 | 16.3 | 0.8x (rocBLAS wins) |
 
 The fp32 Hessian GEMM is faster on rocBLAS, which is why the Hessian builders
-keep the pin there. The fp16/bf16 rows are the AWQ/ParoQuant/RTN paths that no
-longer pay it. GPTQ's end-to-end time is unchanged by design (it keeps the old
-whole-run pin): 58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the
+keep the pin there. The fp16/bf16 rows are the AWQ/RTN paths that no longer pay
+it. ParoQuant pays the pin deliberately: hipBLASLt chose GEMM kernels per
+process and made identically seeded checkpoints differ (issue #4460). GPTQ's
+end-to-end time is unchanged by design (it keeps the old whole-run pin):
+58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the
 issue's 61 s / 56 s. AWQ's 128-sample run measured 50.7 s / 45.5 s, against the
 issue's 128 s / 124 s with the whole-run pin.
 

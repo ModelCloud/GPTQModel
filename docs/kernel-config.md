@@ -108,6 +108,7 @@ flowchart LR
 | `os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE")` at import | `quantization/awq/modules/triton/scheduler.py:27` | `KernelConfig.awq_triton_schedule` |
 | `GPTQMODEL_GGUF_FUSED_*`, `GGUF_CPP_NATIVE_MATMUL`, `GGUF_CPP_THREADS` | `qlinear/gguf.py:1197-1215`, `qlinear/gguf_cpp.py:445,1190` | `KernelConfig.gguf_*` |
 | `GPTQMODEL_PAROQUANT_*` behaviour switches | `qlinear/paroquant.py:53-66`, `paroquant_triton.py:66-70`, `quantization/paroquant/**` | `KernelConfig.paroquant_*` |
+| `GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*` timing knobs | `gptqmodel_ext/paroquant/rotation.cu` | internal constants; `KernelConfig.paroquant_rotate_autotune` / `_cta_m` / `_row_pad` select behaviour |
 | `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
 | `GPTQMODEL_GSQ_DISABLE_*_RELAXATION` | `quantization/gsq_cuda_relaxation.py:400-403` | `KernelConfig.gsq_disable_*` |
 | `GPTQMODEL_EXL3_*` | `exl3_lib/quantize.py:136`, `exllamav3_processor.py:127-130`, `utils/exl3_capture_*.py` | `KernelConfig.exl3_*` |
@@ -220,6 +221,10 @@ representation, not another machine's kernel tuning.
 | `paroquant_rotate_cta_m` | `None` | Pin the rotation CTA-M tile to `4`, `8` or `16`. |
 | `paroquant_rotate_row_pad` | `None` | Pin the rotation row padding to `0` or `2`. |
 | `paroquant_autotune_cache` | `True` | Persist rotation autotune results. |
+
+The fused-rotation autotune measurement counts and thresholds are internal
+constants in `gptqmodel_ext/paroquant/rotation.cu`; they are not environment
+variables. Only the fields above select behaviour.
 
 ### bitsandbytes and BitBLAS
 

@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2586,7 +2587,44 @@ def test_paroquant_clear_rotation_extension_cache_delegates_to_shared_loader(mon
     assert calls == ["clear"]
 
 
-def test_paroquant_rotation_launch_config_honors_env_overrides(monkeypatch):
+def test_paroquant_has_no_environment_variable_reads():
+    """ParoQuant runtime choices come from KernelConfig, never env vars (AGENTS.md).
+
+    The fused-rotation autotune knobs used to be read from
+    ``GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*`` in ``rotation.cu``, which made a
+    code path selectable outside the config object. They are internal constants
+    now; only ``KernelConfig.paroquant_rotate_*`` selects behaviour.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    sources = [
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.cu")),
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.cuh")),
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.cpp")),
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.h")),
+    ]
+    read_tokens = ("getenv", "environ")
+    offenders = []
+    for path in sources:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if "GPTQMODEL_PAROQUANT_" in line and any(token in line for token in read_tokens):
+                offenders.append(f"{path.relative_to(repo_root)}:{lineno}: {line.strip()}")
+
+    assert sources, "expected ParoQuant extension sources"
+    assert not offenders, "environment-variable behaviour switches remain:\n" + "\n".join(offenders)
+
+    for name in (
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_WARMUP",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_ITERS",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_REPEATS",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_TARGET_MS",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_PCT",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_US",
+    ):
+        assert all(name not in path.read_text() for path in sources), name
+
+
+def test_paroquant_rotation_launch_config_honors_config_overrides(monkeypatch):
     """Guard manual launch-shape overrides so benchmarking can pin one kernel variant."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")

@@ -56,6 +56,39 @@ Introduced in [PR #3744](https://github.com/ModelCloud/GPTQModel/pull/3744).
 
 Current internal benchmarks have only shown a clear resource-usage benefit for `layer` scope. `module` and `compute_block` support the toggle, but they are not enabled by default because we have not yet measured a consistent memory win there.
 
+## ROCm quantization determinism
+
+ParoQuant derives per-module seeds from `opt_seed`, so a fixed seed is expected
+to produce the same checkpoint. CUDA runs are bitwise-identical after
+[PR #4499](https://github.com/ModelCloud/GPTQModel/pull/4499) made the fused
+rotation gradient independent of the launch plan.
+
+ROCm needed a separate fix. ParoQuant accumulates no Hessian, so it used to
+keep hipBLASLt, which selects GEMM kernels per process. Two Qwen2.5-0.5B runs
+with the same seed and calibration produced PPL `21.26` and `21.44`. The
+quantization run plan now treats `ProcessorStep.PARO` like the Hessian builders
+in `_needs_deterministic_hessian` (`gptqmodel/models/base.py`), so
+`quant_blas_backend(deterministic=True)` pins rocBLAS for the whole run. Two
+runs with rocBLAS pinned produced bitwise-identical checkpoints (issue #4460).
+
+The trade-off is accepted: rocBLAS is deterministic but its fp16/bf16 GEMMs are
+slower than hipBLASLt (8-14x on gfx1201 for the shapes in
+[ROCm default environment](rocm-default-environment.md)). Deterministic
+checkpoints are the product contract, so ParoQuant pays that cost. The
+documented reproducibility opt-out remains
+`KernelConfig(rocm_quant_blas="hipblaslt")`.
+
+The fused-rotation autotune timing knobs are internal C++ constants now; they
+are no longer read from `GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*` environment
+variables. `KernelConfig.paroquant_rotate_autotune`,
+`KernelConfig.paroquant_rotate_cta_m` and `KernelConfig.paroquant_rotate_row_pad`
+are the only controls.
+
+| Test | Invariant |
+| --- | --- |
+| `test_paroquant_selects_the_deterministic_pin_on_mocked_rocm` | A `ProcessorStep.PARO` run plan selects the rocBLAS pin on a mocked ROCm platform |
+| `test_paroquant_has_no_environment_variable_reads` | The ParoQuant extension sources contain no `GPTQMODEL_PAROQUANT_*` environment reads |
+
 ## Triton bias epilogue
 
 ParoQuant Triton decode and prefill kernels accumulate quantized products in

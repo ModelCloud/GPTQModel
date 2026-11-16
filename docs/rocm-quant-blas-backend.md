@@ -16,8 +16,14 @@ the duration of the quantization phase removes that cost.
 | ParoQuant | 6.45 s | 4.56 s | −1.89 s (−29%) |
 | AWQ | 3.23 s | 3.24 s | neutral |
 
-Warm runs are unchanged for every method (GPTQ 0.74 s → 0.73 s), so steady-state
-throughput is unaffected.
+Warm runs are unchanged by the library preloading for every method (GPTQ
+0.74 s → 0.73 s). The steady-state GEMM cost of choosing rocBLAS is separate;
+ParoQuant now pays it deliberately for reproducibility.
+
+ParoQuant now pins rocBLAS for the whole quantization run to make seeded
+checkpoints reproducible (issue #4460), so its cold time is the rocBLAS column
+above. The deterministic pin gives up hipBLASLt's faster fp16/bf16 GEMMs; see
+[ROCm default environment](rocm-default-environment.md) for that trade-off.
 
 ## Where the time goes
 

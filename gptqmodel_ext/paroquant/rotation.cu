@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -653,6 +652,15 @@ constexpr float kAutotuneMinRelativeSpeedup = 0.15f;
 // Tiny decode kernels can show large relative swings from timer noise. Require
 // a minimum absolute win before overriding the architecture baseline.
 constexpr float kAutotuneMinAbsoluteSpeedupMs = 0.01f;
+// Autotune measurement knobs. These are internal constants, not environment
+// variables: runtime behaviour is selected through ``KernelConfig`` only
+// (AGENTS.md). ``paroquant_rotate_autotune`` enables or disables the search,
+// and ``paroquant_rotate_cta_m``/``paroquant_rotate_row_pad`` pin a launch
+// shape. The values below keep the historical defaults.
+constexpr int kAutotuneWarmup = 3;
+constexpr int kAutotuneBaseIters = 25;
+constexpr int kAutotuneRepeats = 5;
+constexpr float kAutotuneTargetMs = 5.0f;
 constexpr std::array<LaunchConfig, 6> kAutotuneCandidates = {{
     {4, 0},
     {4, 2},
@@ -708,46 +716,6 @@ std::mutex &autotune_measurement_mutex() {
   // the same or competing launch plans concurrently on cache misses.
   static std::mutex mutex;
   return mutex;
-}
-
-int resolve_autotune_count(const char *name, int default_value) {
-  if (const char *raw = std::getenv(name)) {
-    int parsed = std::atoi(raw);
-    if (parsed > 0) {
-      return parsed;
-    }
-  }
-  return default_value;
-}
-
-float resolve_autotune_target_ms() {
-  if (const char *raw = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_TARGET_MS")) {
-    const float parsed = std::atof(raw);
-    if (parsed > 0.0f) {
-      return parsed;
-    }
-  }
-  return 5.0f;
-}
-
-float resolve_autotune_min_relative_speedup() {
-  if (const char *raw = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_PCT")) {
-    const float parsed = std::atof(raw);
-    if (parsed > 0.0f) {
-      return parsed / 100.0f;
-    }
-  }
-  return kAutotuneMinRelativeSpeedup;
-}
-
-float resolve_autotune_min_absolute_speedup_seconds() {
-  if (const char *raw = std::getenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_US")) {
-    const float parsed = std::atof(raw);
-    if (parsed > 0.0f) {
-      return parsed / 1e6f;
-    }
-  }
-  return kAutotuneMinAbsoluteSpeedupMs / 1e3f;
 }
 
 bool requests_autotune(int requested_cta_m, int requested_row_pad) {
@@ -847,10 +815,10 @@ LaunchConfig resolve_legacy_launch_config(at::ScalarType dtype, int explicit_cta
 float benchmark_launch_config(const at::Tensor &x, const at::Tensor &idx, const at::Tensor &theta,
                               const at::Tensor &scales, int64_t group_size, int64_t krot,
                               LaunchConfig config) {
-  const int warmup = resolve_autotune_count("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_WARMUP", 3);
-  const int base_iters = resolve_autotune_count("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_ITERS", 25);
-  const int repeats = resolve_autotune_count("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_REPEATS", 5);
-  const float target_ms = resolve_autotune_target_ms();
+  constexpr int warmup = kAutotuneWarmup;
+  constexpr int base_iters = kAutotuneBaseIters;
+  constexpr int repeats = kAutotuneRepeats;
+  constexpr float target_ms = kAutotuneTargetMs;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   auto synchronize_stream = [stream]() {
     const cudaError_t status = cudaStreamSynchronize(stream);
@@ -940,8 +908,8 @@ LaunchConfig autotune_launch_config(const at::Tensor &x, const at::Tensor &idx, 
       resolve_legacy_launch_config(x.scalar_type(), kLegacyLaunchSentinel, kLegacyLaunchSentinel);
   const float fallback_seconds =
       benchmark_launch_config(x, idx, theta, scales, group_size, krot, fallback);
-  const float min_relative_speedup = resolve_autotune_min_relative_speedup();
-  const float min_absolute_speedup_seconds = resolve_autotune_min_absolute_speedup_seconds();
+  constexpr float min_relative_speedup = kAutotuneMinRelativeSpeedup;
+  constexpr float min_absolute_speedup_seconds = kAutotuneMinAbsoluteSpeedupMs / 1e3f;
   auto beats_fallback = [&](float candidate_seconds, float baseline_seconds) {
     const float absolute_improvement = baseline_seconds - candidate_seconds;
     return absolute_improvement >= min_absolute_speedup_seconds &&
