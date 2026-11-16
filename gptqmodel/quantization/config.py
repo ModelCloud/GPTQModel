@@ -2448,6 +2448,31 @@ class _TrackedDict(dict):
             source = dict(*args, **kwargs)
             for key, value in source.items():
                 dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+        if self._root is self:
+            self._reorder_exclusions_first()
+
+    @staticmethod
+    def _is_exclusion_key(key) -> bool:
+        return isinstance(key, str) and key.startswith("-:")
+
+    def _reorder_exclusions_first(self):
+        """Keep ``-:`` exclusion rules ahead of every positive rule.
+
+        ``dynamic`` resolves first-match in insertion order, so an exclusion
+        appended after construction would lose to an earlier positive rule
+        while the same rules reloaded from JSON would win (``__post_init__``
+        reorders). Normalize the order on every root-level mutation so the
+        in-process lookup, the saved JSON and the reloaded config agree.
+        """
+
+        items = list(dict.items(self))
+        ordered = [item for item in items if self._is_exclusion_key(item[0])]
+        ordered.extend(item for item in items if not self._is_exclusion_key(item[0]))
+        if [key for key, _ in ordered] == [key for key, _ in items]:
+            return
+        dict.clear(self)
+        for key, value in ordered:
+            dict.__setitem__(self, key, value)
 
     def _touch(self):
         # Nested tracked containers point at the same root, so any edit
@@ -2462,6 +2487,8 @@ class _TrackedDict(dict):
     def __setitem__(self, key, value):
         with self._root._dynamic_lock:
             dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+            if self._root is self and self._is_exclusion_key(key):
+                self._reorder_exclusions_first()
             self._touch()
 
     def __delitem__(self, key):
@@ -2636,6 +2663,8 @@ def _track_dynamic_value(value, root):
         root = tracked._root
         for key, item in value.items():
             dict.__setitem__(tracked, key, _track_dynamic_value(item, root))
+        if root is tracked:
+            tracked._reorder_exclusions_first()
         return tracked
     if isinstance(value, (list, tuple)):
         tracked = _TrackedList(_root=root)
