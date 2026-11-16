@@ -174,16 +174,16 @@ def test_ordinary_gptq_dequantization_preserves_bias_contract(dtype, bias):
     model.proj.scales.copy_(torch.arange(1, 5)[:, None] / 8.)
     if bias:
         model.proj.bias.copy_(torch.linspace(-1, 1, 128))
-    expected_bias = model.proj.bias.half() if bias else None
+    expected_bias = model.proj.bias.to(dtype) if bias else None
     # Independently unpack the repeated hexadecimal fixture and apply the
     # four group scales; do not use the implementation's dequantizer as oracle.
     rows = torch.arange(128)
-    weight = (rows.remainder(8) * ((rows // 32 + 1) / 8.)).half()[:, None].expand(128, 128)
-    x = torch.linspace(-1, 1, 128).half()[None]
+    weight = (rows.remainder(8) * ((rows // 32 + 1) / 8.)).to(dtype)[:, None].expand(128, 128)
+    x = torch.linspace(-1, 1, 128).to(dtype)[None]
     expected = torch.nn.functional.linear(x, weight.T, expected_bias)
     dequantize_model(model)
     assert type(model.proj) is torch.nn.Linear
     assert (model.proj.bias is not None) == bias
-    assert model.proj.weight.dtype == torch.float16
+    assert model.proj.weight.dtype == dtype
     assert not hasattr(model.config, "quantization_config")
     torch.testing.assert_close(model.proj(x), expected, rtol=0, atol=0)

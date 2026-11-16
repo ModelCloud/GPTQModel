@@ -16,7 +16,12 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear, _device_family
+from ...nn_modules.qlinear import (
+    BaseQuantLinear,
+    PackableQuantLinear,
+    _device_family,
+    resolve_dequantize_dtype,
+)
 from ...quantization import FORMAT, METHOD
 from ...utils.arch import cuda_arch as _arch_cuda_arch
 from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
@@ -1070,9 +1075,10 @@ class TorchLinear(PackableQuantLinear):
 
         return torch.cat(weights, dim=1)
 
-def dequantize_model(model: PreTrainedModel):
-    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
-    # bf16 checkpoints and their exported config.
+def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None):
+    # Use the model's compute dtype, not the checkpoint storage dtype: GPTQ
+    # restores fp16 scales even for a bf16 model, so ``scales.dtype`` would
+    # turn a bf16 model into fp16 dense layers that fail in forward.
     target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchLinear):
@@ -1083,12 +1089,7 @@ def dequantize_model(model: PreTrainedModel):
 
         if isinstance(module, TorchLinear):
             if target_dtype is None:
-                scales_dtype = getattr(module, "scales", None)
-                target_dtype = (
-                    scales_dtype.dtype
-                    if scales_dtype is not None and scales_dtype.is_floating_point()
-                    else torch.float16
-                )
+                target_dtype = resolve_dequantize_dtype(model, module, dtype)
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(
                 module.in_features, module.out_features,
