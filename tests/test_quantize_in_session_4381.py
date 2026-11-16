@@ -15,7 +15,6 @@ import torch
 from torch import nn
 from transformers import LlamaConfig, LlamaForCausalLM
 
-import gptqmodel.models.base as base_module
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.models._const import DEVICE
 from gptqmodel.models.base import rehome_quantized_kernel, select_in_session_quant_linear
@@ -191,7 +190,7 @@ def test_rehome_quantized_kernel_switches_cuda_only_module(monkeypatch):
         quantize_config=AWQConfig(bits=4, format="gemm", group_size=128, offload_to_disk=False),
         qlinear_kernel=_CudaOnlyAwq,
     )
-    monkeypatch.setattr(base_module, "select_in_session_quant_linear", lambda *_args: AwqTorchLinear)
+    monkeypatch.setattr("gptqmodel.models.base.select_in_session_quant_linear", lambda *_args: AwqTorchLinear)
 
     rehome_quantized_kernel(fake_model)
 
@@ -223,7 +222,7 @@ def test_rehome_quantized_kernel_raises_when_no_portable_kernel(monkeypatch):
     def _no_portable(*_args):
         raise ValueError("No valid quant linear")
 
-    monkeypatch.setattr(base_module, "select_in_session_quant_linear", _no_portable)
+    monkeypatch.setattr("gptqmodel.models.base.select_in_session_quant_linear", _no_portable)
 
     with pytest.raises(RuntimeError, match="reload the saved checkpoint"):
         rehome_quantized_kernel(fake_model)
