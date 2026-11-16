@@ -231,6 +231,8 @@ print(model.tokenizer.decode(tokens))
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
 covers backend selection, generation, and adapters. Only enable
 `trust_remote_code=True` for checkpoint code you trust.
+Generation settings preserved during quantized checkpoint re-save are described
+in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 
 ### Quantization 🗜️
 

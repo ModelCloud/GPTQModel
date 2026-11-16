@@ -2219,6 +2219,11 @@ def ModelWriter(cls):
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
+            live_generation_config = getattr(self.model, "generation_config", None)
+            if live_generation_config is not None:
+                # The save-time shell derives its generation config from the
+                # model config. Preserve the live checkpoint settings instead.
+                model_for_save.generation_config = copy.deepcopy(live_generation_config)
 
         # --- start config save block ---
         # Keep the Transformers config small. EXL3's per-tensor storage map can
