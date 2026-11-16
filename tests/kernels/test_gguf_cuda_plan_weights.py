@@ -89,7 +89,9 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
     try:
         assert weight.nbytes == qweight.numel() * qweight.element_size()
 
-        for rows in (1, 2, 4, 8):
+        # Build largest first: the shared arena only grows, and a grow would
+        # invalidate plans bound to the previous buffer.
+        for rows in (8, 4, 2, 1):
             plan = bridge.build_quantized_matmul_cuda_plan(
                 backend=cpu_backend,
                 weight=weight,
@@ -101,13 +103,16 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
             )
             plans.append((rows, plan))
 
+        scratch = bridge._cuda_scratch[0]
+        assert scratch.size >= max(plan.scratch_nbytes for _, plan in plans)
         for rows, plan in plans:
-            plan_bytes = _buffer_size(bridge, plan.buffer)
-            # A pre-fix plan buffer contained the packed weight (weight.nbytes);
-            # now it holds only this plan's activation and output tensors.
-            assert plan_bytes < weight.nbytes
-            assert plan_bytes >= rows * (in_features + out_features) * 4
-            assert plan_bytes <= rows * (in_features + out_features) * 4 + 8192
+            # A pre-fix plan owned a buffer that also held the packed weight.
+            # Now every plan is a slice of the single device arena.
+            assert plan.scratch is scratch
+            assert plan.scratch_generation == scratch.generation
+            assert not hasattr(plan, "buffer")
+            assert plan.scratch_nbytes >= rows * (in_features + out_features) * 4
+            assert plan.scratch_nbytes <= rows * (in_features + out_features) * 4 + 8192
 
         # The shared weight tensor is usable from a plan built in another ctx.
         # Compare against the single-shot CPU path, which runs the same ggml
@@ -116,7 +121,7 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
         x = torch.from_numpy(
             np.random.default_rng(1).standard_normal((2, in_features)).astype(np.float32)
         )
-        rows, plan = plans[1]
+        rows, plan = next(item for item in plans if item[0] == 2)
         assert rows == x.shape[0]
         actual = _compute_plan_on_cpu(bridge, cpu_backend, plan, x)
         expected = bridge.quantized_matmul_cpu(
@@ -131,6 +136,7 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
         for _, plan in plans:
             plan.close()
         weight.close()
+        bridge._cuda_scratch.pop(0, None).close()
 
 
 class _FakePlan:
@@ -164,6 +170,9 @@ class _FakeBridge:
 
     def cuda_available(self):
         return True, None
+
+    def cuda_scratch_generation(self, device_index):
+        return 0
 
     def build_cuda_weight(self, **kwargs):
         weight = _FakeWeight()

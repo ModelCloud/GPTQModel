@@ -120,50 +120,117 @@ class _GGMLSharedWeight:
             pass
 
 
+class _GGMLCudaScratch:
+    """One ggml backend buffer per device, shared by every CUDA plan.
+
+    A plan's input/output/intermediate tensors are pure scratch: the forward
+    copies the activation in and the result out.  Keeping a backend buffer per
+    module *and* per row count retained gigabytes outside the Torch allocator
+    (issue #4387).  All plans now point at offsets inside this single arena.
+
+    ``ggml_backend_tensor_alloc`` requires ``tensor->data == NULL``, so tensors
+    cannot be moved to a grown arena.  Growth therefore frees the old buffer and
+    bumps ``generation``; ``GGUFCudaKernel`` closes any plan whose generation is
+    stale before it is used again.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend,
+        alloc_buffer,
+        buffer_free,
+        buffer_get_base,
+        buffer_get_size,
+    ) -> None:
+        self.backend = backend
+        self.buffer = None
+        self.base = None
+        self.size = 0
+        self.generation = 0
+        self._alloc_buffer = alloc_buffer
+        self._buffer_free = buffer_free
+        self._buffer_get_base = buffer_get_base
+        self._buffer_get_size = buffer_get_size
+
+    def ensure(self, nbytes: int) -> "_GGMLCudaScratch":
+        if self.buffer is not None and self.size >= nbytes:
+            return self
+        if self.buffer is not None:
+            self._buffer_free(self.buffer)
+            self.buffer = None
+            self.base = None
+            self.size = 0
+        buffer = self._alloc_buffer(self.backend, max(int(nbytes), 1))
+        if not buffer:
+            raise RuntimeError(
+                f"ggml CUDA scratch allocation of {nbytes} bytes failed."
+            )
+        self.buffer = buffer
+        self.base = int(self._buffer_get_base(buffer))
+        self.size = int(self._buffer_get_size(buffer))
+        self.generation += 1
+        return self
+
+    def close(self) -> None:
+        if self.buffer:
+            self._buffer_free(self.buffer)
+            self.buffer = None
+        self.base = None
+        self.size = 0
+
+
 class _GGMLMatmulPlan:
     """Per-batch-size ggml graph.
 
-    ``buffer`` covers only the activation, output and any intermediate tensors
-    of this plan; the quantized weight is owned by a :class:`_GGMLSharedWeight`
-    that every plan on the device references.
+    The quantized weight is owned by a :class:`_GGMLSharedWeight`; this plan's
+    activation, output and intermediate tensors are slices of the per-device
+    :class:`_GGMLCudaScratch`.  The plan keeps only graph metadata, never its
+    own backend buffer.
     """
 
     def __init__(
         self,
         *,
         ctx,
-        buffer,
         weight_tensor,
         input_tensor,
         output_tensor,
         graph,
         rows: int,
         out_features: int,
+        device_index: int,
+        backend,
+        tensors,
+        tensor_offsets,
+        scratch_nbytes: int,
         output_nbytes: int,
         output_dtype: torch.dtype,
-        backend_buffer_free,
         ctx_free,
     ) -> None:
         self.ctx = ctx
-        self.buffer = buffer
         self.weight_tensor = weight_tensor
         self.input_tensor = input_tensor
         self.output_tensor = output_tensor
         self.graph = graph
         self.rows = rows
         self.out_features = out_features
+        self.device_index = device_index
+        self.backend = backend
+        self.tensors = tensors
+        self.tensor_offsets = tensor_offsets
+        self.scratch_nbytes = scratch_nbytes
         self.output_nbytes = output_nbytes
         self.output_dtype = output_dtype
-        self._backend_buffer_free = backend_buffer_free
         self._ctx_free = ctx_free
+        self.scratch = None
+        self.scratch_generation = -1
 
     def close(self) -> None:
-        if self.buffer:
-            self._backend_buffer_free(self.buffer)
-            self.buffer = None
         if self.ctx:
             self._ctx_free(self.ctx)
             self.ctx = None
+        self.tensors = None
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:
@@ -236,6 +303,8 @@ class _GGMLBridge:
         self._cpu_backend: Optional[int] = None
         self._cpu_backend_lock = threading.RLock()
         self._cuda_backends: Dict[int, int] = {}
+        # One scratch arena per device; see _GGMLCudaScratch.
+        self._cuda_scratch: Dict[int, _GGMLCudaScratch] = {}
         # ggml-cuda keeps process-global state (cuBLAS handles, memory pools)
         # that is shared across devices, so entry must serialize process-wide,
         # not per device (#4378). One re-entrant lock covers every device.
@@ -265,6 +334,15 @@ class _GGMLBridge:
         self._bind(self._ggml_base, "ggml_nbytes", [ctypes.c_void_p], ctypes.c_size_t)
         self._bind(self._ggml_base, "ggml_element_size", [ctypes.c_void_p], ctypes.c_size_t)
         self._bind(self._ggml_base, "ggml_backend_alloc_ctx_tensors", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_void_p)
+        self._bind(self._ggml_base, "ggml_backend_get_default_buffer_type", [ctypes.c_void_p], ctypes.c_void_p)
+        self._bind(self._ggml_base, "ggml_backend_buft_get_alignment", [ctypes.c_void_p], ctypes.c_size_t)
+        self._bind(self._ggml_base, "ggml_backend_buft_get_alloc_size", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_size_t)
+        self._bind(self._ggml_base, "ggml_backend_alloc_buffer", [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_void_p)
+        self._bind(self._ggml_base, "ggml_backend_buffer_get_base", [ctypes.c_void_p], ctypes.c_void_p)
+        self._bind(self._ggml_base, "ggml_backend_buffer_get_size", [ctypes.c_void_p], ctypes.c_size_t)
+        self._bind(self._ggml_base, "ggml_backend_tensor_alloc", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int)
+        self._bind(self._ggml_base, "ggml_get_first_tensor", [ctypes.c_void_p], ctypes.c_void_p)
+        self._bind(self._ggml_base, "ggml_get_next_tensor", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_void_p)
         self._bind(self._ggml_base, "ggml_backend_buffer_free", [ctypes.c_void_p], None)
         self._bind(self._ggml_base, "ggml_backend_free", [ctypes.c_void_p], None)
         self._bind(
@@ -742,6 +820,54 @@ class _GGMLBridge:
             if previous_device is not None and torch.cuda.current_device() != previous_device:
                 torch.cuda.set_device(previous_device)
 
+    def cuda_scratch_generation(self, device_index: int) -> int:
+        """Generation of the device scratch arena (0 when not allocated yet)."""
+
+        scratch = self._cuda_scratch.get(device_index)
+        return 0 if scratch is None else scratch.generation
+
+    def _cuda_scratch_for(
+        self, device_index: int, backend: int, nbytes: int
+    ) -> _GGMLCudaScratch:
+        scratch = self._cuda_scratch.get(device_index)
+        if scratch is None or scratch.backend != backend:
+            if scratch is not None:
+                scratch.close()
+            scratch = _GGMLCudaScratch(
+                backend=backend,
+                alloc_buffer=self._ggml_base.ggml_backend_alloc_buffer,
+                buffer_free=self._ggml_base.ggml_backend_buffer_free,
+                buffer_get_base=self._ggml_base.ggml_backend_buffer_get_base,
+                buffer_get_size=self._ggml_base.ggml_backend_buffer_get_size,
+            )
+            self._cuda_scratch[device_index] = scratch
+        return scratch.ensure(nbytes)
+
+    def _bind_cuda_plan(self, plan: _GGMLMatmulPlan) -> _GGMLCudaScratch:
+        """Point a plan's scratch tensors at the shared device arena."""
+
+        scratch = self._cuda_scratch_for(
+            plan.device_index, plan.backend, plan.scratch_nbytes
+        )
+        if plan.scratch is scratch and plan.scratch_generation == scratch.generation:
+            return scratch
+        if plan.scratch is not None:
+            # ggml_backend_tensor_alloc only accepts unbound tensors.  Growth
+            # frees the old arena, so the caller must rebuild stale plans.
+            raise RuntimeError("stale ggml CUDA plan: rebuild it after scratch growth")
+        base = int(scratch.base)
+        for tensor, offset in zip(plan.tensors, plan.tensor_offsets):
+            status = self._ggml_base.ggml_backend_tensor_alloc(
+                scratch.buffer, tensor, base + offset
+            )
+            if status != 0:
+                raise RuntimeError(
+                    f"ggml backend tensor allocation failed with status={status}."
+                )
+        plan.scratch = scratch
+        plan.scratch_generation = scratch.generation
+        return scratch
+
     def build_quantized_matmul_cuda_plan(
         self,
         *,
@@ -752,8 +878,14 @@ class _GGMLBridge:
         rows: int,
         input_ggml_type: int,
         kernel_name: str,
+        device_index: int = 0,
     ) -> _GGMLMatmulPlan:
-        """Build the batch-size-specific graph around a shared weight tensor."""
+        """Build the batch-size-specific graph around a shared weight tensor.
+
+        The plan owns no backend buffer: its input/output/intermediate tensors
+        are bound into the single per-device scratch arena, so a layer with
+        many batch sizes no longer retains one ggml buffer per plan.
+        """
 
         ctx = self._ggml_base.ggml_init(
             _GGMLInitParams(
@@ -765,7 +897,6 @@ class _GGMLBridge:
         if not ctx:
             raise RuntimeError(f"{kernel_name} failed to initialize GGML metadata context.")
 
-        buffer = None
         try:
             weight_tensor = weight.tensor
             input_tensor = self._ggml_base.ggml_new_tensor_2d(
@@ -787,34 +918,50 @@ class _GGMLBridge:
                 raise RuntimeError(f"{kernel_name} failed to allocate GGML graph.")
             self._ggml_base.ggml_build_forward_expand(graph, output_tensor)
 
-            # Only this plan's tensors are allocated here: `weight_tensor`
-            # belongs to the shared weight context and keeps its own buffer.
-            buffer = self._ggml_base.ggml_backend_alloc_ctx_tensors(ctx, backend)
-            if not buffer:
-                raise RuntimeError(f"{kernel_name} failed to allocate GGML backend tensors.")
+            # Compute the same per-tensor layout `ggml_backend_alloc_ctx_tensors`
+            # would use, but leave the tensors unbound for the shared arena.
+            buft = self._ggml_base.ggml_backend_get_default_buffer_type(backend)
+            alignment = max(int(self._ggml_base.ggml_backend_buft_get_alignment(buft)), 1)
+            tensors = []
+            tensor_offsets = []
+            offset = 0
+            tensor = self._ggml_base.ggml_get_first_tensor(ctx)
+            while tensor:
+                tensors.append(tensor)
+                tensor_offsets.append(offset)
+                alloc_size = int(
+                    self._ggml_base.ggml_backend_buft_get_alloc_size(buft, tensor)
+                )
+                offset += ((alloc_size + alignment - 1) // alignment) * alignment
+                tensor = self._ggml_base.ggml_get_next_tensor(ctx, tensor)
+            if offset <= 0:
+                raise RuntimeError(f"{kernel_name} GGML plan has no scratch tensors.")
 
             output_nbytes = self._ggml_base.ggml_nbytes(output_tensor)
             output_dtype = self._torch_dtype_from_ggml_element_size(
                 int(self._ggml_base.ggml_element_size(output_tensor)),
                 kernel_name=kernel_name,
             )
-            return _GGMLMatmulPlan(
+            plan = _GGMLMatmulPlan(
                 ctx=ctx,
-                buffer=buffer,
                 weight_tensor=weight_tensor,
                 input_tensor=input_tensor,
                 output_tensor=output_tensor,
                 graph=graph,
                 rows=rows,
                 out_features=out_features,
+                device_index=device_index,
+                backend=backend,
+                tensors=tensors,
+                tensor_offsets=tensor_offsets,
+                scratch_nbytes=offset,
                 output_nbytes=output_nbytes,
                 output_dtype=output_dtype,
-                backend_buffer_free=self._ggml_base.ggml_backend_buffer_free,
                 ctx_free=self._ggml_base.ggml_free,
             )
+            self._bind_cuda_plan(plan)
+            return plan
         except Exception:
-            if buffer:
-                self._ggml_base.ggml_backend_buffer_free(buffer)
             self._ggml_base.ggml_free(ctx)
             raise
 
@@ -826,6 +973,7 @@ class _GGMLBridge:
         x: torch.Tensor,
         kernel_name: str,
     ) -> torch.Tensor:
+        self._bind_cuda_plan(plan)
         # ggml runs the graph on its own CUDA stream. Any work the caller
         # enqueued on its current stream (for example under
         # `torch.cuda.stream(s)`) must be visible before ggml copies the input
@@ -945,6 +1093,7 @@ class _GGMLBridge:
                     rows=x_cuda.shape[0],
                     input_ggml_type=input_ggml_type,
                     kernel_name="GGUFCudaKernel",
+                    device_index=0 if device.index is None else device.index,
                 )
             output = self.run_quantized_matmul_cuda_plan(
                 backend=backend,
@@ -1295,6 +1444,9 @@ class GGUFCudaKernel(GGUFTorchLinear):
         # closed.
         self._ggml_cuda_weight: _GGMLSharedWeight | None = None
         self._ggml_cuda_weight_key: tuple | None = None
+        # Generation of the shared per-device scratch arena the cached plans
+        # were bound to. Growth invalidates every previously bound plan.
+        self._ggml_cuda_plan_generation = -1
         # Reject at construction: `create_quant_layer` retries the next AUTO
         # candidate only on a NotImplementedError raised here. A guard in
         # `forward()` is too late to fall back and would surface as a runtime
@@ -1316,6 +1468,7 @@ class GGUFCudaKernel(GGUFTorchLinear):
         for plan in self._ggml_cuda_plans.values():
             plan.close()
         self._ggml_cuda_plans.clear()
+        self._ggml_cuda_plan_generation = -1
 
     def _release_cuda_weight(self) -> None:
         if self._ggml_cuda_weight is not None:
@@ -1421,12 +1574,19 @@ class GGUFCudaKernel(GGUFTorchLinear):
         # on the same device (#4378). The lock is re-entrant: `_cuda_weight`
         # takes it again for the swap itself.
         with self._cuda_lock_for_device(device_index):
+            bridge = _get_ggml_bridge()
             # Resolve the shared weight first: it may drop plans built against
             # a stale weight buffer, so the plan lookup below must happen after
             # it.
             weight = self._cuda_weight(x_flat)
+            generation = bridge.cuda_scratch_generation(device_index)
+            if self._ggml_cuda_plan_generation != generation:
+                # The device arena grew since these plans were bound; their
+                # tensors point into the freed buffer.
+                self._close_cuda_plans()
+                self._ggml_cuda_plan_generation = generation
             cached_plan = self._ggml_cuda_plans.get(plan_key)
-            output, plan = _get_ggml_bridge().quantized_matmul_cuda(
+            output, plan = bridge.quantized_matmul_cuda(
                 x=x_flat,
                 gguf_tensor_qtype=self.gguf_tensor_qtype,
                 padded_in_features=self.padded_in_features,
@@ -1434,11 +1594,17 @@ class GGUFCudaKernel(GGUFTorchLinear):
                 plan=cached_plan,
                 weight=weight,
             )
+            current_generation = bridge.cuda_scratch_generation(device_index)
+            if current_generation != generation:
+                # Building this plan grew the arena and invalidated every plan
+                # bound to the old one. Keep only the plan just built.
+                self._close_cuda_plans()
             self._remember_cuda_plan(
                 plan_key,
                 plan,
                 cached=cached_plan is not None,
             )
+            self._ggml_cuda_plan_generation = current_generation
         output = _finish_ggml_output(self, x_flat, output)
 
         if self.adapter:
