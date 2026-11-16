@@ -2592,7 +2592,15 @@ def ModelWriter(cls):
                         )
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=model_dtype,
+                # Do not cast the export shell. Each quantized module
+                # allocates its buffers in the checkpoint's storage dtype
+                # (packed FP8 weight, FP16 GPTQ scales, FP32 QQQ
+                # ``s_channel``), and accelerate's ``dtype=None`` path copies a
+                # checkpoint tensor into that existing dtype. Passing the model
+                # dtype narrowed every packed/scale buffer to bf16/fp16, so an
+                # FP8 re-save was no longer loadable and GPTQ/QQQ re-saves were
+                # lossy (issue #4303).
+                dtype=None,
                 checkpoint=self.checkpoint_file_name,
                 # Load each tensor exactly once. With ``device_map=None``
                 # accelerate 1.15 calls ``set_model_state_dict`` once per
