@@ -1395,24 +1395,56 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=No
     raise NotImplementedError(AWQ_GEMV_ROCM_UNSUPPORTED)
 
 
-def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
+# The GEMV/GEMV_FAST/LLM_AWQ layouts are read by kernels that declare
+# ``SUPPORTS_DTYPES = [torch.float16]``. AUTO has not resolved a concrete kernel
+# at load time, but every kernel AUTO can select for these layouts is fp16-only,
+# so the format alone decides the dtype.
+_AWQ_FP16_ONLY_FORMATS = (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ)
+
+
+def _coerce_quantized_awq_dtype(
+    *, backend: BACKEND, qcfg: QuantizeConfig, dtype, explicit_dtype: bool = False
+):
+    """Return a dtype the selected AWQ kernel can actually execute.
+
+    An unsupported explicit ``dtype=`` is a configuration conflict, so raise
+    here instead of letting layer-0 finalize fail after calibration has already
+    run. An auto-selected dtype is fixed to fp16 and logged, and the loader then
+    materializes the whole model in that dtype so the forward cannot mix dtypes.
+    """
     if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
-        return dtype
-    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
     if not isinstance(dtype, torch.dtype):
         return dtype
 
-    try:
-        qlinear = get_kernel_for_backend(backend, qcfg.quant_method, qcfg.format)
-    except ValueError:
-        return dtype
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        if format_code not in _AWQ_FP16_ONLY_FORMATS:
+            return dtype
+        supported_dtypes = [torch.float16]
+        kernel_name = f"FORMAT.{format_code.name} AWQ GEMV"
+    else:
+        try:
+            qlinear = get_kernel_for_backend(backend, qcfg.quant_method, format_code)
+        except ValueError:
+            return dtype
+        supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
+        kernel_name = qlinear.__name__
 
-    supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
     if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
         return dtype
 
-    log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
+    if explicit_dtype:
+        raise ValueError(
+            f"`dtype={dtype}` is not supported by {kernel_name}: it only supports "
+            f"{supported_dtypes}. Pass `dtype=torch.float16`, or use a GEMM format "
+            "(for example `FORMAT.GEMM`) that supports bfloat16."
+        )
+
+    log.info(
+        f"Loader: Auto fix `dtype` from `{dtype}` to `torch.float16` for "
+        f"`{kernel_name}`"
+    )
     return torch.float16
 
 
@@ -1796,6 +1828,18 @@ def ModelLoader(cls):
                 config=config,
                 device=dtype_device,
                 quant_inference=False,
+            )
+
+        # Resolve fp16-only AWQ kernels (the GEMV layouts) before the shell
+        # model is materialized, so every module -- including the non-quantized
+        # ones -- loads in one dtype and the failure cannot surface in layer-0
+        # finalize after calibration.
+        if isinstance(quantize_config, BaseQuantizeConfig):
+            dtype = _coerce_quantized_awq_dtype(
+                backend=backend,
+                qcfg=quantize_config,
+                dtype=dtype,
+                explicit_dtype=requested_dtype is not None,
             )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
@@ -2191,6 +2235,7 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_quantized",
             explicit_dtype=dtype,
         )
+        requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
@@ -2429,14 +2474,14 @@ def ModelLoader(cls):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.BITSANDBYTES
 
-        if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-            # GEMV_FAST and LLM_AWQ only supports torch.float16
-            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
-            dtype = torch.float16
-
         _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
 
-        dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        dtype = _coerce_quantized_awq_dtype(
+            backend=backend,
+            qcfg=qcfg,
+            dtype=dtype,
+            explicit_dtype=requested_dtype is not None,
+        )
 
         qcfg.calculate_bits_per_weight()
 
