@@ -300,6 +300,7 @@ variable-length calibration samples, `batch_size=1`, `OMP_NUM_THREADS=4`:
 | --- | --- | --- |
 | GPTAQ, 2 GPUs | `RuntimeError` at `gptaq.py:148`, two devices `cuda:0` and `cuda:1` | `quantize()` completes, `qweight` shape `[112, 896]` |
 | FOEM, 2 GPUs | `RuntimeError` at `foem.py:226`, two devices `cuda:0` and `cuda:1` | `quantize()` completes, `qweight` shape `[112, 896]` |
+| `test_tiny_qwen2_moe_gptaq_and_foem_quantize` | `RuntimeError` at `gptaq.py:148`; the loader spread the 3 layers over `cuda:0` and `cuda:1` | `1 passed` in 20.7 s |
 
 `tests/test_gptaq_foem_multigpu.py` pins the float64 oracle for both the CPU
 out-of-order case and the two-device case; the two-device tests skip when fewer
