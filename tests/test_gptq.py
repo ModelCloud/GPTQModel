@@ -21,6 +21,7 @@ from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import (
     FOEMConfig,
     GPTAQConfig,
+    GPTQConfig,
     HessianConfig,
     QuantizeConfig,
 )
@@ -166,6 +167,68 @@ def test_gptq_act_group_aware_is_disabled_for_per_channel_quantization():
     gptq = GPTQ(layer, qcfg=qcfg)
     assert gptq.qcfg.act_group_aware is False
     assert gptq.columns == 8
+
+
+def _attention_sink_fixture(*, exclude: bool) -> tuple[GPTQ, torch.Tensor]:
+    torch.manual_seed(0)
+    layer = nn.Linear(4, 3, bias=False, dtype=torch.float32).eval()
+    qcfg = GPTQConfig(
+        bits=4,
+        group_size=2,
+        sym=True,
+        exclude_attention_sinks=exclude,
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    # Two sequences, four tokens each. The leading row of each sequence is the
+    # attention sink this option is meant to drop.
+    inp = torch.arange(2 * 4 * 4, dtype=torch.float32).reshape(2, 4, 4) / 7.0
+    return gptq, inp
+
+
+def _normalized_hessian_oracle(rows: torch.Tensor) -> torch.Tensor:
+    """float64 ``2 * X^T X / n`` oracle for ``finalize_hessian``."""
+
+    rows64 = rows.reshape(-1, rows.shape[-1]).to(torch.float64)
+    return (2.0 * (rows64.T @ rows64) / rows64.shape[0]).to(torch.float32)
+
+
+def test_gptq_exclude_attention_sinks_drops_only_leading_token():
+    gptq, inp = _attention_sink_fixture(exclude=True)
+    gptq.add_batch(inp, None)
+
+    # Keep every token except position 0 of each sequence.
+    expected_rows = inp[:, 1:, :].reshape(-1, inp.shape[-1])
+    expected = _normalized_hessian_oracle(expected_rows)
+
+    assert gptq.nsamples == expected_rows.shape[0]
+    torch.testing.assert_close(gptq.finalize_hessian(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_gptq_attention_sink_default_and_flat_inputs_are_unchanged():
+    # Default config must accumulate exactly the historical Hessian.
+    default_gptq, inp = _attention_sink_fixture(exclude=False)
+    default_gptq.add_batch(inp, None)
+    assert default_gptq.nsamples == inp.shape[0] * inp.shape[1]
+    torch.testing.assert_close(
+        default_gptq.finalize_hessian(),
+        _normalized_hessian_oracle(inp),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    # A flattened routed-expert batch has no sequence axis, so the opt-in must
+    # leave it untouched instead of guessing where a sequence starts.
+    flat_gptq, _ = _attention_sink_fixture(exclude=True)
+    flat = inp.reshape(-1, inp.shape[-1])
+    flat_gptq.add_batch(flat, None)
+    assert flat_gptq.nsamples == flat.shape[0]
+    torch.testing.assert_close(
+        flat_gptq.finalize_hessian(),
+        _normalized_hessian_oracle(flat),
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 def _make_embedding_gptq(*, group_size: int = 2, desc_act: bool = False) -> GPTQ:

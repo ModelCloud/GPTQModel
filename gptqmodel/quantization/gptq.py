@@ -1054,6 +1054,40 @@ class GPTQ:
 
         return xtx_accum
 
+    def _attention_sink_row_keep(
+        self,
+        inp: torch.Tensor,
+        rows: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """Row mask that drops the leading token of every calibration sequence.
+
+        ``GPTQConfig.exclude_attention_sinks`` is a calibration-only opt-in for
+        tokenizers that prepend a BOS/special token: that position becomes an
+        attention sink whose activation norm can dwarf every text token, so a
+        single row dominates the input Hessian (issue #4393). Returning a mask
+        here lets ``process_batch`` accumulate ``X^T X`` over exactly the rows
+        GPTQ should optimize for.
+
+        Only a 3-D linear/Conv1D batch still carries its sequence axis. The
+        calibration hook flattens routed-expert inputs to ``[rows, hidden]``
+        before they reach us, so their token boundaries are unrecoverable and
+        they are left untouched rather than guessed at.
+        """
+
+        if not getattr(self.qcfg, "exclude_attention_sinks", False):
+            return None
+        if not isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+            return None
+        if inp.dim() != 3:
+            return None
+        batch, seq_len = int(inp.shape[0]), int(inp.shape[1])
+        if seq_len <= 1 or batch * seq_len != rows:
+            return None
+        keep = torch.ones((batch, seq_len), dtype=torch.bool, device=device)
+        keep[:, 0] = False
+        return keep.reshape(-1)
+
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
@@ -1144,6 +1178,15 @@ class GPTQ:
                 non_blocking=False,
             )
             canonical_device = accumulator_device
+
+        sink_keep = self._attention_sink_row_keep(
+            inp, reshaped_inp.shape[0], reshaped_inp.device
+        )
+        if sink_keep is not None:
+            # Drop attention-sink rows before the Hessian GEMM so ``H`` and the
+            # sample count describe the same token set.
+            reshaped_inp = reshaped_inp[sink_keep].contiguous()
+            del sink_keep
 
         batch_token_size = reshaped_inp.shape[0]
 
