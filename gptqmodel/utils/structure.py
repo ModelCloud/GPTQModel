@@ -806,9 +806,9 @@ class _LazyCheckpointAssembly:
     concat_dim: Optional[int]
 
 
-# A shard holding several model layers is re-opened and re-read once per layer
-# it contains. The layout is fixed per checkpoint, so a process only needs to
-# hear it once.
+# A shard holding several model layers is re-opened and its header re-parsed
+# once per layer it contains; the tensor bytes themselves are read once. The
+# layout is fixed per checkpoint, so a process only needs to hear it once.
 _NON_LAYERWISE_SHARD_WARNING_LOCK = threading.Lock()
 _NON_LAYERWISE_SHARD_WARNING_EMITTED = False
 
@@ -2407,8 +2407,9 @@ class LazyTurtle:
 
         log.warning(
             "LazyTurtle: loading this checkpoint for quantization, but its shards are not layer-wise: "
-            "%s. The same shard is opened and re-read once per layer it holds, adding "
-            "avoidable I/O during quantization; re-shard so each layer has its own file.",
+            "%s. The same shard is re-opened and its header re-parsed once per layer it "
+            "holds, while its tensor data is read once; re-shard so each layer has its "
+            "own file to avoid the repeated header I/O.",
             self._format_shard_layout_detail(
                 shard_groups=shard_groups,
                 multi_layer_shards=multi_layer_shards,

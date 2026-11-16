@@ -110,8 +110,8 @@ def test_monolithic_shard_warns_once(tmp_path, warnings):
     assert "for quantization" in warnings[0]
     assert "shards are not layer-wise" in warnings[0]
     assert "`model.safetensors` holds 3 model layers" in warnings[0]
-    assert "opened and re-read once per layer" in warnings[0]
-    assert "avoidable I/O" in warnings[0]
+    assert "re-opened and its header re-parsed once per layer" in warnings[0]
+    assert "tensor data is read once" in warnings[0]
     assert "re-shard so each layer has its own file" in warnings[0]
     # A single-file checkpoint should not report an awkward "1 of 1" count.
     assert "of 1 safetensors" not in warnings[0]

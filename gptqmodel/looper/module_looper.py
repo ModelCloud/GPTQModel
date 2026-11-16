@@ -2022,7 +2022,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             offload_to_disk(
                 model=self.gptq_model.model,
                 module=base_modules,
-                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                source_root=getattr(self.gptq_model, "model_local_path", None),
+                source_checkpoint=getattr(self.gptq_model, "checkpoint_file_name", None),
             )
 
         for processor in self.processors:

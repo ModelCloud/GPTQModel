@@ -1038,6 +1038,8 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 model=self.gptq_model.model,
                 module=base_modules,
                 disk_path=quant_config.offload_to_disk_path,
+                source_root=getattr(self.gptq_model, "model_local_path", None),
+                source_checkpoint=getattr(self.gptq_model, "checkpoint_file_name", None),
             )
 
         layer_modules = self.gptq_model.simple_layer_modules(

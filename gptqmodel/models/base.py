@@ -115,7 +115,13 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
-from ..utils.torch import TORCH_HAS_COMPILE, as_torch_device, torch_compile, torch_empty_cache
+from ..utils.torch import (
+    TORCH_HAS_COMPILE,
+    as_torch_device,
+    release_pinned_host_cache,
+    torch_compile,
+    torch_empty_cache,
+)
 from ._const import (
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
@@ -2488,6 +2494,10 @@ class BaseQModel(nn.Module):
             run_started=run_started,
             vram_devices=vram_devices,
         )
+        # Quantization offloads every layer through pinned host staging. Those
+        # copies are gone once the loop returns, but PyTorch keeps the pinned
+        # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
+        release_pinned_host_cache()
         return result
 
     @staticmethod
