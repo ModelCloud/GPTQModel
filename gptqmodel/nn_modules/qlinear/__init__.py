@@ -289,6 +289,14 @@ class BaseQuantLinear(nn.Module):
     REQUIRES_FORMAT_V2: bool = False
     AUTOTUNE: bool = False
 
+    # Floating buffers whose dtype follows the model dtype at load time:
+    # activation-side operands the forward consumes at the activation dtype.
+    # Every other persistent floating buffer is quantization state (scales,
+    # zero points, codebook scales, sign vectors, ...) and loads at the dtype
+    # the checkpoint stores, because the kernel computes with that precision.
+    # See docs/checkpoint-and-runtime-contracts.md section 4.
+    MODEL_DTYPE_BUFFERS: Tuple[str, ...] = ("bias",)
+
     def __init__(self,
                  bits: int,
                  in_features: int,

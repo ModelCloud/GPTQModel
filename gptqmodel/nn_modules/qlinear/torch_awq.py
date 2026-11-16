@@ -44,6 +44,9 @@ class AwqTorchLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "awq_torch"
+    # The bias is added after a wide reduction (`matmul_fp32_reduce`), so it
+    # keeps its checkpoint dtype like the scales.
+    MODEL_DTYPE_BUFFERS = ()
 
     def __init__(
         self,

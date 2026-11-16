@@ -110,6 +110,8 @@ class ParoLinear(AwqTorchLinear):
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "awq_paroquant"
+    # Unlike Torch AWQ, the forward adds an activation-dtype runtime bias.
+    MODEL_DTYPE_BUFFERS = ("bias",)
 
     def __init__(
         self,
