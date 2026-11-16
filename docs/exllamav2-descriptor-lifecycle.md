@@ -42,7 +42,8 @@ flowchart TD
     SHAPE -->|"yes"| BIND
     EVENT -->|"_FusionGroup.install"| CLONE["FusionKernelSpec.combine: clone live descriptor into packed layer"]
     CLONE --> VIEWS["_share_operands: bind source views while descriptors stay live"]
-    VIEWS --> RUN["Packed and direct source forwards use native GEMM"]
+    VIEWS --> SNAPSHOT["FusionKernelSpec.release_operand_snapshots:<br/>drop the pre-fusion _q_fast operand snapshots"]
+    SNAPSHOT --> RUN["Packed and direct source forwards use native GEMM"]
     RUN -->|"inference tensor mutation"| INVALIDATE["Installed clear_weight_cache invalidates group; next call rebuilds views"]
     INVALIDATE --> CLONE
     RUN -->|"source storage or device changes"| MOVED["Installed clear_weight_cache frees source descriptor; direct forward rebinds on new storage"]
@@ -64,6 +65,7 @@ flowchart TD
 | Fusion install | `FusionKernelSpec.combine` freed its new descriptor before `rebind` | Keeps the cloned descriptor; source views clone from live descriptors |
 | Fused source device or dtype move | A source descriptor still named the old GPU or scale buffer | Installed cache clear releases the changed source descriptor; direct execution rebinds before fusion resumes |
 | Fusion removal | Source handles could be freed before restoring independent operands | Rebinds each source to its restored packed allocation |
+| Fusion install (retained storage) | Sources and the copied executor kept a `_q_fast` snapshot of their standalone `qweight`/`qzeros`/`scales`, so the replaced allocations outlived every fused forward | `FusionKernelSpec.release_operand_snapshots` drops those snapshots after `_share_operands`; descriptors stay live and a direct source call rebuilds its snapshot on the fused views |
 
 Relevant code: `gptqmodel/nn_modules/qlinear/exllamav2.py`,
 `gptqmodel/nn_modules/qlinear/exllamav2_awq.py`,
