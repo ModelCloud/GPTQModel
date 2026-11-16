@@ -862,6 +862,24 @@ def _normalize_gguf_config(
 _GGUF_K_QUALITY_ALIASES = frozenset({"s", "m", "l"})
 
 
+def _gguf_bits_implies_format(bits: Any) -> bool:
+    """Return True when a ``bits`` value already names a ggml subtype.
+
+    A subtype such as ``q6_k`` fixes the ggml format on its own. Treating it as
+    a bare width and inheriting the global subtype rejected valid recipes like
+    ``Q4_K_M`` with a per-module ``Q6_K`` layer.
+    """
+
+    if isinstance(bits, GGUFBits):
+        return True
+    if isinstance(bits, str):
+        try:
+            float(bits.strip().lower().replace("-", "_"))
+        except ValueError:
+            return True
+    return False
+
+
 def _warn_gguf_quality_alias(bits_spec: GGUFBits) -> None:
     """Warn that `q*_k_s`/`q*_k_m`/`q*_k_l` store a uniform K-quant.
 
@@ -3913,6 +3931,24 @@ def _resolve_dynamic_group_size_error() -> str:
     return "QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 128, 256, 512, 1024]`."
 
 
+def _validate_dynamic_boolean_overrides(layer_name: str, layer_dict: Mapping) -> None:
+    """Reject non-boolean `sym`/`desc_act` values in one per-module rule.
+
+    The top-level fields are type-checked, but `dynamic` values were coerced
+    with `bool(...)` when the module was packed, so `{"sym": "False"}` silently
+    became `sym=True` and produced a checkpoint labelled with the opposite
+    layout. `None` keeps meaning "inherit the global value".
+    """
+
+    for key in ("sym", "desc_act"):
+        value = layer_dict.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise TypeError(
+                f"QuantizeConfig: `dynamic['{layer_name}'].{key}` must be a bool, "
+                f"got {type(value).__name__} ({value!r})."
+            )
+
+
 def _default_damp_percent(method: METHOD) -> float:
     # QQQ has no activation-group-aware calibration, so a single massive
     # activation (Llama's BOS token) can dominate the Hessian. The previous
@@ -4662,6 +4698,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -6618,6 +6655,7 @@ class FP8Config(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -6629,22 +6667,35 @@ class FP8Config(PreProcessorConfig):
         if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
             raise ValueError("FP8Config: `group_size` is not used; keep it at `-1`.")
 
+        explicit_block_size = "weight_block_size" in layer_dict
         block_size = _normalize_fp8_weight_block_size(layer_dict.get("weight_block_size"))
         raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("fmt"))
         if raw_format is not None:
             layer_dict[FORMAT_FIELD_CODE] = _normalize_fp8_fmt(raw_format)
         layer_dict.pop("fmt", None)
-        if "weight_scale_method" in layer_dict or block_size is not None:
+        method_override_present = "weight_scale_method" in layer_dict
+        if method_override_present or explicit_block_size:
+            if explicit_block_size:
+                effective_block_size = block_size
+            elif str(layer_dict.get("weight_scale_method", "")).strip().lower() == "block":
+                # A per-module `block` rule without its own size keeps the
+                # global block size.
+                effective_block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
+            else:
+                effective_block_size = None
             layer_dict["weight_scale_method"] = _normalize_fp8_weight_scale_method(
                 layer_dict.get("weight_scale_method"),
-                weight_block_size=block_size,
+                weight_block_size=effective_block_size,
+            )
+            # Materialize the effective pair: a `row` rule must not inherit the
+            # global `weight_block_size` in the per-module clone.
+            layer_dict["weight_block_size"] = (
+                list(effective_block_size) if effective_block_size is not None else None
             )
         if "weight_scale_semantics" in layer_dict:
             layer_dict["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
                 layer_dict["weight_scale_semantics"]
             )
-        if "weight_block_size" in layer_dict:
-            layer_dict["weight_block_size"] = list(block_size) if block_size is not None else None
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
@@ -6904,6 +6955,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -6928,6 +6980,18 @@ class BitsAndBytesConfig(PreProcessorConfig):
         raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("bnb_quant_type"))
         if raw_format is not None:
             layer_dict[FORMAT_FIELD_CODE] = _normalize_bitsandbytes_format(raw_format, bits=dynamic_bits)
+        else:
+            # A bits-only rule inherits the global subtype, which may not exist
+            # at the new width (`nf4` has no 8-bit form). Materialize the
+            # effective subtype here so the per-module clone does not inherit
+            # an invalid one; an 8-bit module always resolves to `int8`.
+            effective_bits = quant_bits_width(dynamic_bits)
+            try:
+                effective_format = _normalize_bitsandbytes_format(self.format, bits=effective_bits)
+            except ValueError:
+                effective_format = _normalize_bitsandbytes_format(None, bits=effective_bits)
+            if effective_format != self.format:
+                layer_dict[FORMAT_FIELD_CODE] = effective_format
         if "block_size" in layer_dict or "bnb_block_size" in layer_dict:
             layer_dict["block_size"] = _normalize_bitsandbytes_block_size(
                 layer_dict.get("block_size", layer_dict.get("bnb_block_size"))
@@ -7311,23 +7375,27 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
 
         if bits_override_present or format_override_present:
             raw_bits = layer_dict.get("bits", self.bits)
-            raw_format = layer_dict.get(FORMAT_FIELD_CODE, self.format)
+            bits_implied_format = _gguf_bits_implies_format(raw_bits)
+            if format_override_present:
+                raw_format = layer_dict[FORMAT_FIELD_CODE]
+            elif bits_implied_format:
+                # The subtype already fixes the format. Inheriting the global
+                # subtype here rejected the common Q4_K_M + Q6_K recipe with
+                # "Unsupported GGUF combination".
+                raw_format = None
+            else:
+                raw_format = self.format
             normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config(raw_bits, raw_format)
             _warn_gguf_quality_alias(normalized_runtime_bits)
 
             layer_dict["bits"] = normalized_bits
 
-            bits_implied_format = isinstance(raw_bits, GGUFBits)
-            if isinstance(raw_bits, str):
-                try:
-                    float(raw_bits.strip().lower().replace("-", "_"))
-                except ValueError:
-                    bits_implied_format = True
             if format_override_present or bits_implied_format:
                 layer_dict[FORMAT_FIELD_CODE] = normalized_format
 
