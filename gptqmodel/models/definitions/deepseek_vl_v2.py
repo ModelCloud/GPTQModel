@@ -42,11 +42,14 @@ class DeepSeekVLV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            # `use_mla=false` checkpoints (deepseek-vl2-tiny) instantiate
-            # `LlamaAttention`, so `k_proj`/`v_proj` are checkpoint-owned
-            # decoder Linears next to the dense `q_proj`/`o_proj`. MLA
-            # checkpoints keep the q_a/q_b and kv_a/kv_b low-rank path.
-            "self_attn": ("q_a_proj:0", "q_b_proj:0:in=q_a", "q_proj:0", "k_proj:0", "v_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0:in=kv_a", "o_proj:1"),
+            # MLA split mirrors DeepSeek-V2/V3: q_a/kv_a produce the low-rank
+            # latents, q_b/kv_b consume them, and o_proj consumes the attention
+            # output. `use_mla=false` checkpoints (deepseek-vl2-tiny) instead
+            # instantiate `LlamaAttention`, so `k_proj`/`v_proj` are
+            # checkpoint-owned decoder Linears next to the dense
+            # `q_proj`/`o_proj`; MLA checkpoints keep the q_a/q_b and
+            # kv_a/kv_b low-rank path.
+            "self_attn": ("q_a_proj:0", "q_b_proj:1:in=q_a", "q_proj:0", "k_proj:0", "v_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:1:in=kv_a", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),

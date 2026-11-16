@@ -90,6 +90,7 @@ FAMILY_MODEL_TYPES = [
     "minimax",
     "minimax_m2",
     "deepseek_v2",
+    "lfm2_moe",
     "qwen2_moe",
     "qwen3_moe",
     "mixtral",
@@ -230,6 +231,11 @@ def _tiny_config(model_type):
         # These families keep the first two decoder layers dense, so a third
         # layer is required to exercise the routed + shared expert group.
         kwargs["num_hidden_layers"] = 3
+    if model_type == "lfm2_moe" and "layer_types" in fields:
+        # LFM2-MoE has no default `layer_types`; without one the decoder layer
+        # indexes `None`. Exercise the short-convolution and attention mixers.
+        kwargs["layer_types"] = ["conv", "full_attention"]
+        kwargs["num_dense_layers"] = 1
     for key in ("head_dim", "rotary_dim"):
         if key in fields:
             kwargs[key] = 8

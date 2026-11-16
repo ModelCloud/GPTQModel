@@ -26,7 +26,8 @@ class LFM2MoeQModel(BaseQModel):
         "#",
         {
             "operator_norm": ("operator_norm:!",),
-            "conv": ("in_proj", "out_proj"),
+            # `out_proj` consumes the convolution output built from `in_proj`.
+            "conv": ("in_proj:0", "out_proj:1"),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
             "ffn_norm": ("ffn_norm:!",),
             "feed_forward:moe": {

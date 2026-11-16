@@ -58,7 +58,11 @@ def test_shared_expert_down_proj_is_its_own_subset():
         "self_attn.forget_gate.f_proj",
         "self_attn.b_proj",
     ] in blocks
-    assert ["self_attn.o_proj", "self_attn.kv_b_proj"] in blocks
+    # `o_proj` consumes the gated attention output built from `kv_b_proj`, so
+    # it must not share the producer's subset (issue #4372).
+    assert ["self_attn.kv_b_proj"] in blocks
+    assert ["self_attn.o_proj"] in blocks
+    assert blocks.index(["self_attn.kv_b_proj"]) < blocks.index(["self_attn.o_proj"])
     assert ["attention.query_key_value"] in blocks
     assert ["attention.dense"] in blocks
     assert ["mlp.gate_proj", "mlp.up_proj"] in blocks
