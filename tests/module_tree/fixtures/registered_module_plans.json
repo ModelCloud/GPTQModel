@@ -1956,7 +1956,13 @@
         ["mixer.o_proj"],
         ["mixer.in_proj", "mixer.out_proj"],
         ["mixer.gate_proj", "mixer.up_proj"],
-        ["mixer.down_proj"]
+        ["mixer.down_proj"],
+        ["mixer.conv1d:!"],
+        ["mixer.gate:!"],
+        ["mixer.shared_experts.up_proj"],
+        ["mixer.shared_experts.down_proj"],
+        ["mixer.experts.{expert_index}.up_proj"],
+        ["mixer.experts.{expert_index}.down_proj"]
       ]
     },
     "Olmo3QModel/gptq": {
