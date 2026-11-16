@@ -75,7 +75,23 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
+    # ``gemm_half_q_half`` has a native quantized GEMM only for FP16
+    # activations. BF16/FP32 inputs take the extension's dense fallback, which
+    # rebuilds the full FP16 weight and an FP32 copy on every forward
+    # (~266 MiB and ~640 us for a 4096x11008 layer, see #4213). AUTO must
+    # therefore rank ExLlamaV2 below kernels with a native path for those
+    # dtypes. Explicit backend selection still reaches this kernel.
+    AUTO_NON_FP16_PRIORITY = 1
+
     REQUIRES_FORMAT_V2 = True
+
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        priority = super().auto_select_priority(fmt, dtype)
+        if dtype is not None and dtype != torch.float16:
+            # Never raise the declared rank; only demote the dense fallback.
+            return min(priority, cls.AUTO_NON_FP16_PRIORITY)
+        return priority
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"

@@ -650,6 +650,18 @@ class BaseQuantLinear(nn.Module):
         return supported is None or dtype in supported
 
     @classmethod
+    def auto_select_priority(cls, fmt: FORMAT, dtype: Optional[t.dtype] = None) -> int:
+        """AUTO-selection rank for one format and activation dtype.
+
+        ``SUPPORTS_FORMATS`` is a dtype-independent rank. A kernel whose
+        non-native dtype path is a slow fallback can lower its rank for that
+        dtype here without giving up explicit backend selection. ``dtype=None``
+        means the caller did not constrain the activation dtype, so the
+        declared rank is returned unchanged.
+        """
+        return cls.SUPPORTS_FORMATS.get(fmt, 0)
+
+    @classmethod
     def supports_gguf_qtype(cls, bits) -> bool:
         """Whether this kernel can construct the concrete GGUF tensor layout.
 
