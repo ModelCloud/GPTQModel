@@ -34,6 +34,7 @@ from typing import Optional
 
 import torch
 
+from ..nn_modules.qlinear._numerics import linear_fp32_reduce
 from .logger import setup_logger
 from .rocm import IS_ROCM
 
@@ -480,6 +481,4 @@ def mxfp4_w4a16_linear(
     if bh is not None:
         xb = rotate_blocks(xb, bh)
     weight = dequant_w4_to_bf16(w_packed, w_scales).to(compute_dtype)
-    return torch.nn.functional.linear(
-        xb, weight, None if bias is None else bias.to(xb.dtype)
-    )
+    return linear_fp32_reduce(xb, weight, None if bias is None else bias.to(xb.dtype))

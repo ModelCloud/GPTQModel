@@ -33,6 +33,7 @@ from ...utils.macaq_triton import (
     triton_mxfp4_available,
 )
 from . import WeightOnlyQuantLinear
+from ._numerics import linear_fp32_reduce
 
 
 log = setup_logger()
@@ -320,7 +321,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
             if bh is not None:
                 xb = macaq_core.rotate_blocks(xb, bh)
         bias = None if self.bias is None else self.bias.to(dtype)
-        return torch.nn.functional.linear(xb, weight, bias)
+        return linear_fp32_reduce(xb, weight, bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         if self.activation_precision == "w4a4":
