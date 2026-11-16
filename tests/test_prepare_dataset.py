@@ -243,9 +243,10 @@ def test_prepare_dataset_concat_preserves_every_row_of_a_2d_item():
 
     ids = [int(value) for batch in concat for value in batch["input_ids"][0].tolist()]
     masks = [int(value) for batch in concat for value in batch["attention_mask"][0].tolist()]
-    # Both rows are present in order; only trailing padding follows.
-    assert ids == [11, 12, 13, 21, 22, 23, 0, 0]
-    assert masks == [1, 1, 1] + [1, 0, 1] + [0, 0]
+    # Both rows are present in order; the masked position is stripped instead
+    # of being packed, and only trailing padding follows (#4311).
+    assert ids == [11, 12, 13, 21, 23, 0, 0, 0]
+    assert masks == [1, 1, 1, 1, 1, 0, 0, 0]
 
 
 def test_prepare_dataset_concat_separates_rows_of_a_2d_item():

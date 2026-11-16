@@ -32,6 +32,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import QuantizeConfig
+from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
@@ -60,18 +61,20 @@ def remove_processor_log(log_path: Optional[str], *, keep: bool = True) -> bool:
 
 
 def _calibration_dataset_length(dataset) -> Optional[int]:
-    """Return ``len(dataset)`` when the calibration input exposes a size.
+    """Return the calibration row count when the input exposes a size.
 
     ``datasets.IterableDataset`` and plain generators are valid calibration
     inputs (``prepare_calibration_dataset`` materialises them), but they do not
     implement ``__len__``. Callers must treat ``None`` as "unknown" instead of
     forcing a length the input cannot provide.
+
+    A columnar mapping (``{"input_ids": [...], "attention_mask": [...]}``) has
+    one entry per column, so ``len(mapping)`` is the column count, not the row
+    count. ``calibration_input_row_count`` resolves that case to the primary
+    column's length.
     """
 
-    try:
-        return len(dataset)
-    except TypeError:
-        return None
+    return calibration_input_row_count(dataset)
 
 
 def _sized_calibration_dataset(dataset):
