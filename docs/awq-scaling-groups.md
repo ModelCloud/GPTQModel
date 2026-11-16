@@ -208,6 +208,25 @@ group under `fallback=None`. The safety checks are not expanded to infer an
 arbitrary graph. Raw replay exceptions (for example a native Bloom forward
 missing its residual argument) remain errors, not configured fallback.
 
+## Issue #4175: gated, lerped and hyper-connection consumers
+
+These definitions emitted groups that passed `_validate_scale_group` but
+changed the full-precision layer output when the fold was applied without
+quantization:
+
+| Definition | Incorrect relationship | Existing-format repair |
+| --- | --- | --- |
+| `intern_s2_preview`, `minicpmv4_6` | DeltaNet `in_proj_qkv`/`in_proj_z` read the same layer input norm, but the missing `:in=x` tags folded only `in_proj_qkv` and then folded the second branch into `in_proj_qkv`. | Restore Qwen3.5's `:in=x` tags: one group per input norm, with `in_proj_b`/`in_proj_a` compensated. |
+| `minicpmv`, `minicpmo` | Sequential `q:0,k:1,v:2,o:3` folded the norm into `q`, then `q` into `k`; the ungrouped MLP put `down_proj` in the gate/up subset. | Q/K/V share stage 0 with `:in=x`, `o_proj:1`, gate/up `:in=x`, `down_proj:1`. |
+| `diffusion_gemma` | The scale-free `v_norm` hides `v_proj` from `o_proj`, and the router was compensated as a consumer of `pre_feedforward_layernorm_2` although it reads the raw residual through its own scale-free norm. | `v_proj:...:nosrc`; declare the router after the expert block so it is not collected as a scale consumer. |
+| `ricursive` | `g_proj` is a sigmoid gate on the attention output but was `o_proj`'s source; `v_proj` reads `lerp(value_residual, normed)` and was folded with the input norm. | `g_proj:nosrc`, `v_proj` in its own stage, and `input_layernorm:nosrc` because no single `v_proj` scale can undo a fold through the lerp. |
+| `qwen4_exp`, `qwen4_exp_text` | No norms are declared, so attention `o_proj`/`out_proj` became the MLP input source across the gated hyper-connection mix. | Mark `o_proj`, `in_proj_a` and `out_proj` `:nosrc`; shared and routed experts fall back to plain quantization together. |
+
+`tests/module_tree/test_awq_fold_safety_4175.py` applies every emitted fold
+without quantization to a real tiny CPU layer and compares the full output
+(~1e-7). That is the regression guard the width/binding validation could not
+provide.
+
 `tests/module_tree/test_awq_relationships.py` uses real tiny CPU model modules,
 their `state_dict()` owners, nontrivial synthetic folds and full text outputs.
 It covers shared/no-shared Granite, nested Hunyuan routing, a Falcon Mamba width
