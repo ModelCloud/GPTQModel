@@ -1147,6 +1147,16 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if self._is_runtime_layout():
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    f"{self.__class__.__name__} rewrites packed tensors into a "
+                    "kernel-private runtime layout; the original checkpoint tensors "
+                    "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
+                    "for a loadable checkpoint, or reload the original checkpoint."
+                )
         super()._save_to_state_dict(destination, prefix, keep_vars)
         self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
         self._write_state_dict_layout_marker(destination, prefix, keep_vars)
@@ -1461,6 +1471,13 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
 
         self._qzeros_format = format
+        # Keep the persistent marker in sync with the words actually held by the
+        # live buffers. ``accelerate`` builds a shard's load dict from these
+        # buffers, so a stale placeholder would label v2 words as v1 and make
+        # ``_load_from_state_dict`` convert them a second time.
+        marker = self._buffers.get(QZEROS_FORMAT_BUFFER)
+        if isinstance(marker, t.Tensor) and marker.numel() == 1:
+            marker.fill_(format)
         return self._qzeros_format
 
     def _emitted_qzeros_format(self) -> int:
@@ -1634,6 +1651,39 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             return 2
         return None
 
+    def _incoming_qzeros_is_live(self, state_dict, prefix: str) -> bool:
+        """Whether the incoming words are the module's own live buffer.
+
+        ``accelerate`` with ``device_map=None`` loads a sharded checkpoint by
+        handing the module a dict in which every key missing from the current
+        shard has been refilled from the module's own state. Those entries are
+        the live tensors (or a view sharing their storage), not checkpoint
+        words, so converting them again would shift every zero point once per
+        shard (issue #4166). A real checkpoint tensor always has its own
+        storage.
+        """
+
+        incoming = state_dict.get(prefix + "qzeros") if state_dict is not None else None
+        live = getattr(self, "qzeros", None)
+        if not isinstance(incoming, t.Tensor) or not isinstance(live, t.Tensor):
+            return False
+        if incoming is live:
+            return True
+        if incoming.device.type == "meta" or live.device.type == "meta":
+            return False
+        try:
+            incoming_ptr = incoming.data_ptr()
+            live_ptr = live.data_ptr()
+            if incoming_ptr == 0 or live_ptr == 0:
+                return False
+            return (
+                incoming_ptr == live_ptr
+                and tuple(incoming.shape) == tuple(live.shape)
+                and incoming.dtype == live.dtype
+            )
+        except RuntimeError:
+            return False
+
     def _restore_qzeros_format(self, incoming_format: int) -> None:
         """Convert the copied qzeros words to this kernel's runtime layout."""
 
@@ -1683,11 +1733,20 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         # the runtime layout alone: relabelling the live v2 words as v1 would
         # make the next save emit them under the wrong checkpoint label.
         if state_dict is not None and (prefix + "qzeros") in state_dict:
-            incoming_format = layout_code
-            if incoming_format not in (1, 2):
+            if layout_code in (1, 2):
+                # The marker travels with the words it labels. When it already
+                # matches this kernel's live layout the copy is a no-op, which
+                # is what makes a repeated load idempotent.
+                if layout_code != self._runtime_qzeros_format():
+                    self._restore_qzeros_format(layout_code)
+            elif layout_code == 0:
+                # A runtime-layout payload; the receiver is in the same layout
+                # or ``PackedGroupedQuantLinear`` already refused it above.
+                pass
+            elif not self._incoming_qzeros_is_live(state_dict, prefix):
                 incoming_format = self._incoming_qzeros_format(local_metadata)
-            if incoming_format is not None:
-                self._restore_qzeros_format(incoming_format)
+                if incoming_format is not None:
+                    self._restore_qzeros_format(incoming_format)
         # Derived packed layouts depend on both the loaded words and the
         # checkpoint format. Invalidate only after the format has been restored.
         self._clear_runtime_weight_cache()
@@ -2129,6 +2188,10 @@ class PackableQuantLinear(GPTQQuantLinear):
         # ---------- register buffers ----------
         self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
         self.register_buffer("qzeros", qzeros.to(dtype=self.pack_dtype))
+        # Every raw GPTQ packer writes logical (v2) zero points. Record that
+        # layout here so a direct ``pack()`` caller does not serialize the
+        # words under the constructor's v1 label (issue #4167).
+        self.qzero_format(format=2)
 
     @t.inference_mode()
     def pack_gpu(
@@ -2320,6 +2383,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         self.register_buffer("qweight", qweight_dev.to(device="cpu", dtype=self.pack_dtype))
         self.register_buffer("qzeros", qzeros_dev.to(device="cpu", dtype=self.pack_dtype))
+        self.qzero_format(format=2)
 
         del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
@@ -2501,6 +2565,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                 raise NotImplementedError(f"Unsupported bits={self.bits}")
 
             self.register_buffer("qzeros", qzeros.to(dtype=self.pack_dtype))
+            self.qzero_format(format=2)
 
             # assert
             # assert isinstance(self, TorchLinear), f"type: {self.__class_}"

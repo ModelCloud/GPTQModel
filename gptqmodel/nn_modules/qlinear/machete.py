@@ -300,6 +300,9 @@ class MacheteLinear(GPTQQuantLinear):
             self.bias = self.bias.to(device=device)
 
         super().post_init()
+        # ``qweight`` is now Machete-prepacked and ``qzeros`` is a float offset
+        # table (or empty); neither can be inverted back to checkpoint words.
+        self._native_shuffled = True
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
