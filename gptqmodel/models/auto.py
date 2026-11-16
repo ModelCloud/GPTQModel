@@ -610,6 +610,35 @@ def _hide_unsupported_quantization_config_for_lm_eval(model):
         yield
 
 
+_LLAVA_HF_ARCHITECTURES = frozenset({"LlavaForConditionalGeneration"})
+
+
+def _is_original_llava_config(config) -> bool:
+    """Return whether ``config`` belongs to an original (non-HF) LLaVA checkpoint.
+
+    Both the Hugging Face checkpoint and the original liuhaotian checkpoint use
+    ``model_type: llava``. The Hugging Face one declares
+    ``LlavaForConditionalGeneration``; the original one declares a plain
+    causal-LM architecture (``LlavaLlamaForCausalLM``) and points at its vision
+    tower through ``mm_vision_tower``, so building the Hugging Face shell from
+    it fails deep inside the loader. ``text_config`` cannot be used here because
+    ``AutoConfig`` fills it with defaults for both layouts.
+    """
+
+    architectures = getattr(config, "architectures", None) or []
+    if isinstance(architectures, str):
+        architectures = [architectures]
+    architectures = [str(arch) for arch in architectures]
+
+    if any(arch in _LLAVA_HF_ARCHITECTURES for arch in architectures):
+        return False
+
+    if any(arch.endswith("ForCausalLM") for arch in architectures):
+        return True
+
+    return bool(getattr(config, "mm_vision_tower", None))
+
+
 def _get_config_load_kwargs(kwargs: dict) -> dict:
     """Config-selection kwargs for model-type detection.
 
@@ -639,6 +668,19 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     # Unsupported model types use BaseQModel and fail closed unless the caller
     # supplies an explicit model definition/module tree.
     definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # `model_type: llava` covers both the Hugging Face composite checkpoint and
+    # the original liuhaotian checkpoint, which declares a plain causal-LM
+    # architecture and cannot be built as a `LlavaForConditionalGeneration`
+    # shell (issue #4229).
+    if model_type == "llava" and _is_original_llava_config(config):
+        raise ValueError(
+            f"Original (non-HF) LLaVA checkpoints are not supported: `{model_dir}` "
+            "resolves to `model_type=llava` with architecture(s) "
+            f"{list(getattr(config, 'architectures', None) or [])}, which is not a "
+            "Hugging Face `LlavaForConditionalGeneration` checkpoint. Use the "
+            "Hugging Face format instead, e.g. `llava-hf/llava-1.5-7b-hf`."
+        )
 
     # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
     # checkpoint that needs the bounded K3 runner, and native Transformers
