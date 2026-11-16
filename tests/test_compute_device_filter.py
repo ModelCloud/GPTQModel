@@ -247,4 +247,4 @@ def test_parallel_forward_writes_shared_kv_cache_when_model_requests_it(monkeypa
     )
 
     assert outputs == []
-    assert shared_kv_cache_dict[0] == kv_payload
+    assert shared_kv_cache_dict[(0, 0)] == kv_payload

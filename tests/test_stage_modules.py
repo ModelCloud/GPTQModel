@@ -3486,6 +3486,302 @@ def test_run_layer_stage_catches_up_packed_layer_with_original_forward_topology(
     assert [event["submodule_finalized"] for event in looper.events] == [False, True]
 
 
+def test_run_layer_stage_skips_boundary_commit_when_finalize_fails(monkeypatch):
+    """A failed submodule finalizer must not publish a durable layer boundary."""
+
+    layer = torch.nn.Linear(4, 4, bias=False)
+    named = NamedModule(
+        layer,
+        name="self_attn.q_proj",
+        full_name="model.layers.0.self_attn.q_proj",
+        layer_index=0,
+    )
+
+    def fake_run_subset_stage(looper, **kwargs):
+        return SubsetStageResult(
+            processed_subset={"self_attn.q_proj": named},
+            layer_inputs=kwargs["layer_inputs"],
+            plan=kwargs["plan"],
+        )
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage
+    )
+    monkeypatch.setattr(
+        "gptqmodel.looper.stage_layer.find_modules", lambda *_, **__: {}
+    )
+
+    class DummyPB:
+        def __init__(self, iterable):
+            self._iterable = list(iterable)
+            self.current_iter_step = 0
+
+        def __iter__(self):
+            return iter(self._iterable)
+
+        def __len__(self):
+            return len(self._iterable)
+
+        def manual(self):
+            return self
+
+        def set(self, **_):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def next(self):
+            return self
+
+        def close(self):
+            return None
+
+    class DummyLogger:
+        def __init__(self):
+            self.warnings = []
+
+        def pb(self, iterable):
+            return DummyPB(iterable)
+
+        def info(self, *_, **__):
+            return None
+
+        def debug(self, *_, **__):
+            return None
+
+        def warning(self, *args, **__):
+            self.warnings.append(args)
+
+        warn = warning
+
+        def error(self, *_, **__):
+            return None
+
+        def exception(self, *_, **__):
+            return None
+
+    class FailingFinalizeProcessor:
+        def __init__(self):
+            self.forward = ForwardConfig(
+                required=True,
+                replay_after_process=False,
+                all_modules_in_single_pass=False,
+            )
+            self.inputs_cache = types.SimpleNamespace(
+                layer_inputs=[[torch.zeros(1, 4)]],
+                layer_input_kwargs=[{}],
+                position_ids=[],
+                attention_masks=[],
+            )
+            self.log = []
+            self.tasks = {}
+            self.layer_count = 1
+
+        def collect_memory_info(self, *_):
+            return None
+
+        def clear_cache_data(self):
+            return None
+
+        def receive_layer_inputs(self, inputs):
+            self.inputs_cache.layer_inputs = inputs
+
+        def name(self):
+            return "failing"
+
+        def submodule_finalize(self, *_):
+            raise RuntimeError("finalize failed")
+
+        def finalize(self, *_):
+            return None
+
+        def log_plotly(self):
+            return None
+
+    class Boundary:
+        def __init__(self):
+            self.committed = []
+
+        def commit_layer(self, **kwargs):
+            self.committed.append(kwargs)
+
+    class DummyGptqModel:
+        def __init__(self, boundary):
+            self.model = torch.nn.Module()
+            self.model.config = types.SimpleNamespace(model_type="llama")
+            self.quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                offload_to_disk=False,
+            )
+            self.quantization_layer_boundary_checkpoint = boundary
+            self.lm_head = None
+
+        def pre_quantize(self, module):
+            return module
+
+        def should_quantize_layer(self, *_args):
+            return True
+
+        def post_quantize(self, module):
+            return module
+
+    class DummyLooper:
+        def __init__(self):
+            self.processors = [FailingFinalizeProcessor()]
+            self.boundary = Boundary()
+            self.gptq_model = DummyGptqModel(self.boundary)
+            self.input_embeddings_name = None
+            self.output_embeddings_name = None
+            self._quant_devices = [torch.device("cpu")]
+            self._module_device_map = {}
+            self._quant_device_lock = threading.Lock()
+            self._moe_subset_threshold = 16
+            self._dense_quant_devices = [torch.device("cpu")]
+            self._moe_quant_devices = [torch.device("cpu")]
+            self._dense_vram_strategy = types.SimpleNamespace()
+            self._moe_vram_strategy = types.SimpleNamespace()
+            self._dense_vram_strategy_explicit = False
+            self._moe_vram_strategy_explicit = False
+            self._layer_events = []
+            self._stop_exc = None
+
+        def _check_loop_stop(self):
+            return False
+
+        def _is_attention_module_name(self, _name):
+            return False
+
+        def _extract_moe_group_key(self, _name):
+            return None
+
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
+        def _emit_layer_complete(self, **kwargs):
+            self._layer_events.append(kwargs)
+
+        def _request_loop_stop(self, exc):
+            self._stop_exc = exc
+
+        def _subset_event_dispatch(self, **_kwargs):
+            pass
+
+        def _run_forward_batches(self, **kwargs):
+            del kwargs
+            return [[torch.zeros(1, 4)]]
+
+        def layer_modules_for_prefix(self, _prefix, planning=False):
+            del planning
+            return None
+
+        def create_named_modules(
+            self,
+            module,
+            full,
+            is_lm_head_module,
+            layer_index,
+            layers_prefix,
+            names,
+            processor,
+            fallback,
+            layer_module=None,
+        ):
+            del full, is_lm_head_module, layers_prefix, names, processor, fallback, layer_module
+            return {
+                "self_attn.q_proj": NamedModule(
+                    module,
+                    name="self_attn.q_proj",
+                    full_name=f"model.layers.{layer_index}.self_attn.q_proj",
+                    layer_index=layer_index,
+                )
+            }
+
+    looper = DummyLooper()
+    logger = DummyLogger()
+    pb = DummyPB(range(1))
+
+    run_layer_stage(
+        looper,
+        layers=[layer],
+        layer_modules=[["self_attn.q_proj"]],
+        planning_layer_modules=[["self_attn.q_proj"]],
+        layer_names=["model.layers.0"],
+        fallback=True,
+        shared_kv_cache_dict={},
+        pb=pb,
+        layer_count=1,
+        region_timer=None,
+        finalize_progress_cls=FinalizeProgressInfo,
+        logger=logger,
+    )
+
+    assert isinstance(looper._stop_exc, RuntimeError)
+    assert looper.boundary.committed == []
+    assert logger.warnings
+
+
+def test_runtime_dynamic_exclusion_records_pattern_under_dynamic_lock():
+    from gptqmodel.looper.stage_subset import _record_dynamic_exclusion
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, dynamic={})
+    full_name = "model.layers.0.moe.experts.3"
+    _record_dynamic_exclusion(qcfg, full_name)
+    _record_dynamic_exclusion(qcfg, full_name)
+
+    pattern = "-:model\\.layers\\.0\\.moe\\.experts\\.3"
+    assert list(qcfg.dynamic) == [pattern]
+    assert qcfg._runtime_dynamic_exclusions == {pattern}
+
+
+def test_runtime_dynamic_exclusion_waits_for_the_dynamic_lock():
+    """GIL=0 invariant: the prune write serializes with dynamic readers."""
+
+    from gptqmodel.looper.stage_subset import _record_dynamic_exclusion
+    from gptqmodel.quantization.config import _dynamic_lock_for
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, dynamic={})
+    lock = _dynamic_lock_for(qcfg.dynamic)
+    holding = threading.Event()
+    release = threading.Event()
+    writer_done = threading.Event()
+
+    def holder():
+        with lock:
+            holding.set()
+            release.wait(5)
+
+    def writer():
+        _record_dynamic_exclusion(qcfg, "model.layers.0.moe.experts.3")
+        writer_done.set()
+
+    holder_thread = threading.Thread(target=holder)
+    holder_thread.start()
+    assert holding.wait(5)
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    try:
+        # The writer must not mutate the mapping while the reader holds the lock.
+        assert not writer_done.wait(0.2)
+    finally:
+        release.set()
+        writer_thread.join(5)
+        holder_thread.join(5)
+
+    assert writer_done.is_set()
+    assert qcfg.dynamic
+
+
 def test_masked_hook_wrapper_trims_left_padded_inputs_before_add_batch():
     looper = ModuleLooper.__new__(ModuleLooper)
     looper.gptq_model = types.SimpleNamespace(quant_region_timer=None)
