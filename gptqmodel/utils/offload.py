@@ -22,7 +22,6 @@ import torch
 from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 from accelerate.utils import align_module_device, has_offloaded_params
-from safetensors import safe_open
 from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
@@ -36,6 +35,8 @@ from .torch import CPU, META
 
 
 _SMALL_MODULE_OFFLOAD_BYTES = 4 * 1024  # Skip disk writes for <4KB payloads
+# Bound on host bytes held while proving a live tensor equals its source payload.
+_SOURCE_COMPARE_CHUNK_BYTES = 16 * 1024 * 1024
 
 log = setup_logger()
 
@@ -432,6 +433,57 @@ def _source_shard_tensor_map(root: str, index_path: str) -> Optional[dict[str, t
     return tensor_map
 
 
+def _source_payload_sha256_if_equal(
+    tensor: torch.Tensor,
+    path: str,
+    offset: int,
+    nbytes: int,
+) -> Optional[str]:
+    """Return the payload's sha256 when ``tensor`` holds exactly those bytes.
+
+    The source range is streamed through one reusable buffer of at most
+    ``_SOURCE_COMPARE_CHUNK_BYTES``, and the live tensor is compared through a
+    byte view of its own storage. Neither side is materialized as a second
+    full-size host tensor, and the source is read with ``readinto`` rather than
+    mapped, so the check adds at most one chunk to the process RSS. The digest
+    is computed over the bytes just compared, which are the live tensor's
+    bytes. Returns ``None`` on any byte difference or a short source.
+    """
+
+    live = tensor.detach()
+    if live.is_conj() or live.is_neg():
+        live = live.resolve_conj().resolve_neg()
+    live = live.reshape(-1).view(torch.uint8)
+    if live.numel() != nbytes:
+        return None
+    digest = hashlib.sha256()
+    if nbytes == 0:
+        return digest.hexdigest()
+
+    scratch = bytearray(min(nbytes, _SOURCE_COMPARE_CHUNK_BYTES))
+    scratch_view = memoryview(scratch)
+    scratch_tensor = torch.frombuffer(scratch, dtype=torch.uint8)
+    with open(path, "rb", buffering=0) as handle:
+        handle.seek(offset)
+        position = 0
+        while position < nbytes:
+            length = min(len(scratch), nbytes - position)
+            filled = 0
+            while filled < length:
+                read = handle.readinto(scratch_view[filled:length])
+                if not read:
+                    return None
+                filled += read
+            live_chunk = live[position:position + length]
+            if live_chunk.device.type != "cpu":
+                live_chunk = live_chunk.to("cpu")
+            if not torch.equal(scratch_tensor[:length], live_chunk):
+                return None
+            digest.update(scratch_view[:length])
+            position += length
+    return digest.hexdigest()
+
+
 def _module_source_reference_index(
     module: nn.Module,
     *,
@@ -444,7 +496,9 @@ def _module_source_reference_index(
 
     Returns ``None`` when any module tensor is absent from the source, has a
     different dtype/shape, differs in content, or lives inside the offload
-    directory. The caller then falls back to serializing a bundle.
+    directory. The caller then falls back to serializing a bundle. Content is
+    proven byte for byte against the source payload in bounded chunks
+    (`_source_payload_sha256_if_equal`), never by loading the source tensor.
     """
 
     try:
@@ -494,25 +548,19 @@ def _module_source_reference_index(
             return None
 
         try:
-            with safe_open(path, framework="pt", device="cpu") as handle:
-                source = handle.get_tensor(source_key)
-        except (KeyError, OSError, RuntimeError):
+            sha256 = _source_payload_sha256_if_equal(tensor, path, data_base + start, end - start)
+        except OSError:
             return None
-        if (
-            source.dtype != tensor.dtype
-            or tuple(source.shape) != tuple(tensor.shape)
-            or not torch.equal(source, tensor)
-        ):
+        if sha256 is None:
             return None
 
-        _owner, buffer = tensor_buffer(tensor)
         index[key] = {
             "dtype": str(tensor.dtype).removeprefix("torch."),
             "shape": list(tensor.shape),
             "safetensors_file": path,
             "weight_name": source_key,
             "data_offsets": [data_base + start, data_base + end],
-            "sha256": hashlib.sha256(buffer).hexdigest(),
+            "sha256": sha256,
         }
     return index
 
