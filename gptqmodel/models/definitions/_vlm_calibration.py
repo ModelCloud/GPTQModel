@@ -9,7 +9,9 @@
 conversations. Vision-language processors only understand conversations, so
 definitions that override ``prepare_dataset`` use these helpers to keep the
 base text path for pre-tokenized rows instead of handing token ids to
-``processor.apply_chat_template`` (issue #4228).
+``processor.apply_chat_template`` (issue #4228). Rows that carry processor
+tensors alongside ``input_ids`` are rejected instead of being reduced to their
+token ids, which would silently change the calibration sample (issue #4371).
 """
 
 from __future__ import annotations
@@ -35,18 +37,66 @@ log = setup_logger()
 
 _MISSING = object()
 
+# Text columns the base token-id path understands (``input_ids``,
+# ``attention_mask``), consumes instead of token ids (``text``, ``messages``),
+# or may drop without changing which activations the calibration row produces.
+_PRETOKENIZED_TEXT_COLUMNS = frozenset(
+    {
+        "input_ids",
+        "attention_mask",
+        "text",
+        "messages",
+        "token_type_ids",
+        "labels",
+        "special_tokens_mask",
+        "position_ids",
+    }
+)
+
+
+def _unsupported_text_row_columns(sample: Any) -> list[Any]:
+    """Return mapping columns the base token-id path would silently drop."""
+
+    if not isinstance(sample, Mapping) or "input_ids" not in sample:
+        return []
+    # An explicit ``None`` column carries no data, so dropping it is harmless.
+    return [
+        key
+        for key in sample
+        if key not in _PRETOKENIZED_TEXT_COLUMNS and sample[key] is not None
+    ]
+
+
+def _reject_unsupported_text_row(sample: Any, *, label: str) -> None:
+    unsupported = _unsupported_text_row_columns(sample)
+    if not unsupported:
+        return
+
+    names = ", ".join(repr(key) for key in unsupported)
+    supported = ", ".join(sorted(_PRETOKENIZED_TEXT_COLUMNS))
+    raise ValueError(
+        f"{label}: pre-tokenized calibration row carries unsupported column(s) "
+        f"{names}. The base token-id path handles only text columns ({supported}); "
+        "the rest would be silently dropped, changing the calibration sample. "
+        "Pass chat `messages`/`text` rows so the model processor rebuilds "
+        "multimodal tensors, or remove these columns."
+    )
+
 
 def is_pretokenized_sample(sample: Any) -> bool:
     """Return whether ``sample`` is a token-id row the base text path accepts.
 
     The base path keeps only ``input_ids``/``attention_mask`` from a mapping, so
-    extra tokenizer columns (``token_type_ids``, ...) must not divert the row to
-    the processor path, where it would be wrapped as a chat message. NumPy
-    arrays and rows built from NumPy/0-D-tensor token ids are token ids too.
+    extra text-only tokenizer columns (``token_type_ids``, ...) must not divert
+    the row to the processor path, where it would be wrapped as a chat message.
+    A row that also carries processor tensors (``pixel_values``,
+    ``image_grid_thw``, ...) is *not* pre-tokenized text: routing it here would
+    drop those tensors. NumPy arrays and rows built from NumPy/0-D-tensor token
+    ids are token ids too.
     """
 
     if isinstance(sample, Mapping):
-        return "input_ids" in sample
+        return "input_ids" in sample and not _unsupported_text_row_columns(sample)
     if isinstance(sample, (list, tuple)):
         return bool(sample) and _is_integer_sequence(sample)
     if isinstance(sample, np.ndarray):
@@ -60,6 +110,9 @@ def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
     if len(calibration_dataset) == 0:
         return []
     if _is_columnar_mapping(calibration_dataset):
+        # Columnar mappings are unpacked with only the base calibration
+        # columns, so reject processor columns before they are dropped.
+        _reject_unsupported_text_row(calibration_dataset, label=label)
         return _columnar_mapping_examples(calibration_dataset)
     if _is_dataset_split_mapping(calibration_dataset):
         splits = ", ".join(repr(key) for key in calibration_dataset.keys())
@@ -85,7 +138,8 @@ def split_calibration_dataset(
     Returns ``(pretokenized_rows, conversations)``; exactly one of the two is
     ``None``. Mixing both row kinds in one dataset is rejected because the
     processor path cannot consume token ids and silently dropping them would
-    change the calibration set.
+    change the calibration set. A token-id row that also carries processor
+    tensors is rejected because the base text path would drop those tensors.
     """
 
     if isinstance(calibration_dataset, Mapping):
@@ -96,11 +150,13 @@ def split_calibration_dataset(
     if first is _MISSING:
         # Let the base text path report the empty dataset.
         return [], None
+    _reject_unsupported_text_row(first, label=label)
     if not is_pretokenized_sample(first):
         return None, itertools.chain((first,), iterator)
 
     rows = [first]
     for sample in iterator:
+        _reject_unsupported_text_row(sample, label=label)
         if not is_pretokenized_sample(sample):
             raise ValueError(
                 f"{label}: calibration dataset mixes pre-tokenized rows with chat "
