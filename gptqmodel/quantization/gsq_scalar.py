@@ -16,6 +16,7 @@ import pcre
 import torch
 
 from ..utils.gemv import awq_gemv_codes
+from ..utils.packing_math import awq_packed_codes, awq_storage_dtype
 from .config import normalize_gsq_config
 
 
@@ -58,19 +59,18 @@ def affine_codes(weight, scales, zeros, g_idx, bits, *, packing, scale_dtype=tor
         scale = scales[:, g_idx].float()
         values = (weight.float() + zeros[:, g_idx].float() * scale) / scale
     elif packing == "awq_gemm":
-        stored = scales.to(scale_dtype)[:, g_idx]
-        offset = (zeros[:, g_idx] * stored).to(weight.dtype)
-        values = (weight + offset) / stored
+        return awq_packed_codes(
+            weight, scales, zeros, g_idx, bits=bits,
+            scale_dtype=awq_storage_dtype(scale_dtype, gemm=True),
+        )
     elif packing in ("awq_gemv", "awq_gemv_fast"):
         if bits != 4 or scale_dtype != torch.float16:
             raise ValueError("AWQ GEMV GSQ requires 4 bits and FP16 scales")
         return awq_gemv_codes(weight, scales, zeros, g_idx)
     else:
         raise ValueError("Unknown affine GSQ packing format")
-    rounded = values.round()
-    # GPTQ's pack_original clamps. AWQ GEMM/GEMV packers do not, so hiding an
-    # overflowing code here could silently spill bits into adjacent nibbles.
-    return rounded.clamp(0, 2**bits - 1) if packing == "gptq" else rounded
+    # GPTQ's pack_original clamps its codes.
+    return values.round().clamp(0, 2**bits - 1)
 
 
 def _metric_factor(hessian: torch.Tensor) -> torch.Tensor:
@@ -283,6 +283,12 @@ def refine_affine_scalar(
         return ScalarGSQResult(weight.clone(), scales.clone(), zeros.clone(), g_idx.clone(), None, None, [])
     if isinstance(bits, bool) or not isinstance(bits, int) or not 1 <= bits <= 8:
         raise ValueError("scalar GSQ bits must be an integer in [1,8]")
+    if packing in ("awq_gemm", "awq_gemv", "awq_gemv_fast"):
+        if packing != "awq_gemm" and scale_dtype != torch.float16:
+            raise ValueError("AWQ GEMV GSQ requires FP16 scales")
+        # Resolve the checkpoint scale dtype once so code recovery and the
+        # export score use the same stored values the packer will write.
+        scale_dtype = awq_storage_dtype(scale_dtype, gemm=(packing == "awq_gemm"))
     if weight.ndim != 2 or target.shape != weight.shape or not weight.is_floating_point():
         raise ValueError("scalar GSQ requires floating [out,in] weights and a matching teacher")
     n, k = weight.shape
@@ -394,12 +400,8 @@ def refine_affine_scalar(
                 value = value - 2 * ((matrix-teacher) * correction).sum()
             return value / denominator
 
-        gemv = packing in ("awq_gemv", "awq_gemv_fast")
-
         def recover_codes(candidate_weight, candidate_scales):
-            source_scales = candidate_scales.to(scales.dtype) if gemv else candidate_scales
-            source_zeros = zero.to(zeros.dtype) if gemv else zero
-            values = affine_codes(candidate_weight, source_scales, source_zeros, groups, bits,
+            values = affine_codes(candidate_weight, candidate_scales, zero, groups, bits,
                                   packing=packing, scale_dtype=scale_dtype)
             # Packing arithmetic keeps its native dtype above. Optimization
             # needs FP32: Adam's epsilon underflows in FP16 for local grids.
@@ -417,11 +419,7 @@ def refine_affine_scalar(
             return stored_scales[:, groups] * (codes - zero[:, groups])
 
         def exported(candidate_weight, candidate_scales):
-            source_scales = candidate_scales.to(scales.dtype) if gemv else candidate_scales
-            recovered = recover_codes(candidate_weight, source_scales)
-            if (recovered < 0).any() or (recovered >= 2**bits).any():
-                raise ValueError("AWQ GSQ producer arithmetic produced an out-of-range packed code")
-            return decode(recovered, source_scales)
+            return decode(recover_codes(candidate_weight, candidate_scales), candidate_scales)
 
         base_codes = recover_codes(baseline, base_scales)
         if count == 2**bits:
@@ -466,13 +464,8 @@ def refine_affine_scalar(
                 selected = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
                 hard_codes = codes.gather(-1, selected).squeeze(-1)
                 hard_scales = (base_scales * scale_delta.exp()).to(scale_dtype).float()
-                if gemv:
-                    hard_scales = hard_scales.to(scales.dtype)
                 candidate = decode(hard_codes, hard_scales).to(weight.dtype)
                 candidate_codes = recover_codes(candidate, hard_scales)
-                if (candidate_codes < 0).any() or (candidate_codes >= 2**bits).any():
-                    history.append(best)
-                    continue
                 score = float(loss(decode(candidate_codes, hard_scales)))
                 if not torch.isfinite(torch.tensor(score)):
                     raise ValueError("non-finite scalar GSQ hard objective")

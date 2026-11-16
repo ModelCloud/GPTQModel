@@ -252,12 +252,15 @@ class RTN:
 
         module_name = self._named_module.full_name if self._named_module is not None else self.name
         if gsq_enabled_for(self.qcfg.gsq, module_name):
+            packing = {FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
+                       FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}.get(
+                           self.qcfg.format, "gptq")
             fitted = refine_affine_scalar(
                 quantized.to(self.module.weight.dtype), scale, zero, g_idx,
                 target=weights[:, :valid_cols], bits=self.qcfg.bits, config=self.qcfg.gsq,
-                packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
-                         FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}.get(
-                             self.qcfg.format, "gptq"),
+                packing=packing,
+                scale_dtype=(scale.dtype if packing == "awq_gemm" and
+                             scale.dtype in (torch.float16, torch.bfloat16) else torch.float16),
             )
             quantized, scale, zero, g_idx = fitted.weight, fitted.scales, fitted.zeros, fitted.g_idx
             self.gsq_diagnostics = {
