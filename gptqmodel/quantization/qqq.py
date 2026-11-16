@@ -763,6 +763,26 @@ class QQQ:
         # cache, so the return value is the one to quantize with.
         self.H = self.materialize_hessian(self.layer.weight.device)
 
+        # No calibration rows reached this module (for example an unrouted
+        # expert). A zero Hessian makes every column look calibration-dead, so
+        # ``_neutralize_dead_columns`` would zero the whole weight and return an
+        # all-zero module. Absence of evidence is not evidence that every column
+        # is dead: use the data-independent RTN grid instead, matching GPTQ's
+        # zero-sample guard.
+        if self.nsamples == 0:
+            resolved_strategy = FallbackStrategy.RTN
+            log.warn(
+                "Quantization: Module `%s` -> no calibration samples reached this module; "
+                "forcing `%s` fallback quantization instead of quantizing a zero Hessian.",
+                self.name,
+                resolved_strategy.value,
+            )
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(resolved_strategy)
+
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
         actorder = self.qcfg.desc_act
@@ -889,8 +909,11 @@ class QQQ:
                     extra,
                     self.expected_nsamples,
                 )
-                if resolved_strategy != FallbackStrategy.RTN:
-                    return self._fallback_quantize(resolved_strategy)
+                # The selected fallback is data-independent: it must never
+                # continue into the block loop with ``Hinv=None``. RTN used to
+                # fall through here and fail with
+                # ``TypeError: 'NoneType' object is not subscriptable``.
+                return self._fallback_quantize(resolved_strategy)
             else:
                 raise
 
