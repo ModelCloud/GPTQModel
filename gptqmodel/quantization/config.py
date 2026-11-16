@@ -16,7 +16,7 @@ import weakref
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from functools import total_ordering
 from os.path import join
@@ -3241,6 +3241,29 @@ def _serialize_smooth_method(method: Optional[SmoothMethod]) -> Optional[Dict[st
     return payload
 
 
+def _serialize_dynamic_override_value(value: Any) -> Any:
+    """Return a JSON-safe form for one per-module ``dynamic`` override value.
+
+    ``dynamic`` accepts typed objects per module -- ``Fallback``, ``MSEConfig``,
+    ``SmootherConfig``/``SmoothMethod``, ``torch.dtype`` and enums -- because the
+    processors normalize them before use. Serialization used to copy them
+    through untouched, so ``to_dict()``/``save_pretrained()`` failed with a
+    ``TypeError`` from ``json.dumps`` after quantization had already finished.
+    """
+
+    if isinstance(value, torch.dtype):
+        return str(value).split(".")[-1]
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return _serialize_dynamic_override_value(asdict(value))
+    if isinstance(value, Mapping):
+        return {key: _serialize_dynamic_override_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_dynamic_override_value(item) for item in value]
+    return value
+
+
 def _normalize_smoother_config(
     payload: Optional[Union[SmootherConfig, SmoothMethod, Dict[str, Any], str]]
 ) -> Optional[SmootherConfig]:
@@ -4332,6 +4355,87 @@ _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS = frozenset({"weight_only"})
 # working; the field they derive from is authoritative when both are present.
 _QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS = frozenset({"backend"})
 
+# `to_dict()` stores settings that do not take part in inference inside
+# `meta`. They are real config fields, so both reload paths (`from_quant_config`
+# and `QuantizeConfig(**config.to_dict())`) must lift them back to the top
+# level; otherwise a serialized config silently reloads with class defaults.
+_SERIALIZED_META_FIELD_NAMES = (
+    "telemetry",
+    "fallback",
+    "hessian",
+    "gptaq",
+    "foem",
+    "weight_only",
+    "preprocessors",
+    "gc_mode",
+    "wait_for_submodule_finalizers",
+    "auto_forward_data_parallel",
+    "dense_vram_strategy",
+    "dense_vram_strategy_devices",
+    "moe_vram_strategy",
+    "moe_vram_strategy_devices",
+    "moe",
+    "p2p",
+    "offload_to_disk",
+    "offload_to_disk_path",
+    "pack_impl",
+    "mse",
+    "mock_quantization",
+    "act_group_aware",
+    "true_sequential",
+    "static_groups",
+    "damp_percent",
+    "damp_auto_increment",
+    "opt_rotation_epochs",
+    "opt_finetune_epochs",
+    "opt_train_samples",
+    "opt_validation_samples",
+    "opt_batch_size",
+    "opt_rotation_lr",
+    "opt_weight_lr",
+    "opt_quantizer_lr",
+    "opt_pair_ratio",
+    "opt_seed",
+    "opt_optimizer",
+    "opt_weight_decay",
+    "opt_betas",
+    "opt_eps",
+    "opt_amsgrad",
+    "opt_sgd_momentum",
+    "opt_sgd_dampening",
+    "opt_sgd_nesterov",
+    "opt_fused_rotation",
+    "opt_gradient_checkpointing",
+    "opt_stage_cudagraph",
+    "opt_amp",
+    "opt_best_state_dtype",
+    "opt_train_on_noisy_inputs",
+    "opt_scope",
+    "opt_stage_impl",
+    "opt_pair_impl",
+    "opt_quantizer_impl",
+    "opt_channel_scale_clamp_min",
+    "opt_channel_scale_clamp_max",
+    "scale_search_chunked_activations",
+)
+
+
+def _lift_serialized_meta_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Lift `meta`-stored config settings back to the top level.
+
+    An explicit top-level key wins over the `meta` copy, so a caller can
+    override one field without rebuilding the whole payload.
+    """
+
+    meta_payload = payload.get(META_FIELD)
+    if not isinstance(meta_payload, dict) or not meta_payload:
+        return payload
+    lifted = dict(payload)
+    for field_name in _SERIALIZED_META_FIELD_NAMES:
+        if field_name not in lifted and field_name in meta_payload:
+            lifted[field_name] = meta_payload.get(field_name)
+    return lifted
+
 
 def _validate_quantize_config_factory_kwargs(target_cls, payload: Dict[str, Any]) -> None:
     known_fields = _known_quantize_config_field_names()
@@ -4399,6 +4503,10 @@ class QuantizeConfigMeta(type):
     def __call__(cls, *args, **kwargs):
         kwargs = _normalize_quantize_config_constructor_kwargs(kwargs)
         if cls is QuantizeConfig:
+            # A serialized `to_dict()` payload keeps calibration/meta settings
+            # inside `meta`; lift them before class resolution so e.g. an RTN
+            # payload keeps its `weight_only` marker and is not read as AWQ.
+            kwargs = _lift_serialized_meta_fields(kwargs)
             target_cls = _resolve_quantize_config_class(kwargs)
             target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
@@ -5289,69 +5397,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.info("Detected llm-awq quantization format; FORMAT automatically set to FORMAT.LLM_AWQ.")
 
         meta_payload = normalized.get(META_FIELD)
-        meta_field_map = {
-            "telemetry": "telemetry",
-            "fallback": "fallback",
-            "hessian": "hessian",
-            "gptaq": "gptaq",
-            "foem": "foem",
-            "weight_only": "weight_only",
-            "preprocessors": "preprocessors",
-            "gc_mode": "gc_mode",
-            "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
-            "auto_forward_data_parallel": "auto_forward_data_parallel",
-            "dense_vram_strategy": "dense_vram_strategy",
-            "dense_vram_strategy_devices": "dense_vram_strategy_devices",
-            "moe_vram_strategy": "moe_vram_strategy",
-            "moe_vram_strategy_devices": "moe_vram_strategy_devices",
-            "moe": "moe",
-            "p2p": "p2p",
-            "offload_to_disk": "offload_to_disk",
-            "offload_to_disk_path": "offload_to_disk_path",
-            "pack_impl": "pack_impl",
-            "mse": "mse",
-            "mock_quantization": "mock_quantization",
-            "act_group_aware": "act_group_aware",
-            "true_sequential": "true_sequential",
-            "static_groups": "static_groups",
-            "damp_percent": "damp_percent",
-            "damp_auto_increment": "damp_auto_increment",
-            "opt_rotation_epochs": "opt_rotation_epochs",
-            "opt_finetune_epochs": "opt_finetune_epochs",
-            "opt_train_samples": "opt_train_samples",
-            "opt_validation_samples": "opt_validation_samples",
-            "opt_batch_size": "opt_batch_size",
-            "opt_rotation_lr": "opt_rotation_lr",
-            "opt_weight_lr": "opt_weight_lr",
-            "opt_quantizer_lr": "opt_quantizer_lr",
-            "opt_pair_ratio": "opt_pair_ratio",
-            "opt_seed": "opt_seed",
-            "opt_optimizer": "opt_optimizer",
-            "opt_weight_decay": "opt_weight_decay",
-            "opt_betas": "opt_betas",
-            "opt_eps": "opt_eps",
-            "opt_amsgrad": "opt_amsgrad",
-            "opt_sgd_momentum": "opt_sgd_momentum",
-            "opt_sgd_dampening": "opt_sgd_dampening",
-            "opt_sgd_nesterov": "opt_sgd_nesterov",
-            "opt_fused_rotation": "opt_fused_rotation",
-            "opt_gradient_checkpointing": "opt_gradient_checkpointing",
-            "opt_stage_cudagraph": "opt_stage_cudagraph",
-            "opt_amp": "opt_amp",
-            "opt_best_state_dtype": "opt_best_state_dtype",
-            "opt_train_on_noisy_inputs": "opt_train_on_noisy_inputs",
-            "opt_scope": "opt_scope",
-            "opt_stage_impl": "opt_stage_impl",
-            "opt_pair_impl": "opt_pair_impl",
-            "opt_quantizer_impl": "opt_quantizer_impl",
-            "opt_channel_scale_clamp_min": "opt_channel_scale_clamp_min",
-            "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
-            "scale_search_chunked_activations": "scale_search_chunked_activations",
-        }
-        if isinstance(meta_payload, dict):
-            for normalized_key, meta_key in meta_field_map.items():
-                if normalized_key not in normalized and meta_key in meta_payload:
-                    normalized[normalized_key] = meta_payload.get(meta_key)
+        normalized = _lift_serialized_meta_fields(normalized)
 
         # GPTQModel 5.4.x wrote `meta.gptaq` as a boolean and kept the
         # coefficient/device in sibling keys that have no config field of their
@@ -5528,10 +5574,15 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         dynamic = out["dynamic"]
         if dynamic:
             dynamic = copy.deepcopy(dynamic)
-            for _, v in dynamic.items():
-                v.pop("adapter", None)
-                if "bits" in v:
-                    v["bits"] = serialize_quant_bits(v["bits"])
+            for _, overrides in dynamic.items():
+                if not isinstance(overrides, Mapping):
+                    continue
+                overrides.pop("adapter", None)
+                for key, value in overrides.items():
+                    if key == "bits":
+                        overrides[key] = serialize_quant_bits(value)
+                    else:
+                        overrides[key] = _serialize_dynamic_override_value(value)
             out["dynamic"] = dynamic
 
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
@@ -5786,15 +5837,23 @@ class GPTQConfig(PreProcessorConfig):
             self.act_group_aware = False
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
-        if self.gptaq is None:
-            meta_payload["gptaq"] = None
-        elif self.foem is None:
+        # PreProcessorConfig writes the smoothing preprocessors here. Skipping
+        # this call dropped `smoother` from every GPTQ-family checkpoint, and
+        # QQQ/VPTQ inherit this hook.
+        super()._update_meta_payload(meta_payload)
+
+        # GPTAQ and FOEM are independent switches: a run can enable both, and
+        # the old `elif` chain wrote FOEM only when GPTAQ was also set while
+        # never writing `gptaq` itself.
+        if self.gptaq is not None:
             device = self.gptaq.device
             meta_payload["gptaq"] = {
                 "alpha": self.gptaq.alpha,
                 "device": device if isinstance(device, str) else str(device),
             }
         else:
+            meta_payload["gptaq"] = None
+        if self.foem is not None:
             device = self.foem.device
             meta_payload["foem"] = {
                 "alpha": self.foem.alpha,
@@ -5805,6 +5864,13 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse.norm
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        # Calibration controls do not take part in inference, so they live in
+        # `meta` (the writer already records them there). `to_dict()` must
+        # write the same values or a factory reload silently restores the
+        # defaults.
+        meta_payload["damp_percent"] = self.damp_percent
+        meta_payload["damp_auto_increment"] = self.damp_auto_increment
+        meta_payload["static_groups"] = self.static_groups
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
@@ -6096,6 +6162,8 @@ class ParoConfig(PreProcessorConfig):
         }
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        # PreProcessorConfig records the smoothing preprocessors here.
+        super()._update_meta_payload(meta_payload)
         meta_payload["opt_rotation_epochs"] = self.opt_rotation_epochs
         meta_payload["opt_finetune_epochs"] = self.opt_finetune_epochs
         meta_payload["opt_train_samples"] = self.opt_train_samples
@@ -6129,6 +6197,7 @@ class ParoConfig(PreProcessorConfig):
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
+        out["sym"] = self.sym
         out["krot"] = self.krot
         out[FORMAT_FIELD_CODE] = self.format
         if self.gsq is not None:
@@ -6335,6 +6404,7 @@ class VPTQConfig(GPTQConfig):
         }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["sym"] = self.sym
         out["vector_lens"] = list(self.vector_lens)
         out["num_centroids"] = list(self.num_centroids)
         out["num_res_centroids"] = list(self.num_res_centroids)
