@@ -26,6 +26,14 @@ def _bridge():
         pytest.skip(f"llama-cpp-python GGML bridge unavailable: {exc}")
 
 
+def _buffer_size(bridge, buffer) -> int:
+    lib = bridge._ggml_base
+    # `ggml_backend_buffer_get_size` is not part of the bridge's bound surface.
+    lib.ggml_backend_buffer_get_size.argtypes = [ctypes.c_void_p]
+    lib.ggml_backend_buffer_get_size.restype = ctypes.c_size_t
+    return int(lib.ggml_backend_buffer_get_size(buffer))
+
+
 def _packed_q8_0(bridge, out_features: int, in_features: int) -> torch.Tensor:
     weight = np.random.default_rng(0).standard_normal(
         (out_features, in_features)
@@ -63,7 +71,6 @@ def _compute_plan_on_cpu(bridge, backend, plan, x: torch.Tensor) -> torch.Tensor
 
 def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
     bridge = _bridge()
-    lib = bridge._ggml_base
     cpu_backend = bridge._get_cpu_backend()
     monkeypatch.setattr(bridge, "_get_cuda_backend", lambda index: cpu_backend)
 
@@ -94,7 +101,7 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
             plans.append((rows, plan))
 
         for rows, plan in plans:
-            plan_bytes = int(lib.ggml_backend_buffer_get_size(plan.buffer))
+            plan_bytes = _buffer_size(bridge, plan.buffer)
             # A pre-fix plan buffer contained the packed weight (weight.nbytes);
             # now it holds only this plan's activation and output tensors.
             assert plan_bytes < weight.nbytes
