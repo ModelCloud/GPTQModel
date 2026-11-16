@@ -218,6 +218,15 @@ backend = BACKEND.FP8_TORCH
 Use `format="float8_e5m2"` for E5M2. This recipe quantizes weights without
 calibration; it does not enable the experimental GPTQ FP8 activation stream.
 
+`TorchFP8Linear` is **weight-only (W8A16)**: the packed FP8 weight tile is
+dequantized for the current matmul and activations keep their FP16/BF16 input
+dtype. The GPU `torch._scaled_mm` path is not used by this recipe. It is
+reachable only through the explicit
+`TorchFP8Linear.set_activation_quant_method("per_token")` opt-in, which makes
+the layer **W8A8** with one activation scale per token. There is no per-tensor
+activation mode, because it would make a row's output depend on its batch
+neighbours. See [FP8 weight-only dispatch](fp8-weight-only-dispatch.md).
+
 #### FP8 source weight validation
 
 FP8 quantization requires finite dense source weights that remain finite when

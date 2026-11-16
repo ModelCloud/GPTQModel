@@ -12,6 +12,7 @@ from ..fusable import FusableConfig, LlamaFusableConfig
 class FalconH1QModel(BaseQModel):
     fusable = FusableConfig("falcon_h1").merge(LlamaFusableConfig())
 
+    pre_lm_head_norm_module = "model.final_layernorm"
     layers_node = "model.layers"
 
     module_tree= [
@@ -23,7 +24,7 @@ class FalconH1QModel(BaseQModel):
             # Attention and the Mamba mixer are parallel branches of one norm.
             "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
             # The SSM between in_proj and out_proj is not homogeneous.
-            "mamba": ("in_proj:0:in=x:nosrc", "out_proj:1"),
+            "mamba": ("in_proj:0:in=x:nosrc", "out_proj:1", "conv1d:!"),
             "pre_ff_layernorm": ("pre_ff_layernorm:!",),
             "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }

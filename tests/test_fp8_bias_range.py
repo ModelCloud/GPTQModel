@@ -147,6 +147,7 @@ def test_fp8_gpu_scaled_mm_adds_fp32_bias_before_rounding(dtype, input_value):
         in_features=16, out_features=16, bias=True,
         register_buffers=False, format="float8_e4m3fn",
         weight_scale_method="tensor",
+        activation_quant_method="per_token",
     )
     module.pack_original(linear, scales=None, zeros=None)
     module = module.to("cuda")

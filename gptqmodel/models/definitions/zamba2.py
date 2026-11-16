@@ -14,7 +14,7 @@ class Zamba2QModel(BaseQModel):
     require_monkeypatch = True
     require_pkgs = ["mamba_ssm>=2.3.1", "causal_conv1d>=1.2.0"]
 
-    pre_lm_head_norm_module = "lm_head"
+    pre_lm_head_norm_module = "model.final_layernorm"
 
     # Module-level kernels the legacy Zamba2 fast path relied on. Newer
     # transformers releases removed them in favour of kernel-decorated
@@ -37,12 +37,17 @@ class Zamba2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "mamba": ("in_proj:0", "out_proj:1"),
+            "mamba": ("in_proj:0", "out_proj:1", "conv1d:!"),
             "linear": ("linear:0",),
             "mamba_decoder": {
                 "input_layernorm": ("input_layernorm:!",),
-                "mamba": ("in_proj:0", "out_proj:1"),
+                "mamba": ("in_proj:0", "out_proj:1", "conv1d:!"),
             },
+            # Hybrid layers reuse a shared transformer block. It is
+            # checkpoint-owned but its nested projections are not part of the
+            # declared quantization plan, so exclude the whole subtree
+            # explicitly instead of leaving it undeclared.
+            "shared_transformer": ("shared_transformer:!",),
         },
     ]
 

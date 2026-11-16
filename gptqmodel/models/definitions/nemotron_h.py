@@ -14,6 +14,9 @@ class NemotronHQModel(BaseQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
     layer_modules_strict = False
+    # Routed-expert cardinality lives on `n_routed_experts` (not `num_experts`).
+    dynamic_expert_index = "n_routed_experts"
+    pre_lm_head_norm_module = "model.norm_f"
     # require_pkgs = ["transformers<=4.48.3"]
 
     # Transformers 5.22 renamed the native tree root ``backbone`` -> ``model``
@@ -30,6 +33,16 @@ class NemotronHQModel(BaseQModel):
             # homogeneous, so `up_proj`'s output is not `down_proj`'s input
             # scale source (fold error 2.2e-2).
             "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:2", "gate_proj:3", "up_proj:3:nosrc", "down_proj:4"),
+            # The SSM conv is checkpoint-owned but is not a quantizable Linear.
+            "mixer.conv1d": ("conv1d:!",),
+            # Routed top-k router keeps its checkpoint dtype.
+            "mixer.gate": ("gate:!",),
+            # Shared experts are dense Linears; declare them so they do not stay
+            # in the source dtype just because the MoE root is nested.
+            "mixer.shared_experts": ("up_proj:0", "down_proj:1"),
+            "mixer.experts:moe": {
+                "#": ("up_proj:0", "down_proj:1"),
+            },
         }
     ]
 
