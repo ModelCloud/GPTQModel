@@ -207,8 +207,10 @@ def test_nested_token_id_list_is_accepted():
 @pytest.mark.parametrize(
     "sample",
     [
+        # Only a zero-ROW item is structural. A zero-COLUMN row (including the
+        # 1-D empty tensor below, which becomes `(1, 0)`) is a too-short sample
+        # that the min-length filter drops; see test_calibration_empty_text_4306.
         torch.empty(0, 8, dtype=torch.long),
-        torch.empty(0, dtype=torch.long),
     ],
 )
 def test_empty_token_tensor_raises_a_clear_error(sample):
