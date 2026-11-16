@@ -2339,6 +2339,14 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.BITBLAS,
     FORMAT.LLM_AWQ,
 )
+# AWQ layouts whose runtime kernels (native CUDA GEMV, GEMV_FAST and LLM_AWQ)
+# declare `SUPPORTS_DTYPES = [torch.float16]`. Validating the model dtype up
+# front keeps the failure before calibration instead of in layer-0 finalize.
+AWQ_FP16_ONLY_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.GEMV,
+    FORMAT.GEMV_FAST,
+    FORMAT.LLM_AWQ,
+)
 PAROQUANT_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.PAROQUANT,
 )
@@ -5997,6 +6005,28 @@ class AWQConfig(PreProcessorConfig):
         # AWQ runtimes do not use GPTQ-style activation reordering unless the
         # checkpoint explicitly asks for it.
         return False
+
+    def validate_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        """Reject a non-fp16 model dtype for the fp16-only AWQ packing formats.
+
+        ``AwqGEMVLinear``/``AwqGEMVTritonLinear`` (and the GEMV_FAST/LLM_AWQ
+        kernels) declare ``SUPPORTS_DTYPES = [torch.float16]``. The loader only
+        checks that when the module is built in layer-0 finalize, after the AWQ
+        search has already consumed the calibration data (#4394). Fail here,
+        before the model is loaded, with the fix in the message.
+        """
+
+        if dtype is None or dtype == torch.float16:
+            return
+        if self.format not in AWQ_FP16_ONLY_FORMATS:
+            return
+        raise ValueError(
+            f"AWQConfig: `format={self.format.value}` only supports "
+            f"`dtype=torch.float16`, but the model is set to load as `{dtype}`. "
+            "Pass `dtype=torch.float16` to the loader (for example "
+            "`GPTQModel.load(..., dtype=torch.float16)`) or use "
+            "`format=FORMAT.GEMM`."
+        )
 
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)

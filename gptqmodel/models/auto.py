@@ -66,6 +66,11 @@ from ..utils.hf import (  # noqa: E402
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
+from ..utils.importer import (  # noqa: E402
+    auto_select_device,
+    normalize_device_device_map,
+    selector_device_family,
+)
 from ..utils.linalg_warmup import (  # noqa: E402
     kick_torch_linear_prewarm,
     kick_torch_quantize_prewarm,
@@ -1079,6 +1084,32 @@ class GPTQModel:
             trust_remote_code,
             **_get_config_load_kwargs(model_init_kwargs),
         )
+
+        if quantize_config is not None:
+            # The AWQ GEMV/GEMV_FAST/LLM_AWQ kernels are fp16-only. Their dtype
+            # is otherwise checked when the first module is built, after the AWQ
+            # search has already consumed the calibration data (#4394). Reject an
+            # unsupported target dtype here, before the model is loaded.
+            dtype = model_init_kwargs.get("dtype")
+            required_dtype = getattr(model_definition, "require_dtype", None)
+            if isinstance(required_dtype, str):
+                required_dtype = getattr(torch, required_dtype.removeprefix("torch."), None)
+            if isinstance(required_dtype, torch.dtype):
+                dtype = required_dtype
+            elif not isinstance(dtype, torch.dtype):
+                resolved_device = normalize_device_device_map(
+                    model_init_kwargs.get("device"),
+                    model_init_kwargs.get("device_map"),
+                )
+                resolved_device = auto_select_device(resolved_device, backend)
+                dtype = auto_dtype(
+                    config=config,
+                    device=selector_device_family(resolved_device),
+                    quant_inference=False,
+                )
+            validate_dtype = getattr(quantize_config, "validate_dtype", None)
+            if callable(validate_dtype):
+                validate_dtype(dtype)
 
         return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
