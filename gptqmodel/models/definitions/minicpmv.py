@@ -39,9 +39,18 @@ class MiniCPMVQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "o_proj:3"),
+            # Q/K/V are parallel consumers of `input_layernorm`, and `o_proj`
+            # consumes the attention output. Sequential stages made the norm
+            # fold into q only and then q into k. The MLP stages were also
+            # merged, so `down_proj` shared the gate/up GPTQ subset.
+            "self_attn": (
+                "q_proj:0:in=x",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
+                "o_proj:1",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj", "up_proj", "down_proj"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         }
     ]
 
