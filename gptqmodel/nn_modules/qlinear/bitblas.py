@@ -271,8 +271,11 @@ def import_bitblas():
         from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
         bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
-        visible = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
-        BITBLAS_TARGET = _normalize_bitblas_target(patched_auto_detect_nvidia_target(visible))
+        # device_smi resolves ``cuda:N`` against CUDA_VISIBLE_DEVICES, so N is a
+        # logical index. The env entry itself may be a physical id, UUID or MIG
+        # name and must not be parsed as one.
+        device_index = torch.cuda.current_device()
+        BITBLAS_TARGET = _normalize_bitblas_target(patched_auto_detect_nvidia_target(device_index))
         os.environ["TVM_TARGET"] = f"{BITBLAS_TARGET}"
         log.debug("BITBLAS_TARGET %s", BITBLAS_TARGET)
 
