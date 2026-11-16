@@ -98,7 +98,7 @@ class ParoQuantTritonLinear(ParoLinear):
         """Initialize Triton autotune settings and the per-shape plan cache."""
         kwargs.setdefault("backend", BACKEND.PAROQUANT_TRITON)
         super().__init__(*args, **kwargs)
-        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        kernel = resolve_kernel_config(self)
         self.paroquant_triton_autotune_enabled = kernel.paroquant_triton_autotune
         self.paroquant_triton_autotune_warmup = kernel.paroquant_triton_autotune_warmup
         self.paroquant_triton_autotune_iters = kernel.paroquant_triton_autotune_iters

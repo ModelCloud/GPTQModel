@@ -143,6 +143,59 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         generator.manual_seed(1234)
         return bool(torch.randn(64, generator=generator, device="cuda").abs().sum().item() > 0)
 
+    def set_num_threads_thread_local() -> bool:
+        """Split the intra-op budget across workers and re-enter it twice.
+
+        ``DeviceThreadPool`` calls ``torch.set_num_threads`` once per worker
+        thread so each OpenMP team is bounded (issue #4356). The probe checks
+        the two properties the fix relies on: the new value is visible to
+        threads the worker spawns (an OpenMP team is per pthread that enters
+        the region, and nested helper threads inherit the worker's value) and
+        it never leaks back to the caller.
+        """
+
+        from gptqmodel.utils.threadx import split_intraop_threads
+
+        caller_before = torch.get_num_threads()
+        target = split_intraop_threads(8, 8)
+        if target != 1:
+            raise AssertionError(f"split_intraop_threads(8, 8) returned {target}")
+        if split_intraop_threads(4, 8) != 2:
+            raise AssertionError("split_intraop_threads(4, 8) did not return 2")
+
+        state: Dict[str, int] = {}
+
+        def worker() -> None:
+            torch.set_num_threads(target)
+            state["worker"] = torch.get_num_threads()
+            matrix = torch.randn(256, 256)
+            state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+
+            child: Dict[str, int] = {}
+
+            def nested() -> None:
+                child["value"] = torch.get_num_threads()
+                child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+
+            thread = threading.Thread(target=nested)
+            thread.start()
+            thread.join()
+            state["child"] = child["value"]
+            state["child_finite"] = child["sum_finite"]
+
+        with ThreadPoolExecutor(max_workers=THREADS) as pool:
+            list(pool.map(lambda _: worker(), range(THREADS)))
+
+        if state["worker"] != target or state["child"] != target:
+            raise AssertionError(f"worker saw {state['worker']}, nested thread saw {state['child']}")
+        if not (state["sum_finite"] and state["child_finite"]):
+            raise AssertionError("matmul produced non-finite values under a split intra-op pool")
+        if torch.get_num_threads() != caller_before:
+            raise AssertionError(
+                f"worker set_num_threads leaked into the caller: {caller_before} -> {torch.get_num_threads()}"
+            )
+        return True
+
     def cpu_autocast_override() -> bool:
         x = torch.full((1, 32), 1000.0)
         weight = torch.full((32, 1), 3.125)
@@ -1050,6 +1103,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.is_autocast_enabled + torch.autocast (CPU)": cpu_autocast_override,
         "torch.is_autocast_enabled + torch.autocast (CUDA)": cuda_autocast_disable,
         "torch.get_autocast_dtype + torch.autocast (CUDA)": cuda_autocast_dtype,
+        "torch.set_num_threads (per worker)": set_num_threads_thread_local,
     }
     return probes
 

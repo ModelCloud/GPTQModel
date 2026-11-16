@@ -1226,7 +1226,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_block_size = qtype_info["block_size"]
         self.gguf_type_size = qtype_info["type_size"]
         self.padded_in_features = math.ceil(in_features / self.gguf_block_size) * self.gguf_block_size
-        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
         self.gguf_fused_cuda_max_rows = kernel.gguf_fused_cuda_max_rows
         self.gguf_fused_cuda_min_matrix_elements = kernel.gguf_fused_cuda_min_matrix_elements
         self.gguf_fused_cpu_max_rows = kernel.gguf_fused_cpu_max_rows

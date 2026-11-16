@@ -83,6 +83,7 @@ from ..utils.backend import (
     backend_for_activation,
     normalize_backend,
 )
+from ..utils.backend_config import Backend, resolve_quantize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
@@ -1894,7 +1895,7 @@ class BaseQModel(nn.Module):
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
+        backend: Optional[Backend] = BACKEND.AUTO,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
@@ -1926,6 +1927,10 @@ class BaseQModel(nn.Module):
 
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
+
+        # A typed choice on the dense-model load survives into quantize(),
+        # while an explicit quantize backend may replace that choice.
+        backend, _ = resolve_quantize_backend(backend, self.quantize_config, inherit=True)
 
         dynamic_cache_stats_before = (
             dynamic_override_cache_stats(self.quantize_config.dynamic) if self.quantize_config.dynamic else None

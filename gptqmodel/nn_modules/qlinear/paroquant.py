@@ -145,7 +145,7 @@ class ParoLinear(AwqTorchLinear):
                 "eight codes per int32, and ParoQuant reuses that layout for every "
                 "inference path, so a narrower output cannot be packed."
             )
-        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
         self._paroquant_cpu_avx512 = kernel.paroquant_cpu_avx512
         self.fp32_accum = bool(kernel.fp32_accum if fp32_accum is None else fp32_accum)
         self.cache_runtime_dtype = bool(
@@ -463,6 +463,7 @@ class ParoLinear(AwqTorchLinear):
                 kernel_scales,
                 self.qzeros,
                 _PAROQUANT_AWQ_SPLIT_K,
+                kernel=self.kernel,
             )
             bias = self._bias_for_compute(device=x_flat.device).float()
             return (out + bias).to(dtype=x_flat.dtype)
@@ -474,6 +475,7 @@ class ParoLinear(AwqTorchLinear):
             self.qzeros,
             _PAROQUANT_AWQ_SPLIT_K,
             fp32_accum=self.fp32_accum,
+            kernel=self.kernel,
         )
         if kernel_bias is not None:
             out = out + kernel_bias

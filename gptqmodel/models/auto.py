@@ -72,6 +72,7 @@ from ..utils.linalg_warmup import (  # noqa: E402
 )
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
 from ..utils.kernel import KernelConfig, configure_kernel  # noqa: E402
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend  # noqa: E402
 from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import normalize_device  # noqa: E402
@@ -816,7 +817,7 @@ class GPTQModel:
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
@@ -826,16 +827,15 @@ class GPTQModel:
             p2p: Optional[Union[P2PConfig, Dict]] = None,
             kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
         if type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         kwargs["fuse"] = fuse
-        if kernel is None:
-            if isinstance(quantize_config, Dict):
-                kernel = quantize_config.get("kernel")
-            elif quantize_config is not None:
-                kernel = getattr(quantize_config, "kernel", None)
+        if isinstance(quantize_config, Dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         configure_kernel(kernel)
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
@@ -968,14 +968,18 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
             kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ) -> BaseQModel:
+        if isinstance(quantize_config, dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The looper installs this policy before it enables peer access.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
@@ -1093,7 +1097,7 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
@@ -1102,8 +1106,10 @@ class GPTQModel:
             p2p: Optional[Union[P2PConfig, Dict]] = None,
             kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ) -> BaseQModel:
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,

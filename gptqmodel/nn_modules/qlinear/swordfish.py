@@ -367,6 +367,8 @@ class SwordfishLinear(GPTQQuantLinear):
             size_n=self.out_features,
             group_zps=group_zeros,
             num_bits=self.bits,
+            dense_m_override=self.kernel.swordfish_dense_m,
+            deterministic=self.kernel.swordfish_deterministic,
         )
 
         if self.bias is not None:
@@ -738,6 +740,8 @@ class AwqSwordfishLinear(AWQuantLinear):
             size_n=self.out_features,
             group_zps=group_zeros,
             num_bits=self.bits,
+            dense_m_override=self.kernel.swordfish_dense_m,
+            deterministic=self.kernel.swordfish_deterministic,
         )
 
         if self.bias is not None:

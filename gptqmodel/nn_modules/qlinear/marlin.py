@@ -155,7 +155,6 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
-        self.fp32 = resolve_kernel_config(kwargs.get("kernel")).marlin_fp32
 
         super().__init__(
             bits=bits,
@@ -171,6 +170,7 @@ class MarlinLinear(GPTQQuantLinear):
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
+        self.fp32 = resolve_kernel_config(self).marlin_fp32
         if not self.fp32:
             log.warn.once(
                 "Kernel: KernelConfig.marlin_fp32 is disabled. Marlin will use reduced-precision reduction.")

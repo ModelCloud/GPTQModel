@@ -288,7 +288,10 @@ class _BlockfloatStorage(nn.Module):
 
         shape = x.shape
         flat = x.reshape(-1, shape[-1])
-        out = bf_cuda.linear(flat, self.codes, self.exponents, self.bits, bias)
+        out = bf_cuda.linear(
+            flat, self.codes, self.exponents, self.bits, bias,
+            cublas=self.kernel.blockfloat_cublas,
+        )
         return out.reshape(*shape[:-1], out.shape[-1])
 
 
@@ -341,6 +344,7 @@ class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
             register_buffers=False,
             dtype=dtype,
             validate_kwargs={"pack_dtype": pack_dtype},
+            **kwargs,
         )
         self.block = block
         self.pack_dtype = pack_dtype

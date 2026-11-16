@@ -416,6 +416,7 @@ def _build_device_thread_pool(warmup_devices=None):
     return DeviceThreadPool(
         inference_mode=True,
         warmup_devices=warmup_devices,
+        intraop_threads_per_worker=get_kernel_config().pool_intraop_threads,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
@@ -542,6 +543,23 @@ def exllama_set_max_input_length(model, max_input_length: int):
 import torch
 
 from . import extension
+from .backend import (  # noqa: F401
+    AwqGemmConfig,
+    AwqTorchConfig,
+    AwqTritonConfig,
+    BackendConfig,
+    BitsAndBytesConfig,
+    GGUFCPPConfig,
+    GGUFCUDAConfig,
+    GGUFTorchConfig,
+    MarlinConfig,
+    ParoQuantConfig,
+    ParoQuantTritonConfig,
+    RuntimeConfig,
+    SwordfishConfig,
+    TorchConfig,
+    TTBlockFloatConfig,
+)
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
 from .models import (

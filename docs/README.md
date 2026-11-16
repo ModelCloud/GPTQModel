@@ -185,6 +185,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [AMD RDNA4 (gfx1200 / gfx1201 / gfx1250) support](rocm-rdna4.md)
 - [Device thread pool error propagation](thread-pool-error-contract.md)
 - [Torch thread caps](thread-caps.md)
+- [Device thread pool intra-op budget](device-thread-pool-intraop-budget.md)
 
 ### Adapters and accuracy recovery
 
@@ -194,6 +195,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Embedding checkpoint shard replacement](embedding-checkpoint-shard-replacement.md)
 - [GSQ paper reproduction: Llama 3.2 1B and distributed Llama 3.1 8B](experiments/gsq-paper-reproduction.md)
 - [GSQ CUDA empty-geometry dispatch](gsq-cuda-empty-geometry.md)
+- [GSQ fused relaxation precision contract](gsq-fused-relaxation-precision.md)
 - [Runtime LoRA output composition](lora-runtime-output.md)
 - [PEFT LoRA Training and Adapter Loading](peft.md)
 
