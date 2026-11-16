@@ -125,6 +125,30 @@ def test_rtn_accepts_transposed_low_precision_weights(dtype):
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("group_size", [32, 128])
+def test_rtn_torch_oracle_non_negative_group(dtype, group_size):
+    """A group that never goes negative must still be fitted around zero.
+
+    The symmetric midpoint is fixed at 8 for INT4, so fitting ``[0, max]``
+    would saturate the positive half of the grid at 7/15 of the maximum.
+    """
+
+    source = torch.ones(4, group_size * 2, dtype=dtype)
+    actual, expected = _compare(source, group_size=group_size)
+
+    np.testing.assert_array_equal(
+        np.asarray(actual[2].astype(mx.float32)), np.full((4, 2), 8.0)
+    )
+    reference = expected[0].float()
+    assert torch.allclose(
+        reference,
+        torch.full_like(reference, 14.0 / 15.0),
+        rtol=0,
+        atol=float(torch.finfo(dtype).eps),
+    )
+
+
 def test_rtn_rounding_boundaries():
     # The first row's extrema fix scale at 2/15. Adjacent values probe
     # values exactly on and one float32 step around several code boundaries.

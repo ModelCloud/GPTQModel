@@ -335,17 +335,21 @@ def test_two_bit_asymmetric_mse_search_optimizes_zero_point_orientation(monkeypa
     assert optimized_loss < legacy_loss
 
 
-def _legacy_find_params_range(x, sym):
-    """The pre-optimization range math, kept verbatim as the numeric oracle."""
+def _reference_find_params_range(x, sym):
+    """Zero-centered range reference for the min/max normalization.
+
+    A symmetric checkpoint stores the fixed zero point ``(maxq + 1) // 2``, so
+    every group is fitted against ``[-max|x|, max|x|]``.  Mirroring only the
+    ``xmin < 0`` lanes would fit a non-negative group as ``[0, max|x|]`` and
+    saturate the positive half of the grid.
+    """
     tmp = torch.zeros(x.shape[0], device=x.device)
     xmin = torch.minimum(x.min(1)[0], tmp)
     xmax = torch.maximum(x.max(1)[0], tmp)
 
     if sym:
         xmax = torch.maximum(torch.abs(xmin), xmax)
-        tmp = xmin < 0
-        if torch.any(tmp):
-            xmin[tmp] = -xmax[tmp]
+        xmin = -xmax
     tmp = (xmin == 0) & (xmax == 0)
     xmin[tmp] = -1
     xmax[tmp] = +1
@@ -356,6 +360,11 @@ def _range_cases(dtype):
     generator = torch.Generator().manual_seed(0)
     cases = {"randn": torch.randn(48, 32, generator=generator)}
     cases["all_zero"] = torch.zeros(48, 32)
+    # Non-negative groups are the regression case: they must still be fitted
+    # against a zero-centered range.
+    cases["all_positive"] = torch.rand(48, 32, generator=generator) + 0.25
+    cases["all_negative"] = -(torch.rand(48, 32, generator=generator) + 0.25)
+    cases["constant_positive"] = torch.full((48, 32), 2.5)
 
     mixed = torch.randn(48, 32, generator=generator)
     mixed[::3] = 0.0
@@ -377,7 +386,7 @@ def _raw_bytes(tensor):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize("sym", [True, False])
 def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
-    """The min/max normalization must stay bit-identical to the legacy math.
+    """The min/max normalization must stay bit-identical to the reference math.
 
     It also must not fall back to boolean-mask indexing: ``xmin[mask] = ...``
     forces a ``nonzero`` scan plus a device-to-host round trip on every call,
@@ -400,7 +409,7 @@ def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
         with _Recorder():
             quantizer.find_params(weights, weight=True)
 
-        expected_xmin, expected_xmax = _legacy_find_params_range(weights.clone(), sym)
+        expected_xmin, expected_xmax = _reference_find_params_range(weights.clone(), sym)
         expected_scale = (expected_xmax - expected_xmin) / quantizer.maxq.cpu()
         if sym:
             expected_zero = torch.full_like(expected_scale, (quantizer.maxq.cpu() + 1) / 2)
@@ -435,7 +444,7 @@ def _legacy_mse_range_search(x, *, bits, sym, mse, grid=100, maxshrink=0.8):
     """The pre-optimization MSE search, kept verbatim as the numeric oracle."""
     x = x.flatten(1)
     maxq = 2**bits - 1
-    xmin, xmax = _legacy_find_params_range(x, sym)
+    xmin, xmax = _reference_find_params_range(x, sym)
     scale = (xmax - xmin) / maxq
     zero = torch.full_like(scale, (maxq + 1) / 2) if sym else torch.round(-xmin / scale)
     best = torch.full([x.shape[0]], float("inf"), device=x.device)

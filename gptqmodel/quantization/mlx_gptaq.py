@@ -26,8 +26,10 @@ def _gptaq_group_kernel():
                 maximum = metal::max(maximum, values[k]);
             }
             if (SYM) {
+                // The stored zero point is fixed, so the range is
+                // zero-centered even when the group never goes negative.
                 maximum = metal::max(metal::abs(minimum), maximum);
-                if (minimum < 0.0f) minimum = -maximum;
+                minimum = -maximum;
             }
             if (minimum == 0.0f && maximum == 0.0f) {
                 minimum = -1.0f;

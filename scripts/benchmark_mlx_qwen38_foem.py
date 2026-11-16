@@ -31,7 +31,7 @@ def _torch_foem_group_update(weight, factor, group_size=128, beta=0.2, *, record
         minimum = torch.minimum(group.amin(1), torch.zeros(rows))
         maximum = torch.maximum(group.amax(1), torch.zeros(rows))
         maximum = torch.maximum(minimum.abs(), maximum)
-        minimum = torch.where(minimum < 0, -maximum, minimum)
+        minimum = -maximum
         empty = (minimum == 0) & (maximum == 0)
         minimum = torch.where(empty, -1, minimum)
         maximum = torch.where(empty, 1, maximum)

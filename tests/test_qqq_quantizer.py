@@ -22,7 +22,7 @@ def _legacy_qqq_quantize(x, scale, zero, maxq, sym, groupsize):
     return scale * q
 
 
-def _legacy_qqq_find_params(
+def _reference_qqq_find_params(
     x,
     *,
     bits,
@@ -41,9 +41,9 @@ def _legacy_qqq_find_params(
 
     if sym:
         xmax = torch.maximum(torch.abs(xmin), xmax)
-        tmp = xmin < 0
-        if torch.any(tmp):
-            xmin[tmp] = -xmax[tmp]
+        # The stored zero point is fixed at ``(maxq + 1) // 2``, so the range
+        # must be zero-centered for non-negative groups too.
+        xmin = -xmax
     tmp = (xmin == 0) & (xmax == 0)
     xmin[tmp] = -1
     xmax[tmp] = +1
@@ -91,6 +91,10 @@ def _cases(dtype):
     generator = torch.Generator().manual_seed(0)
     cases = {"randn": torch.randn(16, 64, generator=generator)}
     cases["all_zero"] = torch.zeros(16, 64)
+    # Non-negative groups are the regression case for zero-centered fitting.
+    cases["all_positive"] = torch.rand(16, 64, generator=generator) + 0.25
+    cases["all_negative"] = -(torch.rand(16, 64, generator=generator) + 0.25)
+    cases["constant_positive"] = torch.full((16, 64), 2.5)
 
     mixed = torch.randn(16, 64, generator=generator)
     mixed[::3] = 0.0
@@ -151,7 +155,7 @@ def test_qqq_find_params_stays_bit_exact_and_sync_free(dtype, bits, sym, groupsi
         with recorder:
             quantizer.find_params(weights, weight=True)
 
-        expected_scale, expected_zero = _legacy_qqq_find_params(
+        expected_scale, expected_zero = _reference_qqq_find_params(
             weights.clone(),
             bits=bits,
             sym=sym,
@@ -310,7 +314,7 @@ def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget):
         bits=bits, perchannel=True, sym=sym, groupsize=groupsize, mse=True,
     )
     quantizer.find_params(weights, weight=True)
-    scale, zero = _legacy_qqq_find_params(
+    scale, zero = _reference_qqq_find_params(
         weights, bits=bits, sym=sym, groupsize=groupsize, mse=True,
     )
     torch.testing.assert_close(quantizer.scale.flatten(), scale, rtol=0, atol=0)
