@@ -400,11 +400,13 @@ def get_kernel_config() -> KernelConfig:
     return _ACTIVE_CONFIG
 
 
-def resolve_kernel_config(owner: Any = None) -> KernelConfig:
+def resolve_kernel_config(owner: Any = None, *, use_process_default: bool = True) -> KernelConfig:
     """Return the policy that applies to ``owner`` (a quantize config).
 
     An explicit ``owner.kernel`` wins; otherwise the process-wide policy
-    installed by a looper or ``GPTQModel.load`` applies.
+    installed by a looper or ``GPTQModel.load`` applies. Run boundaries pass
+    ``use_process_default=False`` so an unset run resets to fresh defaults
+    rather than inheriting the previous run's process fallback.
     """
 
     if isinstance(owner, KernelConfig):
@@ -419,7 +421,7 @@ def resolve_kernel_config(owner: Any = None) -> KernelConfig:
     runtime = getattr(owner, "runtime", None) if owner is not None else None
     if runtime is not None:
         return runtime.to_kernel_config()
-    return get_kernel_config()
+    return get_kernel_config() if use_process_default else KernelConfig()
 
 
 def snapshot_kernel_config(owner: Any = None) -> KernelConfig:

@@ -99,6 +99,8 @@ Shared quantization/host utilities still use a process-wide fallback guarded
 by an `RLock`. Concurrent model quantization with different shared runtime
 settings is not isolated by this API. `configure_kernel(None)` resets that
 fallback to defaults; it does not modify constructed modules.
+Both loopers resolve an unset run policy with `use_process_default=False` to
+reset to defaults before quantization instead of inheriting a previous run.
 
 ## Before and after
 

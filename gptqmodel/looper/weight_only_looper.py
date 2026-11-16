@@ -114,7 +114,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # summary, and never blocks quantization when a link is unsupported.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
-        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config))
+        configure_kernel(resolve_kernel_config(self.gptq_model.quantize_config, use_process_default=False))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 

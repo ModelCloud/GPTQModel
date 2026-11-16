@@ -57,8 +57,8 @@ flowchart TD
     A["QuantizeConfig(kernel=KernelConfig(...))"] --> B["BaseQuantizeConfig.__post_init__<br/>_normalize_kernel_config"]
     C["GPTQModel.load(..., kernel=KernelConfig(...))"] --> D["GPTQModel.load"]
     D --> E["configure_kernel(kernel)"]
-    B --> F["ModuleLooper.__init__<br/>configure_kernel(resolve_kernel_config(qcfg))"]
-    B --> G["WeightOnlyLooper.__init__<br/>configure_kernel(resolve_kernel_config(qcfg))"]
+    B --> F["ModuleLooper.__init__<br/>resolve_kernel_config(qcfg, use_process_default=False)"]
+    B --> G["WeightOnlyLooper.__init__<br/>resolve_kernel_config(qcfg, use_process_default=False)"]
     F --> E
     G --> E
     E --> H["_ACTIVE_CONFIG (process-wide, RLock)"]
