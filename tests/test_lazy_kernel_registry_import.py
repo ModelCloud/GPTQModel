@@ -74,6 +74,9 @@ def test_import_gptqmodel_skips_optional_backend_modules():
                 name for name in sys.modules
                 if name.startswith("gptqmodel.nn_modules.qlinear.")
                 and name.count(".") == 3
+                # Private modules such as ``_numerics``/``_runtime_cache`` are
+                # core package helpers, not optional kernel backends.
+                and not name.rsplit(".", 1)[-1].startswith("_")
             ]
             assert len(kernel_modules) <= 12, (
                 f"kernel discovery ran eagerly at import time: {{sorted(kernel_modules)}}"

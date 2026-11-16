@@ -321,7 +321,8 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         original_weight = original_state[f"{name}.weight"].to(dtype=torch.float16)
         expected_qweight, expected_g_idx = _reference_rtn_quantized_weight(original_weight, device=device, smooth=smooth)
 
-        assert qmodule.qzero_format() == 1
+        # ``pack()`` writes logical (v2) zero points and records that layout.
+        assert qmodule.qzero_format() == 2
         assert qmodule.qweight.device.type == "cpu"
         assert qmodule.qzeros.device.type == "cpu"
         assert qmodule.scales.device.type == "cpu"

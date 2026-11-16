@@ -1697,7 +1697,9 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         monkey_patcher.undo()
 
     assert captured["inp_device"] == "cpu"
-    assert captured["fp16_output_devices"] == ["cpu"]
+    # Chunked reference outputs stay on the replay (module) device; the grid
+    # loop moves them per group instead of paying a host round trip here.
+    assert captured["fp16_output_devices"] == ["cuda"]
     assert captured["fp16_output_shapes"] == [(4, 8, 16)]
     assert captured["replay_batch_size"] == 0
     assert captured["prepared_forward"] is not None

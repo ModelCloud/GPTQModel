@@ -53,7 +53,7 @@ def _awq_processor(qcfg: QuantizeConfig) -> AWQProcessor:
     )
 
 
-def test_awq_capture_is_pre_forward_and_gptq_does_not_receive_the_hook():
+def test_awq_capture_is_pre_forward_and_gptq_registers_the_padding_hook():
     events = []
 
     class Root(nn.Module):
@@ -84,14 +84,17 @@ def test_awq_capture_is_pre_forward_and_gptq_does_not_receive_the_hook():
     root(hidden_states)
     assert [event[0] for event in events] == ["forward"]
 
-    # GPTQ inherits the generic no-op lifecycle method; it must not receive an
-    # AWQ root hook even when it processes the same MoE module.
+    # GPTQ uses the hook to zero calibration padding rows on the MoE input so
+    # padded rows cannot bias the expert Hessians.
     gptq_probe = GPTQProcessor(
         tokenizer=None,
         qcfg=QuantizeConfig(method=METHOD.GPTQ),
         calibration=CalibrationConfig(),
     )
-    assert gptq_probe.register_moe_root_capture_hook(root, "mlp", []) is False
+    gptq_handles = []
+    assert gptq_probe.register_moe_root_capture_hook(root, "mlp", gptq_handles) is True
+    assert len(gptq_handles) == 1
+    gptq_handles[0].remove()
 
 
 def test_gptq_lifecycle_collects_normalized_hessian_without_awq_feature_state():

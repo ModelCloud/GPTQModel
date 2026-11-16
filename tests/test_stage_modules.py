@@ -702,6 +702,8 @@ def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch)
             return None
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = types.SimpleNamespace(
             quantize_config=QuantizeConfig(bits=4, group_size=128),
         )
@@ -776,6 +778,8 @@ def test_subset_pass_restored_capture_skips_forward(monkeypatch):
             return None
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = types.SimpleNamespace(
             quantize_config=QuantizeConfig(bits=4, group_size=128),
         )
@@ -939,6 +943,8 @@ def test_subset_pass_finishes_zero_route_recovery_before_quant_fanout(monkeypatc
             return RecoveryContext()
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = DummyQModel()
 
         def _masked_hook_wrapper(self, _processor, hook, _source):
@@ -1075,6 +1081,8 @@ def test_subset_pass_restored_recovery_frontier_is_validated_before_fanout(
             events.append("process")
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         gptq_model = types.SimpleNamespace(
             quantize_config=QuantizeConfig(bits=4, group_size=128),
         )
@@ -1596,6 +1604,8 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             return value
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -1819,6 +1829,8 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             return value
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -2108,6 +2120,8 @@ def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
             return "lm_head"
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -2392,6 +2406,8 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             return value
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor()]
@@ -2501,6 +2517,8 @@ def test_replay_layer_outputs_without_plan_uses_generic_progress():
             timer_records.append((args, kwargs))
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = "not-cleared"
             self.forward_calls = []
@@ -2618,6 +2636,8 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
             timer_records.append((args, kwargs))
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = replay_modules
             self.forward_calls = []
@@ -2733,6 +2753,8 @@ def test_replay_layer_outputs_with_plan_can_skip_override_restore():
             return DummyPB()
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = replay_modules
             self.forward_calls = []
@@ -2842,6 +2864,8 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
             timer_records.append((args, kwargs))
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self._current_subset = replay_modules
             self.forward_calls = []
@@ -3090,6 +3114,8 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             return value
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self, layers, initial_inputs):
             self.gptq_model = DummyGptqModel()
             self.processors = [DummyProcessor(initial_inputs)]
@@ -3435,6 +3461,8 @@ def test_run_layer_stage_catches_up_packed_layer_with_original_forward_topology(
             raise AssertionError("packed catch-up used generic post_quantize")
 
     class DummyLooper:
+        def layer_modules_for_prefix(self, prefix, *, planning=False):
+            return None
         def __init__(self):
             self.processors = [DummyProcessor()]
             self.boundary = Boundary(self.processors[0])

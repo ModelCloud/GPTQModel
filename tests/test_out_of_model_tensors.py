@@ -65,6 +65,9 @@ class _DummyQuantizeConfig:
         with open(os.path.join(save_dir, "quantize_config.json"), "w", encoding="utf-8") as handle:
             json.dump({"meta": dict(self._meta)}, handle)
 
+    def has_dynamic_exclusions(self):
+        return False
+
     def extract_adapter_rank_patterns(self):
         return {}
 
@@ -351,6 +354,12 @@ class _DummyModel:
     def __init__(self):
         self.config = _DummyConfig()
         self.generation_config = _DummyGenerationConfig()
+
+    def named_modules(self):
+        return iter(())
+
+    def modules(self):
+        return iter(())
 
     def save_pretrained(self, save_dir, state_dict=None, is_main_process=True):
         with open(os.path.join(save_dir, "config.json"), "w", encoding="utf-8") as handle:

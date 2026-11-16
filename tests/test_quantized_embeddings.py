@@ -95,7 +95,9 @@ def _pack_embedding(
     )
     module.pack_original(
         embedding,
-        scales=torch.rand(dim, groups) * 0.02,
+        # Keep every nonzero scale in the fp16 normal range; the library
+        # rejects scales that would underflow to zero on storage.
+        scales=(torch.rand(dim, groups) * 0.02).clamp_min(1e-3),
         zeros=torch.randint(0, 1 << bits, (dim, groups)),
         g_idx=torch.arange(vocab, dtype=torch.int32) // group_size,
     )

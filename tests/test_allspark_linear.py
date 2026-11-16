@@ -160,12 +160,14 @@ def test_linear_bias_does_not_expand_persistent_storage(dtype):
     packed_bytes = (mod.qweight_packed.numel()
                     + mod.scales_packed.numel() * mod.scales_packed.element_size())
     bias_bytes = mod.bias.numel() * mod.bias.element_size()
-    before = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()}
+    before = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()
+              if name != "qzeros_format"}
     x = torch.full((4, k), 16.0, dtype=dtype, device="cuda")
     for _ in range(3):
         mod(x)
         torch.cuda.synchronize()
-        after = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()}
+        after = {name: t.numel() * t.element_size() for name, t in mod.named_buffers()
+                 if name != "qzeros_format"}
         assert after == before
     assert sum(before.values()) == packed_bytes + bias_bytes
 
@@ -271,13 +273,18 @@ def test_module_export_keeps_checkpoint_layout(dtype):
 
     module, qweight, scales, codes = _load_gptq_module(dtype)
     pristine = {name: tuple(t.shape) for name, t in module.state_dict().items()}
-    assert set(pristine) == {"qweight", "scales", "bias"}
+    assert set(pristine) == {"qweight", "scales", "bias", "qzeros_format"}
 
     module.post_init()
     assert {name: tuple(t.shape) for name, t in module.state_dict().items()} == pristine
-    assert {name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()} == pristine
+    exported_pristine = {name: shape for name, shape in pristine.items() if name != "qzeros_format"}
+    assert {
+        name: tuple(entry.shape) for name, entry in get_state_dict_for_save(module).items()
+    } == exported_pristine
     # The kernel layout is derived, not part of the checkpoint.
-    assert set(dict(module.named_buffers())) == {"bias", "qweight_packed", "scales_packed"}
+    assert set(dict(module.named_buffers())) == {
+        "bias", "qweight_packed", "scales_packed", "qzeros_format",
+    }
     assert "qweight_packed" not in dict(module.state_dict())
 
     x = (torch.randn(4, module.in_features, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
@@ -332,4 +339,5 @@ def test_runtime_state_dict_roundtrip_and_cache_invalidation(dtype):
         "qweight": torch.Size([64, 512]),
         "scales": torch.Size([1, 512]),
         "bias": torch.Size([512]),
+        "qzeros_format": torch.Size([]),
     }

@@ -112,7 +112,9 @@ def test_marlin_cpu_offload_refreshes_packed_weights(
         tensor.numel() * tensor.element_size()
         for tensor in hook.weights_map.dataset.values()
     ) == sum(tensor.numel() * tensor.element_size() for tensor in expected.values())
-    assert set(layer.state_dict()) == {"qweight", "scales", "qzeros", "g_idx", "bias"}
+    assert set(layer.state_dict()) == {
+        "qweight", "scales", "qzeros", "g_idx", "bias", "qzeros_format",
+    }
 
 
 def test_marlin_disk_offload_is_rejected_before_repacking(monkeypatch, tmp_path):

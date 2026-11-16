@@ -461,6 +461,11 @@ class BaseQuantLinear(nn.Module):
                     f"{self.__class__.__name__} cannot load mixed or invalid CPU int4pack "
                     "operand shapes; supply one checkpoint or runtime layout."
                 )
+            from ._fused_train_state import (
+                materialize_fused_runtime_state,
+                runtime_state_matches_live,
+            )
+
             if layout == "checkpoint":
                 # Only a checkpoint load restores the snapshot. The cache clear
                 # hook keeps the live packed buffers authoritative for moves and
@@ -477,11 +482,7 @@ class BaseQuantLinear(nn.Module):
                 # is deliberately replacing. Keep the live transformed tensors
                 # the load is about to write, and let the clear below rebuild
                 # derived metadata from them.
-                from ._fused_train_state import (
-                    materialize_fused_runtime_state,
-                    runtime_state_matches_live,
-                )
-
+                #
                 # Keep the checkpoint snapshot for a true self round-trip.
                 # A modified runtime layout has no guaranteed inverse back to
                 # checkpoint zero codes, so export must fail explicitly.
@@ -489,14 +490,17 @@ class BaseQuantLinear(nn.Module):
                     getattr(self, "_fused_train_state_exportable", True)
                     and runtime_state_matches_live(self, state_dict, prefix)
                 )
-                local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
-                assign = isinstance(local_metadata, dict) and bool(
-                    local_metadata.get("assign_to_params_buffers", False)
-                )
-                if not assign:
-                    # A forward ran the transform inside ``inference_mode``;
-                    # copying into inference tensors outside it is rejected.
-                    materialize_fused_runtime_state(self, state_dict, prefix)
+
+            local_metadata = args[2] if len(args) > 2 else kwargs.get("local_metadata", {})
+            assign = isinstance(local_metadata, dict) and bool(
+                local_metadata.get("assign_to_params_buffers", False)
+            )
+            if not assign:
+                # A forward ran the transform inside ``inference_mode``;
+                # copying into inference tensors outside it is rejected.
+                # ``g_idx`` is not part of the snapshot, so this applies to
+                # checkpoint loads as well as runtime ones.
+                materialize_fused_runtime_state(self, state_dict, prefix)
         super()._load_from_state_dict(*args, **kwargs)
         if layout == "runtime":
             # Invalidate derived metadata without restoring the snapshot that

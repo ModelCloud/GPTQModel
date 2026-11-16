@@ -533,7 +533,13 @@ def test_awq_cost_includes_partial_words_and_metadata(group_size, width):
     adapter = adapter_for(AWQConfig(bits=4, group_size=group_size), options=(width,))
     module = AwqTorchLinear(bits=width, group_size=group_size, sym=True, desc_act=False,
                             in_features=32, out_features=8, register_buffers=True)
-    actual = sum(t.numel() * t.element_size() * 8 for t in module.buffers())
+    # ``qzeros_format`` is a fixed 64-bit serialization marker, not part of
+    # the packed weight/scale/zero payload the cost model estimates.
+    actual = sum(
+        t.numel() * t.element_size() * 8
+        for name, t in module.named_buffers()
+        if name != "qzeros_format"
+    )
     assert adapter.cost_matrix([(8, 32)]).item() * 256 == actual
 
 
@@ -680,9 +686,6 @@ def test_measure_allocate_quantize_and_reload(tmp_path, method):
 
 
 def test_exl3_measurement_recomputes_error_instead_of_using_native_sentinels(monkeypatch):
-    import sys
-    from types import SimpleNamespace
-
     runner = script('rco_format_allocate')
     seen = {}
 
@@ -692,8 +695,11 @@ def test_exl3_measurement_recomputes_error_instead_of_using_native_sentinels(mon
         h_data['H'].zero_()  # native finalization mutates its private copy
         return weight * .5, -1., {}
 
-    monkeypatch.setitem(sys.modules, 'gptqmodel.exllamav3.modules.quant.exl3_lib.quantize',
-                        SimpleNamespace(quantize_exl3=quantize))
+    import gptqmodel.exllamav3.modules.quant.exl3_lib.quantize as exl3_quantize
+
+    # Patch the function on the real module: replacing the whole module breaks
+    # the numerical-contract imports in ``gptqmodel.looper.exllamav3_processor``.
+    monkeypatch.setattr(exl3_quantize, 'quantize_exl3', quantize)
     weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
     hessian = torch.eye(4)
     config = EXL3Config(bits=3, codebook='mul1', out_scales='never')
