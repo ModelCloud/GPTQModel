@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import os
 import types
@@ -9,6 +10,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from gptqmodel.looper.checkpoint_store import CheckpointError
+from gptqmodel.looper.gptq_checkpoint import _source_identity
 from gptqmodel.models.base import _QuantizedCheckpointSource
 from gptqmodel.models.writer import _save_module_replacement_safetensors
 from gptqmodel.utils.checkpoint_paths import (
@@ -139,6 +142,79 @@ def test_auxiliary_hf_blob_symlink_allowed(tmp_path):
     os.symlink(os.path.join("..", "..", "blobs", "abc"), snapshot / "README.md")
 
     assert_auxiliary_copy_allowed(str(snapshot), str(snapshot / "README.md"))
+
+
+def test_source_identity_accepts_hf_snapshot_symlinks(tmp_path):
+    hub = tmp_path / "hub"
+    blobs = hub / "blobs"
+    snapshot = hub / "snapshots" / "rev"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+
+    contents = {
+        "config.json": "{}",
+        "model-00001-of-00001.safetensors": "weights",
+    }
+    for name, text in contents.items():
+        blob = blobs / name
+        blob.write_text(text, encoding="utf-8")
+        os.symlink(os.path.join("..", "..", "blobs", name), snapshot / name)
+    (snapshot / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {"model.layers.0.weight": "model-00001-of-00001.safetensors"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = _source_identity(types.SimpleNamespace(model_local_path=str(snapshot)))
+
+    assert identity == {
+        name: hashlib.sha256(text.encode("utf-8")).hexdigest()
+        for name, text in contents.items()
+    }
+
+
+@pytest.mark.parametrize(
+    "shard_name",
+    ["../outside.safetensors", "/tmp/gptqmodel-victim/outside.safetensors"],
+)
+def test_source_identity_rejects_unsafe_shard_names(tmp_path, shard_name):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}", encoding="utf-8")
+    _write_index(source, {"model.layers.0.weight": shard_name})
+
+    with pytest.raises(CheckpointError):
+        _source_identity(types.SimpleNamespace(model_local_path=str(source)))
+
+
+def test_source_identity_rejects_symlink_outside_source_tree(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}", encoding="utf-8")
+    secret = tmp_path / "secret"
+    secret.write_text("private", encoding="utf-8")
+    os.symlink(secret, source / "model.safetensors")
+
+    with pytest.raises(CheckpointError):
+        _source_identity(types.SimpleNamespace(model_local_path=str(source)))
+
+
+def test_source_identity_rejects_symlinked_directory_outside_source_tree(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "shard.safetensors").write_text("weights", encoding="utf-8")
+    os.symlink(outside, source / "nested")
+    _write_index(source, {"model.layers.0.weight": "nested/shard.safetensors"})
+
+    with pytest.raises(CheckpointError):
+        _source_identity(types.SimpleNamespace(model_local_path=str(source)))
 
 
 def test_copy_py_files_rejects_symlink_escape(tmp_path):

@@ -23,6 +23,11 @@ from safetensors.torch import save
 
 from ..adapter.adapter import Lora
 from ..quantization.config import METHOD, resolve_model_rotation
+from ..utils.checkpoint_paths import (
+    CheckpointPathError,
+    assert_source_read_allowed,
+    resolve_checkpoint_path,
+)
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.offload import set_submodule
 from ..utils.tensor import tensor_bytes
@@ -326,9 +331,18 @@ def _source_identity(model):
         )
     result = {}
     for name in ["config.json", *shards]:
-        path = (root / name).resolve()
-        if not path.is_relative_to(root.resolve()):
-            raise CheckpointError("source shard escapes the model directory")
+        try:
+            path = Path(
+                resolve_checkpoint_path(
+                    str(root), name, kind="source file", follow_symlinks=False
+                )
+            )
+            # Hugging Face snapshot files are symlinks into the sibling blob
+            # store, so hash through the link while still rejecting links that
+            # escape the source tree for any other reason.
+            assert_source_read_allowed(str(root), str(path), kind="source file")
+        except CheckpointPathError as exc:
+            raise CheckpointError(str(exc)) from exc
         with path.open("rb") as stream:
             result[name] = hashlib.file_digest(stream, "sha256").hexdigest()
     return result
