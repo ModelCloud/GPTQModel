@@ -35,6 +35,10 @@ def _reference_qqq_find_params(
 ):
     x = x.flatten(1)
     maxq = 2**bits - 1 if groupsize != -1 or not sym else 2 ** (bits - 1) - 1
+    # Tensor division has different rounding from scalar reciprocal-multiply
+    # on accelerators. Keep the reference's FP32 division in the same domain
+    # as the stored maxq buffer, without calling the production fitter.
+    maxq_tensor = torch.tensor(maxq, dtype=torch.int64, device=x.device)
     tmp = torch.zeros(x.shape[0], device=x.device)
     xmin = torch.minimum(x.min(1)[0], tmp)
     xmax = torch.maximum(x.max(1)[0], tmp)
@@ -52,10 +56,10 @@ def _reference_qqq_find_params(
         scale = xmax
         zero = xmin
     elif groupsize != -1 or not sym:
-        scale = (xmax - xmin) / maxq
+        scale = (xmax - xmin) / maxq_tensor
         zero = torch.full_like(scale, (maxq + 1) / 2) if sym else torch.round(-xmin / scale)
     else:
-        scale = xmax / maxq
+        scale = xmax / maxq_tensor
         zero = torch.zeros_like(scale)
 
     if mse:
@@ -64,7 +68,7 @@ def _reference_qqq_find_params(
             p = 1 - index / grid
             xmin1 = p * xmin
             xmax1 = p * xmax
-            scale1 = (xmax1 - xmin1) / maxq if groupsize != -1 or not sym else xmax1 / maxq
+            scale1 = (xmax1 - xmin1) / maxq_tensor if groupsize != -1 or not sym else xmax1 / maxq_tensor
             zero1 = torch.round(-xmin1 / scale1) if not sym else zero
             q = _legacy_qqq_quantize(
                 x,
@@ -304,9 +308,12 @@ def test_qqq_hessian_reduction_uses_the_direction_aware_move(monkeypatch):
     (2, False, 32), (3, True, -1), (4, True, 32), (8, False, -1),
 ])
 @pytest.mark.parametrize("budget", [0, 1])
-def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget):
+@pytest.mark.parametrize("non_negative", [False, True])
+def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget, non_negative):
     weights = torch.randn(128, 32, generator=torch.Generator().manual_seed(7))
     weights = weights.to(device=device, dtype=dtype)[::2, ::2].t()
+    if non_negative:
+        weights = weights.abs()
     quantizer = Quantizer(
         qcfg=QuantizeConfig(mse=MSEConfig(norm=2.4, grid_budget=budget)),
     )

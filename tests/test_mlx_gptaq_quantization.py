@@ -29,7 +29,7 @@ def _torch_params(group, bits, sym):
     maximum = torch.maximum(group.amax(dim=1), torch.zeros(group.shape[0]))
     if sym:
         maximum = torch.maximum(minimum.abs(), maximum)
-        minimum = torch.where(minimum < 0, -maximum, minimum)
+        minimum = -maximum
     empty = (minimum == 0) & (maximum == 0)
     minimum = torch.where(empty, -1, minimum)
     maximum = torch.where(empty, 1, maximum)
@@ -157,16 +157,22 @@ def test_gptaq_code_boundaries_and_input_casts(sym):
 
 
 @pytest.mark.parametrize("sym", [False, True])
-def test_gptaq_fused_params_extrema_match_torch(sym):
-    source = np.zeros((4, 32), dtype=np.float32)
+@pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16])
+def test_gptaq_fused_params_extrema_match_torch(sym, dtype):
+    source = np.zeros((7, 32), dtype=np.float32)
     source[1] = np.linspace(0.125, 2, 32, dtype=np.float32)
     source[2] = -source[1]
     source[3, :2] = (-3, 2)
+    source[4] = 1
+    source[5] = np.linspace(0, 1, 32, dtype=np.float32)
+    source[6] = -0.0
+    weight = mx.array(source).astype(dtype)
+    resident = np.asarray(weight.astype(mx.float32))
     factor = np.eye(32, dtype=np.float32)
     correction = np.zeros((32, 32), dtype=np.float32)
-    expected = _torch_oracle(source, factor, correction, 4, 32, sym)
+    expected = _torch_oracle(resident, factor, correction, 4, 32, sym)
     actual = gptaq_quantize_weight_mlx(
-        mx.array(source),
+        weight,
         mx.array(factor),
         mx.array(correction),
         group_size=32,
@@ -224,8 +230,7 @@ def _exact_banded_tie_margin(source_row, target, group_size=128):
             minimum = min(Decimal(0), min(group))
             maximum = max(Decimal(0), max(group))
             maximum = max(abs(minimum), maximum)
-            if minimum < 0:
-                minimum = -maximum
+            minimum = -maximum
             if minimum == maximum == 0:
                 minimum, maximum = Decimal(-1), Decimal(1)
             scale = (maximum - minimum) / 15
