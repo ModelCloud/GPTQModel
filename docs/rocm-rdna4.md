@@ -122,13 +122,23 @@ groups differing in 222/483 (the issue measured 224/482). GPT-QModel warns once
 whenever the pin is skipped, including the opt-out spellings.
 
 Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
-hipBLASLt remains available as an explicit experiment:
+hipBLASLt remains available as an explicit experiment. Attach it to the
+quantization config so each quantization run installs it:
 
 ```python
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel import GPTQModel
+from gptqmodel.backend import RuntimeConfig
+from gptqmodel.quantization import QuantizeConfig
 
-configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))
+qcfg = QuantizeConfig(bits=4, runtime=RuntimeConfig(rocm_quant_blas="hipblaslt"))
+model = GPTQModel.load("org/model", quantize_config=qcfg)
+model.quantize(calibration_dataset)
 ```
+
+A bare `configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))` call does
+not last: every `GPTQModel.load` and both quantization loopers install the
+policy their config resolves to, so a process-wide policy set beforehand is
+reset to the default.
 
 `gptqmodel.utils.rocm.quantize_tuning(device)` returns
 `{"blas_backend", "amp", "prewarm_ops"}`; `amp` stays disabled on ROCm

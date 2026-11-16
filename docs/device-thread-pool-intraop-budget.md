@@ -55,7 +55,7 @@ outside this contract.
 
 | Item | Value |
 | --- | --- |
-| Parameter | `DeviceThreadPool(intraop_threads_per_worker=...)`, set from `KernelConfig.pool_intraop_threads` by `_build_device_thread_pool()` |
+| Parameter | `DeviceThreadPool(intraop_threads_per_worker=...)`, set from `RuntimeConfig.pool_intraop_threads` (`KernelConfig.pool_intraop_threads`) by `_build_device_thread_pool()` |
 | `None` (default) | split `torch.get_num_threads()` across the pool's worker count |
 | `n > 0` | every worker uses exactly `n` |
 | `n <= 0` | workers keep the pool inherited from the spawning thread |
@@ -69,13 +69,16 @@ team instead of zero threads.
 
 The value is resolved once, when the pool is built. `DeviceThreadPool` does not
 re-resolve it after a worker restart, and it does not react to a later
-`torch.set_num_threads` by the caller.
+`torch.set_num_threads` by the caller. A later `GPTQModel.load` whose policy
+asks for a different `pool_intraop_threads`, `cpu_workers` or `cuda_workers`
+rebuilds the process pool at the load boundary (`resize_device_thread_pool`
+compares all three).
 
 ## Where it is set
 
 `gptqmodel/__init__.py` builds the process-wide pool through
 `_build_device_thread_pool()`, which passes
-`KernelConfig.pool_intraop_threads`. Its default `None` means "split across
+`RuntimeConfig.pool_intraop_threads`. Its default `None` means "split across
 that pool's workers"; set `0` to keep the inherited pool, or a positive value
 to pin one size. `gptqmodel/utils/stream.py` builds the stream-sync pool the
 same way. Command-line tools and tests that want an explicit value pass it

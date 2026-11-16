@@ -103,6 +103,11 @@ _OPTIONAL_CHOICE_FIELDS = {
 
 _AWQ_SCHEDULE_CHOICES = frozenset({"auto", "legacy"})
 
+# ``rocblas`` pins rocBLAS; ``hipblaslt``/``cublaslt`` opt into torch's
+# hipBLASLt default; ``""``/``0``/``off``/``default`` skip the pin. Mirrors
+# ``utils.rocm.QUANT_BLAS_BACKEND_DISABLED | _QUANT_BLAS_BACKEND_CHOICES``.
+_ROCM_QUANT_BLAS_CHOICES = frozenset({"rocblas", "hipblaslt", "cublaslt", "", "0", "off", "default"})
+
 
 @dataclass
 class KernelConfig:
@@ -324,13 +329,21 @@ class KernelConfig:
 
         # An explicit empty string is a documented opt-out spelling, so it must
         # stay distinct from ``None`` (which keeps the reproducible default).
+        # Any other unknown spelling is rejected: a typo such as "hipblas_lt"
+        # must not silently pin rocBLAS.
         if self.rocm_quant_blas is not None:
             if not isinstance(self.rocm_quant_blas, str):
                 raise TypeError(
                     "KernelConfig.rocm_quant_blas should be a string or None; got "
                     f"{type(self.rocm_quant_blas).__name__}"
                 )
-            self.rocm_quant_blas = self.rocm_quant_blas.strip()
+            blas = self.rocm_quant_blas.strip().lower()
+            if blas not in _ROCM_QUANT_BLAS_CHOICES:
+                raise ValueError(
+                    "KernelConfig.rocm_quant_blas should be None or one of "
+                    f"{sorted(_ROCM_QUANT_BLAS_CHOICES)}; got {self.rocm_quant_blas!r}"
+                )
+            self.rocm_quant_blas = blas
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -407,10 +420,13 @@ def get_kernel_config() -> KernelConfig:
 def resolve_kernel_config(owner: Any = None, *, use_process_default: bool = True) -> KernelConfig:
     """Return the policy that applies to ``owner`` (a quantize config).
 
-    An explicit ``owner.kernel`` wins; otherwise the process-wide policy
-    installed by a looper or ``GPTQModel.load`` applies. Run boundaries pass
-    ``use_process_default=False`` so an unset run resets to fresh defaults
-    rather than inheriting the previous run's process fallback.
+    The policy an API boundary resolved for the config (typed backend plus its
+    runtime or legacy kernel, kept in ``owner._resolved_kernel``) wins; then an
+    explicit ``owner.kernel``, then ``owner.runtime``; otherwise the
+    process-wide policy installed by a looper or ``GPTQModel.load`` applies.
+    Run boundaries pass ``use_process_default=False`` so an unset run resets
+    to fresh defaults rather than inheriting the previous run's process
+    fallback.
     """
 
     if isinstance(owner, KernelConfig):
@@ -419,6 +435,9 @@ def resolve_kernel_config(owner: Any = None, *, use_process_default: bool = True
 
     if isinstance(owner, (BackendConfig, RuntimeConfig)):
         return owner.to_kernel_config()
+    resolved = getattr(owner, "_resolved_kernel", None) if owner is not None else None
+    if isinstance(resolved, KernelConfig):
+        return resolved
     kernel = getattr(owner, "kernel", None) if owner is not None else None
     if isinstance(kernel, KernelConfig):
         return kernel

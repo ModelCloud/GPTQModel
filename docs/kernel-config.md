@@ -40,9 +40,13 @@ model = GPTQModel.load(
 
 A plain mapping with the same keys is accepted anywhere a `KernelConfig` is.
 Combining a typed backend configuration or `runtime=` with legacy `kernel=`
-raises `ValueError`; it would supply two competing policies.
-`configure_kernel(KernelConfig(...))` installs a process-wide policy directly,
-and `None` restores the documented defaults.
+raises `ValueError`; it would supply two competing policies. The rule is the
+same whether each one is a call argument or a `QuantizeConfig.kernel` /
+`QuantizeConfig.runtime` field. `configure_kernel(KernelConfig(...))` installs
+a process-wide policy directly, and `None` restores the documented defaults.
+Every `GPTQModel.load` and both quantization loopers install the policy their
+own config resolves to, so a policy installed by hand before them does not
+survive; put run settings on `QuantizeConfig.runtime` or pass them to the load.
 
 ## Legacy adapter flow
 
@@ -62,7 +66,7 @@ flowchart TD
     F --> E
     G --> E
     E --> H["_ACTIVE_CONFIG (process-wide, RLock)"]
-    H --> I["resolve_kernel_config(owner)<br/>owner.kernel wins, else _ACTIVE_CONFIG"]
+    H --> I["resolve_kernel_config(owner)<br/>owner._resolved_kernel, owner.kernel,<br/>owner.runtime, else _ACTIVE_CONFIG"]
     I --> M["BaseQuantLinear / make_quant<br/>snapshot_kernel_config"]
     M --> J["Module-owned policy: TorchLinear, MarlinLinear,<br/>GGUF, ParoQuant, bitsandbytes"]
     M --> K["Native op arguments: AWQ, block-float,<br/>Swordfish and GGUF CPU"]
@@ -73,8 +77,10 @@ flowchart TD
 Two precedence rules are worth stating explicitly, because they are the
 contract a reviewer has to check:
 
-- An explicit `owner.kernel` (a quantize config) wins over the process policy,
-  so a caller that holds the config never inherits another run's tuning.
+- A quantize config's own policy wins over the process policy: the policy its
+  last load or `quantize()` resolved, else its `kernel`, else its `runtime`. A
+  caller that holds the config never inherits another run's tuning, and the
+  resolved policy is never written back to `QuantizeConfig.kernel`.
 - `configure_kernel(None)` restores the documented defaults; it does not leave
   the previous policy in place.
 
@@ -112,6 +118,10 @@ flowchart LR
 | `GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE` | `gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu:160` | `fused_splitk_reduce` argument on `gemm_forward` and `gemm_forward_fp32_reduce` |
 | `GPTQMODEL_BLOCKFLOAT_NO_CUBLAS` | `gptqmodel_ext/tt_blockfloat_cuda/tt_blockfloat_cuda.cu:723` | `allow_cublas` argument on `blockfloat_linear` |
 | `APHRODITE_SWORDFISH_DENSE_M`, `APHRODITE_SWORDFISH_DETERMINISTIC` | `gptqmodel_ext/swordfish/.../swordfish_mm.cu:84,106` | `dense_m_override`, `deterministic` arguments on `swordfish_mm` |
+
+The retired variables are never read. GPT-QModel warns once for each one that
+is set: at import, and again at `GPTQModel.load` / `from_pretrained` /
+`from_quantized` for a variable exported after the import.
 
 The three names in the last rows are why this change is not purely Python: a
 native kernel cannot read a Python object, so the choice is passed as an op
@@ -243,7 +253,7 @@ representation, not another machine's kernel tuning.
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. |
+| `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. Any other value raises `ValueError`. |
 | `rocm_llc` | `True` | Last-level-cache back-port for torch. |
 
 `rocm_quant_blas` selects the quantization BLAS backend. `None` keeps the
@@ -261,7 +271,10 @@ the last-level-cache back-port for torch.
 | `pool_intraop_threads` | `None` | Torch intra-op pool per device-pool worker. `None` splits the process pool across the pool's workers; `0` keeps the inherited pool. |
 
 `None` keeps the platform-derived defaults. `max_packers` is the number of
-threads that pack completed modules after quantization.
+threads that pack completed modules after quantization. All four are
+`RuntimeConfig` fields. The device pool is built once per process; a later load
+whose policy changes `cpu_workers`, `cuda_workers` or `pool_intraop_threads`
+rebuilds it before the load continues.
 `pool_intraop_threads` bounds each worker's OpenMP team, because libgomp gives
 every pthread its own team: see
 [Device thread pool intra-op budget](device-thread-pool-intraop-budget.md).
@@ -270,8 +283,9 @@ every pthread its own team: see
 
 `KernelConfig` rejects values that cannot be honoured instead of silently
 clamping them: thread counts and tile sizes must be positive, the rotation tile
-choices are fixed sets, and `awq_triton_schedule` must be one of the two
-documented modes. This keeps a typo from turning into a different numerical
+choices are fixed sets, `awq_triton_schedule` must be one of the two
+documented modes, and `rocm_quant_blas` must be one of the documented
+spellings (a typo such as `"hipblas_lt"` would otherwise pin rocBLAS). This keeps a typo from turning into a different numerical
 path.
 
 The same rule covers the kernels that used to read the environment inside

@@ -181,6 +181,25 @@ def test_bare_integer_device_is_a_full_model_map_pinned_to_that_ordinal(
     assert explicit == {"": f"cuda:{ordinal}"}
 
 
+@pytest.mark.parametrize("visible,ordinal,message", [
+    (1, 1, "device=1 is not a visible cuda ordinal"),
+    (4, 4, "device=4 is not a visible cuda ordinal"),
+    (4, -1, "device=-1 is not an accelerator ordinal"),
+])
+def test_bare_integer_device_beyond_the_visible_devices_is_a_value_error(
+    monkeypatch, visible, ordinal, message
+):
+    """#4449: an out-of-range ordinal fails before placement, not in the CUDA runtime."""
+
+    _fake_visible(monkeypatch, visible)
+    monkeypatch.setattr(importer, "_current_accelerator_type", lambda: "cuda")
+
+    with pytest.raises(ValueError, match=message):
+        _indexed_device_request(ordinal)
+    with pytest.raises(ValueError, match=message):
+        _normalize_explicit_placement(ordinal, None, None)
+
+
 def test_bare_integer_device_without_an_accelerator_is_rejected(monkeypatch):
     """A CPU-only host must not turn an integer ordinal into a CPU request."""
 

@@ -509,13 +509,29 @@ def _default_cuda_workers() -> int:
     return 4
 
 
-def _build_device_thread_pool(warmup_devices=None, cpu_workers=None):
-    if cpu_workers is None:
-        cpu_workers = _default_cpu_workers()
-    return DeviceThreadPool(
+def _device_thread_pool_settings(cpu_workers=None) -> tuple:
+    """Return the pool parameters the current kernel policy selects.
+
+    The tuple is ``(cpu_workers, cuda_workers_per_device, intraop_threads)``.
+    Worker threads are fixed at construction, so any change to one of these
+    requires a rebuild.
+    """
+
+    return (
+        _default_cpu_workers() if cpu_workers is None else int(cpu_workers),
+        _default_cuda_workers(),
+        get_kernel_config().pool_intraop_threads,
+    )
+
+
+def _build_device_thread_pool(warmup_devices=None, cpu_workers=None, settings=None):
+    if settings is None:
+        settings = _device_thread_pool_settings(cpu_workers)
+    cpu_workers, cuda_workers, intraop_threads = settings
+    pool = DeviceThreadPool(
         inference_mode=True,
         warmup_devices=warmup_devices,
-        intraop_threads_per_worker=get_kernel_config().pool_intraop_threads,
+        intraop_threads_per_worker=intraop_threads,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
@@ -523,7 +539,7 @@ def _build_device_thread_pool(warmup_devices=None, cpu_workers=None):
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": _default_cuda_workers(),
+            "cuda:per": cuda_workers,
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
@@ -532,10 +548,14 @@ def _build_device_thread_pool(warmup_devices=None, cpu_workers=None):
         },
         empty_cache_every_n=512,
     )
+    # Remember what the pool was built for so a later load can tell whether
+    # its policy asks for a different pool.
+    pool._gptqmodel_settings = settings
+    return pool
 
 
-def _device_thread_pool_cpu_workers(pool: DeviceThreadPool) -> int:
-    return len(pool._worker_groups.get("cpu", ()))
+def _device_thread_pool_settings_of(pool) -> tuple | None:
+    return getattr(pool, "_gptqmodel_settings", None)
 
 
 def get_device_thread_pool(warmup_devices=None):
@@ -553,12 +573,13 @@ def get_device_thread_pool(warmup_devices=None):
 
 
 def resize_device_thread_pool(warmup_devices=None, cpu_workers=None, *, create: bool = True):
-    """Match the singleton pool's CPU group to the current kernel policy.
+    """Match the singleton pool to the current kernel policy.
 
-    Worker threads cannot be resized in place, so a later load that asks for a
-    different ``RuntimeConfig.cpu_workers`` replaces the pool at the load
-    boundary. Before this, the per-process singleton kept the first load's
-    worker count and silently ignored every later request (issue #4396).
+    Worker threads cannot be resized in place, so a later load whose
+    ``RuntimeConfig`` asks for a different ``cpu_workers``, ``cuda_workers`` or
+    ``pool_intraop_threads`` replaces the pool at the load boundary. Before
+    this, the per-process singleton kept the first load's settings and
+    silently ignored later requests (issues #4396, #4448).
 
     ``create=False`` only retunes an existing pool; callers that must not build
     one eagerly (post-quantized loads) leave the lazy build to the first use,
@@ -566,28 +587,29 @@ def resize_device_thread_pool(warmup_devices=None, cpu_workers=None, *, create: 
     """
 
     global _DEVICE_THREAD_POOL
-    target = _default_cpu_workers() if cpu_workers is None else int(cpu_workers)
+    target = _device_thread_pool_settings(cpu_workers)
     pool = _DEVICE_THREAD_POOL
-    if pool is not None and _device_thread_pool_cpu_workers(pool) == target:
+    if pool is not None and _device_thread_pool_settings_of(pool) == target:
         return pool
     if pool is None and not create:
         return None
 
     with _DEVICE_THREAD_POOL_LOCK:
         pool = _DEVICE_THREAD_POOL
-        if pool is not None and _device_thread_pool_cpu_workers(pool) == target:
+        if pool is not None and _device_thread_pool_settings_of(pool) == target:
             return pool
         if pool is not None:
             log.info(
-                "ENV: resizing device thread pool CPU workers from %s to %s for the new kernel policy.",
-                _device_thread_pool_cpu_workers(pool),
+                "ENV: rebuilding device thread pool (cpu_workers, cuda_workers, pool_intraop_threads) "
+                "from %s to %s for the new kernel policy.",
+                _device_thread_pool_settings_of(pool),
                 target,
             )
             # Detach before shutting down so no concurrent caller can submit to
             # a pool whose workers are stopping.
             _DEVICE_THREAD_POOL = None
             pool.shutdown(wait=True)
-        pool = _build_device_thread_pool(warmup_devices=warmup_devices, cpu_workers=target)
+        pool = _build_device_thread_pool(warmup_devices=warmup_devices, settings=target)
         atexit.register(_shutdown_device_thread_pool, pool)
         _DEVICE_THREAD_POOL = pool
         return pool
