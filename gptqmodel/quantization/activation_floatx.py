@@ -228,6 +228,11 @@ def _nvfp4_mse_quantize_blocks(
     """
     recipe = nvfp4_kernel_recipe(recipe)
     block_amax = blocks.abs().amax(dim=-1, keepdim=True)
+    # Compare candidates in units of a per-block power of two.  Scaling by
+    # 2**-e is exact for finite values, so this keeps the ranking identical to
+    # the absolute SSE while preventing FP32 overflow for large activations.
+    _, block_exponent = torch.frexp(block_amax)
+    block_exponent = block_exponent.to(torch.int32)
     best_error = torch.full_like(block_amax, torch.inf)
     best_local = torch.ones_like(block_amax).to(torch.float8_e4m3fn)
     best_values = torch.zeros_like(blocks)
@@ -236,8 +241,25 @@ def _nvfp4_mse_quantize_blocks(
     def evaluate(local: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         scale = local.float() * global_scale
         values = _e2m1_nearest_values(blocks / scale)
-        error = (values * scale - blocks).square().sum(dim=-1, keepdim=True)
-        return values, error
+        scaled_blocks = torch.ldexp(blocks, -block_exponent)
+        scaled_scale = torch.ldexp(scale, -block_exponent)
+        reconstructed = values * scaled_scale
+        # A zero code reconstructs to exactly zero; avoid 0 * inf when the
+        # candidate scale itself overflows.
+        reconstructed = torch.where(
+            values == 0, torch.zeros_like(reconstructed), reconstructed
+        )
+        error = (reconstructed - scaled_blocks).square().sum(dim=-1, keepdim=True)
+        # A zero or non-finite scale cannot produce a meaningful candidate.
+        valid = torch.isfinite(scale) & (scale > 0)
+        return values, torch.where(valid, error, torch.full_like(error, torch.inf))
+
+    def require_finite(error: torch.Tensor) -> None:
+        if not bool(torch.isfinite(error).all()):
+            raise ValueError(
+                "NVFP4 block-scale search produced no finite candidate; "
+                "the activation magnitude is not representable."
+            )
 
     def refine(values: torch.Tensor) -> torch.Tensor:
         denominator = values.square().sum(dim=-1, keepdim=True)
@@ -267,6 +289,7 @@ def _nvfp4_mse_quantize_blocks(
         best_values = torch.where(use, values, best_values)
 
     if recipe in {"nvidia", "four_six"}:
+        require_finite(best_error)
         return best_local, best_values
 
     for _local, values in seeds:
@@ -285,6 +308,7 @@ def _nvfp4_mse_quantize_blocks(
     best_values = torch.where(use, values, best_values)
 
     if recipe == "least_squares":
+        require_finite(best_error)
         return best_local, best_values
 
     # Coordinate refinement can stop at a local E2M1 assignment.  Search a
@@ -302,6 +326,7 @@ def _nvfp4_mse_quantize_blocks(
         best_error = torch.where(use, error, best_error)
         best_local = torch.where(use, candidate, best_local)
         best_values = torch.where(use, values, best_values)
+    require_finite(best_error)
     return best_local, best_values
 
 

@@ -54,6 +54,7 @@ from ...utils.allspark_hip import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
 from ._runtime_cache import tensor_cache_key
 
@@ -199,7 +200,9 @@ class AllSparkAwqLinear(AWQuantLinear):
         scale_zeros = zeros * scales
 
         scale_dtype = self.scales.dtype if getattr(self, "scales", None) is not None else self.compute_dtype
-        self.register_buffer("scales", scales.clone().to(scale_dtype))
+        # Reject an unrepresentable storage cast before replacing module state.
+        stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
+        self.register_buffer("scales", stored_scales)
         if linear.bias is not None:
             # Keep the source width; an FP32 bias must stay FP32 through the
             # kernel's FP32 epilogue instead of narrowing to the activation

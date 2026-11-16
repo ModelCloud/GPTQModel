@@ -804,6 +804,225 @@ def test_awq_token_rows_replay_recovers_real_padded_hf_masks():
     assert attention_mask.shape == (1, 1, 8, 8)
 
 
+def test_awq_token_row_source_structure_recovers_an_all_zero_additive_mask():
+    """An all-zero additive mask attends to every key, not none of them (#4187).
+
+    Additive attention masks are summed into the logits: ``0`` is neutral and
+    only a negative entry suppresses a key. An unpadded ``batch_size > 1``
+    capture therefore stores an all-zero ``[B, 1, S, S]`` mask. The old
+    ``(m > 0)`` branch read that as "everything masked", so the diagonal keep
+    mask was all ``False``, the ``row_count`` check failed, and the replay
+    silently fell back to one causal sequence across every packed document.
+    """
+
+    batch, seq_len = 2, 3
+    mask = torch.zeros(batch, 1, seq_len, seq_len, dtype=torch.float16)
+
+    structure = AWQProcessor._token_row_source_structure(mask, batch * seq_len)
+
+    assert structure is not None
+    documents, positions, allowed, form = structure
+    assert form == AWQProcessor._MASK_FORM_ADDITIVE
+    assert documents.tolist() == [0, 0, 0, 1, 1, 1]
+    assert positions.tolist() == [0, 1, 2, 0, 1, 2]
+    # Every real token attended to itself, so every row is retained and the
+    # captured all-attended relation survives normalization.
+    assert allowed.shape == (batch * seq_len, batch * seq_len)
+    assert allowed.all()
+
+
+def test_awq_token_rows_replay_unpadded_additive_mask_is_block_diagonal():
+    """An unpadded ``bs > 1`` additive capture must replay per document (#4187).
+
+    With no padding the captured ``[B, 1, S, S]`` additive mask is all zeros.
+    Reading it as fully masked returned ``None`` from
+    ``_token_row_source_structure`` and the replay fell back to one causal
+    sequence over all ``B*S`` rows, letting document 1 attend to document 0.
+    """
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 6} if name == module_name else None
+    )
+
+    batch, seq_len = 2, 3
+    # Unpadded calibration batch: every document has seq_len real tokens, so
+    # the additive mask has no negative entries at all.
+    batch_mask = torch.zeros(batch, 1, seq_len, seq_len, dtype=torch.float16)
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[batch_mask],
+        position_ids=[torch.arange(seq_len).unsqueeze(0).expand(batch, -1)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [
+            torch.arange(batch * seq_len * 4, dtype=torch.float32).reshape(
+                1, batch * seq_len, 4
+            )
+        ],
+        "batch_indices": [0],
+    }
+
+    features = processor._layer_input_features(state)
+    assert features[module_name].shape == (1, batch * seq_len, 4)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.shape == (1, 1, batch * seq_len, batch * seq_len)
+    assert attention_mask.dtype.is_floating_point
+
+    allowed = attention_mask[0, 0] >= 0
+    # The captured grid has no suppression at all, so every retained row keeps
+    # its own document's full relation; causality stays inside the attention
+    # implementation for this captured form. Cross-document cells must be the
+    # only thing the replay adds.
+    expected = torch.zeros(batch * seq_len, batch * seq_len, dtype=torch.bool)
+    expected[:seq_len, :seq_len] = True
+    expected[seq_len:, seq_len:] = True
+    assert torch.equal(allowed, expected)
+    # Document 1 may not read document 0, and vice versa. The broken fallback
+    # produced exactly one causal block spanning the whole packed batch.
+    assert not allowed[:seq_len, seq_len:].any()
+    assert not allowed[seq_len:, :seq_len].any()
+    assert not torch.equal(
+        allowed,
+        torch.tril(torch.ones(batch * seq_len, batch * seq_len, dtype=torch.bool)),
+    )
+    assert torch.equal(
+        replay["position_ids"],
+        torch.tensor([[0, 1, 2, 0, 1, 2]]),
+    )
+
+
+def test_awq_token_row_source_structure_keeps_padded_additive_and_bool_forms():
+    """The working mask forms must keep recovering the document grid (#4187).
+
+    Guards the two conventions this fix must not trade away: an additive mask
+    that suppresses padding keys with ``finfo.min``, and bool grids in both
+    polarities (``True`` = attended for SDPA, ``True`` = masked for
+    ``masked_fill``).
+    """
+
+    def block_causal(kept_documents, kept_positions):
+        same_document = kept_documents.unsqueeze(1) == kept_documents.unsqueeze(0)
+        causal = kept_positions.unsqueeze(1) >= kept_positions.unsqueeze(0)
+        return same_document & causal
+
+    padded_len = 4
+    padded_additive = torch.full(
+        (2, 1, padded_len, padded_len),
+        torch.finfo(torch.float16).min,
+        dtype=torch.float16,
+    )
+    for row, length in enumerate((3, 2)):
+        for query in range(length):
+            padded_additive[row, 0, query, : query + 1] = 0.0
+
+    structure = AWQProcessor._token_row_source_structure(padded_additive, 5)
+    assert structure is not None
+    documents, positions, allowed, form = structure
+    assert form == AWQProcessor._MASK_FORM_ADDITIVE
+    assert documents.tolist() == [0, 0, 0, 1, 1]
+    assert positions.tolist() == [0, 1, 2, 0, 1]
+    assert torch.equal(
+        allowed & block_causal(documents, positions), block_causal(documents, positions)
+    )
+
+    bool_seq_len = 3
+    bool_keep = torch.zeros(2, 1, bool_seq_len, bool_seq_len, dtype=torch.bool)
+    for row in range(2):
+        for query in range(bool_seq_len):
+            bool_keep[row, 0, query, : query + 1] = True
+
+    for mask, expected_form in (
+        (bool_keep, AWQProcessor._MASK_FORM_BOOL_KEEP),
+        (~bool_keep, AWQProcessor._MASK_FORM_BOOL_MASKED),
+    ):
+        structure = AWQProcessor._token_row_source_structure(mask, 6)
+        assert structure is not None
+        documents, positions, allowed, form = structure
+        assert form == expected_form
+        assert documents.tolist() == [0, 0, 0, 1, 1, 1]
+        assert positions.tolist() == [0, 1, 2, 0, 1, 2]
+        assert torch.equal(
+            allowed & block_causal(documents, positions), block_causal(documents, positions)
+        )
+
+
+def test_awq_token_row_source_structure_recovers_a_0_1_keep_grid():
+    """An integer 0/1 keep grid is not an additive mask (#4187).
+
+    LLaDA2 expands its tokenizer mask with ``tril * padding`` into an integer
+    ``[B, 1, S, S]`` grid where ``1`` marks an attended key. Reading it as an
+    additive mask would count padding queries as real and fall back, so it is
+    classified as the ``positive = attended`` form instead.
+    """
+
+    padded_len = 4
+    mask = torch.zeros(2, 1, padded_len, padded_len, dtype=torch.int64)
+    for row, length in enumerate((3, 2)):
+        for query in range(padded_len):
+            for key in range(padded_len):
+                mask[row, 0, query, key] = int(key <= query and key < length)
+
+    structure = AWQProcessor._token_row_source_structure(mask, 5)
+    assert structure is not None
+    documents, positions, allowed, form = structure
+    assert form == AWQProcessor._MASK_FORM_POSITIVE_KEEP
+    assert documents.tolist() == [0, 0, 0, 1, 1]
+    assert positions.tolist() == [0, 1, 2, 0, 1]
+    expected = torch.zeros(5, 5, dtype=torch.bool)
+    expected[:3, :3] = torch.tril(torch.ones(3, 3, dtype=torch.bool))
+    expected[3:, 3:] = torch.tril(torch.ones(2, 2, dtype=torch.bool))
+    same_document = documents.unsqueeze(1) == documents.unsqueeze(0)
+    assert torch.equal(allowed & same_document, expected)
+
+
+def test_awq_token_rows_replay_preserves_a_0_1_keep_grid():
+    """The rebuilt replay must stay a multiplicative 0/1 keep grid (#4187)."""
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128)
+    )
+    module_name = "self_attn.q_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 5} if name == module_name else None
+    )
+
+    padded_len = 4
+    mask = torch.zeros(2, 1, padded_len, padded_len, dtype=torch.int64)
+    for row, length in enumerate((3, 2)):
+        for query in range(padded_len):
+            for key in range(padded_len):
+                mask[row, 0, query, key] = int(key <= query and key < length)
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[mask],
+        position_ids=[torch.arange(padded_len).unsqueeze(0).expand(2, -1)],
+        layer_input_kwargs=[{}],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.zeros(1, 5, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    attention_mask = replay["attention_mask"]
+    assert attention_mask.dtype == torch.int64
+    assert attention_mask.shape == (1, 1, 5, 5)
+    expected = torch.zeros(5, 5, dtype=torch.int64)
+    expected[:3, :3] = torch.tril(torch.ones(3, 3, dtype=torch.int64))
+    expected[3:, 3:] = torch.tril(torch.ones(2, 2, dtype=torch.int64))
+    assert torch.equal(attention_mask[0, 0], expected)
+    assert torch.equal(replay["position_ids"], torch.tensor([[0, 1, 2, 0, 1]]))
+
+
 def test_awq_token_rows_replay_keeps_a_2d_mask_two_dimensional():
     """A 2-D captured mask (FlashAttention) must not be replaced by a 4-D mask."""
 
