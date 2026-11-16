@@ -43,7 +43,7 @@ from gptqmodel.quantization.paroquant.optimization import (
 )
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 from gptqmodel.utils.paroquant import (
     _rotation_launch_config,
     apply_paroquant_rotation,
@@ -55,6 +55,7 @@ from gptqmodel.utils.paroquant import (
     prewarm_paroquant_rotation_extension,
 )
 from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 @pytest.fixture(autouse=True)
@@ -1739,9 +1740,9 @@ def test_paroquant_triton_affine_ste_dispatch_and_kill_switch():
     weight = weight.detach().to(device).requires_grad_(True)
     scale = scale.detach().to(device).requires_grad_(True)
     zero_point = zero_point.detach().to(device).requires_grad_(True)
-    enabled = triton_ste._AFFINE_STE_TRITON_ENABLED
+    previous_kernel_config = get_kernel_config()
     try:
-        triton_ste._AFFINE_STE_TRITON_ENABLED = False
+        configure_kernel(KernelConfig(paroquant_affine_ste_triton=False))
         assert not triton_ste.affine_quant_dequant_ste_available()
         assert (
             triton_ste.affine_quant_dequant_ste(weight, scale, zero_point, qmin=0, qmax=15, group_size=8) is None
@@ -1758,7 +1759,7 @@ def test_paroquant_triton_affine_ste_dispatch_and_kill_switch():
         )
         assert "_AffineQuantDequantSTEBackward" in type(fallback.grad_fn).__name__
     finally:
-        triton_ste._AFFINE_STE_TRITON_ENABLED = enabled
+        configure_kernel(previous_kernel_config)
 
     routed = paroquant_optimization.pseudo_quantize_dequant(
         weight,
@@ -6007,6 +6008,10 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     """Guard that the CUDA AWQ fast path does not silently downcast bf16 inputs."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
+    if IS_ROCM:
+        # The AWQ GEMM extension is CUDA-only; ``_cuda_awq_kernel_supported``
+        # routes HIP to the portable path, so this fast path never runs there.
+        pytest.skip("The ParoQuant AWQ CUDA fast path is not built for ROCm.")
 
     paroquant_module = sys.modules[ParoLinear.__module__]
 
@@ -6025,8 +6030,8 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
 
     seen = {}
 
-    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True):
-        del qweight, qzeros, fp32_accum
+    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True, kernel=None):
+        del qweight, qzeros, fp32_accum, kernel
         seen["input_dtype"] = input.dtype
         seen["scales_dtype"] = scales.dtype
         seen["split_k_iters"] = split_k_iters
