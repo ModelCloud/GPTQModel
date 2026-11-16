@@ -375,6 +375,7 @@ def _patch_optimum_gptqmodel_load_bridge():
 
 from .utils import has_gil_disabled
 from .utils.env import env_flag
+from .utils.kernel import get_kernel_config
 from .utils.modelscope import ensure_modelscope_available
 
 
@@ -389,14 +390,11 @@ _DEVICE_THREAD_POOL_LOCK = threading.Lock()
 
 
 def _default_cpu_workers() -> int:
-    """Return the default CPU worker count, respecting an explicit env override."""
+    """Return the CPU worker count selected by the kernel policy."""
 
-    env_workers = os.getenv("GPTQMODEL_CPU_WORKERS")
-    if env_workers is not None:
-        try:
-            return max(1, int(env_workers))
-        except ValueError:
-            pass
+    configured = get_kernel_config().cpu_workers
+    if configured is not None:
+        return configured
 
     # Cap CPU workers to avoid OpenMP team explosion under free-threading.
     # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
@@ -406,14 +404,11 @@ def _default_cpu_workers() -> int:
 
 
 def _default_cuda_workers() -> int:
-    """Return the per-CUDA worker count, respecting an explicit env override."""
+    """Return the per-CUDA worker count selected by the kernel policy."""
 
-    env_workers = os.getenv("GPTQMODEL_CUDA_WORKERS")
-    if env_workers is not None:
-        try:
-            return max(1, int(env_workers))
-        except ValueError:
-            pass
+    configured = get_kernel_config().cuda_workers
+    if configured is not None:
+        return configured
     return 4
 
 
@@ -421,6 +416,7 @@ def _build_device_thread_pool(warmup_devices=None):
     return DeviceThreadPool(
         inference_mode=True,
         warmup_devices=warmup_devices,
+        intraop_threads_per_worker=get_kernel_config().pool_intraop_threads,
         warmups={
             "cuda": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
             "xpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
@@ -547,6 +543,23 @@ def exllama_set_max_input_length(model, max_input_length: int):
 import torch
 
 from . import extension
+from .backend import (  # noqa: F401
+    AwqGemmConfig,
+    AwqTorchConfig,
+    AwqTritonConfig,
+    BackendConfig,
+    BitsAndBytesConfig,
+    GGUFCPPConfig,
+    GGUFCUDAConfig,
+    GGUFTorchConfig,
+    MarlinConfig,
+    ParoQuantConfig,
+    ParoQuantTritonConfig,
+    RuntimeConfig,
+    SwordfishConfig,
+    TorchConfig,
+    TTBlockFloatConfig,
+)
 from .looper.checkpoint import CheckpointStopped
 from .looper.checkpoint_store import CheckpointConfig
 from .models import (

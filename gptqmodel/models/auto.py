@@ -71,6 +71,8 @@ from ..utils.linalg_warmup import (  # noqa: E402
     kick_torch_quantize_prewarm,
 )
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
+from ..utils.kernel import KernelConfig, configure_kernel  # noqa: E402
+from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_config, resolve_quantize_backend  # noqa: E402
 from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import normalize_device  # noqa: E402
@@ -815,7 +817,7 @@ class GPTQModel:
             quantize_config: Optional[QuantizeConfig | Dict] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
@@ -823,12 +825,18 @@ class GPTQModel:
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ):
         if type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         kwargs["fuse"] = fuse
+        if isinstance(quantize_config, Dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
+        configure_kernel(kernel)
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
             _prebuild_device_thread_pool(device)
@@ -853,6 +861,13 @@ class GPTQModel:
                 quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
         elif quantize_config is not None:
             p2p = quantize_config.p2p
+        if kernel is not None:
+            if quantize_config is not None:
+                quantize_config.kernel = (
+                    KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+                )
+        elif quantize_config is not None:
+            kernel = quantize_config.kernel
 
         backend = normalize_backend(backend)
         profile = normalize_profile(profile)
@@ -914,6 +929,7 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 p2p=p2p,
+                kernel=kernel,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
@@ -935,6 +951,7 @@ class GPTQModel:
                 profile=profile,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
+                kernel=kernel,
                 module_tree=module_tree,
                 **kwargs,
             )
@@ -951,16 +968,26 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **model_init_kwargs,
     ) -> BaseQModel:
+        if isinstance(quantize_config, dict):
+            quantize_config = QuantizeConfig(**quantize_config)
+        backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         if p2p is not None and quantize_config is not None:
             # The looper installs this policy before it enables peer access.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+        if kernel is not None and quantize_config is not None:
+            # The looper installs this policy before it selects a kernel.
+            quantize_config.kernel = (
+                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+            )
 
         if quantize_config is not None:
             _kick_quantize_prewarms(
@@ -1030,6 +1057,7 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=tokenizer_trust_remote_code,
                 p2p=p2p,
+                kernel=kernel,
                 module_tree=module_tree,
                 **model_init_kwargs,
             )
@@ -1069,16 +1097,19 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
-            backend: Union[str, BACKEND] = BACKEND.AUTO,
+            backend: Backend = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
+            runtime: Optional[RuntimeConfig] = None,
             **kwargs,
     ) -> BaseQModel:
+        backend, kernel = resolve_backend_config(backend, kernel, runtime)
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -1108,6 +1139,7 @@ class GPTQModel:
             device_map=device_map,
             device=device,
             p2p=p2p,
+            kernel=kernel,
             backend=backend,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ctypes
-import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -18,6 +17,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.kernel import get_kernel_config
 from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
@@ -442,12 +442,9 @@ class _GGMLBridge:
 
     @staticmethod
     def _cpu_threads() -> int:
-        override = os.environ.get("GPTQMODEL_GGUF_CPP_THREADS")
+        override = get_kernel_config().gguf_cpp_threads
         if override is not None:
-            try:
-                return max(1, int(override))
-            except ValueError:
-                pass
+            return max(1, int(override))
         return max(1, torch.get_num_threads())
 
     def cpu_available(self) -> Tuple[bool, Optional[Exception]]:
@@ -872,6 +869,7 @@ class _GGMLBridge:
         gguf_tensor_qtype: str,
         padded_in_features: int,
         out_features: int,
+        threads: Optional[int] = None,
     ) -> torch.Tensor:
         if x.device.type != "cpu":
             raise RuntimeError("GGUFCppKernel only supports CPU input tensors.")
@@ -894,8 +892,12 @@ class _GGMLBridge:
 
         # ggml's CPU backend owns mutable graph scratch shared by all callers.
         with self._cpu_backend_lock:
+            backend = self._get_cpu_backend()
+            self._ggml_cpu.ggml_backend_cpu_set_n_threads(
+                backend, self._cpu_threads() if threads is None else threads,
+            )
             return self._run_quantized_matmul(
-                backend=self._get_cpu_backend(),
+                backend=backend,
                 qweight_cpu=self._normalize_qweight_cpu(qweight),
                 x_cpu=self._normalize_input_cpu(x, padded_in_features),
                 gguf_tensor_qtype=gguf_tensor_qtype,
@@ -1119,9 +1121,8 @@ class GGUFCppKernel(GGUFTorchLinear):
         ``exact_matmul`` selects the activation path per layer: ``True`` uses
         the exact torch dequantize-then-matmul path (``GGUF_TORCH`` numerics),
         ``False`` requests the lossy native ggml matmul, and ``None`` (default)
-        keeps the capability-based native choice that the
-        ``GPTQMODEL_GGUF_CPP_NATIVE_MATMUL`` environment variable can override
-        (#4316). The constructor argument wins over the environment variable.
+        keeps the capability-based native choice controlled by
+        ``GGUFCPPConfig.native_matmul``. The constructor argument wins.
         """
         kwargs.setdefault("backend", BACKEND.GGUF_CPP_CPU)
         super().__init__(
@@ -1138,6 +1139,8 @@ class GGUFCppKernel(GGUFTorchLinear):
             **kwargs,
         )
         self.exact_matmul = None if exact_matmul is None else bool(exact_matmul)
+        if self.kernel.gguf_cpp_threads is None:
+            self.kernel.gguf_cpp_threads = torch.get_num_threads()
         self._gguf_cpu_autotune_cache: Dict[tuple, bool] = {}
 
     @classmethod
@@ -1154,6 +1157,7 @@ class GGUFCppKernel(GGUFTorchLinear):
             gguf_tensor_qtype=self.gguf_tensor_qtype,
             padded_in_features=self.padded_in_features,
             out_features=self.out_features,
+            threads=self.kernel.gguf_cpp_threads,
         )
 
     def _forward_torch_cpu(
@@ -1176,20 +1180,19 @@ class GGUFCppKernel(GGUFTorchLinear):
         does not) depend on the machine and on the run (#4219).
 
         An explicit ``exact_matmul`` constructor argument selects the path for
-        one layer (``True`` = exact torch path, ``False`` = native), and the
-        process-wide ``GPTQMODEL_GGUF_CPP_NATIVE_MATMUL`` environment variable
-        still overrides the default when no argument is given. A layout that
-        fails at compute time is recorded as unusable so the following calls
-        take the exact torch path.
+        one layer (``True`` = exact torch path, ``False`` = native). Without it,
+        ``KernelConfig.gguf_cpp_native_matmul`` selects the path; ``None`` keeps
+        the capability default. A layout that fails at compute time is recorded
+        as unusable so the following calls take the exact torch path.
         """
 
         if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
             return False
         if self.exact_matmul is not None:
             return not self.exact_matmul
-        override = os.environ.get("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL")
+        override = self.kernel.gguf_cpp_native_matmul
         if override is not None:
-            return override.strip().lower() not in {"0", "false", "off"}
+            return override
         return self._gguf_cpu_autotune_cache.get(self._ggml_cpu_matmul_key(x_flat), True)
 
     def clear_autotune(self):

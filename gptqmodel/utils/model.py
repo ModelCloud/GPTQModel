@@ -77,6 +77,7 @@ from .device import get_device
 from .hf import get_hf_config_dtype, resolve_checkpoint_subfolder
 from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
+from .kernel import resolve_kernel_config, snapshot_kernel_config
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
@@ -620,6 +621,7 @@ def make_quant(
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
     init_kwargs = qcfg.quant_linear_init_kwargs()
+    init_kwargs["kernel"] = snapshot_kernel_config(qcfg)
 
     export_quant_method = qcfg.export_quant_method()
     backend = normalize_backend(backend, quant_method=export_quant_method)
@@ -1490,14 +1492,12 @@ def pack_model(
     else:
         default_max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
-    env_max_packers = os.getenv("GPTQMODEL_MAX_PACKERS")
-    if env_max_packers is not None:
-        try:
-            max_packers = max(1, int(env_max_packers))
-        except ValueError:
-            max_packers = default_max_packers
-    else:
-        max_packers = default_max_packers
+    configured_max_packers = resolve_kernel_config(qcfg).max_packers
+    max_packers = (
+        configured_max_packers
+        if configured_max_packers is not None
+        else default_max_packers
+    )
 
     with ctx(ThreadPoolExecutor(max_workers=max_packers), log.pb(names).manual()) as (executor, pb):
         def wrapper(name):
@@ -2008,7 +2008,7 @@ def auto_dtype(config: PretrainedConfig,
     # Update: latest kernel accuracies have shown, with multiple ranges of shapes
     # There are no accuracy issues with bf16 vs fp16. The Marlin reduce-accumulation
     # path can use fp16, but it is disabled by default via
-    # GPTQMODEL_MARLIN_USE_FP32=True.
+    # KernelConfig.marlin_fp32=True.
     # # for inference, always use FP16 for max accuracy
     # # check test_kernel_outputs for validation between fp16 and b16 in terms of kernel accuracy
     # if quant_inference:

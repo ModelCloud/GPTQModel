@@ -10,16 +10,19 @@ namespace {
 
 torch::Tensor gemm_forward_dispatch(torch::Tensor in_feats, torch::Tensor kernel,
                                     torch::Tensor scaling_factors, torch::Tensor zeros,
-                                    int64_t split_k_iters, bool fp32_accum) {
+                                    int64_t split_k_iters, bool fp32_accum,
+                                    bool fused_splitk_reduce) {
   return gemm_forward_cuda(in_feats, kernel, scaling_factors, zeros, static_cast<int>(split_k_iters),
-                           fp32_accum);
+                           fp32_accum, fused_splitk_reduce);
 }
 
 torch::Tensor gemm_forward_fp32_reduce_dispatch(torch::Tensor in_feats, torch::Tensor kernel,
                                                 torch::Tensor scaling_factors, torch::Tensor zeros,
-                                                int64_t split_k_iters, bool fp32_output) {
+                                                int64_t split_k_iters, bool fp32_output,
+                                                bool fused_splitk_reduce) {
   return gemm_forward_cuda_fp32_reduce(in_feats, kernel, scaling_factors, zeros,
-                                       static_cast<int>(split_k_iters), fp32_output);
+                                       static_cast<int>(split_k_iters), fp32_output,
+                                       fused_splitk_reduce);
 }
 
 torch::Tensor gemmv2_forward_dispatch(torch::Tensor in_feats, torch::Tensor kernel,
@@ -60,8 +63,8 @@ torch::Tensor dequantize_weights_dispatch(torch::Tensor kernel, torch::Tensor sc
 } // namespace
 
 TORCH_LIBRARY(gptqmodel_awq, m) {
-  m.def("gemm_forward(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros, int split_k_iters, bool fp32_accum=False) -> Tensor");
-  m.def("gemm_forward_fp32_reduce(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros, int split_k_iters, bool fp32_output=False) -> Tensor");
+  m.def("gemm_forward(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros, int split_k_iters, bool fp32_accum=False, bool fused_splitk_reduce=True) -> Tensor");
+  m.def("gemm_forward_fp32_reduce(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros, int split_k_iters, bool fp32_output=False, bool fused_splitk_reduce=True) -> Tensor");
   m.def("gemmv2_forward(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros, int group_size, int split_k_iters) -> Tensor");
   m.def("gemv_forward(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros, int group_size) -> Tensor");
   m.def("gemm_fast_forward_prefill(Tensor in_feats, Tensor kernel, Tensor scaling_factors, Tensor zeros) -> Tensor");

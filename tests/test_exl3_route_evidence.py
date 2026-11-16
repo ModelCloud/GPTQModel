@@ -13,8 +13,8 @@ from gptqmodel.looper.exllamav3_processor import (
     _router_recovery_candidates,
 )
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.utils.exl3_capture_batch_spool import CAPTURE_BATCH_SPOOL_ENV
 from gptqmodel.utils.exl3_error_ledger import ROUTE_EVIDENCE_SCHEMA
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 class _Router(nn.Module):
@@ -265,7 +265,7 @@ def _recoverable_processor_and_subset():
 def test_capture_batch_resume_rebuilds_shared_hessians_and_route_state(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv(CAPTURE_BATCH_SPOOL_ENV, str(tmp_path))
+    configure_kernel(KernelConfig(exl3_capture_batch_spool=str(tmp_path)))
     processor, subset = _recoverable_processor_and_subset()
     layer = _TwoExpertLayer()
     committed = processor.restore_subset_capture_batches(

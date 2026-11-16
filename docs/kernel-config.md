@@ -1,0 +1,281 @@
+# Backend configuration and thread selection
+
+Use `backend=` for both execution selection and backend-specific settings.
+An enum/string selects defaults; a typed configuration selects its own backend
+with custom settings. See [Backend selection and configuration](backend-selection.md)
+for the complete API, available types, resolution diagrams and compatibility rules.
+
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.backend import BACKEND, MarlinConfig, RuntimeConfig
+from gptqmodel.quantization import QuantizeConfig
+
+qcfg = QuantizeConfig(
+    bits=4,
+    group_size=128,
+    runtime=RuntimeConfig(max_packers=2),
+)
+model = GPTQModel.load("org/model", backend=BACKEND.MARLIN)  # Default settings
+model = GPTQModel.load("org/model", backend=MarlinConfig(fp32=False))
+```
+
+`BackendConfig` is the abstract base for the concrete, immutable backend
+configurations. A caller cannot give `MarlinConfig` another backend identity.
+`RuntimeConfig` holds shared quantizer and host controls, and is accepted by
+loaders as `runtime=` or on `QuantizeConfig` as above.
+
+The remaining fields below describe the legacy `KernelConfig` adapter.
+Existing `kernel=` calls remain supported with enum/string backend selectors:
+
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.utils.kernel import KernelConfig
+
+model = GPTQModel.load(
+    "org/model",
+    backend=BACKEND.MARLIN,
+    kernel=KernelConfig(marlin_fp32=False, torch_streaming=True),
+)
+```
+
+A plain mapping with the same keys is accepted anywhere a `KernelConfig` is.
+Combining a typed backend configuration or `runtime=` with legacy `kernel=`
+raises `ValueError`; it would supply two competing policies.
+`configure_kernel(KernelConfig(...))` installs a process-wide policy directly,
+and `None` restores the documented defaults.
+
+## Legacy adapter flow
+
+Before the explicit-policy adapter, a decision was made by reading the process environment at
+the point of use: a worker thread could change it, a test could only reach it
+through `monkeypatch.setenv`, and the same checkpoint could take a different
+numerical path in a different process. `KernelConfig` moves the decision to a
+single explicit object that the caller owns.
+
+```mermaid
+flowchart TD
+    A["QuantizeConfig(kernel=KernelConfig(...))"] --> B["BaseQuantizeConfig.__post_init__<br/>_normalize_kernel_config"]
+    C["GPTQModel.load(..., kernel=KernelConfig(...))"] --> D["GPTQModel.load"]
+    D --> E["configure_kernel(kernel)"]
+    B --> F["ModuleLooper.__init__<br/>resolve_kernel_config(qcfg, use_process_default=False)"]
+    B --> G["WeightOnlyLooper.__init__<br/>resolve_kernel_config(qcfg, use_process_default=False)"]
+    F --> E
+    G --> E
+    E --> H["_ACTIVE_CONFIG (process-wide, RLock)"]
+    H --> I["resolve_kernel_config(owner)<br/>owner.kernel wins, else _ACTIVE_CONFIG"]
+    I --> M["BaseQuantLinear / make_quant<br/>snapshot_kernel_config"]
+    M --> J["Module-owned policy: TorchLinear, MarlinLinear,<br/>GGUF, ParoQuant, bitsandbytes"]
+    M --> K["Native op arguments: AWQ, block-float,<br/>Swordfish and GGUF CPU"]
+    J --> L["run"]
+    K --> L
+```
+
+Two precedence rules are worth stating explicitly, because they are the
+contract a reviewer has to check:
+
+- An explicit `owner.kernel` (a quantize config) wins over the process policy,
+  so a caller that holds the config never inherits another run's tuning.
+- `configure_kernel(None)` restores the documented defaults; it does not leave
+  the previous policy in place.
+
+The failure path is the important one. A value that cannot be honoured is
+rejected at construction rather than clamped, so a typo cannot silently select
+a different numerical path:
+
+```mermaid
+flowchart LR
+    A["KernelConfig(field=value)"] --> B{"__post_init__ type<br/>and range check"}
+    B -- "valid" --> C["policy installed"]
+    B -- "wrong type or out of range" --> D["TypeError / ValueError<br/>(fail closed)"]
+    B -- "None on an optional field" --> E["keep the documented default"]
+```
+
+### Mechanism replaced
+
+| Old mechanism | Location (before) | Replacement |
+| --- | --- | --- |
+| `env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")` | `quantization/gptq.py:2490`, `quantization/qqq.py:885` | `KernelConfig.gptq_fused_block_update` |
+| `os.getenv("GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE")` at import | `quantization/npu_linalg.py:9` | `KernelConfig.npu_cholesky_block_size` passed per call |
+| `os.environ.get("GPTQ_TORCH_*")` | `nn_modules/qlinear/torch.py:245-276` | `KernelConfig.torch_*` |
+| `env_flag("GPTQMODEL_MARLIN_USE_FP32")` | `nn_modules/qlinear/marlin.py:158` | `KernelConfig.marlin_fp32` |
+| `env_flag("GPTQMODEL_FP32_ACCUM")` | `gemm_awq.py:30`, `gemm_awq_triton.py:32`, `quantization/awq/**/gemm.py:28`, `quantization/paroquant/**/gemm.py:32` | `KernelConfig.fp32_accum` |
+| `os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE")` at import | `quantization/awq/modules/triton/scheduler.py:27` | `KernelConfig.awq_triton_schedule` |
+| `GPTQMODEL_GGUF_FUSED_*`, `GGUF_CPP_NATIVE_MATMUL`, `GGUF_CPP_THREADS` | `qlinear/gguf.py:1197-1215`, `qlinear/gguf_cpp.py:445,1190` | `KernelConfig.gguf_*` |
+| `GPTQMODEL_PAROQUANT_*` behaviour switches | `qlinear/paroquant.py:53-66`, `paroquant_triton.py:66-70`, `quantization/paroquant/**` | `KernelConfig.paroquant_*` |
+| `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
+| `GPTQMODEL_GSQ_DISABLE_*_RELAXATION` | `quantization/gsq_cuda_relaxation.py:400-403` | `KernelConfig.gsq_disable_*` |
+| `GPTQMODEL_EXL3_*` | `exl3_lib/quantize.py:136`, `exllamav3_processor.py:127-130`, `utils/exl3_capture_*.py` | `KernelConfig.exl3_*` |
+| `GPTQMODEL_ROCM_QUANT_BLAS`, `GPTQMODEL_NO_ROCM_LLC` | `utils/rocm.py`, `rocm_llc.py:414` | `KernelConfig.rocm_quant_blas`, `rocm_llc` |
+| `GPTQMODEL_FLOATX_CPU_THREADS`, `GPTQMODEL_MAX_PACKERS`, `GPTQMODEL_CPU_WORKERS`, `GPTQMODEL_CUDA_WORKERS` | `dtype.py:166`, `utils/model.py:1493`, `__init__.py:394,411` | `KernelConfig.floatx_cpu_threads`, `max_packers`, `cpu_workers`, `cuda_workers` |
+| `GPTQMODEL_CPU_BF16X3`, `GPTQMODEL_EXL3_CPU_BF16X3` | `utils/cpu_features.py:17,103`, `nn_modules/exllamav3_torch.py:35,46` | `KernelConfig.cpu_bf16x3_matmul` |
+| `GPTQMODEL_FLOATX_CPU_DISABLE_AVX2`, `_AVX512` read inside `floatx_cpu.cpp` | `gptqmodel_ext/floatx_cpu.cpp:371-386` | `dequantize_fp8_cpu` / `dequantize_fp4_cpu` `simd_level` argument |
+| `GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE` | `gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu:160` | `fused_splitk_reduce` argument on `gemm_forward` and `gemm_forward_fp32_reduce` |
+| `GPTQMODEL_BLOCKFLOAT_NO_CUBLAS` | `gptqmodel_ext/tt_blockfloat_cuda/tt_blockfloat_cuda.cu:723` | `allow_cublas` argument on `blockfloat_linear` |
+| `APHRODITE_SWORDFISH_DENSE_M`, `APHRODITE_SWORDFISH_DETERMINISTIC` | `gptqmodel_ext/swordfish/.../swordfish_mm.cu:84,106` | `dense_m_override`, `deterministic` arguments on `swordfish_mm` |
+
+The three names in the last rows are why this change is not purely Python: a
+native kernel cannot read a Python object, so the choice is passed as an op
+argument on every call. That keeps the value visible in the dispatch site, and
+it means a test can exercise both paths in one process.
+
+## Lifetime and serialization
+
+Quantized linear modules own a snapshot of their execution policy. Later
+loads, `configure_kernel` calls and mutations to the original legacy object do
+not change those modules. Shared quantization and host utilities still use a
+process-wide fallback installed before the loop or load starts. Concurrent
+quantization runs with different shared runtime settings are not isolated.
+
+`kernel` and `runtime` are runtime-only fields. Neither is written to the checkpoint, because
+the host that loads a checkpoint is not necessarily the host that produced it.
+The same applies to `compile`: a saved checkpoint carries the numerical
+representation, not another machine's kernel tuning.
+
+## Fields
+
+### GPTQ and NPU
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `gptq_fused_block_update` | `True` | Use the fused 128-column GPTQ block-update kernel. `False` forces the eager per-column path. |
+| `npu_cholesky_block_size` | `64` | Blocked Cholesky panel width on Ascend NPU. |
+| `blockfloat_cublas` | `True` | Tenstorrent block-float CUDA linear: use the cuBLAS prefill. `False` forces the fused dequant+MMA fallback. |
+| `swordfish_deterministic` | `False` | Swordfish Blackwell decode: force the run-stable smem-reduction epilogue. |
+| `swordfish_dense_m` | `0` | Swordfish dense-tier crossover row count. `0` keeps the measured per-SM heuristic. |
+
+### FloatX CPU decode
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `floatx_cpu_threads` | `None` | Native FloatX CPU thread count. `None` keeps the size-derived default. |
+| `floatx_cpu_native_fp8` | `False` | Prefer the native FP8 decode path over the reference path. |
+| `floatx_cpu_simd_level` | `2` | Highest SIMD path the FP8/FP4 CPU decode may use: `0` scalar, `1` AVX2/F16C, `2` AVX512. |
+| `cpu_bf16x3_matmul` | `True` | Allow oneDNN BF16x3 FP32 matmul on CPU (EXL3 and generic CPU matmul). |
+
+### Torch GPTQ kernel
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `torch_streaming` | `False` | Stream dequantized tiles instead of materializing the whole weight. |
+| `torch_stream_tile` | `512` | Column width of one streamed tile. |
+| `torch_triton_dequant` | `None` | Triton dequantization. `None` follows availability. |
+| `torch_rocm_gemv` | `True` | Allow the ROCm GEMV path. |
+| `torch_rocm_gemm` | `True` | Allow the ROCm GEMM path. |
+| `torch_cache_weights` | `False` | Legacy opt-in; dense caches are refused and warned about. |
+| `torch_lookahead` | `False` | Legacy opt-in; the lookahead schedule is refused and warned about. |
+
+### Marlin, Triton, AWQ
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `marlin_fp32` | `True` | FP32 Marlin reduction. `False` uses the reduced-precision reduction. |
+| `fp32_accum` | `True` | FP32 accumulation in the Triton AWQ/ParoQuant GEMMs. |
+| `awq_triton_schedule` | `"auto"` | AWQ Triton dispatch mode: `"auto"` or `"legacy"`. |
+| `awq_fused_splitk_reduce` | `True` | Use the fused split-K reduce. `False` reduces through the eager `sum(0)`. |
+
+### GGUF
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `gguf_fused_cuda_max_rows` | `32` | Row ceiling for the fused CUDA forward. |
+| `gguf_fused_cuda_min_matrix_elements` | `8388608` | Matrix-size floor for the fused CUDA forward. |
+| `gguf_fused_cpu_max_rows` | `64` | Row ceiling for the fused CPU forward. |
+| `gguf_fused_cpu_min_matrix_elements` | `0` | Matrix-size floor for the fused CPU forward. |
+| `gguf_fused_chunk_blocks` | `0` | Explicit K-chunk block count. `0` uses the byte budget. |
+| `gguf_fused_chunk_bytes` | `33554432` | Transient-memory budget for one K chunk. |
+| `gguf_fused_autotune_warmup` | `1` | Warmup launches per autotune candidate. |
+| `gguf_fused_autotune_iters` | `2` | Timed launches per autotune candidate. |
+| `gguf_fused_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
+| `gguf_cpp_native_matmul` | `None` | Force the native ggml matmul on or off. `None` follows capability. |
+| `gguf_cpp_threads` | `None` | Native ggml CPU thread count. `None` follows torch. |
+
+### ParoQuant
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `paroquant_cache_runtime_dtype` | `False` | Cache the typed runtime rotation state. |
+| `paroquant_auto_cache_bf16_runtime_dtype` | `True` | Enable that cache automatically for BF16. |
+| `paroquant_cache_rotation_dtype` | `False` | Cache typed rotation metadata. |
+| `paroquant_auto_cache_bf16_rotation_dtype` | `True` | Enable that cache automatically for BF16. |
+| `paroquant_cpu_avx512` | `True` | Allow the AVX512 BF16 CPU GEMM. |
+| `paroquant_triton_autotune` | `True` | Autotune the Triton GEMM tiles. |
+| `paroquant_triton_autotune_warmup` | `2` | Warmup launches per candidate. |
+| `paroquant_triton_autotune_iters` | `4` | Timed launches per candidate. |
+| `paroquant_triton_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
+| `paroquant_triton_decode_max_rows` | `8` | Largest row count that uses the decode tile. |
+| `paroquant_sym_ste_triton` | `True` | Allow the symmetric Triton STE. |
+| `paroquant_affine_ste_triton` | `True` | Allow the affine Triton STE. |
+| `paroquant_affine_ste_triton_backward` | `False` | Use the Triton affine backward instead of the hybrid. |
+| `paroquant_rotate_autotune` | `True` | Autotune the fused-rotation launch shape. |
+| `paroquant_rotate_cta_m` | `None` | Pin the rotation CTA-M tile to `4`, `8` or `16`. |
+| `paroquant_rotate_row_pad` | `None` | Pin the rotation row padding to `0` or `2`. |
+| `paroquant_autotune_cache` | `True` | Persist rotation autotune results. |
+
+### bitsandbytes and BitBLAS
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `bitsandbytes_cpu_packed` | `False` | Opt into the packed 4-bit CPU candidate. |
+| `bitsandbytes_cpu_int8_dense` | `True` | Allow the tiled FP32 recompute over native INT8. |
+| `bitsandbytes_triton` | `False` | Force the Triton bitsandbytes kernel where a measured tile exists. |
+| `disable_bitblas` | `False` | Skip BitBLAS probing and selection. |
+
+### GSQ
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `gsq_disable_cuda_relaxation` | `False` | Force the eager GSQ relaxation path everywhere. |
+| `gsq_disable_hip_relaxation` | `False` | Skip only the HIPRTC GSQ backend. |
+
+### EXL3
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `exl3_tile_batch` | `256` | EXL3 quantization scratch slots per launch |
+| `exl3_host_rss_limit_bytes` | `0` | EXL3 capture host-memory ceiling (`0` disables) |
+| `exl3_cuda_allocation_limit_bytes` | `0` | EXL3 capture device-memory ceiling (`0` disables) |
+| `exl3_memory_telemetry_interval_batches` | `0` | Batches between capture memory checks |
+| `exl3_capture_batch_spool` | `None` | Durable batch-spool root |
+| `exl3_capture_batch_checkpoint_interval` | `1` | Committed batches between spool checkpoints |
+| `exl3_capture_frontier` | `None` | Durable capture-frontier root |
+
+### ROCm
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. |
+| `rocm_llc` | `True` | Last-level-cache back-port for torch. |
+
+`rocm_quant_blas` selects the quantization BLAS backend. `None` keeps the
+reproducible `rocblas` default; `"hipblaslt"` opts into torch's hipBLASLt
+default and is faster but not reproducible across processes. `rocm_llc` controls
+the last-level-cache back-port for torch.
+
+### Threads
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `cpu_workers` | `None` | CPU worker count. |
+| `cuda_workers` | `None` | Per-device worker count on CUDA/ROCm. |
+| `max_packers` | `None` | Threads that pack completed modules after quantization. |
+| `pool_intraop_threads` | `None` | Torch intra-op pool per device-pool worker. `None` splits the process pool across the pool's workers; `0` keeps the inherited pool. |
+
+`None` keeps the platform-derived defaults. `max_packers` is the number of
+threads that pack completed modules after quantization.
+`pool_intraop_threads` bounds each worker's OpenMP team, because libgomp gives
+every pthread its own team: see
+[Device thread pool intra-op budget](device-thread-pool-intraop-budget.md).
+
+## Validation
+
+`KernelConfig` rejects values that cannot be honoured instead of silently
+clamping them: thread counts and tile sizes must be positive, the rotation tile
+choices are fixed sets, and `awq_triton_schedule` must be one of the two
+documented modes. This keeps a typo from turning into a different numerical
+path.
+
+The same rule covers the kernels that used to read the environment inside
+CUDA/C++ code: the FloatX SIMD level, the AWQ fused split-K reduce, the
+Tenstorrent block-float cuBLAS prefill, and the Swordfish dense-tier and
+deterministic decode switches are all op arguments derived from
+`KernelConfig`.

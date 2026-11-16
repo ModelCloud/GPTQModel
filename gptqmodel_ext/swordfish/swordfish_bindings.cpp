@@ -25,7 +25,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_swordfish, ops) {
   ops.def(
       "swordfish_mm(Tensor a, Tensor b_packed, Tensor group_scales, "
       "Tensor? group_zps, int num_bits, int group_size, "
-      "SymInt size_k, SymInt size_n) -> Tensor");
+      "SymInt size_k, SymInt size_n, int dense_m_override=0, "
+      "bool deterministic=False) -> Tensor");
 
   // Dequantize Swordfish-packed weights to dense fp16/bf16, optionally
   // out-major transposed and expert-stacked, for the dense tier.

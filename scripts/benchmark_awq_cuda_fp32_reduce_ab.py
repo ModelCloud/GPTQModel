@@ -180,6 +180,8 @@ def _run_path(
         )
 
     from gptqmodel.utils.awq import awq_gemm_forward
+    from gptqmodel.utils.kernel import get_kernel_config
+
     return awq_gemm_forward(
         x,
         qweight,
@@ -187,6 +189,7 @@ def _run_path(
         qzeros,
         split_k,
         fp32_accum=(mode == "fp32_accum"),
+        fused_splitk_reduce=get_kernel_config().awq_fused_splitk_reduce,
     )
 
 

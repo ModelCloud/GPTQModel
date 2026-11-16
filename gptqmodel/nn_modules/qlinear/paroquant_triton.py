@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Optional, Tuple
 
@@ -25,6 +24,7 @@ from ...quantization.paroquant.modules.triton.gemm import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ...utils.kernel import resolve_kernel_config
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paroquant import ParoLinear
 
@@ -63,11 +63,11 @@ class ParoQuantTritonLinear(ParoLinear):
     SUPPORTS_ADAPTERS = ParoLinear.SUPPORTS_ADAPTERS
     SUPPORTS_DTYPES = ParoLinear.SUPPORTS_DTYPES
     QUANT_TYPE = "awq_paroquant_triton"
-    PAROQUANT_TRITON_AUTOTUNE = os.environ.get("GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE", "1") != "0"
-    PAROQUANT_TRITON_AUTOTUNE_WARMUP = max(0, int(os.environ.get("GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_WARMUP", "2")))
-    PAROQUANT_TRITON_AUTOTUNE_ITERS = max(1, int(os.environ.get("GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_ITERS", "4")))
-    PAROQUANT_TRITON_AUTOTUNE_MARGIN = max(0.0, float(os.environ.get("GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_MARGIN", "0.05")))
-    PAROQUANT_TRITON_DECODE_MAX_ROWS = max(1, int(os.environ.get("GPTQMODEL_PAROQUANT_TRITON_DECODE_MAX_ROWS", "8")))
+    PAROQUANT_TRITON_AUTOTUNE = True
+    PAROQUANT_TRITON_AUTOTUNE_WARMUP = 2
+    PAROQUANT_TRITON_AUTOTUNE_ITERS = 4
+    PAROQUANT_TRITON_AUTOTUNE_MARGIN = 0.05
+    PAROQUANT_TRITON_DECODE_MAX_ROWS = 8
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -98,11 +98,12 @@ class ParoQuantTritonLinear(ParoLinear):
         """Initialize Triton autotune settings and the per-shape plan cache."""
         kwargs.setdefault("backend", BACKEND.PAROQUANT_TRITON)
         super().__init__(*args, **kwargs)
-        self.paroquant_triton_autotune_enabled = self.PAROQUANT_TRITON_AUTOTUNE
-        self.paroquant_triton_autotune_warmup = self.PAROQUANT_TRITON_AUTOTUNE_WARMUP
-        self.paroquant_triton_autotune_iters = self.PAROQUANT_TRITON_AUTOTUNE_ITERS
-        self.paroquant_triton_autotune_margin = self.PAROQUANT_TRITON_AUTOTUNE_MARGIN
-        self.paroquant_triton_decode_max_rows = self.PAROQUANT_TRITON_DECODE_MAX_ROWS
+        kernel = resolve_kernel_config(self)
+        self.paroquant_triton_autotune_enabled = kernel.paroquant_triton_autotune
+        self.paroquant_triton_autotune_warmup = kernel.paroquant_triton_autotune_warmup
+        self.paroquant_triton_autotune_iters = kernel.paroquant_triton_autotune_iters
+        self.paroquant_triton_autotune_margin = kernel.paroquant_triton_autotune_margin
+        self.paroquant_triton_decode_max_rows = kernel.paroquant_triton_decode_max_rows
         self._plan_cache: dict[str, str] = {}
 
     def post_init(self):

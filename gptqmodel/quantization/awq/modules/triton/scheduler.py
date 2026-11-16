@@ -10,7 +10,6 @@ Everything else falls back to the historical dispatch.
 
 from __future__ import annotations
 
-import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -19,12 +18,19 @@ from typing import Any
 
 import torch
 
+from gptqmodel.utils.kernel import get_kernel_config
+
 
 # Keep these sets aligned with the packing and kernel layouts we have tested.
 SUPPORTED_GROUP_SIZES = (32, 64, 128)
 SUPPORTED_SPLITS = (1, 2, 4, 8, 16, 32)
 MAX_PLAN_CACHE = 256
-DEFAULT_SCHEDULE_MODE = os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE", "auto").lower()
+
+
+def default_schedule_mode() -> str:
+    """Return the configured AWQ Triton dispatch mode."""
+
+    return get_kernel_config().awq_triton_schedule
 
 
 @dataclass(frozen=True)
@@ -494,7 +500,7 @@ def mark_awq_triton_plan_warmed(
 ) -> None:
     """Record a plan only after its complete eager path launched successfully."""
     G = resolve_group_size(group_size, K)
-    resolved_mode = DEFAULT_SCHEDULE_MODE if mode is None else mode.lower()
+    resolved_mode = default_schedule_mode() if mode is None else mode.lower()
     key = _warmup_key(
         M=M, N=N, K=K, G=G, device=device, input_dtype=input_dtype,
         compute_dtype=compute_dtype, output_dtype=output_dtype,
@@ -550,7 +556,7 @@ def select_awq_triton_plan(
     if M <= 0:
         raise ValueError("plan selection is not defined for empty input")
     G = resolve_group_size(group_size, K)
-    mode = DEFAULT_SCHEDULE_MODE if mode is None else mode.lower()
+    mode = default_schedule_mode() if mode is None else mode.lower()
     if mode not in ("auto", "legacy"):
         raise ValueError("AWQ Triton schedule mode must be 'auto' or 'legacy'")
     if cuda_graph:

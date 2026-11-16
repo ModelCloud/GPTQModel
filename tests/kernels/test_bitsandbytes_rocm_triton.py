@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear import bitsandbytes_triton as bt
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 bnb = pytest.importorskip("bitsandbytes")
@@ -211,7 +212,7 @@ def test_triton_dispatch_falls_back_when_the_input_needs_grad(monkeypatch):
     if bt._family(module.weight.device) not in bt.tuned_families():
         pytest.skip(f"no tuned bitsandbytes tile for {bt._family(module.weight.device)}")
 
-    monkeypatch.setenv("GPTQMODEL_BNB_TRITON", "1")
+    configure_kernel(KernelConfig(bitsandbytes_triton=True))
     triton_calls = []
     triton_matmul = bt.matmul_4bit
 
@@ -289,7 +290,7 @@ def test_selected_gpu_module_matches_oracle_without_expanded_storage(dtype, quan
     if path == "vendor":
         monkeypatch.setattr(bnb_module, "_triton_backend", lambda: None)
     else:
-        monkeypatch.setenv("GPTQMODEL_BNB_TRITON", "1")
+        configure_kernel(KernelConfig(bitsandbytes_triton=True))
         triton_matmul = bt.matmul_4bit
 
         def counted_matmul(*args, **kwargs):

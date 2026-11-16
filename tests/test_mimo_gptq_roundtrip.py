@@ -30,6 +30,7 @@ from gptqmodel.quantization.config import (
     QuantizeConfig,
 )
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.fixture
@@ -254,7 +255,7 @@ def test_mimo_cpu_gptq_roundtrip(
     cpu_threads: None,
 ) -> None:
     # The lazy loader's virtual pool requires two CPU workers, even on CI VMs.
-    monkeypatch.setenv("GPTQMODEL_CPU_WORKERS", "2")
+    configure_kernel(KernelConfig(cpu_workers=2))
     if dtype == "auto":
         # A host accelerator must not override the explicit CPU quantization device.
         select_device = loader_module.auto_select_device

@@ -29,6 +29,7 @@ for _thread_env in (
 os.environ.setdefault("OMP_NESTED", "FALSE")
 
 import numpy
+import pytest
 import torch
 
 
@@ -53,6 +54,19 @@ except RuntimeError:
 torch.manual_seed(787)
 random.seed(787)
 numpy.random.seed(787)
+
+
+@pytest.fixture(autouse=True)
+def _reset_kernel_config_between_tests():
+    """Keep the process-wide kernel policy from leaking between tests."""
+
+    from gptqmodel.utils.kernel import reset_kernel_config
+
+    reset_kernel_config()
+    try:
+        yield
+    finally:
+        reset_kernel_config()
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _MODELS_TESTS_DIR = _TESTS_DIR / "models"

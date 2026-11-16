@@ -24,12 +24,8 @@ from ...quantization.awq.modules.triton.scheduler import (
 )
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import get_kernel_config, resolve_kernel_config
 from ...utils.torch import HAS_XPU
-
-
-# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
-FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 
 def _cuda_graph_capturing(device: torch.device) -> bool:
@@ -85,7 +81,10 @@ class AwqGemmTritonFn(torch.autograd.Function):
         request = prefer_backend if isinstance(prefer_backend, dict) else {}
         # Keep the biased sum wide even when low-precision accumulation was
         # requested: rounding the GEMM first can turn a finite sum into inf.
-        fp32_accum = bias is not None or bool(request.get("fp32_accum", FP32_ACCUM))
+        requested_fp32_accum = request.get("fp32_accum")
+        if requested_fp32_accum is None:
+            requested_fp32_accum = get_kernel_config().fp32_accum
+        fp32_accum = bias is not None or bool(requested_fp32_accum)
         if qzeros.ndim != 2 or scales.ndim != 2 or qzeros.shape[0] <= 0:
             raise ValueError("AWQ Triton qzeros/scales must be non-empty rank-2 tensors")
         if K % qzeros.shape[0] or scales.shape[0] != qzeros.shape[0]:
@@ -229,13 +228,19 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
-        fp32_accum = bool(kwargs.pop("fp32_accum", FP32_ACCUM))
+        kernel = resolve_kernel_config(kwargs.get("kernel") or kwargs.get("backend"))
+        requested_fp32_accum = kwargs.pop("fp32_accum", None)
+        fp32_accum = bool(
+            kernel.fp32_accum if requested_fp32_accum is None else requested_fp32_accum
+        )
         schedule_mode = kwargs.pop(
             "schedule_mode", kwargs.pop("awq_triton_schedule_mode", None)
         )
         schedule = kwargs.pop(
             "schedule", kwargs.pop("awq_triton_schedule", None)
         )
+        if schedule_mode is None and schedule is None:
+            schedule = kernel.awq_triton_schedule
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -303,7 +308,7 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                     self.bias,
                     self.out_features,
                     {
-                        "fp32_accum": getattr(self, "fp32_accum", FP32_ACCUM),
+                        "fp32_accum": self.fp32_accum,
                         "schedule_mode": getattr(self, "awq_triton_schedule_mode", None),
                         "schedule": getattr(self, "awq_triton_schedule", None),
                         "training": self.training,

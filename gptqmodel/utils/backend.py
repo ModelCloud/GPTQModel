@@ -39,7 +39,7 @@ class BACKEND(str, Enum):
     # Marlin kernels
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
-    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by KernelConfig.marlin_fp32
 
     # Machete kernels
     # A single backend covers both Machete sub-kernels. The quantization method
@@ -222,6 +222,11 @@ def normalize_backend(
     *,
     quant_method: Optional[Union[str, Any]] = None,
 ) -> Optional[BACKEND]:
+    # Imported lazily: configs depend on the enum and normalization rules.
+    from .backend_config import BackendConfig
+
+    if isinstance(backend, BackendConfig):
+        backend = backend.backend
     if backend is None:
         return None
 

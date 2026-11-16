@@ -22,7 +22,7 @@ from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
-from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.p2p import safe_move_to
 from .conv_padding import conv_padding_pairs, pad_mode
 from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
@@ -817,7 +817,10 @@ class QQQ:
 
         try:
             if H.device.type == "npu":
-                H = npu_inverse_cholesky_factor(H)
+                H = npu_inverse_cholesky_factor(
+                    H,
+                    block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
+                )
             else:
                 H = torch.linalg.cholesky(H)
                 H = torch.cholesky_inverse(H)
@@ -882,7 +885,7 @@ class QQQ:
                 and groupsize != -1
                 and type(self.quantizer) is Quantizer
                 and not self.qcfg.mock_quantization
-                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+                and resolve_kernel_config(self.qcfg).gptq_fused_block_update
             ):
                 from .gptq_cuda import block_update_available, gptq_block_update
 

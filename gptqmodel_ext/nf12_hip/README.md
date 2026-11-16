@@ -370,7 +370,7 @@ Environment knobs:
 | `GPTQMODEL_NF12_HIP_FORCE_REBUILD` | Rebuild even when the cache matches. |
 | `GPTQMODEL_NF12_HIP_FORCE_DOT_FALLBACK` | Force the gfx1250 portable-dot path on gfx1200/gfx1201 for oracle validation. |
 | `GPTQMODEL_EXT_VERBOSE` | Show the full hipcc command line. |
-| `GPTQMODEL_NO_ROCM_LLC` | Skip the `gptqmodel.rocm_llc` back-port. |
+| `KernelConfig(rocm_llc=False)` | Skip the `gptqmodel.rocm_llc` back-port (a config field, not an environment variable). |
 
 ## Files
 

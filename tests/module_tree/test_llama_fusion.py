@@ -270,7 +270,14 @@ def test_source_operands_share_only_fused_storage_and_unfuse_restores_it(method,
                 assert tensor.untyped_storage().data_ptr() == operand.untyped_storage().data_ptr()
         assert group.guard()
     state = get_state_dict_for_save(model.model)
-    assert {name for name, tensor in original.items() if tensor.numel()} <= set(state)
+    # `qzeros_format` is the runtime marker (#4125/#4134) that `state_dict()`
+    # carries and the writer deliberately drops, so exclude it from the set
+    # that must survive the export.
+    exported = {
+        name for name, tensor in original.items()
+        if tensor.numel() and not name.endswith(".qzeros_format")
+    }
+    assert exported <= set(state)
     for name, entry in state.items():
         torch.testing.assert_close(entry.source, original[name], rtol=0, atol=0)
     del state

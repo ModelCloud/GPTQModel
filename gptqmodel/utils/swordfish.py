@@ -346,7 +346,23 @@ def swordfish_mm(
     size_n: int,
     group_zps: Optional[torch.Tensor] = None,
     num_bits: int = 4,
+    dense_m_override: Optional[int] = None,
+    deterministic: Optional[bool] = None,
 ) -> torch.Tensor:
+    """Swordfish w4a16/w8a16 GEMM.
+
+    ``dense_m_override`` and ``deterministic`` select the decode dispatch. They
+    are explicit kernel options from ``KernelConfig`` so the same shape takes
+    the same path on the same host; ``None`` keeps the measured defaults.
+    """
+
+    from .kernel import get_kernel_config
+
+    kernel = get_kernel_config()
+    if dense_m_override is None:
+        dense_m_override = kernel.swordfish_dense_m
+    if deterministic is None:
+        deterministic = kernel.swordfish_deterministic
     return _extension_api().op("swordfish", "swordfish_mm")(
         a,
         b_packed,
@@ -356,6 +372,8 @@ def swordfish_mm(
         group_size,
         size_k,
         size_n,
+        int(dense_m_override or 0),
+        bool(deterministic),
     )
 
 
