@@ -113,6 +113,11 @@ def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
     row = tl.program_id(0).to(tl.int64)
     k = tl.arange(0, BK)
     x = tl.load(X + row * K + k, k < K, other=0).to(tl.float32)
+    # `tl.max` ignores NaN, so a NaN element leaves `amax` finite and the clamp
+    # below turns the NaN quotient into a saturated finite code. Poison the row
+    # scale instead so the NaN reaches the caller (the Torch reference
+    # `fp8_token_qdq` rejects such a row) rather than a silent finite result.
+    row_has_nan = tl.max((x != x).to(tl.int32), 0) > 0
     amax = tl.max(tl.abs(x), 0)
     # `amax / 448.0` can underflow to zero for tiny-but-finite rows, and
     # `div_rn(x, 0)` then returns NaN/Inf that the clamp folds into a wrong
@@ -120,6 +125,7 @@ def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
     # (`fp8_token_qdq`) so both paths stay bit-exact.
     scale = amax / 448.0
     scale = tl.where(scale > 0, scale, 1.0)
+    scale = tl.where(row_has_nan, float("nan"), scale)
     # Divide with the IEEE round-to-nearest instruction. Triton's plain `/`
     # may lower to the approximate reciprocal sequence, which is one ULP off
     # near an E4M3 midpoint and flips the code; `fp8_token_qdq`, the oracle
