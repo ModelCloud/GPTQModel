@@ -51,7 +51,9 @@ class BailingMoeQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
-                "shared_experts": ("gate_proj", "up_proj", "down_proj"),
+                # `down_proj` consumes the gate/up product, so it must be
+                # calibrated (and AWQ-scaled) after gate/up are quantized.
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
