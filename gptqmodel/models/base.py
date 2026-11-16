@@ -105,6 +105,7 @@ from ..utils.model import (
     warn_fused_unit_dynamic_conflicts,
 )
 from ..utils.model_dequant import infer_block_shape
+from ..utils.offload import release_private_offload_root
 from ..utils.p2p import safe_module_to
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
@@ -3151,17 +3152,22 @@ class BaseQModel(nn.Module):
             else:
                 self.save_pretrained(save_dir=save_dir, **kwargs)
         finally:
-            if timer is not None and start_time is not None:
-                try:
-                    target = os.path.abspath(save_dir)
-                except (TypeError, ValueError, OSError):
-                    target = str(save_dir)
-                timer.record(
-                    "model_save",
-                    time.perf_counter() - start_time,
-                    source=target,
-                )
-                timer.flush()
+            try:
+                if timer is not None and start_time is not None:
+                    try:
+                        target = os.path.abspath(save_dir)
+                    except (TypeError, ValueError, OSError):
+                        target = str(save_dir)
+                    timer.record(
+                        "model_save",
+                        time.perf_counter() - start_time,
+                        source=target,
+                    )
+                    timer.flush()
+            finally:
+                # The save-time reader has finished with the per-run offload
+                # bundles, so the run directory can be removed (issue #4368).
+                release_private_offload_root(self)
 
     def _active_auto_module_decoder_config(self) -> Optional[AutoModuleDecoderConfig]:
         """Return the active auto-decoder preprocessor config, if any."""

@@ -9,10 +9,12 @@ run must get a private namespace that both the writer and the save-time reader
 agree on.
 """
 
+import gc
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors import safe_open
 from torch import nn
@@ -20,7 +22,11 @@ from torch import nn
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils.model import OffloadTensorRef, get_state_dict_for_save
-from gptqmodel.utils.offload import bind_private_offload_root, offload_to_disk
+from gptqmodel.utils.offload import (
+    bind_private_offload_root,
+    offload_to_disk,
+    release_private_offload_root,
+)
 
 
 class _TinyModel(nn.Module):
@@ -125,3 +131,108 @@ def test_offload_bundles_do_not_cross_run_namespaces(tmp_path):
         _resolved_weight(second_model, second.quantize_config),
         torch.full((8, 8), 2.0),
     )
+
+
+def test_release_private_offload_root_removes_explicit_run_dir_only(tmp_path):
+    shared = _shared_config(tmp_path)
+    model = _dummy_qmodel(shared)
+    base = Path(shared.offload_to_disk_path)
+    run_root = Path(bind_private_offload_root(model))
+    sibling = base / "run-sibling"
+    sibling.mkdir()
+    (run_root / "model.layers.0.linear").mkdir(parents=True)
+
+    released = release_private_offload_root(model)
+
+    assert released == str(run_root)
+    assert not run_root.exists()
+    assert sibling.is_dir()
+    assert base.is_dir()
+
+
+def test_release_private_offload_root_removes_auto_temp_run_dir(tmp_path):
+    config = QuantizeConfig(bits=4, group_size=32, offload_to_disk=True, device="cpu")
+    base = Path(config.offload_to_disk_path)
+    model = _dummy_qmodel(config)
+
+    run_root = Path(bind_private_offload_root(model))
+    assert run_root.parent == base
+    assert run_root.is_dir()
+
+    release_private_offload_root(model)
+
+    assert not run_root.exists()
+    assert base.is_dir()
+
+
+def test_private_offload_run_dir_is_removed_when_model_is_collected(tmp_path):
+    shared = _shared_config(tmp_path)
+    model = _TinyModel(1.0)
+    model.quantize_config = shared
+
+    run_root = Path(bind_private_offload_root(model))
+    assert run_root.is_dir()
+
+    del model
+    gc.collect()
+
+    assert not run_root.exists()
+
+
+def test_rebinding_private_offload_root_releases_the_previous_run_dir(tmp_path):
+    shared = _shared_config(tmp_path)
+    model = _dummy_qmodel(shared)
+    first_root = Path(bind_private_offload_root(model))
+    assert first_root.is_dir()
+
+    second_root = Path(bind_private_offload_root(model))
+
+    assert second_root != first_root
+    assert not first_root.exists()
+    assert second_root.is_dir()
+    assert model.quantize_config.offload_to_disk_path == str(second_root)
+
+
+def test_module_looper_failure_releases_private_run_dir(tmp_path, monkeypatch):
+    shared = _shared_config(tmp_path)
+    model = _dummy_qmodel(shared)
+    looper = ModuleLooper(model, processors=[SimpleNamespace(qcfg=shared)])
+    run_root = Path(model.quantize_config.offload_to_disk_path)
+    assert run_root.is_dir()
+
+    def fail(**_kwargs):
+        raise RuntimeError("quantization failed")
+
+    monkeypatch.setattr(looper, "_loop_impl", fail)
+
+    with pytest.raises(RuntimeError, match="quantization failed"):
+        looper.loop()
+
+    assert not run_root.exists()
+
+
+def test_base_model_save_releases_private_run_dir(tmp_path):
+    from gptqmodel.models.base import BaseQModel
+
+    class _SaveModel(BaseQModel):
+        def __init__(self, config):
+            nn.Module.__init__(self)
+            self.quantized = True
+            self.quantize_config = config
+            self.quant_override_files = {}
+            self._model_free_weight_only_replacements_only = False
+
+        def _warn_fused_unit_dynamic_overrides(self):
+            return None
+
+        def save_quantized(self, **_kwargs):
+            return None
+
+    shared = _shared_config(tmp_path)
+    model = _SaveModel(shared)
+    run_root = Path(bind_private_offload_root(model))
+    assert run_root.is_dir()
+
+    model.save(str(tmp_path / "saved"))
+
+    assert not run_root.exists()
