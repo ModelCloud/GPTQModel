@@ -20,7 +20,7 @@ from ..looper.named_module import NamedModule
 from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
-from .quantizer import HF_OPTIMUM, Quantizer
+from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer
 
 
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
@@ -214,6 +214,7 @@ class RTN:
                         maxq,
                         steps=mse_steps,
                         maxshrink=mse_maxshrink,
+                        eps=SCALE_STORAGE_FLOOR,
                     )
                 else:
                     block_mod, scale_factor = smooth_block(
@@ -221,7 +222,18 @@ class RTN:
                         self._primary,
                         group_size=effective_group_size,
                     )
-                    self.quantizer.find_params(block_mod, weight=True)
+                    # Row/column smoothing restores ``scale_factor`` after
+                    # quantization, so bound the normalized scale in the final
+                    # weight domain before selecting codes.
+                    scale_min = (
+                        SCALE_STORAGE_FLOOR if scale_factor is None
+                        else SCALE_STORAGE_FLOOR / scale_factor
+                    )
+                    self.quantizer.find_params(
+                        block_mod,
+                        weight=True,
+                        scale_min=scale_min.flatten() if isinstance(scale_min, torch.Tensor) else scale_min,
+                    )
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale
                     zero = self.quantizer.zero
