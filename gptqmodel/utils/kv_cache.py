@@ -3,17 +3,31 @@
 """Estimate the KV-cache footprint of a model config.
 
 Weight quantization decides how big the checkpoint is; the KV cache decides how
-much context fits next to it. The two are independent - 4-bit weights on a 32k
-context can still need more VRAM for the cache than for the model - and the
-question users ask after quantizing is exactly "what will 8k cost me".
+much context fits next to it, and the two are independent - 4-bit weights on a
+32k context can still need more VRAM for the cache than for the model.
 
-This is arithmetic on the config, not a runtime measurement: it reports what the
-declared shapes imply, so a config that hides its shapes returns ``None`` rather
-than a number that looks authoritative and is wrong.
+The arithmetic depends on how a model stores attention state, and recent model
+families no longer agree on one layout:
+
+``gqa``/``mqa``  every layer keeps one K and one V per KV head, so the cache is
+                 ``2 * kv_heads * head_dim`` per token per layer.
+``mla``          DeepSeek-style attention keeps a compressed latent
+                 (``kv_lora_rank``) plus one decoupled RoPE key
+                 (``qk_rope_head_dim``) per token, shared across heads. There is
+                 no per-head K/V pair and no factor of two; summing per-head
+                 shapes here would overstate the cache by an order of magnitude.
+``linear``       recurrent layers (``linear_attention`` and friends) keep a
+                 constant-size state. They do not grow with context, so they are
+                 reported separately and never counted in the per-token slope.
+``sliding``      layers with a window cap growth at ``min(context, window)``.
+
+Mixed stacks (GLM5, DeepSeek V4.1 Flash and similar) declare their layout in
+``layer_types``; the estimator resolves per layer and reports what it could not
+classify instead of folding it into a total that looks authoritative.
 """
 
-from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Optional, Sequence, Tuple
 
 import torch
 
@@ -25,52 +39,109 @@ _DTYPE_ITEMSIZE = {
     torch.float64: 8,
 }
 
-# Configs whose attention state is not one K/V pair per KV head per layer.
-# MLA keeps a single compressed latent, so the usual per-head formula does not
-# describe its cache and returning a number would be misleading.
-_UNSUPPORTED_SHAPE_FIELDS = ("kv_lora_rank", "q_lora_rank")
+# Layer types whose cache grows with the number of tokens.
+_FULL_ATTENTION_TYPES = frozenset({
+    "full_attention", "attention", "self_attention", "indexed_attention",
+    "deepseek_sparse_attention", "sparse_attention", "mla", "multi_latent_attention",
+})
+_SLIDING_ATTENTION_TYPES = frozenset({
+    "sliding_attention", "sliding_window_attention", "window_attention",
+})
+# Layer types that keep a constant-size recurrent state.
+_LINEAR_ATTENTION_TYPES = frozenset({
+    "linear_attention", "gated_deltanet", "deltanet", "gla", "recurrent",
+    "mamba", "mamba2", "ssm", "lightning_attention",
+})
+
+_LAYER_TYPE_FIELDS = ("layer_types", "attention_layer_types", "attn_layer_types")
 
 
 @dataclass(frozen=True)
 class KVCacheEstimate:
     """Per-token KV-cache cost implied by a config, for one batch element."""
 
-    layers: int
-    kv_heads: int
-    head_dim: int
+    layer_type: str                      # "gqa" | "mla"
+    growing_layers: int                  # attention layers whose cache grows
+    dims_per_layer_token: int            # elements per token per growing layer
     dtype: torch.dtype
+    sliding_layers: int = 0
     sliding_window: Optional[int] = None
+    linear_layers: int = 0               # constant-state layers, not counted
+    mtp_layers: int = 0                  # next-token-prediction layers, counted
+    unclassified: Tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def itemsize(self) -> int:
         return _DTYPE_ITEMSIZE[self.dtype]
 
     @property
-    def bytes_per_token(self) -> int:
-        """K and V, every layer, one batch element."""
+    def exact(self) -> bool:
+        """False when some layer type could not be classified."""
 
-        return self.layers * 2 * self.kv_heads * self.head_dim * self.itemsize
+        return not self.unclassified
+
+    @property
+    def full_layers(self) -> int:
+        return self.growing_layers - self.sliding_layers
+
+    def _bytes_per_layer_token(self) -> int:
+        return self.dims_per_layer_token * self.itemsize
+
+    @property
+    def bytes_per_token(self) -> int:
+        """Asymptotic growth per token: sliding layers do not grow past the window."""
+
+        return self.full_layers * self._bytes_per_layer_token()
 
     def bytes_for(self, tokens: int, *, batch_size: int = 1) -> int:
-        return self.bytes_per_token * max(0, int(tokens)) * max(1, int(batch_size))
+        tokens = max(0, int(tokens))
+        batch = max(1, int(batch_size))
+        window = self.sliding_window or tokens
+        sliding_tokens = min(tokens, window)
+        growing = self.full_layers * tokens + self.sliding_layers * sliding_tokens
+        return growing * self._bytes_per_layer_token() * batch
 
     def tokens_for(self, budget_bytes: int, *, batch_size: int = 1) -> int:
-        per_token = self.bytes_per_token * max(1, int(batch_size))
-        if per_token <= 0:
+        """Largest context whose cache fits in ``budget_bytes``."""
+
+        budget = max(0, int(budget_bytes)) // max(1, int(batch_size))
+        per_layer = self._bytes_per_layer_token()
+        if per_layer <= 0 or budget <= 0:
             return 0
-        return max(0, int(budget_bytes)) // per_token
+
+        window = self.sliding_window or 0
+        # Up to the window every layer pays; past it only the full layers do.
+        first_stage = (self.full_layers + self.sliding_layers) * per_layer
+        if window and first_stage * window >= budget:
+            return budget // first_stage
+        if not window:
+            return budget // first_stage if first_stage else 0
+
+        remaining = budget - first_stage * window
+        slope = self.full_layers * per_layer
+        if slope <= 0:
+            return window
+        return window + remaining // slope
 
     def format(self, contexts: Sequence[int] = (8192, 32768)) -> str:
-        """One line: per-token cost and what a few context lengths need."""
+        """One line: per-token cost, a few context sizes, and the assumptions."""
 
-        parts = [
-            f"KV cache: {_human(self.bytes_per_token)}/token"
-            f" ({self.layers}L x {self.kv_heads}KV x {self.head_dim}d, {_dtype_name(self.dtype)})"
-        ]
+        shape = (
+            f"{self.growing_layers}L x {self.dims_per_layer_token} elem/token, {self.layer_type}"
+        )
+        parts = [f"KV cache: {_human(self.bytes_per_token)}/token ({shape}, {_dtype_name(self.dtype)})"]
         for context in contexts:
             parts.append(f"{_tokens_name(context)} ctx {_human(self.bytes_for(context))}")
-        if self.sliding_window:
-            parts.append(f"sliding window {_tokens_name(self.sliding_window)} caps growth")
+        if self.sliding_layers and self.sliding_window:
+            parts.append(
+                f"{self.sliding_layers} sliding layer(s) capped at {_tokens_name(self.sliding_window)}"
+            )
+        if self.linear_layers:
+            parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
+        if self.mtp_layers:
+            parts.append(f"incl. {self.mtp_layers} MTP layer(s)")
+        if self.unclassified:
+            parts.append(f"unknown layer type(s): {', '.join(self.unclassified)}")
         return " | ".join(parts)
 
 
@@ -79,7 +150,7 @@ def _dtype_name(dtype: torch.dtype) -> str:
 
 
 def _tokens_name(tokens: int) -> str:
-    if tokens % 1024 == 0 and tokens >= 1024:
+    if tokens >= 1024 and tokens % 1024 == 0:
         return f"{tokens // 1024}k"
     return str(tokens)
 
@@ -100,6 +171,34 @@ def _text_config(config: Any) -> Any:
     return text_config if text_config is not None else config
 
 
+def _layer_types(source: Any, layers: int) -> Tuple[Optional[list], Tuple[str, ...]]:
+    """Return the declared per-layer types, or a single-type list of ``None``."""
+
+    for field_name in _LAYER_TYPE_FIELDS:
+        declared = getattr(source, field_name, None)
+        if isinstance(declared, (list, tuple)) and declared:
+            declared = [str(entry).lower() for entry in declared]
+            if len(declared) > layers:
+                return None, ()
+            # MTP layers reuse the last declared attention layer's layout.
+            mtp = int(getattr(source, "num_nextn_predict_layers", 0) or 0)
+            return declared + [declared[-1]] * mtp, ()
+    return [None] * layers, ()
+
+
+def _is_mla(source: Any) -> Tuple[bool, Optional[int]]:
+    """MLA caches a compressed latent plus a decoupled RoPE key."""
+
+    latent = getattr(source, "kv_lora_rank", None)
+    if not latent:
+        return False, None
+    rope = getattr(source, "qk_rope_head_dim", 0) or 0
+    try:
+        return True, int(latent) + int(rope)
+    except (TypeError, ValueError):
+        return False, None
+
+
 def estimate_kv_cache(
         config: Any,
         *,
@@ -111,20 +210,28 @@ def estimate_kv_cache(
         return None
     source = _text_config(config)
 
-    for field in _UNSUPPORTED_SHAPE_FIELDS:
-        if getattr(source, field, None):
-            return None
-
     layers = getattr(source, "num_hidden_layers", None)
-    heads = getattr(source, "num_attention_heads", None)
-    hidden = getattr(source, "hidden_size", None)
-    if not layers or not heads or not hidden:
+    if not layers:
         return None
 
-    kv_heads = getattr(source, "num_key_value_heads", None) or heads
-    head_dim = getattr(source, "head_dim", None) or (hidden // heads)
-    if not kv_heads or not head_dim:
-        return None
+    mtp = int(getattr(source, "num_nextn_predict_layers", 0) or 0)
+    declared_types, unclassified_declared = _layer_types(source, int(layers))
+
+    is_mla, mla_dims = _is_mla(source)
+    if is_mla:
+        if not mla_dims:
+            return None
+        layer_type, dims = "mla", mla_dims
+    else:
+        heads = getattr(source, "num_attention_heads", None)
+        hidden = getattr(source, "hidden_size", None)
+        if not heads or not hidden:
+            return None
+        kv_heads = getattr(source, "num_key_value_heads", None) or heads
+        head_dim = getattr(source, "head_dim", None) or (hidden // heads)
+        if not kv_heads or not head_dim:
+            return None
+        layer_type, dims = "gqa", 2 * int(kv_heads) * int(head_dim)
 
     resolved_dtype = dtype or getattr(source, "torch_dtype", None) or torch.float16
     if not isinstance(resolved_dtype, torch.dtype) or resolved_dtype not in _DTYPE_ITEMSIZE:
@@ -133,10 +240,34 @@ def estimate_kv_cache(
     window = getattr(source, "sliding_window", None)
     window = int(window) if isinstance(window, int) and window > 0 else None
 
+    growing = sliding = linear = 0
+    unclassified = list(unclassified_declared)
+    for entry in declared_types:
+        if entry is None:
+            growing += 1
+        elif entry in _FULL_ATTENTION_TYPES:
+            growing += 1
+        elif entry in _SLIDING_ATTENTION_TYPES:
+            growing += 1
+            sliding += 1
+        elif entry in _LINEAR_ATTENTION_TYPES:
+            linear += 1
+        else:
+            if entry not in unclassified:
+                unclassified.append(entry)
+
+    if growing == 0 and not unclassified:
+        # Every layer is recurrent: there is no per-token cache to report.
+        return None
+
     return KVCacheEstimate(
-        layers=int(layers),
-        kv_heads=int(kv_heads),
-        head_dim=int(head_dim),
+        layer_type=layer_type,
+        growing_layers=growing,
+        dims_per_layer_token=dims,
         dtype=resolved_dtype,
-        sliding_window=window,
+        sliding_layers=sliding,
+        sliding_window=window if sliding else None,
+        linear_layers=linear,
+        mtp_layers=mtp,
+        unclassified=tuple(unclassified),
     )
