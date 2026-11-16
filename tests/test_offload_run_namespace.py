@@ -211,7 +211,8 @@ def test_module_looper_failure_releases_private_run_dir(tmp_path, monkeypatch):
     assert not run_root.exists()
 
 
-def test_base_model_save_releases_private_run_dir(tmp_path):
+def test_base_model_save_keeps_private_run_dir_for_in_session_use(tmp_path):
+    """#4368: save() must not delete bundles the live model still reads."""
     from gptqmodel.models.base import BaseQModel
 
     class _SaveModel(BaseQModel):
@@ -232,7 +233,20 @@ def test_base_model_save_releases_private_run_dir(tmp_path):
     model = _SaveModel(shared)
     run_root = Path(bind_private_offload_root(model))
     assert run_root.is_dir()
+    (run_root / "model.layers.0.linear").mkdir(parents=True)
 
     model.save(str(tmp_path / "saved"))
+
+    # The quantized modules stay meta-backed by this directory, so an in-session
+    # forward (and a second save) still resolves its bundles.
+    assert run_root.is_dir()
+    assert (run_root / "model.layers.0.linear").is_dir()
+
+    model.save(str(tmp_path / "saved-again"))
+
+    assert run_root.is_dir()
+
+    del model
+    gc.collect()
 
     assert not run_root.exists()
