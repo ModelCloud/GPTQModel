@@ -10,18 +10,28 @@ import importlib
 import threading
 import time
 from importlib.metadata import version
+from typing import Optional
 
 from packaging.version import InvalidVersion, Version
 
+from .logger import setup_logger
 from .safe import ThreadSafe
 
+
+log = setup_logger()
 
 _PATCHED_ATTR = "_gptqmodel_locked_save_file"
 _MISSING = object()
 
 TRITON_MIN_VERSION_STR = "3.5.0"
-# Alternate distribution names used by Windows and XPU builds.
-TRITON_COMPATIBLE_PKGS = ("triton", "triton-windows", "pytorch_triton_xpu")
+# Alternate distribution names used by Windows, XPU and ROCm builds.
+TRITON_COMPATIBLE_PKGS = (
+    "triton",
+    "triton-windows",
+    "pytorch_triton_xpu",
+    "triton-rocm",
+    "pytorch-triton-rocm",
+)
 
 
 def patch_safetensors_save_file() -> None:
@@ -126,41 +136,62 @@ def patch_triton_jit_compile() -> None:
     JITFunction._gptqmodel_compile_serialized = True
 
 # TODO: triton has unfixed threading bugs in the autotuner code
-def patch_triton_autotuner() -> None:
+def patch_triton_autotuner() -> Optional[bool]:
     try:
-        import triton # noqa
+        import triton
         from triton.runtime import autotuner as module
     except ImportError:
-        # skip
-        return
+        # Triton is an optional dependency.
+        return None
 
-    # Try alternative distribution names used by Windows or XPU builds.
-    triton_version_str = None
-    for package_name in TRITON_COMPATIBLE_PKGS:
-        try:
-            triton_version_str = version(package_name)
-            break
-        except importlib.metadata.PackageNotFoundError:
-            triton_version_str = None
-
-    # skip
+    # ``triton.__version__`` is authoritative. ROCm builds install as
+    # ``triton-rocm`` / ``pytorch-triton-rocm``; relying on the distribution
+    # name alone silently skipped the patch there.
+    triton_version_str = getattr(triton, "__version__", None)
     if not triton_version_str:
-        return
+        # Try alternative distribution names used by Windows, XPU or ROCm.
+        for package_name in TRITON_COMPATIBLE_PKGS:
+            try:
+                triton_version_str = version(package_name)
+                break
+            except importlib.metadata.PackageNotFoundError:
+                triton_version_str = None
+
+    if not triton_version_str:
+        log.warning(
+            "Triton is installed but its version could not be determined from "
+            "triton.__version__ or any of %s; the autotuner threading fix is "
+            "NOT active.",
+            TRITON_COMPATIBLE_PKGS,
+        )
+        return False
 
     try:
         triton_ver = Version(triton_version_str)
         triton_min_version = Version(TRITON_MIN_VERSION_STR)
         # skip
         if triton_ver < triton_min_version:
-            return
+            log.warning(
+                "Triton %s is older than %s; the autotuner threading fix is "
+                "NOT active.",
+                triton_version_str,
+                TRITON_MIN_VERSION_STR,
+            )
+            return False
     except InvalidVersion:
         # skip
         if triton_version_str < TRITON_MIN_VERSION_STR:
-            return
+            log.warning(
+                "Triton %s is older than %s; the autotuner threading fix is "
+                "NOT active.",
+                triton_version_str,
+                TRITON_MIN_VERSION_STR,
+            )
+            return False
 
     autotuner_cls = module.Autotuner
     if getattr(autotuner_cls, "_gptqmodel_threadsafe", False):
-        return
+        return True
 
     builtins_mod = module.builtins
     Config = module.Config
@@ -410,3 +441,4 @@ def patch_triton_autotuner() -> None:
     autotuner_cls._get_config_for_key = _get_config_for_key
     autotuner_cls.run = patched_run
     autotuner_cls._gptqmodel_threadsafe = True
+    return True
