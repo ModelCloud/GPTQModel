@@ -60,6 +60,13 @@ Manual findings that a probe cannot express go in
 | Kernel | Linux 7.2.13, glibc 2.43 |
 | Probed on | 2026-11-02 |
 
+Rows added on 2026-11-16 were probed on a third host: Python 3.14.7
+free-threading build with `PYTHON_GIL=0` (`sys._is_gil_enabled() is False`),
+Torch `2.15.0.dev20260928+cu130`, one visible NVIDIA PG506-230 (SM80), Linux
+7.3.1/glibc 2.43. It has no ROCm device, so the ROCm cells in those rows say
+"not probed here" and quote the report from the issue instead of inventing a
+result.
+
 The CUDA host used for the rest of the P2P work (2x RTX 4090, torch
 2.15.0+cu132) runs a GIL build, so its probes cannot detect GIL=0 races. The
 `broadcast_coalesced` corruption above was reproduced separately on the
@@ -93,6 +100,7 @@ results below for that build.
 | `torch.cuda.current_stream` | SAFE (concurrent), thread-local | copies, events | Returns the calling thread's stream. Never cache another thread's stream. |
 | `torch.cuda.Stream` | SAFE (concurrent), per-thread | forward workers | Create one stream per worker; do not share a stream across threads. |
 | `torch.cuda.stream` (context manager) | SAFE (concurrent), per-thread | scoped work | Only affects the calling thread. |
+| `Tensor.record_stream` / `torch.cuda.Stream.wait_stream` | SAFE (concurrent), per-stream | TorchLinear dequant pipeline (`nn_modules/qlinear/torch.py:704-706`), activation copies (`utils/stream.py:268-277`, `utils/cuda_activation_buffer.py:113-119`), P2P staging (`utils/p2p.py:1841`), Marlin scratch (`utils/marlin_scratch.py:317`) | TorchLinear keeps one dequant stream per module and every thread that calls the layer waits on it, so probe `scripts/gil0_api_probe.py --only 'Tensor.record_stream + Stream.wait_stream'` shares one stream across the 8 workers and gives each worker its own compute stream; 3/3 processes PASS on 2026-11-16 (CUDA, PG506-230, GIL disabled), bitwise. `record_stream` only extends the allocator lifetime of a tensor on that stream, it does not order work: pair it with `wait_stream`/`wait_event` before the consumer reads. ROCm not probed here. |
 | `torch.cuda.device` (context manager) | SAFE (concurrent), thread-local | P2P peer copies | Sets the calling thread's current device and restores it on exit. **Required** around a HIP peer copy: see manual finding 5. |
 | `torch.cuda.Event` (record / wait / synchronize) | SAFE (concurrent), per-thread | P2P copy ordering, Hessian readiness | Record on the producing stream, `wait_event` on the consuming one. Do not synchronize an event from a thread that did not record it. |
 | `torch.cuda.synchronize` | SAFE (concurrent) | tests, diagnostics | Safe but waits for the whole device. Use a stream sync in hot paths. |
@@ -109,7 +117,7 @@ results below for that build.
 | `torch.cuda.is_initialized` | SAFE (concurrent) | startup checks | Avoid calling before you want CUDA initialized. |
 | `torch.cuda.is_current_stream_capturing` | SAFE (concurrent) | graph guards | Thread-local. |
 | `torch.cuda.get_arch_list` | SAFE (concurrent) | diagnostics | Pure metadata query. |
-| `torch.cuda.CUDAGraph` + `torch.cuda.graph` | SAFE (single-thread only) | not used yet | Graph capture is process-global. Capture on the main thread, then replay from one stream per worker. |
+| `torch.cuda.CUDAGraph` + `torch.cuda.graph` | SAFE (single-thread only), NVIDIA CUDA | ParoQuant stage train step: `quantization/paroquant/optimization.py:1960-1985` (`_run_stage_gptqmodel_cudagraph`) captures one graph and replays it per full mini-batch, with an eager tail-batch fallback | Capture is reachable from the public `optimize_paroquant_linear(..., stage_cudagraph=None)` default. `_should_use_paroquant_stage_cudagraph` (`:1859`) skips it on ROCm (hipBLASLt raises "operation not permitted when stream is capturing" inside the cuBLASLt handle pool and deadlocks), off CUDA tensors, without `fused_rotation`, and when the stage has fewer rows than `batch_size`; `ParoQuantProcessor._module_scope_stage_cudagraph_enabled` (`looper/paroquant_processor.py:673`) passes `False` in module scope so the graph's private pool cannot ratchet VRAM layer by layer. Capture and replay stay on the calling thread: never capture from two threads at once, and replay from one stream per worker. Probe `scripts/gil0_api_probe.py --only 'torch.cuda.CUDAGraph + torch.cuda.graph'` is single-shot and passed 3/3 processes on 2026-11-16 (CUDA, PG506-230, GIL disabled); ROCm not probed here. |
 
 ## Cross-device collective copies
 
@@ -200,6 +208,26 @@ results below for that build.
 | `torch.is_autocast_enabled("cpu")` + `torch.autocast("cpu", enabled=False)` | SAFE (concurrent CPU) | GGUF Torch CPU FP32 reduction | On Python 3.14.10t / Torch 2.16.0.dev20261102+cu130 with `PYTHON_GIL=0`, the probe ran 8 threads x 4 iterations in three subprocesses. The active flag remained thread-local; the nested disabled context returned the exact FP32 dot `100000`, while surrounding BF16 dots stayed `99840`. |
 | `torch.is_autocast_enabled("cuda")` + `torch.autocast("cuda", enabled=False)` | SAFE (concurrent CUDA) | NF12 wide fallback GEMM, Torch FP8 wide fallback | Probed 2026-11-10 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 2x RTX 4090: 8 threads x 4 iterations, 3 subprocesses, all PASS. The CUDA autocast flag stayed thread-local and the nested disabled context produced the FP32 dot `100000` while the surrounding BF16 dots stayed `99840`. An 8-thread x 3-process stress of `NF12Linear`'s FP16 wide branch returned no hangs and no torn data; the bitwise differences observed were FP32-vs-FP64 rounding ties that also appear single-threaded. |
 | `torch.get_autocast_dtype("cuda")` | SAFE (concurrent CUDA) | NF12 fallback predicate choosing FP16 vs wide | Probed 2026-11-10 on Python 3.14.7t / Torch 2.15.0+cu132 with `PYTHON_GIL=0`, 2x RTX 4090: 8 threads x 4 iterations in 3 subprocesses, three repeated runs, all PASS (probe `torch.get_autocast_dtype + torch.autocast (CUDA)`). The value stayed thread-local: `float16` outside a context, `bfloat16` inside one, unchanged across a nested `enabled=False` context. |
+
+## Linear algebra (cuSOLVER / hipSOLVER)
+
+| API | Result | Where we use it | Notes / workaround |
+|---|---|---|---|
+| `torch.linalg.cholesky` | SAFE (concurrent), NVIDIA CUDA | GPTQ Hessian factorisation (`quantization/gptq.py:1866-1868`, `GPTQ.hessian_inverse`), QQQ (`quantization/qqq.py:822-824`), background prewarm (`utils/linalg_warmup.py:88`), GSQ (`quantization/gsq_training.py:1318`), vendored ExLlamaV3 (`exllamav3/modules/quant/exl3_lib/quantize.py:438`) | cuSOLVER returns bitwise-identical factors for a fixed input on every worker stream. Probe `scripts/gil0_api_probe.py --only 'torch.linalg.cholesky / cholesky_ex / torch.cholesky_inverse'`: one 1024x1024 fp32 SPD Hessian, 8 threads x 4 iterations, one stream per worker, compared bitwise against the single-threaded reference; 3/3 processes PASS on 2026-11-16. **ROCm: not probed here** — issue #4207 reports SAFE on a Radeon AI PRO R9700 (3.14t, 8 threads x 6 iterations, per-thread streams, 1024² fp32, bitwise, 4/4 processes: 2 cold, 2 warm). |
+| `torch.linalg.cholesky_ex` | SAFE (concurrent), NVIDIA CUDA | GPTQ damped retry loop (`quantization/gptq.py:1844`), background prewarm (`utils/linalg_warmup.py:204`), GSQ (`quantization/gsq_scalar.py:79`) | Called with `check_errors=False`, so a non-positive-definite input reports through `info` instead of raising; `info` stayed `0` in every concurrent call. Same probe and environment as `torch.linalg.cholesky`. ROCm: not probed here (issue #4207 reports the Cholesky family SAFE on R9700). |
+| `torch.cholesky_inverse` | SAFE (concurrent), NVIDIA CUDA | GPTQ (`quantization/gptq.py:1865`, both the plain call and the `out=factor` in-place form), QQQ (`quantization/qqq.py:823`) | The probe covers both forms; both matched the single-threaded reference bitwise. Same probe and environment as `torch.linalg.cholesky`. ROCm: not probed here. ROCm cross-process *numerics* are a separate concern: `gptqmodel/_rocm_env.py` sets `ROCBLAS_USE_HIPBLASLT=0` so the GEMMs feeding the factor do not pick a different hipBLASLt kernel per process. |
+
+`utils/linalg_warmup.py::run_torch_linalg_warmup` does run on a background thread, but it holds
+`_GLOBAL_WARMUP_LOCK` for the whole warmup (it also touches `eigh`, `svd`, and `qr`), so the
+prewarm never overlaps itself or a second prewarm. The concurrent exposure for this family is the
+per-device GPTQ/QQQ workers, not the prewarm.
+
+## Process-global backend and thread-pool settings
+
+| API | Result | Where we use it | Notes / workaround |
+|---|---|---|---|
+| `torch.backends.cuda.preferred_blas_library` (getter + setter) | SAFE (concurrent read), process-global write | `gptqmodel/utils/rocm.py::quant_blas_backend` (`:309`), called from GPTQ (`quantization/gptq.py:971`, `:1821`), `models/base.py:1966`, `:2260` | The selection is process-global, not thread-local: a worker reading it while another scope flips it sees either backend. `quant_blas_backend` therefore reference-counts the pin under `_QUANT_BLAS_GUARD_COND` and makes a run that needs the other backend wait instead of switching under the active one (issues #4094/#4123). Probe `scripts/gil0_api_probe.py --only 'torch.backends.cuda.preferred_blas_library'`: 8 threads x 4 iterations read the getter while one serialized round-trip selects the alternate backend, proves a second thread observes the switch, runs a 64x64 GEMM on it, and restores the original; 3/3 processes PASS on 2026-11-16. On CUDA `quant_blas_backend` yields immediately (`not IS_ROCM`), so this row covers the getter/setter plumbing, not the ROCm pin; the pin itself has only been exercised on R9700 hardware. **ROCm: not probed here.** |
+| `threadpoolctl.threadpool_limits` | UNSAFE (leaks thread limits) | `BaseQuantLinear.pack_original` (`nn_modules/qlinear/__init__.py:2391`), RCO (`quantization/rco.py:300`), BitBLAS (`utils/bitblas.py:115`); all entered from finaliser threads | Not reference-counted (issue #4206): each scope saves the limit current at entry, so of two overlapping scopes the one that entered second restores the pinned `1` last and OpenBLAS stays at one thread for the rest of the process. Probe `scripts/gil0_api_probe.py --only 'threadpoolctl.threadpool_limits (overlap restore)'` reproduces it and reports the leak as an ERROR — `left {'openmp': 256, 'openblas': 1}; baseline was {'openmp': 256, 'openblas': 64}` — in 3/3 processes on 2026-11-16. Do not add another overlapping user; re-run the probe after #4206's refcounted scope lands before calling it SAFE. |
 
 ## Manual findings
 

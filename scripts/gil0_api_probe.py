@@ -127,6 +127,193 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         torch.cuda.synchronize()
         return torch.equal(static_out.cpu(), (static_in * 2).cpu())
 
+    linalg_state: Dict[str, Any] = {}
+    linalg_lock = threading.Lock()
+    linalg_thread = threading.local()
+
+    def linalg_cholesky() -> bool:
+        """Qualify Cholesky factorisation and inverse from worker threads.
+
+        Mirrors the GPTQ/QQQ device workers and the background prewarm: a
+        1024x1024 fp32 Hessian, one stream per worker, and a bitwise
+        comparison against a single-threaded reference on the same device.
+        """
+        with linalg_lock:
+            if not linalg_state:
+                generator = torch.Generator(device="cuda").manual_seed(20261116)
+                base = torch.randn((1024, 1024), generator=generator, device="cuda")
+                matrix = base @ base.T + 1024.0 * torch.eye(1024, device="cuda")
+                factor = torch.linalg.cholesky(matrix)
+                inverse = torch.cholesky_inverse(factor)
+                # ``cholesky_inverse(..., out=...)`` overwrites the factor, which
+                # is the GPTQ device-worker shape; keep a copy for the reference.
+                inplace = factor.clone()
+                torch.cholesky_inverse(inplace, out=inplace)
+                upper = torch.linalg.cholesky(inverse, upper=True)
+                _, info = torch.linalg.cholesky_ex(matrix, check_errors=False)
+                linalg_state.update(
+                    matrix=matrix,
+                    expected=(factor, inverse, inplace, upper),
+                    info=int(info),
+                )
+        if not hasattr(linalg_thread, "stream"):
+            linalg_thread.stream = torch.cuda.Stream()
+        stream = linalg_thread.stream
+        matrix = linalg_state["matrix"]
+        with torch.cuda.stream(stream):
+            factor = torch.linalg.cholesky(matrix)
+            inverse = torch.cholesky_inverse(factor)
+            inplace = factor.clone()
+            torch.cholesky_inverse(inplace, out=inplace)
+            upper = torch.linalg.cholesky(inverse, upper=True)
+            _, info = torch.linalg.cholesky_ex(matrix, check_errors=False)
+            stream.synchronize()
+        if int(info) != linalg_state["info"]:
+            raise AssertionError("concurrent cholesky_ex changed the info code")
+        for name, actual, reference in zip(
+            ("cholesky", "cholesky_inverse", "cholesky_inverse(out=)", "cholesky(upper=True)"),
+            (factor, inverse, inplace, upper),
+            linalg_state["expected"],
+        ):
+            if not torch.equal(actual, reference):
+                raise AssertionError(f"concurrent {name} differs bitwise from the single-threaded reference")
+        return True
+
+    stream_state: Dict[str, Any] = {}
+    stream_lock = threading.Lock()
+    stream_thread = threading.local()
+
+    def stream_record_wait() -> bool:
+        """Qualify ``Tensor.record_stream`` and ``Stream.wait_stream`` across workers.
+
+        TorchLinear keeps one dequant stream per module, and every thread that
+        calls the layer waits on it and records its buffers there. The probe
+        shares one stream across the worker pool and gives each worker its own
+        compute stream, then checks the copy bitwise.
+        """
+        with stream_lock:
+            if "dequant" not in stream_state:
+                stream_state["dequant"] = torch.cuda.Stream()
+                stream_state["next"] = 0
+            if not hasattr(stream_thread, "index"):
+                stream_thread.index = stream_state["next"]
+                stream_state["next"] += 1
+        if not hasattr(stream_thread, "compute"):
+            stream_thread.compute = torch.cuda.Stream()
+        dequant = stream_state["dequant"]
+        compute = stream_thread.compute
+        with torch.cuda.stream(compute):
+            source = torch.full((256, 256), float(stream_thread.index + 1), device="cuda")
+            target = torch.empty_like(source)
+        dequant.wait_stream(compute)
+        for tensor in (source, target):
+            tensor.record_stream(dequant)
+        with torch.cuda.stream(dequant):
+            target.copy_(source)
+        compute.wait_stream(dequant)
+        compute.synchronize()
+        if not torch.equal(target, source):
+            raise AssertionError("concurrent record_stream/wait_stream returned a torn copy")
+        return True
+
+    blas_state: Dict[str, Any] = {}
+    blas_lock = threading.Lock()
+
+    def preferred_blas_library() -> bool:
+        """Read and round-trip the process-global BLAS selection from workers.
+
+        ``torch.backends.cuda.preferred_blas_library`` selects cuBLAS vs
+        cuBLASLt (rocBLAS vs hipBLASLt) for the whole process. The probe checks
+        that concurrent reads agree, that the setter is visible to another
+        thread (process-global, not thread-local), and that a tiny GEMM still
+        runs on the alternate backend. The setter is serialized here, as it is
+        in ``gptqmodel.utils.rocm.quant_blas_backend``.
+        """
+        getter = getattr(torch.backends.cuda, "preferred_blas_library", None)
+        if getter is None:
+            raise AssertionError("torch.backends.cuda.preferred_blas_library is unavailable")
+        with blas_lock:
+            if "expected" not in blas_state:
+                original = getter()
+                name = getattr(original, "name", None) or str(original)
+                if torch.version.hip is not None:
+                    fast, deterministic = "cublaslt", "hipblas"
+                else:
+                    fast, deterministic = "cublaslt", "cublas"
+                alternate = fast if "ublaslt" not in name.lower() else deterministic
+                observed: List[Any] = []
+                try:
+                    getter(alternate)
+                    switched = getattr(getter(), "name", None)
+                    reader = threading.Thread(target=lambda: observed.append(getter()))
+                    reader.start()
+                    reader.join(timeout=30)
+                    product = torch.randn(64, 64, device="cuda") @ torch.randn(64, 64, device="cuda")
+                    torch.cuda.synchronize()
+                    gemm_finite = bool(torch.isfinite(product).all())
+                finally:
+                    getter(original)
+                blas_state["expected"] = original
+                blas_state["alternate"] = alternate
+                blas_state["switched"] = switched
+                blas_state["observed"] = getattr(observed[0], "name", None) if observed else None
+                if switched is None or switched.lower() == name.lower():
+                    raise AssertionError("the process-global BLAS setter did not take effect")
+                if blas_state["observed"] != switched:
+                    raise AssertionError("a second thread did not observe the process-global BLAS switch")
+                if not gemm_finite:
+                    raise AssertionError("a GEMM on the alternate BLAS backend returned non-finite values")
+        if getter() != blas_state["expected"]:
+            raise AssertionError("a worker observed a different process-global BLAS backend")
+        return True
+
+    def threadpoolctl_limits() -> bool:
+        """Check that overlapping ``threadpool_limits`` scopes restore the baseline.
+
+        ``BaseQuantLinear.pack_original`` and the RCO/BitBLAS paths enter
+        ``THREADPOOLCTL.threadpool_limits(1)`` on finaliser threads. The scope
+        saves the limit current at entry, so a second overlapping scope
+        restores the pinned value last and leaves OpenBLAS at one thread for
+        the rest of the process (issue #4206). This probe asserts the
+        restoration contract, so an ERROR here is the recorded leak, not a
+        broken probe; it turns into a PASS once the scope is reference-counted.
+        """
+        from threadpoolctl import threadpool_info, threadpool_limits
+
+        def limits() -> Dict[str, int]:
+            return {info["internal_api"]: info["num_threads"] for info in threadpool_info()}
+
+        baseline = limits()
+        if not baseline:
+            return True  # no BLAS library loaded; nothing to observe
+        entered = threading.Event()
+        second_entered = threading.Event()
+        first_exited = threading.Event()
+
+        def first() -> None:
+            with threadpool_limits(limits=1):
+                entered.set()
+                second_entered.wait(timeout=30)
+            first_exited.set()
+
+        def second() -> None:
+            entered.wait(timeout=30)
+            with threadpool_limits(limits=1):
+                second_entered.set()
+                first_exited.wait(timeout=30)
+
+        threads = (threading.Thread(target=first), threading.Thread(target=second))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        leaked = limits()
+        if leaked != baseline:
+            raise AssertionError(
+                f"overlapping threadpool_limits scopes left {leaked}; baseline was {baseline}"
+            )
+        return True
+
     def save_load() -> bool:
         tensor = torch.randn(1024)
         handle = tempfile.NamedTemporaryFile(suffix=".pt", delete=False)
@@ -993,6 +1180,10 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.is_current_stream_capturing": lambda: bool(torch.cuda.is_current_stream_capturing()),
         "torch.cuda.get_arch_list": lambda: len(torch.cuda.get_arch_list()),
         "torch.cuda.CUDAGraph + torch.cuda.graph": graph_capture,
+        "torch.linalg.cholesky / cholesky_ex / torch.cholesky_inverse": linalg_cholesky,
+        "Tensor.record_stream + Stream.wait_stream": stream_record_wait,
+        "torch.backends.cuda.preferred_blas_library": preferred_blas_library,
+        "threadpoolctl.threadpool_limits (overlap restore)": threadpoolctl_limits,
         "torch.cuda.comm.broadcast_coalesced": broadcast_coalesced,
         "torch.cuda.comm.broadcast": comm_broadcast,
         "torch.cuda.comm.reduce_add": comm_reduce_add,
