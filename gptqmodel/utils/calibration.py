@@ -361,6 +361,13 @@ def prepare_calibration_dataset(
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
 
+        # `torch.as_tensor([])` / `torch.as_tensor([[]])` infers float32 from the
+        # empty Python container. That is an absent value, not a float token id,
+        # so normalize empty containers to long before the integer check instead
+        # of reporting a misleading dtype error.
+        if tensor.numel() == 0 and not torch.is_tensor(value):
+            tensor = tensor.to(dtype=torch.long)
+
         if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
             raise ValueError(
                 f"Quantize: `{name}` for calibration item {idx} must contain integers, got dtype {tensor.dtype}."
@@ -413,10 +420,14 @@ def prepare_calibration_dataset(
     def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
 
-        if ids_tensor.shape[0] == 0 or ids_tensor.shape[1] == 0:
+        # A zero-ROW item (`torch.empty(0, N)`) carries no sample at all and is a
+        # structural error. A zero-COLUMN row (`(1, 0)`, e.g. tokenizing `""`
+        # with a tokenizer that adds no BOS) is merely too short: it is dropped
+        # by the minimum-length filter below, exactly as before #4194.
+        if ids_tensor.shape[0] == 0:
             raise ValueError(
                 f"Quantize: calibration item {idx} has empty `input_ids` with shape "
-                f"{tuple(ids_tensor.shape)}; every item needs at least one token."
+                f"{tuple(ids_tensor.shape)}; every item needs at least one row of tokens."
             )
 
         if mask_value is None:
@@ -629,10 +640,13 @@ def prepare_calibration_dataset(
 
         for row_index, (row_ids, row_mask) in enumerate(zip(input_ids, attention_mask)):
             if len(row_ids) == 0:
-                raise ValueError(
-                    f"Quantize: calibration item {example_index} row {row_index} is empty; "
-                    "every row needs at least one token."
-                )
+                # An empty token row is a too-short sample, not a malformed one:
+                # tokenizers without a BOS encode `""` as `(1, 0)`. Drop it
+                # through the minimum-length filter below so one blank line in
+                # the calibration data cannot abort the whole run.
+                too_short_row_count += 1
+                rows_changed = True
+                continue
             if len(row_ids) != len(row_mask):
                 raise ValueError(
                     f"Quantize: calibration item {example_index} row {row_index} has "
