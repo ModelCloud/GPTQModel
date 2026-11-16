@@ -540,7 +540,7 @@
       "layers": ["language.model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
+        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
@@ -1919,8 +1919,10 @@
         ["mixer.gate:!"],
         ["mixer.shared_experts.up_proj"],
         ["mixer.shared_experts.down_proj"],
+        ["mixer.fc1_latent_proj"],
         ["mixer.experts.{expert_index}.up_proj"],
-        ["mixer.experts.{expert_index}.down_proj"]
+        ["mixer.experts.{expert_index}.down_proj"],
+        ["mixer.fc2_latent_proj"]
       ]
     },
     "NemotronHPuzzleQModel/gptq": {
@@ -1961,8 +1963,10 @@
         ["mixer.gate:!"],
         ["mixer.shared_experts.up_proj"],
         ["mixer.shared_experts.down_proj"],
+        ["mixer.fc1_latent_proj"],
         ["mixer.experts.{expert_index}.up_proj"],
-        ["mixer.experts.{expert_index}.down_proj"]
+        ["mixer.experts.{expert_index}.down_proj"],
+        ["mixer.fc2_latent_proj"]
       ]
     },
     "Olmo3QModel/gptq": {
@@ -2383,11 +2387,14 @@
     "Qwen4ExpQModel/gptq": {
       "layers": ["model.language_model.layers"],
       "blocks": [
+        ["ple:!"],
+        ["attn_hyper_connection:!"],
         ["self_attn.indexer.index_qk_proj:!", "self_attn.indexer.q_layernorm:!", "self_attn.indexer.k_layernorm:!", "self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["linear_attn.conv1d:!", "linear_attn.in_proj_qkv", "linear_attn.norm:!"],
         ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
         ["linear_attn.out_proj"],
+        ["mlp_hyper_connection:!"],
         ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
         ["mlp.shared_expert.down_proj"],
         ["mlp.gate:!"],
@@ -2399,11 +2406,14 @@
     "Qwen4ExpTextQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
+        ["ple:!"],
+        ["attn_hyper_connection:!"],
         ["self_attn.indexer.index_qk_proj:!", "self_attn.indexer.q_layernorm:!", "self_attn.indexer.k_layernorm:!", "self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["linear_attn.conv1d:!", "linear_attn.in_proj_qkv", "linear_attn.norm:!"],
         ["linear_attn.in_proj_z", "linear_attn.in_proj_b:!", "linear_attn.in_proj_a:!"],
         ["linear_attn.out_proj"],
+        ["mlp_hyper_connection:!"],
         ["mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"],
         ["mlp.shared_expert.down_proj"],
         ["mlp.gate:!"],

@@ -35,13 +35,22 @@ class Qwen4ExpQModel(BaseQModel):
     # GQA makes o_proj shape-incompatible with the Q/K/V AWQ scale group.
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
-    # Only unmarked entries are quantized; PLE and hyper weights are omitted.
+    # Only unmarked entries are quantized. PLE and the hyper-connection
+    # transforms stay dense on purpose, so they carry `:!` instead of being
+    # left undeclared (an undeclared Linear silently stays BF16).
     module_tree = [
         "model",
         "language_model",
         "layers",
         "#",
         {
+            # PLE is optional per layer (`ple_layer_ids`) and injects hashed
+            # n-gram features; its projections, depthwise conv and embedding
+            # remain in the checkpoint dtype.
+            "ple:!": (),
+            # The hyper-connection mixers are gated low-rank transforms of the
+            # residual stream, not quantization candidates.
+            "attn_hyper_connection:!": (),
             "self_attn": (
                 "indexer.index_qk_proj:!",
                 "indexer.q_layernorm:!",
@@ -70,6 +79,7 @@ class Qwen4ExpQModel(BaseQModel):
                 # shared-expert input.
                 "out_proj:2:nosrc",
             ),
+            "mlp_hyper_connection:!": (),
             "mlp:moe": {
                 # Keep shared experts separate so placeholder expansion does not duplicate them.
                 "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
