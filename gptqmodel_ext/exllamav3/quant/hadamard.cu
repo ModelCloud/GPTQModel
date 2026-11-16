@@ -16,8 +16,11 @@ void had_hf_r_128_kernel
     const float r_scale
 )
 {
-    input_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
-    output_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
+    // `gridDim.y * 128 * blockIdx.x` is the row offset (rows * cols) and must
+    // be computed in 64-bit: rows * cols exceeds 2^32 for large prefill
+    // batches (K=4096, M >= 2^20) and the 32-bit product wrapped.
+    input_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
+    output_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
     had_hf_r_128_inner(input_ptr, output_ptr, pre_scale, post_scale, r_scale);
 }
 
@@ -31,8 +34,8 @@ void had_ff_r_128_kernel
     const float r_scale
 )
 {
-    input_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
-    output_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
+    input_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
+    output_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
     had_ff_r_128_inner(input_ptr, output_ptr, pre_scale, post_scale, r_scale);
 }
 
@@ -50,12 +53,12 @@ void had_hf_r_128_dual_kernel
     const float r_scale
 )
 {
-    input1_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
-    output1_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
+    input1_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
+    output1_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
     had_hf_r_128_inner(input1_ptr, output1_ptr, pre1_scale, post1_scale, r_scale);
 
-    input2_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
-    output2_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
+    input2_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
+    output2_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
     had_hf_r_128_inner(input2_ptr, output2_ptr, pre2_scale, post2_scale, r_scale);
 }
 
@@ -73,12 +76,12 @@ void had_ff_r_128_dual_kernel
     const float r_scale
 )
 {
-    input1_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
-    output1_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
+    input1_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
+    output1_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
     had_ff_r_128_inner(input1_ptr, output1_ptr, pre1_scale, post1_scale, r_scale);
 
-    input2_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
-    output2_ptr += gridDim.y * 128 * blockIdx.x + blockIdx.y * 128;
+    input2_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
+    output2_ptr += (size_t) gridDim.y * 128 * blockIdx.x + (size_t) blockIdx.y * 128;
     had_ff_r_128_inner(input2_ptr, output2_ptr, pre2_scale, post2_scale, r_scale);
 }
 
@@ -102,6 +105,10 @@ void had_r_128
     TORCH_CHECK_SHAPES_FULL(input, output);
     TORCH_CHECK_DIM(input, 2);
     TORCH_CHECK_DIV(input, 1, 128);
+    // The kernel indexes `input`/`output` as densely packed rows; a strided
+    // view silently transforms the wrong elements.
+    TORCH_CHECK(input.is_contiguous(), "had_r_128 requires a contiguous input");
+    TORCH_CHECK(output.is_contiguous(), "had_r_128 requires a contiguous output");
     int rows = input.size(0);
     int cols = input.size(1);
 
@@ -163,6 +170,10 @@ void had_r_128_dual
     TORCH_CHECK_SHAPES_FULL(output1, output2);
     TORCH_CHECK_DIM(input1, 2);
     TORCH_CHECK_DIV(input1, 1, 128);
+    TORCH_CHECK(input1.is_contiguous(), "had_r_128_dual requires a contiguous input1");
+    TORCH_CHECK(output1.is_contiguous(), "had_r_128_dual requires a contiguous output1");
+    TORCH_CHECK(input2.is_contiguous(), "had_r_128_dual requires a contiguous input2");
+    TORCH_CHECK(output2.is_contiguous(), "had_r_128_dual requires a contiguous output2");
     int rows = input1.size(0);
     int cols = input1.size(1);
 

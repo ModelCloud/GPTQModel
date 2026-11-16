@@ -59,5 +59,20 @@ class OlmoHybridQModel(BaseQModel):
         },
     ]
 
+    def awq_post_norm_modules(self, layer):
+        """Only the full-attention layer's `post_attention_layernorm` is a post-norm.
+
+        ``OlmoHybridAttentionDecoderLayer`` post-norms the attention output and
+        adds it to the residual, so folding a consumer's input scale into that
+        norm changes the layer output (measured 3.6e-1 on a tiny model).
+        ``OlmoHybridLinearAttentionDecoderLayer`` feeds the same-named norm
+        straight into the MLP, where the fold is exact.
+        """
+
+        modules = super().awq_post_norm_modules(layer)
+        if getattr(layer, "self_attn", None) is not None:
+            modules.add("post_attention_layernorm")
+        return modules
+
 
 __all__ = ["OlmoHybridQModel"]

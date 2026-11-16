@@ -112,7 +112,7 @@ assignment logits and any positive contiguous group size. It uses the same
 scalar relaxation and gradient equations, but GPU reductions and transcendental
 functions have small rounding differences from PyTorch eager. The numerical
 tests compare weights and gradients with tolerances. Set
-`GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION=1` to use the eager implementation;
+`KernelConfig(gsq_disable_cuda_relaxation=True)` to use the eager implementation;
 CUDA configurations without the runtime compiler also fall back to eager.
 
 The precision audit found and corrected a Q/K discrepancy in the first fused

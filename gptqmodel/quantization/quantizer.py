@@ -334,12 +334,15 @@ class Quantizer(nn.Module):
         xmax = torch.maximum(xmax_raw, tmp)
 
         if self.qcfg.sym:
-            # ``xmax >= |xmin|`` from here on, so the negative mirror is exactly
-            # the ``xmin < 0`` lane.  Expressing it as an elementwise select
-            # keeps the decision on the device: the masked write it replaces
-            # forced a ``nonzero`` scan plus a host round trip per call.
+            # A symmetric grid stores the fixed zero point ``(maxq + 1) // 2``,
+            # so the fitted range has to be centered on zero as well.  Mirroring
+            # only the ``xmin < 0`` lanes left every non-negative group fitted
+            # as ``[0, max]`` against that midpoint, which saturates the positive
+            # half of the grid at ``(maxq - zero) / maxq`` of the true maximum
+            # (7/15 for INT4).  ``xmax >= |xmin|`` already holds, so negating it
+            # unconditionally is the zero-centered range for every group.
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            xmin = torch.where(xmin < 0, -xmax, xmin)
+            xmin = -xmax
         # Empty groups (all-zero ranges) get the +-1 sentinel so the scale below
         # stays finite.  ``both_zero`` selects the same lanes as the previous
         # pair of masked writes without a device-to-host synchronization.

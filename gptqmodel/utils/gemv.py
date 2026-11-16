@@ -5,9 +5,11 @@
 
 import torch
 
+from .packing_math import awq_packed_codes
+
 
 def awq_gemv_codes(weight, scales, zeros, g_idx):
-    """Recover AWQ GEMV's bounded int4 codes with its source offset arithmetic."""
+    """Recover the int4 codes AWQ GEMV stores for the supplied weights."""
     if (weight.ndim != 2 or scales.ndim != 2 or scales.shape != zeros.shape
             or scales.shape[0] != weight.shape[0] or g_idx.shape != (weight.shape[1],)
             or not weight.numel() or not scales.numel()):
@@ -23,12 +25,10 @@ def awq_gemv_codes(weight, scales, zeros, g_idx):
         raise ValueError("AWQ GEMV scales must remain positive in FP16 storage")
     if (zeros != zeros.round()).any() or (zeros < 0).any() or (zeros > 15).any():
         raise ValueError("AWQ GEMV zero points must be integers in [0, 15]")
-    offset = zeros * scales
-    if not torch.isfinite(offset).all():
-        raise ValueError("AWQ GEMV source offsets must be finite")
-    # GEMV's packer does not clamp before shifting codes into its int32 words.
-    # Preserve an out-of-range result so GSQ can reject an illegal payload.
-    return ((weight + offset[:, g_idx]) / stored[:, g_idx]).round()
+    # The GEMV packer computes the offset and the division in FP32, rounds,
+    # then saturates. Delegate so this prediction cannot drift from GEMM or
+    # from the packer again.
+    return awq_packed_codes(weight, scales, zeros, g_idx, bits=4, scale_dtype=torch.float16)
 
 def make_divisible(c, divisor):
     return (c + divisor - 1) // divisor

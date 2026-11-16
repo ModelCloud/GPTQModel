@@ -30,11 +30,12 @@ unquantized modules add storage beyond the nominal weight bit width.
 | BitsAndBytes 8-bit | INT8 | Native INT8 matmul quantizes activations dynamically; fallback arithmetic can differ | Not required |
 | EXL3 | Variable-rate codebooks; `bits` is a target average bits per weight | Floating-point model activations | Required |
 | VPTQ | Vector-codebook indices plus codebooks | Floating-point model activations; effective bits per weight depend on vector and codebook sizes | Required |
+| MACaQ | OCP MXFP4 (E2M1) with one E8M0 scale per 32 values | Native MXFP4 W4A4 (`tl.dot_scaled`) on CUDA; bf16 W4A16 on the portable Torch path | Required |
 | Experimental GPTQ W4A | Packed GPTQ INT4 | Explicit FP8 or NVFP4 activation policy for selected Llama decoder operations | Required for fresh quantization |
 
 This is a recipe map, not a promise that every method, bit width, dtype, and
-device combination works. Check the [method/format/backend matrix](../README.md#quant-method--format--backend-matrix-)
-and [hardware table](../README.md#platform-and-hw-support-). `BACKEND.AUTO`
+device combination works. Check the [method/format/backend matrix](support-matrix.md#methods-formats-and-backends)
+and [hardware table](support-matrix.md#hardware-and-operating-systems). `BACKEND.AUTO`
 selects a compatible installed kernel; it cannot make an unsupported combination
 valid. The portable Torch kernels are useful for establishing a working baseline.
 An FP8 **source checkpoint** decoded for requantization is also distinct from
@@ -217,6 +218,15 @@ backend = BACKEND.FP8_TORCH
 Use `format="float8_e5m2"` for E5M2. This recipe quantizes weights without
 calibration; it does not enable the experimental GPTQ FP8 activation stream.
 
+`TorchFP8Linear` is **weight-only (W8A16)**: the packed FP8 weight tile is
+dequantized for the current matmul and activations keep their FP16/BF16 input
+dtype. The GPU `torch._scaled_mm` path is not used by this recipe. It is
+reachable only through the explicit
+`TorchFP8Linear.set_activation_quant_method("per_token")` opt-in, which makes
+the layer **W8A8** with one activation scale per token. There is no per-tensor
+activation mode, because it would make a row's output depend on its batch
+neighbours. See [FP8 weight-only dispatch](fp8-weight-only-dispatch.md).
+
 #### FP8 source weight validation
 
 FP8 quantization requires finite dense source weights that remain finite when
@@ -346,6 +356,27 @@ This assigns 12 main index bits plus 4 residual index bits per 8-weight vector,
 or nominally 2 bits per weight before codebook overhead. Read the
 [VPTQ guide](vptq.md) for calibration coverage, codebook sizing, and runtime choices.
 
+### MACaQ MXFP4 W4A4
+
+```python
+from gptqmodel.quantization import MacaqConfig
+
+qcfg = MacaqConfig(
+    n_flip_iters=256,
+    had_block=32,
+    pre_alpha=0.5,
+    activation_precision="w4a4",
+)
+backend = BACKEND.MACAQ_TRITON
+```
+
+MACaQ stores nibble-packed E2M1 weights with one E8M0 scale per 32 values and
+applies the same D1 balance plus block-Hadamard transform to activations at
+runtime. Use `BACKEND.MACAQ_TRITON` on CUDA for the native block-scaled GEMM;
+`BACKEND.MACAQ_TORCH` is the portable path (CPU, ROCm, XPU, MPS). Set
+`activation_precision="w4a16"` to keep bf16 activations. See the
+[MACaQ guide](macaq.md) for the recipe, kernel scope, and validation numbers.
+
 ### Experimental GPTQ INT4 with FP8 or NVFP4 activations
 
 These require a separate workflow: explicit `activation` policy, supported Llama
@@ -361,12 +392,12 @@ imply that attention arithmetic or the KV cache is also entirely FP8/FP4.
 A successful `generate()` checks the save/load path; it does not establish
 accuracy. Evaluate the original unquantized model and each quantized checkpoint
 on the same held-out tasks, rendered prompts, token IDs, generation settings,
-and dtype. Use the [evaluation example](../README.md#pair-with-evaluation-for-post-quantization-llm-benchmarks-)
+and dtype. Use the [evaluation example](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation#evalution-the-current-benchmark-path)
 to run task benchmarks. Compare memory use and latency separately from quality.
 
 Before deploying to vLLM, SGLang, or Transformers, check that runtime's supported
 method, format, dtype, and hardware. Native GPT-QModel support does not imply
-external-engine support. Use the [integration matrix](../README.md#quantization-support-)
+external-engine support. Use the [integration matrix](support-matrix.md#runtime-integrations)
 and keep an engine's pinned dependencies in a separate environment.
 
 ## Explore the remaining features
@@ -375,14 +406,14 @@ and keep an engine's pinned dependencies in a separate environment.
 | --- | --- |
 | Use several GPUs or control calibration memory | [Multi-GPU quantization](multi_gpu_quantization.md) |
 | Resume an interrupted job | [Quantization checkpoints](../checkpoint.md) |
-| Mix weight precisions or exclude modules | [`dynamic` rules and fused-module constraints](../README.md#dynamic-quantization-per-module-quantizeconfig-override-) |
+| Mix weight precisions or exclude modules | [`dynamic` rules and fused-module constraints](support-matrix.md#mixed-precision-and-fused-modules) |
 | Describe quantization as staged rules | [Quantization protocol](quantization_protocol.md) |
-| Requantize FP8/FP4 source modules or smooth weights | [Preprocessors](../README.md#preprocessors-) |
-| Improve GPTQ error compensation | [GPTAQ](../README.md#using-gptaq-experimental-not-moe-compatible-and-results-may-not-be-better-than-original-) and [FOEM](../README.md#using-foem-); these modify the solve, not activation precision |
+| Requantize FP8/FP4 source modules or smooth weights | [Preprocessors](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#preprocessor-pipeline) |
+| Improve GPTQ error compensation | [GPTAQ](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction) and [FOEM](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#foem-and-gptaq-correction); these modify the solve, not activation precision |
 | Recover quality with adapters or train LoRA | [EoRA](eora/README.md) and [PEFT](peft.md) |
-| Handle sparse MoE calibration coverage | [MoE routing and fallback controls](../README.md#moe-quantization-) |
-| Tune normalization after quantization | [Norm tuning](../README.md#norm-tuning) |
-| Quantize on Apple silicon | [Native MLX workflow](../README.md#native-mlx-quantization-on-apple-silicon) |
+| Handle sparse MoE calibration coverage | [MoE routing and fallback controls](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models#moe-configuration-and-examples) |
+| Tune normalization after quantization | [Norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) |
+| Quantize on Apple silicon | [Native MLX workflow](mlx-runtime.md) |
 | Select, pack, or repack individual layer kernels | [HF packing API](hf_packing_api.md) |
 | Change the on-disk shard layout | [Reshard a checkpoint](#reshard-a-checkpoint) |
 

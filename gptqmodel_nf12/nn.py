@@ -216,3 +216,39 @@ class NF12Embedding(_NF12WeightModule):
             f"{self.num_embeddings}, {self.embedding_dim}, exp_base={self.exp_base}, "
             f"escapes={self.nf12_escapes.shape[0]}"
         )
+
+def escaped_groups(packed: torch.Tensor) -> torch.Tensor:
+    """Number of escaped groups in a packed weight (the groups whose 32-bit meta
+    word is the M == 0 sentinel: all four bytes zero), as a 0-d tensor on the
+    weight's device; a consistent weight has that many escape rows."""
+    meta = packed.reshape(-1, 3, 128, 4)[:, 0]  # super-atoms of three 512-byte planes; plane 0 holds the meta words
+    return (meta == 0).all(dim=-1).sum()
+
+
+def verify_weights(model) -> None:
+    """Checks every NF12 weight in ``model`` is loaded and consistent (its packed
+    array's escaped groups match its escape rows). Call it after assembling
+    weights from partial (e.g. sharded) loads. One synchronization; raises
+    ValueError naming each problem. MLX modules hold the weight outside this
+    package's buffers, so they are checked by the MLX holder instead."""
+    if not isinstance(model, nn.Module):
+        raise TypeError(f"nf12: verify_weights needs a torch module, got {type(model).__name__}")
+    problems, counts = [], []
+    for name, module in model.named_modules():
+        if not isinstance(module, _NF12WeightModule):
+            continue
+        where = f"{name}.weight" if name else "weight"
+        if module.nf12_packed.device.type == "meta":
+            problems.append(f"{where}: not loaded (still on the meta device)")
+        else:
+            counts.append((where, escaped_groups(module.nf12_packed), module.nf12_escapes.shape[0]))
+    if counts:
+        device = counts[0][1].device
+        groups = torch.stack([count.to(device) for _, count, _ in counts]).tolist()  # the one synchronization
+        problems += [
+            f"{where}: {PACKED_KEY} has {count} escaped groups but {ESCAPES_KEY} has {rows} rows"
+            for (where, _, rows), count in zip(counts, groups)
+            if count != rows
+        ]
+    if problems:
+        raise ValueError("nf12: NF12 weights failed verification: " + "; ".join(problems))

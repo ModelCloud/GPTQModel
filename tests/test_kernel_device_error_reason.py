@@ -19,6 +19,7 @@ import gptqmodel.nn_modules.qlinear.machete as machete_module
 from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+from gptqmodel.utils.machete import machete_extension_available
 from gptqmodel.utils.rocm import IS_ROCM
 
 
@@ -47,6 +48,15 @@ def _reject(monkeypatch, reason):
         raise NotImplementedError(reason)
 
     monkeypatch.setattr(MacheteLinear, "SUPPORTS_PLATFORM", [PLATFORM.ALL])
+    # ``validate()`` consults ``cached_validate_once()`` first, and that calls
+    # ``validate_once()`` - not ``validate_device``.  On a host without the
+    # extension (or on ROCm) the once-gate returns its own error before the
+    # patched device check can run, so let the once-gate pass here.  Patch the
+    # cached wrapper itself: patching ``validate_once`` would store a True
+    # result in its ``lru_cache`` and leak into later tests.
+    monkeypatch.setattr(
+        MacheteLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
     monkeypatch.setattr(MacheteLinear, "validate_device", classmethod(reject))
 
 
@@ -105,6 +115,13 @@ def test_rocm_rejection_reason_survives(monkeypatch):
     """
     monkeypatch.setattr(MacheteLinear, "SUPPORTS_PLATFORM", [PLATFORM.ALL])
     monkeypatch.setattr(MacheteLinear, "SUPPORTS_DEVICES", [DEVICE.CUDA, DEVICE.ROCM])
+    # ``MacheteLinear.validate()`` asks ``cached_validate_once()`` first, which
+    # on a HIP host already rejects with MACHETE_ROCM_UNSUPPORTED.  This test
+    # covers the device-check message, so skip the cached once-gate and let the
+    # patched ROCm flag reach ``validate_device``.
+    monkeypatch.setattr(
+        MacheteLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
     monkeypatch.setattr(machete_module, "IS_ROCM", True)
     ok, err = MacheteLinear.validate(**_validate_kwargs())
     assert ok is False
@@ -119,6 +136,8 @@ def test_real_hopper_only_message_reaches_the_caller():
         pytest.skip("needs a CUDA device")
     if IS_ROCM:
         pytest.skip("Machete rejects ROCm before the Hopper check; see the mocked test")
+    if not machete_extension_available():
+        pytest.skip("needs a built Machete extension")
     capability = torch.cuda.get_device_capability()
     if capability[0] == 9:
         pytest.skip("Hopper supports Machete; this checks the rejection path")

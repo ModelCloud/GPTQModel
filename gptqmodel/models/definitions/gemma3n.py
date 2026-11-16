@@ -19,23 +19,25 @@ _GEMMA3N_ALL_PER_LAYER_INPUTS = "__gptqmodel_gemma3n_all_per_layer_inputs"
 
 def _gemma3n_decoder_block():
     return {
-        "input_layernorm": ("input_layernorm:!",),
+        "altup:!": ("correction_coefs:!:nosrc", "prediction_coefs:!:nosrc", "modality_router:!:nosrc", "router_norm:!:nosrc"),
+        "laurel": ("linear_left:!:nosrc", "linear_right:!:nosrc", "post_laurel_norm:!:nosrc"),
+        "input_layernorm": ("input_layernorm:!:nosrc",),
         "self_attn": (
             "q_norm:!",
             "q_proj:0",
             "k_norm:!",
             "k_proj:0",
             "v_norm:!",
-            "v_proj:0",
+            "v_proj:0:nosrc",
             "o_proj:1",
         ),
-        "post_attention_layernorm": ("post_attention_layernorm:!",),
+        "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
         "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
         "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-        "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
-        "per_layer_input_gate": ("per_layer_input_gate:0",),
-        "post_per_layer_input_norm": ("post_per_layer_input_norm:!",),
+        "post_feedforward_layernorm": ("post_feedforward_layernorm:!:nosrc",),
+        "per_layer_input_gate": ("per_layer_input_gate:0:nosrc",),
         "per_layer_projection": ("per_layer_projection:1",),
+        "post_per_layer_input_norm": ("post_per_layer_input_norm:!:nosrc",),
     }
 
 
@@ -259,6 +261,9 @@ class Gemma3nTextQModel(LlamaQModel):
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh Gemma 3n layer kwargs during cached replay."""
 
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_gemma3n_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
     def pre_quantize_generate_hook_start(self):
@@ -308,6 +313,9 @@ class Gemma3nForConditionalGenerationGPTQ(BaseQModel):
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
         """Refresh Gemma 3n layer kwargs during cached replay."""
 
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_gemma3n_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
     def pre_quantize_generate_hook_start(self):

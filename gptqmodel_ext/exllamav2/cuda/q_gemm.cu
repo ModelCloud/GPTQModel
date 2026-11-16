@@ -56,11 +56,38 @@ static void c_reduce_splits_to_half(const float* partials, half* out, int64_t sp
         (partials, out, split_stride, splits, count);
 }
 
+__global__ void c_reduce_splits_to_float_kernel
+(
+    const float* __restrict__ partials,
+    float* __restrict__ out,
+    const int64_t split_stride,
+    const int splits,
+    const int64_t count
+)
+{
+    int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+
+    float sum = partials[i];
+    for (int s = 1; s < splits; ++s)
+        sum += partials[(int64_t) s * split_stride + i];
+    out[i] = sum;
+}
+
+static void c_reduce_splits_to_float(const float* partials, float* out, int64_t split_stride, int splits, int64_t count)
+{
+    const int threads = 256;
+    const int64_t blocks = DIVIDE(count, threads);
+    c_reduce_splits_to_float_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>
+        (partials, out, split_stride, splits, count);
+}
+
 void gemm_half_q_half_cuda_part
 (
     const half* a,
     QMatrix* b,
     half* c,
+    float* c_out_float,
     int size_m,
     int size_n,
     int size_k,
@@ -90,6 +117,7 @@ void gemm_half_q_half_cuda_part
             b->cuda_q_scale,
             b->cuda_q_scale_max,
             c,
+            c_out_float,
             size_m,
             size_n,
             size_k,
@@ -173,6 +201,7 @@ void gemm_half_q_half_cuda
     const half* a,
     QMatrix* b,
     half* c,
+    float* c_out_float,
     int size_m,
     int size_n,
     int size_k,
@@ -208,6 +237,16 @@ void gemm_half_q_half_cuda
             : at::zeros({split_element_stride}, float_options);
     }
     float* c_float = b->is_gptq ? accum.data_ptr<float>() : nullptr;
+    const bool wide_output = c_out_float != nullptr;
+    if (wide_output && !b->is_gptq) {
+        // The non-GPTQ kernel atomically accumulates FP32 K blocks directly
+        // into the output, so zero it before the first launch.
+        cudaMemsetAsync(
+            c_out_float, 0,
+            (size_t) size_m * size_n * sizeof(float),
+            at::cuda::getCurrentCUDAStream());
+        clear = false;
+    }
 
     int max_chunks = size_m / BLOCK_M_SIZE_MAX;
     int last_chunk = max_chunks * BLOCK_M_SIZE_MAX;
@@ -215,7 +254,7 @@ void gemm_half_q_half_cuda
 
     if (max_chunks)
     {
-        gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear, c_float, split_count, c_split_stride);
+        gemm_half_q_half_cuda_part(a, b, c, c_out_float, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear, c_float, split_count, c_split_stride);
     }
 
     if (last_chunk_size)
@@ -226,15 +265,22 @@ void gemm_half_q_half_cuda
         // split slice, so split 0 still begins at the buffer base while the
         // kernel's `blockIdx.z * c_split_stride` advances by whole slices;
         // the two offsets compose without overlapping.
-        gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear, c_float ? c_float + last_chunk * size_n : nullptr, split_count, c_split_stride);
+        gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c ? c + last_chunk * size_n : nullptr, c_out_float ? c_out_float + last_chunk * size_n : nullptr, last_chunk_size, size_n, size_k, last_chunk_size, clear, c_float ? c_float + last_chunk * size_n : nullptr, split_count, c_split_stride);
     }
     if (b->is_gptq) {
         // Private slices are summed here; the shared fallback is one slice,
         // which makes the same kernel a plain FP32->FP16 conversion.
-        c_reduce_splits_to_half(
-            c_float, c, c_split_stride,
-            private_splits ? split_count : 1,
-            (int64_t) size_m * size_n);
+        if (wide_output) {
+            c_reduce_splits_to_float(
+                c_float, c_out_float, c_split_stride,
+                private_splits ? split_count : 1,
+                (int64_t) size_m * size_n);
+        } else {
+            c_reduce_splits_to_half(
+                c_float, c, c_split_stride,
+                private_splits ? split_count : 1,
+                (int64_t) size_m * size_n);
+        }
     }
 
 }

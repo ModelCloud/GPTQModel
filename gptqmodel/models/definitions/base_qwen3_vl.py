@@ -13,16 +13,140 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMi
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY, get_module, move_to
+from ...utils.model import MODALITY, get_module, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+)
 
 
 QWEN_VL_UTILS_INSTALL_HINT = (
     "qwen_vl_utils is required for Qwen3-VL video inputs. "
     "Install it with `pip install qwen-vl-utils`."
 )
+
+
+_DEEPSTACK_VISUAL_MASK = "__gptqmodel_deepstack_visual_pos_masks"
+_DEEPSTACK_VISUAL_EMBEDS = "__gptqmodel_deepstack_visual_embeds"
+
+
+class DeepStackReplayMixin:
+    """Replay the DeepStack residual that the outer text loop adds after early layers.
+
+    ``Qwen3VLTextModel`` (and the Qwen3-Omni thinker text model) add
+    ``deepstack_visual_embeds[i]`` to the output of decoder layer ``i`` for the
+    first ``len(deepstack_visual_embeds)`` layers. That happens in the model
+    loop, not inside a decoder layer, so isolated layer replay never applies it
+    and every later layer is calibrated on activations the real model never
+    produces. Capture the outer-loop tensors at the layer-0 hook and apply the
+    residual to the replayed output in place.
+    """
+
+    def _deepstack_language_model(self):
+        raise NotImplementedError
+
+    def _start_deepstack_input_capture(self) -> None:
+        self._stop_deepstack_input_capture()
+        language_model = self._deepstack_language_model()
+
+        def capture_outer_inputs(module, args, kwargs):
+            del args
+            setattr(module, _DEEPSTACK_VISUAL_MASK, kwargs.get("visual_pos_masks"))
+            setattr(module, _DEEPSTACK_VISUAL_EMBEDS, kwargs.get("deepstack_visual_embeds"))
+
+        self._deepstack_input_capture_handle = language_model.register_forward_pre_hook(
+            capture_outer_inputs,
+            with_kwargs=True,
+        )
+
+    def _stop_deepstack_input_capture(self) -> None:
+        handle = getattr(self, "_deepstack_input_capture_handle", None)
+        if handle is not None:
+            handle.remove()
+            delattr(self, "_deepstack_input_capture_handle")
+
+        language_model = self._deepstack_language_model()
+        for name in (_DEEPSTACK_VISUAL_MASK, _DEEPSTACK_VISUAL_EMBEDS):
+            if hasattr(language_model, name):
+                delattr(language_model, name)
+
+    def capture_first_layer_input_kwargs(
+        self,
+        args,
+        kwargs,
+        batch_device,
+        layer_input_kwargs,
+    ):
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(
+            args,
+            kwargs,
+            batch_device,
+            layer_input_kwargs,
+        )
+        language_model = self._deepstack_language_model()
+        visual_pos_masks = getattr(language_model, _DEEPSTACK_VISUAL_MASK, None)
+        deepstack_visual_embeds = getattr(language_model, _DEEPSTACK_VISUAL_EMBEDS, None)
+        if visual_pos_masks is not None and deepstack_visual_embeds is not None:
+            layer_input_kwargs[_DEEPSTACK_VISUAL_MASK] = nested_move_to(
+                visual_pos_masks,
+                device=batch_device,
+            )
+            layer_input_kwargs[_DEEPSTACK_VISUAL_EMBEDS] = nested_move_to(
+                deepstack_visual_embeds,
+                device=batch_device,
+            )
+        return layer_input_kwargs
+
+    def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer,
+            layer_input,
+            additional_inputs,
+            target_device,
+        )
+        # The outer-loop tensors are replay bookkeeping, not decoder-layer kwargs.
+        additional_inputs.pop(_DEEPSTACK_VISUAL_MASK, None)
+        additional_inputs.pop(_DEEPSTACK_VISUAL_EMBEDS, None)
+        return additional_inputs
+
+    def update_layer_replay_kwargs_from_output(
+        self,
+        layer,
+        layer_output,
+        layer_input_kwargs,
+        target_device,
+    ):
+        del target_device
+        visual_pos_masks = layer_input_kwargs.get(_DEEPSTACK_VISUAL_MASK)
+        deepstack_visual_embeds = layer_input_kwargs.get(_DEEPSTACK_VISUAL_EMBEDS)
+        layer_index = getattr(getattr(layer, "self_attn", None), "layer_idx", None)
+        if (
+            visual_pos_masks is None
+            or deepstack_visual_embeds is None
+            or layer_index is None
+            or not 0 <= layer_index < len(deepstack_visual_embeds)
+        ):
+            return layer_input_kwargs
+
+        primary_output = layer_output[0] if isinstance(layer_output, tuple) else layer_output
+        if not torch.is_tensor(primary_output):
+            return layer_input_kwargs
+
+        language_model = self._deepstack_language_model()
+        deepstack_process = getattr(language_model, "_deepstack_process", None)
+        if not callable(deepstack_process):
+            return layer_input_kwargs
+
+        updated_output = deepstack_process(
+            primary_output,
+            visual_pos_masks,
+            deepstack_visual_embeds[layer_index],
+        )
+        primary_output.copy_(updated_output)
+        return layer_input_kwargs
 
 
 def _load_fetch_video():
@@ -34,7 +158,7 @@ def _load_fetch_video():
     return fetch_video
 
 
-class BaseQwen3VLGPTQ(BaseQModel):
+class BaseQwen3VLGPTQ(DeepStackReplayMixin, BaseQModel):
     loader = AutoModelForImageTextToText
 
     # Wrapped Qwen3-VL layouts keep the text decoder under ``language_model``;
@@ -104,6 +228,9 @@ class BaseQwen3VLGPTQ(BaseQModel):
         _, core_model = self._resolve_multimodal_layout(self.model)
         return core_model
 
+    def _deepstack_language_model(self):
+        return self._core_multimodal_model().language_model
+
     def _materialize_core_module(self, parent, attr_name: str):
         module = getattr(parent, attr_name)
         if (
@@ -125,8 +252,10 @@ class BaseQwen3VLGPTQ(BaseQModel):
         self._materialize_core_module(core_model.language_model, "embed_tokens")
         self._materialize_core_module(core_model.language_model, "rotary_emb")
         self._materialize_core_module(core_model, "visual")
+        self._start_deepstack_input_capture()
 
     def pre_quantize_generate_hook_end(self):
+        self._stop_deepstack_input_capture()
         core_model = self._core_multimodal_model()
         if self.quantize_config.offload_to_disk:
             offload_to_disk(
@@ -448,6 +577,7 @@ class BaseQwen3VLGPTQ(BaseQModel):
         if all_pretokenized:
             return super().prepare_dataset(prefix, batch_size=batch_size, **kwargs)
         calibration_dataset = itertools.chain(prefix, remainder)
+        sort, min_length = pop_conversation_calibration_options(kwargs, label="Qwen3-VL")
 
         try:
             # Some adapter contract tests construct an uninitialized wrapper
@@ -498,4 +628,6 @@ class BaseQwen3VLGPTQ(BaseQModel):
                     ) from exc
         finally:
             del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label="Qwen3-VL"
+        )

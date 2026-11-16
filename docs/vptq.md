@@ -89,7 +89,7 @@ reported as `config.bits` and can be tuned by changing the codebook sizes
 | `kmeans_mode` | `"hessian"` | Sample weighting for codebook learning: `"hessian"` (Hessian-diagonal weighted, the reference default) or `""` (uniform). |
 | `kmeans_iters` | `100` | Maximum Lloyd iterations per codebook. |
 | `kmeans_tol` | `1e-5` | Relative centroid-movement tolerance for early stop. |
-| `kmeans_seed` | `0` | Seed for deterministic centroid initialization. |
+| `kmeans_seed` | `0` | Seed for centroid initialization. Repeated runs on the same device are bitwise reproducible; the CUDA and ROCm `randperm` streams differ (see [Reproducibility](#reproducibility)). |
 | `enable_norm` | `False` | Per-channel min/max normalization before vector quantization. |
 | `norm_dim` | `0` | Normalization axis: `0` (columns) or `1` (rows). |
 | `enable_perm` | `False` | Re-order input channels by descending Hessian diagonal before quantization. |
@@ -120,7 +120,92 @@ Configuration constraints:
   set while the outlier codebook is enabled. Without an outlier codebook the
   remainder stays in the last group, and the last group's zero padding is
   dropped when the weight is reconstructed. The same holds for a trailing
-  partial group when `group_size` is set explicitly.
+  partial group when `group_size` is set explicitly. Because every group shares
+  one `group_size`, a `group_num` whose ceiling division would start a group
+  past the last channel is rejected before quantization instead of producing an
+  empty trailing codebook. The error suggests an exact replacement
+  `group_num`, or an explicit `group_size` with `group_num=-1`; either preserves
+  the computed group width. Valid group counts do not form a contiguous range:
+  for 64 input channels, 31 groups leave empty codebooks, while both 32 and 64
+  groups are valid.
+
+## Reproducibility
+
+VPTQ quantization is reproducible for a fixed device, seed, calibration
+dataset and configuration: repeated runs produce a bitwise-identical checkpoint
+(codebooks, residual codebooks, indices and packed weights).
+
+The codebook update is a weighted segment sum, and `index_add_` reduces with
+floating-point atomics on CUDA and HIP. Atomic summation order is not fixed, so
+each Lloyd iteration used to change the codebook in its last bits; the
+sequential column pass then amplified a flipped near-tie into a different
+checkpoint for the same seed and calibration (issue #4137). The quantizer runs
+that reduction by sorting the vectors by assigned centroid and summing each
+contiguous bucket with `torch.segment_reduce`, a per-segment kernel with no
+floating-point atomics, so the summation order is fixed and repeated runs are
+bitwise identical. A float `torch.cumsum` is not used because it is itself
+nondeterministic on CUDA and HIP (issue #4224). The reduction is local to the
+quantizer; it does not toggle the process-global
+`torch.use_deterministic_algorithms` switch, which would also re-route a
+concurrent quantization worker's kernels and can raise for an op that has no
+deterministic implementation.
+
+Cross-device results are **not** bit-identical. `kmeans_seed` seeds the initial
+`randperm`, and CUDA and ROCm draw that permutation from different device RNG
+streams, so their initial centroids differ. Both streams are uniform, so
+neither device is biased, but a CUDA run and a ROCm run of the same
+configuration can land on different equal-loss solutions and therefore report
+different held-out perplexity. A checkpoint produced on one device still runs
+on the other. Compare runs on one device when checking a change; a
+cross-platform comparison needs the same starting checkpoint, not the same
+seed.
+
+## Group layout resolution
+
+`VPTQ.quantize_weight()` and `VPTQLinear.__init__()` share
+`vptq_group_setting()`, so an invalid layout fails before codebook training or
+packed-buffer allocation. The requested codebook count stays explicit; the
+resolver never silently reduces it. This contract was introduced in
+[PR #3851](https://github.com/ModelCloud/GPTQModel/pull/3851).
+
+```mermaid
+flowchart TD
+    Q["VPTQ.quantize_weight()"] --> R["vptq_group_setting()"]
+    L["VPTQLinear.__init__()"] --> R
+    R --> V{"Valid dimensions and exclusive group_size/group_num?"}
+    V -->|No| E["ValueError: invalid configuration"]
+    V -->|Yes| P["Clamp initial_outlier_size from npercent when enabled;<br/>remaining_columns = in_features - initial_outlier_size"]
+    P --> G{"Explicit group_num?"}
+    G -->|Yes| C{"group_num exceeds remaining_columns?"}
+    C -->|Yes| E
+    C -->|No| O{"enable_outlier?"}
+    O -->|Yes| A["Move remainder to outlier_size; use floor group width"]
+    O -->|No| W["Use ceiling group width; count nonempty groups"]
+    W --> N{"nonempty_group_num equals group_num?"}
+    N -->|No| F["ValueError: empty codebook groups;<br/>suggest exact group_num or group_size with group_num=-1"]
+    N -->|Yes| H
+    A --> H
+    G -->|No| S["Explicit group_size: ceiling group count;<br/>otherwise one group"]
+    S --> H{"Positive resolved group count and width?"}
+    H -->|No| E
+    H -->|Yes| T["Return outlier_size, group_size, group_num"]
+    T --> K["VPTQ: train codebooks and quantize"]
+    T --> B["VPTQLinear: allocate packed indices and codebooks"]
+    classDef failure fill:#ffe0e0,stroke:#b91c1c,color:#111;
+    class E,F failure;
+```
+
+| Mechanism | Before | Current behavior |
+| --- | --- | --- |
+| No-outlier ceiling layout | [`vptq_group_setting()` at `e31004984:gptqmodel/utils/vptq.py:88`](https://github.com/ModelCloud/GPTQModel/blob/e310049849b109c9da64d2c542a7ea99594f55a0/gptqmodel/utils/vptq.py#L88) kept the requested count even when trailing groups owned no channels. | Reject before quantization or allocation when the nonempty count differs from the request. |
+| Recovery advice | [`b5e811aa5:gptqmodel/utils/vptq.py:96`](https://github.com/ModelCloud/GPTQModel/blob/b5e811aa526872aaf50d33e15c5b817cc8177168/gptqmodel/utils/vptq.py#L96) suggested an upper bound, although smaller counts can still be invalid. | Suggest an exact count or an explicit width with `group_num=-1`. |
+| Valid partial groups | [`e31004984:gptqmodel/utils/vptq.py:88`](https://github.com/ModelCloud/GPTQModel/blob/e310049849b109c9da64d2c542a7ea99594f55a0/gptqmodel/utils/vptq.py#L88) and [`:92`](https://github.com/ModelCloud/GPTQModel/blob/e310049849b109c9da64d2c542a7ea99594f55a0/gptqmodel/utils/vptq.py#L92) used ceiling division. | Preserve the layout and trim padding during reconstruction. |
+
+For example, 64 input channels with `group_num=31` imply a width of 3, but
+only 22 groups own channels. The error recommends `group_num=22`, or
+`group_size=3` with `group_num=-1`. Both produce 22 nonempty groups and two
+padding columns. A still smaller count can introduce empty groups again, so
+the recommendation is an exact replacement rather than a maximum.
 
 ## Supported modules
 

@@ -87,6 +87,41 @@ dense = tt_blockfloat_hip.dequantize(codes, exponents, 4, weight.shape, torch.fl
 automatically use these kernels when the module is on a ROCm device; the torch
 path remains the fallback everywhere else.
 
+## Device contract
+
+Every entry point validates its tensors before it takes a raw pointer. The
+kernels receive `codes`, `exponents` and the activation as bare addresses and
+run on the stream of one guarded device, so all of them must live on that same
+accelerator. `check_weight` covers dtype, shape and contiguity;
+`check_weight_device` covers device ownership.
+
+```mermaid
+flowchart TD
+    A["linear / embedding / dequant"] --> B["check_weight: dtype, shape, contiguous"]
+    B --> C{"codes.is_cuda and exponents.is_cuda?"}
+    C -- No --> R1["RuntimeError: weight must be on a CUDA/ROCm device"]
+    C -- Yes --> D{"codes.device == exponents.device?"}
+    D -- No --> R2["RuntimeError: codes and exponents must share a device"]
+    D -- Yes --> E{"activation/ids on the codes device?"}
+    E -- No --> R3["RuntimeError: must share a device"]
+    E -- Yes --> F["CUDAGuard, then launch on the current stream"]
+    style R1 fill:#fee,stroke:#c00
+    style R2 fill:#fee,stroke:#c00
+    style R3 fill:#fee,stroke:#c00
+```
+
+| Situation | Before | After |
+| --- | --- | --- |
+| `exponents` on the host, `codes` on the device | Accepted; the kernel dereferenced a host pointer | `RuntimeError` naming the device requirement |
+| `exponents` on `cuda:1`, `codes` on `cuda:0` | Accepted; the kernel read another device's address, which raised an illegal memory access | `RuntimeError` naming both devices |
+| All tensors on one device | Launched | Launched (unchanged) |
+
+A mismatched pointer previously surfaced either as an illegal memory access or,
+worse, as plausible-looking output read from unrelated memory. On ROCm an
+illegal access also poisons the HIP context for the rest of the process, which
+is why the regression tests in `tests/test_tt_blockfloat_hip.py` run each
+mismatch in its own interpreter.
+
 ## Build and validate without ROCm PyTorch
 
 The JIT extension is the production entry point, but the kernels can be
@@ -249,6 +284,34 @@ Measured progression on this card (bf16 prefill, 4096x4096 bf8/bf4 weights):
 | 64-row M block (half the weight re-reads) | 39 us | 296 us |
 | 128x128 block, 32x32 warp tile | 39 us | 185 us |
 | partial-tile fix, staging test hoisted out of the loop | 35 us | 186 us |
+
+## Thread safety
+
+`ttbf_wmma_device()` caches a per-device architecture decision
+(`gfx1200`/`gfx1201` selects the WMMA path) because `hipGetDeviceProperties` is
+a driver call, and the bf16 `m > 1` linear path consults it on every launch.
+The cache is process-wide, so it must be initialized exactly once per device.
+
+```mermaid
+flowchart TD
+    A["ttbf_linear, bf16, m greater than 1"] --> B["ttbf_wmma_device()"]
+    B --> C["hipGetDevice"]
+    C --> D{"call_once for this device already ran?"}
+    D -- No --> E["one thread: hipGetDeviceProperties, store cache for device"]
+    D -- Yes --> F["cache for device is published by call_once"]
+    E --> G["return cache for device"]
+    F --> G
+    style E fill:#dfd,stroke:#060
+```
+
+`std::call_once` per device replaces the previous `static bool initialised[64]`
+flag. That flag was read and written without synchronization, so two threads
+entering their first bf16 linear on the same device could both observe it unset
+and write `cache[device]` concurrently — a C++ data race with no defined
+publication order for the dispatch decision. `call_once` gives each device one
+synchronized initialization and a happens-before edge, so every later caller
+observes the published result. The launch path is otherwise unchanged; the only
+added cost is one atomic check per call.
 
 ## Limitations
 

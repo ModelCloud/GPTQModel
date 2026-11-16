@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
@@ -25,9 +26,12 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
-from .fallback_smooth import mse_optimal_quant, smooth_block
+from ..utils.rocm import quant_blas_backend
+from .conv_padding import conv_padding_pairs, pad_mode
+from .fallback_smooth import affine_range_with_zero, mse_optimal_quant, smooth_block, symmetric_range
 from .gar import (
     compose_final_perm,
     compute_global_perm,
@@ -48,6 +52,50 @@ from .quantizer import (
 
 
 log = setup_logger()
+
+
+# Accelerator solver/allocator status codes that mean "allocation failed" even
+# though the message does not contain the legacy "out of memory" phrase.
+_MEMORY_ALLOCATION_ERROR_MARKERS = (
+    "cusolver_status_alloc_failed",
+    "hipsolver_status_alloc_failed",
+    "cublas_status_alloc_failed",
+    "hipblas_status_alloc_failed",
+    "cudnn_status_alloc_failed",
+    "miopen_status_out_of_resources",
+    "cuda_error_out_of_memory",
+    "cudaerroroutofmemory",
+    "cudaerrormemoryallocation",
+    "cuda_error_memory_allocation",
+    "cudaerror_memoryallocation",
+    "hiperroroutofmemory",
+    "hiperrormemoryallocation",
+    "hiperror_out_of_memory",
+)
+
+
+def _is_memory_allocation_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` is an accelerator memory/allocation failure.
+
+    The GPTQ CPU fallbacks used to match only ``"out of memory"``. cuSOLVER and
+    hipSOLVER report a failed workspace allocation as
+    ``CUSOLVER_STATUS_ALLOC_FAILED`` / ``HIPSOLVER_STATUS_ALLOC_FAILED``, so the
+    exception type and solver status code are the primary discriminator and the
+    historical phrase is only a last-resort supplement (issue #4350).
+
+    A non-positive-definite factorization is a numerical failure, not a memory
+    failure. ``torch._C._LinAlgError`` is excluded first so it can never be
+    downgraded to the CPU retry.
+    """
+
+    if isinstance(exc, torch._C._LinAlgError):
+        return False
+    if isinstance(exc, (torch.OutOfMemoryError, MemoryError)):
+        return True
+    text = str(exc).lower()
+    if any(marker in text for marker in _MEMORY_ALLOCATION_ERROR_MARKERS):
+        return True
+    return "out of memory" in text
 
 
 def _log_hessian_verbose() -> bool:
@@ -108,6 +156,7 @@ class _HessianAccumulatorState:
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
 _WORKSPACE_SLOTS: Dict[Tuple[Tuple[str, Optional[int]], torch.dtype], list["_WorkspaceSlot"]] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
+_WORKSPACE_GENERATION = 0
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 
 
@@ -235,6 +284,8 @@ def _lease_workspace(
     key = _workspace_cache_key(device)
     lock = _workspace_lock(key)
     slot_key = (key, dtype)
+    with _WORKSPACE_LOCKS_GUARD:
+        generation = _WORKSPACE_GENERATION
     with lock:
         # Test fixtures and callers historically clear ``_WORKSPACE_CACHE``;
         # treat that as clearing the event-gated pool too.
@@ -277,14 +328,37 @@ def _lease_workspace(
                 slot.ready_event.record(stream)
             else:
                 slot.ready_event = None
-            slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
-            slots.append(slot)
-            # Keep a small bounded pool (the default CUDA worker pool is four
-            # workers/GPU) while allowing concurrent leases without a host
-            # synchronization.  Extra slots are safe to release.
-            if len(slots) > 8:
-                del slots[:-8]
-            _WORKSPACE_CACHE[key] = workspace
+            with _WORKSPACE_LOCKS_GUARD:
+                released_while_leased = _WORKSPACE_GENERATION != generation
+            if not released_while_leased:
+                slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
+                slots.append(slot)
+                # Keep a small bounded pool (the default CUDA worker pool is four
+                # workers/GPU) while allowing concurrent leases without a host
+                # synchronization.  Extra slots are safe to release.
+                if len(slots) > 8:
+                    del slots[:-8]
+                _WORKSPACE_CACHE[key] = workspace
+
+
+def release_workspace_cache() -> None:
+    """Drop every cached Hessian workspace slot.
+
+    The slots are process-wide tensors, so they survive ``quantize()`` returning
+    and the model being deleted, and ``torch.cuda.empty_cache()`` cannot
+    reclaim them. A lease that is still running observes the generation change
+    and drops its slot instead of repopulating the pool.
+    """
+
+    global _WORKSPACE_GENERATION
+    with _WORKSPACE_LOCKS_GUARD:
+        _WORKSPACE_GENERATION += 1
+        keys = list(_WORKSPACE_LOCKS)
+    for key in keys:
+        with _workspace_lock(key):
+            _WORKSPACE_CACHE.pop(key, None)
+            for slot_key in [slot_key for slot_key in _WORKSPACE_SLOTS if slot_key[0] == key]:
+                _WORKSPACE_SLOTS.pop(slot_key, None)
 
 
 def _device_supports_bfloat16(device: torch.device) -> bool:
@@ -326,10 +400,34 @@ def get_number_of_rows_and_cols(layer: nn.Module):
         return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
-@lru_cache(maxsize=8)
+def _uniform_column_group_stream(device: torch.device):
+    """Identify the stream whose ordering makes a cached zero-fill visible.
+
+    The cached tensor's fill is queued on the stream that created it. A second
+    worker on another stream could otherwise observe the tensor before that
+    fill completes. Keying the cache by the stream object keeps one tensor per
+    stream and keeps the stream alive for as long as the entry is cached.
+    """
+
+    if device.type == "cuda":
+        return torch.cuda.current_stream(device)
+    return None
+
+
+@lru_cache(maxsize=32)
+def _uniform_column_group_cached(
+    count: int,
+    device: torch.device,
+    stream,
+) -> torch.Tensor:
+    del stream
+    return torch.zeros(count, device=device, dtype=torch.int32)
+
+
 def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
     """Constant group index for blocks whose columns share one quantizer group."""
-    return torch.zeros(count, device=device, dtype=torch.int32)
+
+    return _uniform_column_group_cached(count, device, _uniform_column_group_stream(device))
 
 
 class GPTQ:
@@ -594,6 +692,11 @@ class GPTQ:
     def validate_module(module):
         assert isinstance(module, (nn.Embedding, nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        if isinstance(module, (nn.Conv1d, nn.Conv2d)):
+            # Resolve the padding contract before calibration: a setting whose
+            # im2col geometry cannot be reproduced must not silently capture a
+            # Hessian for a different operator.
+            conv_padding_pairs(module)
 
     # def has_hessian_issues(self) -> bool:
     #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
@@ -822,6 +925,13 @@ class GPTQ:
             return torch.bfloat16
 
         if staging_dtype == torch.float16:
+            # float16 has a much narrower exponent range than bfloat16, so a
+            # bf16 activation outside +/-65504 becomes inf when staged. Never
+            # stage to a narrower-range dtype than the input.
+            if input_dtype == torch.bfloat16:
+                if not _device_supports_bfloat16(device):
+                    return torch.float32
+                return torch.bfloat16
             return torch.float16
 
         return torch.float32
@@ -922,7 +1032,13 @@ class GPTQ:
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
-            xtx = torch.matmul(mat32.T, mat32)
+            # Determinism across processes comes from this fp32 X^T X GEMM
+            # running on rocBLAS (see ``utils/rocm.py``). The quantization run
+            # already holds the override for Hessian methods; this per-call
+            # context keeps a direct Hessian computation on the deterministic
+            # path too, and is a reference-counted no-op when nested.
+            with quant_blas_backend(matrix.device):
+                xtx = torch.matmul(mat32.T, mat32)
             del mat32
             return xtx
 
@@ -933,7 +1049,8 @@ class GPTQ:
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
-                xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
+                with quant_blas_backend(matrix.device):
+                    xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
         return xtx_accum
 
@@ -971,10 +1088,20 @@ class GPTQ:
                     inp.shape[2],
                     1,
                 )
+                # `nn.Unfold` only accepts integer zero padding, so apply the
+                # layer's own padding (including its mode) and unfold the
+                # already-padded input. `padding="same"` is resolved to
+                # PyTorch's asymmetric split by `conv_padding_pairs`.
+                (left, right), = conv_padding_pairs(self.module)
+                reshaped_inp = F.pad(
+                    reshaped_inp,
+                    (0, 0, left, right),
+                    mode=pad_mode(self.module.padding_mode),
+                )
                 unfold = nn.Unfold(
                     self.module.kernel_size + (1,),
                     dilation=self.module.dilation + (1,),
-                    padding=self.module.padding + (0,),
+                    padding=0,
                     stride=self.module.stride + (1,),
                 )
                 # output size (batch_size, channels * \prod kernel_size, num_patches)
@@ -986,10 +1113,16 @@ class GPTQ:
                     inp.shape[2],
                     inp.shape[3],
                 )
+                (left, right), (top, bottom) = conv_padding_pairs(self.module)
+                reshaped_inp = F.pad(
+                    reshaped_inp,
+                    (left, right, top, bottom),
+                    mode=pad_mode(self.module.padding_mode),
+                )
                 unfold = nn.Unfold(
                     self.module.kernel_size,
                     dilation=self.module.dilation,
-                    padding=self.module.padding,
+                    padding=0,
                     stride=self.module.stride,
                 )
                 # output size (batch_size, channels * \prod kernel_size, num_patches)
@@ -1023,7 +1156,7 @@ class GPTQ:
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
-                and "out of memory" in str(exc).lower()
+                and _is_memory_allocation_failure(exc)
             ):
                 log.warn(
                     "GPTQ module '%s' fell back to CPU Hessian accumulation due to GPU OOM during batch processing.",
@@ -1354,9 +1487,9 @@ class GPTQ:
                 producer,
             )
         except RuntimeError as exc:
-            # CUDA OOM/CPU fallback paths must not leave a partially computed
+            # Memory/CPU fallback paths must not leave a partially computed
             # artifact visible to sibling tasks.
-            if "out of memory" in str(exc).lower():
+            if _is_memory_allocation_failure(exc):
                 self._shared_hessian_cache_disabled = True
             raise
 
@@ -1380,27 +1513,93 @@ class GPTQ:
         deliberately leaves ``H`` and the per-device partials in place so the
         subsequent quantization pass can consume the original device-local
         capture without retaining every Hessian in host memory.
+
+        Both the already-finalized contribution (``self.H`` or ``self._H_diag``)
+        and any partials collected after it are merged by their own sample
+        counts, mirroring :meth:`materialize_global_hessian`.  Embedding
+        captures use the same count-derived diagonal normalization as
+        :meth:`finalize_hessian`.
         """
 
         with self.lock:
             device = self._select_hessian_target_device(target_device)
+
+            if isinstance(self.module, nn.Embedding):
+                if not self._hessian_dirty and self._H_diag is not None:
+                    self._wait_hessian_ready(device)
+                    source_diag = self._H_diag
+                    result = source_diag.detach().to(device=device, dtype=torch.float32)
+                    if result.data_ptr() == source_diag.data_ptr():
+                        # `.to()` is a no-op that returns the live diagonal
+                        # itself when the device and dtype already match. The
+                        # snapshot outlives the capture, so detach it from the
+                        # storage that later finalization mutates in place.
+                        result = result.clone()
+                    elif result.device != source_diag.device or result.dtype != source_diag.dtype:
+                        event = self._cuda_event_for(device)
+                        if event is not None:
+                            event.record(torch.cuda.current_stream(device))
+                        self._defer_hessian_sources([source_diag], event)
+                    return result
+
+                finalized_samples, pending_samples = self._snapshot_sample_counts()
+                total_samples = finalized_samples + pending_samples
+                diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
+                if total_samples == 0:
+                    return diag
+
+                sources: list[torch.Tensor] = []
+                if finalized_samples and self._H_diag is not None:
+                    self._wait_hessian_ready(device)
+                    source_diag = self._H_diag
+                    previous = safe_move_to(source_diag, device, dtype=torch.float32)
+                    diag.add_(
+                        previous,
+                        alpha=float(finalized_samples) / float(total_samples),
+                    )
+                    if previous is not source_diag:
+                        sources.append(source_diag)
+
+                for partial_device in sorted(
+                    self._device_embedding_counts, key=_device_reduction_key
+                ):
+                    counts = self._device_embedding_counts[partial_device]
+                    partial_event = self._device_hessian_partial_ready.get(
+                        torch.device(partial_device)
+                    )
+                    if partial_event is not None:
+                        if device.type == "cuda":
+                            torch.cuda.current_stream(device).wait_event(partial_event)
+                        else:
+                            partial_event.synchronize()
+                    diag.add_(
+                        safe_move_to(counts, device, dtype=torch.float32),
+                        alpha=2.0 / float(total_samples),
+                    )
+                event = self._cuda_event_for(device)
+                if event is not None:
+                    event.record(torch.cuda.current_stream(device))
+                self._defer_hessian_sources(sources, event)
+                return diag
+
             if not self._hessian_dirty and self.H is not None:
                 self._wait_hessian_ready(device)
                 source = self.H
                 result = source.detach().to(device=device, dtype=torch.float32)
-                if result.device != source.device:
+                if result.data_ptr() == source.data_ptr():
+                    # Same device and dtype: `.to()` returned the live Hessian,
+                    # which `materialize_global_hessian` mutates in place on the
+                    # next finalization. The snapshot must be independent.
+                    result = result.clone()
+                elif result.device != source.device:
                     event = self._cuda_event_for(device)
                     if event is not None:
                         event.record(torch.cuda.current_stream(device))
                     self._defer_hessian_sources([source], event)
                 return result
 
-            total_samples = sum(self._device_sample_counts.values())
-            if total_samples != self.nsamples:
-                raise RuntimeError(
-                    f"Hessian snapshot sample-count drift: partials={total_samples}, "
-                    f"capture={self.nsamples}"
-                )
+            finalized_samples, pending_samples = self._snapshot_sample_counts()
+            total_samples = finalized_samples + pending_samples
             result = torch.zeros(
                 (self.columns, self.columns),
                 dtype=torch.float32,
@@ -1410,6 +1609,16 @@ class GPTQ:
                 return result
 
             sources = list(self._device_hessian_partials.values())
+            if finalized_samples and self.H is not None:
+                self._wait_hessian_ready(device)
+                source_hessian = self.H
+                previous = safe_move_to(source_hessian, device, dtype=torch.float32)
+                result.add_(
+                    previous,
+                    alpha=float(finalized_samples) / float(total_samples),
+                )
+                if previous is not source_hessian:
+                    sources.insert(0, source_hessian)
             for partial_device in sorted(self._device_hessian_partials, key=_device_reduction_key):
                 partial = self._device_hessian_partials[partial_device]
                 event = self._device_hessian_partial_ready.get(torch.device(partial_device))
@@ -1418,13 +1627,27 @@ class GPTQ:
                         torch.cuda.current_stream(device).wait_event(event)
                     else:
                         event.synchronize()
-                result.add_(partial.to(device=device, dtype=torch.float32))
-            result.mul_(2.0 / float(total_samples))
+                result.add_(
+                    safe_move_to(partial, device, dtype=torch.float32),
+                    alpha=2.0 / float(total_samples),
+                )
             event = self._cuda_event_for(device)
             if event is not None:
                 event.record(torch.cuda.current_stream(device))
             self._defer_hessian_sources(sources, event)
             return result
+
+    def _snapshot_sample_counts(self) -> Tuple[int, int]:
+        """Return the finalized and pending sample counts of the live capture."""
+
+        finalized_samples = self._hessian_total_samples
+        pending_samples = sum(self._device_sample_counts.values())
+        if finalized_samples + pending_samples != self.nsamples:
+            raise RuntimeError(
+                f"Hessian snapshot sample-count drift: finalized={finalized_samples}, "
+                f"partials={pending_samples}, capture={self.nsamples}"
+            )
+        return finalized_samples, pending_samples
 
     def create_H(self, target_device):
         return torch.zeros((self.columns, self.columns), dtype=torch.float32,
@@ -1459,6 +1682,33 @@ class GPTQ:
         scale_chunks = []
         zero_chunks = []
 
+        def _affine_quantize(block_mod, lo, hi, scale_min):
+            """Quantize one group against a range that includes zero.
+
+            ``lo``/``hi`` are the strategy's desired endpoints. Extending them
+            to include zero keeps the derived integer zero point inside
+            ``[0, maxq]`` instead of clamping a positive-only group to zero and
+            shifting every value by roughly the group minimum.
+            """
+
+            if self.qcfg.sym:
+                # Every symmetric kernel assumes zero = 2 ** (bits - 1);
+                # Marlin does not even read the stored qzeros. Fit the common
+                # symmetric range so all strategies store that fixed zero.
+                lo, hi = symmetric_range(block_mod)
+            else:
+                lo, hi = affine_range_with_zero(lo, hi)
+            scale = _floor_scale_for_storage(
+                _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8)),
+                scale_min,
+            )
+            if self.qcfg.sym:
+                zero = torch.full_like(scale, (maxq + 1) // 2)
+            else:
+                zero = torch.clamp(torch.round(-lo / scale), 0, maxq)
+            q = torch.clamp(torch.round(block_mod / scale + zero), 0, maxq)
+            return (q - zero) * scale, scale, zero
+
         for start in range(0, self.columns, effective_group_size):
             end = min(start + effective_group_size, self.columns)
             block = W[:, start:end]
@@ -1487,58 +1737,32 @@ class GPTQ:
                 if strategy == FallbackStrategy.MIDPOINT:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
-                    mid = (w_max + w_min) / 2.0
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale(torch.clamp((w_max - w_min) / maxq, min=1e-8)),
-                        scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, w_min, w_max, scale_min
                     )
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - mid) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (mid / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.MEAN:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale((2 * max_dev) / maxq), scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, mean - max_dev, mean + max_dev, scale_min
                     )
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - mean) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (mean / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.MEDIAN:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale((2 * max_dev) / maxq), scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, median - max_dev, median + max_dev, scale_min
                     )
-                    zero_mid = torch.full_like(scale, maxq / 2.0)
-                    q = torch.round((block_mod - median) / scale + zero_mid)
-                    q = torch.clamp(q, 0, maxq)
-                    zero = torch.round(zero_mid - (median / scale))
-                    zero = torch.clamp(zero, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     std = block_mod.std(dim=1, keepdim=True, unbiased=False)
                     std = torch.clamp(std, min=1e-8)
                     lo = mean - sigma * std
                     hi = mean + sigma * std
-                    scale = _floor_scale_for_storage(
-                        _replace_zero_scale(torch.clamp((hi - lo) / maxq, min=1e-8)),
-                        scale_min,
+                    dequant, scale, zero = _affine_quantize(
+                        block_mod, lo, hi, scale_min
                     )
-                    zero = torch.round(-lo / scale)
-                    zero = torch.clamp(zero, 0, maxq)
-                    q = torch.round(block_mod / scale + zero)
-                    q = torch.clamp(q, 0, maxq)
-                    dequant = (q - zero) * scale
                 elif strategy == FallbackStrategy.RTN:
                     self.quantizer.find_params(
                         block_mod, weight=True,
@@ -1599,6 +1823,25 @@ class GPTQ:
         self.H = None
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
+    def _rtn_fallback_after_hessian_failure(self, blocksize: int):
+        """Quantize with GPTQ's data-independent RTN grid.
+
+        ``hessian_inverse`` returns ``(None, 1.0)`` when every damp and
+        diagonal-floor attempt fails. GPTAQ and FOEM call this helper so a
+        non-invertible Hessian degrades to the same weight-only grid GPTQ uses
+        for low-sample modules instead of dereferencing the missing inverse.
+        It delegates to ``_fallback_quantize``; there is no second fallback
+        implementation.
+        """
+
+        log.warn(
+            "Quantization: Module `%s` -> Hessian inverse unavailable; using `%s` fallback quantization.",
+            self.name,
+            FallbackStrategy.RTN.value,
+        )
+        self.H = None
+        return self._fallback_quantize(FallbackStrategy.RTN, blocksize)
+
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
             self,
@@ -1641,7 +1884,10 @@ class GPTQ:
             if timer is not None
             else contextlib.nullcontext()
         )
-        with timer_cm:
+        # Keep the deterministic rocBLAS selection on the Hessian/linalg path
+        # (rocSOLVER GEMMs included) for direct callers; the run-scoped override
+        # in ``models/base.py`` already covers the quantization path.
+        with timer_cm, quant_blas_backend(H.device):
             if _log_hessian_verbose():
                 log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
             try:
@@ -1660,7 +1906,10 @@ class GPTQ:
                     diag_view.add_(damp * mean)
                     try:
                         if H.device.type == "npu":
-                            return npu_inverse_cholesky_factor(H)
+                            return npu_inverse_cholesky_factor(
+                                H,
+                                block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
+                            )
 
                         # ``cholesky_ex`` reports a non positive-definite input through
                         # ``info`` instead of raising, so failed probes stay cheap.
@@ -2057,8 +2306,15 @@ class GPTQ:
         cpu_fallback_used = False
         from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
 
+        zero_samples = self.nsamples == 0
         resolved_strategy = resolve_fallback_strategy(self.fallback)
-        fallback_requested = should_use_fallback(
+        if zero_samples:
+            # A zero Hessian makes every column look calibration-dead, and
+            # ``_neutralize_dead_columns`` would then zero the entire weight.
+            # RTN is the only data-independent grid, so use it even when the
+            # threshold fallback is disabled rather than ship an all-zero module.
+            resolved_strategy = FallbackStrategy.RTN
+        fallback_requested = zero_samples or should_use_fallback(
             self.fallback,
             float(self.nsamples),
             self.expected_nsamples,
@@ -2069,6 +2325,13 @@ class GPTQ:
         if fallback_requested:
             use_hessian = False
             self._disable_shared_hessian_cache()
+            if zero_samples:
+                log.warn(
+                    "Quantization: Module `%s` -> no calibration samples reached this module; "
+                    "forcing `%s` fallback quantization instead of quantizing a zero Hessian.",
+                    self.name,
+                    FallbackStrategy.RTN.value,
+                )
             threshold_text = str(getattr(self.fallback, "threshold", None))
             threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
             log.warn(
@@ -2114,6 +2377,16 @@ class GPTQ:
 
         # H = self.H.to(device=self.H.device)
 
+        # Capture the NaN-retry diagonal before any activation ordering. The
+        # retry clones ``W`` in natural column order, so a diagonal captured
+        # after desc_act/act_group_aware permutation would make ``argsort`` the
+        # identity and silently drop act-order from the retried ``g_idx``.
+        retry_hessian_diag = (
+            self.H.diagonal().clone()
+            if use_hessian and fallback_configured and not self.qcfg.mock_quantization
+            else None
+        )
+
         if use_hessian:
             _neutralize_dead_columns(self.H, W)
 
@@ -2137,10 +2410,17 @@ class GPTQ:
         if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(torch.diag(self.H), descending=True)
             try:
-                W = W[:, perm]
-                self.H = self.H[perm][:, perm]
+                # Gather H before W: H needs two ``cols x cols`` temporaries
+                # and is the allocation most likely to exhaust the device.
+                # Both results stay in locals until both gathers succeed, so
+                # the fallback below always sees an unpermuted ``W`` and
+                # ``self.H``.  Assigning ``W`` first would leave it permuted
+                # when the H gather raises and make the fallback permute it
+                # a second time.
+                H_permuted = self.H[perm][:, perm]
+                W_permuted = W[:, perm]
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                if self.H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
                     raise
 
                 self.log_cpu_fallback("Hessian permutation", self.H.device)
@@ -2151,6 +2431,9 @@ class GPTQ:
                 W = W.to(device=cpu_device)[:, perm]
                 self.H = self.H.to(device=cpu_device)[perm][:, perm]
                 self.quantizer.find_params(W, weight=True)
+            else:
+                W = W_permuted
+                self.H = H_permuted
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -2167,10 +2450,13 @@ class GPTQ:
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             final_perm = extend_perm_with_tail(final_perm, self.columns)
             try:
-                W = W[:, final_perm]
-                self.H = self.H[final_perm][:, final_perm]
+                # See the desc_act branch above: keep both permutations in
+                # locals so a failed H gather leaves W unpermuted for the
+                # CPU fallback.
+                H_permuted = self.H[final_perm][:, final_perm]
+                W_permuted = W[:, final_perm]
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                if self.H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
                     raise
 
                 self.log_cpu_fallback("act-group Hessian permutation", self.H.device)
@@ -2181,6 +2467,9 @@ class GPTQ:
                 W = W.to(device=cpu_device)[:, final_perm]
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
                 self.quantizer.find_params(W, weight=True)
+            else:
+                W = W_permuted
+                self.H = H_permuted
 
         static_group_perm = None
         if self.qcfg.static_groups:
@@ -2211,7 +2500,7 @@ class GPTQ:
                         # retry/mock snapshot so NaN recovery remains exact.
                         self.H.diagonal().copy_(effective_diag)
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                if self.H.device.type != "cuda" or not _is_memory_allocation_failure(exc):
                     raise
 
                 # Full-attention blocks on very large models can exceed GPU memory during the
@@ -2227,15 +2516,10 @@ class GPTQ:
         else:
             Hinv, damp = None, 0.0
 
-        # The block update uses Hinv, but never reads the Hessian again. Keep
-        # only its diagonal for the optional NaN -> mock-quantization retry:
-        # that path uses an identity inverse and reads H only for dead columns
-        # and activation ordering. Rebuild the diagonal matrix if it retries.
-        retry_hessian_diag = (
-            self.H.diagonal().clone()
-            if Hinv is not None and fallback_configured and not self.qcfg.mock_quantization
-            else None
-        )
+        # The block update uses Hinv, but never reads the Hessian again. The
+        # NaN -> mock-quantization retry rebuilds a diagonal matrix from the
+        # natural-order snapshot captured above, then re-runs neutralization and
+        # activation ordering so it reproduces the primary column order.
         if Hinv is not None:
             self.H = None
 
@@ -2251,7 +2535,7 @@ class GPTQ:
             and self.quantizer._maxq_value == (1 << self.qcfg.bits) - 1
             and not self.qcfg.mock_quantization
             and type(self.quantizer) is Quantizer
-            and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+            and resolve_kernel_config(self.qcfg).gptq_fused_block_update
         ):
             from .gptq_cuda import block_update_available, gptq_block_update
 

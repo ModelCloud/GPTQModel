@@ -76,6 +76,9 @@ class _DummyQuantizeConfig:
     def extract_adapter_rank_patterns(self):  # pragma: no cover - not exercised here
         return {}
 
+    def has_dynamic_exclusions(self):
+        return False
+
 
 class _DummyConfig:
     def __init__(self):
@@ -98,6 +101,9 @@ class _DummyModel:
         self.config = _DummyConfig()
         self.generation_config = _DummyGenerationConfig()
         self._tracker = tracker
+
+    def named_modules(self):
+        return iter(())
 
     def save_pretrained(self, *_args, **_kwargs):
         self._tracker["config_snapshot"] = dict(self.config.__dict__)
@@ -132,7 +138,7 @@ def test_save_quantized_strips_attention_before_serialization(tmp_path, monkeypa
 
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
 
-    def stop_after_checks(model, _save_dir, _source_model_dir):
+    def stop_after_checks(model, _save_dir, _source_model_dir, **_kwargs):
         tracker["config_snapshot"] = dict(model.config.__dict__)
         tracker["generation_snapshot"] = dict(model.generation_config.__dict__)
         raise RuntimeError("stop after checks")
@@ -195,7 +201,7 @@ def test_save_quantized_persists_exl3_ledger_and_unambiguous_csv(tmp_path, monke
     ]
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
 
-    def stop_after_checks(model, _save_dir, _source_model_dir):
+    def stop_after_checks(model, _save_dir, _source_model_dir, **_kwargs):
         tracker["config_snapshot"] = dict(model.config.__dict__)
         tracker["generation_snapshot"] = dict(model.generation_config.__dict__)
         raise RuntimeError("stop after checks")

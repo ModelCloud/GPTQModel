@@ -89,7 +89,7 @@ class InternS1QModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=True)
+        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
 
     @classmethod
     def prepare_inputs_for_conversations(

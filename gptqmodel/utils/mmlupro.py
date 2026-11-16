@@ -135,6 +135,7 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
         with torch.inference_mode():
             outputs = model.generate(
                 input_ids=input_tensor["input_ids"],
+                attention_mask=input_tensor["attention_mask"],
                 tokenizer=tokenizer,
                 do_sample=False,
                 temperature=0.0,
@@ -189,11 +190,24 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
         prompt = None
         while not prompt_length_ok:
             prompt = generate_cot_prompt(val_df, curr, k)
-            inputs = tokenizer(prompt, return_tensors="pt")
-            inputs = {key: value.cuda() for key, value in inputs.items()}
-            length = len(inputs["input_ids"][0])
+            # Count prompt tokens on the CPU tokenizer output. Moving the
+            # tensor to CUDA only to read its length made CPU-only evaluation
+            # fail before generation even started.
+            input_ids = tokenizer(prompt)["input_ids"]
+            if hasattr(input_ids, "shape"):
+                length = input_ids.shape[-1]
+            elif isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], (list, tuple)):
+                length = len(input_ids[0])
+            else:
+                length = len(input_ids)
             if length < max_model_length - max_new_tokens:
                 prompt_length_ok = True
+            elif k == 0:
+                raise ValueError(
+                    f"MMLU-Pro prompt for subject {subject!r} is still longer than the "
+                    f"{max_model_length - max_new_tokens}-token budget with zero few-shot "
+                    "examples; shorten the question or raise max_model_length"
+                )
             k -= 1
         inference_batches.append(prompt)
 
@@ -206,7 +220,8 @@ def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, ba
     accu, corr, wrong = save_res(res, output_path)
     log.info("this batch accu is: {}, corr: {}, wrong: {}\n".format(str(accu), str(corr), str(wrong)))
 
-    accu, corr, wrong = save_res(res, output_path)
+    # Score once: save_res guesses a missing prediction at random, so a second
+    # call can report a different accuracy than the one just logged.
     return accu, corr, wrong
 
 

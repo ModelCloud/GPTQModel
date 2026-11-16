@@ -53,6 +53,7 @@ struct Params {
   int64_t ldx;
   const uint8_t* weights;
   const uint4* escapes;
+  uint32_t num_escapes;
   uint32_t base;
   const Bf16* bias;
   Bf16* y;
@@ -276,7 +277,7 @@ __global__ void __launch_bounds__(256, 1) small_m_async_kernel(Params p) {
           }
         }
       } else {
-        T::fragments(planes, p.base, p.escapes, fragments);
+        T::fragments(planes, p.base, p.escapes, p.num_escapes, fragments);
       }
       uint32_t operands[2][4];
       const uint32_t activation_stage = smem_addr(activations + stage * kActivationElements);
@@ -312,7 +313,7 @@ cudaError_t launch(const LinearArgs& a) {
   const cudaError_t status = small_m_prepare_kernel(
       reinterpret_cast<const void*>(small_m_async_kernel<S, Stages, StageEscapes>), *a.dev, shared);
   if (status != cudaSuccess) return status;
-  Params p{a.x, a.ldx, a.weight, a.escapes, exp_base_x4(a.exp_base), a.bias, a.y, a.ldy,
+  Params p{a.x, a.ldx, a.weight, a.escapes, a.num_escapes, exp_base_x4(a.exp_base), a.bias, a.y, a.ldy,
            static_cast<int>(a.m), static_cast<int>(a.k / 256), S == WeightSource::kNF12 && a.weights_ready,
            a.k <= 2048 ? a.n > 4096 : a.n <= 4096};
   cudaLaunchConfig_t config{};

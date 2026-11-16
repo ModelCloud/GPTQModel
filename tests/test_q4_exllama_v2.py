@@ -16,7 +16,7 @@ import unittest  # noqa: E402
 
 import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
-from q4_reference import REFERENCE, get_diff  # noqa: E402
+from q4_reference import get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
@@ -64,27 +64,76 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         self.assertTrue(isinstance(linear, ExllamaV2Linear))
 
-        torch.manual_seed(42)
+        # Deterministic nibble codes. The previous fixture used
+        # ``torch.randint`` with a fixed seed, whose stream is torch-version
+        # dependent, so the baked reference no longer described the inputs.
+        rows = torch.arange(k, dtype=torch.int64).reshape(k // 8, 8, 1)
+        cols = torch.arange(n, dtype=torch.int64).reshape(1, 1, n)
+        codes = ((rows * 7 + cols * 3) % 16).to(torch.int32)
+        qweight = torch.zeros(k // 8, n, dtype=torch.int32)
+        for lane in range(8):
+            qweight.bitwise_or_(codes[:, lane, :] << (4 * lane))
 
-        linear.qweight = torch.randint(-100, 100, size=linear.qweight.shape, dtype=torch.int32)
-        linear.scales = linear.scales + 0.002
-        linear.qzeros += 0b00010001000100010001000100010001  # for new weight format
+        linear.qweight = qweight
+        linear.scales = torch.full_like(linear.scales, 0.002)
+        linear.qzeros.zero_()
+        # One zero point per nibble (v2 layout: the stored word is the zero).
+        linear.qzeros += 0b00010001000100010001000100010001
+        linear.qzero_format(2)
+
+        # ``gptqmodel_post_init`` shuffles ``qweight`` in place into ExLlamaV2's
+        # native runtime layout, so keep the checkpoint-layout buffers for the
+        # independent reference.
+        checkpoint_qweight = linear.qweight.detach().clone()
+        checkpoint_qzeros = linear.qzeros.detach().clone()
+        checkpoint_scales = linear.scales.detach().clone()
 
         linear = linear.eval()
         linear = linear.to(device)
 
         linear = gptqmodel_post_init(linear, use_act_order=False)
 
+        torch.manual_seed(42)
         inp = torch.rand(1, m, k, dtype=torch.float16).to(device)
 
         with torch.inference_mode():
             res = linear(inp)[0][0]
 
-        reference = REFERENCE.to(device)
+        # Independent fp64 dequantization of the exact buffers above. This does
+        # not call any gptqmodel kernel or dequantizer.
+        def unpack_rows(qw, bits=4):
+            factor = 32 // bits
+            kf, width = qw.shape
+            out = torch.zeros(kf * factor, width, dtype=torch.int64)
+            words = qw.to(torch.int64) & 0xFFFFFFFF
+            for lane in range(factor):
+                out[lane::factor] = (words >> (bits * lane)) & 0xF
+            return out
+
+        def unpack_cols(qz, bits=4):
+            factor = 32 // bits
+            groups, width = qz.shape
+            out = torch.zeros(groups, width * factor, dtype=torch.int64)
+            words = qz.to(torch.int64) & 0xFFFFFFFF
+            for lane in range(factor):
+                out[:, lane::factor] = (words >> (bits * lane)) & 0xF
+            return out
+
+        q = unpack_rows(checkpoint_qweight.cpu()).to(torch.float64)
+        z = unpack_cols(checkpoint_qzeros.cpu()).to(torch.float64)
+        scales = checkpoint_scales.cpu().to(torch.float64)
+        weight = torch.zeros_like(q)
+        groups = z.shape[0]
+        rows_per_group = k // groups
+        for group in range(groups):
+            span = slice(group * rows_per_group, (group + 1) * rows_per_group)
+            weight[span, :] = (q[span, :] - z[group:group + 1, :]) * scales[group:group + 1, :]
+
+        reference = (inp[0][0].cpu().to(torch.float64) @ weight).to(torch.float32)
 
         self.assertTrue(
-            torch.allclose(res, reference, rtol=3e-5, atol=2e-2),
-            get_diff(res, reference),
+            torch.allclose(res.float().cpu(), reference, rtol=3e-5, atol=2e-2),
+            get_diff(res.cpu(), reference),
         )
 
     def test_generation_desc_act_false(self):

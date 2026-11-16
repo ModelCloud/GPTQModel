@@ -23,6 +23,59 @@ from gptqmodel.utils.hf import (
 )
 
 
+class _LegacyRemoteRopeConfig:
+    """Pre-5.x trust_remote_code config: declares ``rope_scaling``, not ``rope_parameters``."""
+
+    def __init__(
+        self,
+        *,
+        model_type="nanbeige",
+        rope_scaling=None,
+        rope_theta=70_000_000.0,
+        **kwargs,
+    ):
+        self.model_type = model_type
+        self.rope_scaling = rope_scaling
+        # transformers 5 exposes `rope_parameters` as a property aliasing
+        # `rope_scaling`; mirror the shared value on the stand-in.
+        self.rope_parameters = kwargs.pop("rope_parameters", rope_scaling)
+        self.rope_theta = rope_theta
+
+
+class _ModernRemoteRopeConfig:
+    """Transformers-5 trust_remote_code config: declares ``rope_parameters``."""
+
+    def __init__(self, *, model_type="modern_remote", rope_parameters=None, rope_theta=10_000.0):
+        self.model_type = model_type
+        self.rope_parameters = rope_parameters
+        self.rope_theta = rope_theta
+
+
+class _LegacyChatGLMConfig:
+    """Pre-5.x ChatGLM config: ``seq_length``/``num_layers`` + ``attribute_map``."""
+
+    model_type = "chatglm"
+
+    def __init__(self):
+        self.seq_length = 8192
+        self.num_layers = 28
+        self.use_cache = True
+        self.attribute_map = {}
+
+    def __getattr__(self, name):
+        attribute_map = self.__dict__.get("attribute_map") or {}
+        if name in attribute_map:
+            return getattr(self, attribute_map[name])
+        raise AttributeError(name)
+
+    def _get_generation_parameters(self):
+        parameters = {}
+        for key in ("max_length", "min_length"):
+            if hasattr(self, key) and getattr(self, key) is not None:
+                parameters[key] = getattr(self, key)
+        return parameters
+
+
 def test_get_hf_config_dtype_avoids_modern_deprecated_alias():
     class ModernConfig:
         dtype = None
@@ -38,6 +91,19 @@ def test_get_hf_config_dtype_preserves_stored_legacy_value():
     config = SimpleNamespace(dtype=None, torch_dtype="float16")
 
     assert get_hf_config_dtype(config) is torch.float16
+
+
+def test_get_hf_config_dtype_accepts_the_torch_prefixed_string():
+    config = SimpleNamespace(dtype="torch.bfloat16")
+
+    assert get_hf_config_dtype(config) is torch.bfloat16
+
+
+def test_get_hf_config_dtype_rejects_a_non_dtype_torch_attribute():
+    config = SimpleNamespace(dtype="torch.pi")
+
+    with pytest.raises(ValueError, match="Invalid dtype string"):
+        get_hf_config_dtype(config)
 
 
 def test_normalize_hf_config_compat_backfills_llama_rope_parameters():
@@ -75,6 +141,24 @@ def test_normalize_torch_dtype_kwarg_resolves_explicit_dtype_parameter():
 
     assert resolved is torch.bfloat16
     assert kwargs == {}
+
+
+@pytest.mark.parametrize("value", ["bfloat16", "torch.bfloat16"])
+def test_normalize_torch_dtype_kwarg_resolves_dtype_strings(value):
+    kwargs = {"dtype": value}
+
+    resolved = normalize_torch_dtype_kwarg(kwargs, api_name="test")
+
+    assert resolved is torch.bfloat16
+    assert kwargs == {"dtype": torch.bfloat16}
+
+
+def test_normalize_torch_dtype_kwarg_rejects_invalid_dtype_string():
+    with pytest.raises(ValueError, match="Invalid dtype"):
+        normalize_torch_dtype_kwarg(
+            {"dtype": "not-a-torch-dtype"},
+            api_name="test",
+        )
 
 
 def test_normalize_torch_dtype_kwarg_rejects_conflicting_values():
@@ -177,9 +261,8 @@ def test_normalize_hf_config_compat_preserves_rope_parameters_after_remote_clean
     assert config.rope_parameters["rope_theta"] == 10000.0
 
 
-def test_normalize_hf_config_compat_keeps_nanbeige_default_rope_unscaled():
-    config = SimpleNamespace(
-        model_type="nanbeige",
+def test_normalize_hf_config_compat_keeps_legacy_default_rope_unscaled():
+    config = _LegacyRemoteRopeConfig(
         rope_scaling={"rope_type": "default", "rope_theta": 70000000.0},
         rope_parameters={"rope_type": "default", "rope_theta": 70000000.0},
     )
@@ -190,9 +273,23 @@ def test_normalize_hf_config_compat_keeps_nanbeige_default_rope_unscaled():
     assert config.rope_parameters is None
 
 
-def test_normalize_hf_config_compat_preserves_nanbeige_scaled_rope():
-    config = SimpleNamespace(
-        model_type="nanbeige",
+@pytest.mark.parametrize("model_type", ["nanbeige", "minicpm", "mobilellm"])
+def test_normalize_hf_config_compat_clears_unscaled_legacy_rope(model_type):
+    """Legacy remote code indexes ``rope_scaling["type"]`` for any non-None dict."""
+
+    config = _LegacyRemoteRopeConfig(
+        model_type=model_type,
+        rope_scaling={"rope_type": "default", "rope_theta": 10000.0},
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_scaling is None
+    assert config.rope_parameters is None
+
+
+def test_normalize_hf_config_compat_preserves_legacy_scaled_rope():
+    config = _LegacyRemoteRopeConfig(
         rope_scaling={"type": "linear", "factor": 2.0},
         rope_parameters=None,
         rope_theta=70000000.0,
@@ -202,6 +299,19 @@ def test_normalize_hf_config_compat_preserves_nanbeige_scaled_rope():
 
     assert config.rope_scaling["type"] == "linear"
     assert config.rope_scaling["factor"] == 2.0
+
+
+def test_normalize_hf_config_compat_keeps_modern_remote_rope_parameters():
+    """A config class declaring ``rope_parameters`` keeps the transformers-5 dict."""
+
+    config = _ModernRemoteRopeConfig(
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+    )
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_parameters["rope_type"] == "default"
+    assert config.rope_parameters["rope_theta"] == 10000.0
 
 
 def test_normalize_hf_config_compat_restores_sliding_window_cache_alias(monkeypatch):
@@ -418,7 +528,7 @@ def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatc
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
     monkeypatch.setattr(
         "gptqmodel.utils.hf.inspect.stack",
         lambda context=0: [SimpleNamespace(filename="/tmp/speech_conformer_encoder.py", lineno=1426)],
@@ -450,7 +560,7 @@ def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(mon
         auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config)
+    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
 
     DummyRemoteModel().tie_weights(missing_keys={"lm_head.weight"}, recompute_mapping=False)
 
@@ -477,7 +587,7 @@ def test_prepare_remote_model_init_compat_backfills_legacy_flash_attn_flag(monke
 
     assert "_supports_flash_attn" not in DummyRemoteBase.__dict__
 
-    prepare_remote_model_init_compat("/tmp/ling", config)
+    prepare_remote_model_init_compat("/tmp/ling", config, trust_remote_code=True)
 
     assert DummyRemoteBase._supports_flash_attn is True
     assert DummyRemoteModel._supports_flash_attn is True
@@ -505,7 +615,7 @@ def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(mo
         auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config)
+    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
 
     assert "TokenizersBackend" in Llama3ConversationFormatter.support_tokenizer_types
     assert getattr(Llama3ConversationFormatter, "_gptqmodel_tokenizer_backend_patch", False) is True
@@ -563,7 +673,7 @@ def test_prepare_remote_model_init_compat_bridges_ovis_visual_tokenizer_registra
         visual_tokenizer_config=RuntimeVisualConfig(),
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis", config)
+    prepare_remote_model_init_compat("/tmp/ovis", config, trust_remote_code=True)
 
     assert captured["config_class"] is RuntimeVisualConfig
     assert captured["model_class"] is DummyVisualModel
@@ -615,7 +725,7 @@ def test_prepare_remote_model_init_compat_bridges_ovis2_5_vit_registration(monke
         vit_config=RuntimeVitConfig(),
     )
 
-    prepare_remote_model_init_compat("/tmp/ovis2_5", config)
+    prepare_remote_model_init_compat("/tmp/ovis2_5", config, trust_remote_code=True)
 
     assert captured["config_class"] is RuntimeVitConfig
     assert captured["model_class"] is DummyVitModel
@@ -647,7 +757,7 @@ def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
     monkeypatch.setattr(
         "gptqmodel.utils.hf.inspect.stack",
         lambda context=0: [SimpleNamespace(filename="/tmp/speech_conformer_encoder.py", lineno=895)],
@@ -685,7 +795,7 @@ def test_prepare_remote_model_init_compat_tightens_peft_awq_probe(monkeypatch):
 
     monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     peft_awq = pytest.importorskip("peft.tuners.lora.awq")
 
@@ -717,7 +827,7 @@ def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(mo
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     model_inputs = Phi4MMModel().prepare_inputs_for_generation(input_ids="ids", past_key_values="cache")
 
@@ -754,7 +864,7 @@ def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monke
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     model = Phi4MMForCausalLM()
 
@@ -785,12 +895,12 @@ def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward
         auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
     )
 
-    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+    prepare_remote_model_init_compat("/tmp/phi4mm", config, trust_remote_code=True)
 
     assert not hasattr(Phi4MMForCausalLM, "_gptqmodel_input_mode_patch")
 
 
-def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, capsys):
+def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, caplog):
     hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
     monkeypatch.setattr(
         hf_utils,
@@ -798,11 +908,14 @@ def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypa
         lambda model_id_or_path: (True, "phi3", "Phi3ForCausalLM"),
     )
 
-    resolved = resolve_trust_remote_code("/tmp/phi3", trust_remote_code=True)
-    captured = capsys.readouterr()
+    # The warning is emitted through the library logger, whose sink is a logbar
+    # handler bound at import time; ``caplog`` observes the record, ``capsys``
+    # does not see that handler's stream.
+    with caplog.at_level("WARNING"):
+        resolved = resolve_trust_remote_code("/tmp/phi3", trust_remote_code=True)
 
     assert resolved is False
-    assert "overriding trust_remote_code=True to False" in captured.out + captured.err
+    assert "overriding trust_remote_code=True to False" in caplog.text
 
 
 def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch, caplog):
@@ -818,3 +931,37 @@ def test_resolve_trust_remote_code_keeps_true_without_native_support(monkeypatch
 
     assert resolved is True
     assert caplog.text == ""
+
+
+def test_patch_transformers_remote_code_compat_shims_output_recorder():
+    """Issue #4093 item 12: `modeling_klear.py` imports both legacy symbols."""
+
+    hf_utils._patch_transformers_remote_code_compat()
+
+    import transformers.utils.generic as generic
+    from transformers.utils.output_capturing import OutputRecorder
+
+    assert generic.OutputRecorder is OutputRecorder
+
+
+def test_normalize_chatglm_config_exposes_aliases_without_generation_leak():
+    """Issue #4093 item 11: remote code needs the aliases, `generate()` must not see them."""
+
+    config = _LegacyChatGLMConfig()
+
+    hf_utils._normalize_chatglm_remote_code_config_compat(config)
+
+    assert config.max_length == 8192
+    assert config.num_hidden_layers == 28
+    assert config._get_generation_parameters() == {}
+
+
+def test_normalize_chatglm_config_keeps_alias_out_of_serialized_fields():
+    """The compatibility view must not become a serialized config field."""
+
+    config = _LegacyChatGLMConfig()
+
+    hf_utils._normalize_chatglm_remote_code_config_compat(config)
+
+    assert "max_length" not in config.__dict__
+    assert "num_hidden_layers" not in config.__dict__

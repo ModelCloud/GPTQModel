@@ -3,6 +3,7 @@ import types
 import torch
 
 from gptqmodel.looper import module_looper
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 
 
 def _dummy_model():
@@ -71,3 +72,14 @@ def test_module_looper_only_probes_the_disk_when_the_run_streams_through_it(monk
         model=_dummy_model(), processors=[], disk_write_expected=True
     )
     assert calls == [1]
+
+
+def test_module_looper_unset_policy_resets_previous_run(monkeypatch):
+    monkeypatch.setattr(module_looper, "select_forward_devices", lambda _base: [torch.device("cpu")])
+    previous = get_kernel_config()
+    try:
+        configure_kernel(KernelConfig(marlin_fp32=False, max_packers=2))
+        module_looper.ModuleLooper(model=_dummy_model(), processors=[])
+        assert get_kernel_config().to_dict() == KernelConfig().to_dict()
+    finally:
+        configure_kernel(previous)

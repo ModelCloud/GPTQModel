@@ -49,22 +49,23 @@ def _encode_weight(
     from ..utils import nf12 as cuda_rt
     from ..utils import nf12_hip as hip_rt
 
-    matrix = weight.detach().to(device="cpu", dtype=dtype).contiguous()
-
     # A forced base must stay on the codec: the kernels choose `exp_base`
     # themselves (minimum escapes, smallest base) and expose no override.
-    if exp_base is None and matrix.shape[0] % 16 == 0 and matrix.shape[1] % 64 == 0:
+    if exp_base is None and weight.shape[0] % 16 == 0 and weight.shape[1] % 64 == 0:
         runtime, device = _native_encode_runtime(weight, hip_rt, cuda_rt)
         if runtime is not None:
             try:
-                gpu = matrix.to(device=device, dtype=dtype).contiguous()
+                gpu = weight.detach().to(device=device, dtype=dtype).contiguous()
                 packed, escapes, base = runtime.encode(gpu)
-                # Byte-identical to the codec (asserted by the validator), so
-                # returning host tensors here keeps both routes interchangeable.
-                return packed.cpu(), escapes.cpu(), int(base)
+                if weight.device.type != "cuda":
+                    # Preserve the existing CPU-return contract for host inputs
+                    # that were staged to an accelerator for native encoding.
+                    return packed.cpu(), escapes.cpu(), int(base)
+                return packed, escapes, int(base)
             except Exception:  # noqa: BLE001 - optional accelerator
                 pass
 
+    matrix = weight.detach().to(device="cpu", dtype=dtype).contiguous()
     return nf12_codec.encode_weight(matrix, dtype=dtype, exp_base=exp_base)
 
 

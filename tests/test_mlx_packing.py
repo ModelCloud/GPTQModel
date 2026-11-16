@@ -635,3 +635,362 @@ def test_auto_selects_mlx_only_for_compatible_models():
     qcfg.group_size = 16
     assert select() == BACKEND.MLX
     assert select(method=METHOD.AWQ, format_code=FORMAT.GEMM) == BACKEND.MLX
+
+
+def _tiny_qwen2_dir(path):
+    """Create a self-contained dense Qwen2 checkpoint for export tests."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
+
+    config = Qwen2Config(
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+    )
+    Qwen2ForCausalLM(config).save_pretrained(path, safe_serialization=True)
+
+    tokenizer = Tokenizer(WordLevel(vocab={"a": 0, "b": 1, "c": 2, "d": 3, "e": 4}, unk_token="a"))
+    tokenizer.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer, pad_token="a", unk_token="a",
+    ).save_pretrained(path)
+
+
+def _convert_tiny_qwen2(path, dynamic, desc_act=False, stock_compatible=False):
+    from gptqmodel import GPTQModel
+    from gptqmodel.quantization.config import RTNConfig
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+
+    _tiny_qwen2_dir(path)
+    qcfg = RTNConfig(bits=4, group_size=128, sym=False, desc_act=desc_act, dynamic=dynamic)
+    model = GPTQModel.load(str(path), quantize_config=qcfg, device="cpu")
+    model.quantize(calibration=None)
+    quantized = path.parent / (path.name + "_quantized")
+    model.save(str(quantized))
+    # Export reloads the saved checkpoint; do the same so the source tensors
+    # are materialized rather than the quantization pass's meta scaffolding.
+    # `GPTQModel.export` pins the portable Torch GPTQ backend, so do the same.
+    source = GPTQModel.load(str(quantized), device="cpu", backend=BACKEND.GPTQ_TORCH)
+    return source, convert_gptq_to_mlx_weights(
+        str(quantized), source, qcfg.to_dict(), source.lm_head,
+        stock_compatible=stock_compatible,
+    )
+
+
+def test_mlx_quant_predicate_honors_dynamic():
+    from gptqmodel.utils.mlx import _mlx_quant_predicate
+
+    dynamic = {
+        "-:.*mlp\\.down_proj": {},
+        "+:.*self_attn\\.o_proj": {"bits": 8, "group_size": 32},
+    }
+    predicate = _mlx_quant_predicate(dynamic, 4, 128)
+    assert predicate("model.layers.0.mlp.down_proj", None) is False
+    assert predicate("model.layers.0.self_attn.o_proj", None) == {
+        "group_size": 32, "bits": 8, "mode": "affine",
+    }
+    assert predicate("model.layers.0.mlp.up_proj", None) is True
+
+    # A `+:` override without `bits` keeps the base bit width.
+    predicate = _mlx_quant_predicate({"+:.*o_proj": {"group_size": 32}}, 4, 128)
+    assert predicate("model.layers.0.self_attn.o_proj", None) == {
+        "group_size": 32, "bits": 4, "mode": "affine",
+    }
+
+
+def test_mlx_export_transfers_packed_dynamic_layout_without_requantization(tmp_path):
+    from mlx.utils import tree_flatten
+
+    dynamic = {
+        "-:.*mlp\\.down_proj": {},
+        "+:.*self_attn\\.o_proj": {"bits": 8, "group_size": 32},
+    }
+    source, (mlx_model, mlx_config) = _convert_tiny_qwen2(tmp_path / "tiny", dynamic)
+
+    assert mlx_config["_gptqmodel_custom_mlx_runtime"] is True
+    assert mlx_config["quantization"]["model.layers.0.self_attn.o_proj"] == {
+        "group_size": 32, "bits": 8, "mode": "affine",
+    }
+    assert "model.layers.0.mlp.down_proj" not in mlx_config["quantization"]
+
+    params = {name: np.array(value) for name, value in tree_flatten(mlx_model.parameters())}
+    assert "model.layers.0.mlp.down_proj.weight" in params
+    assert "model.layers.0.mlp.down_proj.scales" not in params
+    assert "model.layers.0.self_attn.o_proj.linear.scales" in params
+
+    # Decode the exported 8-bit group-32 words independently and compare with
+    # the source layer's own quantized weight (exact packed transfer).
+    module = source.model.get_submodule("model.layers.0.self_attn.o_proj")
+    expected = module.dequantize_weight().detach().float().numpy().T
+    words = params["model.layers.0.self_attn.o_proj.linear.weight"].astype(np.uint64)
+    scales = params["model.layers.0.self_attn.o_proj.linear.scales"].astype(np.float32)
+    biases = params["model.layers.0.self_attn.o_proj.linear.biases"].astype(np.float32)
+    shifts = np.arange(4, dtype=np.uint64) * 8
+    codes = ((words.reshape(-1)[:, None] >> shifts) & 0xFF).reshape(scales.shape[0], -1)
+    actual = scales.repeat(32, axis=1) * codes + biases.repeat(32, axis=1)
+    np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=2e-3)
+
+
+def test_mlx_requantization_honors_dynamic(tmp_path):
+    from mlx.utils import tree_flatten
+
+    dynamic = {
+        "-:.*mlp\\.down_proj": {},
+        "+:.*self_attn\\.o_proj": {"bits": 8, "group_size": 32},
+    }
+    # desc_act makes the packed transfer unavailable, forcing requantization.
+    _, (mlx_model, mlx_config) = _convert_tiny_qwen2(tmp_path / "tiny", dynamic, desc_act=True)
+
+    assert mlx_config["quantization"]["model.layers.0.self_attn.o_proj"] == {
+        "group_size": 32, "bits": 8, "mode": "affine",
+    }
+    assert "model.layers.0.mlp.down_proj" not in mlx_config["quantization"]
+
+    params = {name: np.array(value) for name, value in tree_flatten(mlx_model.parameters())}
+    assert "model.layers.0.mlp.down_proj.scales" not in params
+    assert "model.layers.0.self_attn.o_proj.scales" in params
+
+
+def test_mlx_stock_compatible_export_loads_with_stock_mlx_lm(tmp_path):
+    """#4091 item 10: the default export layout must load in stock `mlx_lm`."""
+    import mlx.nn as mlx_nn
+    from mlx.utils import tree_flatten
+    from mlx_lm import load as mlx_load
+    from mlx_lm.utils import save_config, save_model
+
+    dynamic = {
+        "-:.*mlp\\.down_proj": {},
+        "+:.*self_attn\\.o_proj": {"bits": 8, "group_size": 32},
+    }
+    source, (mlx_model, mlx_config) = _convert_tiny_qwen2(
+        tmp_path / "tiny", dynamic, stock_compatible=True,
+    )
+
+    assert "_gptqmodel_custom_mlx_runtime" not in mlx_config
+    assert "_gptqmodel_group16_runtime" not in mlx_config
+    params = {
+        name: np.array(value) for name, value in tree_flatten(mlx_model.parameters())
+    }
+    # Stock `mlx_lm` reads direct `weight`/`scales`/`biases` names, not the
+    # custom runtime's `*.linear.*` wrapper.
+    assert not any(".linear." in name for name in params)
+    expected_words = params["model.layers.0.self_attn.o_proj.weight"]
+
+    out = tmp_path / "export"
+    save_model(str(out), mlx_model, donate_model=True)
+    save_config(mlx_config, config_path=str(out / "config.json"))
+    source.tokenizer.save_pretrained(str(out))
+
+    loaded, _ = mlx_load(str(out))
+    o_proj = loaded.model.layers[0].self_attn.o_proj
+    assert isinstance(o_proj, mlx_nn.QuantizedLinear)
+    assert (o_proj.group_size, o_proj.bits) == (32, 8)
+    # The exact packed transfer survived the stock load.
+    np.testing.assert_array_equal(np.array(o_proj.weight), expected_words)
+
+
+def test_mlx_stock_compatible_transfer_refuses_custom_runtime_layers():
+    """A group-16 layer has no stock MLX layout; export must requantize or fail."""
+    import torch
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.quantization.config import FORMAT
+    from gptqmodel.utils import mlx as mlx_utils
+
+    source = torch.nn.Module()
+    source.linear = TorchLinear(
+        bits=4, group_size=16, sym=True, desc_act=False,
+        in_features=128, out_features=64, bias=False,
+        pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
+        format=FORMAT.GPTQ_V2,
+    )
+    source.linear.qzero_format(2)
+
+    assert (
+        mlx_utils._packed_mlx_weights(
+            source, {}, "lm_head", stock_compatible=True
+        )
+        is None
+    )
+
+
+def test_mlx_generate_through_base_generate_maps_inputs(monkeypatch):
+    from functools import partial
+
+    import torch
+
+    from gptqmodel.models.base import BaseQModel
+    from gptqmodel.utils import mlx as mlx_utils
+
+    calls = []
+
+    def fake_generate(**kwargs):
+        calls.append(kwargs)
+        prompt = kwargs["prompt"]
+        return prompt if isinstance(prompt, str) else " ".join(str(token) for token in prompt)
+
+    monkeypatch.setattr(mlx_utils, "generate", fake_generate)
+
+    class FakeTokenizer:
+        eos_token_id = 1
+        eos_token_ids = {1}
+        pad_token_id = 0
+
+    model = object.__new__(BaseQModel)
+    model.model = object()
+    model.tokenizer = FakeTokenizer()
+    model._runtime_generate = partial(mlx_utils.mlx_generate, tokenizer=model.tokenizer)
+
+    assert model.generate("Hello") == "Hello"
+    assert calls[-1]["prompt"] == "Hello"
+
+    assert model.generate(input_ids=torch.tensor([[1, 2, 3]])) == "1 2 3"
+    assert calls[-1]["prompt"] == [1, 2, 3]
+
+    assert model.generate(prompts=["Hello"]) == "Hello"
+    assert calls[-1]["prompt"] == "Hello"
+
+    assert model.generate(prompts=["Hello", "world"]) == ["Hello", "world"]
+    assert [call["prompt"] for call in calls[-2:]] == ["Hello", "world"]
+
+    assert model.generate("Hello", max_new_tokens=5) == "Hello"
+    assert calls[-1]["max_tokens"] == 5
+
+    assert model.generate("Hello", max_tokens=4) == "Hello"
+    assert calls[-1]["max_tokens"] == 4
+
+
+def test_mlx_generate_maps_seed_do_sample_eos_and_stop(monkeypatch):
+    from gptqmodel.utils import mlx as mlx_utils
+
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        return "hello STOP world"
+
+    monkeypatch.setattr(mlx_utils, "generate", fake_generate)
+    seeded = []
+    monkeypatch.setattr(mlx_utils.mx.random, "seed", lambda value: seeded.append(value))
+
+    tokenizer = SimpleNamespace(eos_token_ids={1})
+    result = mlx_utils.mlx_generate(
+        model=object(), tokenizer=tokenizer, prompt="Hello",
+        seed=7, do_sample=False, stop=["STOP"], eos_token_id=[1, 9],
+    )
+    assert result == "hello "
+    assert seeded == [7]
+    # #4091 item 9: the explicit EOS ids belong to this call only.
+    assert tokenizer.eos_token_ids == {1}
+    assert captured["tokenizer"].eos_token_ids == {1, 9}
+    sampler = captured["sampler"]
+    assert callable(sampler)
+    assert int(sampler(mlx.array([0.1, 0.9, 0.2]))) == 1
+
+    # A plain HF tokenizer is wrapped so mlx_lm sees the explicit EOS ids.
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast
+
+    raw = Tokenizer(WordLevel(vocab={"a": 0, "b": 1}, unk_token="a"))
+    raw.pre_tokenizer = Whitespace()
+    hf_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=raw, pad_token="a", unk_token="a",
+    )
+    wrapped = mlx_utils._mlx_tokenizer_with_eos(hf_tokenizer, [1])
+    assert wrapped.eos_token_ids == {1}
+    # A second scoped wrapper must not widen the first one.
+    mlx_utils._mlx_tokenizer_with_eos(hf_tokenizer, [2])
+    assert wrapped.eos_token_ids == {1}
+
+
+def test_mlx_generate_strips_batched_left_padding(monkeypatch):
+    """#4091 item 8: pad ids must not become prompt tokens."""
+    import torch
+
+    from gptqmodel.utils import mlx as mlx_utils
+
+    seen = []
+
+    def fake_generate(**kwargs):
+        seen.append(kwargs["prompt"])
+        return "ok"
+
+    monkeypatch.setattr(mlx_utils, "generate", fake_generate)
+    input_ids = torch.tensor([[0, 0, 11, 12], [13, 14, 15, 16]])
+    attention_mask = torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])
+
+    mlx_utils.mlx_generate(
+        model=object(), tokenizer=SimpleNamespace(),
+        input_ids=input_ids, attention_mask=attention_mask,
+    )
+
+    assert seen == [[11, 12], [13, 14, 15, 16]]
+
+
+def test_mlx_generate_strips_pad_token_id_without_a_mask(monkeypatch):
+    """A `pad_token_id` fallback trims leading and trailing pad ids."""
+    import torch
+
+    from gptqmodel.utils import mlx as mlx_utils
+
+    seen = []
+
+    def fake_generate(**kwargs):
+        seen.append(kwargs["prompt"])
+        return "ok"
+
+    monkeypatch.setattr(mlx_utils, "generate", fake_generate)
+    mlx_utils.mlx_generate(
+        model=object(), tokenizer=SimpleNamespace(),
+        input_ids=torch.tensor([[0, 0, 11, 12, 0]]), pad_token_id=0,
+    )
+
+    assert seen == [[11, 12]]
+
+
+def test_mlx_eos_override_is_scoped_to_one_call(monkeypatch):
+    """#4091 item 9: one call's EOS ids must not truncate later calls."""
+    from gptqmodel.utils import mlx as mlx_utils
+
+    seen = []
+
+    def fake_generate(**kwargs):
+        seen.append(set(kwargs["tokenizer"].eos_token_ids))
+        return "ok"
+
+    monkeypatch.setattr(mlx_utils, "generate", fake_generate)
+    tokenizer = SimpleNamespace(eos_token_ids={1})
+
+    mlx_utils.mlx_generate(
+        model=object(), tokenizer=tokenizer, prompt="Hi", eos_token_id=145456,
+    )
+    mlx_utils.mlx_generate(model=object(), tokenizer=tokenizer, prompt="Hi")
+
+    assert seen == [{1, 145456}, {1}]
+    assert tokenizer.eos_token_ids == {1}
+
+
+def test_mlx_generate_warns_on_unhonoured_arguments(monkeypatch):
+    from gptqmodel.utils import mlx as mlx_utils
+
+    warnings = []
+    monkeypatch.setattr(mlx_utils, "generate", lambda **kwargs: "ok")
+    monkeypatch.setattr(
+        mlx_utils.log, "warn", lambda message, *args, **kwargs: warnings.append(message)
+    )
+
+    mlx_utils.mlx_generate(
+        model=object(), tokenizer=SimpleNamespace(), prompt="Hi", use_cache=False,
+    )
+
+    assert any("use_cache" in message for message in warnings)

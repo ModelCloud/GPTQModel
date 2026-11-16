@@ -58,7 +58,7 @@ that report.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Optional, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -417,6 +417,8 @@ def gptq_solve_blockfloat(
     damp: float = 0.01,
     block: int = BLOCKFLOAT_BLOCK,
     grid: str = "blockfloat",
+    block_axis: str = "in",
+    act_order: bool = False,
 ) -> torch.Tensor:
     """GPTQ error-feedback solve whose quantizer is the block-float grid.
 
@@ -436,7 +438,40 @@ def gptq_solve_blockfloat(
 
     This is the honest form of "GPTQ for bf4_b". Re-encoding an int4 checkpoint onto
     this grid is not the same thing and measures far worse.
+
+    ``block_axis`` picks which axis of ``weight`` the 16-value exponent blocks run
+    along:
+
+    * ``"in"`` (default, the historical layout): blocks of 16 consecutive input
+      features of one output row. Exponents are fixed from the original weights.
+    * ``"out"``: blocks of 16 consecutive *output* features of one input column.
+      This is the layout a Tenstorrent device stores for ``ttnn.linear(x, W^T)``,
+      whose weight operand is ``[in_features, out_features]`` and whose block
+      floats share one exponent per 16 values along the last dim. An ``"in"``
+      checkpoint uploaded that way is silently re-quantized (measured on a p300c:
+      3.4-5.0 % weight error for bf4_b, ~8 % output error); an ``"out"`` result
+      uploads with zero drift. A block now lies inside one GPTQ column, so its
+      exponent is chosen when the column is quantized (after error feedback, by
+      the same lowest-error search as :func:`quantize_blockfloat`), and
+      ``act_order`` column permutation never splits a block.
+
+    ``act_order`` quantizes columns in descending Hessian-diagonal order. It is
+    only valid with ``block_axis="out"``: with ``"in"`` a permutation would split
+    the shared-exponent blocks.
     """
+
+    if block_axis not in ("in", "out"):
+        raise ValueError(f"block_axis must be 'in' or 'out', got {block_axis!r}")
+    if block_axis == "out":
+        return _gptq_solve_blockfloat_out(
+            weight, hessian, bits=bits, damp=damp, block=block, grid=grid,
+            act_order=act_order,
+        )
+    if act_order:
+        raise ValueError(
+            "act_order permutes input columns, which splits block_axis='in' "
+            "exponent blocks; use block_axis='out'"
+        )
 
     w = weight.detach().to(torch.float32).clone()
     if w.dim() != 2:
@@ -513,6 +548,102 @@ def gptq_solve_blockfloat(
     return q
 
 
+def quantize_blockfloat_column(
+    column: torch.Tensor, bits: int, *, block: int = BLOCKFLOAT_BLOCK
+) -> torch.Tensor:
+    """Round a 1-D column onto the grid with one exponent per ``block`` entries.
+
+    Identical rule to :func:`quantize_blockfloat` (``floor(log2(max))`` and both
+    neighbours, lowest squared error wins), applied to consecutive entries of
+    the column. This is the per-column quantizer of the ``block_axis="out"``
+    solve.
+    """
+
+    if column.dim() != 1 or column.numel() % block:
+        raise ValueError(
+            f"column must be 1-D with a multiple of {block} entries, got {tuple(column.shape)}"
+        )
+    return quantize_blockfloat(column.reshape(-1, block), bits, block=block)[0].reshape(-1)
+
+
+def _gptq_solve_blockfloat_out(
+    weight: torch.Tensor,
+    hessian: torch.Tensor,
+    *,
+    bits: int,
+    damp: float,
+    block: int,
+    grid: str,
+    act_order: bool,
+    lazy_block: int = 128,
+) -> torch.Tensor:
+    """``block_axis="out"`` GPTQ solve (see :func:`gptq_solve_blockfloat`).
+
+    Uses GPTQ's lazy-batch update: error feedback inside a ``lazy_block`` of
+    columns is applied immediately and propagated to the remaining columns with
+    one GEMM per batch, which is exact and turns the rank-1 tail updates into a
+    matrix multiply.
+    """
+
+    w = weight.detach().to(torch.float32).clone()
+    if w.dim() != 2:
+        raise ValueError(f"weight must be 2-D, got {tuple(w.shape)}")
+    out_features, in_features = w.shape
+    if tuple(hessian.shape) != (in_features, in_features):
+        raise ValueError(
+            f"hessian must be [{in_features}, {in_features}], got {tuple(hessian.shape)}"
+        )
+    if bits not in (2, 4, 8):
+        raise ValueError(f"bits must be 2, 4 or 8, got {bits}")
+    if grid != "blockfloat":
+        raise ValueError("block_axis='out' only applies to grid='blockfloat'")
+    if out_features % block:
+        raise ValueError(
+            f"block_axis='out' needs out_features divisible by {block}, got {out_features}"
+        )
+
+    # float64 for the factorisation: an 8192-wide damped Hessian loses enough in
+    # float32 that the Cholesky of its inverse can fail on real activations.
+    h = hessian.detach().to(torch.float64).clone()
+    dead = torch.diag(h) == 0
+    h[dead, dead] = 1.0
+    w[:, dead] = 0.0
+    perm = None
+    if act_order:
+        perm = torch.argsort(torch.diag(h), descending=True)
+        w = w[:, perm]
+        h = h[perm][:, perm]
+    h += torch.eye(in_features, dtype=h.dtype) * (damp * torch.mean(torch.diag(h)))
+    try:
+        hinv = torch.cholesky_inverse(torch.linalg.cholesky(h))
+        hinv = torch.linalg.cholesky(hinv, upper=True)
+    except Exception:
+        hinv = torch.linalg.inv(h)
+        eye = torch.eye(in_features, dtype=hinv.dtype)
+        jitter = torch.finfo(torch.float32).eps * torch.diag(hinv).abs().mean()
+        hinv = torch.linalg.cholesky(hinv + eye * jitter.clamp_min(1e-12), upper=True)
+    hinv = hinv.to(torch.float32)
+
+    q = torch.zeros_like(w)
+    for i1 in range(0, in_features, lazy_block):
+        i2 = min(i1 + lazy_block, in_features)
+        w1 = w[:, i1:i2].clone()
+        err1 = torch.zeros_like(w1)
+        hinv1 = hinv[i1:i2, i1:i2]
+        for i in range(i2 - i1):
+            col = w1[:, i]
+            quant = quantize_blockfloat_column(col, bits, block=block)
+            q[:, i1 + i] = quant
+            err = (col - quant) / hinv1[i, i]
+            w1[:, i:] -= err.unsqueeze(1) @ hinv1[i, i:].unsqueeze(0)
+            err1[:, i] = err
+        if i2 < in_features:
+            w[:, i2:] -= err1 @ hinv[i1:i2, i2:]
+    if perm is not None:
+        q = q[:, torch.argsort(perm)]
+    return q
+
+
 __all__ += [
     "BLOCKFLOAT_SAVE_FORMAT_VERSION",
     "decompose_blockfloat",
@@ -523,6 +654,8 @@ __all__ += [
     "read_blockfloat_checkpoint",
     "save_blockfloat_checkpoint",
     "collect_layer_hessians",
+    "is_on_blockfloat_grid",
+    "quantize_blockfloat_column",
     "quantize_model_blockfloat",
 ]
 
@@ -666,6 +799,10 @@ def quantize_model_blockfloat(
     text: Union[str, Sequence[str]],
     embed_bits: Optional[int] = None,
     verbose: bool = False,
+    block_axis: str = "in",
+    act_order: bool = False,
+    sequential: bool = False,
+    seqlen: int = 256,
 ) -> dict:
     """Quantize every decoder linear onto the TT block-float grid, in place.
 
@@ -683,13 +820,39 @@ def quantize_model_blockfloat(
     this the writer finds an off-grid table and stores it dense, silently
     ignoring the requested width. The tied head follows automatically because it
     shares the embedding's storage.
+
+    ``sequential=True`` runs GPTQ the standard way: decoder blocks are
+    quantized one at a time, and each block's Hessians are collected from the
+    outputs of the blocks *already quantized* before it, so later layers
+    calibrate against the activations they will actually see.  The default
+    collects every Hessian from the dense model in one pass.  Measured on
+    Llama-3.2-1B-Instruct (out-axis, act-order, 128 x 512-token windows) the
+    sequential checkpoint reached held-out perplexity +1.6 % over dense.
+
+    ``block_axis``/``act_order`` are forwarded to :func:`gptq_solve_blockfloat`.
+    With ``block_axis="out"`` the embedding is also blocked along the vocabulary
+    (16 consecutive tokens per hidden channel), which is the layout a tied head
+    ``E^T [hidden, vocab]`` stores on device.
     """
 
     from .logger import setup_logger
 
     log = setup_logger()
+    if sequential:
+        report = _quantize_sequential(
+            model, tokenizer, bits=bits, damp=damp, nsamples=nsamples, seqlen=seqlen,
+            text=text, block_axis=block_axis, act_order=act_order, verbose=verbose,
+        )
+        if embed_bits is not None:
+            report.update(
+                _quantize_embedding_on_grid(
+                    model, int(embed_bits), verbose=verbose, block_axis=block_axis
+                )
+            )
+        return report
+
     hessians = collect_layer_hessians(
-        model, tokenizer, nsamples=nsamples, text=text
+        model, tokenizer, nsamples=nsamples, text=text, seqlen=seqlen
     )
     hessians.pop("__nsamples__", None)
 
@@ -707,7 +870,8 @@ def quantize_model_blockfloat(
             weight = module.weight.detach().clone()
             try:
                 quantized = gptq_solve_blockfloat(
-                    weight, h, bits=layer_bits, damp=damp, grid="blockfloat"
+                    weight, h, bits=layer_bits, damp=damp, grid="blockfloat",
+                    block_axis=block_axis, act_order=act_order,
                 )
             except Exception as exc:  # pragma: no cover - per-layer guard
                 log.warning(f"TTBlockFloat: skipping {key}: {exc}")
@@ -715,9 +879,7 @@ def quantize_model_blockfloat(
             with torch.no_grad():
                 module.weight.copy_(quantized.to(module.weight.dtype))
             norm_l1 = relative_error(weight, quantized)
-            on_grid = torch.allclose(
-                quantized, quantize_blockfloat(quantized, layer_bits)[0], atol=1e-6
-            )
+            on_grid = is_on_blockfloat_grid(quantized, layer_bits, block_axis=block_axis)
             report[key] = {
                 "norm_l1": norm_l1,
                 "on_grid": bool(on_grid),
@@ -727,11 +889,194 @@ def quantize_model_blockfloat(
                 log.info(f"TTBlockFloat: {key} norm_l1={norm_l1:.4f} on_grid={on_grid}")
 
     if embed_bits is not None:
-        report.update(_quantize_embedding_on_grid(model, int(embed_bits), verbose=verbose))
+        report.update(
+            _quantize_embedding_on_grid(
+                model, int(embed_bits), verbose=verbose, block_axis=block_axis
+            )
+        )
     return report
 
 
-def _quantize_embedding_on_grid(model, bits: int, *, verbose: bool = False) -> dict:
+class _StopForward(Exception):
+    """Raised by the capture hook once the last decoder block's inputs are seen."""
+
+
+def _solve_module_onto_grid(module, hessian, *, bits, damp, block_axis, act_order):
+    weight = module.weight.detach().clone()
+    quantized = gptq_solve_blockfloat(
+        weight, hessian, bits=bits, damp=damp, grid="blockfloat",
+        block_axis=block_axis, act_order=act_order,
+    )
+    with torch.no_grad():
+        module.weight.copy_(quantized.to(module.weight.dtype))
+    return {
+        "norm_l1": relative_error(weight, quantized),
+        "on_grid": is_on_blockfloat_grid(quantized, bits, block_axis=block_axis),
+        "bits": bits,
+    }
+
+
+def _quantize_sequential(
+    model, tokenizer, *, bits, damp, nsamples, seqlen, text, block_axis, act_order, verbose
+) -> dict:
+    """Block-by-block GPTQ: calibrate each block on its quantized predecessors' outputs.
+
+    A decoder block's side inputs (attention mask, rotary embeddings, position
+    ids, cache positions) belong to that block, not to the first one. Hybrid
+    attention models such as Gemma2/3 build a different causal mask per
+    ``attention_type``, so replaying block 0's kwargs through every block would
+    calibrate a full-attention layer on the sliding-window mask (and vice
+    versa). Capture the kwargs of every block from one dense forward, then
+    replay each block with its own; only the hidden states are propagated
+    through the quantized blocks.
+    """
+
+    import torch.nn as nn
+
+    from .logger import setup_logger
+
+    log = setup_logger()
+    blocks = _decoder_blocks(model)
+    windows = list(iter_calibration_windows(tokenizer, text, seqlen=seqlen, nsamples=nsamples))
+    if not windows:
+        raise ValueError("no calibration windows")
+
+    # Capture what every block receives -- hidden states plus whatever the
+    # backbone passes alongside (rotary embeddings, masks, cache positions) --
+    # by stopping the forward at the last block's entry.  Those side inputs do
+    # not depend on the weights being quantized, so each block replays with the
+    # ones its own native forward saw.  The shared tensors (a mask, a rotary
+    # tuple) are references, so this does not copy them per block.
+    captured_extras: List[list] = [[] for _ in blocks]
+    captured_hidden: List[torch.Tensor] = []
+
+    def _capture(block_index):
+        def hook(_module, args, kwargs):
+            # Keep only the side inputs.  Holding every block's input hidden
+            # state would retain the whole dense activation chain (one
+            # [1, seqlen, hidden] tensor per block per window) for no reason:
+            # replay only needs block 0's input, then propagates its own.
+            captured_extras[block_index].append(
+                (
+                    args[1:],
+                    {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in ("hidden_states", "past_key_values", "past_key_value", "use_cache")
+                    },
+                )
+            )
+            if block_index == 0:
+                captured_hidden.append(args[0])
+            if block_index == len(blocks) - 1:
+                raise _StopForward
+        return hook
+
+    backbone = getattr(model, "model", None)
+    runner = backbone if isinstance(backbone, nn.Module) and type(backbone).forward is not nn.Module.forward else model
+    handles = [
+        block.register_forward_pre_hook(_capture(index), with_kwargs=True)
+        for index, block in enumerate(blocks)
+    ]
+    model.eval()
+    try:
+        with torch.no_grad():
+            for window in windows:
+                try:
+                    runner(window)
+                except _StopForward:
+                    # Expected: the last block's pre-hook stops the forward
+                    # once every block's inputs are captured.
+                    continue
+    finally:
+        for handle in handles:
+            handle.remove()
+    if len(captured_hidden) != len(windows) or any(
+        len(block_captured) != len(windows) for block_captured in captured_extras
+    ):
+        raise RuntimeError("failed to capture every decoder block's inputs")
+    hidden = captured_hidden
+    extras = captured_extras
+
+    def _run(block, block_index, index):
+        args, kwargs = extras[block_index][index]
+        out = block(hidden[index], *args, use_cache=False, **kwargs)
+        return out[0] if isinstance(out, tuple) else out
+
+    report = {}
+    for block_index, block in enumerate(blocks):
+        targets = {name: m for name, m in block.named_modules() if isinstance(m, nn.Linear)}
+        sums = dict.fromkeys(targets)
+        rows = dict.fromkeys(targets, 0)
+        shared: dict = {}
+
+        def _hook(name):
+            def hook(_module, inputs, _output):
+                x = inputs[0]
+                key = (x.data_ptr(), tuple(x.shape))
+                cached = shared.get(key)
+                if cached is None:
+                    # float32 for the same reason as collect_layer_hessians.
+                    xf = x.detach().to(torch.float32).reshape(-1, x.shape[-1])
+                    cached = (x, xf.T @ xf, int(xf.shape[0]))
+                    shared[key] = cached
+                sums[name] = cached[1] if sums[name] is None else sums[name] + cached[1]
+                rows[name] += cached[2]
+            return hook
+
+        handles = [m.register_forward_hook(_hook(n)) for n, m in targets.items()]
+        try:
+            with torch.no_grad():
+                for index in range(len(hidden)):
+                    shared.clear()
+                    _run(block, block_index, index)
+        finally:
+            for h in handles:
+                h.remove()
+        shared.clear()
+        for name, module in targets.items():
+            if sums[name] is None:
+                continue
+            key = f"{block_index}.{name}"
+            layer_bits = _layer_bits(bits, key)
+            hessian = sums[name] / max(rows[name], 1)
+            try:
+                report[key] = _solve_module_onto_grid(
+                    module, hessian, bits=layer_bits, damp=damp,
+                    block_axis=block_axis, act_order=act_order,
+                )
+            except Exception as exc:  # pragma: no cover - per-layer guard
+                log.warning(f"TTBlockFloat: skipping {key}: {exc}")
+                continue
+            if verbose:
+                log.info(f"TTBlockFloat: {key} norm_l1={report[key]['norm_l1']:.4f} on_grid={report[key]['on_grid']}")
+        sums.clear()  # release the Hessians before propagating
+        # Propagate through the *quantized* block for the next one.
+        with torch.no_grad():
+            hidden = [_run(block, block_index, index) for index in range(len(hidden))]
+    return report
+
+
+def is_on_blockfloat_grid(
+    weight: torch.Tensor, bits: int, *, block_axis: str = "in", block: int = BLOCKFLOAT_BLOCK
+) -> bool:
+    """Whether ``weight`` [rows, cols] is a fixed point of the grid along ``block_axis``.
+
+    ``"in"`` blocks the last dim, ``"out"`` the first dim (checked on the
+    transpose).
+    """
+
+    w = weight.detach().to(torch.float32)
+    if block_axis == "out":
+        w = w.T.contiguous()
+    elif block_axis != "in":
+        raise ValueError(f"block_axis must be 'in' or 'out', got {block_axis!r}")
+    return bool(torch.allclose(w, quantize_blockfloat(w, bits, block=block)[0], atol=1e-6))
+
+
+def _quantize_embedding_on_grid(
+    model, bits: int, *, verbose: bool = False, block_axis: str = "in"
+) -> dict:
     """Round the input embedding onto the grid, in place.
 
     GPTQ error feedback needs ``X^T X`` over calibration text, and a lookup table
@@ -750,13 +1095,14 @@ def _quantize_embedding_on_grid(model, bits: int, *, verbose: bool = False) -> d
         if not isinstance(module, nn.Embedding) or not name.endswith("embed_tokens"):
             continue
         weight = module.weight.detach().clone()
-        quantized = quantize_blockfloat(weight, bits)[0]
+        if block_axis == "out":
+            quantized = quantize_blockfloat(weight.T.contiguous(), bits)[0].T.contiguous()
+        else:
+            quantized = quantize_blockfloat(weight, bits)[0]
         with torch.no_grad():
             module.weight.copy_(quantized.to(module.weight.dtype))
         norm_l1 = relative_error(weight, quantized)
-        on_grid = torch.allclose(
-            quantized, quantize_blockfloat(quantized, bits)[0], atol=1e-6
-        )
+        on_grid = is_on_blockfloat_grid(quantized, bits, block_axis=block_axis)
         report[name] = {"norm_l1": norm_l1, "on_grid": bool(on_grid), "bits": bits}
         if verbose:
             log.info(f"TTBlockFloat: {name} norm_l1={norm_l1:.4f} on_grid={on_grid}")
@@ -1377,6 +1723,7 @@ class TTBlockfloatForCausalLM({BASE_CLASS}):
             default_bits=int(quant.get("bits", 4)),
             embed_bits=int(quant.get("embed_bits", 8)),
             block=int(quant.get("block", 16)),
+            block_axis=str(quant.get("block_axis", "in")),
         )
 
     def tie_weights(self, *args, **kwargs):
@@ -1433,6 +1780,7 @@ def save_blockfloat_model(
     metadata: "Optional[dict]" = None,
     safetensors_metadata: "Optional[dict]" = None,
     max_shard_bytes: int = DEFAULT_MAX_SHARD_BYTES,
+    block_axis: "Optional[str]" = None,
 ) -> dict:
     """Write a self-contained checkpoint in the standard HF layout.
 
@@ -1444,6 +1792,12 @@ def save_blockfloat_model(
     (``<prefix>.codes`` / ``.exponents`` / ``.code_shape``), so ``load_state_dict``
     needs no translation table. The embedding is stored the same way, at
     ``embed_bits``.
+
+    ``block_axis`` is the exponent-block axis of the dense weights being
+    written (``"in"`` or ``"out"``, see :func:`gptq_solve_blockfloat`). Already
+    packed modules carry their own axis; ``None`` takes it from them, falling
+    back to ``"in"``. A checkpoint holds one axis, recorded in
+    ``quantization_config.block_axis`` when it is ``"out"``.
     """
 
     import json
@@ -1455,7 +1809,27 @@ def save_blockfloat_model(
     default_bits = _default_bits(bits)
     tied = bool(getattr(model.config, "tie_word_embeddings", False))
 
-    for prefix in _quantized_prefixes(model):
+    prefixes = _quantized_prefixes(model)
+    packed_axes = {
+        getattr(model.get_submodule(prefix), "block_axis", "in")
+        for prefix in prefixes
+        if _packed_state(model.get_submodule(prefix)) is not None
+    }
+    if len(packed_axes) > 1:
+        raise ValueError(
+            f"model mixes block axes {sorted(packed_axes)}; a checkpoint stores one"
+        )
+    if block_axis is None:
+        block_axis = next(iter(packed_axes), "in")
+    if block_axis not in ("in", "out"):
+        raise ValueError(f"block_axis must be 'in' or 'out', got {block_axis!r}")
+    if packed_axes and block_axis not in packed_axes:
+        raise ValueError(
+            f"block_axis={block_axis!r} contradicts the packed modules' axis "
+            f"{next(iter(packed_axes))!r}"
+        )
+
+    for prefix in prefixes:
         module = model.get_submodule(prefix)
         # A table exposes ``num_embeddings``; a projection does not. Using the
         # presence of ``in_features`` instead would misclassify a block-float
@@ -1474,8 +1848,10 @@ def save_blockfloat_model(
             continue
         layer_width = embed_bits if is_embedding else _layer_bits(bits, prefix)
         weight = module.weight.detach().to(torch.float32)
+        # ``"out"`` stores W^T so the 16-value blocks run along the last dim.
+        stored = weight.T.contiguous() if block_axis == "out" else weight
         try:
-            codes, exponents = decompose_blockfloat(weight, bits=layer_width)
+            codes, exponents = decompose_blockfloat(stored, bits=layer_width)
         except ValueError:
             # Not on the grid (or not quantized): keep it dense like any other
             # float tensor rather than claiming a format it does not have.
@@ -1572,6 +1948,9 @@ def save_blockfloat_model(
     }
     if len(widths) > 1:
         quantization_config["mixed_bits"] = True
+    if block_axis != "in":
+        # Only written when it differs, so existing checkpoints are unchanged.
+        quantization_config["block_axis"] = block_axis
     config["quantization_config"] = quantization_config
 
     # Ship the modeling file so plain ``transformers`` can load this directory.
@@ -1680,7 +2059,9 @@ def _resolve_layer_widths(state: dict, quantization_config: dict) -> dict:
     return widths
 
 
-def _validate_restored_geometry(restored: dict, state: dict, block: int) -> None:
+def _validate_restored_geometry(
+    restored: dict, state: dict, block: int, block_axis: str = "in"
+) -> None:
     """Check every packed buffer against the module it was installed in.
 
     ``_resolve_layer_widths`` can only see the checkpoint, so a ``code_shape``
@@ -1692,29 +2073,35 @@ def _validate_restored_geometry(restored: dict, state: dict, block: int) -> None
 
     for prefix, geometry in sorted(restored.items()):
         out_features, in_features = (int(geometry[0]), int(geometry[1]))
-        if in_features % block:
+        # The stored matrix is [out, in] for block_axis="in" and [in, out] for
+        # "out"; blocks always run along its last dim.
+        rows, cols = (
+            (out_features, in_features) if block_axis == "in" else (in_features, out_features)
+        )
+        axis_name = "in_features" if block_axis == "in" else "out_features"
+        if cols % block:
             raise ValueError(
-                f"{prefix}: in_features={in_features} is not a multiple of the "
+                f"{prefix}: {axis_name}={cols} is not a multiple of the "
                 f"block size {block}, so one exponent per block cannot cover it."
             )
         shape = state.get(f"{prefix}.code_shape")
         if shape is not None:
             actual = [int(v) for v in shape.tolist()]
-            if actual != [out_features, in_features]:
+            if actual != [rows, cols]:
                 raise ValueError(
                     f"{prefix}: the checkpoint declares code_shape {actual}, but "
-                    f"the module is [{out_features}, {in_features}]. A swapped "
-                    "or resized shape decodes the codes in the wrong order, so "
-                    "the checkpoint is corrupt."
+                    f"the module stores [{rows}, {cols}] (block_axis="
+                    f"{block_axis!r}). A swapped or resized shape decodes the "
+                    "codes in the wrong order, so the checkpoint is corrupt."
                 )
         exponents = state.get(f"{prefix}.exponents")
         if exponents is not None:
-            expected = (out_features, in_features // block)
+            expected = (rows, cols // block)
             if tuple(int(v) for v in exponents.shape) != expected:
                 raise ValueError(
                     f"{prefix}: `.exponents` has shape "
                     f"{list(exponents.shape)}, but one exponent per {block} "
-                    f"inputs over [{out_features}, {in_features}] is "
+                    f"{axis_name} over [{rows}, {cols}] is "
                     f"{list(expected)}."
                 )
 
@@ -1764,11 +2151,22 @@ def build_blockfloat_model(
         )
     # Build through the dtype-aware constructor, then cast per tensor. A blanket
     # ``.to(dtype)`` would also narrow Llama's float32 rotary ``inv_freq``, which
-    # ``from_pretrained`` deliberately leaves alone.
-    model = getattr(transformers, class_name)._from_config(config)
+    # ``from_pretrained`` deliberately leaves alone. ``_from_config`` mutates the
+    # process-global default dtype, so it must share the model-construction lock
+    # (issue #4204).
+    from ..models.loader import model_load_lock
+
+    with model_load_lock():
+        model = getattr(transformers, class_name)._from_config(config)
     _cast_model_dtype(model, dtype)
     _sync_config_dtype(model.config, dtype)
 
+    block_axis = str(quantization_config.get("block_axis", "in"))
+    if block_axis not in ("in", "out"):
+        raise ValueError(
+            f"{checkpoint_dir}: quantization_config.block_axis must be 'in' or "
+            f"'out', got {block_axis!r}"
+        )
     restored = swap_blockfloat_modules(
         model,
         bits_per_layer=widths,
@@ -1776,6 +2174,7 @@ def build_blockfloat_model(
         embed_bits=int(quantization_config.get("embed_bits", 8)),
         block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK)),
         quantized_prefixes=sorted(widths),
+        block_axis=block_axis,
     )
 
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -1798,7 +2197,10 @@ def build_blockfloat_model(
         )
 
     _validate_restored_geometry(
-        restored, state, block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK))
+        restored,
+        state,
+        block=int(quantization_config.get("block", BLOCKFLOAT_BLOCK)),
+        block_axis=block_axis,
     )
 
     model.eval()

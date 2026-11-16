@@ -153,18 +153,32 @@ def test_engine_alias_conflicts_are_rejected(source, target):
         )
 
 
-def test_enforce_eager_conflict_and_rocm_normalization():
+def test_enforce_eager_conflict_is_rejected():
     with pytest.raises(ValueError, match="enforce_eager"):
         sglang_utils._normalize_sglang_engine_kwargs(
             {"enforce_eager": True, "disable_cuda_graph": False},
             trust_remote_code=False,
         )
+
+
+def test_rocm_device_aliases_to_cuda_only_on_a_hip_build(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
     assert (
         sglang_utils._normalize_sglang_engine_kwargs({"device": "rocm"}, False)[
             "device"
         ]
         == "cuda"
     )
+
+
+def test_rocm_device_is_rejected_on_a_cuda_only_build(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", None)
+
+    with pytest.raises(ValueError, match="ROCm PyTorch build"):
+        sglang_utils._normalize_sglang_engine_kwargs({"device": "rocm"}, False)
+
+    # An NVIDIA request still resolves normally.
+    assert sglang_utils._normalize_sglang_engine_kwargs({"device": "cuda"}, False)["device"] == "cuda"
 
 
 def test_loader_sglang_kwargs_pass_only_resolved_dtype():
@@ -271,6 +285,19 @@ def test_sampling_params_merge_stop_ids_and_force_determinism():
         ]
         == 2
     )
+    # Hugging Face semantics: no `do_sample` means greedy, even when a
+    # temperature was supplied, because the default request must not sample.
+    assert (
+        sglang_utils._build_sglang_sampling_params(None, {"temperature": 0.9})[
+            "temperature"
+        ]
+        == 0.0
+    )
+    stop_params = sglang_utils._build_sglang_sampling_params(
+        {"stop": ["stop1"]},
+        {"stop_strings": ["stop2", "stop3"]},
+    )
+    assert stop_params["stop"] == ["stop1", "stop2", "stop3"]
 
 
 def test_sampling_params_reject_bad_aliases_and_lengths():
@@ -306,6 +333,51 @@ def test_engine_generation_passes_dict_sampling_and_parses_single_batch_results(
     assert call["prompt"] == ["a", "b"]
     assert call["input_ids"] is None
     assert call["sampling_params"] == {"temperature": 0.0, "max_new_tokens": 3}
+
+
+def test_engine_generation_defaults_to_greedy_without_do_sample(fake_sglang):
+    """`GPTQModel.generate` does not set `do_sample`; that path must be greedy."""
+    runtime = _FakeEngine()
+    setattr(runtime, sglang_utils._ENGINE_MARKER, True)
+
+    assert sglang_utils.sglang_generate(
+        runtime, prompts="hello", max_new_tokens=4
+    ).text == "engine result"
+
+    # SGLang reads an absent temperature from the model generation config,
+    # falling back to 1.0, which samples. Determinism must be explicit.
+    assert runtime.calls[0]["sampling_params"] == {
+        "temperature": 0.0,
+        "max_new_tokens": 4,
+    }
+
+
+def test_engine_generation_preserves_explicit_sampling_params(fake_sglang):
+    """An explicit `sampling_params` override is the caller's own contract."""
+    runtime = _FakeEngine()
+    setattr(runtime, sglang_utils._ENGINE_MARKER, True)
+
+    sglang_utils.sglang_generate(
+        runtime,
+        prompts="hello",
+        sampling_params={"temperature": 0.7, "top_p": 0.9},
+    )
+
+    assert runtime.calls[0]["sampling_params"] == {"temperature": 0.7, "top_p": 0.9}
+
+
+def test_engine_generation_keeps_sampling_when_do_sample_is_true(fake_sglang):
+    runtime = _FakeEngine()
+    setattr(runtime, sglang_utils._ENGINE_MARKER, True)
+
+    sglang_utils.sglang_generate(
+        runtime, prompts="hello", max_new_tokens=4, do_sample=True, temperature=0.6
+    )
+
+    assert runtime.calls[0]["sampling_params"] == {
+        "temperature": 0.6,
+        "max_new_tokens": 4,
+    }
 
 
 def test_engine_generation_input_ids_and_result_validation(fake_sglang):
@@ -381,12 +453,20 @@ def test_legacy_generation_is_flattened_and_supports_batch_text(monkeypatch):
     monkeypatch.setattr(sglang_utils, "SGLANG_AVAILABLE", True)
 
     assert sglang_utils.sglang_generate(
-        object(), prompts=["a", "b"], temperature=0.5, max_new_tokens=3
+        object(), prompts=["a", "b"], do_sample=True, temperature=0.5, max_new_tokens=3
     ) == ["A", "B"]
     assert calls == [
         {"prompt": "a", "temperature": 0.5, "max_tokens": 3},
         {"prompt": "b", "temperature": 0.5, "max_tokens": 3},
     ]
+
+    # Without `do_sample` the public path is greedy, so a supplied temperature
+    # is not forwarded as a sampling temperature.
+    calls.clear()
+    assert sglang_utils.sglang_generate(
+        object(), prompts=["a"], temperature=0.5, max_new_tokens=3
+    ) == ["A"]
+    assert calls == [{"prompt": "a", "temperature": 0.0, "max_tokens": 3}]
 
 
 def test_legacy_generation_rejects_input_ids_and_unsupported_or_bad_state(monkeypatch):

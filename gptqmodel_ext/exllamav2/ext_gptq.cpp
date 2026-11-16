@@ -20,6 +20,12 @@ int64_t make_q_matrix(
     bool already_shuffled
 )
 {
+    // QMatrix's constructor calls cudaSetDevice(device) and never restores the
+    // caller's device. Guard the whole op so a multi-GPU load leaves
+    // torch.cuda.current_device() unchanged (same class as the GGUF leak in
+    // #4047).
+    const at::cuda::OptionalCUDAGuard device_guard(at::device_of(q_weight));
+
     torch::Tensor q_perm = q_perm_opt.value_or(torch::Tensor());
     torch::Tensor q_invperm = q_invperm_opt.value_or(torch::Tensor());
     torch::Tensor q_scale = q_scale_opt.value_or(torch::Tensor());
@@ -74,6 +80,22 @@ int64_t make_q_matrix(
     // decodes inside its launch, and the dense fallback allocates a transient
     // tensor per call in gemm_half_q_half().
 
+    // Act-order remapping reads g_idx on the host and writes a histogram
+    // indexed by its values. Validate the checkpoint tensor at the op entry so
+    // direct API callers cannot reach make_sequential() with an unchecked
+    // index. Already-shuffled matrices do not consume g_idx.
+    if (gptq_g_idx.defined() && !gptq_g_idx.device().is_meta() && !already_shuffled)
+    {
+        TORCH_CHECK(gptq_g_idx.is_cpu(), "gptq_g_idx must be a CPU tensor");
+        TORCH_CHECK(gptq_g_idx.numel() == height,
+                    "gptq_g_idx has ", gptq_g_idx.numel(), " entries but the weight has ", height, " rows");
+        TORCH_CHECK(groups > 0, "act-order weights need at least one scale group");
+        const int64_t g_min = gptq_g_idx.min().item<int64_t>();
+        const int64_t g_max = gptq_g_idx.max().item<int64_t>();
+        TORCH_CHECK(g_min >= 0 && g_max < groups,
+                    "gptq_g_idx must be in [0, ", groups - 1, "], got min=", g_min, " max=", g_max);
+    }
+
     QMatrix* m = new QMatrix(
         device,
         height,
@@ -91,6 +113,12 @@ int64_t make_q_matrix(
         already_shuffled
     );
 
+    if (m->failed)
+    {
+        delete m;
+        TORCH_CHECK(false, "ExLlamaV2 failed to build the act-order row mapping from g_idx");
+    }
+
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(m));
 }
 
@@ -105,7 +133,9 @@ void gemm_half_q_half(
 
     TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16 || a.scalar_type() == at::kFloat,
                 "ExLlamaV2 requires FP16, BF16 or FP32 activations");
-    TORCH_CHECK(c.scalar_type() == a.scalar_type(), "output dtype must match input");
+    const bool wide_output = a.scalar_type() == at::kHalf && c.scalar_type() == at::kFloat;
+    TORCH_CHECK(c.scalar_type() == a.scalar_type() || wide_output,
+                "output dtype must match input, or be FP32 for FP16 input");
     TORCH_CHECK_SHAPES(a, 0, c, 0, 1);
     TORCH_CHECK(qm->height == a.size(1), "a and b have incompatible shapes");
     TORCH_CHECK(qm->width == c.size(1), "b and c have incompatible shapes");
@@ -114,7 +144,7 @@ void gemm_half_q_half(
     if (a.scalar_type() != at::kHalf || (a.size(0) > MAX_Q_GEMM_ROWS && !force_cuda)) {
         auto weights = torch::empty({qm->height, qm->width}, a.options().dtype(at::kHalf));
         qm->reconstruct(reinterpret_cast<half*>(weights.data_ptr()));
-        if (a.scalar_type() == at::kHalf) {
+        if (a.scalar_type() == at::kHalf && !wide_output) {
             gemm_half_half_cuda(
                 at::cuda::getCurrentCUDABlasHandle(),
                 (const half*) a.data_ptr(),
@@ -135,7 +165,8 @@ void gemm_half_q_half(
         at::cuda::getCurrentCUDABlasHandle(),
         (const half*) a.data_ptr(),
         qm,
-        (half*) c.data_ptr(),
+        wide_output ? nullptr : (half*) c.data_ptr(),
+        wide_output ? c.data_ptr<float>() : nullptr,
         c.size(0),
         c.size(1),
         a.size(1),

@@ -13,6 +13,11 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 from .qwen3_5 import Qwen3_5QModel
 
 
@@ -31,18 +36,30 @@ class MiniCPMV4_6QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_norm:!", "q_proj:0", "k_norm:!", "k_proj:0", "v_proj:0", "o_proj:1"),
+            # Parallel Q/K/V read the same input norm. The DeltaNet
+            # `in_proj_qkv`/`in_proj_z` branches read that same norm output
+            # through the layer input, so all four must fold into one source
+            # (Qwen3.5's tree). Without the tags the second branch folds into
+            # `in_proj_qkv` and the norm scale is never compensated.
+            "self_attn": (
+                "q_norm:!",
+                "q_proj:0:in=x",
+                "k_norm:!",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
+                "o_proj:1",
+            ),
             "linear_attn": (
                 "norm:!",
                 "conv1d:!",
-                "in_proj_qkv:0",
-                "in_proj_z:1",
+                "in_proj_qkv:0:in=x",
+                "in_proj_z:1:in=x",
                 "in_proj_b:!:1",
                 "in_proj_a:!:1",
                 "out_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         }
     ]
 
@@ -114,9 +131,15 @@ class MiniCPMV4_6QModel(BaseQModel):
         return inputs
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(
                 self.prepare_inputs_for_conversations(
                     processor,
@@ -124,7 +147,9 @@ class MiniCPMV4_6QModel(BaseQModel):
                 )
             )
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )
 
     def move_input_capture_example(self, example, data_device):
         for key, value in example.items():

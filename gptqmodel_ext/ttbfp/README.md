@@ -4,9 +4,8 @@
 **block-float** tensor formats directly on ordinary CPUs, so models and kernels
 that use them can run on non-Tenstorrent hardware.
 
-This directory is vendored in GPT-QModel as `gptqmodel_ext/ttbfp/`.  It is a
-standalone library: `setup.py` does not build it and it is not imported by the
-`gptqmodel` package.  Build and test it from this directory with `make`.
+The CPU kernels and Python helpers live in `gptqmodel_ext/ttbfp/`. See
+[Build and test](#5-build-and-test) for building the library and running its tests.
 
 It provides:
 

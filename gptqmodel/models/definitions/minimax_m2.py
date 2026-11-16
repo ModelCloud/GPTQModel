@@ -78,7 +78,11 @@ class MiniMaxQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
+            # The original MiniMax layer feeds the *normalized* value into the
+            # residual (`residual * alpha + attn * beta`), so neither norm's
+            # output is a plain projection input. A folded scale would change
+            # the residual term, so both norms are declared non-sources.
+            "input_layernorm": ("input_layernorm:!:nosrc",),
             "self_attn": (
                 # full-attention layers
                 "q_proj:0",
@@ -87,10 +91,14 @@ class MiniMaxQModel(BaseQModel):
                 "o_proj:1",
                 # linear-attention ("lightning") layers
                 "qkv_proj:0",
-                "out_proj:1",
-                "output_gate:1",
+                # `output_gate` reads the same normed input as qkv_proj, so it
+                # belongs in that group and receives the folded scale. Its own
+                # output feeds `out_proj` through a sigmoid, so it is a
+                # non-source and `out_proj` keeps its own group.
+                "output_gate:0:nosrc",
+                "out_proj:2",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
             "mlp:moe": {  # MoE module
                 "gate": ("gate:!",),
                 "experts": {

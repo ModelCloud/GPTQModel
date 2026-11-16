@@ -24,12 +24,10 @@ import triton
 import triton.language as tl
 
 from gptqmodel.utils.arch import tuning_family
-from gptqmodel.utils.env import env_flag
+from gptqmodel.utils.kernel import get_kernel_config
 
 
 PAROQUANT_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
-# Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
-FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 
 # Per-tuning-family launch tiles for the fused ParoQuant GEMM.
@@ -404,8 +402,10 @@ def _paroquant_gemm_triton(
     block_size_k: int,
     num_warps: int,
     num_stages: int,
-    fp32_accum: bool = FP32_ACCUM,
+    fp32_accum: bool = None,
 ) -> torch.Tensor:
+    if fp32_accum is None:
+        fp32_accum = get_kernel_config().fp32_accum
     M, N, K, group_size = _validate_shapes(input, qweight, scales, qzeros)
     # The fused GEMM uses dense row and column offsets for every operand.
     input = input.contiguous()
@@ -473,7 +473,7 @@ def paroquant_gemm_triton_decode(
         block_size_k=block_size_k,
         num_warps=num_warps,
         num_stages=num_stages,
-        fp32_accum=FP32_ACCUM,
+        fp32_accum=get_kernel_config().fp32_accum,
     )
 
 
@@ -498,7 +498,7 @@ def paroquant_gemm_triton_prefill(
         block_size_k=block_size_k,
         num_warps=num_warps,
         num_stages=num_stages,
-        fp32_accum=FP32_ACCUM,
+        fp32_accum=get_kernel_config().fp32_accum,
     )
 
 

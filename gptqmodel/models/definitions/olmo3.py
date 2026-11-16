@@ -72,13 +72,21 @@ class Olmo3QModel(BaseQModel):
                 "v_proj:0:v",
                 "o_proj:1",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # OLMo 3 adds the normalized attention output to the residual, so
+            # the norm does not feed the MLP directly.
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
             "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },
     ]
 
     def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        # Consume the base-type replay metadata (mask and per-type rotary) first;
+        # otherwise the private capture key leaks into the decoder layer and the
+        # full-attention layers keep layer 0's sliding mask.
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer, layer_input, additional_inputs, target_device
+        )
         return _prepare_olmo3_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
 

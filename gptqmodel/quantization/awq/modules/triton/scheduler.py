@@ -10,7 +10,6 @@ Everything else falls back to the historical dispatch.
 
 from __future__ import annotations
 
-import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -19,12 +18,19 @@ from typing import Any
 
 import torch
 
+from gptqmodel.utils.kernel import get_kernel_config
+
 
 # Keep these sets aligned with the packing and kernel layouts we have tested.
 SUPPORTED_GROUP_SIZES = (32, 64, 128)
 SUPPORTED_SPLITS = (1, 2, 4, 8, 16, 32)
 MAX_PLAN_CACHE = 256
-DEFAULT_SCHEDULE_MODE = os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE", "auto").lower()
+
+
+def default_schedule_mode() -> str:
+    """Return the configured AWQ Triton dispatch mode."""
+
+    return get_kernel_config().awq_triton_schedule
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,43 @@ def legacy_plan(M: int, K: int | None = None, N: int | None = None, group_size: 
         return AwqTritonPlan(path="dense")
     # Keep the public legacy/training contract byte-for-byte: fixed 32 tiles
     # and split-K=8. Candidate generation separately rejects zero-work splits.
+    return AwqTritonPlan(path="fused")
+
+
+_RDNA4_ARCHES = frozenset({"gfx1200", "gfx1201", "gfx1250"})
+
+
+def _single_split_required(device: torch.device | str | None) -> bool:
+    """Whether the generic fused tile must avoid the split-K atomic reduction.
+
+    The fp32 split-K reduction uses ``tl.atomic_add`` (``gemm.py``), so the
+    summation order changes from launch to launch. RDNA4 is wave32 and was
+    measured faster with one split; a host running with deterministic
+    algorithms enabled must not use the atomic reduction either.
+    """
+
+    if torch.are_deterministic_algorithms_enabled():
+        return True
+    d = torch.device(device) if device is not None else torch.device("cuda")
+    if d.type != "cuda" or torch.version.hip is None:
+        return False
+    index = d.index
+    if index is None and torch.cuda.is_available():
+        index = torch.cuda.current_device()
+    try:
+        arch = _rocm_arch_for_index(index)
+    except Exception:
+        return False
+    return arch in _RDNA4_ARCHES
+
+
+def _generic_fused_plan(M: int, device: torch.device | str | None) -> AwqTritonPlan:
+    """Historical 32/32/32 fused tile with a reproducible K reduction."""
+
+    if M > 128:
+        return AwqTritonPlan(path="dense")
+    if _single_split_required(device):
+        return AwqTritonPlan(path="fused", split_k_iters=1)
     return AwqTritonPlan(path="fused")
 
 
@@ -290,7 +333,12 @@ _VERIFIED_4090_FP16_RULES: dict[tuple[int, int, int, int], AwqTritonPlan] = {
 # atomic-reduction pass here); ``num_warps=4`` is 128 lanes on wave32.
 # Independently checked against an FP64 Torch oracle that unpacks the packed
 # qweight/qzeros itself: max relative error 3.8e-04..4.6e-04, output dtype
-# preserved, repeated forwards bit-identical, no dense dequantized cache.
+# preserved, no dense dequantized cache.
+#
+# Repeated forwards are bit-identical only for these split-K=1 rules.  The
+# generic fused tile uses ``tl.atomic_add`` for its split-K reduction, so its
+# summation order varies between launches; ``_generic_fused_plan`` keeps that
+# fallback at split-K=1 on RDNA4 and whenever deterministic algorithms are on.
 _VERIFIED_RDNA4_PROFILE = (
     "AMD Radeon AI PRO R9700", "gfx1201", 32, 34_208_743_424,
 )
@@ -452,7 +500,7 @@ def mark_awq_triton_plan_warmed(
 ) -> None:
     """Record a plan only after its complete eager path launched successfully."""
     G = resolve_group_size(group_size, K)
-    resolved_mode = DEFAULT_SCHEDULE_MODE if mode is None else mode.lower()
+    resolved_mode = default_schedule_mode() if mode is None else mode.lower()
     key = _warmup_key(
         M=M, N=N, K=K, G=G, device=device, input_dtype=input_dtype,
         compute_dtype=compute_dtype, output_dtype=output_dtype,
@@ -508,7 +556,7 @@ def select_awq_triton_plan(
     if M <= 0:
         raise ValueError("plan selection is not defined for empty input")
     G = resolve_group_size(group_size, K)
-    mode = DEFAULT_SCHEDULE_MODE if mode is None else mode.lower()
+    mode = default_schedule_mode() if mode is None else mode.lower()
     if mode not in ("auto", "legacy"):
         raise ValueError("AWQ Triton schedule mode must be 'auto' or 'legacy'")
     if cuda_graph:
@@ -547,6 +595,9 @@ def select_awq_triton_plan(
     cache_key = (
         d.type, index, M, N, K, G, input_dtype, compute_dtype,
         output_dtype, bool(fp32_accum),
+        # The generic fallback tile depends on this flag; a plan cached before
+        # the caller enabled deterministic algorithms must not be reused.
+        torch.are_deterministic_algorithms_enabled(),
     )
     # CPython protects individual mapping reads in free-threaded builds.  Keep
     # the overwhelmingly common hit path read-only; misses and all mutations
@@ -560,7 +611,9 @@ def select_awq_triton_plan(
         if cached is not None:
             return cached
         # Exact device rules are the only source of auto optimization. Unknown
-        # devices and shapes retain the old M boundary and tile configuration.
+        # devices and shapes retain the old M boundary and tile configuration,
+        # but the generic fused plan drops the nondeterministic split-K
+        # reduction on RDNA4 and under deterministic algorithms.
         rule_key = _plan_key(
             M=M, N=N, K=K, G=G, device=device, input_dtype=input_dtype,
             compute_dtype=compute_dtype, output_dtype=output_dtype,
@@ -574,7 +627,7 @@ def select_awq_triton_plan(
                 output_dtype=output_dtype, fp32_accum=fp32_accum,
             )
         if plan is None:
-            plan = legacy_plan(M, K, N, G)
+            plan = _generic_fused_plan(M, device)
         if plan.fused:
             ok, _ = validate_fused_config(
                 M=M, N=N, K=K, group_size=G, block_size_m=plan.block_size_m,
@@ -583,7 +636,7 @@ def select_awq_triton_plan(
                 num_stages=plan.num_stages,
             )
             if not ok:
-                plan = legacy_plan(M, K, N, G)
+                plan = _generic_fused_plan(M, device)
         if len(_PLAN_CACHE) >= MAX_PLAN_CACHE:
             _PLAN_CACHE.popitem(last=False)
         _PLAN_CACHE[cache_key] = plan

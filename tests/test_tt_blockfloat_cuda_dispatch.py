@@ -60,3 +60,38 @@ def test_blockfloat_modules_check_their_own_gpu(monkeypatch):
     reference = F.embedding(ids, embedding.dequantize(dtype=embedding.output_dtype))
     assert torch.equal(gathered, reference)
     assert selected == [device, device]
+
+
+def test_wider_block_does_not_dispatch_to_cuda(monkeypatch):
+    """A wider ``block`` has no native exponent geometry, so it must not dispatch.
+
+    The CUDA kernels bind one exponent per 16 values. An embedding built with
+    ``block=32`` stores ``in_features // 32`` exponents per row, which the
+    native validation rejects; it has to keep using the Torch reference path on
+    every device, including one where the extension is ready.
+    """
+
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("CUDA block-float kernels must not run for block != 16")
+
+    calls = []
+    monkeypatch.setattr(bf_cuda, "ready", lambda device=None: calls.append(device) or True)
+    monkeypatch.setattr(bf_cuda, "embedding", refuse)
+    monkeypatch.setattr(bf_cuda, "linear", refuse)
+
+    with FakeTensorMode():
+        wide = TTBlockfloatEmbedding(3, 32, bits=4, block=32).to("cuda:0")
+        ids = torch.empty((2,), dtype=torch.int64, device="cuda:0")
+        hidden = torch.empty((2, 32), dtype=torch.float32, device="cuda:0")
+
+        assert wide.cuda_dispatch(ids) is False
+        assert wide._kernel_embedding(ids) is None
+        # The tied head reads the embedding through the linear path.
+        assert wide._kernel_linear(hidden) is None
+        assert calls == []
+
+        fixed = TTBlockfloatEmbedding(3, 32, bits=4).to("cuda:0")
+        assert fixed.cuda_dispatch(ids) is True
+        assert calls == [ids.device]

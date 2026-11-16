@@ -520,7 +520,7 @@ __global__ void __launch_bounds__(C::kThreads, 1) large_m_stream_kernel(const __
         v.w = __shfl_sync(0xffffffffu, win[P][rb].w, src);
         const bool miss = g.meta == 0u && (!((win_ok[P] >> rb) & 1u) || slot >= 32u);
         if (__any_sync(0xffffffffu, miss)) {
-          if (miss) v = __ldg(escapes + g.lo0);
+          if (miss && g.lo0 < num_escapes) v = __ldg(escapes + g.lo0);
         }
         if (g.meta == 0u) {
           a_frag[kk & 1][rb][0] = v.x;
@@ -717,7 +717,9 @@ __global__ void __launch_bounds__(C::kThreads, 1) large_m_staged_kernel(const __
     for (int j = 0; j < 4; ++j) {
       uint32_t r[4];
       decode_bulk(g[j], base_x4, r);
-      store_group(dst + j * kPlaneBytes, r, g[j].meta, escapes + g[j].lo0);
+      const uint32_t esc_count = prob.num_escapes(work);
+      const uint32_t esc_index = (g[j].meta == 0u && g[j].lo0 < esc_count) ? g[j].lo0 : 0u;
+      store_group(dst + j * kPlaneBytes, r, g[j].meta, escapes + esc_index);
     }
   };
 
@@ -865,7 +867,9 @@ __global__ void __launch_bounds__(C::kThreads, 1)
       for (int j = 0; j < 4; ++j) {
         uint32_t r[4];
         decode_bulk(g[j], base_x4, r);
-        store_group(dst + j * kPlaneBytes, r, g[j].meta, escapes + g[j].lo0);
+        const uint32_t esc_count = prob.num_escapes(work);
+      const uint32_t esc_index = (g[j].meta == 0u && g[j].lo0 < esc_count) ? g[j].lo0 : 0u;
+      store_group(dst + j * kPlaneBytes, r, g[j].meta, escapes + esc_index);
       }
     };
     auto prefetch = [&](int kb) {
@@ -1031,7 +1035,9 @@ __global__ void __launch_bounds__(C::kThreads, 1) large_m_ring_kernel(const __gr
     for (int j = 0; j < 4; ++j) {
       uint32_t r[4];
       decode_bulk(g[j], base_x4, r);
-      store_group(dst + j * kPlaneBytes, r, g[j].meta, escapes + g[j].lo0);
+      const uint32_t esc_count = prob.num_escapes(work);
+      const uint32_t esc_index = (g[j].meta == 0u && g[j].lo0 < esc_count) ? g[j].lo0 : 0u;
+      store_group(dst + j * kPlaneBytes, r, g[j].meta, escapes + esc_index);
     }
   };
 

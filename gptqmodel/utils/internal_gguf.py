@@ -16,6 +16,7 @@ import pcre
 import torch
 
 from ..nn_modules.qlinear.gguf import (
+    _decode_gguf_bf16,
     _dequantize_gguf_tensor_numpy,
     _dequantize_sign_only_torch,
     _quantize_gguf_tensor_numpy,
@@ -384,8 +385,7 @@ def dequantize_to_torch(
     elif resolved_qtype == GGMLQuantizationType.F16:
         tensor = torch.from_numpy(np.array(data, dtype=np.float16, copy=True, order="C")).to(torch.float32)
     elif resolved_qtype == GGMLQuantizationType.BF16:
-        rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
-        tensor = torch.from_numpy(np.left_shift(rows, np.uint32(16)).view(np.float32).copy())
+        tensor = torch.from_numpy(_decode_gguf_bf16(data).copy())
     else:
         tensor = torch.from_numpy(np.ascontiguousarray(_dequantize_gguf_tensor_numpy(np.asarray(data), resolved_qtype)))
 

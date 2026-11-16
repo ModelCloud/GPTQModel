@@ -127,6 +127,14 @@ def _normalize_sglang_engine_kwargs(kwargs: Mapping[str, Any], trust_remote_code
             normalized.setdefault("base_gpu_id", parsed_device.index)
         normalized["device"] = parsed_device.type
     elif device == "rocm":
+        # SGLang spells every accelerator "cuda"; on a HIP build that alias
+        # names the same AMD device. On an NVIDIA-only build it would silently
+        # launch the checkpoint on CUDA instead of the requested hardware.
+        if torch.version.hip is None:
+            raise ValueError(
+                "SGLang device `rocm` requires a ROCm PyTorch build; "
+                "this process runs an NVIDIA CUDA build."
+            )
         normalized["device"] = "cuda"
 
     for key in ("base_gpu_id", "context_length", "random_seed", "tp_size"):
@@ -261,6 +269,22 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
         if kwargs.get(source) is not None:
             sampling_params[target] = kwargs[source]
 
+    stop_entries = []
+    if "stop" in sampling_params and sampling_params["stop"] is not None:
+        val = sampling_params["stop"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if kwargs.get("stop_strings") is not None:
+        val = kwargs["stop_strings"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if stop_entries:
+        sampling_params["stop"] = list(dict.fromkeys(stop_entries))
+
     stop_ids = []
     if "stop_token_ids" in sampling_params and sampling_params["stop_token_ids"] is not None:
         stop_ids.extend(_normalize_stop_token_ids(sampling_params["stop_token_ids"]))
@@ -271,8 +295,17 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
     if stop_ids:
         sampling_params["stop_token_ids"] = list(dict.fromkeys(stop_ids))
 
-    # do_sample=False is deterministic even when an explicit temperature was supplied.
-    if kwargs.get("do_sample") is False:
+    # GPT-QModel's public generate method follows Hugging Face semantics, where
+    # sampling is disabled unless explicitly requested. SGLang treats a missing
+    # temperature as the model's generation-config default (1.0 when unset), so
+    # an omitted `do_sample` must still resolve to greedy. An explicit
+    # `sampling_params` mapping is the caller's own contract and is left alone,
+    # except for an explicit `do_sample=False`, which is deterministic even when
+    # the mapping supplied a temperature.
+    if value is None:
+        if kwargs.get("do_sample") is not True:
+            sampling_params["temperature"] = 0.0
+    elif kwargs.get("do_sample") is False:
         sampling_params["temperature"] = 0.0
     return sampling_params
 

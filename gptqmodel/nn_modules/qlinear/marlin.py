@@ -25,7 +25,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     _marlin_all_visible_devices_supported,
@@ -60,6 +60,25 @@ log = setup_logger()
 # SM 7.5 is supported through the FP16-only Turing path.
 _MARLIN_SM75_CAPABILITY = (7, 5)
 _MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
+
+
+def _g_idx_is_contiguous(g_idx: Optional[torch.Tensor], in_features: int, group_size: int) -> bool:
+    """Return whether ``g_idx`` describes plain contiguous groups.
+
+    ``desc_act=False`` checkpoints normally store ``arange(K) // group_size``.
+    A third-party writer can leave the field describing a block permutation
+    while still declaring ``desc_act=False``; that index is authoritative and
+    must not be discarded. An empty index is the runtime layout of a kernel
+    that already dropped it, so keep the historical contiguous assumption.
+    """
+
+    if g_idx is None or g_idx.numel() == 0:
+        return True
+    if g_idx.numel() != in_features:
+        return False
+    group = group_size if group_size and group_size > 0 else in_features
+    expected = torch.arange(in_features, device=g_idx.device, dtype=torch.long) // group
+    return torch.equal(g_idx.to(torch.long), expected)
 
 
 class MarlinLinear(GPTQQuantLinear):
@@ -136,7 +155,6 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
-        self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
 
         super().__init__(
             bits=bits,
@@ -152,9 +170,10 @@ class MarlinLinear(GPTQQuantLinear):
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
+        self.fp32 = resolve_kernel_config(self).marlin_fp32
         if not self.fp32:
             log.warn.once(
-                "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
+                "Kernel: KernelConfig.marlin_fp32 is disabled. Marlin will use reduced-precision reduction.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
@@ -181,13 +200,22 @@ class MarlinLinear(GPTQQuantLinear):
             ),
         )
 
-        # Activation order
+        # Activation order. ``post_init()`` inspects ``g_idx`` to tell a real
+        # activation-order checkpoint from a plain ``desc_act=False`` layer, so
+        # the placeholder must never be uninitialised memory. Seed it with the
+        # canonical contiguous mapping (``arange(K) // group_size``) that the
+        # base class stores for ``desc_act=False``: it is the identity ordering,
+        # a valid shape for ``load_state_dict()``, and it keeps a checkpoint
+        # that omits ``g_idx`` on the contiguous fast path.
         self.register_parameter(
             "g_idx",
-            torch.nn.Parameter(data=torch.empty(
-                self.in_features,
-                dtype=torch.int32,
-            ), requires_grad=False),
+            torch.nn.Parameter(
+                data=torch.arange(
+                    self.in_features,
+                    dtype=torch.int32,
+                ) // self.group_size,
+                requires_grad=False,
+            ),
         )
 
         # Scales
@@ -349,7 +377,30 @@ class MarlinLinear(GPTQQuantLinear):
                 + marlin_runtime_error(self.compute_dtype)
             )
 
-        self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
+        # A non-contiguous ``g_idx`` is an activation-order checkpoint even
+        # when it declares ``desc_act=False``. Trust the stored index instead
+        # of silently replacing it with an empty one.
+        effective_desc_act = self.desc_act
+        if not effective_desc_act and not _g_idx_is_contiguous(
+            getattr(self, "g_idx", None),
+            self.in_features,
+            self.requested_group_size,
+        ):
+            if not marlin_is_tile_aligned(self.out_features, self.in_features):
+                raise NotImplementedError(
+                    "GPTQ Marlin: checkpoint g_idx is non-contiguous but "
+                    "`desc_act` is False. Activation-order decoding requires "
+                    f"tile-aligned shapes; got K={self.in_features}, "
+                    f"N={self.out_features}. Load with a non-Marlin backend."
+                )
+            log.warn.once(
+                "Kernel: checkpoint g_idx is non-contiguous while "
+                "`desc_act=False`; decoding with the Marlin activation-order path."
+            )
+            effective_desc_act = True
+            self.desc_act = True
+
+        self.is_k_full = marlin_is_k_full(effective_desc_act, is_row_parallel=False)
 
         # Allocate marlin workspace.
         self.workspace = marlin_make_workspace_new(device)
@@ -361,7 +412,7 @@ class MarlinLinear(GPTQQuantLinear):
             else self.requested_group_size
         )
         # Validation keeps act-order shapes aligned; other shapes may use zero padding.
-        if self.desc_act:
+        if effective_desc_act:
             padded_n, padded_k = self.out_features, self.in_features
         else:
             padded_n, padded_k = marlin_padded_nk(
@@ -410,7 +461,7 @@ class MarlinLinear(GPTQQuantLinear):
             return x
 
         # Handle sorting for activation reordering if needed.
-        if self.desc_act:
+        if effective_desc_act:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(getattr(self, "g_idx"))
             _transform_param(self, "g_idx", lambda _: g_idx)
             self.g_idx_sort_indices = g_idx_sort_indices
@@ -428,7 +479,25 @@ class MarlinLinear(GPTQQuantLinear):
                 marlin_pad_dim(self.bias, self.out_features, padded_n)
             )
 
+        # The checkpoint's GPTQ words are now Marlin-tile-permuted and the
+        # original zero points are gone. Mark the module so a state-dict save
+        # fails closed instead of writing this runtime layout as a checkpoint.
+        self._marlin_repacked = True
+
         super().post_init()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_marlin_repacked", False):
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    "Marlin rewrites `qweight` into its runtime tile layout and replaces "
+                    "`qzeros`/`g_idx`; the original checkpoint tensors cannot be "
+                    "reconstructed. Use `GPTQModel.save()`/`save_quantized()` for a "
+                    "loadable checkpoint, or reload the original checkpoint."
+                )
+        super()._save_to_state_dict(destination, prefix, keep_vars)
 
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process

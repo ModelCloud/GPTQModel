@@ -57,6 +57,39 @@ def _linear_attn_cfg(name):
     )
 
 
+def _gptj_cfg():
+    return transformers.GPTJConfig(
+        vocab_size=VOCAB,
+        n_positions=32,
+        n_embd=32,
+        n_layer=2,
+        n_head=2,
+        n_inner=48,
+        rotary_dim=8,
+    )
+
+
+def _jamba_cfg():
+    return transformers.JambaConfig(
+        vocab_size=VOCAB,
+        hidden_size=32,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        attn_layer_offset=1,
+        attn_layer_period=2,
+        expert_layer_offset=1,
+        expert_layer_period=2,
+        num_experts=2,
+        num_experts_per_tok=2,
+        mamba_d_state=8,
+        mamba_d_conv=4,
+        mamba_expand=2,
+        max_position_embeddings=32,
+    )
+
+
 @lru_cache(maxsize=1)
 def _load_spark_config():
     return transformers.AutoConfig.from_pretrained(SPARK_MODEL_ID, trust_remote_code=True)
@@ -215,6 +248,66 @@ CASES = {
         ),
         [("feed_forward.experts.0.gate_proj", "feed_forward.experts.0.up_proj")],
     ),
+    "glm": (
+        lambda: _cfg("GlmConfig", pad_token_id=0, eos_token_id=1, bos_token_id=2),
+        _DENSE_PAIRS,
+    ),
+    "exaone4": (lambda: _cfg("Exaone4Config"), _DENSE_PAIRS),
+    "hunyuan_v1_dense": (lambda: _cfg("HunYuanDenseV1Config", head_dim=16), _DENSE_PAIRS),
+    "apertus": (
+        lambda: _cfg("ApertusConfig"),
+        # Apertus' MLP has no gate projection.
+        [("self_attn.q_proj", "self_attn.k_proj"), ("self_attn.q_proj", "self_attn.v_proj")],
+    ),
+    "gemma4_text": (lambda: _cfg("Gemma4TextConfig", head_dim=16), _DENSE_PAIRS),
+    # Issue #4041 item 3: dense siblings that read one activation but carried
+    # no `:in=` tag, so Hessian dedup was off.
+    "opt": (
+        lambda: _cfg("OPTConfig", ffn_dim=48),
+        [
+            ("self_attn.q_proj", "self_attn.k_proj"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+        ],
+    ),
+    "starcoder2": (
+        lambda: _cfg("Starcoder2Config"),
+        [
+            ("self_attn.q_proj", "self_attn.k_proj"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+        ],
+    ),
+    "gptj": (
+        _gptj_cfg,
+        [
+            ("attn.q_proj", "attn.k_proj"),
+            ("attn.q_proj", "attn.v_proj"),
+        ],
+    ),
+    "phi": (
+        lambda: _cfg("PhiConfig"),
+        [
+            ("self_attn.q_proj", "self_attn.k_proj"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+        ],
+    ),
+    "jamba": (
+        _jamba_cfg,
+        [
+            ("self_attn.q_proj", "self_attn.k_proj"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+            ("feed_forward.gate_proj", "feed_forward.up_proj"),
+            ("feed_forward.experts.0.gate_proj", "feed_forward.experts.0.up_proj"),
+            ("feed_forward.experts.1.gate_proj", "feed_forward.experts.1.up_proj"),
+        ],
+    ),
+    "lfm2": (
+        lambda: _cfg("Lfm2Config", layer_types=["conv", "full_attention"]),
+        [
+            ("self_attn.q_proj", "self_attn.k_proj"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+            ("feed_forward.w1", "feed_forward.w3"),
+        ],
+    ),
 }
 
 
@@ -339,6 +432,56 @@ def test_plan_covers_every_quantizable_linear(name):
         plan = template_plan.filter_modules(live)
         linears = {n for n, m in live.items() if isinstance(m, torch.nn.Linear)} - non_quantized
         assert linears == set(plan.modules)
+
+
+_ISSUE_4041_TAGGED_FAMILIES = ("gptj", "jamba", "lfm2", "opt", "phi", "starcoder2")
+
+
+def _strip_in_tags(node):
+    if isinstance(node, dict):
+        return {
+            ":".join(part for part in key.split(":") if not part.startswith("in=")): _strip_in_tags(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, (list, tuple)):
+        items = [_strip_in_tags(item) for item in node]
+        return tuple(items) if isinstance(node, tuple) else items
+    if isinstance(node, str):
+        return ":".join(part for part in node.split(":") if not part.startswith("in="))
+    return node
+
+
+@pytest.mark.parametrize("name", _ISSUE_4041_TAGGED_FAMILIES)
+def test_in_tags_do_not_change_quantization_blocks(name):
+    """The safety argument for item 3: tags only add Hessian dedup, never order.
+
+    Packed tensors are a pure function of the emitted subset blocks, their
+    order, and each module's captured input. This asserts the first two are
+    byte-identical with and without the `:in=` metadata; the real-forward case
+    above asserts the third is bitwise identical.
+    """
+
+    qmodel_cls = MODEL_MAP[_factory_model_type(name)]
+    tagged = qmodel_cls.module_tree
+    untagged = _strip_in_tags(tagged)
+    assert tagged != untagged, f"{name}: no :in= tags found to strip"
+    for include_capture_only in (False, True):
+        assert qmodel_cls.build_layer_modules(
+            tagged, include_capture_only=include_capture_only
+        ) == qmodel_cls.build_layer_modules(untagged, include_capture_only=include_capture_only)
+
+
+@pytest.mark.parametrize("name", _ISSUE_4041_TAGGED_FAMILIES)
+def test_issue_4041_families_activate_same_subset_dedup(name):
+    cfg, qmodel_cls, _, _, _ = _build(name)
+    assert qmodel_cls.shared_input_verified(cfg)
+    plan = qmodel_cls.shared_input_plan(cfg, QC)
+    assert plan.dedup_count >= 1, (name, plan.groups)
+
+
+def _factory_model_type(name):
+    factory, _ = CASES[name]
+    return factory().model_type
 
 
 def test_probe_detects_wrong_tag_on_real_model():

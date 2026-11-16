@@ -116,7 +116,9 @@ if(NF12_BUILD_TORCH)
   find_library(NF12_TORCH_CUDA_LIB torch_cuda PATHS "${NF12_TORCH_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
 
   file(GLOB NF12_TORCH_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/csrc/torch/*.cpp")
-  add_library(nf12_torch SHARED ${NF12_TORCH_SOURCES} csrc/torch/fused_decode.cu)
+  add_library(nf12_torch SHARED ${NF12_TORCH_SOURCES}
+    csrc/torch/fused_decode.cu
+    csrc/torch/rowmajor_embedding.cu)
   target_include_directories(nf12_torch SYSTEM PRIVATE "${NF12_TORCH_DIR}/include")
   target_include_directories(nf12_torch PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/csrc")
   target_compile_options(nf12_torch PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${NF12_CUDA_FLAGS}>)

@@ -330,6 +330,16 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 f"VPTQLinear `{self.name}`: unexpected `indices` shape {tuple(self.indices.shape)}; "
                 f"expected {(self.group_num, self.num_indices, self.packed_words)}."
             )
+        # Outlier codes are codebook rows read by the CUDA kernel. The
+        # quantizer bounds them; a checkpoint does not have to.
+        if getattr(self, "enable_outlier", False) and self.outlier_indices.numel() > 0:
+            low = int(self.outlier_indices.min())
+            high = int(self.outlier_indices.max())
+            if low < 0 or high >= self.outlier_num_centroids:
+                raise ValueError(
+                    f"VPTQLinear `{self.name}`: outlier index is outside "
+                    f"[0, {self.outlier_num_centroids}): got min={low} max={high}."
+                )
         if self.enable_perm:
             self.inverse_perm.copy_(torch.argsort(self.perm.to(torch.int64)).to(torch.int32))
 

@@ -15,6 +15,7 @@ from gptqmodel.nn_modules.triton_utils.gptq_gemm import (
 )
 from gptqmodel.utils import arch
 from gptqmodel.utils.arch import gemm_fused_dtypes
+from tests.kernels._gptq_gemm_pre_rewrite import pre_rewrite_gptq_gemm
 
 
 # Registered fused families. Each kernel case is skipped unless the running
@@ -71,9 +72,11 @@ def _fake_rocm_device(monkeypatch, name):
         ("gfx1200", (32, 32, 256, 4, 2, 16, 17408)),
         ("gfx1201:sramecc+:xnack-", (32, 32, 256, 4, 2, 16, 17408)),
         ("gfx1250", (32, 32, 256, 4, 2, 16, 17408)),
-        # Ada (RTX 4090) has its own measured tile and gate; it is not a gfx
-        # string, but the shared tuning-family vocabulary must route it here.
-        ("sm_89", (16, 16, 256, 4, 2, 16, 2048)),
+        # Ada (RTX 4090) and Blackwell have their own packed-load tile; they
+        # are not gfx strings, but the shared tuning-family vocabulary routes
+        # them here.
+        ("sm_89", (16, 32, 128, 4, 2, 64, 0)),
+        ("sm_100", (16, 32, 128, 4, 2, 64, 0)),
         ("sm_90", None),
         ("gfx9999", None),
     ],
@@ -118,9 +121,11 @@ def test_rdna4_launch_is_measured_not_a_cdna_placeholder():
 
 
 def test_gate_limits_reject_unregistered_arch():
-    # Ada is registered (see test_launch_config_table); everything else that is
-    # not an explicit sm_*/gfx* target must keep the fused gate disabled.
-    assert gate_limits("sm_89") == (16, 2048)
+    # Ada and Blackwell are registered (see test_launch_config_table);
+    # everything else that is not an explicit sm_*/gfx* target must keep the
+    # fused gate disabled.
+    assert gate_limits("sm_89") == (64, 0)
+    assert gate_limits("sm_100") == (64, 0)
     assert gate_limits("sm_80") == (0, 0)
     assert gate_limits("sm_90") == (0, 0)
     assert gate_limits(None) == (0, 0)
@@ -441,6 +446,41 @@ def test_gfx1201_gptq_gemm_matches_independent_torch_oracle(
 ):
     _require_gpu_arch("gfx1201")
     _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("desc_act", [False, True])
+@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("m", [2, 16])
+def test_fused_gemm_split_off_is_bitwise_equal_to_pre_rewrite(
+    dtype, desc_act, bits, m,
+):
+    arch_name = _device_arch()
+    if arch_name not in FUSED_ARCHES:
+        pytest.skip(f"registered fused ROCm GPU required (found {arch_name or 'none'})")
+    tile = launch_config(arch_name)
+    module = _make_module(2048, 1024, dtype, 128, desc_act, False, bits)
+    x = torch.randn(m, 2048, device="cuda", dtype=dtype)
+
+    def old(out_dtype):
+        return pre_rewrite_gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=out_dtype, bits=bits,
+            block_m=tile.block_m, block_n=tile.block_n, block_k=tile.block_k,
+            num_warps=tile.num_warps, num_stages=tile.num_stages,
+        )
+
+    def new(out_dtype):
+        return gptq_gemm(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=out_dtype, bits=bits,
+            uniform_group=module._gptq_gemm_uniform_group, split_k=1,
+        )
+
+    with torch.inference_mode():
+        assert torch.equal(old(torch.float32), new(torch.float32))
+        assert torch.equal(old(None), new(None))
 
 
 @pytest.mark.cuda

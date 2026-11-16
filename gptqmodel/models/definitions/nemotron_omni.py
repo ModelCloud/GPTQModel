@@ -14,7 +14,7 @@ from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
-from .nemotron_h import NemotronHQModel
+from .nemotron_h import NEMOTRON_H_LAYER_MODULES, NemotronHQModel
 
 
 class NemotronOmniQModel(NemotronHQModel):
@@ -35,25 +35,17 @@ class NemotronOmniQModel(NemotronHQModel):
 
     pre_lm_head_norm_module = "language_model.backbone.norm_f"
 
+    # The embedded language backbone is the Nemotron-H decoder, so the layer
+    # inventory must be the one `NemotronHQModel` declares. Reusing it keeps
+    # routed experts, shared experts, the top-k router and the SSM convolution
+    # declared here too; a local copy previously dropped all of them and left
+    # most of the checkpoint in BF16 with no error (issue #4355).
     module_tree = [
         "language_model",
         "backbone",
         "layers",
         "#",
-        {
-            "norm": ("norm:!",),
-            "mixer": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
-                "o_proj:1",
-                "in_proj:2",
-                "out_proj:2",
-                "gate_proj:3",
-                "up_proj:3",
-                "down_proj:4",
-            ),
-        }
+        NEMOTRON_H_LAYER_MODULES,
     ]
 
     @classmethod
@@ -140,7 +132,7 @@ class NemotronOmniQModel(NemotronHQModel):
 
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(
-            self.model_local_path, trust_remote_code=True
+            self.model_local_path, trust_remote_code=self.trust_remote_code
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):

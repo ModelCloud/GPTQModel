@@ -6,12 +6,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear, _undo_awq_interleave
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_runtime_error
-from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
+from gptqmodel.utils.marlin import (
+    awq_to_marlin_zero_points,
+    marlin_runtime_available,
+    marlin_runtime_error,
+)
 from gptqmodel.utils.swordfish import (
     _validate_swordfish_device_support,
     prewarm_swordfish_extension,
@@ -21,7 +25,10 @@ from gptqmodel.utils.swordfish import (
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
     pack_factor = 32 // bits
-    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+    # Only the classic 4-bit layout is interleaved. Wider widths are packed as
+    # a contiguous little-endian stream, matching AWQ readers such as
+    # AwqTorch/AllSpark.
+    order_map = [0, 2, 4, 6, 1, 3, 5, 7] if bits == 4 else list(range(pack_factor))
 
     assert unpacked.shape[1] % pack_factor == 0
     packed = torch.zeros(
@@ -33,6 +40,26 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
             value = unpacked[:, col * pack_factor + order].to(torch.int32)
             packed[:, col] |= value << (lane * bits)
     return packed
+
+
+def _marlin_zero_points_reference(
+    zero_points: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    bits: int,
+) -> torch.Tensor:
+    """Independent Torch oracle for Marlin's zero-point permutation + packing."""
+    scale_perm = [i + 8 * j for i in range(8) for j in range(8)]
+    interleave = [0, 2, 4, 6, 1, 3, 5, 7] if bits == 4 else [0, 2, 1, 3]
+
+    zp = zero_points.reshape(-1, len(scale_perm))[:, scale_perm]
+    zp = zp.reshape(-1, len(interleave))[:, interleave].ravel()
+    zp = zp.reshape(size_k, size_n).to(torch.int32)
+
+    pack_factor = 32 // bits
+    fields = zp.reshape(size_k, size_n // pack_factor, pack_factor)
+    shifts = torch.arange(pack_factor, dtype=torch.int32) * bits
+    return (fields << shifts).sum(dim=2, dtype=torch.int32)
 
 
 def _mock_awq_module_tensors(
@@ -291,3 +318,79 @@ def test_awq_swordfish_cuda_zero_points_match_torch_awq():
         atol=0.15,
         rtol=0.05,
     )
+
+
+def test_awq_marlin_zero_points_8bit_keeps_natural_column_order():
+    """8-bit AWQ zero points are packed in natural order, so Marlin must only
+    apply its own permutation and not undo a 4-bit-style interleave."""
+    torch.manual_seed(3974)
+    bits = 8
+    size_k, size_n = 4, 256
+    zero_points = torch.randint(0, 1 << bits, (size_k, size_n), dtype=torch.int32)
+
+    packed = _pack_awq_tensor(zero_points, bits)
+    actual = awq_to_marlin_zero_points(packed, size_k, size_n, bits)
+    expected = _marlin_zero_points_reference(zero_points, size_k, size_n, bits)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_machete_undo_awq_interleave_8bit_is_identity():
+    values = torch.arange(64, dtype=torch.int32).reshape(8, 8)
+
+    actual = _undo_awq_interleave(values, 8)
+
+    torch.testing.assert_close(actual, values, rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("group_size", [128, -1])
+def test_awq_marlin_cuda_8bit_matches_dense_reference(group_size):
+    if marlin_import_exception is not None:
+        pytest.skip(f"AWQ Marlin kernel unavailable: {marlin_import_exception}")
+    if not marlin_runtime_available(torch.float16):
+        pytest.skip(marlin_runtime_error(torch.float16))
+
+    torch.manual_seed(3974)
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    bits = 8
+    rows, in_features, out_features = 8, 512, 256
+    effective_group_size = in_features if group_size == -1 else group_size
+    groups = in_features // effective_group_size
+    maxq = (1 << bits) - 1
+
+    codes = torch.randint(0, maxq + 1, (in_features, out_features), dtype=torch.int32)
+    zero_points = torch.randint(0, maxq + 1, (groups, out_features), dtype=torch.int32)
+    scales = (torch.rand(groups, out_features) * 0.01 + 0.001).to(dtype)
+    qweight = _pack_awq_tensor(codes, bits)
+    qzeros = _pack_awq_tensor(zero_points, bits)
+
+    module = _build_awq_module(
+        AwqMarlinLinear,
+        device=device,
+        bits=bits,
+        group_size=group_size,
+        in_features=in_features,
+        out_features=out_features,
+        qweight=qweight,
+        qzeros=qzeros,
+        scales=scales,
+        bias=torch.zeros(out_features, dtype=dtype),
+    )
+
+    group_indices = torch.arange(in_features) // effective_group_size
+    dense_weight = (codes - zero_points.index_select(0, group_indices)).to(dtype)
+    dense_weight = dense_weight * scales.index_select(0, group_indices)
+    dense_weight = dense_weight.to(device)
+    x = torch.randn((rows, in_features), device=device, dtype=dtype) / in_features**0.5
+    expected = x @ dense_weight
+
+    with torch.inference_mode():
+        actual = module(x)
+        repeated = module(x)
+    torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(actual, expected, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(repeated, expected, atol=5e-2, rtol=5e-2)

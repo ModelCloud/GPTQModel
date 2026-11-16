@@ -15,10 +15,30 @@ import weakref
 
 import torch
 import torch.nn.functional as F
-import triton
-import triton.language as tl
+
+
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # no Triton (e.g. macOS): the module still imports for the pure-torch paths
+    triton = None
+    tl = None
 
 from .api import NF12Weight
+
+
+def _jit(fn):
+    """``triton.jit`` when Triton is available; identity otherwise so import succeeds.
+
+    The decorated bodies only need ``tl`` when a launcher runs them, and every
+    launcher calls :func:`_require_triton` first.
+    """
+    return triton.jit(fn) if triton is not None else fn
+
+
+def _require_triton() -> None:
+    if triton is None:
+        raise RuntimeError("nf12: the FP32 gate kernels need Triton, which this build does not have")
 
 
 _gate_views: weakref.WeakKeyDictionary[NF12Weight, tuple[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = (
@@ -97,7 +117,7 @@ def _get_gate_view(weight: NF12Weight):
         return cached[1]
 
 
-@triton.jit
+@_jit
 def _linear_fp32_gate_planes(
     x_ptr, meta_ptr, low_ptr, escapes_ptr, bias_ptr, out_ptr,
     n: tl.constexpr, exp_base: tl.constexpr, has_bias: tl.constexpr, m: tl.constexpr,
@@ -155,7 +175,7 @@ def _linear_fp32_gate_planes(
         tl.store(out_ptr + 5 * n + output_row, tl.sum(acc5, 0) + bias)
 
 
-@triton.jit
+@_jit
 def _linear_fp32(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, rows_ptr, out_ptr,
     n: tl.constexpr, output_n: tl.constexpr, k: tl.constexpr, m: tl.constexpr,
@@ -209,7 +229,7 @@ def _linear_fp32(
     tl.store(out_ptr + row_m * output_n + output_row, result, row_m < m)
 
 
-@triton.jit
+@_jit
 def _linear_fp32_six_b1(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, out_ptr,
     n: tl.constexpr, k: tl.constexpr, exp_base: tl.constexpr,
@@ -272,7 +292,7 @@ def _linear_fp32_six_b1(
     tl.store(out_ptr + (row + 5) * n + output_row, tl.sum(acc5, axis=1) + bias)
 
 
-@triton.jit
+@_jit
 def _linear_fp32_short(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, rows_ptr, out_ptr,
     n: tl.constexpr, output_n: tl.constexpr, k: tl.constexpr,
@@ -316,7 +336,7 @@ def _linear_fp32_short(
     tl.store(out_ptr + input_row * output_n + output_rows, result, output_rows < output_n)
 
 
-@triton.jit
+@_jit
 def _linear_bf16_fp32_tc(
     x_ptr, packed_ptr, escapes_ptr, bias_ptr, out_ptr,
     n: tl.constexpr, k: tl.constexpr, m: tl.constexpr,
@@ -366,6 +386,7 @@ def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
     Short-K full heads use BF16 Tensor Cores with FP32 accumulation. Other
     shapes use the general packed FP32 path without retaining a dense weight.
     """
+    _require_triton()
     if not x.is_cuda or x.dtype != torch.bfloat16 or x.ndim < 1:
         raise ValueError("gptqmodel_nf12.linear_bf16_fp32 needs a CUDA BF16 activation")
     if x.shape[-1] != weight.shape[1] or x.device != weight.device:
@@ -388,7 +409,7 @@ def linear_bf16_fp32(x: torch.Tensor, weight: NF12Weight,
     return out
 
 
-@triton.jit
+@_jit
 def _linear_fp32_prefill_gate_tc(
     x_ptr, weight_ptr, bias_ptr, out_ptr,
     m: tl.constexpr, n: tl.constexpr, k: tl.constexpr,
@@ -421,6 +442,7 @@ def _linear_fp32_prefill_gate_tc(
 def _linear_fp32_prefill_gate(x: torch.Tensor, weight: NF12Weight,
                               bias: torch.Tensor | None) -> torch.Tensor:
     """Decode one BF16 gate only for this call, then run FP32 Tensor Core GEMM."""
+    _require_triton()
     n, k = weight.shape
     m = x.numel() // k
     out = torch.empty((*x.shape[:-1], n), dtype=torch.float32, device=x.device)
@@ -446,6 +468,7 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
     a persistent BF16 or FP32 weight copy. The reduction is numerically close
     to dense FP32 GEMM but may use a different summation order.
     """
+    _require_triton()
     if not x.is_cuda or x.dtype != torch.float32 or x.ndim < 1:
         raise ValueError("gptqmodel_nf12.linear_fp32 needs a CUDA FP32 activation")
     if x.shape[-1] != weight.shape[1] or x.device != weight.device:
@@ -517,4 +540,5 @@ def linear_fp32(x: torch.Tensor, weight: NF12Weight,
 def linear_fp32_staged_b1(x: torch.Tensor, weight: NF12Weight,
                           bias: torch.Tensor | None = None) -> torch.Tensor:
     """Fuse FP32 staged rows while retaining each ordinary B1 reduction tree."""
+    _require_triton()
     return linear_fp32(x, weight, bias, _staged_b1=True)

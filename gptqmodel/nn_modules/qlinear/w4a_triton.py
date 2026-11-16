@@ -32,16 +32,18 @@ except ImportError:  # pragma: no cover - exercised on a build without mma_v2
     mma_v2 = None
 
 
-def _gluon_jit(fn):
+def _gluon_jit(fn=None, *, do_not_specialize=None):
     """Decorate ``fn`` with ``gluon.jit`` when Gluon is importable.
 
     Without a usable Gluon Ampere MMA the kernel cannot be lowered. Keep the
     definition so the module surface is stable, but leave it undecorated: the
     callers check :func:`native_fp8_gemm_error` first and report that error.
     """
+    if fn is None:
+        return lambda inner: _gluon_jit(inner, do_not_specialize=do_not_specialize)
     if gluon is None:
         return fn
-    return gluon.jit(fn)
+    return gluon.jit(fn, do_not_specialize=do_not_specialize)
 
 
 NATIVE_FP8_GEMM_MIN_TRITON = "3.6.0"
@@ -106,20 +108,39 @@ def _to_e4m3_rn(value):
 
 @triton.jit
 def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
-    row = tl.program_id(0)
+    # rows * K can exceed 2^31 for a very large prefill batch; compute the row
+    # offset in 64-bit so the load/store addresses do not wrap.
+    row = tl.program_id(0).to(tl.int64)
     k = tl.arange(0, BK)
     x = tl.load(X + row * K + k, k < K, other=0).to(tl.float32)
+    # `tl.max` ignores NaN, so a NaN element leaves `amax` finite and the clamp
+    # below turns the NaN quotient into a saturated finite code. Poison the row
+    # scale instead so the NaN reaches the caller (the Torch reference
+    # `fp8_token_qdq` rejects such a row) rather than a silent finite result.
+    row_has_nan = tl.max((x != x).to(tl.int32), 0) > 0
     amax = tl.max(tl.abs(x), 0)
-    scale = tl.where(amax > 0, amax / 448.0, 1.0)
-    q = _to_e4m3_rn(tl.minimum(tl.maximum(x / scale, -448.0), 448.0))
+    # `amax / 448.0` can underflow to zero for tiny-but-finite rows, and
+    # `div_rn(x, 0)` then returns NaN/Inf that the clamp folds into a wrong
+    # saturated code.  Keep the same unscaled fallback as the Torch reference
+    # (`fp8_token_qdq`) so both paths stay bit-exact.
+    scale = amax / 448.0
+    scale = tl.where(scale > 0, scale, 1.0)
+    scale = tl.where(row_has_nan, float("nan"), scale)
+    # Divide with the IEEE round-to-nearest instruction. Triton's plain `/`
+    # may lower to the approximate reciprocal sequence, which is one ULP off
+    # near an E4M3 midpoint and flips the code; `fp8_token_qdq`, the oracle
+    # GPTQ replay calibrates against, divides in exact FP32. Keep the scale
+    # itself as `amax / 448.0`: `div_rn` there would change the reference
+    # scale and break equality instead.
+    q = _to_e4m3_rn(tl.minimum(tl.maximum(tl.div_rn(x, scale), -448.0), 448.0))
     tl.store(Q + row * K + k, q, k < K)
     tl.store(RowScale + row, scale)
 
 
-@_gluon_jit
+@_gluon_jit(do_not_specialize=["M"])
 def _grouped_fp8_gemm(
     A, W, Scales, RowScale, Bias, Out,
-    M: gl.constexpr, N: gl.constexpr, K: gl.constexpr,
+    M, N: gl.constexpr, K: gl.constexpr,
     HAS_BIAS: gl.constexpr,
     BM: gl.constexpr, BN: gl.constexpr,
 ):
@@ -127,7 +148,10 @@ def _grouped_fp8_gemm(
     mma_layout: gl.constexpr = gl.NVMMADistributedLayout(
         version=[2, 0], warps_per_cta=[4, 1], instr_shape=[16, 8]
     )
-    rows = gl.program_id(0) * BM + gl.arange(0, BM, layout=gl.SliceLayout(1, layout))
+    # `M` is a runtime int (the token count) so a new batch size does not
+    # recompile the kernel. Rows are 64-bit for the same reason as the
+    # overflow fix: rows * N can exceed 2^31.
+    rows = gl.program_id(0).to(gl.int64) * BM + gl.arange(0, BM, layout=gl.SliceLayout(1, layout))
     cols = gl.program_id(1) * BN + gl.arange(0, BN, layout=gl.SliceLayout(0, layout))
     ka = gl.arange(0, 128, layout=gl.SliceLayout(0, layout))
     kb = gl.arange(0, 128, layout=gl.SliceLayout(1, layout))

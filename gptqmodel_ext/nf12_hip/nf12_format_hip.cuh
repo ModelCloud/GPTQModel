@@ -133,9 +133,9 @@ __device__ __forceinline__ void decode_bulk(const Group& g, uint32_t base_x4, ui
 // wave-uniform on the fast path.
 __device__ __forceinline__ void decode_group(const Group& g, uint32_t base_x4,
                                              const uint4* __restrict__ escapes,
-                                             uint32_t (&r)[4]) {
+                                             uint32_t num_escapes, uint32_t (&r)[4]) {
   decode_bulk(g, base_x4, r);
-  if (g.meta == 0u) {
+  if (g.meta == 0u && g.lo0 < num_escapes) {
     const uint4 v = escapes[g.lo0];
     r[0] = v.x;
     r[1] = v.y;
@@ -183,6 +183,69 @@ __device__ __forceinline__ void store_row_tile(__hip_bfloat16* __restrict__ out,
   for (int h = 0; h < 2; ++h) {
 #pragma unroll
     for (int q = 0; q < 2; ++q) p[h * row8 + 4 * q] = x[h][q];
+  }
+}
+
+// Store the same elements as `store_row_tile`, widened to FP32 in one pass.
+// BF16 -> FP32 is an exact bit shift (sign, zero, infinity and NaN payloads
+// included), so this is bit-identical to storing BF16 and widening afterwards.
+__device__ __forceinline__ void store_row_tile_fp32(float* __restrict__ out,
+                                                    int64_t off, int64_t ld, const RowTile& x) {
+  const int64_t row8 = ld;
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+      const uint4 v = x[h][q];
+      const uint32_t words[4] = {v.x, v.y, v.z, v.w};
+      float4 lo;
+      float4 hi;
+      lo.x = __uint_as_float((words[0] & 0x0000ffffu) << 16);
+      lo.y = __uint_as_float(words[0] & 0xffff0000u);
+      lo.z = __uint_as_float((words[1] & 0x0000ffffu) << 16);
+      lo.w = __uint_as_float(words[1] & 0xffff0000u);
+      hi.x = __uint_as_float((words[2] & 0x0000ffffu) << 16);
+      hi.y = __uint_as_float(words[2] & 0xffff0000u);
+      hi.z = __uint_as_float((words[3] & 0x0000ffffu) << 16);
+      hi.w = __uint_as_float(words[3] & 0xffff0000u);
+      // Same element offsets as the BF16 store: chunk (h, q) starts at
+      // off + 8*h*ld + 32*q elements (each uint4 is 8 BF16 values).
+      float4* dst = reinterpret_cast<float4*>(out + off + 8 * h * row8 + 32 * q);
+      dst[0] = lo;
+      dst[1] = hi;
+    }
+  }
+}
+
+// out = widen(x) - wq, at the same element offsets as `store_row_tile`.
+// `wq` is a dense FP32 matrix with the same layout as the decoded output.
+__device__ __forceinline__ void store_row_tile_sub_fp32(float* __restrict__ out,
+                                                        const float* __restrict__ wq,
+                                                        int64_t off, int64_t ld, const RowTile& x) {
+  const int64_t row8 = ld;
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+      const uint4 v = x[h][q];
+      const uint32_t words[4] = {v.x, v.y, v.z, v.w};
+      const float4* src = reinterpret_cast<const float4*>(wq + off + 8 * h * row8 + 32 * q);
+      const float4 a = src[0];
+      const float4 b = src[1];
+      float4 lo;
+      float4 hi;
+      lo.x = __uint_as_float((words[0] & 0x0000ffffu) << 16) - a.x;
+      lo.y = __uint_as_float(words[0] & 0xffff0000u) - a.y;
+      lo.z = __uint_as_float((words[1] & 0x0000ffffu) << 16) - a.z;
+      lo.w = __uint_as_float(words[1] & 0xffff0000u) - a.w;
+      hi.x = __uint_as_float((words[2] & 0x0000ffffu) << 16) - b.x;
+      hi.y = __uint_as_float(words[2] & 0xffff0000u) - b.y;
+      hi.z = __uint_as_float((words[3] & 0x0000ffffu) << 16) - b.z;
+      hi.w = __uint_as_float(words[3] & 0xffff0000u) - b.w;
+      float4* dst = reinterpret_cast<float4*>(out + off + 8 * h * row8 + 32 * q);
+      dst[0] = lo;
+      dst[1] = hi;
+    }
   }
 }
 
@@ -286,12 +349,12 @@ __device__ __forceinline__ void load_source_planes(const uint4* __restrict__ pac
 template <WeightSource S>
 __device__ __forceinline__ void source_planes_to_atoms(
     const uint4 (&p)[SourceTraits<S>::kLoads], uint32_t base_x4,
-    const uint4* __restrict__ escapes, AtomRegs& r) {
+    const uint4* __restrict__ escapes, uint32_t num_escapes, AtomRegs& r) {
   if constexpr (S == WeightSource::kNf12) {
-    decode_group(Group{p[0].x, p[1].x, p[1].y}, base_x4, escapes, r[0]);
-    decode_group(Group{p[0].y, p[1].z, p[1].w}, base_x4, escapes, r[1]);
-    decode_group(Group{p[0].z, p[2].x, p[2].y}, base_x4, escapes, r[2]);
-    decode_group(Group{p[0].w, p[2].z, p[2].w}, base_x4, escapes, r[3]);
+    decode_group(Group{p[0].x, p[1].x, p[1].y}, base_x4, escapes, num_escapes, r[0]);
+    decode_group(Group{p[0].y, p[1].z, p[1].w}, base_x4, escapes, num_escapes, r[1]);
+    decode_group(Group{p[0].z, p[2].x, p[2].y}, base_x4, escapes, num_escapes, r[2]);
+    decode_group(Group{p[0].w, p[2].z, p[2].w}, base_x4, escapes, num_escapes, r[3]);
   } else {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {

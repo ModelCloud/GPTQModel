@@ -8,6 +8,8 @@ from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class Starcoder2QModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"starcoder2"})
+
     fusable = FusableConfig("starcoder2").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     pre_lm_head_norm_module = "model.norm"
@@ -18,8 +20,10 @@ class Starcoder2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("c_fc:0", "c_proj:1"),
+            # ``c_proj`` consumes the GELU of ``c_fc``, so folding a scale into
+            # ``c_fc`` would not preserve the MLP output.
+            "mlp": ("c_fc:0:nosrc", "c_proj:1"),
         }
     ]

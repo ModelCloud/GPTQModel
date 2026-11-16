@@ -46,6 +46,7 @@ struct NarrowParams {
   int64_t ldx;
   const uint8_t* w;
   const uint4* escapes;
+  uint32_t num_escapes;
   uint32_t base_x4;
   const __nv_bfloat16* bias;
   __nv_bfloat16* y;
@@ -173,7 +174,7 @@ __global__ void __launch_bounds__(32 * W) narrow_kernel(const __grid_constant__ 
           }
         }
         uint32_t a[4][4];
-        T::fragments(wv[i], p.base_x4, p.escapes, a);
+        T::fragments(wv[i], p.base_x4, p.escapes, p.num_escapes, a);
 #pragma unroll
         for (int j = 0; j < 4; ++j)
 #pragma unroll
@@ -370,6 +371,7 @@ cudaError_t linear_narrow_sm120(const LinearArgs& a, int config) {
   p.x = a.x;
   p.ldx = a.ldx;
   p.w = a.weight;
+  p.num_escapes = a.num_escapes;
   p.escapes = a.source == WeightSource::kNF12 ? a.escapes : nullptr;
   p.base_x4 = exp_base_x4(a.exp_base);
   p.bias = a.bias;

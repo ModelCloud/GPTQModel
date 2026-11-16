@@ -26,6 +26,7 @@ from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
     quantize_exl3,
     reconstruct_exl3_tensors,
+    validate_exl3_quantization_geometry,
 )
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
@@ -56,12 +57,9 @@ from ..quantization.config import FORMAT, METHOD, EXL3Config, GPTQConfig
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exl3_capture_batch_spool import (
-    CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV,
-    CAPTURE_BATCH_SPOOL_ENV,
     EXL3CaptureBatchSpool,
 )
 from ..utils.exl3_capture_frontier import (
-    CAPTURE_FRONTIER_ENV,
     EXL3CaptureDescriptor,
     EXL3CaptureFrontierStore,
     EXL3CaptureRecord,
@@ -116,18 +114,14 @@ from ..utils.exl3_router_candidates import (
     has_learned_router_recovery,
     learned_router_ranked_choices,
 )
-from ..utils.exllamav3 import create_exllamav3_module
+from ..utils.exllamav3 import _resolve_linear_shape, create_exllamav3_module
+from ..utils.kernel import get_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from ..utils.offload import offload_to_disk, offload_to_safetensors_reference
 
 
-HOST_RSS_LIMIT_ENV = "GPTQMODEL_EXL3_HOST_RSS_LIMIT_BYTES"
-CUDA_ALLOCATION_LIMIT_ENV = "GPTQMODEL_EXL3_CUDA_ALLOCATION_LIMIT_BYTES"
-MEMORY_TELEMETRY_INTERVAL_ENV = (
-    "GPTQMODEL_EXL3_MEMORY_TELEMETRY_INTERVAL_BATCHES"
-)
 HESSIAN_OWNER_POLICY_META = "ds4rt_hessian_owner_policy"
 HESSIAN_OWNER_WEIGHTED_ROUND_ROBIN = (
     "ds4rt.exl3-hessian-owner-weighted-round-robin-v1"
@@ -835,7 +829,7 @@ class EXL3Processor(LoopProcessor):
     ) -> EXL3CaptureFrontierStore | None:
         """Construct the opt-in durable Hessian store at most once per run."""
 
-        configured_root = os.getenv(CAPTURE_FRONTIER_ENV)
+        configured_root = get_kernel_config().exl3_capture_frontier
         root = Path(configured_root).expanduser().resolve() if configured_root else None
         family_join = (
             provenance.get("family_join")
@@ -935,20 +929,13 @@ class EXL3Processor(LoopProcessor):
     ) -> frozenset[int]:
         """Rebuild live Hessians from durable batches before missing forwards."""
 
-        configured_root = os.getenv(CAPTURE_BATCH_SPOOL_ENV)
+        configured_root = get_kernel_config().exl3_capture_batch_spool
         if not configured_root:
             self._active_capture_batch_spool = None
             self._active_capture_batch_layer = None
             return frozenset()
         phase, identities = self._subset_capture_phase(subset)
-        try:
-            checkpoint_interval = int(
-                os.getenv(CAPTURE_BATCH_CHECKPOINT_INTERVAL_ENV, "1")
-            )
-        except ValueError as error:
-            raise RuntimeError(
-                "EXL3 capture checkpoint interval is invalid"
-            ) from error
+        checkpoint_interval = get_kernel_config().exl3_capture_batch_checkpoint_interval
         if checkpoint_interval <= 0:
             raise RuntimeError("EXL3 capture checkpoint interval must be positive")
         family_ids = {
@@ -1069,7 +1056,7 @@ class EXL3Processor(LoopProcessor):
             self, "_active_capture_batch_layer", None
         ) == layer_index:
             capture.commit_batch(batch_index)
-            interval = int(os.getenv(MEMORY_TELEMETRY_INTERVAL_ENV, "0"))
+            interval = get_kernel_config().exl3_memory_telemetry_interval_batches
             spool = getattr(self, "_active_capture_batch_spool", None)
             complete = (
                 spool is not None
@@ -1084,11 +1071,9 @@ class EXL3Processor(LoopProcessor):
     def _enforce_capture_memory_limits(self, *, context: str) -> dict[str, Any]:
         """Stop after a durable batch if host or device capture memory is unsafe."""
 
-        try:
-            host_limit = int(os.getenv(HOST_RSS_LIMIT_ENV, "0"))
-            cuda_limit = int(os.getenv(CUDA_ALLOCATION_LIMIT_ENV, "0"))
-        except ValueError as error:
-            raise RuntimeError("EXL3 memory-safety environment is invalid") from error
+        kernel = get_kernel_config()
+        host_limit = kernel.exl3_host_rss_limit_bytes
+        cuda_limit = kernel.exl3_cuda_allocation_limit_bytes
         summary = self.log_capture_memory_summary(context)
         rss = int(summary.get("process_rss_bytes", 0))
         if host_limit > 0 and rss > host_limit:
@@ -2146,6 +2131,13 @@ class EXL3Processor(LoopProcessor):
         if module_qcfg is None:
             return
 
+        in_features, out_features = _resolve_linear_shape(module)
+        validate_exl3_quantization_geometry(
+            in_features,
+            out_features,
+            label=f"EXL3 projection `{module.full_name}`",
+        )
+
         capture_qcfg = GPTQConfig(
             bits=max(1, module_qcfg.runtime_bits),
             group_size=-1,
@@ -2322,10 +2314,37 @@ class EXL3Processor(LoopProcessor):
         return quant_args
 
     def _quant_input_weight(self, capture: GPTQ, device: torch.device) -> torch.Tensor:
-        """Exports the captured dense weight matrix in EXL3 quantizer layout."""
+        """Exports the captured dense weight in EXL3's padded quantizer layout.
+
+        The quantizer expects ``(in_features, stored_out_features)`` with a
+        128-aligned output width. The extra output columns are zero and are
+        cropped by ``ExllamaV3Linear.forward`` after reconstruction.
+        """
 
         normalized = capture.clone_module(copy=True, device=device)
-        return normalized.t().contiguous().to(torch.float32)
+        weight = normalized.t().contiguous().to(torch.float32)
+        in_features, out_features = int(weight.shape[0]), int(weight.shape[1])
+        named_module = getattr(capture, "_named_module", None)
+        label = (
+            f"EXL3 projection `{named_module.full_name}`"
+            if isinstance(named_module, NamedModule)
+            else "EXL3 projection"
+        )
+        stored_outputs = validate_exl3_quantization_geometry(
+            in_features,
+            out_features,
+            label=label,
+        )
+        if stored_outputs == out_features:
+            return weight
+        padded = torch.zeros(
+            (in_features, stored_outputs),
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        padded[:, :out_features].copy_(weight)
+        del weight
+        return padded
 
     def _restore_module_weight(
         self, module: NamedModule, quantized_weight: torch.Tensor
@@ -2335,10 +2354,16 @@ class EXL3Processor(LoopProcessor):
         target = module.module if isinstance(module, NamedModule) else module
 
         if isinstance(target, transformers.Conv1D):
-            return quantized_weight.contiguous().view_as(target.weight.data)
+            stored = quantized_weight
+            if stored.shape[1] > target.weight.shape[1]:
+                stored = stored[:, : target.weight.shape[1]]
+            return stored.contiguous().view_as(target.weight.data)
 
         if isinstance(target, (torch.nn.Linear, _ConvNd)):
-            return quantized_weight.t().contiguous().view_as(target.weight.data)
+            stored = quantized_weight
+            if stored.shape[1] > target.weight.shape[0]:
+                stored = stored[:, : target.weight.shape[0]]
+            return stored.t().contiguous().view_as(target.weight.data)
 
         raise NotImplementedError(
             f"Unsupported EXL3 module type: {target.__class__.__name__}"

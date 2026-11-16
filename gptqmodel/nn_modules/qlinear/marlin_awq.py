@@ -350,7 +350,24 @@ class AwqMarlinLinear(AWQuantLinear):
                 marlin_pad_dim(self.bias, self.out_features, padded_n)
             )
 
+        # AWQ words are now repacked and permuted into Marlin's runtime layout;
+        # the original checkpoint tensors are no longer recoverable.
+        self._marlin_repacked = True
+
         super().post_init()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_marlin_repacked", False):
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    "AWQ Marlin rewrites `qweight`/`qzeros` into its runtime layout; the "
+                    "original checkpoint tensors cannot be reconstructed. Use "
+                    "`GPTQModel.save()`/`save_quantized()` for a loadable checkpoint, or "
+                    "reload the original checkpoint."
+                )
+        super()._save_to_state_dict(destination, prefix, keep_vars)
 
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:

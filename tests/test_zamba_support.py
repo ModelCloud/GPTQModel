@@ -54,9 +54,12 @@ def test_zamba_module_tree_expands_mamba_and_hybrid_paths():
     full_flat_modules = {name for block in full_layer_modules for name in block}
 
     assert ZambaQModel.layer_modules_strict is False
-    assert ZambaQModel.pre_lm_head_norm_module == "lm_head"
+    assert ZambaQModel.pre_lm_head_norm_module == "model.final_layernorm"
     assert ZambaQModel.extract_layers_node() == ["model.layers"]
     assert "input_layernorm:!" in full_flat_modules
+    assert "mamba.conv1d:!" in full_flat_modules
+    assert "mamba_decoder.mamba.conv1d:!" in full_flat_modules
+    assert "shared_transf:!" in full_flat_modules
     assert "mamba.in_proj" in flat_modules
     assert "mamba.out_proj" in flat_modules
     assert "linear" in flat_modules
@@ -174,6 +177,23 @@ def test_zamba_mixer_uses_fast_path_when_kernels_are_available(monkeypatch):
         "cache_params": cache_params,
         "attention_mask": attention_mask,
     }
+
+
+def test_zamba_mixer_without_legacy_paths_keeps_upstream_forward():
+    """Transformers 5.22 removed slow_forward/cuda_kernels_forward from the mixer."""
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
+        return "upstream"
+
+    mixer_class = type("ZambaMambaMixer", (), {"forward": forward})
+    mixer = mixer_class()
+    layer = SimpleNamespace(mamba=mixer)
+    qmodel = ZambaQModel.__new__(ZambaQModel)
+    qmodel.model = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
+
+    qmodel.monkey_patch()
+
+    assert mixer.forward(object()) == "upstream"
 
 
 def test_zamba_capture_and_replay_kwargs_preserve_original_hidden_states_and_layer_index():

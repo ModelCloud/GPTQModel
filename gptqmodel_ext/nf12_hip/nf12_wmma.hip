@@ -129,7 +129,7 @@ struct WmmaRoute {
 template <WeightSource S, bool kRouted, int kMt, int kSplits, bool kDbl, bool kPad>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     wmma_kernel(const __hip_bfloat16* __restrict__ x, const uint4* __restrict__ packed,
-                const uint4* __restrict__ escapes, uint32_t base_x4, int64_t n, int64_t k,
+                const uint4* __restrict__ escapes, uint32_t num_escapes, uint32_t base_x4, int64_t n, int64_t k,
                 int64_t m_rows, __hip_bfloat16* __restrict__ out,
                 const __hip_bfloat16* __restrict__ bias, float* __restrict__ partial,
                 WmmaRoute route_in) {
@@ -137,7 +137,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 #if !NF12_HAS_WMMA
   // gfx1250 has no wmma-128b-insts. The body still has to exist so the host
   // and device passes agree on the symbol; the dispatcher never selects it.
-  (void)x; (void)packed; (void)escapes; (void)base_x4; (void)n; (void)k; (void)m_rows;
+  (void)x; (void)packed; (void)escapes; (void)num_escapes; (void)base_x4; (void)n; (void)k; (void)m_rows;
   (void)out; (void)bias; (void)partial; (void)route_in;
   if (blockIdx.x == 0xffffffffu && threadIdx.x == 0xffffffffu) out[0] = __float2bfloat16(0.f);
 #else
@@ -156,6 +156,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // scanned count are free: they return before touching memory.
   int64_t m = m_rows;
   int64_t m0 = int64_t(blockIdx.y) * (kMt * 16);
+  uint32_t esc_count = num_escapes;
   WmmaRoute route = route_in;
   if constexpr (kRouted) {
     int64_t rem = int64_t(blockIdx.z) * gridDim.y + blockIdx.y;
@@ -182,7 +183,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     // so all three are resolved here rather than by the launcher.
     packed += int64_t(e) * route.weight_expert_vecs;
     base_x4 = exp_base_x4(route.exp_base[e]);
-    if (escapes != nullptr) escapes = escapes + route.escape_offsets[e];
+    if (escapes != nullptr) {
+      const int64_t esc_lo = route.escape_offsets[e];
+      const int64_t esc_hi = route.escape_offsets[e + 1];
+      escapes = escapes + esc_lo;
+      esc_count = esc_hi > esc_lo ? static_cast<uint32_t>(esc_hi - esc_lo) : 0u;
+    }
   }
   const int64_t m_local = min(int64_t(kMt * 16), m - m0);
   if (m_local <= 0) return;
@@ -272,7 +278,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   // Decode the planes into the row-major 16x64 shared tile.
   auto decode_into = [&](const uint4 (&planes)[SourceTraits<S>::kLoads], __hip_bfloat16* dst) {
     AtomRegs r;
-    source_planes_to_atoms<S>(planes, base_x4, escapes, r);
+    source_planes_to_atoms<S>(planes, base_x4, escapes, esc_count, r);
 
     RowTile xr;
     atoms_to_tile(r, xr);
@@ -417,15 +423,18 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 #endif  // NF12_HAS_WMMA
 }
 
-// Sum the per-split FP32 planes and round to BF16 exactly once, so the result
-// is identical to a single-pass FP32 accumulation followed by one rounding
-// (splitting K only changes the association order of the FP32 adds).
+// Sum the per-split FP32 planes pairwise and round to BF16 exactly once.
+// K splitting creates several long FP32 accumulator chains; a balanced tree
+// avoids adding a small tail partial to an already large linear sum.
 __global__ void wmma_reduce_kernel(const float* __restrict__ partial, __hip_bfloat16* __restrict__ out,
                                    int64_t total, int splits, int64_t n, const __hip_bfloat16* __restrict__ bias) {
   for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < total;
        i += int64_t(gridDim.x) * blockDim.x) {
-    float s = partial[i];
-    for (int j = 1; j < splits; ++j) s += partial[int64_t(j) * total + i];
+    float vals[8];
+    for (int j = 0; j < splits; ++j) vals[j] = partial[int64_t(j) * total + i];
+    for (int width = 1; width < splits; width *= 2)
+      for (int j = 0; j + width < splits; j += 2 * width) vals[j] += vals[j + width];
+    float s = vals[0];
     if (bias != nullptr) s += __bfloat162float(bias[i % n]);
     out[i] = __float2bfloat16(s);
   }
@@ -495,6 +504,7 @@ static bool wmma_available() {
 //   25600x5120   40 CTAs, 400 k-blocks   s1 / s1
 //   8192x8192    64 CTAs, 128 k-blocks   s1 / s1
 //   8192x57344  448 CTAs, 128 k-blocks   s2 / s2
+//   8192x2048    16 CTAs, 128 k-blocks   s8 / s8
 //   2048x8192    64 CTAs,  32 k-blocks   s1 / s1
 //   896x4864     38 CTAs,  14 k-blocks   s1 / s1
 static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
@@ -508,6 +518,12 @@ static int pick_splits(int64_t blocks_x, int64_t m, int64_t k_blocks) {
   // single token tile leaves the machine idle; at m=32/64 the extra CTAs only
   // add the reduce pass (1260/1371 -> 1230/1293 us).
   if (blocks_x >= 8 * kOneWave) return (m >= 128 || m <= 16) ? 2 : 1;
+  // A single token tile with long K and a half-wave to one-wave grid still
+  // benefits from split-K. On gfx1201, 2048x8192 at m=16 drops from 45.3 us
+  // unsplit to 23.2 us with eight disjoint K slices.
+  if (m <= 16 && blocks_x >= kOneWave / 2 && blocks_x <= kOneWave &&
+      k_blocks >= 4 * kOneWave)
+    return 8;
   // Wide N already fills the machine several times over, so a split only adds
   // the reduce pass. Measured on gfx1201 against the same launch with one K
   // pass: 4096x28672 (224 CTAs) lost 6.5% / 11.1% / 23.7% at m=16/32/64 when
@@ -607,7 +623,7 @@ static WmmaPlan wmma_plan(int64_t n, int64_t k, int64_t m) {
 // rather than a second implementation.
 template <WeightSource Src>
 static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
-                                   uint32_t exp_base, const void* x, void* out, int64_t n,
+                                   uint32_t exp_base, uint32_t num_escapes, const void* x, void* out, int64_t n,
                                    int64_t k, int64_t m, const void* bias, void* workspace,
                                    size_t workspace_bytes, hipStream_t stream) {
   if constexpr (Src == WeightSource::kNf12) {
@@ -650,7 +666,7 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
 #define NF12_LAUNCH(SRC, ROUTED, T, SPL, D, P)                                          \
   wmma_kernel<SRC, ROUTED, T, SPL, D, P><<<grid, kThreadsPerBlock, 0, stream>>>(           \
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),  \
-      escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out),     \
+      escapes, num_escapes, exp_base_x4(exp_base), n, k, m, reinterpret_cast<__hip_bfloat16*>(out), \
       reinterpret_cast<const __hip_bfloat16*>(bias), partial, route)
 
   // (tile count, split count) pairs the dispatcher can reach. Split 1 needs
@@ -682,7 +698,8 @@ static hipError_t linear_wmma_impl(const uint8_t* packed, const uint4* escapes,
   const int lds_kib = pad ? 36 : 32;
   const int64_t waves = (ctas + kCtasPerWave - 1) / kCtasPerWave;
   const bool lds_starved = waves > 128 / lds_kib && waves <= 4;
-  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved);
+  const bool dbl = (tiles <= 6) && (tiles > 2 || !lds_starved) &&
+                   !(m <= 16 && splits >= 8 && ctas >= 4 * kCtasPerWave);
   // Only the two smallest tile counts get the runtime buffer choice; from
   // three tiles up the buffer is unconditional, so those stay single.
 #define NF12_TILES(SRC, T, D)                                                \
@@ -795,7 +812,7 @@ static hipError_t moe_linear_impl(const uint8_t* packed, const uint4* escapes,
   // single tile keeps the VGPR budget low enough for several CTAs per CU.
   wmma_kernel<Src, true, 1, 1, false, false><<<grid, kThreadsPerBlock, 0, stream>>>(
       reinterpret_cast<const __hip_bfloat16*>(x), reinterpret_cast<const uint4*>(packed),
-      escapes, 0u, n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, nullptr, route);
+      escapes, 0u, 0u, n, k, 0, reinterpret_cast<__hip_bfloat16*>(out), nullptr, nullptr, route);
   return hipGetLastError();
 }
 
@@ -841,10 +858,10 @@ size_t nf12_wmma_workspace_bytes(int64_t n, int64_t k, int64_t m) {
 
 
 hipError_t nf12_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_t exp_base,
-                                const void* x, void* out, int64_t n, int64_t k, int64_t m,
+                                uint32_t num_escapes, const void* x, void* out, int64_t n, int64_t k, int64_t m,
                                 const void* bias, void* workspace, size_t workspace_bytes,
                                 hipStream_t stream) {
-  return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, x, out, n, k, m, bias,
+  return linear_wmma_impl<WeightSource::kNf12>(packed, escapes, exp_base, num_escapes, x, out, n, k, m, bias,
                                                workspace, workspace_bytes, stream);
 }
 
@@ -852,7 +869,7 @@ hipError_t nf12_linear_wmma(const uint8_t* packed, const uint4* escapes, uint32_
 hipError_t nf12_linear_wmma_bf16t(const uint8_t* packed, const void* x, void* out, int64_t n,
                                       int64_t k, int64_t m, const void* bias, void* workspace,
                                       size_t workspace_bytes, hipStream_t stream) {
-  return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, x, out, n, k, m, bias,
+  return linear_wmma_impl<WeightSource::kBf16t>(packed, nullptr, 0u, 0u, x, out, n, k, m, bias,
                                                 workspace, workspace_bytes, stream);
 }
 

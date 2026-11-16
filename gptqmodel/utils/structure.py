@@ -28,6 +28,7 @@ Notes:
 import atexit
 import copy
 import gc
+import hashlib
 import inspect
 import json
 import os
@@ -35,6 +36,7 @@ import re
 import shutil
 import tempfile
 import threading
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
@@ -46,6 +48,7 @@ from safetensors import safe_open
 from torch import nn
 
 from ..utils.logger import setup_logger
+from .checkpoint_paths import validate_relative_checkpoint_path
 from .p2p import safe_move_to
 from .torch import as_torch_device
 
@@ -843,6 +846,286 @@ def reset_non_layerwise_shard_warning() -> None:
         _NON_LAYERWISE_SHARD_WARNING_EMITTED = False
 
 
+def _build_module_init_template(
+    owner_module: nn.Module,
+    *,
+    fallback_config: Any = None,
+    target_model: Optional[nn.Module] = None,
+) -> Optional[nn.Module]:
+    """Construct a CPU template module for init-only buffers missing from checkpoints."""
+
+    config_source = getattr(owner_module, "config", None)
+    if config_source is None and target_model is not None:
+        config_source = getattr(target_model, "config", None)
+    if config_source is None:
+        config_source = fallback_config
+
+    module_type = type(owner_module)
+    try:
+        signature = inspect.signature(module_type)
+    except (TypeError, ValueError):
+        return None
+
+    params = list(signature.parameters.values())
+    if not params:
+        return None
+
+    args = []
+    kwargs = {}
+
+    for param in params:
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+
+        if param.name == "config":
+            if config_source is None:
+                return None
+            value = copy.deepcopy(config_source)
+        elif param.name == "device":
+            value = torch.device("cpu")
+        elif hasattr(owner_module, param.name):
+            # Some remote-code modules rebuild buffers from constructor attributes instead of config.
+            raw_value = getattr(owner_module, param.name)
+            if isinstance(raw_value, torch.Tensor) and raw_value.device.type == "meta":
+                scalar_attr_name = f"scalar_{param.name}"
+                if hasattr(owner_module, scalar_attr_name):
+                    raw_value = getattr(owner_module, scalar_attr_name)
+                elif param.default is not inspect.Parameter.empty:
+                    continue
+                else:
+                    return None
+            value = copy.deepcopy(raw_value)
+        elif param.default is not inspect.Parameter.empty:
+            continue
+        else:
+            return None
+
+        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            args.append(value)
+        else:
+            kwargs[param.name] = value
+
+    try:
+        return module_type(*args, **kwargs)
+    except Exception as exc:
+        log.debug(
+            "LazyTurtle: failed to build template for `%s`: %s",
+            module_type.__name__,
+            exc,
+        )
+        return None
+
+
+def restore_init_owned_rotary_buffers(model: nn.Module) -> int:
+    """Rebuild rotary buffers that transformers 5 materialized uninitialized.
+
+    transformers 5 initializes models on the meta device and materializes every
+    non-persistent buffer that the checkpoint does not own with
+    ``torch.empty_like`` (``PreTrainedModel._move_missing_keys_from_meta_to_device``).
+    Its default ``_init_weights`` re-derives a native rotary module's ``inv_freq``
+    only when the module exposes ``original_inv_freq``; a model class that
+    overrides ``_init_weights`` (most legacy remote-code families) never gets
+    that restore. The rotary buffers then hold uninitialized memory, which
+    silently corrupts every native baseline (issue #4093 item 10).
+
+    Rebuild each affected module's direct non-persistent buffers from a CPU
+    constructor template. Meta shells are left to LazyTurtle, which restores
+    them when the owning module is materialized.
+    """
+
+    from transformers import PreTrainedModel
+
+    uses_default_init_weights = (
+        getattr(type(model), "_init_weights", None) is PreTrainedModel._init_weights
+    )
+    fallback_config = getattr(model, "config", None)
+    restored = 0
+
+    for module in model.modules():
+        if not isinstance(getattr(module, "inv_freq", None), torch.Tensor):
+            continue
+        if uses_default_init_weights and hasattr(module, "original_inv_freq"):
+            # transformers' default `_init_weights` already re-derived these.
+            continue
+        non_persistent = getattr(module, "_non_persistent_buffers_set", None)
+        if not non_persistent:
+            continue
+        direct_buffers = dict(module.named_buffers(recurse=False))
+        if any(buffer.is_meta for buffer in direct_buffers.values()):
+            # Lazy shell: LazyTurtle restores on materialization.
+            continue
+        template = _build_module_init_template(
+            module,
+            fallback_config=fallback_config,
+        )
+        if template is None:
+            continue
+        template_buffers = dict(template.named_buffers(recurse=False))
+        for name in non_persistent:
+            buffer = direct_buffers.get(name)
+            source = template_buffers.get(name)
+            if buffer is None or source is None or buffer.is_meta:
+                continue
+            module.register_buffer(
+                name,
+                safe_move_to(source, buffer.device, dtype=buffer.dtype),
+                persistent=False,
+            )
+            restored += 1
+
+    return restored
+
+
+# ---------------------------------------------------------------------------
+# LazyTurtle pickle-checkpoint conversion cache
+# ---------------------------------------------------------------------------
+#
+# Converting a `.bin`/`.pt` checkpoint to safetensors materializes a full model
+# copy on disk.  That copy must live at least as long as every LazyTurtle that
+# reads from it, be shared by concurrent turtles for the same source, and be
+# removed as soon as the last one is released (issue #4205).  The cache below
+# owns those directories; turtles hold a refcounted lease backed by a
+# `weakref.finalize` callback so garbage collection releases the directory even
+# when callers never call `close()`.
+
+_CONVERSION_COMPLETE_MARKER = ".lazyturtle-complete"
+_CONVERSION_CACHE: Dict[tuple, "_ConvertedCheckpoint"] = {}
+_CONVERSION_CACHE_LOCK = threading.Lock()
+_CONVERSION_PATH_LOCKS: Dict[str, threading.RLock] = {}
+# Only these model-init kwargs select the conversion output location.  The
+# configured GPTQModel offload path arrives as `offload_to_disk_path`; the
+# transformers spelling is accepted for callers that reuse HF kwargs.
+_CONVERSION_OFFLOAD_KWARGS = ("offload_to_disk_path", "offload_folder")
+
+
+@dataclass
+class _ConvertedCheckpoint:
+    path: str
+    refcount: int = 0
+
+
+def _normalize_conversion_root(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        value = os.fspath(value)
+    except TypeError:
+        return None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or value == "auto":
+        return None
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def _conversion_stable_json(value: Any) -> str:
+    def _default(obj: Any) -> str:
+        if isinstance(obj, torch.dtype):
+            return str(obj)
+        if isinstance(obj, bytes):
+            return obj.hex()
+        if isinstance(obj, type):
+            return f"{obj.__module__}.{obj.__qualname__}"
+        if callable(obj):
+            return f"{getattr(obj, '__module__', '')}.{getattr(obj, '__qualname__', type(obj).__qualname__)}"
+        return repr(obj)
+
+    try:
+        return json.dumps(value, sort_keys=True, default=_default)
+    except Exception:
+        return repr(value)
+
+
+def _conversion_path_lock(path: str) -> threading.RLock:
+    with _CONVERSION_CACHE_LOCK:
+        lock = _CONVERSION_PATH_LOCKS.get(path)
+        if lock is None:
+            lock = threading.RLock()
+            _CONVERSION_PATH_LOCKS[path] = lock
+        return lock
+
+
+def _conversion_is_complete(path: str) -> bool:
+    if os.path.islink(path) or not os.path.isdir(path):
+        return False
+    return os.path.isfile(os.path.join(path, _CONVERSION_COMPLETE_MARKER))
+
+
+def _perform_conversion(path: str, convert) -> None:
+    root = os.path.dirname(path)
+    os.makedirs(root, exist_ok=True)
+    if os.path.islink(path):
+        raise RuntimeError(f"LazyTurtle: conversion target `{path}` is a symlink")
+    staging = tempfile.mkdtemp(
+        prefix=f".{os.path.basename(path)}.tmp-",
+        dir=root,
+    )
+    try:
+        convert(staging)
+        # The marker is written inside the staging directory and published by
+        # the atomic rename, so a directory without it is always partial.
+        marker = os.path.join(staging, _CONVERSION_COMPLETE_MARKER)
+        with open(marker, "w", encoding="utf-8") as fp:
+            fp.write("ok\n")
+            fp.flush()
+            os.fsync(fp.fileno())
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise RuntimeError(f"LazyTurtle: conversion target `{path}` is unsafe")
+            shutil.rmtree(path)
+        os.replace(staging, path)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _acquire_conversion(*, key: tuple, path: str, convert) -> None:
+    """Ensure `path` holds a complete conversion, holding one cache refcount."""
+
+    lock = _conversion_path_lock(path)
+    with lock:
+        with _CONVERSION_CACHE_LOCK:
+            entry = _CONVERSION_CACHE.get(key)
+            if entry is None:
+                entry = _ConvertedCheckpoint(path=path)
+                _CONVERSION_CACHE[key] = entry
+            elif entry.path != path:
+                raise RuntimeError("LazyTurtle: conversion cache path changed")
+            entry.refcount += 1
+        try:
+            if not _conversion_is_complete(path):
+                _perform_conversion(path, convert)
+        except BaseException:
+            _release_conversion(key, path)
+            raise
+
+
+def _release_conversion(key: tuple, path: str) -> None:
+    lock = _conversion_path_lock(path)
+    with lock:
+        with _CONVERSION_CACHE_LOCK:
+            entry = _CONVERSION_CACHE.get(key)
+            if entry is None:
+                return
+            entry.refcount -= 1
+            if entry.refcount > 0:
+                return
+            _CONVERSION_CACHE.pop(key, None)
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _cleanup_all_conversions() -> None:
+    with _CONVERSION_CACHE_LOCK:
+        paths = [entry.path for entry in _CONVERSION_CACHE.values()]
+        _CONVERSION_CACHE.clear()
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_cleanup_all_conversions)
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -854,8 +1137,9 @@ class LazyTurtle:
     This source keeps only the checkpoint index in memory and materializes the
     requested shell submodule directly from the relevant safetensors shards. If
     a local checkpoint only provides PyTorch pickle weights (`.bin`, `.pt`,
-    `.pth`, `.ckpt`), LazyTurtle converts them into temporary safetensors once
-    and then reads from that converted directory.
+    `.pth`, `.ckpt`), LazyTurtle converts them into safetensors once, caches the
+    result per source/config for as long as any turtle needs it, and reads from
+    that converted directory.
     """
 
     supports_reload = False
@@ -872,6 +1156,7 @@ class LazyTurtle:
         module_tree: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
+        offload_path: Optional[str] = None,
     ) -> None:
         self.config = copy.deepcopy(config)
         # Some tests and lightweight loaders pass a minimal config object.
@@ -880,6 +1165,13 @@ class LazyTurtle:
         if self._model_type is None:
             self._model_type = getattr(getattr(target_model, "config", None), "model_type", None)
         self._model_init_kwargs = dict(model_init_kwargs or {})
+        # Pickle-checkpoint conversions belong under the configured offload root,
+        # not the system TMPDIR.  `_resolve_checkpoint_source` runs before the
+        # rest of the shell is built, so resolve this first.
+        self._conversion_root = _normalize_conversion_root(offload_path) or self._infer_conversion_root(
+            target_model
+        )
+        self._conversion_leases: Dict[tuple, Any] = {}
         self.model_local_path, self._weight_map = self._resolve_checkpoint_source(
             model_local_path=model_local_path,
             target_model=target_model,
@@ -908,6 +1200,100 @@ class LazyTurtle:
         self._lock = threading.RLock()
         self._active_source_root: Optional[str] = None
         self._active_source_provenance: Optional[Dict[str, Any]] = None
+
+    def close(self) -> None:
+        """Release the converted checkpoint directory held by this turtle.
+
+        The directory is shared with every other live turtle that reads the same
+        source/config and is removed only when the last lease is released.
+        """
+
+        leases = getattr(self, "_conversion_leases", None)
+        if not leases:
+            return
+        self._conversion_leases = {}
+        for finalizer in leases.values():
+            finalizer()
+
+    def __enter__(self) -> "LazyTurtle":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def _infer_conversion_root(self, target_model: Optional[nn.Module]) -> Optional[str]:
+        """Resolve the configured offload root from the turtle's load settings."""
+
+        for key in _CONVERSION_OFFLOAD_KWARGS:
+            value = (self._model_init_kwargs or {}).get(key)
+            root = _normalize_conversion_root(value)
+            if root is not None:
+                return root
+        if target_model is not None:
+            for attr in ("quantize_config", "_quantize_config"):
+                quantize_config = getattr(target_model, attr, None)
+                if quantize_config is None:
+                    continue
+                root = _normalize_conversion_root(
+                    getattr(quantize_config, "offload_to_disk_path", None)
+                )
+                if root is not None:
+                    return root
+        return None
+
+    def _conversion_root_for(self, target_model: Optional[nn.Module]) -> str:
+        return (
+            getattr(self, "_conversion_root", None)
+            or self._infer_conversion_root(target_model)
+            or os.path.abspath(tempfile.gettempdir())
+        )
+
+    def _conversion_cache_digest(
+        self,
+        *,
+        model_local_path: str,
+        resolved_archive_file: str,
+        target_model: Optional[nn.Module],
+    ) -> str:
+        model_cls = type(target_model) if target_model is not None else None
+        config = getattr(self, "config", None)
+        to_dict = getattr(config, "to_dict", None)
+        if callable(to_dict):
+            try:
+                config_payload = to_dict()
+            except Exception:
+                config_payload = repr(config)
+        else:
+            config_payload = repr(config)
+        load_kwargs = dict(getattr(self, "_model_init_kwargs", {}) or {})
+        load_kwargs.pop("device_map", None)
+        source_stat = None
+        try:
+            stat = os.stat(resolved_archive_file)
+            source_stat = [stat.st_size, stat.st_mtime_ns]
+        except OSError:
+            pass
+        payload = {
+            "source": os.path.realpath(model_local_path),
+            "archive": [os.path.realpath(resolved_archive_file), source_stat],
+            "class": (
+                f"{model_cls.__module__}.{model_cls.__qualname__}"
+                if model_cls is not None
+                else None
+            ),
+            "config": config_payload,
+            "load_kwargs": load_kwargs,
+        }
+        return hashlib.sha256(_conversion_stable_json(payload).encode("utf-8")).hexdigest()[:16]
+
+    def _register_conversion_lease(self, *, key: tuple, path: str) -> None:
+        leases = getattr(self, "_conversion_leases", None)
+        if leases is None:
+            leases = {}
+            self._conversion_leases = leases
+        if key in leases:
+            return
+        leases[key] = weakref.finalize(self, _release_conversion, key, path)
 
     def configure_active_source_staging(
         self,
@@ -1063,6 +1449,7 @@ class LazyTurtle:
         module_tree: Optional[Any] = None,
         hf_conversion_map_reversed: Optional[Any] = None,
         target_model: Optional[nn.Module] = None,
+        offload_path: Optional[str] = None,
     ) -> Optional["LazyTurtle"]:
         if not model_local_path or not os.path.isdir(model_local_path):
             return None
@@ -1075,14 +1462,17 @@ class LazyTurtle:
                 module_tree=module_tree,
                 hf_conversion_map_reversed=hf_conversion_map_reversed,
                 target_model=target_model,
+                offload_path=offload_path,
             )
         except Exception as exc:
-            log.debug(
-                "LazyTurtle: disabled for `%s`: %s",
-                model_local_path,
-                exc,
-            )
-            return None
+            # Every caller treats `None` as a hard failure ("can't open model
+            # path ... for offload_to_disk"), so swallowing the construction
+            # error only replaced the real cause with a misleading one. Surface
+            # it with the path and the original exception chained.
+            raise RuntimeError(
+                f"LazyTurtle: cannot open `{model_local_path}` as a lazy checkpoint source: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     def eval(self) -> "LazyTurtle":
         return self
@@ -1098,6 +1488,7 @@ class LazyTurtle:
         recurse: bool = True,
         tie_weights: bool = True,
         show_progress: bool = True,
+        skip_module_types: tuple[type, ...] = (),
     ) -> torch.nn.Module:
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
@@ -1133,6 +1524,7 @@ class LazyTurtle:
                 non_blocking=non_blocking,
                 modules_by_name=modules_by_name,
                 show_progress=show_progress,
+                skip_module_types=skip_module_types,
             )
         if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
@@ -1151,18 +1543,45 @@ class LazyTurtle:
             extensions=list(self._FALLBACK_CHECKPOINT_EXTENSIONS),
             possible_model_basenames=["model", "pytorch_model"],
         )
-        tempdir = tempfile.mkdtemp(prefix=self._TEMPDIR_PREFIX)
-        # CI jobs only guarantee writes under a temp root, so register best-effort
-        # cleanup for the converted checkpoint directory at interpreter exit.
-        atexit.register(shutil.rmtree, tempdir, ignore_errors=True)
-
-        log.info(
-            "LazyTurtle: no safetensors found under `%s`; converting `%s` into temporary safetensors at `%s`.",
-            model_local_path,
-            resolved_archive_file,
-            tempdir,
+        root = self._conversion_root_for(target_model)
+        digest = self._conversion_cache_digest(
+            model_local_path=model_local_path,
+            resolved_archive_file=resolved_archive_file,
+            target_model=target_model,
         )
+        key = (root, digest)
+        # Keep the process id in the name so two processes loading the same
+        # source never share a directory that one of them may delete.
+        path = os.path.join(root, f"{self._TEMPDIR_PREFIX}{os.getpid()}-{digest}")
 
+        def _convert(staging_dir: str) -> None:
+            # Keep a last-resort interpreter-exit cleanup in addition to the
+            # refcounted lease, so a crash in an unrelated finalizer cannot
+            # strand a model-sized directory.
+            atexit.register(shutil.rmtree, path, ignore_errors=True)
+            log.info(
+                "LazyTurtle: no safetensors found under `%s`; converting `%s` into cached safetensors at `%s`.",
+                model_local_path,
+                resolved_archive_file,
+                path,
+            )
+            self._export_checkpoint_to_safetensors(
+                model_local_path=model_local_path,
+                target_model=target_model,
+                output_dir=staging_dir,
+            )
+
+        _acquire_conversion(key=key, path=path, convert=_convert)
+        self._register_conversion_lease(key=key, path=path)
+        return path
+
+    def _export_checkpoint_to_safetensors(
+        self,
+        *,
+        model_local_path: str,
+        target_model: Optional[nn.Module],
+        output_dir: str,
+    ) -> None:
         model_cls = type(target_model) if target_model is not None else None
         if model_cls is None or not callable(getattr(model_cls, "from_pretrained", None)):
             raise TypeError("LazyTurtle: transformers-based fallback requires a target model class with from_pretrained().")
@@ -1192,13 +1611,15 @@ class LazyTurtle:
                     f"LazyTurtle: `{model_cls.__name__}` does not provide save_pretrained(), "
                     "cannot convert checkpoint via transformers full-model load."
                 )
-            loaded_model.save_pretrained(tempdir, safe_serialization=True)
-            return tempdir
-        except Exception:
-            # If transformers reload/export fails, do not leave behind a partial
-            # temp directory because LazyTurtle will be disabled for this model.
-            shutil.rmtree(tempdir, ignore_errors=True)
-            raise
+            # Older trust_remote_code classes still declare
+            # `_tied_weights_keys = ["lm_head.weight"]`. transformers 5 expects
+            # the `{target: source}` mapping and otherwise raises
+            # `AttributeError: 'list' object has no attribute 'keys'` while
+            # saving. Normalize exactly as the quantized writer does.
+            from .hf import _normalize_legacy_tied_weights_keys
+
+            _normalize_legacy_tied_weights_keys(loaded_model)
+            loaded_model.save_pretrained(output_dir, safe_serialization=True)
         finally:
             if loaded_model is not None:
                 del loaded_model
@@ -1222,6 +1643,29 @@ class LazyTurtle:
             )
             weight_map = self._load_weight_map(tempdir)
             return tempdir, weight_map
+
+    def has_checkpoint_tensor(
+        self,
+        *,
+        target_model: nn.Module,
+        target_submodule: nn.Module,
+        rel_name: str = "weight",
+    ) -> bool:
+        """Return whether the checkpoint owns `rel_name` for one shell submodule.
+
+        This resolves the same runtime-to-checkpoint aliases as the
+        materializers but never loads a tensor, so callers can decide whether a
+        lazily loaded module has an independent source weight at all. A tied
+        embedding model omits `lm_head.weight` from the checkpoint, which is
+        exactly the case the shell cannot discover through parameter identity.
+        """
+
+        path = _get_qualified_name(target_model, target_submodule)
+        with self._lock:
+            source_name, _expert_index, _split_index, _split_dim = (
+                self._resolve_checkpoint_tensor_source(path, rel_name)
+            )
+            return source_name is not None
 
     def checkpoint_tensors_for_submodule(
         self,
@@ -1496,6 +1940,11 @@ class LazyTurtle:
             weight_map = index.get("weight_map", {})
             if not isinstance(weight_map, dict) or not weight_map:
                 raise ValueError(f"Invalid safetensors index: {resolved_archive_file}")
+            # Shard names are later joined to an output directory. Reject an
+            # absolute or `..` entry here so every consumer sees a contained
+            # relative name; HF blob symlinks are resolved by the reader.
+            for filename in weight_map.values():
+                validate_relative_checkpoint_path(filename, kind="checkpoint weight_map shard")
             return {str(name): str(filename) for name, filename in weight_map.items()}
 
         shard_name = os.path.basename(resolved_archive_file)
@@ -1661,15 +2110,46 @@ class LazyTurtle:
         return key
 
     @classmethod
+    def _hf_conversion_lookup_keys(
+        cls,
+        *,
+        target_model: Optional[nn.Module] = None,
+        model_type: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        """Ordered keys for the transformers checkpoint-conversion registry.
+
+        Transformers registers some mappings under the config ``model_type`` and
+        others under the model class name (for example ``GPTNeoXForCausalLM``
+        owns the ``embed_out.`` -> ``lm_head.`` rename). Config ``architectures``
+        carries the same class names for checkpoints that were saved with them.
+        """
+        config = getattr(target_model, "config", None)
+        # An explicit definition alias wins, then the config ``model_type``.
+        # Some Transformers 5.22 maps are registered under the class name only
+        # (for example GPT-NeoX), so the model class and ``config.architectures``
+        # are queried as additional keys.
+        candidates: list[Any] = [model_type, getattr(config, "model_type", None)]
+        if target_model is not None:
+            candidates.append(type(target_model).__name__)
+        architectures = getattr(config, "architectures", None)
+        if isinstance(architectures, (list, tuple)):
+            candidates.extend(architectures)
+
+        keys: list[str] = []
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate and candidate not in keys:
+                keys.append(candidate)
+        return tuple(keys)
+
+    @classmethod
     def infer_hf_conversion_map_reversed(
         cls,
         *,
         target_model: Optional[nn.Module] = None,
         model_type: Optional[str] = None,
     ) -> Optional[Any]:
-        if model_type is None:
-            model_type = getattr(getattr(target_model, "config", None), "model_type", None)
-        if isinstance(model_type, str):
+        lookup_keys = cls._hf_conversion_lookup_keys(target_model=target_model, model_type=model_type)
+        if lookup_keys:
             # Prefer the public transformers conversion registry and fall back to
             # older per-model mappings when needed.
             try:
@@ -1683,9 +2163,12 @@ class LazyTurtle:
                     None,
                 )
                 if callable(get_checkpoint_conversion_mapping):
-                    reversed_map = cls.reverse_hf_conversion_map(get_checkpoint_conversion_mapping(model_type))
-                    if reversed_map is not None:
-                        return reversed_map
+                    for lookup_key in lookup_keys:
+                        reversed_map = cls.reverse_hf_conversion_map(
+                            get_checkpoint_conversion_mapping(lookup_key)
+                        )
+                        if reversed_map is not None:
+                            return reversed_map
 
         if target_model is None:
             return None
@@ -3116,11 +3599,18 @@ class LazyTurtle:
         non_blocking: bool,
         modules_by_name: Optional[Dict[str, nn.Module]] = None,
         show_progress: bool = True,
+        skip_module_types: tuple[type, ...] = (),
     ) -> int:
         """Materialize checkpoint tensors into a shell submodule and rebuild missing init-only buffers."""
 
         t_params = dict(target_submodule.named_parameters(recurse=recurse))
         t_bufs = dict(target_submodule.named_buffers(recurse=recurse))
+        # `skip_module_types` names module classes that own a packed
+        # quantization payload rather than a dense checkpoint tensor (for
+        # example a `weight` buffer holding FP8 codes). Materializing those
+        # leaves by checkpoint name would replace the packed payload with the
+        # source tensor, so they are left exactly as their owner holds them.
+        skipped_module_paths = _skipped_submodule_paths(target_submodule, skip_module_types)
         if modules_by_name is None:
             # Fall back to a full model scan when the caller has not supplied a
             # targeted ancestor+descendant map.
@@ -3130,6 +3620,8 @@ class LazyTurtle:
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
         concat_entries: list[tuple[str, str, list[str], int | _LazyCheckpointAssembly]] = []
         for rel_name in t_params:
+            if _is_skipped_tensor_path(rel_name, skipped_module_paths):
+                continue
             concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
             if concat_source is not None:
                 full_names, concat_dim = concat_source
@@ -3158,6 +3650,8 @@ class LazyTurtle:
             grouped_names.setdefault(shard, []).append(("param", rel_name, full_name, expert_index, split_index, split_dim))
 
         for rel_name, target_buffer in list(t_bufs.items()):
+            if _is_skipped_tensor_path(rel_name, skipped_module_paths):
+                continue
             concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
             if concat_source is not None:
                 full_names, concat_dim = concat_source
@@ -3484,66 +3978,11 @@ class LazyTurtle:
     ) -> Optional[nn.Module]:
         """Construct a CPU template module for init-only buffers missing from checkpoint shards."""
 
-        config_source = getattr(owner_module, "config", None)
-        if config_source is None:
-            config_source = getattr(target_model, "config", None)
-        if config_source is None:
-            config_source = self.config
-
-        module_type = type(owner_module)
-        try:
-            signature = inspect.signature(module_type)
-        except (TypeError, ValueError):
-            return None
-
-        params = list(signature.parameters.values())
-        if not params:
-            return None
-
-        args = []
-        kwargs = {}
-
-        for param in params:
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-
-            if param.name == "config":
-                if config_source is None:
-                    return None
-                value = copy.deepcopy(config_source)
-            elif param.name == "device":
-                value = torch.device("cpu")
-            elif hasattr(owner_module, param.name):
-                # Some remote-code modules rebuild buffers from constructor attributes instead of config.
-                raw_value = getattr(owner_module, param.name)
-                if isinstance(raw_value, torch.Tensor) and raw_value.device.type == "meta":
-                    scalar_attr_name = f"scalar_{param.name}"
-                    if hasattr(owner_module, scalar_attr_name):
-                        raw_value = getattr(owner_module, scalar_attr_name)
-                    elif param.default is not inspect.Parameter.empty:
-                        continue
-                    else:
-                        return None
-                value = copy.deepcopy(raw_value)
-            elif param.default is not inspect.Parameter.empty:
-                continue
-            else:
-                return None
-
-            if param.kind is inspect.Parameter.POSITIONAL_ONLY:
-                args.append(value)
-            else:
-                kwargs[param.name] = value
-
-        try:
-            return module_type(*args, **kwargs)
-        except Exception as exc:
-            log.debug(
-                "LazyTurtle: failed to build template for `%s`: %s",
-                module_type.__name__,
-                exc,
-            )
-            return None
+        return _build_module_init_template(
+            owner_module,
+            fallback_config=self.config,
+            target_model=target_model,
+        )
 
     def _restore_missing_nonpersistent_buffers(
         self,
@@ -3916,6 +4355,7 @@ def alias_from_turtle_for_submodule(
     non_blocking: bool = False,
     module_path: Optional[str] = None,
     tie_weights: bool = True,
+    skip_module_types: tuple[type, ...] = (),
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     # A model may intentionally defer tie_weights() until both a capture branch
@@ -3933,6 +4373,7 @@ def alias_from_turtle_for_submodule(
         non_blocking=non_blocking,
         module_path=module_path,
         tie_weights=tie_weights,
+        **({"skip_module_types": skip_module_types} if skip_module_types else {}),
     )
 
 
@@ -3958,6 +4399,34 @@ def alias_direct_meta_from_turtle_for_submodule(
 
 def _is_meta_tensor(t: torch.Tensor) -> bool:
     return bool(getattr(t, "is_meta", False)) or (hasattr(t, "device") and t.device.type == "meta")
+
+
+def _skipped_submodule_paths(
+    submodule: nn.Module,
+    skip_module_types: tuple[type, ...],
+) -> tuple[str, ...]:
+    """Return the relative paths of submodules whose tensors must not be aliased."""
+
+    if not skip_module_types:
+        return ()
+    return tuple(
+        name
+        for name, candidate in submodule.named_modules()
+        if isinstance(candidate, skip_module_types)
+    )
+
+
+def _is_skipped_tensor_path(rel_name: str, skipped_module_paths: tuple[str, ...]) -> bool:
+    """Return whether a relative tensor name is owned by a skipped submodule."""
+
+    if not skipped_module_paths:
+        return False
+    owner_path, _, _ = rel_name.rpartition(".")
+    return any(
+        owner_path == skipped or owner_path.startswith(f"{skipped}.")
+        for skipped in skipped_module_paths
+    )
+
 
 def alias_all_from_turtle_if_meta(
     shell_model: nn.Module,

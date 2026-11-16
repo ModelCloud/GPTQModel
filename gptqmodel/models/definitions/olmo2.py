@@ -37,7 +37,9 @@ class Olmo2QModel(LlamaQModel):
                 "v_proj:0:v:in=x",
                 "o_proj:1:o",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
+            # OLMo 2 normalizes the attention output and then *adds* it to the
+            # residual, so this norm's output is not the MLP input.
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm:postnorm",),
             "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },

@@ -123,6 +123,21 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
         for source, target in field_map.items()
         if hf_params.get(source) is not None
     }
+    stop_entries = []
+    if hf_params.get("stop") is not None:
+        val = hf_params["stop"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if hf_params.get("stop_strings") is not None:
+        val = hf_params["stop_strings"]
+        if isinstance(val, str):
+            stop_entries.append(val)
+        elif isinstance(val, (list, tuple)):
+            stop_entries.extend(val)
+    if stop_entries:
+        sampling_kwargs["stop"] = stop_entries if len(stop_entries) > 1 else stop_entries[0]
     if hf_params.get("eos_token_id") is not None:
         eos_token_ids = _normalize_eos_token_ids(hf_params["eos_token_id"])
         existing_stop_ids = sampling_kwargs.get("stop_token_ids") or []
@@ -231,10 +246,19 @@ def _apply_attention_mask(token_batch: list[list[int]], attention_mask: Any) -> 
             mask = list(mask)
         if not isinstance(mask, list) or len(mask) != len(token_ids):
             raise ValueError("Each `attention_mask` row must have the same length as its token prompt.")
-        filtered = [token_id for token_id, keep in zip(token_ids, mask) if bool(keep)]
-        if not filtered:
+        if any(not isinstance(keep, (bool, int)) or keep not in (0, 1, False, True) for keep in mask):
+            raise TypeError("`attention_mask` values must be boolean or 0/1 integers.")
+        kept_positions = [index for index, keep in enumerate(mask) if bool(keep)]
+        if not kept_positions:
             raise ValueError("`attention_mask` removed every token from a prompt.")
-        filtered_batch.append(filtered)
+        first, last = kept_positions[0], kept_positions[-1]
+        # A token prompt is a bare ID sequence: dropping an interior token would
+        # renumber every later position instead of preserving the prompt, and
+        # vLLM's token prompt cannot express a hole. Only padding removal is a
+        # faithful translation of a Hugging Face mask.
+        if any(not bool(mask[index]) for index in range(first, last + 1)):
+            raise ValueError("`attention_mask` may only remove left or right padding, not tokens inside a prompt.")
+        filtered_batch.append(token_ids[first : last + 1])
     return filtered_batch
 
 
@@ -248,14 +272,35 @@ def _normalize_vllm_inputs(prompts: Any, input_ids: Any, attention_mask: Any):
     if isinstance(value, str):
         if input_ids is not None:
             raise TypeError("`input_ids` cannot be a string.")
+        if attention_mask is not None:
+            raise ValueError("`attention_mask` is only supported with `input_ids`, not text prompts.")
         return value, None
     if isinstance(value, (list, tuple)) and value and all(isinstance(item, str) for item in value):
         if input_ids is not None:
             raise TypeError("`input_ids` cannot contain strings.")
+        if attention_mask is not None:
+            raise ValueError("`attention_mask` is only supported with `input_ids`, not text prompts.")
         return list(value), None
 
     token_batch = _coerce_token_batch(value)
     return None, _apply_attention_mask(token_batch, attention_mask)
+
+
+def _original_token_rows(prompts: Any, input_ids: Any):
+    """Return the caller's own token rows, or ``None`` for a text prompt.
+
+    vLLM is given the *unpadded* rows (see ``_normalize_vllm_inputs``), but a
+    Hugging Face caller slices the returned tensor at the width of the original
+    ``input_ids``. The original rows are what restore that width.
+    """
+
+    if prompts is not None or input_ids is None:
+        return None
+    if isinstance(input_ids, str):
+        return None
+    if isinstance(input_ids, (list, tuple)) and input_ids and all(isinstance(item, str) for item in input_ids):
+        return None
+    return _coerce_token_batch(input_ids)
 
 
 def _build_sampling_params(value: Any, kwargs: Mapping[str, Any]):
@@ -278,6 +323,7 @@ def _build_sampling_params(value: Any, kwargs: Mapping[str, Any]):
             "presence_penalty",
             "ignore_eos",
             "stop",
+            "stop_strings",
             "stop_token_ids",
             "seed",
             "do_sample",
@@ -314,6 +360,9 @@ def vllm_generate(model, **kwargs):
     prompts = kwargs.pop("prompts", None)
     input_ids = kwargs.pop("input_ids", None)
     attention_mask = kwargs.pop("attention_mask", None)
+    # Captured before normalization strips the padding this adapter does not
+    # forward, so the returned tensor keeps each row's original prefix width.
+    original_rows = _original_token_rows(prompts, input_ids)
     text_prompts, token_batch = _normalize_vllm_inputs(prompts, input_ids, attention_mask)
 
     sampling_params = _build_sampling_params(kwargs.pop("sampling_params", None), kwargs)
@@ -334,10 +383,17 @@ def vllm_generate(model, **kwargs):
     )
 
     outputs = []
-    for result in req_results:
+    for index, result in enumerate(req_results):
         prompt_token_ids = list(result.prompt_token_ids)
+        # Restore the caller's padded prompt as the prefix so
+        # ``output[:, input_ids.shape[1]:]`` starts at this row's completion.
+        # A text prompt has no caller-side width, so it keeps the echo.
+        if original_rows is not None and index < len(original_rows):
+            prefix = list(original_rows[index])
+        else:
+            prefix = prompt_token_ids
         for output in result.outputs:
-            outputs.append(prompt_token_ids + list(output.token_ids))
+            outputs.append(prefix + list(output.token_ids))
     if not outputs:
         return torch.empty((0, 0), dtype=torch.long)
 

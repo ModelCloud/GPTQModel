@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import collections
+import copy
 import functools
 import hashlib
 import json
@@ -37,7 +38,7 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from ..adapter.adapter import Adapter
+from ..adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (
     CPU,
@@ -45,7 +46,12 @@ from ..models._const import (
     EXPERT_INDEX_PLACEHOLDER,
     SUPPORTS_MODULE_TYPES,
 )
-from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ..nn_modules.qlinear import (
+    QZEROS_FORMAT_BUFFER,
+    AWQuantLinear,
+    BaseQuantLinear,
+    GPTQQuantLinear,
+)
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from ..nn_modules.qlinear.marlin import MarlinLinear
@@ -59,16 +65,19 @@ from ..quantization.config import (
     dynamic_get,
     dynamic_matching_pattern,
     quant_bits_width,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.module_config import resolve_module_constructor_config
 from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
+from .checkpoint_paths import assert_auxiliary_copy_allowed
 from .ctx import ctx
 from .device import get_device
-from .hf import get_hf_config_dtype
+from .hf import get_hf_config_dtype, resolve_checkpoint_subfolder
 from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
+from .kernel import resolve_kernel_config, snapshot_kernel_config
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .p2p import safe_module_to, safe_move_to
@@ -309,6 +318,70 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
     return obj
 
 
+def move_module_to_cpu_pinned(
+    module: nn.Module,
+    *,
+    pin_min_bytes: int = 8 * 1024 * 1024,
+    chunk_bytes: int = 64 * 1024 * 1024,
+) -> nn.Module:
+    """Move a module to CPU with pinned staging for large accelerator tensors.
+
+    Pageable D2H copies synchronously fault each output page and dominated
+    layer offload. Large tensors keep pinned CPU storage so the device transfer
+    needs no second staging copy. Small tensors stay pageable to avoid pinning
+    allocator metadata and scalar state.
+    """
+
+    if pin_min_bytes < 0:
+        raise ValueError("pin_min_bytes must be non-negative")
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+
+    streams: dict[torch.device, torch.cuda.Stream] = {}
+
+    def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.device.type == "meta":
+            # Meta tensors carry no storage; copying them raises.
+            return tensor
+        if tensor.device.type != "cuda":
+            # XPU, MPS, NPU, XLA and CPU all take the ordinary path. Returning
+            # the accelerator tensor unchanged would defeat layer offload.
+            return tensor.to(device=CPU)
+        if tensor.numel() * tensor.element_size() < pin_min_bytes:
+            return tensor.to(device=CPU)
+
+        source = tensor if tensor.is_contiguous() else tensor.contiguous()
+        try:
+            result = torch.empty(
+                source.shape,
+                dtype=source.dtype,
+                device=CPU,
+                pin_memory=True,
+            )
+        except RuntimeError:
+            return source.to(device=CPU)
+
+        source_flat = source.view(-1)
+        result_flat = result.view(-1)
+        chunk_elements = max(1, chunk_bytes // source.element_size())
+        streams.setdefault(
+            source.device,
+            torch.cuda.current_stream(source.device),
+        )
+        for start in range(0, source.numel(), chunk_elements):
+            end = min(start + chunk_elements, source.numel())
+            result_flat[start:end].copy_(
+                source_flat[start:end],
+                non_blocking=True,
+            )
+        return result
+
+    moved = module._apply(to_cpu)
+    for stream in streams.values():
+        stream.synchronize()
+    return moved
+
+
 def nested_move_to(v, device, dtype: torch.dtype = None):
     if isinstance(v, torch.Tensor):
         return move_to(v, device=device, dtype=dtype)
@@ -534,7 +607,9 @@ def make_quant(
     device: DEVICE = None,
     from_quantized: bool = False,
     dtype: Optional[torch.dtype] = None,
+    bias_dtype: Optional[torch.dtype] = None,
     is_sharded: bool = False,
+    cpu_offload: bool = False,
 ) -> Type[BaseQuantLinear]:
 
     bits = qcfg.runtime_bits
@@ -546,6 +621,7 @@ def make_quant(
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
     init_kwargs = qcfg.quant_linear_init_kwargs()
+    init_kwargs["kernel"] = snapshot_kernel_config(qcfg)
 
     export_quant_method = qcfg.export_quant_method()
     backend = normalize_backend(backend, quant_method=export_quant_method)
@@ -574,6 +650,7 @@ def make_quant(
         multi_select=True,
         adapter=extension,
         is_sharded=is_sharded,
+        cpu_offload=cpu_offload,
     )
 
     log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
@@ -597,6 +674,7 @@ def make_quant(
         format=format,
         init_kwargs=init_kwargs,
         dtype=dtype,
+        bias_dtype=bias_dtype,
     )
     log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
     return linear_cls
@@ -620,9 +698,23 @@ def create_quant_module(
     adapter: Optional[Adapter] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
+    bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
 
 ):
+    # An adapter only covers the modules named by its PEFT target list and
+    # actually present in its tensor file. Passing it to every quantized module
+    # made a standard partial LoRA (q_proj/v_proj only) assert on the modules it
+    # does not cover (issue #4210).
+    if adapter is not None:
+        if not adapter.targets_module(name):
+            adapter = None
+        elif not adapter.has_weights(name):
+            log.warn(
+                f"Adapter: no LoRA tensors for targeted module `{name}`; skipping."
+            )
+            adapter = None
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -751,6 +843,7 @@ def create_quant_module(
         backend=backend,
         register_buffers=register_buffers,
         adapter=adapter,
+        bias_dtype=bias_dtype,
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
@@ -773,6 +866,7 @@ def create_quant_layer(
         format: FORMAT = FORMAT.GPTQ,
         init_kwargs: Optional[Dict[str, Any]] = None,
         dtype: Optional[torch.dtype] = None,
+        bias_dtype: Optional[torch.dtype] = None,
 
 ) -> Type[BaseQuantLinear]:
     if any(isinstance(module, candidate) for candidate in linear_candidates):
@@ -807,6 +901,7 @@ def create_quant_layer(
                     adapter=adapter,
                     init_kwargs=init_kwargs,
                     dtype=dtype,
+                    bias_dtype=bias_dtype,
                 )
             except NotImplementedError as error:
                 last_error = error
@@ -842,7 +937,19 @@ def hf_convert_gptq_v1_to_v2_format(
     checkpoint_format: str,
     meta: Optional[Dict[str, any]],
 ) -> Tuple[nn.Module, bool]:
-    if checkpoint_format == "gptq":
+    try:
+        source_format = resolve_quant_format(checkpoint_format, METHOD.GPTQ)
+    except (TypeError, ValueError):
+        source_format = None
+    if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+        # Optimum calls this before `save_pretrained()` can run. Record the
+        # on-disk layout here so the state-dict hook can undo the runtime v2
+        # conversion for a v1 checkpoint.
+        for module in model.modules():
+            if isinstance(module, GPTQQuantLinear):
+                module._checkpoint_format_on_disk = source_format
+
+    if source_format == FORMAT.GPTQ:
         # Skip v1 to v2 conversion when no loaded quant module requires v2.
         if not any(
             isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
@@ -852,8 +959,7 @@ def hf_convert_gptq_v1_to_v2_format(
 
         cfg = QuantizeConfig(bits=bits)
         return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
-    else:
-        return model, False
+    return model, False
 
 def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
     assert isinstance(module, BaseQuantLinear)
@@ -1038,6 +1144,91 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
+_RESAVE_CONVERTIBLE_GPTQ_FORMATS = (FORMAT.GPTQ, FORMAT.GPTQ_V2)
+_RESAVE_LAYOUT_FIELDS = ("bits", "group_size", "sym", "desc_act", "pack_dtype")
+
+
+def resolve_resave_format_conversion(quantize_config: QuantizeConfig) -> Optional[Tuple[FORMAT, FORMAT]]:
+    """Return ``(on_disk_format, target_format)`` when a re-save converts qzeros.
+
+    ``None`` means the checkpoint layout is unchanged.  A layout change that
+    cannot be represented by the v1/v2 qzero shift is rejected here, before a
+    writer emits a mislabelled checkpoint.
+    """
+
+    source_format = getattr(quantize_config, "_checkpoint_format_on_disk", None)
+    if source_format is None:
+        return None
+    target_format = resolve_quant_format(quantize_config.format, quantize_config.method)
+    if source_format == target_format:
+        return None
+
+    snapshot = getattr(quantize_config, "_checkpoint_layout_snapshot", None) or {}
+    changed = [
+        field
+        for field in _RESAVE_LAYOUT_FIELDS
+        if field in snapshot and getattr(quantize_config, field, None) != snapshot[field]
+    ]
+    if changed:
+        raise ValueError(
+            "Cannot change "
+            + ", ".join(changed)
+            + " while re-saving a loaded checkpoint: the packed weights would no longer "
+            "match the config. Re-quantize from the dense source instead."
+        )
+    if (
+        source_format in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+        and target_format in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+    ):
+        return source_format, target_format
+    raise ValueError(
+        "Cannot re-save a loaded checkpoint with a different quantization format "
+        f"(`{source_format}` -> `{target_format}`). Only GPTQ v1 <-> GPTQ v2 qzero "
+        "conversion is exact; every other layout change requires re-quantization "
+        "from the dense source checkpoint."
+    )
+
+
+def convert_loaded_qzeros_for_format_change(
+    model: nn.Module,
+    source_format: FORMAT,
+    target_format: FORMAT,
+) -> int:
+    """Rewrite loaded GPTQ qzeros from ``source_format`` to ``target_format``.
+
+    The source tensors are read raw from the checkpoint, so this is the only
+    place a format change can be applied before the writer copies them.
+    """
+
+    if source_format == target_format:
+        return 0
+    if (
+        source_format not in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+        or target_format not in _RESAVE_CONVERTIBLE_GPTQ_FORMATS
+    ):
+        raise ValueError(
+            f"Unsupported qzero format conversion: `{source_format}` -> `{target_format}`."
+        )
+
+    converted = 0
+    for module in model.modules():
+        if not isinstance(module, GPTQQuantLinear):
+            continue
+        qzeros = getattr(module, "qzeros", None)
+        if qzeros is None or qzeros.numel() == 0:
+            continue
+        bits = getattr(module, "bits", 4)
+        planar = bool(getattr(module, "planar", False))
+        if target_format == FORMAT.GPTQ_V2:
+            qzeros.data.copy_(_correct_gptq_v1_qzeros(qzeros.data, bits, planar=planar))
+            module.qzero_format(format=2)
+        else:
+            qzeros.data.copy_(_revert_gptq_v1_qzeros_correction(qzeros.data, bits, planar=planar))
+            module.qzero_format(format=1)
+        converted += 1
+    return converted
+
+
 def resolve_pack_device(
     quantize_config: Optional[QuantizeConfig],
     device: Optional[Union[str, torch.device, DEVICE]] = None,
@@ -1209,21 +1400,30 @@ def pack_module(
             else:
                 module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
+        target_format = (
+            resolve_quant_format(quantize_config.format, quantize_config.method)
+            if quantize_config is not None
+            else None
+        )
         if (
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
-            and resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ
-            and getattr(module_cls, "REQUIRES_FORMAT_V2", False)
+            and target_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
         ):
             with log_time_block(
-                "convert_v2_to_v1",
+                "mark_checkpoint_qzero_format",
                 logger=log,
                 module_name=name,
             ):
-                convert_gptq_v2_to_v1_format_module(
-                    module=module,
-                    quantize_config=quantize_config,
-                )
+                # Packing writes logical (v2) zero points, which is also what a
+                # ``REQUIRES_FORMAT_V2`` kernel decodes. Convert only for
+                # serialization: leaving the live buffer in the v1 ``zero - 1``
+                # layout made every in-process forward read each zero point one
+                # step low (issue #4063). ``checkpoint_layout_qzeros`` and the
+                # writer emit the converted copy from this marker.
+                module.qzero_format(format=2)
+                if getattr(module_cls, "REQUIRES_FORMAT_V2", False):
+                    module._checkpoint_format_on_disk = target_format
 
         # TODO: why move it back to gpu?
         # start = time.time()
@@ -1292,14 +1492,12 @@ def pack_model(
     else:
         default_max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
-    env_max_packers = os.getenv("GPTQMODEL_MAX_PACKERS")
-    if env_max_packers is not None:
-        try:
-            max_packers = max(1, int(env_max_packers))
-        except ValueError:
-            max_packers = default_max_packers
-    else:
-        max_packers = default_max_packers
+    configured_max_packers = resolve_kernel_config(qcfg).max_packers
+    max_packers = (
+        configured_max_packers
+        if configured_max_packers is not None
+        else default_max_packers
+    )
 
     with ctx(ThreadPoolExecutor(max_workers=max_packers), log.pb(names).manual()) as (executor, pb):
         def wrapper(name):
@@ -1559,10 +1757,74 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     storage.update(updated)
 
 
+def _dense_adapter_forward_hook(adapter: Adapter):
+    """Return a forward hook that adds the adapter update to a dense module."""
+
+    def hook(module, args, output):
+        if not args or not isinstance(output, torch.Tensor):
+            return output
+        return adapter.apply(x=args[0], out=output)
+
+    return hook
+
+
+def apply_dense_module_adapters(model, adapter: Optional[Adapter]) -> int:
+    """Attach a LoRA adapter to targeted modules that stayed dense.
+
+    Quantized modules carry their adapter inside the kernel, but a module the
+    checkpoint does not quantize (an unquantized ``lm_head``, a dynamic
+    exclusion) stayed a plain ``nn.Linear`` and its adapter weights were
+    silently dropped (issue #4210). Attach one forward hook per targeted dense
+    module so the adapter contribution is added to the base output.
+
+    Returns the number of modules that received an adapter.
+    """
+
+    if adapter is None:
+        return 0
+    if not getattr(adapter, "path", None) or adapter.path in LORA_MERGED_WEIGHT_PATHS:
+        # Merged/EoRA adapters have no separate weights to apply here.
+        return 0
+
+    applied = 0
+    for name, module in model.named_modules():
+        if isinstance(module, BaseQuantLinear):
+            continue
+        if not isinstance(module, (nn.Linear, transformers.Conv1D)):
+            continue
+        if getattr(module, "_gptqmodel_dense_adapter", None) is not None:
+            continue
+        if not adapter.targets_module(name):
+            continue
+        if not adapter.has_weights(name):
+            log.warn(
+                f"Adapter: no LoRA tensors for targeted dense module `{name}`; skipping."
+            )
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.device.type == "meta":
+            continue
+        dense_adapter = copy.deepcopy(adapter)
+        dense_adapter.post_init(weight_key=name, device=weight.device)
+        module._gptqmodel_dense_adapter = dense_adapter
+        module.register_forward_hook(_dense_adapter_forward_hook(dense_adapter))
+        applied += 1
+
+    if applied:
+        log.info(f"Adapter: applied to `{applied}` dense module(s).")
+    return applied
+
+
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
-                        max_input_length: Optional[int] = None):
+                        max_input_length: Optional[int] = None,
+                        awq_batch_size: Optional[int] = None):
     """
     Initialize model-persistent backend scratch buffers after quantized weights are loaded.
+
+    ``awq_batch_size`` sizes the AWQ ExLlamaV2 scratch. It is an explicit
+    argument rather than the ``AWQ_BATCH_SIZE`` environment variable, which a
+    concurrent ``quantize()`` used to overwrite for every later load in the
+    process (issue #4129).
     """
     fixed_bytes = {}
     model_uses_exllamav2 = False
@@ -1578,7 +1840,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed(
                 max_input_len=max_input_length or 2048,
-                max_batch_size=int(os.getenv("AWQ_BATCH_SIZE", 1))
+                max_batch_size=awq_batch_size if awq_batch_size is not None else 1,
             )
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
 
@@ -1631,8 +1893,11 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             attention_mode=quantize_config.activation_attention_mode,
             attention_recipe=quantize_config.activation_attention_recipe,
             mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
-            fused_norms=bool(quantize_config.rotation),
+            fused_norms=bool(resolve_model_rotation(quantize_config)),
         )
+
+    if quantize_config is not None:
+        apply_dense_module_adapters(model, getattr(quantize_config, "adapter", None))
 
     torch_empty_cache()
 
@@ -1648,6 +1913,12 @@ def get_checkpoints(model_id_or_path: str, extensions: List[str], possible_model
     true_model_basename = None
 
     if os.path.isdir(model_id_or_path):
+        # A downloaded snapshot is a local directory, so the Hub branch below
+        # never sees `subfolder`. Apply it here or a nested checkpoint would be
+        # searched at the repository root.
+        model_id_or_path = resolve_checkpoint_subfolder(
+            model_id_or_path, cached_file_kwargs.get("subfolder")
+        )
         for ext in extensions:
             for possible_model_basename in possible_model_basenames:
                 shard_index_name = possible_model_basename + ext + ".index.json"
@@ -1737,7 +2008,7 @@ def auto_dtype(config: PretrainedConfig,
     # Update: latest kernel accuracies have shown, with multiple ranges of shapes
     # There are no accuracy issues with bf16 vs fp16. The Marlin reduce-accumulation
     # path can use fp16, but it is disabled by default via
-    # GPTQMODEL_MARLIN_USE_FP32=True.
+    # KernelConfig.marlin_fp32=True.
     # # for inference, always use FP16 for max accuracy
     # # check test_kernel_outputs for validation between fp16 and b16 in terms of kernel accuracy
     # if quant_inference:
@@ -2043,7 +2314,11 @@ def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
     if os.path.isdir(model_id_or_path):
         py_files = [f for f in os.listdir(model_id_or_path) if f.endswith('.py')]
         for file in py_files:
-            shutil.copy2(os.path.join(model_id_or_path, file), save_dir)
+            source_path = os.path.join(model_id_or_path, file)
+            # `copy2` follows symlinks; a cloned repository must not smuggle a
+            # file from outside its own tree into an output directory.
+            assert_auxiliary_copy_allowed(model_id_or_path, source_path, kind="custom Python file")
+            shutil.copy2(source_path, save_dir)
     else:
         remote_model_info = model_info(model_id_or_path)
         for file in remote_model_info.siblings:
@@ -2293,6 +2568,12 @@ def _collect_state_dict_with_offload(
         for buffer_name, buf in module.named_buffers(recurse=False):
             if buffer_name in non_persistent:
                 continue
+            if buffer_name == QZEROS_FORMAT_BUFFER:
+                # State-dict transport metadata, not a checkpoint payload: the
+                # writer resolves the qzero convention from `config.json`, so
+                # emitting a second, possibly stale, label here could only
+                # disagree with the words it writes.
+                continue
             name = f"{module_name}.{buffer_name}" if module_name else buffer_name
             if include_prefixes is not None and not name.startswith(include_prefixes):
                 continue
@@ -2315,7 +2596,7 @@ def _collect_state_dict_with_offload(
                         f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
                     )
             else:
-                source = buf
+                source = _checkpoint_layout_buffer(module, buffer_name, buf)
             state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
 
     return state_dict
@@ -2342,6 +2623,28 @@ def _restore_checkpoint_layout_for_export(model: nn.Module) -> int:
                 clear()
             restored += 1
     return restored
+
+
+def _checkpoint_layout_buffer(
+    module: nn.Module,
+    buffer_name: str,
+    buffer: torch.Tensor,
+) -> torch.Tensor:
+    """Return the checkpoint-layout payload for one live quantized buffer.
+
+    A kernel that requires the v2 qzero layout keeps logical zero points in
+    memory while the checkpoint stores the v1 ``zero - 1`` words. The module
+    owns the conversion so every serialization surface (this writer and
+    ``state_dict()``) emits the same bytes without mutating the live buffer.
+    """
+
+    if buffer_name != "qzeros":
+        return buffer
+    converter = getattr(module, "checkpoint_layout_qzeros", None)
+    if not callable(converter):
+        return buffer
+    converted = converter(buffer)
+    return buffer if converted is None else converted
 
 
 def get_state_dict_for_save(
@@ -2386,6 +2689,9 @@ def get_state_dict_for_save(
             for buffer_name, buf in module.named_buffers(recurse=False):
                 if buffer_name in non_persistent:
                     continue
+                if buffer_name == QZEROS_FORMAT_BUFFER:
+                    # See `get_state_dict_for_save`.
+                    continue
                 name = f"{module_name}.{buffer_name}" if module_name else buffer_name
                 if include_prefixes is not None and not name.startswith(include_prefixes):
                     continue
@@ -2393,7 +2699,12 @@ def get_state_dict_for_save(
                     continue
                 if name in state_dict:
                     continue
-                state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
+                state_dict[name] = TensorSource(
+                    name=name,
+                    torch_dtype=buf.dtype,
+                    shape=tuple(buf.shape),
+                    source=_checkpoint_layout_buffer(module, buffer_name, buf),
+                )
 
     ptrs = collections.defaultdict(list)
     for name, entry in state_dict.items():
@@ -2508,7 +2819,22 @@ def _checkpoint_tensor_keys(
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
-    if format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+    # AWQ producers (AutoAWQ, llm-compressor) and shared Marlin/BitBLAS
+    # checkpoints expose the same `qweight` key as GPTQ.  Skipping validation
+    # for them let a module whose checkpoint tensor was never loaded keep its
+    # zero-filled placeholder and produce silent NaN output.
+    validated_formats = {
+        FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.GPTQ_P,
+        FORMAT.GEMM,
+        FORMAT.GEMV,
+        FORMAT.GEMV_FAST,
+        FORMAT.LLM_AWQ,
+        FORMAT.MARLIN,
+        FORMAT.BITBLAS,
+    }
+    if format not in validated_formats:
         return
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
@@ -2518,7 +2844,7 @@ def validate_checkpoint_qweights(
     # A shared quantized module can be saved under any one of its aliases.
     module_keys = collections.defaultdict(set)
     for name, module in model.named_modules(remove_duplicate=False):
-        if isinstance(module, GPTQQuantLinear):
+        if isinstance(module, (GPTQQuantLinear, AWQuantLinear)):
             tensor_name = f"{name}.qweight" if name else "qweight"
             module_keys[id(module)].add(tensor_name)
             if callable(key_converter):
@@ -2873,15 +3199,24 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
         # Accelerate casts floating buffers to the requested model dtype even
         # when the quantized module's forward needs the checkpoint precision.
-        # Restore only Torch AWQ's stored operands; its forward makes temporary
-        # activation-dtype copies without rewriting these buffers.
+        # The scale buffer is part of the checkpoint contract, not an activation
+        # operand: narrowing an FP16 scale to BF16 changes the dequantized
+        # weight and makes a later `save_pretrained()` republish the narrowed
+        # value. Restore every quantized module's scales from the checkpoint.
+        # Torch AWQ additionally keeps its bias at the checkpoint dtype because
+        # its forward makes temporary activation-dtype copies.
         for name, module in model.named_modules():
-            if getattr(module, "QUANT_TYPE", None) != "awq_torch":
-                continue
             prefix = f"{name}." if name else ""
-            for buffer_name in ("scales", "bias"):
-                if isinstance(module._buffers.get(buffer_name), torch.Tensor):
-                    restore_dtypes[f"{prefix}{buffer_name}"] = None
+            if (
+                isinstance(module, BaseQuantLinear)
+                and isinstance(module._buffers.get("scales"), torch.Tensor)
+                and "scales" not in module._non_persistent_buffers_set
+            ):
+                restore_dtypes[f"{prefix}scales"] = None
+            if getattr(module, "QUANT_TYPE", None) == "awq_torch":
+                for buffer_name in ("scales", "bias"):
+                    if isinstance(module._buffers.get(buffer_name), torch.Tensor):
+                        restore_dtypes[f"{prefix}{buffer_name}"] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
                 model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
@@ -3225,11 +3560,13 @@ def streaming_state_dict_to_shards(
 
         path = os.path.join(save_dir, filename)
         if _existing_shard_matches(path, shard_entries, metadata):
-            size = os.path.getsize(path)
             log.info(f"Reusing authenticated safetensors shard: {filename}")
         else:
-            size = _write_shard_file(path, shard_entries, metadata)
-        total_size += size
+            _write_shard_file(path, shard_entries, metadata)
+        # Hugging Face's index describes the tensor payload, not the on-disk
+        # file size. The latter includes the safetensors header and padding and
+        # made `metadata.total_size` disagree with every other writer.
+        total_size += sum(entry.num_bytes for entry in shard_entries)
         filenames.append(filename)
         for entry in shard_entries:
             tensor_to_filename[entry.name] = filename

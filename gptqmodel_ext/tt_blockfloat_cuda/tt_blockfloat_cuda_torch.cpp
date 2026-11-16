@@ -76,7 +76,7 @@ void check_exponents(const torch::Tensor& exponents, const torch::Tensor& ref,
 void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
                            const torch::Tensor& exponents, int64_t bits,
                            const std::optional<torch::Tensor>& bias,
-                           torch::Tensor& out) {
+                           torch::Tensor& out, bool allow_cublas) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2, "x must be a 2D CUDA tensor");
   TORCH_CHECK(bits == 4 || bits == 8, "bits must be 4 or 8");
   // A sliced or transposed activation is materialised rather than rejected: the
@@ -101,18 +101,24 @@ void blockfloat_linear_out(const torch::Tensor& x, const torch::Tensor& codes,
   if (m == 0) return;
 
   const void* bias_ptr = nullptr;
+  torch::Tensor bias_f32;
   if (bias.has_value()) {
+    // The stored bias is dense float32 state and the epilogue accumulates in
+    // float32.  Keep it there instead of rounding it to the activation dtype:
+    // float16 cannot represent a large finite float32 bias, and narrowing it
+    // first turns a cancelling result into inf.
     const torch::Tensor& b = *bias;
-    check_like(b, xc, "bias");
     TORCH_CHECK(b.dim() == 1 && b.size(0) == n, "bias must be [n]");
-    TORCH_CHECK(b.scalar_type() == xc.scalar_type(), "bias dtype must match x");
-    bias_ptr = b.data_ptr();
+    bias_f32 = b.to(at::kFloat).contiguous();
+    check_like(bias_f32, xc, "bias");
+    bias_ptr = bias_f32.data_ptr();
   }
 
   const c10::cuda::CUDAGuard guard(xc.device());
   ok(blockfloat_linear(xc.data_ptr(), dtype_code(xc), codes.data_ptr<uint8_t>(),
                        exponents.data_ptr<int8_t>(), static_cast<int>(bits), m, n, k,
-                       bias_ptr, out.data_ptr(), at::cuda::getCurrentCUDAStream()),
+                       bias_ptr, out.data_ptr(), at::cuda::getCurrentCUDAStream(),
+                       allow_cublas ? 1 : 0),
      "blockfloat_linear");
 }
 
@@ -231,7 +237,7 @@ void blockfloat_selftest_out(torch::Tensor& out) {
 TORCH_LIBRARY(gptqmodel_blockfloat_cuda, m) {
   m.def(
       "blockfloat_linear(Tensor x, Tensor codes, Tensor exponents, int bits, "
-      "Tensor? bias, Tensor(a!) out) -> ()");
+      "Tensor? bias, Tensor(a!) out, bool allow_cublas=True) -> ()");
   m.def(
       "blockfloat_dequant(Tensor codes, Tensor exponents, int bits, int rows, int k, "
       "Tensor(a!) out) -> ()");

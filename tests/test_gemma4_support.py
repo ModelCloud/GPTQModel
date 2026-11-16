@@ -35,7 +35,7 @@ def test_gemma4_text_model_type_selects_text_definition(monkeypatch):
 
 def test_gemma4_module_tree_keeps_optional_variant_paths_non_strict():
     layer_modules = Gemma4TextQModel.simple_layer_modules(
-        model_config=SimpleNamespace(),
+        model_config=SimpleNamespace(num_experts=None),
         quantize_config=SimpleNamespace(dynamic=None),
     )
     flat_modules = {name for block in layer_modules for name in block}

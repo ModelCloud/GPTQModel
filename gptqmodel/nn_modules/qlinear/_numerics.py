@@ -46,11 +46,11 @@ def _can_fuse_hip_bias(
     """Whether ``addmm`` must replace the separate bias add on this platform.
 
     HIP keeps the low-precision output because the wide FP32 request is
-    CUDA-only, so a separate add rounds (and can overflow) the partial sum
-    before the bias cancels it; ``addmm`` matches ``(x @ w + bias)`` in FP32 on
-    HIP bitwise. The branch is deliberately scoped to ROCm low-precision
-    activations: NVIDIA FP32 inputs never round before the add, so their
-    expression stays unchanged.
+    CUDA-only, and CPU's low-precision matmul also rounds its accumulator, so a
+    separate add rounds (and can overflow) the partial sum before the bias
+    cancels it; ``addmm`` keeps ``(x @ w + bias)`` in FP32 on both platforms.
+    The branch is scoped to ROCm and CPU low-precision activations: NVIDIA FP32
+    inputs never round before the add, so their expression stays unchanged.
 
     Two shapes of input keep the unfused expression:
 
@@ -60,9 +60,15 @@ def _can_fuse_hip_bias(
     * a bias that needs broadcasting beyond the flattened output shape cannot
       be expressed by the 2D ``addmm`` input.
     """
-    if bias is None or not IS_ROCM or x.device.type != "cuda":
+    if bias is None:
+        return False
+    if x.device.type == "cpu":
+        pass
+    elif not (IS_ROCM and x.device.type == "cuda"):
         return False
     if x.dtype not in (torch.float16, torch.bfloat16) or bias.dtype != x.dtype:
+        return False
+    if weight.dtype != x.dtype:
         return False
     if bias.device != x.device or autocast_active(x.device.type):
         return False
@@ -85,6 +91,12 @@ class _CudaWideMatmul(torch.autograd.Function):
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is None:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
+        elif torch.compiler.is_compiling():
+            # Inductor cannot lower `addmm(..., out_dtype=...)` (torch 2.15
+            # raises `tuned_addmm() takes 3 positional arguments but 4 were
+            # given`), which breaks a compiled static-cache decode. Keep the
+            # wide GEMM and add the FP32 bias as a separate elementwise op.
+            output = torch.mm(flat_x, weight, out_dtype=torch.float32) + bias.float()
         else:
             output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
         return output.to(x.dtype).reshape(x.shape[:-1] + (weight.shape[-1],))
@@ -137,7 +149,14 @@ def matmul_fp32_reduce(
         flat_x = x.reshape(-1, x.shape[-1])
         if bias is not None and (bias.dim() == 1 or bias.shape == shape):
             flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
-            output = torch.addmm(flat_bias.float(), flat_x, weight, out_dtype=torch.float32)
+            if torch.compiler.is_compiling():
+                # Inductor (torch 2.15) cannot lower `addmm` with `out_dtype`.
+                # The eager `addmm` branch is left unchanged so its rounding
+                # stays bitwise identical to the pre-fix path; the compiled
+                # path uses a wide GEMM plus a separate FP32 add.
+                output = torch.mm(flat_x, weight, out_dtype=torch.float32) + flat_bias.float()
+            else:
+                output = torch.addmm(flat_bias.float(), flat_x, weight, out_dtype=torch.float32)
         elif bias is not None:
             # A bias that broadcasts beyond the flattened output shape cannot
             # be expressed by the 2D `addmm` input; add it after reshaping.
@@ -187,12 +206,27 @@ def linear_wide_bias(
     reshape_bias = bias is not None and bias.dim() != 1 and bias.shape != flat_shape
 
     def reduce() -> torch.Tensor:
-        if x.device.type == "cuda" and not wide_autograd:
-            # FP32 output keeps the low-precision operands (no expanded FP32
-            # weight copy) and keeps split reductions wide.
+        # ``out_dtype`` keeps the low-precision operands (no expanded FP32
+        # weight copy) and keeps a split reduction wide, but ATen requires both
+        # operands to share a dtype. A reconstructed FP32 weight beside FP16 or
+        # BF16 activations is the normal shape of a wide dequantizing fallback
+        # (ParoQuant's dense path, for example), so promote the pair rather than
+        # asking for an output dtype the operands cannot satisfy.
+        if (
+            x.device.type == "cuda"
+            and not wide_autograd
+            and flat_x.dtype == weight_t.dtype
+            and flat_x.dtype in (torch.float16, torch.bfloat16)
+        ):
             output = torch.mm(flat_x, weight_t, out_dtype=torch.float32)
         else:
-            output = torch.mm(flat_x.float(), weight_t.float())
+            # Never narrow below FP32: the low-precision operands are widened for
+            # the reduction, exactly as the previous ``.float()`` pair did, and
+            # only an already-wider operand keeps its precision.
+            compute_dtype = torch.promote_types(
+                torch.promote_types(flat_x.dtype, weight_t.dtype), torch.float32
+            )
+            output = torch.mm(flat_x.to(compute_dtype), weight_t.to(compute_dtype))
         if bias is not None:
             if reshape_bias:
                 output = output.reshape(shape) + bias.float()

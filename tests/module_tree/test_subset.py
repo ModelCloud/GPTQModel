@@ -14,6 +14,7 @@ import pytest
 import torch
 from defuser import convert_model
 from defuser.modeling.unfused_moe.qwen2_moe import LinearQwen2MoeSparseMoeBlock
+from module_tree.looper_doubles import NoAutoDtypeCastForward, no_auto_dtype_cast_forward
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.phi3.modeling_phi3 import Phi3Config, Phi3ForCausalLM
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
@@ -41,7 +42,7 @@ from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, AutoDtypeCast
 from gptqmodel.quantization.config import QuantizeConfig, VramStrategy
 from gptqmodel.utils.model import find_modules, get_module_by_name_prefix, restore_moe_topk, set_moe_topk
 
@@ -63,6 +64,49 @@ def _make_quant_config(device: torch.device | str = "cpu") -> QuantizeConfig:
         device=device,
         dense_vram_strategy=VramStrategy.EXCLUSIVE,
     )
+
+
+def test_looper_caster_doubles_match_the_disabled_production_branch():
+    """The shared doubles must mirror the real AUTO_NF12-disabled branch.
+
+    ``ModuleLooper.create_named_modules`` replaces the subset module only when
+    ``gptq_model._maybe_auto_dtype_cast_forward_module`` returns a different
+    object. The doubles below return the module unchanged, so pin that against
+    the production method with ``auto_dtype_cast`` off: both must return the
+    same object and leave the NamedModule state untouched. A double that
+    fabricated a replacement would otherwise hide a looper regression.
+    """
+
+    linear = torch.nn.Linear(64, 16, bias=False)
+    device = torch.device("cpu")
+
+    harness = BaseQModel.__new__(BaseQModel)
+    torch.nn.Module.__init__(harness)
+    harness.quantize_config = QuantizeConfig(
+        auto_dtype_cast=AutoDtypeCast.OFF,
+        offload_to_disk=False,
+    )
+    named = NamedModule(linear, name="proj", full_name="proj", layer_index=0)
+
+    assert (
+        harness._maybe_auto_dtype_cast_forward_module(
+            linear, device=device, named_module=named
+        )
+        is linear
+    )
+    assert "auto_dtype_cast_source_spec" not in named.state
+
+    assert (
+        no_auto_dtype_cast_forward(linear, device=device, named_module=named)
+        is linear
+    )
+    assert (
+        NoAutoDtypeCastForward()._maybe_auto_dtype_cast_forward_module(
+            linear, device=device, named_module=named
+        )
+        is linear
+    )
+    assert "auto_dtype_cast_source_spec" not in named.state
 
 
 def test_mlp_capture_flag_propagates_to_layer_modules():
@@ -161,6 +205,7 @@ def test_phi3_defused_mlp_modules_match_strict_subset_builder():
         quantize_config=SimpleNamespace(device="cpu", compute_device_filter=None, method=None),
         layer_modules_strict=True,
         lm_head="lm_head",
+        _maybe_auto_dtype_cast_forward_module=no_auto_dtype_cast_forward,
     )
     subset = looper.create_named_modules(
         layer,
@@ -484,6 +529,7 @@ def test_stage_subset_early_stop_and_callbacks():
         shell_module_materialize=lambda target_submodule, device, role, named_module=None: target_submodule,
         prepare_layer_replay_kwargs=lambda layer, layer_input, additional_inputs, target_device: additional_inputs,
         prepare_layer_replay_keep_mask=lambda **kwargs: kwargs["keep_mask"],
+        _maybe_auto_dtype_cast_forward_module=no_auto_dtype_cast_forward,
     )
 
     processor = _StubAWQProcessor(quant_cfg)
@@ -602,7 +648,7 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     device = "cuda" if is_causal_conv1d_available else "cpu"
     quant_cfg = _make_quant_config(device)
 
-    class _DummyQwen3_5Model:
+    class _DummyQwen3_5Model(NoAutoDtypeCastForward):
         moe_lifecycle_hooks = Qwen3_5_MoeQModel.moe_lifecycle_hooks
         layer_modules_strict = True
         lm_head = "lm_head"

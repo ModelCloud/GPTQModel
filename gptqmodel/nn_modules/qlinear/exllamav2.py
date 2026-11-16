@@ -5,6 +5,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
+import threading
 from typing import List, Optional, Tuple
 
 import torch
@@ -25,16 +26,38 @@ from ...utils.exllamav2 import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._g_idx import validate_g_idx_bounds
 from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+# A post-load first forward can run from several free-threaded workers after
+# `clear_weight_cache()`. Without serialization each worker built (and leaked)
+# its own native q-matrix. Only the cold rebuild takes the lock; the fast path
+# in `_ensure_q_handle` stays lock-free.
+_Q_HANDLE_REBUILD_LOCK = threading.Lock()
 
 
 def _torch_device(idx):
     if idx == -1:
         return "cpu"
     return f"cuda:{idx}"
+
+
+def _q_fast_signature(tensor):
+    """Cheap change detector for one tensor bound into a native q-matrix."""
+
+    if tensor is None:
+        return None
+    try:
+        # Inference tensors have no version counter; PyTorch raises instead of
+        # returning one. Only their storage identity is stable.
+        version = tensor._version
+    except RuntimeError:
+        version = None
+    return (version, tensor.data_ptr(), tensor.dtype, tensor.shape)
+
 
 class ExllamaV2Linear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_EXLLAMA_V2]
@@ -59,7 +82,23 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
+    # ``gemm_half_q_half`` has a native quantized GEMM only for FP16
+    # activations. BF16/FP32 inputs take the extension's dense fallback, which
+    # rebuilds the full FP16 weight and an FP32 copy on every forward
+    # (~266 MiB and ~640 us for a 4096x11008 layer, see #4213). AUTO must
+    # therefore rank ExLlamaV2 below kernels with a native path for those
+    # dtypes. Explicit backend selection still reaches this kernel.
+    AUTO_NON_FP16_PRIORITY = 1
+
     REQUIRES_FORMAT_V2 = True
+
+    @classmethod
+    def auto_select_priority(cls, fmt, dtype=None):
+        priority = super().auto_select_priority(fmt, dtype)
+        if dtype is not None and dtype != torch.float16:
+            # Never raise the declared rank; only demote the dense fallback.
+            return min(priority, cls.AUTO_NON_FP16_PRIORITY)
+        return priority
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllamav2"
@@ -109,6 +148,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
         self.q_handle = None
         self.q_tensors = None
         self._q_handle_key = None
+        # (tensors, signatures) snapshot for the per-forward handle fast path.
+        self._q_fast = None
         self._native_shuffled = False
 
     @classmethod
@@ -139,6 +180,17 @@ class ExllamaV2Linear(GPTQQuantLinear):
         self._release_q_handle()
         # ext_make_q_matrix only accepts float16
         self.scales = self.scales.to(dtype=torch.float16)
+        # ExLlamaV2's make_sequential() indexes a host histogram with g_idx
+        # directly (no negative wrap), so reject out-of-range values before the
+        # native handle is built at load time rather than corrupting the heap.
+        g_idx = getattr(self, "g_idx", None)
+        if g_idx is not None and g_idx.numel() > 0 and not bool((g_idx == 0).all().item()):
+            validate_g_idx_bounds(
+                g_idx,
+                self.scales,
+                layer_name=f"ExLlamaV2 `{self.name}`",
+                allow_negative_wrap=False,
+            )
         self.q_tensors = None
         self._ensure_q_handle()
 
@@ -149,14 +201,28 @@ class ExllamaV2Linear(GPTQQuantLinear):
             exllamav2_free_q_matrix(self.q_handle)
             self.q_handle = None
         self._q_handle_key = None
+        self._q_fast = None
 
     def clear_weight_cache(self) -> None:
         """Release native pointers derived from the current packed buffers."""
 
-        self._release_q_handle()
-        self.q_tensors = None
+        # Pair with the rebuild lock so a forward cannot publish a handle
+        # while another thread is releasing the packed tensor mapping.
+        with _Q_HANDLE_REBUILD_LOCK:
+            self._release_q_handle()
+            self.q_tensors = None
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_native_shuffled", False):
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    "ExLlamaV2 shuffles `qweight` in place into its native runtime layout; "
+                    "the original checkpoint words cannot be reconstructed. Use "
+                    "`GPTQModel.save()`/`save_quantized()` for a loadable checkpoint, or "
+                    "reload the original checkpoint."
+                )
         super()._save_to_state_dict(destination, prefix, keep_vars)
         metadata = getattr(destination, "_metadata", None)
         if metadata is not None:
@@ -189,40 +255,72 @@ class ExllamaV2Linear(GPTQQuantLinear):
             if self.q_handle is None:
                 raise RuntimeError("ExLlamaV2 fusion view lost its native descriptor")
             return self.q_handle
-        if self.scales.dtype != torch.float16:
-            self.scales = self.scales.to(dtype=torch.float16)
-        tensors = {
-            "qweight": self.qweight,
-            "qzeros": self.qzeros,
-            "scales": self.scales,
-            "g_idx": self.g_idx,
-        }
-        if self.q_tensors is None:
-            self.q_tensors = tensors
-        else:
-            self.q_tensors.update(tensors)
-        key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
-        if (
-            self.q_handle is not None
-            and self._q_handle_key is not None
-            and self._q_handle_key != key
-        ):
-            self._release_q_handle()
-        if self.q_handle is None:
-            already_shuffled = getattr(self, "_native_shuffled", False)
-            if already_shuffled:
-                self.q_handle = self.ext_make_q_matrix(self.q_tensors, already_shuffled=True)
+        # Fast path: the native matrix only has to be rebuilt when a packed
+        # tensor is replaced or written in place. Comparing the live tensors
+        # against a stored identity + (version, data_ptr, dtype, shape)
+        # snapshot is much cheaper than rebuilding the dict, merging it, and
+        # hashing every tensor on every forward. In-place writes bump
+        # ``_version``; ``.data =`` swaps change ``data_ptr``; a replacement
+        # changes the object identity. Inference tensors have no version
+        # counter, which is why the identity/pointer fields stay in the key.
+        fast = getattr(self, "_q_fast", None)
+        if fast is not None and self.q_handle is not None:
+            tensors, signatures = fast
+            live = (self.qweight, self.qzeros, self.scales, self.g_idx)
+            if len(tensors) >= len(live) and all(t is l for t, l in zip(tensors, live)) and all(
+                _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
+            ):
+                return self.q_handle
+        # A post-load first forward can run from several free-threaded workers.
+        # Serialize only this cold rebuild; steady-state forwards stay
+        # lock-free. Re-check under the lock so the workers that queued behind
+        # the first builder reuse its handle instead of building and leaking
+        # another native q-matrix.
+        with _Q_HANDLE_REBUILD_LOCK:
+            fast = getattr(self, "_q_fast", None)
+            if fast is not None and self.q_handle is not None:
+                tensors, signatures = fast
+                live = (self.qweight, self.qzeros, self.scales, self.g_idx)
+                if len(tensors) >= len(live) and all(t is l for t, l in zip(tensors, live)) and all(
+                    _q_fast_signature(t) == s for t, s in zip(tensors, signatures)
+                ):
+                    return self.q_handle
+            if self.scales.dtype != torch.float16:
+                self.scales = self.scales.to(dtype=torch.float16)
+            tensors = {
+                "qweight": self.qweight,
+                "qzeros": self.qzeros,
+                "scales": self.scales,
+                "g_idx": self.g_idx,
+            }
+            if self.q_tensors is None:
+                self.q_tensors = tensors
             else:
-                self.q_handle = self.ext_make_q_matrix(self.q_tensors)
-            self._native_shuffled = True
-            # Act-order matrix creation adds/fills q_perm and q_invperm in
-            # ``q_tensors``. Key the completed dictionary so the next forward
-            # does not mistake those newly inserted tensors for a replacement
-            # and rebuild the native matrix every call.
-            self._q_handle_key = tuple(
-                tensor_cache_key(tensor) for tensor in self.q_tensors.values()
-            )
-        return self.q_handle
+                self.q_tensors.update(tensors)
+            key = tuple(tensor_cache_key(tensor) for tensor in self.q_tensors.values())
+            if (
+                self.q_handle is not None
+                and self._q_handle_key is not None
+                and self._q_handle_key != key
+            ):
+                self._release_q_handle()
+            if self.q_handle is None:
+                already_shuffled = getattr(self, "_native_shuffled", False)
+                if already_shuffled:
+                    self.q_handle = self.ext_make_q_matrix(self.q_tensors, already_shuffled=True)
+                else:
+                    self.q_handle = self.ext_make_q_matrix(self.q_tensors)
+                self._native_shuffled = True
+                # Act-order matrix creation adds/fills q_perm and q_invperm in
+                # ``q_tensors``. Key the completed dictionary so the next forward
+                # does not mistake those newly inserted tensors for a replacement
+                # and rebuild the native matrix every call.
+                self._q_handle_key = tuple(
+                    tensor_cache_key(tensor) for tensor in self.q_tensors.values()
+                )
+            tensors = tuple(self.q_tensors.values())
+            self._q_fast = (tensors, tuple(_q_fast_signature(tensor) for tensor in tensors))
+            return self.q_handle
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -248,8 +346,18 @@ class ExllamaV2Linear(GPTQQuantLinear):
             from ...utils.exllamav2 import exllamav2_clone_q_matrix
 
             handle, temporaries = exllamav2_clone_q_matrix(self, compact=True)
+        # Keep FP16 activations on the quantized kernel and request an FP32
+        # output when a bias must be applied before the single visible cast.
+        # Upcasting the activations would route through dense reconstruction.
+        wide_bias = self.bias is not None and x.dtype == torch.float16
         try:
-            out = self.ext_gemm_half_q_half(x, handle, self.out_features, force_cuda)
+            out = self.ext_gemm_half_q_half(
+                x,
+                handle,
+                self.out_features,
+                force_cuda,
+                out_dtype=torch.float32 if wide_bias else None,
+            )
         finally:
             if temporaries is not None:
                 from ...utils.exllamav2 import exllamav2_free_q_matrix
@@ -257,7 +365,7 @@ class ExllamaV2Linear(GPTQQuantLinear):
                 exllamav2_free_q_matrix(handle)
 
         if self.bias is not None:
-            out.add_(self.bias)
+            out = out + self.bias.to(device=out.device, dtype=torch.float32)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -279,11 +387,15 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
 
-    def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda):
+    def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda, out_dtype=None):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
         x = x.reshape(-1, x.shape[-1]).contiguous()
-        output = torch.empty((x.shape[0], q4_width), dtype=x.dtype, device=x.device)
+        output = torch.empty(
+            (x.shape[0], q4_width),
+            dtype=x.dtype if out_dtype is None else out_dtype,
+            device=x.device,
+        )
         exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 

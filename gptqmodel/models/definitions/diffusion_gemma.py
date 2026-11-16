@@ -196,22 +196,31 @@ class DiffusionGemmaQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 "q_norm:!",
-                "q_proj:0",
+                "q_proj:0:in=x",
                 "k_norm:!",
-                "k_proj:0",
+                "k_proj:0:in=x",
                 "v_norm:!",
-                "v_proj:0",
+                # The scale-free `v_norm` normalizes each value head, so a
+                # positive scale on `v_proj` does not reach `o_proj`'s input.
+                # `v_proj` must stay quantized but may not be a fold source.
+                "v_proj:0:in=x:nosrc",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             "post_feedforward_layernorm_1": ("post_feedforward_layernorm_1:!",),
             "pre_feedforward_layernorm_2": ("pre_feedforward_layernorm_2:!",),
-            "router": ("proj:!",),
             "experts:moe": {
-                "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
+            # The router is an independent consumer of the raw residual: it
+            # applies its own scale-free `router.norm`, not
+            # `pre_feedforward_layernorm_2`. Declaring it after the expert block
+            # keeps it out of that norm's `_scale_consumers`; otherwise the
+            # router weights are multiplied by a scale its input never received
+            # and the selected experts change.
+            "router": ("proj:!",),
             "post_feedforward_layernorm_2": ("post_feedforward_layernorm_2:!",),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },

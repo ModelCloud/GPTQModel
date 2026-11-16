@@ -10,6 +10,7 @@ from safetensors.torch import load_file, save_file
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.writer import _load_native_w4a_for_save
+from gptqmodel.nn_modules.qlinear._fused_train_state import QZEROS_FORMAT_BUFFER
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
 
@@ -32,8 +33,23 @@ def _shell(tied=False):
     return core
 
 
+def _marker_free(state):
+    """Drop the in-process qzeros layout marker.
+
+    The marker is a persistent buffer so read-only ``state_dict()`` transports
+    keep it, but no checkpoint writer emits it (issue #4155). A native W4A
+    checkpoint therefore never contains it.
+    """
+
+    return {
+        key: value for key, value in state.items()
+        if key != QZEROS_FORMAT_BUFFER
+        and not key.endswith("." + QZEROS_FORMAT_BUFFER)
+    }
+
+
 def _source(core, mode="w4a_nvfp4"):
-    state = {key: value.clone() for key, value in core.state_dict().items()}
+    state = {key: value.clone() for key, value in _marker_free(core.state_dict()).items()}
     for name, module in core.named_modules():
         if mode == "w4a_nvfp4" and isinstance(module, TorchLinear):
             state[f"{name}.activation_global_scale_bits"] = torch.tensor(.01234567).view(torch.int32)
@@ -65,7 +81,7 @@ def test_native_writer_preserves_all_values_dtypes_and_scale_bits(tmp_path, shar
     path = _write(tmp_path, source, sharded)
     model = _shell().half()  # Deliberately different from the source dtype.
     _load_native_w4a_for_save(model, path, activation_mode=mode)
-    restored = model.state_dict()
+    restored = _marker_free(model.state_dict())
     assert set(restored) == set(source)
     for key, value in source.items():
         torch.testing.assert_close(restored[key], value, rtol=0, atol=0)
@@ -100,6 +116,27 @@ def test_native_writer_rejects_unexpected_runtime_tensor(tmp_path, mode):
         _load_native_w4a_for_save(_shell(), _write(tmp_path, source), activation_mode=mode)
 
 
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+def test_native_writer_accepts_checkpoint_without_layout_marker(tmp_path, sharded, mode):
+    """Issue #4171 item 2: a real W4A checkpoint has no ``qzeros_format`` key.
+
+    The layout marker is a persistent buffer so read-only ``state_dict()``
+    transports keep it, but every checkpoint writer deliberately omits it. The
+    completeness check compared the source file against ``model.state_dict()``,
+    which still contained the marker, so re-saving any loaded W4A checkpoint
+    raised ``ValueError: Missing native W4A checkpoint tensors``.
+    """
+
+    source = _source(_shell(), mode)
+    path = _write(tmp_path, source, sharded=sharded)
+    model = _shell().half()
+    _load_native_w4a_for_save(model, path, activation_mode=mode)
+    restored = model.state_dict()
+    for key, value in source.items():
+        torch.testing.assert_close(restored[key], value, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 def test_native_writer_rejects_duplicate_shard_entries(tmp_path, mode):
     source = _source(_shell(), mode)
@@ -124,7 +161,7 @@ def test_public_load_save_preserves_native_w4a_tensors(tmp_path, mode, dtype, sh
     source.mkdir()
     core = _shell().to(dtype=dtype)
     state = (_source(core) if mode == "w4a_nvfp4"
-             else {name: value.clone() for name, value in core.state_dict().items()})
+             else {name: value.clone() for name, value in _marker_free(core.state_dict()).items()})
     if dtype == torch.bfloat16:
         # Both are finite BF16 values, but forcing an FP16 serialization shell
         # overflows one and underflows the other. No inference uses this fixture.

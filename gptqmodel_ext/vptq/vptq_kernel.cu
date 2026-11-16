@@ -425,6 +425,24 @@ void launch_linear(
 
 }  // namespace
 
+// Outlier codes select a row of the outlier codebook. The quantizer bounds
+// them, but a checkpoint is untrusted: reject out-of-range codes at the op
+// entry before the kernel dereferences the table.
+static void check_outlier_indices(const c10::optional<at::Tensor>& outlier_indices,
+                                  const c10::optional<at::Tensor>& outlier_centroids,
+                                  int64_t outlier_vector_len) {
+  if (!outlier_indices.has_value() || outlier_indices->numel() == 0) return;
+  TORCH_CHECK(outlier_centroids.has_value() && outlier_vector_len > 0,
+              "VPTQ CUDA outlier indices need an outlier codebook");
+  const int64_t count = outlier_centroids->numel() / outlier_vector_len;
+  TORCH_CHECK(count > 0, "VPTQ CUDA outlier codebook is empty");
+  const int64_t low = outlier_indices->min().item<int64_t>();
+  const int64_t high = outlier_indices->max().item<int64_t>();
+  TORCH_CHECK(low >= 0 && high < count,
+              "VPTQ CUDA outlier index is outside [0, ", count, "): got min=", low,
+              " max=", high);
+}
+
 at::Tensor vptq_dequantize_cuda(
     const at::Tensor& indices, const at::Tensor& centroids,
     const c10::optional<at::Tensor>& res_centroids,
@@ -474,6 +492,7 @@ at::Tensor vptq_dequantize_cuda(
               "VPTQ CUDA normalization scale and bias must be provided together");
   TORCH_CHECK(outlier_indices.has_value() == (outlier_size > 0),
               "VPTQ CUDA outlier buffers and outlier size must agree");
+  check_outlier_indices(outlier_indices, outlier_centroids, outlier_vector_len);
 
   c10::cuda::CUDAGuard guard(indices.device());
   auto out = at::empty({out_features, in_features}, centroids.options());
@@ -548,6 +567,7 @@ at::Tensor vptq_linear_cuda(
               "VPTQ CUDA normalization scale and bias must be provided together");
   TORCH_CHECK(outlier_indices.has_value() == (outlier_size > 0),
               "VPTQ CUDA outlier buffers and outlier size must agree");
+  check_outlier_indices(outlier_indices, outlier_centroids, outlier_vector_len);
   if (bias.has_value()) {
     TORCH_CHECK(bias->numel() == out_features, "VPTQ CUDA bias width mismatch");
   }

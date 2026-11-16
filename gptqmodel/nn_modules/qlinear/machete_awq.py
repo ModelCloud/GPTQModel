@@ -36,7 +36,9 @@ def _undo_awq_interleave(values: torch.Tensor, num_bits: int) -> torch.Tensor:
     if num_bits == 4:
         undo_interleave = [0, 4, 1, 5, 2, 6, 3, 7]
     elif num_bits == 8:
-        undo_interleave = [0, 2, 1, 3]
+        # 8-bit AWQ is packed as a contiguous little-endian stream; only the
+        # 4-bit layout carries the `[0, 2, 4, 6, 1, 3, 5, 7]` interleave.
+        return values.contiguous()
     else:
         raise ValueError(f"Unsupported AWQ num_bits={num_bits}")
 
@@ -82,7 +84,12 @@ class AwqMacheteLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 100, FORMAT.MARLIN: 100}
     SUPPORTS_BITS = [4, 8]
-    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    # The native Machete mainloop requires ``group_size % TileShapeK(64) == 0``
+    # (``machete_mainloop.cuh`` ``can_implement``, enforced by a TORCH_CHECK in
+    # the launcher). Declaring 32 made AUTO rank this kernel above AwqMarlin for
+    # AWQ gs=32 models, which then failed at the first forward. Keep the list in
+    # step with ``query_machete_supported_group_sizes()``, as MacheteLinear does.
+    SUPPORTS_GROUP_SIZE = [-1, 64, 128]
     SUPPORTS_DESC_ACT = [False]  # AWQ kernels do not reorder activations
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
@@ -210,7 +217,7 @@ class AwqMacheteLinear(AWQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        input_2d = x.reshape(-1, x.shape[-1]).contiguous()
         group_scales = self.scales.to(dtype=input_2d.dtype)
         group_zeros = self.qzeros.to(dtype=input_2d.dtype)
 

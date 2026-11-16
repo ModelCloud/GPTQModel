@@ -18,7 +18,8 @@
 import os
 
 from gptqmodel import QuantizeConfig
-from gptqmodel.adapter.adapter import Lora, normalize_adapter
+from gptqmodel.adapter.adapter import Lora, _rank_pattern_matches, normalize_adapter
+from gptqmodel.adapter.peft import LoraConfig
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -107,7 +108,9 @@ class TestExtensionConfig(unittest.TestCase):
 
         assert payload["dynamic"] == {"model.layers.0.self_attn.q_proj": {"bits": 8}}
         assert qconfig.dynamic == expected_dynamic
-        assert qconfig.extract_adapter_rank_patterns() == {"model.layers.0.self_attn.q_proj": 16}
+        assert qconfig.extract_adapter_rank_patterns(
+            module_ranks={"model.layers.0.self_attn.q_proj": 16},
+        ) == {"model\\.layers\\.0\\.self_attn\\.q_proj": 16}
 
     def test_extension_embed(self):
         bits = 4
@@ -126,3 +129,233 @@ class TestExtensionConfig(unittest.TestCase):
         assert qconfig.adapter == eora_config
         assert qconfig.adapter.rank == rank
 
+    def test_rank_pattern_matches_short_suffix_and_regex(self):
+        name = "model.layers.0.self_attn.q_proj"
+
+        for pattern in ("q_proj", "q_proj$", name):
+            adapter = Lora(rank=8)
+            assert adapter.dynamic_rank_override(
+                LoraConfig(r=8, rank_pattern={pattern: 16}), name
+            )
+            assert adapter.rank == 16, pattern
+
+    def test_rank_pattern_override_is_serialized(self):
+        adapter = Lora(rank=8)
+
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"q_proj": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.to_dict()["rank"] == 16
+
+    def test_rank_pattern_does_not_match_other_suffixes(self):
+        adapter = Lora(rank=8)
+
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"v_proj$": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
+    def test_rank_pattern_requires_a_dot_boundary(self):
+        """`1.self_attn.q_proj` names layer 1, not the tail of layer 11."""
+
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"1.self_attn.q_proj": 16}),
+            "model.layers.11.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
+        # `model.layers.1` is a prefix of layer 10/11, not a module suffix.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"model.layers.1": 16}),
+            "model.layers.10.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
+    def test_rank_pattern_matches_canonical_mixed_case_module_name(self):
+        """PEFT rank patterns name module segments in their canonical case."""
+
+        name = "transformer.blocks.0.attn.Wqkv"
+        for pattern in ("Wqkv", "Wqkv$", name):
+            adapter = Lora(rank=8)
+            assert adapter.dynamic_rank_override(
+                LoraConfig(r=8, rank_pattern={pattern: 16}), name
+            ), pattern
+            assert adapter.rank == 16, pattern
+
+        # Baichuan's `W_pack` is the other canonical mixed-case projection.
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"W_pack": 32}),
+            "model.layers.3.mlp.W_pack",
+        )
+        assert adapter.rank == 32
+
+    def test_rank_pattern_preserves_regex_escapes(self):
+        """Lowercasing rewrote `\\S`/`\\D`/`\\W` into their opposite classes."""
+
+        name = "model.layers.0.self_attn.q_proj"
+        for pattern in (r"\S+\.q_proj$", r"\D+\.q_proj$"):
+            adapter = Lora(rank=8)
+            assert adapter.dynamic_rank_override(
+                LoraConfig(r=8, rank_pattern={pattern: 16}), name
+            ), pattern
+            assert adapter.rank == 16, pattern
+
+        # PEFT anchors the optional prefix at a dot boundary, so `\W+` cannot
+        # consume that dot: the prefix group already ends with it. Matching
+        # here would be the broader `re.search` behaviour this rule replaces.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\W+q_proj$": 16}), name
+        )
+        assert adapter.rank == 8
+
+        # The folded classes must not match a name that only the original
+        # spelling selects: `\d` needs a digit immediately before `.q_proj`.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\d+\.q_proj$": 16}), name
+        )
+        assert adapter.rank == 8
+
+    def test_rank_pattern_legacy_lowercase_module_name(self):
+        """Legacy exports lowercased module names; the fallback still matches."""
+
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"Wqkv": 16}),
+            "transformer.blocks.0.attn.wqkv",
+        )
+        assert adapter.rank == 16
+
+        # A lowercase pattern against a canonical mixed-case name is the same
+        # legacy pairing in the other direction.
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={"wqkv": 16}),
+            "transformer.blocks.0.attn.Wqkv",
+        )
+        assert adapter.rank == 16
+
+    def test_rank_pattern_mixed_case_regex_fallback_keeps_escapes(self):
+        """The case-insensitive fallback must not rewrite the pattern either."""
+
+        # `\S+\.Q_PROJ$` only differs from the legacy lowercase name by case,
+        # so the explicit fallback selects it. `\S` must still mean
+        # non-whitespace; a folded `\s` would never match this name.
+        adapter = Lora(rank=8)
+        assert adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\S+\.Q_PROJ$": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.rank == 16
+
+        # The fallback must not turn a genuinely non-matching escape into a
+        # match: `\s+\.q_proj$` requires whitespace and this name has none.
+        adapter = Lora(rank=8)
+        assert not adapter.dynamic_rank_override(
+            LoraConfig(r=8, rank_pattern={r"\s+\.q_proj$": 16}),
+            "model.layers.0.self_attn.q_proj",
+        )
+        assert adapter.rank == 8
+
+
+    def test_rank_pattern_export_uses_trained_rank_not_rule_text(self):
+        """Issue #4199: an earlier rule without an adapter rank must not shadow."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=64),
+            dynamic={
+                r".*\.layers\.0\..*": {"bits": 8},
+                r".*\.q_proj": {"adapter": {"rank": 16}},
+                r"model\.layers\.1\.self_attn": {"adapter": {"rank": 8}},
+            },
+        )
+        names = [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.1.self_attn.k_proj",
+        ]
+
+        # The quantizer resolved 64 and 8; a verbatim export claimed 16 and 64.
+        assert [
+            qconfig.dynamic_get(n, key="adapter", sub_key="rank", default=64)
+            for n in names
+        ] == [64, 8]
+
+        patterns = qconfig.extract_adapter_rank_patterns(
+            module_ranks={names[0]: 64, names[1]: 8},
+        )
+
+        assert patterns == {r"model\.layers\.1\.self_attn\.k_proj": 8}
+        assert next(
+            (v for k, v in patterns.items() if _rank_pattern_matches(k, names[0])),
+            64,
+        ) == 64
+
+    def test_rank_pattern_export_is_exact_for_prefix_rules(self):
+        """A prefix rule used to export a key that PEFT could never match."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=32),
+            dynamic={r"model\.layers\.1\.": {"adapter": {"rank": 64}}},
+        )
+        names = ["model.layers.1.self_attn.q_proj", "model.layers.11.mlp.down_proj"]
+
+        assert qconfig.dynamic_get(
+            names[0], key="adapter", sub_key="rank", default=32,
+        ) == 64
+        patterns = qconfig.extract_adapter_rank_patterns(
+            module_ranks={names[0]: 64, names[1]: 32},
+        )
+        assert patterns == {r"model\.layers\.1\.self_attn\.q_proj": 64}
+
+        assert _rank_pattern_matches(
+            r"model\.layers\.1\.self_attn\.q_proj", names[0],
+        )
+        # Exact keys cannot spill into layer 11 or into a longer name.
+        assert not _rank_pattern_matches(
+            r"model\.layers\.1\.self_attn\.q_proj", names[1],
+        )
+
+    def test_rank_pattern_export_requires_trained_ranks(self):
+        """Dynamic rules alone cannot say which ranks were trained."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={r".*q_proj": {"adapter": {"rank": 4}}},
+        )
+        with self.assertRaises(ValueError):
+            qconfig.extract_adapter_rank_patterns()
+
+        # No adapter rank rule: nothing to export, no ranks needed.
+        plain = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={r".*q_proj": {"bits": 8}},
+        )
+        assert plain.extract_adapter_rank_patterns() == {}
+
+    def test_rank_pattern_export_rejects_stale_resolution(self):
+        """Never export a pattern that `dynamic` would now resolve differently."""
+
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={r".*q_proj": {"adapter": {"rank": 4}}},
+        )
+        with self.assertRaises(ValueError):
+            qconfig.extract_adapter_rank_patterns(
+                module_ranks={"model.layers.0.self_attn.q_proj": 16},
+            )

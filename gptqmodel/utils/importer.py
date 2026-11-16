@@ -1271,6 +1271,21 @@ def hf_select_quant_linear_v2(
 
 
 # auto select the correct/optimal QuantLinear class
+def _auto_select_priority(cls: Type[BaseQuantLinear], fmt: FORMAT, dtype) -> int:
+    """Effective AUTO rank for one candidate at the requested activation dtype.
+
+    ``SUPPORTS_FORMATS`` is a dtype-independent rank. A kernel may lower its
+    own rank for a dtype whose path is a slow fallback. Test doubles that only
+    declare ``SUPPORTS_FORMATS`` keep working through the fallback.
+    """
+
+    resolver = getattr(cls, "auto_select_priority", None)
+    if resolver is not None:
+        return resolver(fmt, dtype)
+    formats = getattr(cls, "SUPPORTS_FORMATS", None) or {}
+    return formats.get(fmt, 0)
+
+
 def select_quant_linear(
         bits,
         group_size: int,
@@ -1288,6 +1303,7 @@ def select_quant_linear(
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
         is_sharded: bool = False,
+        cpu_offload: bool = False,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if isinstance(format, str):
         format = FORMAT(format.lower())
@@ -1303,7 +1319,16 @@ def select_quant_linear(
             _validate_selector_device_families(targets)
             device = targets[0] if len(targets) == 1 else targets
 
-    bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
+    concrete_bits = _normalize_quant_bits(bits, format_value=format)
+    bits = quant_bits_width(concrete_bits)
+    gguf_qtype = None
+    if quant_method == METHOD.GGUF:
+        # A GGUF bit width is ambiguous: 4 bits can be Q4_0, Q4_K or IQ4_NL.
+        # Resolve the concrete ggml layout so a candidate that only implements
+        # a subset of them is rejected during selection, not in its constructor.
+        from ..nn_modules.qlinear.gguf import gguf_tensor_qtype
+
+        gguf_qtype = gguf_tensor_qtype(concrete_bits)
 
     supported_formats = get_backend_to_method_format_mapping().get(quant_method)
     if supported_formats is None:
@@ -1342,9 +1367,35 @@ def select_quant_linear(
     auto_inference_only_fallback = None
 
     def validate_candidate(cls, **kwargs):
+        if gguf_qtype is not None and not cls.supports_gguf_qtype(concrete_bits):
+            supported = getattr(cls, "SUPPORTS_GGUF_QTYPES", ())
+            return False, NotImplementedError(
+                f"{cls.__name__} cannot construct the GGUF `{gguf_qtype}` layout "
+                f"(supported: {sorted(supported)}). Select a kernel that supports "
+                "this GGUF qtype."
+            )
         # A kernel selected for a multi-GPU model must be valid on every target
         # ordinal.  Validate each exact target so device-sensitive kernels query
         # the correct capability rather than the process's current device.
+        if cpu_offload:
+            # A device map with CPU entries runs `post_init` on the
+            # CPU-resident layers; Accelerate only moves them to the execution
+            # device for `forward`. A kernel that needs CUDA during
+            # `post_init` (Marlin, ExLlamaV2, ...) would load and then fail, so
+            # reject it here. The declaration is separate from
+            # `SUPPORTS_DEVICES`: Triton V2 needs CUDA to execute but its
+            # `post_init` is CPU-safe.
+            device_support = getattr(cls, "SUPPORTS_DEVICES", [])
+            if (
+                DEVICE.ALL not in device_support
+                and DEVICE.CPU not in device_support
+                and not getattr(cls, "SUPPORTS_CPU_OFFLOAD", False)
+            ):
+                return False, NotImplementedError(
+                    f"{cls} cannot run `post_init` on a CPU-offloaded layer; "
+                    "select a portable `*Torch` backend or a kernel that "
+                    "declares `SUPPORTS_CPU_OFFLOAD`."
+                )
         if selector_targets is None:
             return validate_quant_linear(cls, **kwargs, device=None)
         last_result = (True, None)
@@ -1360,6 +1411,14 @@ def select_quant_linear(
         allow_quant_linears = list(get_auto_backend_kernel_mapping()[quant_method].get(format, {}).items())
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
+        # Re-rank for the requested activation dtype: a kernel whose dtype path
+        # is a slow fallback (for example ExLlamaV2 reconstructs a dense weight
+        # for BF16) must not outrank a native kernel. The sort is stable, so
+        # equal ranks keep the declared order.
+        allow_quant_linears.sort(
+            key=lambda item: _auto_select_priority(item[1], format, dtype),
+            reverse=True,
+        )
 
         last_err = None
         global message_logged
@@ -1495,6 +1554,7 @@ def select_quant_linear(
         dtype=dtype,
         dynamic=dynamic,
         trainable=trainable,
+        adapter=adapter,
     )
 
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")

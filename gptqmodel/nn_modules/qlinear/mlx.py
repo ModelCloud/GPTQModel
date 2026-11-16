@@ -35,6 +35,8 @@ from .fp8 import TorchFP8Linear
 from .gemv_awq import AwqGEMVLinear
 from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from .gguf import GGUFTorchLinear
+from .macaq import MacaqLinear
+from .nf12 import NF12Linear
 from .paroquant import ParoLinear
 from .qqq import QQQTorchLinear
 from .torch import TorchLinear
@@ -63,6 +65,19 @@ class _MlxLinearContract:
         return True, None
 
     @classmethod
+    def _validate_source(cls, **kwargs):
+        """Validate a packed source layer for the host-side numpy repack.
+
+        ``pack_source`` only decodes and repacks checkpoint words in numpy, so
+        it runs on any OS. Apple Silicon and Metal are requirements of the MLX
+        runtime, enforced by :meth:`validate_once` when the loader instantiates
+        the kernel, not of the export/convert path. The repack emits float16
+        MLX scales regardless of the checkpoint's storage dtype, so callers
+        pass ``dtype=None`` and let ``pack_source`` perform the cast.
+        """
+        return cls._validate(check_platform=False, **kwargs)
+
+    @classmethod
     def _validate(cls, **kwargs):
         ok, err = super()._validate(**kwargs)
         if not ok:
@@ -84,7 +99,7 @@ class _MlxLinearContract:
     def source_compatible(cls, module):
         if not isinstance(module, cls.SOURCE_LINEAR):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits,
             group_size=module.requested_group_size,
             desc_act=module.desc_act,
@@ -92,7 +107,7 @@ class _MlxLinearContract:
             in_features=module.in_features,
             out_features=module.out_features,
             pack_dtype=module.pack_dtype,
-            dtype=module.scales.dtype,
+            dtype=None,
             device=DEVICE.MPS,
             adapter=module.adapter,
         )
@@ -324,7 +339,7 @@ class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
     def source_compatible(cls, module):
         if not isinstance(module, cls):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits,
             group_size=module.requested_group_size,
             desc_act=module.desc_act,
@@ -332,7 +347,7 @@ class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
             in_features=module.in_features,
             out_features=module.out_features,
             pack_dtype=module.pack_dtype,
-            dtype=module.scales.dtype,
+            dtype=None,
             device=DEVICE.MPS,
             adapter=module.adapter,
         )
@@ -514,7 +529,7 @@ class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
     def source_compatible(cls, module):
         if not isinstance(module, cls):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits,
             group_size=module.requested_group_size,
             desc_act=module.desc_act,
@@ -522,7 +537,7 @@ class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
             in_features=module.in_features,
             out_features=module.out_features,
             pack_dtype=module.pack_dtype,
-            dtype=module.scales.dtype,
+            dtype=None,
             device=DEVICE.MPS,
             adapter=module.adapter,
         )
@@ -760,7 +775,7 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
     def source_compatible(cls, module):
         if not isinstance(module, QQQTorchLinear):
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits, group_size=-1 if module.group_size == module.in_features else module.group_size,
             desc_act=module.desc_act, sym=module.sym,
             in_features=module.in_features, out_features=module.out_features,
@@ -844,7 +859,7 @@ class GGUFMlxQuantLinear(_MlxLinearContract, GGUFTorchLinear):
 
         if not isinstance(module, GGUFTorchLinear) or module.gguf_tensor_qtype not in MLX_GGUF_QTYPES:
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=int(module.bits), group_size=-1, desc_act=False, sym=True,
             in_features=module.in_features, out_features=module.out_features,
             pack_dtype=torch.int32, dtype=torch.float16, device=DEVICE.MPS,
@@ -890,7 +905,7 @@ class _MlxDenseContract(_MlxLinearContract):
     def source_compatible(cls, module):
         if not isinstance(module, cls.SOURCE_LINEAR) or module.adapter is not None:
             return False
-        ok, _ = cls.validate(
+        ok, _ = cls._validate_source(
             bits=module.bits, group_size=-1, desc_act=False, sym=True,
             in_features=module.in_features, out_features=module.out_features,
             pack_dtype=torch.int32, dtype=torch.float16, device=DEVICE.MPS,
@@ -1041,3 +1056,162 @@ class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
             if affine is not None:
                 payload["weight"], payload["scales"], payload["affine_biases"], payload["block_size"] = affine
         return payload
+
+
+class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
+    """MACaQ MXFP4 holder loaded into MLX's native MXFP4 Metal matmul.
+
+    MACaQ's checkpoint bytes are already the OCP MXFP4 layout MLX expects: one
+    E2M1 nibble per value (low nibble first) and one E8M0 byte per 32 values.
+    The transfer is therefore a plain ``uint8 -> uint32`` reinterpretation with
+    no requantization, and the rotated-frame pre-scale/Hadamard state moves
+    across unchanged.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.MACAQ]
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 0, FORMAT.MXFP4: 0}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int32, torch.uint8]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    REQUIRES_FORMAT_V2 = False
+
+    SOURCE_LINEAR = MacaqLinear
+
+    @classmethod
+    def source_compatible(cls, module):
+        if not super().source_compatible(module):
+            return False
+        groups = module.in_features // 32
+        return (
+            module.block_size == 32
+            and tuple(module.W_packed.shape) == (module.out_features, module.in_features // 2)
+            and tuple(module.W_scales.view(torch.uint8).shape) == (module.out_features, groups)
+            and (module.pre_scale is None or tuple(module.pre_scale.shape) == (module.in_features,))
+            and (module.BH is None or tuple(module.BH.shape) == (module.had_block, module.had_block))
+        )
+
+    @classmethod
+    def stock_compatible(cls, module):
+        """Whether the layer is exactly a stock MLX ``QuantizedLinear(mode="mxfp4")``.
+
+        A W4A16 layer quantized with ``rotation="none"`` and
+        ``pre_mode="none"`` has no activation transform, so its packed words
+        and E8M0 bytes are a plain MXFP4 linear that stock ``mlx_lm.load``
+        reconstructs. W4A4 layers keep the custom runtime: stock MLX-LM only
+        builds weight-only ``QuantizedLinear``.
+        """
+        return (
+            cls.source_compatible(module)
+            and module.activation_precision == "w4a16"
+            and module.plain_mxfp4
+        )
+
+    @classmethod
+    def mlx_params(cls, module):
+        del module
+        return {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+
+    @classmethod
+    def pack_source(cls, module):
+        """Stock MXFP4 arrays for a :meth:`stock_compatible` layer, unchanged."""
+        if not cls.stock_compatible(module):
+            raise ValueError(f"MACaQ layer {module.name} needs the custom MLX runtime")
+        payload = cls.native_payload(module)
+        return payload["weight"], payload["scales"], None, cls.mlx_params(module)
+
+    @classmethod
+    def native_payload(cls, module):
+        """Return MLX MXFP4 words, E8M0 scales, and the rotation state."""
+        if not cls.source_compatible(module):
+            raise ValueError(f"MACaQ layer {module.name} cannot be transferred to MLX")
+        words = np.ascontiguousarray(module.W_packed.detach().to("cpu").numpy())
+        # Absent transforms (`rotation="none"`, `pre_mode="none"`) travel as
+        # identities so the MLX layer keeps one parameter layout, and the
+        # flags let it skip their dispatch.
+        apply_rotation = module.BH is not None
+        apply_pre_scale = module.pre_scale is not None
+        bh = (module.BH.detach().to("cpu", torch.float32) if apply_rotation
+              else torch.eye(module.had_block, dtype=torch.float32))
+        pre_scale = (module.pre_scale.detach().to("cpu", torch.float32) if apply_pre_scale
+                     else torch.ones(module.in_features, dtype=torch.float32))
+        return {
+            "weight": words.view(np.uint32).reshape(module.out_features, module.in_features // 8),
+            "scales": module.W_scales.detach().view(torch.uint8).to("cpu").numpy(),
+            "pre_scale": pre_scale.numpy(),
+            "BH": bh.numpy(),
+            "apply_rotation": apply_rotation,
+            "apply_pre_scale": apply_pre_scale,
+            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
+            "had_block": module.had_block,
+            "activation_precision": module.activation_precision,
+            "compute_dtype": module.compute_dtype,
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+        }
+
+
+class NF12MlxQuantLinear(_MlxDenseContract, NF12Linear):
+    """NF12 holder decoded by the MLX Metal kernels.
+
+    NF12 stores a lossless 12-bit BF16 stream, so the packed bytes and the
+    escape table move across unchanged and Metal decodes them exactly.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.NF12]
+    SUPPORTS_FORMATS = {FORMAT.NF12: 0}
+    SUPPORTS_BITS = [12]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32, torch.int64]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    REQUIRES_FORMAT_V2 = False
+
+    SOURCE_LINEAR = NF12Linear
+
+    @classmethod
+    def source_compatible(cls, module):
+        if not super().source_compatible(module):
+            return False
+        return (
+            tuple(module.nf12_packed.shape) == (module.out_features, module.in_features * 3 // 2)
+            and module.nf12_packed.dtype == torch.uint8
+            and module.nf12_escapes.dtype == torch.int16
+            and module.nf12_escapes.dim() == 2
+            and module.nf12_escapes.shape[1] == 8
+            and module.nf12_exp_base.numel() == 1
+        )
+
+    @classmethod
+    def native_payload(cls, module):
+        """Return the packed NF12 stream and escape table unchanged."""
+        if not cls.source_compatible(module):
+            raise ValueError(f"NF12 layer {module.name} cannot be transferred to MLX")
+        escapes = module.nf12_escapes.detach().to("cpu").numpy()
+        if escapes.shape[0] == 0:
+            # Metal buffers need a real row; a weight with no escaped groups
+            # never indexes the table, so one zero row is inert.
+            escapes = np.zeros((1, 8), dtype=np.int16)
+        return {
+            "packed": module.nf12_packed.detach().to("cpu").numpy(),
+            "escapes": escapes,
+            "exp_base": int(module.nf12_exp_base.detach().to("cpu").reshape(-1)[0]),
+            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+        }

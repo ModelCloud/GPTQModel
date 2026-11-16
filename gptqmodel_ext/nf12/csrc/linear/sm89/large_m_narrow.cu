@@ -24,6 +24,7 @@ struct NarrowParams {
   int64_t ldx;
   const uint8_t* weight;
   const uint4* escapes;
+  uint32_t num_escapes;
   uint32_t base_x4;
   int m, n, kb;
   const __nv_bfloat16* bias;
@@ -70,7 +71,7 @@ __global__ void __launch_bounds__(32 * SPLITS) narrow_kernel(NarrowParams p) {
       if (kb + 1 < end) load(kb + 1, 1 - slot);
     }
     uint32_t a[4][4];
-    WT::fragments(planes, p.base_x4, p.escapes, a);
+    WT::fragments(planes, p.base_x4, p.escapes, p.num_escapes, a);
 #pragma unroll
     for (int kk = 0; kk < 4; ++kk) {
       uint32_t b[TF][2];
@@ -152,7 +153,7 @@ cudaError_t linear_large_m_sm8x_narrow(const LinearArgs& a, int config) {
   if (!narrow_sm8x_supported(*a.dev)) return cudaErrorNotSupported;
   if (a.m < 1 || a.m > 16384 || a.n < 16 || a.n > 256 || a.n % 16 ||
       a.k < 512 || a.k > 16384 || a.k % 64) return cudaErrorNotSupported;
-  NarrowParams p{a.x, a.ldx, a.weight, a.escapes, exp_base_x4(a.exp_base), static_cast<int>(a.m),
+  NarrowParams p{a.x, a.ldx, a.weight, a.escapes, a.num_escapes, exp_base_x4(a.exp_base), static_cast<int>(a.m),
                  static_cast<int>(a.n), static_cast<int>(a.k / 64), a.bias, a.y, a.ldy};
   switch (config < 0 ? narrow_sm8x_heuristic(a.m, a.n, a.k, *a.dev) : config) {
     case 6: return launch<16, 16>(a, p);

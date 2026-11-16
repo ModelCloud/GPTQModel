@@ -110,9 +110,36 @@ def supported(device: torch.device | str | None = None) -> bool:
     return capability[0] * 10 + capability[1] >= MIN_CAPABILITY
 
 
+def available(device: torch.device | str | None = None) -> bool:
+    """Whether the native block-float CUDA kernels can run here.
+
+    This is a capability probe, not a build: a supported SM architecture alone is
+    not native availability. The kernels are available when the extension is
+    already loaded/registered, a cached or configured prebuilt binary exists, or
+    the source build tools are present. Otherwise callers must keep the dense
+    reference path instead of running native-only assertions.
+    """
+
+    if not supported(device):
+        return False
+    if _EXTENSION.loadable_without_build():
+        return True
+    # A configured prebuilt library is authoritative: load() never falls back to
+    # a source build when one is set, so a missing file means unavailable.
+    if _EXTENSION.configured_prebuilt_library() is not None:
+        return False
+    return _EXTENSION.cuda_source_build_available()
+
+
 def prewarm() -> bool:
     """Compile/load the extension ahead of the first forward pass."""
 
+    # This is a CUDA-only kernel. On HIP, ``load()`` would hand the sources to
+    # torch's ROCm loader, which hipifies them next to the originals; refusing
+    # here keeps a direct ``prewarm()`` call from touching the checkout even if
+    # a future loader ever stopped staging.
+    if not supported():
+        return False
     return _EXTENSION.load()
 
 
@@ -141,6 +168,11 @@ def ready(device: torch.device | str | None = None) -> bool:
 
 
 def _ops():
+    if torch.version.hip is not None:
+        raise RuntimeError(
+            "the Tenstorrent block-float CUDA extension is unavailable: "
+            "the CUDA-only kernels do not run on this device (ROCm uses the HIP loader)"
+        )
     if not _EXTENSION.load():
         raise RuntimeError(
             f"the Tenstorrent block-float CUDA extension is unavailable: {_EXTENSION.last_error_message()}"
@@ -164,11 +196,15 @@ def linear(
     exponents: torch.Tensor,
     bits: int,
     bias: Optional[torch.Tensor] = None,
+    *,
+    cublas: Optional[bool] = None,
 ) -> torch.Tensor:
     """``x @ dequant(codes, exponents).T + bias`` without a dense weight.
 
     ``x`` is ``[m, k]`` in float16, bfloat16 or float32 and the result has the
     same dtype and shape ``[m, n]``, with ``n`` taken from ``exponents``.
+    ``bias`` is float32 and is added to the float32 accumulator before the
+    single output cast, so it keeps the checkpoint's precision.
     """
 
     if x.dim() != 2:
@@ -178,7 +214,17 @@ def linear(
         raise ValueError(f"K={k} must be a multiple of the block size {BLOCKFLOAT_BLOCK}")
     n = _exponent_rows(exponents, k)
     out = torch.empty((x.size(0), n), dtype=x.dtype, device=x.device)
-    _ops().blockfloat_linear(x, codes, exponents, int(bits), bias, out)
+    from .kernel import get_kernel_config
+
+    _ops().blockfloat_linear(
+        x,
+        codes,
+        exponents,
+        int(bits),
+        bias,
+        out,
+        get_kernel_config().blockfloat_cublas if cublas is None else cublas,
+    )
     return out
 
 

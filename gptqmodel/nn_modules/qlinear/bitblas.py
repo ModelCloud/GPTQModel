@@ -22,7 +22,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import get_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
@@ -112,7 +112,7 @@ def _load_cuda_libraries() -> bool:
 
 def _is_bitblas_available() -> bool:
     # Allow disabling BitBLAS probing in environments where TVM import is unstable.
-    if env_flag("GPTQMODEL_DISABLE_BITBLAS", default="0"):
+    if get_kernel_config().disable_bitblas:
         return False
 
     try:
@@ -271,8 +271,11 @@ def import_bitblas():
         from .bitblas_target_detector import patched_auto_detect_nvidia_target
 
         bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
-        visible = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
-        BITBLAS_TARGET = _normalize_bitblas_target(patched_auto_detect_nvidia_target(visible))
+        # device_smi resolves ``cuda:N`` against CUDA_VISIBLE_DEVICES, so N is a
+        # logical index. The env entry itself may be a physical id, UUID or MIG
+        # name and must not be parsed as one.
+        device_index = torch.cuda.current_device()
+        BITBLAS_TARGET = _normalize_bitblas_target(patched_auto_detect_nvidia_target(device_index))
         os.environ["TVM_TARGET"] = f"{BITBLAS_TARGET}"
         log.debug("BITBLAS_TARGET %s", BITBLAS_TARGET)
 
@@ -809,6 +812,20 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
     def post_init(self) -> None:
         super().post_init()
 
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        if getattr(self, "_native_shuffled", False):
+            from ...utils.checkpoint_state import is_checkpoint_serialization
+
+            if is_checkpoint_serialization():
+                raise RuntimeError(
+                    f"{self.__class__.__name__} rewrites packed tensors into a "
+                    "kernel-private BitBLAS runtime layout; the original checkpoint "
+                    "tensors cannot be reconstructed. Use `GPTQModel.save()`/"
+                    "`save_quantized()` for a loadable checkpoint, or reload the "
+                    "original checkpoint."
+                )
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+
     def _transform_bitblas_weight(self, intweight_out_in: torch.Tensor, device: torch.device) -> torch.Tensor:
         from bitblas.quantization.utils import general_compress
 
@@ -867,6 +884,12 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             # The operator runs in fp16 when bf16 compute is unavailable (see module header);
             # keep `x` itself in the module dtype for adapters.
             x_2d = x_2d.to(self.compute_dtype)
+        # `_invoke_bitblas_matmul` hands BitBLAS a raw `data_ptr()`, so the
+        # operand must be densely packed. `reshape` returns a view for a
+        # non-contiguous input such as `hidden_states[:, -1:, :]` (every
+        # batched decode step), and BitBLAS would then read the wrong rows.
+        # A dtype cast above already copies; `contiguous()` is a no-op then.
+        x_2d = x_2d.contiguous()
 
         args = [x_2d, self.qweight, self.scales]
         if self.quant_config.with_zeros:
@@ -959,6 +982,9 @@ class BitblasLinear(BitblasBaseQuantLinear):
             intzeros_group_out=intzeros,
             bias=bias,
         )
+        # The checkpoint tensors were replaced by BitBLAS-compressed runtime
+        # words; they cannot be inverted back to the source GPTQ payload.
+        self._native_shuffled = True
 
 
 BitBLASLinear = BitblasLinear

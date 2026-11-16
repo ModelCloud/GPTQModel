@@ -18,6 +18,11 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -204,7 +209,14 @@ class InternVLChatQModel(BaseQModel):
     def _extract_history_and_question(
         cls,
         conversation: list[Dict[str, Any]],
-    ) -> tuple[Optional[list[tuple[str, str]]], str]:
+    ) -> tuple[Optional[list[tuple[str, str]]], str, Optional[str]]:
+        """Split ``conversation`` into history, query, and the query's answer.
+
+        A conversation that ends with an assistant message keeps that message as
+        the ``answer`` so the calibration text still contains the response the
+        model is meant to predict (issue #4227). ``answer`` is ``None`` when the
+        conversation ends with a user turn.
+        """
         turns: list[tuple[str, str]] = []
         pending_user: Optional[str] = None
 
@@ -224,14 +236,14 @@ class InternVLChatQModel(BaseQModel):
                 pending_user = content
 
         if pending_user is not None:
-            return turns or None, pending_user
+            return turns or None, pending_user, None
 
         if not turns:
             raise ValueError("InternVL calibration conversation must contain at least one user prompt.")
 
         history = turns[:-1] or None
-        question, _ = turns[-1]
-        return history, question
+        question, answer = turns[-1]
+        return history, question, answer
 
     @classmethod
     def process_vision_info(
@@ -283,6 +295,7 @@ class InternVLChatQModel(BaseQModel):
         question: str,
         history: Optional[list[tuple[str, str]]],
         num_patches_list: Optional[list[int]],
+        answer: Optional[str] = None,
     ) -> tuple[str, int, int]:
         tokenizer = self._get_tokenizer()
         template = self.model.conv_template.copy() if hasattr(self.model.conv_template, "copy") else deepcopy(self.model.conv_template)
@@ -296,7 +309,7 @@ class InternVLChatQModel(BaseQModel):
             template.append_message(template.roles[0], old_question)
             template.append_message(template.roles[1], old_answer)
         template.append_message(template.roles[0], question)
-        template.append_message(template.roles[1], None)
+        template.append_message(template.roles[1], answer)
 
         query = template.get_prompt()
         for num_patches in num_patches_list or []:
@@ -324,7 +337,7 @@ class InternVLChatQModel(BaseQModel):
         max_num = int(getattr(config, "max_dynamic_patch", 12))
         use_thumbnail = bool(getattr(config, "use_thumbnail", True))
 
-        history, question = self._extract_history_and_question(conversation)
+        history, question, answer = self._extract_history_and_question(conversation)
         pixel_values, num_patches_list = self.process_vision_info(
             conversation,
             input_size=input_size,
@@ -338,6 +351,7 @@ class InternVLChatQModel(BaseQModel):
             question=question,
             history=history,
             num_patches_list=num_patches_list,
+            answer=answer,
         )
         tokenized = tokenizer(query, return_tensors="pt")
         tokenized["pixel_values"] = pixel_values
@@ -391,11 +405,19 @@ class InternVLChatQModel(BaseQModel):
         self.model.mlp1 = move_to(self.model.mlp1, device=CPU)
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del batch_size, kwargs
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, 1):
+        # The InternVL chat path prepares one conversation at a time.
+        for batch in batched_conversations(conversations, 1):
             calib_data.append(self.prepare_inputs_for_conversation(batch[0]))
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )
 
     def move_input_capture_example(self, example, data_device):
         example = super().move_input_capture_example(example, data_device)

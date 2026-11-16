@@ -5,12 +5,16 @@
 
 import inspect
 import json
+import ntpath
 import os
+import re
 import shutil
 import sys
+import threading
 import warnings
+from collections import Counter
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any, Optional
 
 import torch
@@ -23,6 +27,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+from transformers.utils import cached_file
 
 from ..utils import _MONKEY_PATCH_LOCK
 
@@ -74,13 +79,16 @@ from ..utils.logger import setup_logger
 __all__ = [
     "no_init_weights",
     "suspend_hf_weight_init",
+    "assert_loaded_model_state",
     "get_hf_config_dtype",
     "normalize_torch_dtype_kwarg",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
+    "get_config_selection_kwargs",
     "get_hf_gguf_load_kwargs",
+    "normalize_checkpoint_subfolder",
     "normalize_model_id_or_path_for_hf_gguf",
     "ensure_qwen_drive_registered",
     "resolve_trust_remote_code",
@@ -219,12 +227,17 @@ def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
     if isinstance(dtype, torch.dtype):
         return dtype
 
-    # If provided as a string (e.g., "float16"), resolve it via torch namespace
+    # If provided as a string (e.g., "float16" or "torch.bfloat16"), resolve it
+    # via the torch namespace. The loader accepts the same prefixed spelling.
     if isinstance(dtype, str):
+        name = dtype.strip().removeprefix("torch.")
         try:
-            return getattr(torch, dtype)
+            resolved = getattr(torch, name)
         except AttributeError:
             raise ValueError(f"Invalid dtype string: {dtype}")
+        if not isinstance(resolved, torch.dtype):
+            raise ValueError(f"Invalid dtype string: {dtype}")
+        return resolved
 
     raise ValueError(f"dtype must be torch.dtype or str, but got {dtype} (type={type(dtype)})")
 
@@ -247,11 +260,31 @@ def normalize_torch_dtype_kwarg(
     api_name: str,
     explicit_dtype: Any = _MISSING,
 ) -> Any:
+    def _resolve_dtype(value: Any) -> Any:
+        if value is _MISSING or value is None:
+            return value
+        if isinstance(value, str):
+            if value.strip().lower() == "auto":
+                return "auto"
+        if isinstance(value, torch.dtype):
+            return value
+        if isinstance(value, str):
+            name = value.strip().removeprefix("torch.")
+            resolved = getattr(torch, name, None)
+            if isinstance(resolved, torch.dtype):
+                return resolved
+            raise ValueError(f"Invalid dtype string: {value}")
+        raise ValueError(
+            f"dtype must be torch.dtype, str, None, or 'auto', got {value!r}"
+        )
+
     current_dtype = explicit_dtype
     if explicit_dtype is _MISSING:
         current_dtype = kwargs.pop("dtype", _MISSING)
 
     torch_dtype = kwargs.pop("torch_dtype", _MISSING)
+    current_dtype = _resolve_dtype(current_dtype)
+    torch_dtype = _resolve_dtype(torch_dtype)
     if torch_dtype is _MISSING:
         if explicit_dtype is _MISSING and current_dtype is not _MISSING:
             kwargs["dtype"] = current_dtype
@@ -272,37 +305,222 @@ def normalize_torch_dtype_kwarg(
     return current_dtype
 
 
-@contextmanager
-def suspend_hf_weight_init():
-    """Disable HF/torch parameter init temporarily and always restore globals."""
+_HF_INIT_LOCK = threading.RLock()
+_HF_INIT_DEPTH = 0
+_HF_INIT_SUSPENSION = None
+
+
+def _install_init_suspension():
+    """Patch the process-wide init entry points and return the originals."""
 
     def _skip_init(*args, **kwargs):
         return None
 
-    original_kaiming_uniform = torch.nn.init.kaiming_uniform_
-    original_uniform = torch.nn.init.uniform_
-    original_normal = torch.nn.init.normal_
-
     modeling_utils = transformers.modeling_utils
-    had_init_flag = hasattr(modeling_utils, "_init_weights")
-    original_init_flag = getattr(modeling_utils, "_init_weights", None)
+    originals = {
+        "kaiming_uniform": torch.nn.init.kaiming_uniform_,
+        "uniform": torch.nn.init.uniform_,
+        "normal": torch.nn.init.normal_,
+        "had_init_flag": hasattr(modeling_utils, "_init_weights"),
+        "init_flag": getattr(modeling_utils, "_init_weights", None),
+    }
 
     torch.nn.init.kaiming_uniform_ = _skip_init
     torch.nn.init.uniform_ = _skip_init
     torch.nn.init.normal_ = _skip_init
     modeling_utils._init_weights = False
 
+    # transformers' own guard patches many more torch initializers and
+    # ``PreTrainedModel.init_weights``. Keep it entered for the whole outermost
+    # scope: re-entering it per caller is what makes overlapping entries lose
+    # the originals.
+    no_init = no_init_weights()
+    no_init.__enter__()
+    originals["no_init"] = no_init
+    return originals
+
+
+def _restore_init_suspension(originals):
+    modeling_utils = transformers.modeling_utils
     try:
-        with no_init_weights():
-            yield
+        originals["no_init"].__exit__(None, None, None)
     finally:
-        torch.nn.init.kaiming_uniform_ = original_kaiming_uniform
-        torch.nn.init.uniform_ = original_uniform
-        torch.nn.init.normal_ = original_normal
-        if had_init_flag:
-            modeling_utils._init_weights = original_init_flag
+        torch.nn.init.kaiming_uniform_ = originals["kaiming_uniform"]
+        torch.nn.init.uniform_ = originals["uniform"]
+        torch.nn.init.normal_ = originals["normal"]
+        if originals["had_init_flag"]:
+            modeling_utils._init_weights = originals["init_flag"]
         elif hasattr(modeling_utils, "_init_weights"):
             delattr(modeling_utils, "_init_weights")
+
+
+@contextmanager
+def suspend_hf_weight_init():
+    """Disable HF/torch parameter init until the last overlapping entry exits.
+
+    ``transformers``' ``no_init_weights`` patches process-wide initializers and
+    ``PreTrainedModel.init_weights``, and this module also silences three torch
+    initializers. Both are process-global, so overlapping entries are reference
+    counted: the first entry installs the patches, later entries only increment
+    the depth, and the last exit restores the originals. Without the count the
+    first caller to leave restored the real initializers while another thread
+    was still building its model, and the second exit then restored the
+    ``_skip_init`` stubs, disabling weight init for the rest of the process
+    (issue #4129).
+    """
+
+    global _HF_INIT_DEPTH, _HF_INIT_SUSPENSION
+
+    with _HF_INIT_LOCK:
+        if _HF_INIT_DEPTH == 0:
+            _HF_INIT_SUSPENSION = _install_init_suspension()
+        _HF_INIT_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _HF_INIT_LOCK:
+            _HF_INIT_DEPTH -= 1
+            if _HF_INIT_DEPTH == 0:
+                originals, _HF_INIT_SUSPENSION = _HF_INIT_SUSPENSION, None
+                _restore_init_suspension(originals)
+
+
+_KEEP_IN_FP32_ATTRS = ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
+
+
+def _iter_keep_in_fp32_declarations(model):
+    """Yield the keep-in-fp32 patterns a model declares on itself or a child.
+
+    ``PreTrainedModel.post_init`` already unions child declarations onto the
+    top-level model, but walking submodules keeps the guard correct for models
+    built without that step.
+    """
+
+    seen = set()
+    modules = getattr(model, "modules", None)
+    for module in (modules() if callable(modules) else (model,)):
+        for attr in _KEEP_IN_FP32_ATTRS:
+            declared = getattr(module, attr, None)
+            if not declared:
+                continue
+            if isinstance(declared, str):
+                declared = (declared,)
+            for name in declared:
+                if isinstance(name, str) and name not in seen:
+                    seen.add(name)
+                    yield name
+
+
+def _compile_keep_in_fp32_matcher(model):
+    """Compile the model's fp32-pinned parameter patterns, transformers-style.
+
+    transformers 5.22 matches every ``_keep_in_fp32_modules`` and
+    ``_keep_in_fp32_modules_strict`` entry with ``re.search`` against the full
+    parameter key, expanding ``*`` to ``.*``
+    (``core_model_loading.build_glob_alternation``). In practice those entries
+    are module substrings such as ``gate.weight`` or ``wo``; the regex/glob
+    behaviour is preserved for wildcard declarations.
+    """
+
+    patterns = [
+        re.compile(name.replace("*", ".*"))
+        for name in _iter_keep_in_fp32_declarations(model)
+    ]
+    if not patterns:
+        return None
+
+    def matches(name: str) -> bool:
+        return any(pattern.search(name) is not None for pattern in patterns)
+
+    return matches
+
+
+def assert_loaded_model_state(
+    model,
+    *,
+    api_name: str,
+    default_dtype_before: Optional[torch.dtype] = None,
+    expected_dtype: Optional[torch.dtype] = None,
+    require_uniform_dtype: bool = False,
+    require_materialized: bool = True,
+) -> None:
+    """Fail loudly when a load left the process or the model in a mixed state.
+
+    transformers' ``from_pretrained`` saves, sets and restores the process-wide
+    default dtype and builds parameters through meta-device and no-init
+    contexts. When two loads overlap, a model can come back with mixed
+    fp16/fp32 parameters, a tied weight left on the meta device, or the process
+    default dtype stuck at the load dtype (issue #4129). A silently mixed model
+    is worse than a slow, serialized load, so the loaders call this after every
+    build and raise instead of returning the corrupted model.
+
+    ``require_materialized`` and the dtype checks are skipped for the
+    ``offload_to_disk`` meta shell, which is intentionally meta until its
+    ``LazyTurtle`` materializes each layer. Objects without
+    ``named_parameters`` (the MLX runtime model) only get the default-dtype
+    check.
+
+    transformers deliberately keeps the modules listed in
+    ``_keep_in_fp32_modules`` / ``_keep_in_fp32_modules_strict`` in float32
+    inside a half-precision model, so parameters matched by those declarations
+    are excluded from both dtype checks *while they are float32*: that is the
+    dtype transformers' ``_get_dtype_plan`` pins them to. A declared module left
+    in any other dtype is still reported. Pinned parameters are still checked
+    for materialization, and undeclared mixed dtypes still fail (issue #4170).
+    """
+
+    problems = []
+
+    if default_dtype_before is not None:
+        default_dtype_after = torch.get_default_dtype()
+        if default_dtype_after != default_dtype_before:
+            problems.append(
+                "torch.get_default_dtype() changed from "
+                f"{default_dtype_before} to {default_dtype_after}"
+            )
+
+    named_parameters = getattr(model, "named_parameters", None)
+    if named_parameters is not None and (
+        require_materialized or require_uniform_dtype or expected_dtype is not None
+    ):
+        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
+        dtypes = Counter()
+        meta = []
+        for name, parameter in named_parameters():
+            if not parameter.is_floating_point():
+                continue
+            if parameter.is_meta:
+                meta.append(name)
+                continue
+            if (
+                parameter.dtype is torch.float32
+                and keep_in_fp32 is not None
+                and keep_in_fp32(name)
+            ):
+                continue
+            dtypes[parameter.dtype] += 1
+
+        if require_materialized and meta:
+            problems.append(
+                f"{len(meta)} floating parameter(s) stayed on the meta device, "
+                f"e.g. {meta[:3]}"
+            )
+        if expected_dtype is not None:
+            wrong = {str(dtype): count for dtype, count in dtypes.items() if dtype != expected_dtype}
+            if wrong:
+                problems.append(
+                    f"floating parameters are not all {expected_dtype}: {wrong}"
+                )
+        elif require_uniform_dtype and len(dtypes) > 1:
+            problems.append(
+                "floating parameters have mixed dtypes: "
+                + str({str(dtype): count for dtype, count in dtypes.items()})
+            )
+
+    if problems:
+        raise RuntimeError(
+            f"{api_name}: model load left a corrupted state: " + "; ".join(problems)
+        )
 
 
 def _raise_public_gguf_file_arg_error(api_name: str) -> None:
@@ -317,6 +535,97 @@ def get_hf_gguf_load_kwargs(kwargs: dict[str, Any]) -> dict[str, str]:
     if gguf_file is None:
         return {}
     return {"gguf_file": gguf_file}
+
+
+# Options that decide *which* config file a load reads. Model-type detection and
+# the checkpoint loader must agree on all of them: otherwise dispatch can
+# inspect the repository root or the default revision while the loader targets a
+# nested directory or another revision.
+CONFIG_SELECTION_KWARGS = (
+    "subfolder",
+    "revision",
+    "cache_dir",
+    "local_files_only",
+    "use_auth_token",
+    "force_download",
+    "resume_download",
+    "proxies",
+    "_commit_hash",
+)
+
+
+def get_config_selection_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return the config-selection options the caller actually supplied.
+
+    ``None`` is skipped so an unset option keeps the ``AutoConfig`` default
+    instead of being forced to ``None``; explicit ``False``/``""`` values are
+    preserved because they are meaningful (``subfolder=""`` means the root).
+    ``subfolder`` is validated here so every public entry point rejects an
+    escaping path before it reaches the filesystem or the Hub.
+    """
+
+    selected = {name: kwargs[name] for name in CONFIG_SELECTION_KWARGS if kwargs.get(name) is not None}
+    if "subfolder" in selected:
+        selected["subfolder"] = normalize_checkpoint_subfolder(selected["subfolder"])
+    return selected
+
+
+def normalize_checkpoint_subfolder(subfolder: Optional[str]) -> str:
+    """Validate a repo-relative ``subfolder`` and return its canonical spelling.
+
+    A ``subfolder`` names a directory *inside* the checkpoint or Hub repository,
+    so it may only narrow the base path. Absolute paths, Windows drive letters,
+    backslash separators, and ``.``/``..`` segments are rejected instead of
+    being normalized away, because silently escaping the checkpoint would make
+    the quantize config, the weights, the tokenizer, and the adapter manifest
+    resolve against different roots.
+
+    Returns ``""`` when the checkpoint root itself is requested.
+    """
+
+    if subfolder is None:
+        return ""
+    text = str(subfolder)
+    if text in ("", "."):
+        return ""
+    if "\\" in text or os.path.isabs(text) or ntpath.isabs(text) or ntpath.splitdrive(text)[0]:
+        raise ValueError(
+            f"`subfolder` must be a relative path inside the checkpoint, got `{text}`."
+        )
+    parts = [part for part in text.split("/") if part]
+    if not parts:
+        return ""
+    if any(part in (".", "..") for part in parts):
+        raise ValueError(
+            f"`subfolder` must not contain `.` or `..` segments, got `{text}`."
+        )
+    return "/".join(parts)
+
+
+def resolve_checkpoint_subfolder(base: Any, subfolder: Optional[str]) -> str:
+    """Resolve a repo-relative ``subfolder`` under a local checkpoint root.
+
+    See :func:`normalize_checkpoint_subfolder` for the accepted syntax. A
+    resolved path that leaves the checkpoint through a symlink is rejected.
+    """
+
+    base_path = os.fspath(base)
+    canonical = normalize_checkpoint_subfolder(subfolder)
+    if not canonical:
+        return base_path
+
+    joined = os.path.join(base_path, *canonical.split("/"))
+    if os.path.isdir(base_path) and os.path.exists(joined):
+        base_real = os.path.realpath(base_path)
+        try:
+            inside = os.path.commonpath([base_real, os.path.realpath(joined)]) == base_real
+        except ValueError:
+            inside = False
+        if not inside:
+            raise ValueError(
+                f"`subfolder` must stay inside the checkpoint directory, got `{canonical}`."
+            )
+    return joined
 
 
 def _normalize_repo_file_paths(file_names) -> list[str]:
@@ -874,6 +1183,22 @@ def _patch_transformers_remote_code_compat() -> None:
 
             generic.check_model_inputs = check_model_inputs
 
+        if not hasattr(generic, "OutputRecorder"):
+            # transformers 5.x moved `OutputRecorder` to
+            # `transformers.utils.output_capturing`, but older remote model files
+            # still import it from `transformers.utils.generic` (for example
+            # `modeling_klear.py`). Re-export the real recorder so the remote
+            # `can_record_outputs` mapping keeps working.
+            try:
+                from transformers.utils.output_capturing import OutputRecorder
+            except Exception:
+                log.debug(
+                    "remote-code compat skipped: transformers.utils.output_capturing unavailable",
+                    exc_info=True,
+                )
+            else:
+                generic.OutputRecorder = OutputRecorder
+
         if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
             # transformers 5.x also collapsed the legacy HybridCache entrypoint
             # into StaticCache, which already instantiates hybrid/sliding layers
@@ -881,7 +1206,11 @@ def _patch_transformers_remote_code_compat() -> None:
             cache_utils.HybridCache = cache_utils.StaticCache
 
         cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
-        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
+        # transformers 5.22 moved the length query down to the cache *layers*
+        # and no longer exposes a cache-level `get_max_cache_shape`, so the
+        # shim must not require that method to exist. It reads the layer API
+        # first and only falls back to a cache-level shape query when present.
+        if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length"):
             # Older remote decoders expect `get_max_length()`, while newer
             # transformers renamed that API to `get_max_cache_shape()`. In
             # transformers 5.14, the deprecated cache-level method delegates
@@ -904,7 +1233,11 @@ def _patch_transformers_remote_code_compat() -> None:
                         max_length = -1
 
                 if max_length is missing:
-                    max_length = self.get_max_cache_shape(layer_idx)
+                    shape_getter = getattr(self, "get_max_cache_shape", None)
+                    if callable(shape_getter):
+                        max_length = shape_getter(layer_idx)
+                if max_length is missing:
+                    return None
                 return None if max_length is None or max_length < 0 else max_length
 
             cache_base_cls.get_max_length = get_max_length
@@ -914,6 +1247,10 @@ def _patch_transformers_remote_code_compat() -> None:
             # can compute usable KV length against the newer cache interface.
             def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
                 max_length = self.get_max_length(layer_idx=layer_idx)
+                if max_length is not None and max_length < 0:
+                    # transformers 5 reports `-1` for a dynamic (unbounded)
+                    # layer; transformers 4 reported no limit as `None`.
+                    max_length = None
                 previous_seq_length = self.get_seq_length(layer_idx)
                 if max_length is not None and previous_seq_length + new_seq_length > max_length:
                     return max_length - new_seq_length
@@ -947,6 +1284,36 @@ def _patch_transformers_remote_code_compat() -> None:
                 return cache
 
             dynamic_cache_cls.from_legacy_cache = from_legacy_cache
+
+        if cache_base_cls is not None and not hasattr(cache_base_cls, "seen_tokens"):
+            # transformers 4 exposed the number of cached tokens as
+            # `cache.seen_tokens`; transformers 5 replaced it with
+            # `get_seq_length()`. Legacy remote `prepare_inputs_for_generation`
+            # implementations still read the attribute (MiniCPM-2B-dpo).
+            def seen_tokens(self) -> int:
+                return self.get_seq_length()
+
+            cache_base_cls.seen_tokens = property(seen_tokens)
+
+        if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "__getitem__"):
+            # Legacy remote decoders index the KV cache as the transformers-4
+            # tuple of `(key, value)` pairs, e.g.
+            # `past_key_values[0][0].shape[2]` (DeciLM/Baichuan2 remote
+            # `prepare_inputs_for_generation`).
+            def __getitem__(self, layer_idx):
+                layers = self.layers
+                if isinstance(layer_idx, slice):
+                    return tuple((layer.keys, layer.values) for layer in layers[layer_idx])
+                if layer_idx < 0:
+                    layer_idx += len(layers)
+                if layer_idx < 0 or layer_idx >= len(layers):
+                    raise IndexError(f"cache layer {layer_idx} is out of range")
+                layer = layers[layer_idx]
+                if not getattr(layer, "is_initialized", False):
+                    raise IndexError(f"cache layer {layer_idx} has not been written yet")
+                return layer.keys, layer.values
+
+            dynamic_cache_cls.__getitem__ = __getitem__
 
         if generation_utils is not None and not hasattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING"):
             # Older remote generation code registers custom cache builders through
@@ -1326,6 +1693,29 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
     # newer transformers only preserves the serialized `seq_length` field.
     config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
     config.attribute_map["max_length"] = "seq_length"
+    # transformers 5's DynamicCache sizes itself from `num_hidden_layers`;
+    # ChatGLM serializes the same value as `num_layers`. The shared alias below
+    # covers this and the other legacy layer-count field names.
+    _restore_legacy_layer_count_alias(config)
+
+    # `attribute_map` resolves `config.max_length` for the remote model's
+    # `__init__`, but transformers 5's `_prepare_generation_config` walks the
+    # same attribute and treats it as a user-modified generation parameter:
+    # `_get_generation_parameters()` raises for every `generate()` call because
+    # `max_length` is not a declared config field. The alias is a compatibility
+    # view, not generation state, so hide it from that probe on this config
+    # class. The attribute itself stays available to the remote code.
+    config_cls = type(config)
+    if not getattr(config_cls, "_gptqmodel_max_length_alias", False):
+        original_get_generation_parameters = config_cls._get_generation_parameters
+
+        def _get_generation_parameters(self):
+            parameters = original_get_generation_parameters(self)
+            parameters.pop("max_length", None)
+            return parameters
+
+        config_cls._get_generation_parameters = _get_generation_parameters
+        config_cls._gptqmodel_max_length_alias = True
 
     if not hasattr(config, "use_cache"):
         # transformers v5 removed `use_cache` from PretrainedConfig,
@@ -1378,7 +1768,41 @@ def _rope_parameters_are_per_layer(config: Any, rope_parameters: Any) -> bool:
     )
 
 
-def _normalize_rope_parameters_config_compat(config: Any) -> None:
+def _declares_legacy_rope_field(config: Any) -> bool:
+    """Whether the config class exposes the pre-5.x `rope_scaling` constructor field.
+
+    Legacy remote configs declare `rope_scaling` in `__init__` and read
+    `config.rope_scaling` from their modeling code, treating `None` as the
+    unscaled RoPE path. Transformers 5 configs (native and modern remote code)
+    declare `rope_parameters` instead and require it to stay populated.
+    """
+
+    try:
+        parameters = inspect.signature(type(config).__init__).parameters
+    except (TypeError, ValueError):
+        return False
+    return "rope_scaling" in parameters and "rope_parameters" not in parameters
+
+
+def _rope_config_is_scaled(config: Any) -> bool:
+    """Whether either RoPE alias declares a non-default scaling configuration."""
+
+    for candidate in (
+        getattr(config, "rope_scaling", None),
+        getattr(config, "rope_parameters", None),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("type", candidate.get("rope_type")) not in (None, "default"):
+            return True
+        if candidate.get("factor") not in (None, 1, 1.0):
+            return True
+    return False
+
+
+def _normalize_rope_parameters_config_compat(
+    config: Any, *, clear_unscaled_legacy_rope: bool = False
+) -> None:
     # HunYuanVL is a composite config: RoPE belongs exclusively to its text
     # sub-config. Adding a synthetic top-level rope_parameters value is not
     # harmless here because HunYuanVLConfig treats flat text fields as legacy
@@ -1387,31 +1811,27 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
     if getattr(config, "model_type", None) == "hunyuan_vl":
         text_config = getattr(config, "text_config", None)
         if text_config is not None:
-            _normalize_rope_parameters_config_compat(text_config)
+            _normalize_rope_parameters_config_compat(
+                text_config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+            )
         return
 
-    if str(getattr(config, "model_type", "")).lower() == "nanbeige":
-        # Nanbeige's remote modeling code owns RoPE construction and treats
-        # `rope_scaling is None` as the unscaled/default path. Transformers 5
-        # derives a default `rope_scaling` dictionary from `rope_parameters`,
-        # which the legacy code mistakes for scaled RoPE and then indexes at
-        # `["type"]`. Keep only genuinely scaled Nanbeige configurations.
-        rope_candidates = (
-            getattr(config, "rope_scaling", None),
-            getattr(config, "rope_parameters", None),
-        )
-        has_scaled_rope = any(
-            isinstance(candidate, dict)
-            and (
-                candidate.get("type", candidate.get("rope_type")) not in (None, "default")
-                or candidate.get("factor") not in (None, 1, 1.0)
-            )
-            for candidate in rope_candidates
-        )
-        if not has_scaled_rope:
-            config.rope_scaling = None
-            config.rope_parameters = None
-            return
+    if (
+        clear_unscaled_legacy_rope
+        and not _rope_parameters_are_per_layer(config, getattr(config, "rope_parameters", None))
+        and not _rope_config_is_scaled(config)
+    ):
+        # Legacy remote modeling code (MiniCPM, MobileLLM, Nanbeige, ...) owns
+        # RoPE construction and treats `rope_scaling is None` as the unscaled
+        # path; any dict is indexed at `["type"]` and fails when transformers 5
+        # synthesized a default `{"rope_type": "default"}` dict. Clear both
+        # aliases (they are the same property in transformers 5) so the remote
+        # code sees the unscaled contract it was written for. Genuinely scaled
+        # configs keep their dict, which the remote-code pass below augments
+        # with the legacy `type` key.
+        config.rope_scaling = None
+        config.rope_parameters = None
+        return
 
     rope_parameters = getattr(config, "rope_parameters", None)
     if _rope_parameters_are_per_layer(config, rope_parameters):
@@ -1475,8 +1895,34 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
 
 # Restore config fields renamed by transformers 5.x before older trust_remote_code
 # model files instantiate their architectures from the config object.
+_LEGACY_LAYER_COUNT_FIELDS = ("num_layers", "n_layer", "n_layers")
+
+
+def _restore_legacy_layer_count_alias(config: Any) -> bool:
+    """Alias a legacy layer-count field to `num_hidden_layers`.
+
+    transformers 5 sizes `DynamicCache` (and the heterogeneity helpers it
+    delegates to) from `config.num_hidden_layers`. Remote configs such as
+    `GPTPanguConfig` only declare `num_layers`/`n_layer`, so `generate()` fails
+    while building the cache. The alias lives in `attribute_map`, so the
+    serialized config keeps the checkpoint's own field name.
+    """
+
+    if hasattr(config, "num_hidden_layers"):
+        return False
+    for field in _LEGACY_LAYER_COUNT_FIELDS:
+        value = getattr(config, field, None)
+        if isinstance(value, int) and value > 0:
+            attribute_map = dict(getattr(config, "attribute_map", {}) or {})
+            attribute_map["num_hidden_layers"] = field
+            config.attribute_map = attribute_map
+            return True
+    return False
+
+
 def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
+    _restore_legacy_layer_count_alias(config)
     model_type = getattr(config, "model_type", None)
     model_type_lower = model_type.lower() if isinstance(model_type, str) else None
 
@@ -1630,11 +2076,16 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # Some transformers 5.x model classes now read `config.rope_parameters`
     # directly during `from_config()`, but older local configs may only carry
     # legacy RoPE fields or nothing but a default `rope_theta`.
-    _normalize_rope_parameters_config_compat(config)
+    clear_unscaled_legacy_rope = trust_remote_code and _declares_legacy_rope_field(config)
+    _normalize_rope_parameters_config_compat(
+        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+    )
 
-    auto_map = getattr(config, "auto_map", None) or {}
-    has_remote_automap = isinstance(auto_map.get("AutoModelForCausalLM"), str)
-    if not trust_remote_code and not has_remote_automap:
+    # `auto_map` is checkpoint data, not an opt-in. A config can carry a native
+    # `model_type` (so it loads as a built-in class) and still list remote
+    # classes; applying remote-code shims from that data would execute the
+    # snapshot without the caller's consent.
+    if not trust_remote_code:
         return
 
     _patch_transformers_remote_code_compat()
@@ -1643,21 +2094,133 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # remote-code normalization that clears legacy default `rope_scaling` can
     # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
     # after remote-code field cleanup so from_config() sees stable metadata.
-    _normalize_rope_parameters_config_compat(config)
+    _normalize_rope_parameters_config_compat(
+        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+    )
     # Re-apply remote-code field aliases after RoPE parameter backfill, since
     # some config classes synchronize `rope_scaling` from `rope_parameters` and
     # can drop legacy keys like `rope_scaling["type"]`.
     _normalize_remote_code_config_compat(config)
     # Some config classes can still nullify rope_parameters during the second
-    # remote-code field normalization pass. Ensure final config always carries
-    # valid rope_parameters for model classes that directly subscript it.
-    _normalize_rope_parameters_config_compat(config)
+    # remote-code field normalization pass. Re-apply the same policy: a modern
+    # config keeps a valid `rope_parameters` dict, while a legacy unscaled
+    # remote config stays on its `None` contract.
+    _normalize_rope_parameters_config_compat(
+        config, clear_unscaled_legacy_rope=clear_unscaled_legacy_rope
+    )
 
 
 def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
     normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+_REMOTE_CODE_MODULE_PREFIX = "transformers_modules."
+
+
+def _cache_sequence_length(cache: Any) -> int:
+    get_seq_length = getattr(cache, "get_seq_length", None)
+    if not callable(get_seq_length):
+        return 0
+    try:
+        return int(get_seq_length())
+    except Exception:
+        return 0
+
+
+def install_legacy_generation_compat(model: Any) -> bool:
+    """Restore the transformers-4 KV-cache contract for remote-code decoders.
+
+    transformers 5 hands `generate()`'s cache to `prepare_inputs_for_generation`
+    on the very first step, while transformers 4 passed `None` until the first
+    forward had written it. Legacy remote implementations guard on
+    `past_key_values is not None` and then index the cache as a tuple of
+    `(key, value)` pairs (DeciLM, Baichuan2) or read `seen_tokens`
+    (MiniCPM-2B-dpo). They also expect `cache_position` to be a tensor
+    (EXAONE-3). Nanbeige4.2 calls `get_max_length()` before the cache holds any
+    layer, which raises `max() iterable argument is empty`; passing `None`
+    while the cache is empty keeps that call out of the prefill path.
+
+    This installs one adapter on the remote model class; the cache-side
+    contract itself lives on `transformers.Cache`/`DynamicCache` in
+    `_patch_transformers_remote_code_compat`. Returns True when a wrapper was
+    installed.
+    """
+
+    model_cls = type(model)
+    if not model_cls.__module__.startswith(_REMOTE_CODE_MODULE_PREFIX):
+        return False
+    if getattr(model_cls, "_gptqmodel_legacy_generation_compat", False):
+        return False
+
+    original = getattr(model_cls, "prepare_inputs_for_generation", None)
+    if not callable(original):
+        return False
+    if not getattr(original, "__module__", "").startswith(_REMOTE_CODE_MODULE_PREFIX):
+        # The class inherits transformers' own implementation, which already
+        # speaks the transformers-5 cache contract.
+        return False
+
+    try:
+        parameters = inspect.signature(original).parameters
+    except (TypeError, ValueError):
+        return False
+
+    # Legacy remote implementations put `past_key_values` right after
+    # `input_ids`; anything else is not the contract this adapter restores.
+    positional = [
+        parameter
+        for parameter in parameters.values()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) < 3 or positional[2].name != "past_key_values":
+        return False
+
+    accepts_cache_position = "cache_position" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+    @wraps(original)
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, *args, **kwargs):
+        if past_key_values is not None and _cache_sequence_length(past_key_values) == 0:
+            # No state has been written yet: hand the remote code the
+            # transformers-4 "no past" value instead of an empty Cache.
+            past_key_values = None
+
+        # transformers 5 tells the callee how many tokens this step adds and
+        # passes the full sequence as `input_ids`; the transformers-4 contract
+        # that the remote code implements slices `input_ids` itself and expects
+        # `cache_position` to cover only the new tokens.
+        modern_sequence_length = "next_sequence_length" in parameters
+        num_new_tokens = None if modern_sequence_length else kwargs.pop(
+            "next_sequence_length", None
+        )
+        if (
+            accepts_cache_position
+            and not modern_sequence_length
+            and kwargs.get("cache_position") is None
+        ):
+            past_length = (
+                0 if past_key_values is None else _cache_sequence_length(past_key_values)
+            )
+            if not isinstance(num_new_tokens, int) or num_new_tokens <= 0:
+                num_new_tokens = int(input_ids.shape[-1]) - past_length
+                if num_new_tokens <= 0:
+                    num_new_tokens = 1
+            kwargs["cache_position"] = torch.arange(
+                past_length,
+                past_length + num_new_tokens,
+                device=input_ids.device,
+            )
+
+        return original(self, input_ids, past_key_values, *args, **kwargs)
+
+    prepare_inputs_for_generation._gptqmodel_legacy_generation_compat = True
+    model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
+    model_cls._gptqmodel_legacy_generation_compat = True
+    return True
 
 
 def register_runtime_automodel_config(config, remote_module, config_attr: str, remote_model_name: str) -> None:
@@ -1803,8 +2366,17 @@ def _bridge_legacy_vision2seq_remote_code(model_cls: Any, config: Any) -> Option
         return model_cls
 
 
-def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
-    if not model_id_or_path:
+def prepare_remote_model_init_compat(
+    model_id_or_path: Optional[str],
+    config: Any,
+    *,
+    trust_remote_code: bool = False,
+) -> None:
+    # Importing `auto_map` classes is remote-code execution. It is gated by the
+    # caller's explicit `trust_remote_code`; `auto_map` alone is checkpoint data
+    # and must never enable it. This also covers transformers' cross-repo
+    # `repo--module.Class` form, which resolves to another repository's code.
+    if not trust_remote_code or not model_id_or_path:
         return
 
     deci_init_compat(config)
@@ -2263,30 +2835,82 @@ def load_hf_tokenizer(
 
 _patch_transformers_remote_code_compat()
 
+def _sampling_fields_request_sampling(cfg: GenerationConfig) -> bool:
+    """Whether sampling-only fields contradict an explicitly greedy config.
+
+    Transformers refuses to save a config that sets these fields while
+    ``do_sample`` is ``False``. The checkpoint's fields are authoritative, so
+    this is used only to repair that specific contradiction.
+    """
+    if getattr(cfg, "temperature", None) is not None and cfg.temperature != 1.0:
+        return True
+    if getattr(cfg, "top_p", None) is not None and cfg.top_p != 1.0:
+        return True
+    if getattr(cfg, "min_p", None) is not None:
+        return True
+    if getattr(cfg, "typical_p", None) is not None and cfg.typical_p != 1.0:
+        return True
+    # contrastive search uses top_k
+    if (
+        getattr(cfg, "top_k", None) is not None
+        and cfg.top_k != 50
+        and getattr(cfg, "penalty_alpha", None) is None
+    ):
+        return True
+    if getattr(cfg, "epsilon_cutoff", None) is not None and cfg.epsilon_cutoff != 0.0:
+        return True
+    if getattr(cfg, "eta_cutoff", None) is not None and cfg.eta_cutoff != 0.0:
+        return True
+    return False
+
+
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
     if cfg is None:
         return changed
 
-    if getattr(cfg, "do_sample", None) is not True:
+    # `do_sample` is owned by the checkpoint: never force sampling on. An
+    # absent value means the transformers default (greedy), and an explicit
+    # value must survive load/save unchanged. The only repair is an explicitly
+    # greedy config whose own sampling fields contradict it, which transformers
+    # rejects when saving.
+    if getattr(cfg, "do_sample", None) is False and _sampling_fields_request_sampling(cfg):
         cfg.do_sample = True
         changed = True
+        log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
     return changed
 
 
-def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+def _read_generation_config_payload(path: str) -> Optional[dict]:
+    """Read the raw ``generation_config.json`` without normalizing its values."""
     try:
-        # transformers >= 5 exposes generation configs through from_pretrained
-        # only; the old `get_config_dict` helper no longer exists. Calling it
-        # raised AttributeError on every model, so this branch was dead and the
-        # caller always fell back to a defaults-only config.
-        #
-        # `do_sample=True` is passed here rather than forced afterwards: the
-        # loader validates sampling fields (temperature/top_p/top_k) against the
-        # file's own `do_sample`, so a `do_sample: false` config would warn that
-        # those flags "are not valid and may be ignored" before we flip the bit.
-        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+        config_path = cached_file(path, "generation_config.json")
+    except Exception:
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+    declared = _read_generation_config_payload(path)
+    try:
+        if declared is None:
+            # No readable payload, so there is no declared `do_sample` to
+            # preserve. Let transformers resolve the defaults.
+            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
+        else:
+            # Load with `do_sample=True` so transformers does not warn that the
+            # file's sampling fields are invalid, then restore the declared
+            # value. The file remains authoritative.
+            cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+            cfg.do_sample = declared.get("do_sample") if "do_sample" in declared else None
     except Exception:
         log.debug("generation config %s could not be loaded; falling back to defaults", path, exc_info=True)
         return None
@@ -2316,7 +2940,7 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
             try:
                 cfg = _load_sanitized_generation_config(path)
                 if cfg is None:
-                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
                     _sanitize_generation_config(cfg, drop_sampling_fields=False)
                 if cfg != model.generation_config:
                     # migrated pad_token_id to config
@@ -2340,30 +2964,6 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
 
 def autofix_hf_generation_config(cfg: GenerationConfig):
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
-    # HF has recently started to perform very strict validation model save which results in warnings on load()
-    # to become exceptions on save().
-    if cfg.do_sample is False:
-        errors = 0
-        if hasattr(cfg, "temperature") and cfg.temperature is not None and cfg.temperature != 1.0:
-            errors += 1
-        if hasattr(cfg, "top_p") and cfg.top_p is not None and cfg.top_p != 1.0:
-            errors += 1
-        if hasattr(cfg, "min_p") and cfg.min_p is not None:
-            errors += 1
-        if hasattr(cfg, "typical_p") and cfg.typical_p is not None and cfg.typical_p != 1.0:
-            errors += 1
-        # contrastive search uses top_k
-        if (hasattr(cfg, "top_k") and cfg.top_k is not None and cfg.top_k != 50) and (hasattr(cfg, "penalty_alpha") and cfg.penalty_alpha is None):
-            errors += 1
-        if hasattr(cfg, "epsilon_cutoff") and cfg.epsilon_cutoff is not None and cfg.epsilon_cutoff != 0.0:
-            errors += 1
-        if hasattr(cfg, "eta_cutoff") and cfg.eta_cutoff is not None and cfg.eta_cutoff != 0.0:
-            errors += 1
-
-        # fix wrong do_sample
-        if errors > 0:
-            cfg.do_sample = True
-            log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
 
 def sanitize_model_config(config):
@@ -2373,24 +2973,56 @@ def sanitize_model_config(config):
         del config.attribute_map["max_length"]
 
 
+def _generation_config_payload_contradicts_greedy(data: dict) -> bool:
+    """JSON-payload counterpart of ``_sampling_fields_request_sampling``."""
+    if data.get("do_sample") is not False:
+        return False
+
+    temperature = data.get("temperature")
+    if temperature is not None and temperature != 1.0:
+        return True
+    top_p = data.get("top_p")
+    if top_p is not None and top_p != 1.0:
+        return True
+    if data.get("min_p") is not None:
+        return True
+    typical_p = data.get("typical_p")
+    if typical_p is not None and typical_p != 1.0:
+        return True
+    top_k = data.get("top_k")
+    if top_k is not None and top_k != 50 and data.get("penalty_alpha") is None:
+        return True
+    epsilon_cutoff = data.get("epsilon_cutoff")
+    if epsilon_cutoff is not None and epsilon_cutoff != 0.0:
+        return True
+    eta_cutoff = data.get("eta_cutoff")
+    if eta_cutoff is not None and eta_cutoff != 0.0:
+        return True
+    return False
+
+
 def sanitize_generation_config_file(path: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as fp:
             data = json.load(fp)
     except FileNotFoundError:
         return False
+    except (OSError, TypeError, ValueError):
+        return False
 
-    changed = False
+    if not isinstance(data, dict):
+        return False
 
-    if data.get("do_sample") is not True:
-        data["do_sample"] = True
-        changed = True
+    # Preserve the checkpoint's declared `do_sample`; never add or force it.
+    # Only an explicit greedy declaration contradicted by its own sampling
+    # fields is repaired, because transformers rejects that payload on save.
+    if not _generation_config_payload_contradicts_greedy(data):
+        return False
 
-    if changed:
-        with open(path, "w", encoding="utf-8") as fp:
-            json.dump(data, fp, indent=2)
-
-    return changed
+    data["do_sample"] = True
+    with open(path, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2)
+    return True
 
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(

@@ -3,6 +3,7 @@
 """The shared kernel gates must not read HIP's CUDA namespace as NVIDIA CUDA."""
 
 import shutil
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -309,3 +310,46 @@ def test_nf12_nvcc_honors_cudacxx(monkeypatch, tmp_path, override):
 
     assert f"-DCMAKE_CUDA_COMPILER={override}" in commands[0]
     assert len(commands) == 2
+
+
+def _fake_mlx(*, kernel):
+    return SimpleNamespace(
+        float32="float32",
+        array=lambda values, dtype=None: values,
+        eval=lambda *args: None,
+        fast=SimpleNamespace(metal_kernel=lambda **kwargs: kernel),
+    )
+
+
+def test_mlx_metal_gate_names_the_missing_backend():
+    def kernel(**_kwargs):
+        raise RuntimeError("[metal_kernel] No Metal back-end.")
+
+    reason = accelerator_gates._probe_metal_backend(_fake_mlx(kernel=kernel))
+
+    assert reason is not None
+    assert "No Metal back-end" in reason
+
+
+def test_mlx_metal_gate_passes_after_a_trivial_kernel_runs():
+    def kernel(**_kwargs):
+        return [object()]
+
+    assert accelerator_gates._probe_metal_backend(_fake_mlx(kernel=kernel)) is None
+
+
+def test_mlx_metal_gate_caches_the_probe(monkeypatch):
+    fake_core = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "mlx", SimpleNamespace(core=fake_core))
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+    calls = []
+    monkeypatch.setattr(
+        accelerator_gates, "_probe_metal_backend", lambda mx: calls.append(mx)
+    )
+    accelerator_gates.mlx_metal_skip_reason.cache_clear()
+    try:
+        assert accelerator_gates.mlx_metal_skip_reason() is None
+        assert accelerator_gates.mlx_metal_skip_reason() is None
+    finally:
+        accelerator_gates.mlx_metal_skip_reason.cache_clear()
+    assert calls == [fake_core]

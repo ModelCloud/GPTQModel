@@ -5,9 +5,15 @@
 # GPU=-1
 """Coverage for the ROCm quantize-phase BLAS backend override."""
 
+import threading
+import time
+from contextlib import contextmanager
+
 import pytest
+import torch
 
 from gptqmodel.utils import rocm
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 _BACKEND_NAMES = {
@@ -52,11 +58,24 @@ def _install(monkeypatch, fake):
     monkeypatch.setattr(rocm, "_preferred_blas_library_getter", lambda: fake.preferred_blas_library)
 
 
+@pytest.fixture(autouse=True)
+def _reset_guard(monkeypatch):
+    """The guard is process-global; never leak state between tests."""
+
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_DEPTH", 0)
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_PREVIOUS", None)
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_TARGET", None)
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_RESTORE", False)
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_WAIT_WARNED", False)
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_WAIT_SECONDS", 1800.0)
+    monkeypatch.setattr(rocm._QUANT_BLAS_GUARD_THREAD_LOCAL, "depth", 0, raising=False)
+
+
 def test_switch_is_scoped_to_the_context(monkeypatch):
     fake = _FakeTorchBlas(current="Cublaslt")
     _install(monkeypatch, fake)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     with rocm.quant_blas_backend():
         assert fake.current.name == "Cublas"
@@ -73,7 +92,7 @@ def test_restore_happens_on_error(monkeypatch):
     fake = _FakeTorchBlas(current="Cublaslt")
     _install(monkeypatch, fake)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     with pytest.raises(RuntimeError):
         with rocm.quant_blas_backend():
@@ -88,7 +107,7 @@ def test_env_can_keep_hipblaslt(monkeypatch):
     fake = _FakeTorchBlas(current="Cublaslt")
     _install(monkeypatch, fake)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, "hipblaslt")
+    configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))
 
     with rocm.quant_blas_backend():
         assert fake.current.name == "Cublaslt"
@@ -100,7 +119,7 @@ def test_user_selected_backend_is_respected(monkeypatch):
     fake = _FakeTorchBlas(current="Ck")
     _install(monkeypatch, fake)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     with rocm.quant_blas_backend():
         assert fake.current.name == "Ck"
@@ -112,7 +131,7 @@ def test_non_rocm_hosts_are_untouched(monkeypatch):
     fake = _FakeTorchBlas(current="Cublaslt")
     _install(monkeypatch, fake)
     monkeypatch.setattr(rocm, "IS_ROCM", False)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     with rocm.quant_blas_backend():
         assert fake.current.name == "Cublaslt"
@@ -124,7 +143,7 @@ def test_refused_switch_keeps_the_original_backend(monkeypatch):
     fake = _FakeTorchBlas(current="Cublaslt", refuse="hipblas")
     _install(monkeypatch, fake)
     monkeypatch.setattr(rocm, "IS_ROCM", True)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     with rocm.quant_blas_backend():
         assert fake.current.name == "Cublaslt"
@@ -136,7 +155,225 @@ def test_refused_switch_keeps_the_original_backend(monkeypatch):
 def test_missing_torch_api_is_tolerated(monkeypatch):
     monkeypatch.setattr(rocm, "IS_ROCM", True)
     monkeypatch.setattr(rocm, "_preferred_blas_library_getter", lambda: None)
-    monkeypatch.delenv(rocm.QUANT_BLAS_BACKEND_ENV, raising=False)
+    configure_kernel(KernelConfig())
 
     with rocm.quant_blas_backend():
         pass
+
+
+def _gptq_hessian_recorder(monkeypatch):
+    """Patch GPTQ's Hessian path to record every BLAS-override entry."""
+
+    from gptqmodel.quantization import gptq
+
+    entered: list[object] = []
+
+    @contextmanager
+    def recorder(device=None):
+        entered.append(device)
+        yield
+
+    monkeypatch.setattr(gptq, "quant_blas_backend", recorder)
+    return gptq, entered
+
+
+def test_gptq_hessian_accumulation_enters_the_override(monkeypatch):
+    """Determinism comes from the fp32 X^T X GEMM, so pin only that phase."""
+
+    gptq, entered = _gptq_hessian_recorder(monkeypatch)
+    accumulator = gptq.GPTQ.__new__(gptq.GPTQ)
+    accumulator.columns = 4
+    accumulator.preferred_staging_dtype = lambda dtype, device: dtype
+    accumulator.resolve_hessian_chunk_size = lambda rows, stage: None
+
+    out = accumulator.compute_hessian_xtx(torch.randn(3, 4, dtype=torch.float32))
+
+    assert out.shape == (4, 4)
+    assert entered, "the Hessian X^T X GEMM must run on the deterministic rocBLAS path"
+
+
+def test_chunked_hessian_accumulation_enters_the_override_per_chunk(monkeypatch):
+    gptq, entered = _gptq_hessian_recorder(monkeypatch)
+    accumulator = gptq.GPTQ.__new__(gptq.GPTQ)
+    accumulator.columns = 4
+    accumulator.preferred_staging_dtype = lambda dtype, device: dtype
+    accumulator.resolve_hessian_chunk_size = lambda rows, stage: 2
+
+    @contextmanager
+    def borrow(source, rows):
+        yield source
+
+    accumulator.borrow_materialized_chunk_fp32 = borrow
+
+    out = accumulator.compute_hessian_xtx(torch.randn(5, 4, dtype=torch.float32))
+
+    assert out.shape == (4, 4)
+    assert len(entered) == 3
+
+
+@pytest.mark.parametrize(
+    "step",
+    ["GPTQ", "QQQ", "VPTQ", "MACAQ", "EXL3", "FP8_GSQ"],
+)
+def test_hessian_methods_need_the_deterministic_pin(step):
+    """Every Hessian/Gram builder must accumulate on rocBLAS (issue #4123)."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.models.base import _needs_deterministic_hessian
+    from gptqmodel.models.quantization_run_plan import ProcessorStep
+
+    assert _needs_deterministic_hessian(
+        SimpleNamespace(processors=(getattr(ProcessorStep, step),))
+    )
+
+
+@pytest.mark.parametrize("step", ["AWQ", "PARO", "WEIGHT_ONLY"])
+def test_methods_without_a_hessian_keep_hipblaslt(step):
+    """AWQ, ParoQuant and RTN must not pay the rocBLAS pin."""
+
+    from types import SimpleNamespace
+
+    from gptqmodel.models.base import _needs_deterministic_hessian
+    from gptqmodel.models.quantization_run_plan import ProcessorStep
+
+    assert not _needs_deterministic_hessian(
+        SimpleNamespace(processors=(getattr(ProcessorStep, step),))
+    )
+
+
+def test_nested_scopes_switch_once_and_restore_once(monkeypatch):
+    """Concurrent Hessian workers share one process-wide switch."""
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    configure_kernel(KernelConfig())
+
+    with rocm.quant_blas_backend():
+        with rocm.quant_blas_backend():
+            assert fake.current.name == "Cublas"
+        assert fake.current.name == "Cublas", "the outer scope still holds rocBLAS"
+
+    assert fake.current.name == "Cublaslt"
+    assert fake.calls == ["hipblas", "cublaslt"]
+
+
+def test_non_hessian_run_pins_hipblaslt(monkeypatch):
+    """AWQ/RTN record ownership of hipBLASLt so a Hessian run cannot flip it."""
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    configure_kernel(KernelConfig())
+
+    with rocm.quant_blas_backend(deterministic=False):
+        assert fake.current.name == "Cublaslt"
+        assert rocm._QUANT_BLAS_GUARD_TARGET == rocm._QUANT_BLAS_TARGET_HIPBLASLT
+
+    assert fake.current.name == "Cublaslt"
+    assert fake.calls == [], "the fast backend needs no setter call"
+    assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
+    assert rocm._QUANT_BLAS_GUARD_TARGET is None
+
+
+def test_conflicting_backends_serialize(monkeypatch):
+    """A Hessian run and a non-Hessian run must not flip the backend mid-run."""
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    configure_kernel(KernelConfig())
+
+    hessian_entered = threading.Event()
+    release_hessian = threading.Event()
+    seen = []
+
+    def hessian_run():
+        with rocm.quant_blas_backend(deterministic=True):
+            seen.append(("hessian_start", fake.current.name))
+            hessian_entered.set()
+            release_hessian.wait(timeout=10)
+            seen.append(("hessian_end", fake.current.name))
+
+    def awq_run():
+        with rocm.quant_blas_backend(deterministic=False):
+            seen.append(("awq", fake.current.name))
+
+    hessian_thread = threading.Thread(target=hessian_run)
+    hessian_thread.start()
+    assert hessian_entered.wait(timeout=10)
+    awq_thread = threading.Thread(target=awq_run)
+    awq_thread.start()
+    # The AWQ run must wait for the rocBLAS run instead of sharing (and later
+    # losing) its backend.
+    time.sleep(0.3)
+    assert ("awq", "Cublas") not in seen
+    assert not any(item[0] == "awq" for item in seen)
+
+    release_hessian.set()
+    hessian_thread.join(timeout=10)
+    awq_thread.join(timeout=10)
+
+    assert seen == [
+        ("hessian_start", "Cublas"),
+        ("hessian_end", "Cublas"),
+        ("awq", "Cublaslt"),
+    ]
+    assert fake.calls == ["hipblas", "cublaslt"]
+    assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
+
+
+def test_nested_scope_with_a_different_target_does_not_wait(monkeypatch):
+    """A run must not deadlock on its own outer pin."""
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    configure_kernel(KernelConfig())
+
+    with rocm.quant_blas_backend(deterministic=True):
+        with rocm.quant_blas_backend(deterministic=False):
+            assert fake.current.name == "Cublas", "the nested scope adopts the outer pin"
+        assert fake.current.name == "Cublas"
+
+    assert fake.current.name == "Cublaslt"
+    assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
+
+
+def test_wait_timeout_adopts_the_active_backend(monkeypatch):
+    """A wedged run must not hang a caller forever; the fallback is loud."""
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.setattr(rocm, "_QUANT_BLAS_GUARD_WAIT_SECONDS", 0.0)
+    configure_kernel(KernelConfig())
+    warnings = []
+    monkeypatch.setattr(rocm.log, "warning", lambda *args, **kwargs: warnings.append(args))
+
+    hessian_entered = threading.Event()
+    release_hessian = threading.Event()
+    observed = []
+
+    def hessian_run():
+        with rocm.quant_blas_backend(deterministic=True):
+            hessian_entered.set()
+            release_hessian.wait(timeout=10)
+
+    def awq_run():
+        with rocm.quant_blas_backend(deterministic=False):
+            observed.append(fake.current.name)
+
+    hessian_thread = threading.Thread(target=hessian_run)
+    hessian_thread.start()
+    assert hessian_entered.wait(timeout=10)
+    awq_thread = threading.Thread(target=awq_run)
+    awq_thread.start()
+    awq_thread.join(timeout=10)
+    release_hessian.set()
+    hessian_thread.join(timeout=10)
+
+    assert observed == ["Cublas"], "the late run adopts the active backend"
+    assert warnings and "waited" in warnings[0][0]
+    assert rocm._QUANT_BLAS_GUARD_DEPTH == 0

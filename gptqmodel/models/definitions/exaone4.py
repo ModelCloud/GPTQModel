@@ -9,6 +9,11 @@ class Exaone4QModel(BaseQModel):
 
     fusable = FusableConfig("exaone4").merge(LlamaFusableConfig())
 
+    # q/k/v share the post-norm hidden state and gate/up share the MLP input.
+    # Verified against a real (tiny, CPU) forward in
+    # tests/module_tree/test_shared_input_cpu_forward.py.
+    shared_input_verified_model_types = frozenset({"exaone4"})
+
     pre_lm_head_norm_module = "model.norm"
 
     # Exaone4 uses GQA (Grouped Query Attention) architecture
@@ -22,16 +27,18 @@ class Exaone4QModel(BaseQModel):
         {
             # Skip q_norm and k_norm (too small, RMSNorm layers)
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:in=x",
+                "q_norm:0:!",
+                "k_proj:0:in=x",
+                "k_norm:0:!",
+                "v_proj:0:in=x",
                 "o_proj:1",
-                "q_norm:!",
-                "k_norm:!"
             ),
-            # Skip post_attention_layernorm (RMSNorm, too small)
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            # Skip post_attention_layernorm (RMSNorm, too small). Exaone4 adds
+            # the normalized attention output to the residual, so the norm does
+            # not feed the MLP directly and cannot be an AWQ scale source.
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             # Skip post_feedforward_layernorm (RMSNorm, too small)
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         }
@@ -63,15 +70,17 @@ class Exaone4_5QModel(BaseQwen3VLGPTQ):
         "#",
         {
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:in=x",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
                 "o_proj:1",
                 "q_norm:!",
                 "k_norm:!",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            # Exaone 4.5 adds the normalized attention output to the residual,
+            # so this norm does not feed the MLP (same contract as Exaone4).
+            "post_attention_layernorm": ("post_attention_layernorm:!:postnorm",),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         },
     ]

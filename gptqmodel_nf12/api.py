@@ -16,6 +16,7 @@ from ._library import load
 PACKED_KEY = "nf12_packed"
 ESCAPES_KEY = "nf12_escapes"
 EXP_BASE_KEY = "nf12_exp_base"
+_ROWMAJOR_EMBEDDING_OP = None
 
 
 def check_weight_shape(n: int, k: int) -> None:
@@ -35,6 +36,51 @@ def _check_bf16_matrix(w: torch.Tensor, name: str) -> None:
         raise ValueError(f"nf12: {name} must be a 2-D bfloat16 tensor, got {w.dtype} with shape {tuple(w.shape)}")
     _check_cuda(w, name)
     check_weight_shape(*w.shape)
+
+
+def escape_indices(packed: torch.Tensor, escapes: torch.Tensor) -> torch.Tensor:
+    """Return the escape-table index of every escaped group in ``packed``.
+
+    ``packed`` stores the three planes of each super-atom contiguously
+    (SPEC.md section 4): plane 0 is the four meta words, planes 1 and 2 hold
+    the low bytes. A group is escaped when its meta word is zero, and its
+    ``lo0`` word is then the little-endian escape index.
+    """
+
+    sa = packed.reshape(-1, 3, 512)
+    meta = sa[:, 0].reshape(-1, 32, 4, 4).permute(0, 2, 1, 3).reshape(-1, 4)
+    lo = sa[:, 1:].reshape(-1, 2, 32, 2, 8).permute(0, 1, 3, 2, 4).reshape(-1, 8)
+    escaped = (meta == 0).all(1)
+    if not bool(escaped.any()):
+        return torch.empty(0, dtype=torch.int64, device=packed.device)
+    lo_e = lo[escaped]
+    return (
+        lo_e[:, 0].to(torch.int64)
+        | (lo_e[:, 1].to(torch.int64) << 8)
+        | (lo_e[:, 2].to(torch.int64) << 16)
+        | (lo_e[:, 3].to(torch.int64) << 24)
+    )
+
+
+def validate_escape_indices(packed: torch.Tensor, escapes: torch.Tensor) -> None:
+    """Reject checkpoint escape indices that would read past ``escapes``.
+
+    The native kernels bound the table lookup, but a checkpoint that relies on
+    that clamp decodes the wrong bytes. Fail closed at load instead.
+    """
+
+    if packed.device.type == "meta":
+        return
+    idx = escape_indices(packed, escapes)
+    if idx.numel() == 0:
+        return
+    worst = int(idx.max())
+    count = int(escapes.shape[0])
+    if worst >= count:
+        raise ValueError(
+            f"nf12: checkpoint escape index {worst} is out of range for the "
+            f"{count}-row escape table"
+        )
 
 
 @dataclasses.dataclass(eq=False)
@@ -76,6 +122,9 @@ class NF12Weight:
     def decode(self) -> torch.Tensor:
         return decode(self)
 
+    def decode_fp32(self) -> torch.Tensor:
+        return decode_fp32(self)
+
     def to(self, device: torch.device | str | int) -> NF12Weight:
         return NF12Weight(self.packed.to(device), self.escapes.to(device), self.exp_base)
 
@@ -102,7 +151,9 @@ class NF12Weight:
         exp_base = state_dict[prefix + EXP_BASE_KEY]
         if exp_base.dtype != torch.uint8 or exp_base.numel() != 1:
             raise ValueError(f"nf12: {prefix + EXP_BASE_KEY} must be a uint8 [1] tensor")
-        return cls(state_dict[prefix + PACKED_KEY], state_dict[prefix + ESCAPES_KEY], int(exp_base.item()))
+        weight = cls(state_dict[prefix + PACKED_KEY], state_dict[prefix + ESCAPES_KEY], int(exp_base.item()))
+        validate_escape_indices(weight.packed, weight.escapes)
+        return weight
 
 
 def encode(w: torch.Tensor) -> NF12Weight:
@@ -118,6 +169,42 @@ def decode(weight: NF12Weight) -> torch.Tensor:
     _check_cuda(weight.packed, "weight")
     load()
     return torch.ops.nf12.decode(weight.packed, weight.escapes, weight.exp_base)
+
+
+def decode_fp32(weight: NF12Weight) -> torch.Tensor:
+    """Decodes straight to ``[N, K]`` FP32 without a BF16 intermediate.
+
+    BF16 -> FP32 is an exact bit shift, so every element is bit-identical to
+    ``decode(weight).float()``. FP32 consumers therefore read 1.5 B/element of
+    packed weight and write 4 B/element instead of materializing, then
+    re-reading, a 2 B/element BF16 matrix.
+    """
+    _check_cuda(weight.packed, "weight")
+    load()
+    native = getattr(torch.ops.nf12, "decode_fp32", None)
+    if callable(native):
+        return native(weight.packed, weight.escapes, weight.exp_base)
+    # An already-loaded older runtime may predate the fused widening store.
+    return torch.ops.nf12.decode(weight.packed, weight.escapes, weight.exp_base).float()
+
+
+def sub_fp32(weight: NF12Weight, wq: torch.Tensor) -> torch.Tensor:
+    """``decode_fp32(weight) - wq`` in one pass.
+
+    EoRA consumes the FP32 difference between the source weight and the
+    reconstructed quantized weight. Fusing the widening decode with the
+    subtraction means the source is never materialized as an FP32 matrix, so a
+    module holds one FP32 copy (``wq``) plus the result instead of two dense
+    FP32 matrices plus the result.
+    """
+    _check_cuda(weight.packed, "weight")
+    if wq.dtype != torch.float32 or wq.dim() != 2 or tuple(wq.shape) != weight.shape:
+        raise ValueError(f"nf12: wq must be a float32 {weight.shape} matrix, got {wq.dtype} {tuple(wq.shape)}")
+    load()
+    native = getattr(torch.ops.nf12, "sub_fp32", None)
+    if callable(native):
+        return native(weight.packed, weight.escapes, weight.exp_base, wq)
+    return decode_fp32(weight) - wq
 
 
 def _check_input(x: torch.Tensor, k: int) -> None:
@@ -221,6 +308,39 @@ def embedding_repeat4(ids: torch.Tensor, weight: NF12Weight) -> torch.Tensor:
         return native(ids, weight.packed, weight.escapes, weight.exp_base)
     single = torch.ops.nf12.embedding(ids, weight.packed, weight.escapes, weight.exp_base)
     return single.unsqueeze(-2).repeat_interleave(4, dim=-2)
+
+
+def rowmajor_pack(
+    weight: NF12Weight,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Convert canonical NF12 to the embedding-only row-major layout.
+
+    The returned packed tensor has the same ``[N, K*3/2]`` byte count, but
+    every 64-column row block is contiguous. The metadata values identify the
+    original escape count and selected-half collision records.
+    """
+    _check_cuda(weight.packed, "weight")
+    load()
+    row_packed, row_escapes, original_escapes, collisions = torch.ops.nf12.rowmajor_pack(
+        weight.packed, weight.escapes, weight.exp_base
+    )
+    return row_packed, row_escapes, int(original_escapes), int(collisions)
+
+
+def rowmajor_embedding(
+    ids: torch.Tensor,
+    row_packed: torch.Tensor,
+    row_escapes: torch.Tensor,
+    exp_base: int,
+) -> torch.Tensor:
+    """Gather exact BF16 rows from the embedding-only row-major layout."""
+    global _ROWMAJOR_EMBEDDING_OP
+    # The native binding validates devices, dtypes, shapes, and alignment.
+    # Keep the hot wrapper to extension loading plus the operator call.
+    load()
+    if _ROWMAJOR_EMBEDDING_OP is None:
+        _ROWMAJOR_EMBEDDING_OP = torch.ops.nf12.rowmajor_embedding
+    return _ROWMAJOR_EMBEDDING_OP(ids, row_packed, row_escapes, exp_base)
 
 
 def pack_bf16t(w: torch.Tensor) -> torch.Tensor:

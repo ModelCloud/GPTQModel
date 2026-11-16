@@ -11,6 +11,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    loaded_op,
 )
 
 
@@ -79,6 +80,21 @@ def _extension_api():
     return extension_api
 
 
+# Identity guard for the dispatch fast path: tests replace ``_extension_api``
+# with a fake, and the memoised torch.ops handles must not shadow that fake.
+_QQQ_EXTENSION_API = _extension_api
+
+
+def _qqq_op(op_name: str):
+    """Return the QQQ torch.ops handle without re-resolving the loader per call."""
+
+    if _extension_api is _QQQ_EXTENSION_API:
+        op = loaded_op(_QQQ_TORCH_OPS_EXTENSION, op_name)
+        if op is not None:
+            return op
+    return _extension_api().op("qqq", op_name)
+
+
 def clear_qqq_extension_cache() -> None:
     _QQQ_TORCH_OPS_EXTENSION.clear_cache()
 
@@ -112,7 +128,7 @@ def qqq_gemm(
     sms=-1,
     max_par=16,
 ):
-    return _extension_api().op("qqq", "qqq_gemm")(
+    return _qqq_op("qqq_gemm")(
         A,
         B,
         C,

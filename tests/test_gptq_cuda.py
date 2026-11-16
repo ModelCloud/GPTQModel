@@ -3,6 +3,7 @@ import torch
 
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -51,10 +52,7 @@ def test_fused_gptq_matches_eager_exactly(
     factor.diagonal().fill_(1.0)
 
     def quantize(disable_fusion):
-        if disable_fusion:
-            monkeypatch.setenv("GPTQMODEL_DISABLE_GPTQ_CUDA", "1")
-        else:
-            monkeypatch.delenv("GPTQMODEL_DISABLE_GPTQ_CUDA", raising=False)
+        configure_kernel(KernelConfig(gptq_fused_block_update=not disable_fusion))
 
         layer = torch.nn.Linear(columns, 13, bias=False, device=device)
         layer.weight.data.copy_(weight)
@@ -96,7 +94,7 @@ def test_fused_gptq_matches_eager_exactly(
 def test_falls_back_when_cuda_extension_is_unavailable(monkeypatch):
     from gptqmodel.quantization import gptq_cuda
 
-    monkeypatch.delenv("GPTQMODEL_DISABLE_GPTQ_CUDA", raising=False)
+    configure_kernel(KernelConfig(gptq_fused_block_update=True))
     monkeypatch.setattr(gptq_cuda, "block_update_available", lambda: False)
 
     def should_not_run(*_args, **_kwargs):
@@ -200,3 +198,79 @@ def test_cuda_block_preserves_nan_quantization():
     assert torch.isnan(q[0, 0])
     assert torch.isnan(errors[0, 0])
     assert torch.isnan(losses[0, 0])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("ordering", ["desc_act", "act_group_aware"])
+def test_hessian_permutation_oom_fallback_permutes_w_once(monkeypatch, ordering):
+    """Injecting the H-gather OOM must not permute W a second time.
+
+    The real failure mode is a CUDA OOM while gathering the Hessian into its
+    ``cols x cols`` temporaries.  Raise the same ``RuntimeError`` from the
+    first one-dimensional index of the Hessian instead of waiting for the
+    allocator, then check that the fallback's W and H use one permutation.
+    """
+    device = torch.device("cuda:0")
+    columns, rows, group_size = 64, 8, 16
+    torch.manual_seed(20261116)
+    weight = torch.randn(rows, columns)
+    # Distinct column scales give a non-identity permutation in both modes.
+    inputs = torch.randn(1, 128, columns) * torch.linspace(0.1, 4.0, columns)
+
+    layer = torch.nn.Linear(columns, rows, bias=False, device=device)
+    layer.weight.data.copy_(weight.to(device))
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=group_size,
+        desc_act=ordering == "desc_act",
+        act_group_aware=ordering == "act_group_aware",
+    )
+    task = GPTQ(layer, qcfg=qcfg)
+    task.quantizer.configure(perchannel=True)
+    task.add_batch(inputs.to(device), None)
+    task.finalize_hessian(device)
+
+    original_getitem = torch.Tensor.__getitem__
+    original_find_params = task.quantizer.find_params
+    original_hessian_inverse = task.hessian_inverse
+    injected = {}
+    fallback_w = []
+
+    def getitem(self, index):
+        if (
+            not injected
+            and self is task.H
+            and self.device.type == "cuda"
+            and isinstance(index, torch.Tensor)
+            and index.ndim == 1
+        ):
+            injected["perm"] = index.detach().clone()
+            injected["H"] = self.detach().clone()
+            raise RuntimeError("CUDA out of memory")
+        return original_getitem(self, index)
+
+    def find_params(x, *args, **kwargs):
+        if injected:
+            fallback_w.append(x.detach().clone())
+        return original_find_params(x, *args, **kwargs)
+
+    def hessian_inverse(hessian):
+        if injected and "H_permuted" not in injected:
+            injected["H_permuted"] = hessian.detach().clone()
+        return original_hessian_inverse(hessian)
+
+    monkeypatch.setattr(torch.Tensor, "__getitem__", getitem)
+    monkeypatch.setattr(task.quantizer, "find_params", find_params)
+    monkeypatch.setattr(task, "hessian_inverse", hessian_inverse)
+    task.quantize()
+
+    assert "perm" in injected, "the injected Hessian OOM was never reached"
+    assert "H_permuted" in injected, "quantization never used the permuted Hessian"
+    assert fallback_w, "the CPU fallback never refit the quantizer"
+    perm = injected["perm"]
+    assert not torch.equal(perm.cpu(), torch.arange(columns)), "test permutation must be non-identity"
+
+    expected_h = injected["H"][perm][:, perm].cpu()
+    expected_w = weight[:, perm.cpu()]
+    torch.testing.assert_close(injected["H_permuted"].cpu(), expected_h, rtol=0, atol=0)
+    torch.testing.assert_close(fallback_w[0].cpu(), expected_w, rtol=0, atol=0)

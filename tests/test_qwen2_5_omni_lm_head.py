@@ -3,10 +3,13 @@
 
 """Regression coverage for the nested thinker output head (issue #1841)."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
+from torch import nn
 from transformers import PreTrainedTokenizerFast, Qwen2_5OmniConfig, Qwen2_5OmniForConditionalGeneration
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
@@ -14,12 +17,12 @@ from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import FORMAT, RTNConfig
 from gptqmodel.utils.model import (
-    convert_gptq_v1_to_v2_format,
     get_layers_with_prefixes,
     thinker_multimodal_model,
     thinker_text_model,
     thinker_text_prefix,
 )
+from gptqmodel.utils.structure import LazyTurtle
 
 
 def _tiny_omni():
@@ -104,6 +107,57 @@ def test_thinker_text_prefix_resolves_to_the_decoder():
         assert node.get_submodule(prefix) is thinker_text_model(node)
 
 
+def test_omni_pre_lm_head_norm_candidates_cover_both_layouts():
+    """The class declaration must resolve before `after_model_load` runs."""
+
+    model = _tiny_omni()
+    instance = object.__new__(Qwen2_5_OmniGPTQ)
+    nn.Module.__init__(instance)
+    instance.model = model
+    instance.quantize_config = SimpleNamespace(device=torch.device("cpu"))
+
+    resolved = instance._resolved_pre_lm_head_norm_candidates()
+
+    assert resolved
+    assert resolved[0][1] == "thinker.model.language_model.norm"
+    assert resolved[0][0] is thinker_text_model(model).norm
+
+
+def test_omni_conversion_map_resolves_thinker_runtime_paths():
+    # The top-level `qwen2_5_omni` model type has no HF conversion map; the
+    # renames live under `qwen2_5_omni_thinker`. Without an explicit map the
+    # lazy disk loader cannot find the towers or `embed_tokens` and leaves them
+    # on META.
+    renamings = LazyTurtle._normalize_runtime_to_checkpoint_renamings(
+        Qwen2_5_OmniGPTQ.resolve_hf_conversion_map_reversed()
+    )
+
+    def resolve(key):
+        for renaming in renamings:
+            renamed, matched = renaming.rename_source_key(key)
+            if matched is not None:
+                return renamed
+        return key
+
+    assert (
+        resolve("thinker.model.visual.blocks.0.norm1.weight")
+        == "thinker.visual.blocks.0.norm1.weight"
+    )
+    assert (
+        resolve("thinker.model.audio_tower.proj.weight")
+        == "thinker.audio_tower.proj.weight"
+    )
+    assert (
+        resolve("thinker.model.language_model.embed_tokens.weight")
+        == "thinker.model.embed_tokens.weight"
+    )
+    assert (
+        resolve("thinker.model.language_model.layers.0.mlp.down_proj.weight")
+        == "thinker.model.layers.0.mlp.down_proj.weight"
+    )
+    assert resolve("thinker.lm_head.weight") == "thinker.lm_head.weight"
+
+
 @pytest.mark.parametrize("method", ["gptq", "rtn"])
 @pytest.mark.parametrize("head_bits", [4, 8])
 @pytest.mark.parametrize("device", [
@@ -118,7 +172,7 @@ def test_omni_lm_head_quantize_save_reload(tiny_omni_checkpoint, tmp_path, metho
     }
     qcfg = config_cls(
         bits=4, group_size=32, desc_act=False, lm_head=True, device=device,
-        offload_to_disk=False, format=FORMAT.GPTQ, dynamic=dynamic,
+        format=FORMAT.GPTQ, dynamic=dynamic,
     )
     model = GPTQModel.load(
         str(tiny_omni_checkpoint), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16,
@@ -132,29 +186,34 @@ def test_omni_lm_head_quantize_save_reload(tiny_omni_checkpoint, tmp_path, metho
     assert not any(isinstance(module, TorchLinear) for module in thinker_multimodal_model(model.model).visual.modules())
     output = tmp_path / "quantized"
     model.save(str(output))
-    # Packing produces checkpoint-format zeros. Prepare the in-memory model
-    # for Torch inference exactly as the quantized loader does after reading v1.
-    convert_gptq_v1_to_v2_format(model.model, qcfg, TorchLinear)
-    model.model.to(device).eval()
+    # The default offload_to_disk=True keeps the in-memory model as a lazy
+    # checkpoint-backed shell, so reload the saved checkpoint for Torch
+    # inference instead of trying to materialize the shell in place.
     inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
-    with torch.inference_mode():
-        logits = model(**inputs).logits
-    assert torch.isfinite(logits).all()
-    runtime_state = {name: tensor.clone() for name, tensor in model.model.state_dict().items()}
-
     reloaded = GPTQModel.load(str(output), backend=BACKEND.TORCH, device=device, dtype=torch.float16)
     assert isinstance(reloaded.model.thinker.lm_head, TorchLinear)
     assert reloaded.model.thinker.lm_head.bits == head_bits
-    for name, tensor in reloaded.model.state_dict().items():
+    assert isinstance(thinker_text_model(reloaded.model).layers[0].self_attn.q_proj, TorchLinear)
+    assert not any(
+        isinstance(module, TorchLinear)
+        for module in thinker_multimodal_model(reloaded.model).visual.modules()
+    )
+    with torch.inference_mode():
+        logits = reloaded(**inputs).logits
+    assert torch.isfinite(logits).all()
+    runtime_state = {name: tensor.clone() for name, tensor in reloaded.model.state_dict().items()}
+
+    reloaded_again = GPTQModel.load(str(output), backend=BACKEND.TORCH, device=device, dtype=torch.float16)
+    for name, tensor in reloaded_again.model.state_dict().items():
         torch.testing.assert_close(tensor, runtime_state[name], rtol=0, atol=0, msg=lambda msg: f"{name}: {msg}")
     with torch.inference_mode():
-        torch.testing.assert_close(reloaded(**inputs).logits, logits, rtol=0, atol=0)
+        torch.testing.assert_close(reloaded_again(**inputs).logits, logits, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("method", ["gptq", "rtn"])
 def test_omni_lm_head_rejects_shared_weights(tiny_omni_checkpoint, method):
     config_cls = QuantizeConfig if method == "gptq" else RTNConfig
-    qcfg = config_cls(bits=4, group_size=32, lm_head=True, device="cpu", offload_to_disk=False)
+    qcfg = config_cls(bits=4, group_size=32, lm_head=True, device="cpu")
     model = GPTQModel.load(str(tiny_omni_checkpoint), quantize_config=qcfg, backend=BACKEND.TORCH)
     embedding = thinker_text_model(model.model).embed_tokens
     model.model.thinker.lm_head.weight = embedding.weight

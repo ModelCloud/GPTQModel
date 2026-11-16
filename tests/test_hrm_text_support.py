@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+import transformers
 
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models import auto
@@ -119,6 +120,105 @@ def test_hrm_text_direct_meta_materialization_hook_targets_root_stack():
     assert not outer_model.model.z_L_init.is_meta
     assert outer_model.model.z_L_init.device.type == "cpu"
     assert calls == [(outer_model, outer_model.model, torch.device("cpu"))]
+
+
+def _tiny_hrm_text_model():
+    config = transformers.HrmTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=48,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        H_cycles=2,
+        L_cycles=2,
+        L_bp_cycles=[1, 1],
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    return transformers.HrmTextForCausalLM(config).eval()
+
+
+def _hrm_wrapper(model):
+    instance = object.__new__(HrmTextQModel)
+    nn.Module.__init__(instance)
+    instance._turtle_lock = threading.RLock()
+    instance.model = model
+    instance.turtle_model = None
+    instance.quantize_config = SimpleNamespace(device=torch.device("cpu"))
+    return instance
+
+
+def test_hrm_text_calibration_captures_every_recurrent_invocation():
+    """The L stack runs H_cycles*L_cycles times, the H stack H_cycles times."""
+
+    model = _tiny_hrm_text_model()
+    instance = _hrm_wrapper(model)
+    layers, layer_names = get_layers_with_prefixes(
+        model, HrmTextQModel.extract_layers_node()
+    )
+    assert layer_names == [
+        "model.L_module.layers.0",
+        "model.L_module.layers.1",
+        "model.H_module.layers.0",
+        "model.H_module.layers.1",
+    ]
+
+    example = {
+        "input_ids": torch.randint(0, 64, (1, 8)),
+        "attention_mask": torch.ones(1, 8, dtype=torch.long),
+    }
+    instance.build_quantization_input_cache(
+        layers=layers,
+        calibration_data=[example],
+        use_cache=False,
+        layer_names=layer_names,
+    )
+
+    per_layer = instance._looped_per_layer
+    assert [len(per_layer[id(layer)]["layer_inputs"]) for layer in layers] == [4, 4, 2, 2]
+
+    # Each L-stack invocation receives a different recurrent state, so a single
+    # captured chain pass cannot represent the calibration distribution.
+    l0_inputs = [batch[0] for batch in per_layer[id(layers[0])]["layer_inputs"]]
+    flattened = torch.nn.functional.cosine_similarity(
+        l0_inputs[0].flatten(), l0_inputs[-1].flatten(), dim=0
+    )
+    assert flattened.item() < 0.999
+
+    # H0's input is `z_H + final_norm(z_L)`, not the L1 output the flattened
+    # chain would hand it.
+    l1_outputs = per_layer[id(layers[1])]["layer_inputs"]
+    h0_inputs = per_layer[id(layers[2])]["layer_inputs"]
+    assert len(h0_inputs) == 2
+    for h0_input, l1_input in zip(h0_inputs, l1_outputs):
+        assert not torch.allclose(
+            h0_input[0], l1_input[0], rtol=0.0, atol=1e-6
+        ), "H0 received the flattened L1 output instead of z_H + final_norm(z_L)"
+
+
+def test_hrm_text_pre_quantize_serves_each_layers_own_invocations():
+    model = _tiny_hrm_text_model()
+    instance = _hrm_wrapper(model)
+    layers, layer_names = get_layers_with_prefixes(
+        model, HrmTextQModel.extract_layers_node()
+    )
+    example = {
+        "input_ids": torch.randint(0, 64, (1, 8)),
+        "attention_mask": torch.ones(1, 8, dtype=torch.long),
+    }
+    cache = instance.build_quantization_input_cache(
+        layers=layers,
+        calibration_data=[example],
+        use_cache=False,
+        layer_names=layer_names,
+    )
+
+    for layer in layers:
+        instance.pre_quantize(layer)
+        assert cache.layer_inputs is instance._looped_per_layer[id(layer)]["layer_inputs"]
+        assert len(cache.attention_masks) == len(cache.layer_inputs)
 
 
 def test_stage_input_capture_materializes_hrm_direct_meta_tensor_modules():

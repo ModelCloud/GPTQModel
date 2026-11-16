@@ -13,6 +13,10 @@ class HunYuanDenseV1QModel(LlamaQModel):
     """
     fusable = FusableConfig("hunyuan_v1_dense").merge(LlamaFusableConfig())
 
+    # q/k/v share the post-norm hidden state and gate/up share the MLP input.
+    # Verified against a real (tiny, CPU) forward in
+    # tests/module_tree/test_shared_input_cpu_forward.py.
+    shared_input_verified_model_types = frozenset({"hunyuan_v1_dense"})
 
     module_tree = [
         "model",
@@ -22,13 +26,13 @@ class HunYuanDenseV1QModel(LlamaQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 "query_layernorm:!",
-                "q_proj:0",
+                "q_proj:0:in=x",
                 "key_layernorm:!",
-                "k_proj:0",
-                "v_proj:0",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         },
     ]

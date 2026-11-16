@@ -8,6 +8,17 @@ from ..fusable import FusableConfig, LlamaFusableConfig
 
 
 class LlamaQModel(BaseQModel):
+    # Model-wide rotation fuses `input_layernorm` into q/k/v and
+    # `post_attention_layernorm` into gate/up, then resets both norms to unit
+    # gain. That is only exact for the plain Llama layout: an `x * w` RMSNorm
+    # and a post-attention norm that is the MLP input. This class is also the
+    # definition for other model types with different norm semantics (gemma,
+    # cohere, stablelm, ...), so the opt-in names the verified model types
+    # instead of claiming the class. Lookup is non-inheriting; see
+    # `gptqmodel.models.base.rotation_supported` and
+    # docs/rotation-model-support.md.
+    supports_rotation = frozenset({"llama"})
+
     fusable = FusableConfig((
         "llama", "cohere", "cohere2", "gemma", "granite", "helium", "mistral",
         "olmo", "olmo2", "seed_oss", "smollm3", "stablelm",

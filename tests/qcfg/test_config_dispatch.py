@@ -3,6 +3,7 @@
 
 import pytest
 
+from gptqmodel.quantization import config as config_module
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
@@ -94,6 +95,43 @@ def test_quantize_config_dispatches_awq_ignoring_legacy_gptq_only_kwargs():
     assert cfg.sym is False
 
 
+def test_quantize_config_rejects_unknown_constructor_kwargs_with_suggestion():
+    with pytest.raises(TypeError, match="damp_percnt.*damp_percent"):
+        QuantizeConfig(bits=4, damp_percnt=0.1)
+
+
+def test_quantize_config_warns_when_method_specific_fields_are_dropped(monkeypatch):
+    messages = []
+    monkeypatch.setattr(config_module.log, "warn", messages.append)
+
+    cfg = QuantizeConfig(
+        method=METHOD.AWQ,
+        format=FORMAT.GEMM,
+        static_groups=True,
+        gptaq=True,
+    )
+
+    assert isinstance(cfg, AWQConfig)
+    assert any(
+        "does not accept" in message and "static_groups" in message and "gptaq" in message
+        for message in messages
+    )
+
+
+def test_from_quant_config_remains_lenient_for_legacy_checkpoint_json():
+    cfg = GPTQConfig.from_quant_config(
+        {
+            "bits": 4,
+            "group_size": 128,
+            "damp_percnt": 0.1,
+            "legacy_unknown_key": True,
+        }
+    )
+
+    assert isinstance(cfg, GPTQConfig)
+    assert cfg.damp_percent == 0.05
+
+
 def test_quantize_config_rejects_is_marlin_format_constructor_arg():
     with pytest.raises(ValueError, match="is_marlin_format"):
         QuantizeConfig(is_marlin_format=True)
@@ -107,6 +145,39 @@ def test_quantize_config_rejects_is_marlin_format_in_serialized_payload():
                 "is_marlin_format": True,
             }
         )
+
+
+def test_quantize_config_accepts_is_marlin_format_false():
+    payload = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": True,
+        "sym": True,
+        "quant_method": "gptq",
+        "is_marlin_format": False,
+    }
+
+    cfg = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(cfg, GPTQConfig)
+    assert cfg.format == FORMAT.GPTQ
+
+    constructed = QuantizeConfig(bits=4, is_marlin_format=False)
+    assert isinstance(constructed, GPTQConfig)
+
+
+def test_quantize_config_normalizes_string_bits_and_null_sym():
+    cfg = QuantizeConfig.from_quant_config(
+        {
+            "bits": "4",
+            "group_size": 128,
+            "desc_act": False,
+            "sym": None,
+            "quant_method": "gptq",
+        }
+    )
+
+    assert cfg.bits == 4
+    assert cfg.sym is True
 
 
 def test_quantize_config_dispatches_rtn_constructor():

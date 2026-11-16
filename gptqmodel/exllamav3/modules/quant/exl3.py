@@ -11,6 +11,7 @@ from __future__ import annotations
 import torch
 
 from ...ext import exllamav3_ext as ext
+from ...trellis import validate_trellis_k
 from ...util.tensor import g_tensor_cache
 from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r
 
@@ -71,6 +72,11 @@ class LinearEXL3:
         self.mcg = self.mcg_tensor is not None
         self.mul1 = self.mul1_tensor is not None
 
+        # The native reconstruct op selects a kernel from K (1..8) and the
+        # mcg/mul1 variant. Reject a checkpoint that would index past the
+        # 24-entry table instead of launching a garbage function pointer.
+        validate_trellis_k(self.K, self.mcg, self.mul1)
+
         self.bsz1_xh_args = (self.trellis.device, (1, self.in_features), self.out_dtype)
         self.bc = ext.BC_LinearEXL3(
             self.trellis,
@@ -126,7 +132,11 @@ class LinearEXL3:
             torch_mode = params.get("reconstruct", bsz > 32)
 
         out_shape = x.shape[:-1] + (self.out_features,)
-        x = x.view(-1, self.in_features)
+        # The native hadamard/hgemm/bc kernels treat the operand as densely
+        # packed rows and take `data_ptr()` directly. `view` succeeds on some
+        # strided inputs (column slices, `hidden_states[:, -1:, :]`), which
+        # then produced silently wrong rows, so pack before the kernels.
+        x = x.reshape(-1, self.in_features).contiguous()
         y = torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
 
         if torch_mode:

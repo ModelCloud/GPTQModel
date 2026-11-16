@@ -18,11 +18,22 @@ import gptqmodel_nf12 as nf12
 packed = nf12.encode(bf16_cuda_weight)  # [N, K], N % 16 == 0, K % 64 == 0
 embeddings = nf12.embedding(token_ids, packed)
 hc_embeddings = nf12.embedding_repeat4(token_ids, packed)  # [*token_ids.shape, 4, K]
+row_packed, row_escapes, _, _ = nf12.rowmajor_pack(packed)
+lookup_embeddings = nf12.rowmajor_embedding(
+    token_ids, row_packed, row_escapes, packed.exp_base
+)
 bf16_logits = nf12.linear(bf16_hidden, packed)
 fp32_scores = nf12.linear_fp32(fp32_hidden, packed)
 shortlist = nf12.linear_fp32(fp32_hidden, packed, rows=selected_rows)
 markov_scores = nf12.linear_bf16_fp32(bf16_embedding, packed)
 ```
+
+`rowmajor_pack` derives the embedding-only layout from canonical NF12. Each
+64-column row block becomes one 96-byte record, so lookup does not read the
+paired row required by canonical super-atoms. Keep canonical NF12 for linear
+weights and use the row-major tensors only for embedding lookup. A one-ID
+lookup at `K <= 2048` uses one persistent CTA with a K-block stride loop;
+larger tables and ID tensors retain the established launch geometry.
 
 `NF12Linear`, `NF12Embedding`, `encode_moe`, and `fused_moe` are also exported.
 `NF12Linear` accepts BF16 or FP32 activations; its output follows the activation

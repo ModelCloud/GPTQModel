@@ -17,6 +17,7 @@ from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
+from ...utils.packing_math import scale_to_storage_dtype
 
 
 log = setup_logger()
@@ -224,9 +225,14 @@ class AwqGEMVLinear(AWQuantLinear):
             )
 
         if self.bias is not None:
-            # Preserve the FP16 kernel result and bias until after addition:
-            # rounding either operand to BF16 first can destroy cancellation.
-            out = out.float() + self.bias.float()
+            # A CUDA FP16 add already accumulates in FP32 and rounds once, so
+            # the single kernel is bitwise identical to widening both operands.
+            # Keep the wide path for BF16 and mixed dtypes: rounding either
+            # operand to BF16 before the add changes the result.
+            if input_dtype == torch.float16 and self.bias.dtype == torch.float16:
+                out = torch.add(out, self.bias)
+            else:
+                out = out.float() + self.bias.float()
         out = out.to(dtype=input_dtype)
 
         if self.adapter:
@@ -248,7 +254,8 @@ class AwqGEMVLinear(AWQuantLinear):
             dtype=torch.float16,
             device=scales.device,
         )
-        qscales[:, : scales.shape[1]] = scales
+        # Reject an unrepresentable FP16 scale before replacing module state.
+        qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
         self.register_buffer("scales", qscales)
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.clone().half())

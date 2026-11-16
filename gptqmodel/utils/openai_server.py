@@ -10,7 +10,6 @@ import secrets
 import threading
 import time
 import uuid
-import warnings
 
 import torch
 
@@ -21,8 +20,9 @@ try:
     import uvicorn
     from fastapi import FastAPI, Header, HTTPException, Request
     from fastapi.responses import JSONResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
     from starlette.datastructures import Headers
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
 except ModuleNotFoundError as exception:
     raise type(exception)(
         "GPT-QModel OpenAi serve required dependencies are not installed.",
@@ -32,8 +32,15 @@ except ModuleNotFoundError as exception:
 # Environment fallback so the token does not have to be passed on the command line.
 API_KEY_ENV = "GPTQMODEL_OPENAI_API_KEY"
 
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 80
+
+# Request bounds. A single unauthenticated request used to be able to ask for
+# an unbounded generation or an unbounded body.
+MAX_COMPLETION_TOKENS = 4096
+MAX_CHOICES = 16
+MAX_MESSAGES = 256
+MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024
 
 # Only the inference API is authenticated. Liveness/root routes stay open so
 # probes and browsers do not need the key.
@@ -110,6 +117,65 @@ class AuthenticationMiddleware:
         return self.app(scope, receive, send)
 
 
+class BodySizeLimitMiddleware:
+    """Reject an HTTP request whose body exceeds ``max_bytes``.
+
+    The body is buffered only up to the limit, so a chunked request without a
+    ``Content-Length`` header is bounded too. A declared oversize body is
+    rejected before it is read.
+    """
+
+    def __init__(self, app, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        headers = Headers(scope=scope)
+        declared = headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > self.max_bytes:
+                    return await self._reject(scope, receive, send)
+            except ValueError:
+                # Invalid Content-Length; fall back to bounded streaming check below.
+                # This preserves behavior and still enforces max body size safely.
+                pass
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return None
+            body.extend(message.get("body", b""))
+            if len(body) > self.max_bytes:
+                return await self._reject(scope, receive, send)
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if replayed:
+                # The application consumed the request; wait for disconnect.
+                return await receive()
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        return await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _reject(scope, receive, send):
+        response = JSONResponse(
+            content={"detail": f"Request body exceeds the {MAX_REQUEST_BODY_BYTES} byte limit."},
+            status_code=413,
+        )
+        return await response(scope, receive, send)
+
+
 def _sequence_end(row, eos_token_id, pad_token_id):
     """Return ``(token_count, finish_reason)`` for one generated row.
 
@@ -120,13 +186,65 @@ def _sequence_end(row, eos_token_id, pad_token_id):
     is padding, including a second EOS written as the pad value.
     """
     ids = [int(token) for token in row.tolist()]
-    if eos_token_id is not None and eos_token_id in ids:
-        return ids.index(eos_token_id) + 1, "stop"
+    if eos_token_id is not None:
+        if isinstance(eos_token_id, int):
+            eos_set = {eos_token_id}
+        else:
+            eos_set = {int(e) for e in eos_token_id if e is not None}
+        for index, token in enumerate(ids):
+            if token in eos_set:
+                return index + 1, "stop"
     if pad_token_id is not None:
         # No EOS: a row that only ends in padding was cut short by the budget.
         while ids and ids[-1] == pad_token_id:
             ids.pop()
     return len(ids), "length"
+
+
+def _resolve_eos_token_ids(model, tokenizer) -> list[int]:
+    """Collect all valid EOS token IDs from the model config and tokenizer."""
+    ids: list[int] = []
+    gen_config = getattr(model, "generation_config", None)
+    if gen_config is not None:
+        cfg_eos = getattr(gen_config, "eos_token_id", None)
+        if isinstance(cfg_eos, int):
+            ids.append(cfg_eos)
+        elif isinstance(cfg_eos, (list, tuple, set)):
+            ids.extend(int(x) for x in cfg_eos if x is not None)
+
+    model_config = getattr(model, "config", None)
+    if model_config is not None:
+        cfg_eos = getattr(model_config, "eos_token_id", None)
+        if isinstance(cfg_eos, int):
+            ids.append(cfg_eos)
+        elif isinstance(cfg_eos, (list, tuple, set)):
+            ids.extend(int(x) for x in cfg_eos if x is not None)
+
+    if tokenizer is not None:
+        tok_eos = getattr(tokenizer, "eos_token_id", None)
+        if isinstance(tok_eos, int):
+            ids.append(tok_eos)
+        elif isinstance(tok_eos, (list, tuple, set)):
+            ids.extend(int(x) for x in tok_eos if x is not None)
+
+    return list(dict.fromkeys(ids))
+
+
+def _capture_rng_state():
+    """Capture the CPU RNG state plus the accelerator state when it exists.
+
+    ``torch.cuda.is_initialized()`` is used instead of ``is_available()`` so a
+    CPU-only request never creates a CUDA context just to read its state.
+    """
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    return torch.get_rng_state(), cuda_states
+
+
+def _restore_rng_state(state) -> None:
+    cpu_state, cuda_states = state
+    torch.set_rng_state(cpu_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def _coerce_generation_results(outputs) -> list:
@@ -187,7 +305,7 @@ def _coerce_generation_results(outputs) -> list:
 
 
 class OpenAiServer:
-    def __init__(self, model, api_key: str = None):
+    def __init__(self, model, api_key: str = None, allowed_hosts: list = None):
         self.uvicorn_server = None
         self.app = FastAPI()
         self.model = model
@@ -195,9 +313,12 @@ class OpenAiServer:
         self.model_id_or_path = model.config.name_or_path
         self.api_keys = _resolve_api_keys(api_key)
         self.api_tokens = _token_digests(self.api_keys)
+        self.allowed_hosts_override = list(allowed_hosts) if allowed_hosts is not None else None
+        self._host_validation_installed = False
         # One generation at a time: the endpoint runs in the threadpool, and a
         # single device cannot serve two concurrent generations.
         self._generation_lock = threading.Lock()
+        self.app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
         if self.api_keys:
             self.app.add_middleware(AuthenticationMiddleware, tokens=self.api_keys)
         self.setup_routes()
@@ -217,13 +338,18 @@ class OpenAiServer:
 
     def setup_routes(self):
         class OpenAiRequest(BaseModel):
+            model_config = {"extra": "forbid"}
+
             model: str = ""
-            messages: list = []
-            max_tokens: int = 256
-            temperature: float = 0.0
+            messages: list = Field(default_factory=list, max_length=MAX_MESSAGES)
+            max_tokens: int | None = Field(default=None, ge=1, le=MAX_COMPLETION_TOKENS)
+            max_completion_tokens: int | None = Field(default=None, ge=1, le=MAX_COMPLETION_TOKENS)
+            temperature: float = Field(default=0.0, ge=0.0)
             top_p: float = 1.0
-            n: int = 1
+            n: int = Field(default=1, ge=1, le=MAX_CHOICES)
             stop: list | str | None = None
+            stream: bool = False
+            seed: int | None = None
 
         class OpenAiResponseMessage(BaseModel):
             role: str = "assistant"
@@ -277,8 +403,17 @@ class OpenAiServer:
             # cannot run two generations concurrently, and letting the threadpool
             # call into it in parallel would raise VRAM use until it OOMs.
             # Authentication is enforced by AuthenticationMiddleware for /v1 paths.
+            if request.stream:
+                raise HTTPException(status_code=400, detail="Streaming is not currently supported.")
+
             if not request.messages:
                 raise HTTPException(status_code=400, detail="`messages` must not be empty.")
+
+            max_tokens = (
+                request.max_completion_tokens
+                if request.max_completion_tokens is not None
+                else (request.max_tokens if request.max_tokens is not None else 256)
+            )
 
             try:
                 model_inputs = self.tokenizer.apply_chat_template(
@@ -300,11 +435,17 @@ class OpenAiServer:
                 stop_strings = _stop_list(request.stop)
                 do_sample = request.temperature != 0.0
 
+                eos_ids = _resolve_eos_token_ids(self.model, self.tokenizer)
+                eos_arg = eos_ids if len(eos_ids) > 1 else (eos_ids[0] if eos_ids else None)
+
                 generate_kwargs = {
-                    "max_new_tokens": request.max_tokens,
-                    "eos_token_id": self.tokenizer.eos_token_id,
+                    "max_new_tokens": max_tokens,
                     "do_sample": do_sample,
                 }
+                if eos_arg is not None:
+                    generate_kwargs["eos_token_id"] = eos_arg
+                if request.seed is not None and getattr(self.model, "_runtime_generate", None) is not None:
+                    generate_kwargs["seed"] = request.seed
                 if do_sample:
                     generate_kwargs["temperature"] = request.temperature
                     generate_kwargs["top_p"] = request.top_p
@@ -328,11 +469,30 @@ class OpenAiServer:
                         # External runtime adapters accept the OpenAI-style `stop` argument.
                         generate_kwargs["stop"] = stop_strings
 
-                with self._generation_lock, torch.inference_mode():
-                    outputs = self.model.generate(**generate_kwargs, **generate_inputs)
+                # Transformers `generate` has no seed argument, so the global RNG
+                # is seeded for this one call. Seeding outside the lock would let
+                # a concurrent request overwrite the seed before the model reads
+                # it, and leaving it applied would move every later caller onto
+                # this request's random stream. Capture, seed, generate and
+                # restore therefore all happen while `_generation_lock` is held.
+                seeded = request.seed is not None and getattr(self.model, "_runtime_generate", None) is None
+                rng_state = None
+                with self._generation_lock:
+                    if seeded:
+                        rng_state = _capture_rng_state()
+                        torch.manual_seed(request.seed)
+                    try:
+                        with torch.inference_mode():
+                            outputs = self.model.generate(**generate_kwargs, **generate_inputs)
+                    finally:
+                        # Restore before releasing the lock: otherwise the next
+                        # request can seed and start generating, and this
+                        # request's restore then overwrites its RNG state.
+                        if rng_state is not None:
+                            _restore_rng_state(rng_state)
 
                 pad_token_id = self.tokenizer.pad_token_id
-                eos_token_id = self.tokenizer.eos_token_id
+                eos_token_id = eos_ids or self.tokenizer.eos_token_id
 
                 if torch.is_tensor(outputs):
                     generated_ids = outputs[:, prompt_length:]
@@ -421,32 +581,53 @@ class OpenAiServer:
             return {"message": "Server is shutting down..."}
 
     @staticmethod
-    def _warn_if_exposed(host: str, api_keys: list) -> None:
-        """Warn when an unauthenticated endpoint is reachable from other machines.
-
-        The bind address is the caller's deployment decision, so this never
-        refuses to start; it only makes the consequence explicit.
-        """
-        if api_keys:
-            return
+    def _is_loopback_host(host: str) -> bool:
         try:
-            loopback = ipaddress.ip_address(host).is_loopback
+            return ipaddress.ip_address(host).is_loopback
         except ValueError:
-            # A hostname such as "localhost" is loopback; anything else is effectively exposed.
-            loopback = host in {"localhost", "localhost.localdomain"}
-        if loopback:
+            # A hostname such as "localhost" is loopback; anything else is exposed.
+            return host in {"localhost", "localhost.localdomain"}
+
+    @classmethod
+    def _validate_bind(cls, host: str, api_keys: list) -> None:
+        """Refuse an unauthenticated listener that is reachable from the network.
+
+        Binding to a non-loopback address is an explicit deployment decision,
+        but without a key it exposes inference and `/shutdown` to every peer
+        that can reach the port. Opt in by passing `api_key=`.
+        """
+
+        if api_keys or cls._is_loopback_host(host):
             return
-        warnings.warn(
-            f"GPT-QModel OpenAI server is listening on {host} without an API key, so any "
-            "machine that can reach that address can run inference on this model and stop "
-            "the server. Pass `api_key=` (or set GPTQMODEL_OPENAI_API_KEY) before exposing "
-            "it beyond localhost, or bind to 127.0.0.1 and use an SSH tunnel.",
-            UserWarning,
-            stacklevel=3,
+        raise ValueError(
+            f"Refusing to bind the GPT-QModel OpenAI server to non-loopback host {host!r} "
+            "without an API key. Pass `api_key=` (or set GPTQMODEL_OPENAI_API_KEY), or bind "
+            "to 127.0.0.1 and use an SSH tunnel."
         )
 
+    def _allowed_hosts_for(self, host: str) -> list:
+        if self.allowed_hosts_override is not None:
+            return list(self.allowed_hosts_override)
+        if self._is_loopback_host(host):
+            # DNS rebinding presents the attacker's Host name to a loopback
+            # listener; only accept the loopback spellings.
+            return ["localhost", "127.0.0.1", "::1", "[::1]"]
+        # An explicit non-loopback bind already opted into network exposure and
+        # authenticated the API; accept any Host unless the caller narrows it.
+        return ["*"]
+
+    def _install_host_validation(self, host: str) -> None:
+        if self._host_validation_installed:
+            return
+        self.app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=self._allowed_hosts_for(host),
+        )
+        self._host_validation_installed = True
+
     def start(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, async_mode: bool = True):
-        self._warn_if_exposed(host, self.api_keys)
+        self._validate_bind(host, self.api_keys)
+        self._install_host_validation(host)
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         self.uvicorn_server = uvicorn.Server(config)
 

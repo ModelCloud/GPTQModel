@@ -555,6 +555,34 @@ def test_hf_repack_layer_between_compatible_kernels():
         torch.testing.assert_close(target(x), reference(x))
 
 
+def test_hf_repack_layer_preserves_gptq_v1_zero_points():
+    """Issue #4095: repacking a GPTQ v1 layer must not shift zero points by one.
+
+    `_copy_packed_state` copies raw named buffers and propagates
+    `_checkpoint_format_on_disk` so in-memory zero points and serialized
+    `state_dict()` remain consistent without off-by-one shifts.
+    """
+    if not _torch_aten_available():
+        pytest.skip("torch aten int4 CPU ops are unavailable in this build")
+
+    linear, scales, zeros, g_idx = _make_inputs(4)
+    source = _make_gptq_module()
+    hf_pack_layer(source, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ, post_init=True)
+
+    target = hf_repack_layer(source, BACKEND.GPTQ_TORCH_ATEN)
+
+    from gptqmodel.utils.model_dequant import unpack_cols
+
+    source_logical = unpack_cols(source.qzeros, 4)
+    target_logical = unpack_cols(target.qzeros, 4)
+    assert torch.equal(source_logical, target_logical)
+    assert getattr(target, "_checkpoint_format_on_disk", None) == FORMAT.GPTQ
+
+    source_sd = unpack_cols(source.state_dict()["qzeros"], 4)
+    target_sd = unpack_cols(target.state_dict()["qzeros"], 4)
+    assert torch.equal(source_sd, target_sd)
+
+
 def test_hf_repack_layer_preserves_awq_bfloat16_checkpoint_buffers():
     """`dtype` selects the activation dtype, not checkpoint storage width.
 
@@ -798,6 +826,12 @@ def test_hf_pack_layer_post_init_restores_v2_runtime_layout():
     # decoding zp-1 words raw would return +scale instead.
     assert torch.equal(module(x), torch.zeros(2, 64))
 
+    from gptqmodel.utils.model_dequant import unpack_cols
+
+    assert getattr(module, "_checkpoint_format_on_disk", None) == FORMAT.GPTQ
+    # state_dict() emits checkpoint layout (v1: zero point - 1 = 7)
+    assert unpack_cols(module.state_dict()["qzeros"], 4)[0, 0].item() == 7
+
 
 @pytest.mark.parametrize("container", [False, True])
 def test_hf_post_init_restores_gptq_v2_runtime_layout(container):
@@ -832,6 +866,11 @@ def test_hf_post_init_restores_gptq_v2_runtime_layout(container):
 
     x = torch.randn(2, 128)
     assert torch.equal(module(x), torch.zeros(2, 64))
+
+    from gptqmodel.utils.model_dequant import unpack_cols
+
+    assert getattr(module, "_checkpoint_format_on_disk", None) == FORMAT.GPTQ
+    assert unpack_cols(module.state_dict()["qzeros"], 4)[0, 0].item() == 7
 
 
 @pytest.mark.parametrize("bits", [2, 4, 8])

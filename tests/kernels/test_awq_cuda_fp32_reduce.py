@@ -6,6 +6,7 @@ import torch
 
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.awq import awq_gemm_forward, awq_runtime_available
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers
 
 
@@ -151,11 +152,11 @@ def test_awq_cuda_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     qzeros = qzeros.cuda()
     scales = scales.cuda().to(dtype=dtype)
 
-    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", "1")
+    configure_kernel(KernelConfig(awq_fused_splitk_reduce=False))
     with torch.inference_mode():
         baseline = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
 
-    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", raising=False)
+    configure_kernel(KernelConfig())
     with torch.inference_mode():
         candidate = awq_gemm_forward(x, qweight, scales, qzeros, 4, True)
 
@@ -192,11 +193,11 @@ def test_paroquant_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     channel_scales.uniform_(0.75, 1.25)
     rotated = apply_paroquant_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
 
-    monkeypatch.setenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", "1")
+    configure_kernel(KernelConfig(awq_fused_splitk_reduce=False))
     with torch.inference_mode():
         baseline = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 
-    monkeypatch.delenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", raising=False)
+    configure_kernel(KernelConfig())
     with torch.inference_mode():
         candidate = awq_gemm_forward(rotated, qweight, scales, qzeros, 4, True)
 

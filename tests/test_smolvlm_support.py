@@ -125,6 +125,7 @@ def test_smolvlm_prepare_dataset_uses_processor_chat_template():
     assert calls["kwargs"]["tokenize"] is True
     assert calls["kwargs"]["return_dict"] is True
     assert calls["kwargs"]["return_tensors"] == "pt"
+    assert calls["kwargs"]["padding"] is True
 
 
 def _fake_smolvlm_qmodel():

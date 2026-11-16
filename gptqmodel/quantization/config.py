@@ -4,17 +4,19 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import difflib
 import hashlib
 import json
 import math
 import os.path
+import re
 import tempfile
 import threading
 import weakref
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from functools import total_ordering
 from os.path import join
@@ -24,7 +26,11 @@ import pcre
 import torch
 from packaging import version
 
+from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
 from ..adapter.adapter import Lora, normalize_adapter
+from ..utils.backend_config import RuntimeConfig
+from ..utils.hf import resolve_checkpoint_subfolder
+from ..utils.kernel import KernelConfig, resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.p2p import P2PConfig
 from ..utils.vptq import vptq_index_bits
@@ -108,6 +114,13 @@ META_FIELD_GPTAQ_ENABLED = "gptaq"
 
 META_FIELD_FOEM_ENABLED = "foem"
 
+# GPTQModel <= 5.4.x stored the GPTAQ switch as a bare boolean in `meta.gptaq`
+# and kept its coefficient/device in these sibling keys. 5.x replaced the
+# boolean with the `GPTAQConfig` object, so readers must still understand the
+# legacy shape or every 5.4.x checkpoint fails to load.
+META_FIELD_GPTAQ_ALPHA = "gptaq_alpha"
+META_FIELD_GPTAQ_MEMORY_DEVICE = "gptaq_memory_device"
+
 ADAPTER_FIELD = "adapter"
 
 # saved formats
@@ -138,6 +151,19 @@ class FORMAT(str, Enum):
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
     PAROQUANT = "paroquant"
+    # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales
+    # plus its activation transforms (block-Hadamard `BH`, D1 `pre_scale`).
+    MXFP4_MACAQ = "mxfp4_macaq"
+    # Plain OCP MXFP4: nibble-packed E2M1 and E8M0 scales only. MACaQ writes
+    # it for `rotation="none"` with `pre_mode="none"`.
+    MXFP4 = "mxfp4"
+
+
+class AutoDtypeCast(str, Enum):
+    """Storage policy for source weights used during quantization forwards."""
+
+    OFF = "off"
+    AUTO_NF12 = "auto_nf12"
 
 
 # quant methods
@@ -153,6 +179,7 @@ class METHOD(str, Enum):
     EXL3 = "exl3"
     PARO = "paroquant"
     VPTQ = "vptq"
+    MACAQ = "macaq"
     NF12 = "nf12"
     # Tenstorrent native block-float weights (`bf4_b` / `bf8_b`).
     TT_BLOCKFLOAT = "tt-blockfloat"
@@ -183,6 +210,8 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # VPTQ's nominal bpw label is derived from codebook sizes and clamped to
     # 1-8; the vector codebooks can realize any integer width in that range.
     METHOD.VPTQ: (1, 2, 3, 4, 5, 6, 7, 8),
+    # MACaQ packs OCP MXFP4: E2M1 values plus one E8M0 scale per 32 values.
+    METHOD.MACAQ: (4,),
     # NF12 is a lossless 12-bit encoding of BF16. The width is fixed by the
     # format, so 12 is the only valid request.
     METHOD.NF12: (12,),
@@ -388,7 +417,8 @@ _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
     "q4_k_s": 4.5,
     "q4_k_m": 4.5,
     "q5_k": 5.5,
-    "q5_k_s": 5.0,
+    # `q5_k_s` is stored as uniform Q5_K, whose blocks are 5.5 bpw.
+    "q5_k_s": 5.5,
     "q5_k_m": 5.5,
     "q6_k": 6.0,
     "q8_k": 9.125,
@@ -831,6 +861,47 @@ def _normalize_gguf_config(
     return normalized_bits, normalized_format, bits_spec
 
 
+_GGUF_K_QUALITY_ALIASES = frozenset({"s", "m", "l"})
+
+
+def _gguf_bits_implies_format(bits: Any) -> bool:
+    """Return True when a ``bits`` value already names a ggml subtype.
+
+    A subtype such as ``q6_k`` fixes the ggml format on its own. Treating it as
+    a bare width and inheriting the global subtype rejected valid recipes like
+    ``Q4_K_M`` with a per-module ``Q6_K`` layer.
+    """
+
+    if isinstance(bits, GGUFBits):
+        return True
+    if isinstance(bits, str):
+        try:
+            float(bits.strip().lower().replace("-", "_"))
+        except ValueError:
+            return True
+    return False
+
+
+def _warn_gguf_quality_alias(bits_spec: GGUFBits) -> None:
+    """Warn that `q*_k_s`/`q*_k_m`/`q*_k_l` store a uniform K-quant.
+
+    llama.cpp's `_s`/`_m`/`_l` names select a per-tensor mixture (for example
+    Q6_K for `attn_v`/`ffn_down` in the `use_more_bits` layers). GPT-QModel
+    packs every tensor with the base K type, so the alias name overstates the
+    saved checkpoint's quality.
+    """
+
+    if bits_spec.variant != "k" or bits_spec.quality not in _GGUF_K_QUALITY_ALIASES:
+        return
+    log.warn(
+        "GGUFConfig: `%s` aliases to uniform `Q%d_K`; the llama.cpp per-tensor "
+        "`_s`/`_m`/`_l` quality mixture is not implemented. The saved "
+        "checkpoint is lower quality than its name implies.",
+        bits_spec.to_string(),
+        bits_spec.bits,
+    )
+
+
 def _fractional_bits_error(
     bits: float,
     *,
@@ -986,6 +1057,10 @@ def resolve_quant_format(
         return FORMAT.EXL3
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
+    if method == METHOD.MACAQ:
+        if isinstance(format_value, (str, FORMAT)) and str(getattr(format_value, "value", format_value)).strip().lower() == FORMAT.MXFP4.value:
+            return FORMAT.MXFP4
+        return FORMAT.MXFP4_MACAQ
     if method == METHOD.NF12:
         return FORMAT.NF12
 
@@ -2240,6 +2315,10 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.VPTQ: {
         FORMAT.VPTQ,
     },
+    METHOD.MACAQ: {
+        FORMAT.MXFP4_MACAQ,
+        FORMAT.MXFP4,
+    },
     METHOD.NF12: {
         FORMAT.NF12,
     },
@@ -2294,6 +2373,16 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.VPTQ,
 )
+# Per-layer rotations MACaQ supports: the block Hadamard, or none.
+MACAQ_ROTATIONS: Tuple[str, ...] = ("hadamard", "none")
+# MACaQ reuses `rotation` for its per-layer transform, so checkpoints carry
+# it under its own key and leave the shared model-wide `rotation` null.
+MACAQ_ROTATION_FIELD = "macaq_rotation"
+
+MACAQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.MXFP4_MACAQ,
+    FORMAT.MXFP4,
+)
 NF12_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.NF12,
 )
@@ -2317,6 +2406,8 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
+    FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
+    FORMAT.MXFP4: METHOD.MACAQ,
     FORMAT.NF12: METHOD.NF12,
     FORMAT.TT_BLOCKFLOAT: METHOD.TT_BLOCKFLOAT,
 }
@@ -2377,6 +2468,31 @@ class _TrackedDict(dict):
             source = dict(*args, **kwargs)
             for key, value in source.items():
                 dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+        if self._root is self:
+            self._reorder_exclusions_first()
+
+    @staticmethod
+    def _is_exclusion_key(key) -> bool:
+        return isinstance(key, str) and key.startswith("-:")
+
+    def _reorder_exclusions_first(self):
+        """Keep ``-:`` exclusion rules ahead of every positive rule.
+
+        ``dynamic`` resolves first-match in insertion order, so an exclusion
+        appended after construction would lose to an earlier positive rule
+        while the same rules reloaded from JSON would win (``__post_init__``
+        reorders). Normalize the order on every root-level mutation so the
+        in-process lookup, the saved JSON and the reloaded config agree.
+        """
+
+        items = list(dict.items(self))
+        ordered = [item for item in items if self._is_exclusion_key(item[0])]
+        ordered.extend(item for item in items if not self._is_exclusion_key(item[0]))
+        if [key for key, _ in ordered] == [key for key, _ in items]:
+            return
+        dict.clear(self)
+        for key, value in ordered:
+            dict.__setitem__(self, key, value)
 
     def _touch(self):
         # Nested tracked containers point at the same root, so any edit
@@ -2391,6 +2507,8 @@ class _TrackedDict(dict):
     def __setitem__(self, key, value):
         with self._root._dynamic_lock:
             dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+            if self._root is self and self._is_exclusion_key(key):
+                self._reorder_exclusions_first()
             self._touch()
 
     def __delitem__(self, key):
@@ -2565,6 +2683,8 @@ def _track_dynamic_value(value, root):
         root = tracked._root
         for key, item in value.items():
             dict.__setitem__(tracked, key, _track_dynamic_value(item, root))
+        if root is tracked:
+            tracked._reorder_exclusions_first()
         return tracked
     if isinstance(value, (list, tuple)):
         tracked = _TrackedList(_root=root)
@@ -3141,6 +3261,29 @@ def _serialize_smooth_method(method: Optional[SmoothMethod]) -> Optional[Dict[st
     return payload
 
 
+def _serialize_dynamic_override_value(value: Any) -> Any:
+    """Return a JSON-safe form for one per-module ``dynamic`` override value.
+
+    ``dynamic`` accepts typed objects per module -- ``Fallback``, ``MSEConfig``,
+    ``SmootherConfig``/``SmoothMethod``, ``torch.dtype`` and enums -- because the
+    processors normalize them before use. Serialization used to copy them
+    through untouched, so ``to_dict()``/``save_pretrained()`` failed with a
+    ``TypeError`` from ``json.dumps`` after quantization had already finished.
+    """
+
+    if isinstance(value, torch.dtype):
+        return str(value).split(".")[-1]
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return _serialize_dynamic_override_value(asdict(value))
+    if isinstance(value, Mapping):
+        return {key: _serialize_dynamic_override_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_dynamic_override_value(item) for item in value]
+    return value
+
+
 def _normalize_smoother_config(
     payload: Optional[Union[SmootherConfig, SmoothMethod, Dict[str, Any], str]]
 ) -> Optional[SmootherConfig]:
@@ -3202,6 +3345,18 @@ def _validate_unique_preprocessors(preprocessors: List[BasePreProcessorConfig]) 
         codes_seen.add(preprocessor.code)
 
 
+def _exact_rank_pattern(module_name: str) -> str:
+    """Return a `rank_pattern` key that selects exactly one module name.
+
+    PEFT wraps every key as `(.*\\.)?(key)$`, and that optional prefix group
+    anchors the match at a dot boundary. Escaping the full dotted name is
+    therefore enough: no leading `^`, which the wrapper group would invalidate
+    for names that carry a `base_model.model.` prefix.
+    """
+
+    return re.escape(module_name)
+
+
 def _select_dynamic_value(overrides: Mapping, key: Optional[str], default: Any, sub_key: Optional[str]) -> Any:
     if key is None:
         return overrides
@@ -3236,6 +3391,204 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
         return default
 
     return _select_dynamic_value(overrides, key, default, sub_key)
+
+
+def _unescape_module_pattern(pattern: str) -> Optional[str]:
+    """Return `pattern` as a plain module name when it is a pure literal regex.
+
+    `pcre.escape` (used for runtime-pruned modules) escapes every module-name
+    character, so `model\\.layers\\.0\\.down_proj` names the module
+    `model.layers.0.down_proj`.  Patterns that use regex syntax (anchors,
+    quantifiers, alternation, character classes, or `\\d`-style escapes) are
+    not plain names and are returned as ``None``.
+    """
+
+    if any(character in pattern for character in "*+?[](){}|^$"):
+        return None
+    out: List[str] = []
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character != "\\":
+            out.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(pattern):
+            return None
+        escaped = pattern[index + 1]
+        if escaped.isalnum():
+            # Regex escape such as \d, \w, \1, \x, etc.
+            return None
+        if escaped not in "\\^$*+?{}[]()|.":
+            return None
+        out.append(escaped)
+        index += 2
+    return "".join(out)
+
+
+def _dynamic_exclusion_patterns(dynamic, extra=()) -> List[str]:
+    """Return the patterns of every `-:` dynamic rule, in declaration order.
+
+    The `-:` prefix is GPT-QModel's own exclusion marker; HF Transformers and
+    vLLM read a plain pattern list from `modules_to_not_convert`.  Runtime-pruned
+    modules are recorded as `pcre.escape(name)`; vLLM compares these entries as
+    substrings, so pure-literal regexes are unescaped back to module names.
+    """
+
+    patterns: List[str] = []
+    for pattern in list(dynamic or ()) + list(extra or ()):
+        if not isinstance(pattern, str) or not pattern.startswith("-:"):
+            continue
+        raw = pattern[2:]
+        if not raw:
+            continue
+        literal = _unescape_module_pattern(raw)
+        exported = raw if literal is None else literal
+        if exported not in patterns:
+            patterns.append(exported)
+    return patterns
+
+
+# Third-party producers record module exclusions outside `dynamic`.  AutoAWQ /
+# HF `AwqConfig` use `modules_to_not_convert`, llm-compressor uses `ignore`,
+# and Optimum's GPTQ path uses `modules_in_block_to_quantize` (an inclusion
+# list).  Fold the two exclusion lists into `-:` dynamic rules so the loader
+# has one authoritative decision surface; the inclusion list needs the module
+# tree and is applied by the loader.
+_EXTERNAL_EXCLUSION_KEYS = ("modules_to_not_convert", "ignore")
+_EXTERNAL_INCLUSION_KEY = "modules_in_block_to_quantize"
+
+
+def _external_string_list(value: Any) -> List[str]:
+    """Flatten a producer's string / list-of-strings / list-of-lists value."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[str] = []
+    for item in value:
+        if isinstance(item, str):
+            if item:
+                result.append(item)
+        elif isinstance(item, (list, tuple)):
+            result.extend(entry for entry in item if isinstance(entry, str) and entry)
+    return result
+
+
+_EXTERNAL_REGEX_PREFIX = "re:"
+_EXTERNAL_NAME_PREFIX = r"(?:^|.*\.)"
+
+
+def _external_exclusion_name_pattern(name: str) -> Optional[str]:
+    r"""Return a module-boundary regex that also matches `name`'s children.
+
+    Producer keys name modules (``visual``, ``model.layers.0.``); HF matches
+    them at module boundaries and AutoAWQ / vLLM as substrings, so a parent
+    name must exclude its descendants.  ``dynamic`` matching is start-anchored,
+    hence the leading ``(?:^|.*\.)``.
+    """
+
+    name = name.rstrip(".")
+    if not name:
+        return None
+    return _EXTERNAL_NAME_PREFIX + re.escape(name) + r"(?:\..*)?$"
+
+
+def _external_export_pattern(pattern: str) -> str:
+    """Return the spelling to publish in `modules_to_not_convert`.
+
+    llm-compressor's ``re:`` prefix is not part of the regex it protects, and
+    HF / vLLM consume this list as names/patterns, so drop it on export.  A
+    pure-literal regex (an escaped module name) becomes the plain name.
+    """
+
+    pattern = pattern.strip()
+    if pattern.startswith(_EXTERNAL_REGEX_PREFIX):
+        pattern = pattern[len(_EXTERNAL_REGEX_PREFIX):].strip()
+    literal = _unescape_module_pattern(pattern)
+    return pattern if literal is None else literal
+
+
+def _external_exclusion_dynamic_pattern(pattern: str) -> Optional[str]:
+    r"""Translate one producer exclusion into a `dynamic` matching pattern.
+
+    AutoAWQ / HF / vLLM compare these entries as module-name substrings, while
+    `dynamic` rules are exact literals or start-anchored regexes.  Plain names
+    become a module-boundary regex that covers children
+    (``(?:^|.*\.)visual(?:\..*)?$``); llm-compressor's ``re:`` prefix is
+    stripped and the regex kept verbatim; anything else that already contains
+    regex metacharacters is kept verbatim.
+    """
+
+    pattern = pattern.strip()
+    if not pattern:
+        return None
+    if pattern.startswith(_EXTERNAL_REGEX_PREFIX):
+        regex = pattern[len(_EXTERNAL_REGEX_PREFIX):].strip()
+        if not regex:
+            return None
+        try:
+            pcre.compile(regex)
+        except Exception:
+            return _external_exclusion_name_pattern(regex)
+        return regex
+    # A dot is ambiguous: it is both a module separator and a regex wildcard.
+    # Producer keys name modules, so treat dotted plain names as literals and
+    # only keep patterns with explicit regex syntax.
+    if any(character in pattern for character in "*+?[](){}|^$\\"):
+        try:
+            pcre.compile(pattern)
+            return pattern
+        except Exception:
+            # Producers also emit glob-style entries (e.g. `*.mlp.down_proj`).
+            # Fall back to a glob-to-regex suffix instead of rejecting the
+            # whole checkpoint over one unparsable pattern.
+            glob_parts = pattern.split("*")
+            return _EXTERNAL_NAME_PREFIX + r".*".join(re.escape(part) for part in glob_parts) + r"(?:\..*)?$"
+    return _external_exclusion_name_pattern(pattern)
+
+
+def _apply_external_checkpoint_module_filters(
+    config: "BaseQuantizeConfig",
+    exclusion_patterns: List[str],
+    inclusion_patterns: Optional[List[str]],
+) -> None:
+    """Attach producer-declared exclusions/inclusions to a parsed config."""
+
+    patterns = list(dict.fromkeys(exclusion_patterns))
+    # `AWQConfig` keeps the compatibility field; preserve it as an exclusion
+    # source as well so a config constructed without the parser still honors it.
+    patterns = list(dict.fromkeys(
+        patterns + _external_string_list(getattr(config, "modules_to_not_convert", None))
+    ))
+    if patterns:
+        derived = []
+        for pattern in patterns:
+            dynamic_pattern = _external_exclusion_dynamic_pattern(pattern)
+            if dynamic_pattern is not None:
+                derived.append(dynamic_pattern)
+        if derived:
+            # Exclusions are authoritative and must win first-match resolution.
+            merged: Dict[str, Any] = {}
+            for dynamic_pattern in derived:
+                merged[f"-:{dynamic_pattern}"] = {}
+            for pattern, override in (config.dynamic or {}).items():
+                merged.setdefault(pattern, override)
+            config.dynamic = merged
+        # Keep the producer's spelling (minus the `re:` marker) for export so
+        # `modules_to_not_convert` stays usable by HF / vLLM, while `dynamic`
+        # carries the derived module-boundary regex.
+        exported = list(dict.fromkeys(
+            value for value in (_external_export_pattern(pattern) for pattern in patterns) if value
+        ))
+        config._external_exclusion_patterns = tuple(exported)
+        if getattr(config, "modules_to_not_convert", None):
+            config.modules_to_not_convert = exported
+    if inclusion_patterns is not None:
+        config._external_module_inclusions = tuple(dict.fromkeys(inclusion_patterns))
 
 
 def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
@@ -3308,6 +3661,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.BITSANDBYTES
         if value == FORMAT.EXL3:
             return METHOD.EXL3
+        if value == GGUF_EXPORT_QUANT_METHOD:
+            return METHOD.GGUF
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
         try:
@@ -3380,7 +3735,10 @@ def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, 
         return None
     if isinstance(fallback, dict):
         strategy = fallback.get("strategy", FallbackStrategy.RTN)
-        threshold = fallback.get("threshold", "1.0%")
+        # The dataclass default is the single source of truth.  A dict that only
+        # sets `strategy` or `smooth` must not silently double the threshold from
+        # 0.5% to 1.0%, which moves experts from GPTQ to RTN.
+        threshold = fallback.get("threshold", Fallback.threshold)
         smooth = fallback.get("smooth")
         if smooth is None:
             smooth = fallback.get("smooth_method")
@@ -3502,23 +3860,67 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     config._resolve_activation_ordering(desc_act, act_group_aware)
 
 
-def _normalize_gptaq(gptaq: Optional[Union[GPTAQConfig, Dict[str, Any]]]) -> Optional[GPTAQConfig]:
+def _legacy_optional_number(value: Any) -> Optional[float]:
+    """Return `value` as a float when it is a real number, else `None`."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _normalize_gptaq(
+    gptaq: Optional[Union[GPTAQConfig, Dict[str, Any], bool]],
+    *,
+    legacy_alpha: Any = None,
+    legacy_device: Any = None,
+) -> Optional[GPTAQConfig]:
+    """Normalize `gptaq` from an object, a dict, or the legacy boolean.
+
+    GPTQModel 5.4.x serialized `"gptaq": false|true` into the checkpoint
+    `meta` and stored the coefficient and memory device in the sibling
+    `gptaq_alpha` / `gptaq_memory_device` keys. `False` means "GPTAQ off", so
+    it maps to `None`; `True` means "GPTAQ on", so it maps to a
+    `GPTAQConfig` that keeps the legacy coefficient when one was written.
+    """
+
     if gptaq is None:
         return None
+    if isinstance(gptaq, bool):
+        if not gptaq:
+            return None
+        alpha = _legacy_optional_number(legacy_alpha)
+        device = legacy_device if isinstance(legacy_device, str) and legacy_device else "auto"
+        return GPTAQConfig(
+            alpha=GPTAQConfig().alpha if alpha is None else alpha,
+            device=device,
+        )
     if isinstance(gptaq, dict):
         return GPTAQConfig(**gptaq)
     if not isinstance(gptaq, GPTAQConfig):
-        raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
+        raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, boolean, or None.")
     return gptaq
 
 
-def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Optional[FOEMConfig]:
+def _normalize_foem(
+    foem: Optional[Union[FOEMConfig, Dict[str, Any], bool]],
+) -> Optional[FOEMConfig]:
+    """Normalize `foem`; a legacy boolean follows the same on/off contract.
+
+    No released GPTQModel wrote a boolean `meta.foem`, but the sibling
+    normalizer accepted the same shapes as `gptaq` before the object form, and
+    a boolean here has an unambiguous meaning. Rejecting it would reintroduce
+    the checkpoint-compatibility bug for any producer that mirrored the GPTAQ
+    encoding.
+    """
+
     if foem is None:
         return None
+    if isinstance(foem, bool):
+        return FOEMConfig() if foem else None
     if isinstance(foem, dict):
         return FOEMConfig(**foem)
     if not isinstance(foem, FOEMConfig):
-        raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, or None.")
+        raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, boolean, or None.")
     return foem
 
 
@@ -3615,6 +4017,18 @@ def _normalize_p2p_config(
     return P2PConfig(**value)
 
 
+def _normalize_kernel_config(
+    value: Optional[Union[KernelConfig, Dict[str, Any]]],
+) -> Optional[KernelConfig]:
+    if value is None:
+        return None
+    if isinstance(value, KernelConfig):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("QuantizeConfig: `kernel` must be a KernelConfig, dict, or None.")
+    return KernelConfig(**value)
+
+
 def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> Optional[MoEConfig]:
     if value is None:
         return None
@@ -3646,8 +4060,35 @@ def _resolve_dynamic_group_size_error() -> str:
     return "QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 128, 256, 512, 1024]`."
 
 
+def _validate_dynamic_boolean_overrides(layer_name: str, layer_dict: Mapping) -> None:
+    """Reject non-boolean `sym`/`desc_act` values in one per-module rule.
+
+    The top-level fields are type-checked, but `dynamic` values were coerced
+    with `bool(...)` when the module was packed, so `{"sym": "False"}` silently
+    became `sym=True` and produced a checkpoint labelled with the opposite
+    layout. `None` keeps meaning "inherit the global value".
+    """
+
+    for key in ("sym", "desc_act"):
+        value = layer_dict.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise TypeError(
+                f"QuantizeConfig: `dynamic['{layer_name}'].{key}` must be a bool, "
+                f"got {type(value).__name__} ({value!r})."
+            )
+
+
 def _default_damp_percent(method: METHOD) -> float:
-    return 0.005 if method == METHOD.QQQ else 0.05
+    # QQQ has no activation-group-aware calibration, so a single massive
+    # activation (Llama's BOS token) can dominate the Hessian. The previous
+    # QQQ-only default of 0.005 is half of upstream `HandH1998/QQQ`
+    # (`percdamp=0.01`) and ten times below GPTQ's 0.05. Measured on
+    # Llama-3.2-1B QQQ4, wikitext-2 PPL with BOS kept: 59.5 at 0.005 vs 34.4
+    # at 0.05 (= reference GPTQ without AGA). Qwen2.5 is nearly unchanged
+    # (20.99 -> 21.30), so this is the cheap correct default; the change is
+    # called out in the issue #4074 PR.
+    del method
+    return 0.05
 
 
 def _default_damp_auto_increment(method: METHOD) -> float:
@@ -3806,6 +4247,20 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
     return method
 
 
+def _serialize_export_quant_method(method: METHOD) -> str:
+    """Return the HF-facing ``quant_method`` name for an export method.
+
+    ``METHOD.GGUF`` keeps its internal name but is published under
+    ``GGUF_EXPORT_QUANT_METHOD``: transformers reserves ``gguf`` for its own
+    ``GgufHfQuantizer``, which expects a ``.gguf`` file and otherwise loads the
+    checkpoint as randomly initialized weights.
+    """
+
+    if method == METHOD.GGUF:
+        return GGUF_EXPORT_QUANT_METHOD
+    return method.value if isinstance(method, METHOD) else str(method)
+
+
 def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(payload)
 
@@ -3856,6 +4311,25 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+    elif target_cls is MacaqConfig:
+        expected_method = METHOD.MACAQ
+        # MACaQ checkpoints store their per-layer transform under
+        # `macaq_rotation`; the shared `rotation` key is model-wide (#4225).
+        if MACAQ_ROTATION_FIELD in normalized:
+            normalized["rotation"] = normalized.pop(MACAQ_ROTATION_FIELD)
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        # `MacaqConfig.__post_init__` derives the exact format from
+        # `rotation`/`pre_mode`; only foreign formats are corrected here.
+        if normalized_format is not None and normalized_format not in MACAQ_EXPORT_FORMATS:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.MXFP4_MACAQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.MXFP4_MACAQ
     elif target_cls is VPTQConfig:
         expected_method = METHOD.VPTQ
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -3925,7 +4399,131 @@ def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str
     return {key: value for key, value in payload.items() if key in target_field_names}
 
 
+_QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS = frozenset({"weight_only"})
+# Serialized payloads can carry derived keys that are not dataclass fields.
+# Accept them for the factory so `QuantizeConfig(**config.to_dict())` keeps
+# working; the field they derive from is authoritative when both are present.
+_QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS = frozenset({"backend"})
+
+# `to_dict()` stores settings that do not take part in inference inside
+# `meta`. They are real config fields, so both reload paths (`from_quant_config`
+# and `QuantizeConfig(**config.to_dict())`) must lift them back to the top
+# level; otherwise a serialized config silently reloads with class defaults.
+_SERIALIZED_META_FIELD_NAMES = (
+    "telemetry",
+    "fallback",
+    "hessian",
+    "gptaq",
+    "foem",
+    "weight_only",
+    "preprocessors",
+    "gc_mode",
+    "wait_for_submodule_finalizers",
+    "auto_forward_data_parallel",
+    "dense_vram_strategy",
+    "dense_vram_strategy_devices",
+    "moe_vram_strategy",
+    "moe_vram_strategy_devices",
+    "moe",
+    "p2p",
+    "offload_to_disk",
+    "offload_to_disk_path",
+    "pack_impl",
+    "mse",
+    "mock_quantization",
+    "act_group_aware",
+    "true_sequential",
+    "static_groups",
+    "damp_percent",
+    "damp_auto_increment",
+    "opt_rotation_epochs",
+    "opt_finetune_epochs",
+    "opt_train_samples",
+    "opt_validation_samples",
+    "opt_batch_size",
+    "opt_rotation_lr",
+    "opt_weight_lr",
+    "opt_quantizer_lr",
+    "opt_pair_ratio",
+    "opt_seed",
+    "opt_optimizer",
+    "opt_weight_decay",
+    "opt_betas",
+    "opt_eps",
+    "opt_amsgrad",
+    "opt_sgd_momentum",
+    "opt_sgd_dampening",
+    "opt_sgd_nesterov",
+    "opt_fused_rotation",
+    "opt_gradient_checkpointing",
+    "opt_stage_cudagraph",
+    "opt_amp",
+    "opt_best_state_dtype",
+    "opt_train_on_noisy_inputs",
+    "opt_scope",
+    "opt_stage_impl",
+    "opt_pair_impl",
+    "opt_quantizer_impl",
+    "opt_channel_scale_clamp_min",
+    "opt_channel_scale_clamp_max",
+    "scale_search_chunked_activations",
+)
+
+
+def _lift_serialized_meta_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Lift `meta`-stored config settings back to the top level.
+
+    An explicit top-level key wins over the `meta` copy, so a caller can
+    override one field without rebuilding the whole payload.
+    """
+
+    meta_payload = payload.get(META_FIELD)
+    if not isinstance(meta_payload, dict) or not meta_payload:
+        return payload
+    lifted = dict(payload)
+    for field_name in _SERIALIZED_META_FIELD_NAMES:
+        if field_name not in lifted and field_name in meta_payload:
+            lifted[field_name] = meta_payload.get(field_name)
+    return lifted
+
+
+def _validate_quantize_config_factory_kwargs(target_cls, payload: Dict[str, Any]) -> None:
+    known_fields = _known_quantize_config_field_names()
+    allowed_keys = (
+        known_fields
+        | _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS
+        | _QUANTIZE_CONFIG_LEGACY_SERIALIZED_KEYS
+    )
+    unknown = sorted(key for key in payload if key not in allowed_keys)
+    if unknown:
+        details = []
+        for key in unknown:
+            matches = difflib.get_close_matches(key, sorted(allowed_keys), n=1)
+            details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+        raise TypeError(
+            "QuantizeConfig: unexpected quantization config keyword(s): "
+            + ", ".join(details)
+            + f". `{target_cls.__name__}` accepts fields from the quantization config classes."
+        )
+
+    # Include init=False fields: the concrete class owns and normalises them,
+    # so passing one back from `to_dict` is not a foreign-method setting.
+    target_field_names = {field.name for field in fields(target_cls)}
+    ignored = sorted(
+        key
+        for key in payload
+        if key not in target_field_names and key not in _QUANTIZE_CONFIG_CONSTRUCTOR_ONLY_KEYS
+    )
+    if ignored:
+        log.warn(
+            f"QuantizeConfig: `{target_cls.__name__}` does not accept {ignored}; "
+            "these settings belong to another quantization method and are ignored. "
+            "Use the matching concrete config class to set them."
+        )
+
+
 def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _validate_quantize_config_factory_kwargs(target_cls, payload)
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
     if target_cls is RTNConfig:
         normalized = _normalize_rtn_kwargs(normalized)
@@ -3955,6 +4553,10 @@ class QuantizeConfigMeta(type):
     def __call__(cls, *args, **kwargs):
         kwargs = _normalize_quantize_config_constructor_kwargs(kwargs)
         if cls is QuantizeConfig:
+            # A serialized `to_dict()` payload keeps calibration/meta settings
+            # inside `meta`; lift them before class resolution so e.g. an RTN
+            # payload keeps its `weight_only` marker and is not read as AWQ.
+            kwargs = _lift_serialized_meta_fields(kwargs)
             target_cls = _resolve_quantize_config_class(kwargs)
             target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
@@ -3967,10 +4569,13 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
 
     normalized = dict(kwargs)
     if FORMAT_FIELD_COMPAT_MARLIN in normalized:
-        raise ValueError(
-            "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
-            "or `format=\"gptq\"` for new GPTQ quantization."
-        )
+        # Third-party AutoGPTQ checkpoints write `is_marlin_format: false`.
+        # Only the legacy `true` value requested the removed runtime layout.
+        if _is_truthy_compat_flag(normalized.pop(FORMAT_FIELD_COMPAT_MARLIN)):
+            raise ValueError(
+                "QuantizeConfig: `is_marlin_format: true` is no longer supported. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
+                "or `format=\"gptq\"` for new GPTQ quantization."
+            )
     if METHOD_FIELD_CODE not in normalized and QUANT_METHOD_FIELD in normalized:
         normalized[METHOD_FIELD_CODE] = normalized[QUANT_METHOD_FIELD]
     normalized.pop(QUANT_METHOD_FIELD, None)
@@ -3978,7 +4583,53 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
     if FORMAT_FIELD_CODE not in normalized and FORMAT_FIELD_CHECKPOINT in normalized:
         normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
     normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
+
+    # Serialized payloads also use the legacy `version`/`fmt` names for the
+    # checkpoint format and `wbits` for the bit width.
+    for legacy_key in ("version", "fmt"):
+        if legacy_key in normalized:
+            legacy_value = normalized.pop(legacy_key)
+            if FORMAT_FIELD_CODE not in normalized:
+                normalized[FORMAT_FIELD_CODE] = legacy_value
+    if "wbits" in normalized:
+        wbits = normalized.pop("wbits")
+        if BITS_FIELD_CODE not in normalized:
+            normalized[BITS_FIELD_CODE] = wbits
+
+    if "zero_point" in normalized:
+        zero_point = normalized.pop("zero_point")
+        if not isinstance(zero_point, bool):
+            raise TypeError("QuantizeConfig: `zero_point` must be a bool")
+        if SYMMETRIC_FIELD_CODE not in normalized:
+            normalized[SYMMETRIC_FIELD_CODE] = not zero_point
+
+    if MACAQ_ROTATION_FIELD in normalized:
+        # Factory round-trip of a MACaQ `to_dict()` payload (#4225).
+        normalized["rotation"] = normalized.pop(MACAQ_ROTATION_FIELD)
     return normalized
+
+
+def _is_truthy_compat_flag(value: Any) -> bool:
+    """Interpret a legacy boolean field, tolerating JSON strings."""
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def resolve_model_rotation(qcfg: Any) -> Optional[str]:
+    """Return the model-wide rotation a config asks for, or `None`.
+
+    Real configs answer through `model_rotation`, which a method can override
+    when it reuses `rotation` for its own per-layer transform. Lightweight
+    stand-ins that only carry `rotation` keep working.
+    """
+
+    if qcfg is None:
+        return None
+    if hasattr(qcfg, "model_rotation"):
+        return qcfg.model_rotation
+    return getattr(qcfg, "rotation", None)
 
 
 @dataclass
@@ -4004,6 +4655,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     # Serialized/exported checkpoint layout. This is the authoritative post-quantization format.
     format: FORMAT = field(default=FORMAT.GPTQ)
+
+    # Compress eligible source matrices for calibration forwards. The original
+    # dense dtype is restored from the lossless NF12 representation immediately
+    # before the quantizer consumes each matrix.
+    auto_dtype_cast: AutoDtypeCast = field(default=AutoDtypeCast.AUTO_NF12)
 
     # Input quantization for selected GPTQ Linear modules. Saved weights remain
     # ordinary INT32-packed GPTQ tensors; this only selects the activation path.
@@ -4101,6 +4757,22 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                   "use_torch_replicate=...) or an equivalent dict. None uses the defaults."},
     )
 
+    # Kernel, numerical-path and thread-count selection. This is a runtime-only
+    # choice: it is not serialized into the checkpoint, because the kernels and
+    # the host that will load the checkpoint are not the ones that quantized it.
+    # ``None`` uses the KernelConfig defaults. Replaces the former
+    # GPTQMODEL_* / GPTQ_TORCH_* behaviour switches.
+    kernel: Optional[Union[KernelConfig, Dict[str, Any]]] = field(
+        default=None,
+        metadata={"help": "Kernel, numerical-path and thread-count selection. "
+                  "Pass KernelConfig(...) or an equivalent dict. None uses the defaults."},
+    )
+
+    runtime: Optional[RuntimeConfig] = field(
+        default=None,
+        metadata={"help": "Shared quantizer, worker and host settings. Runtime-only; not serialized."},
+    )
+
     # User-facing dense-pool strategy. The dense pool owns the serial path:
     # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
     dense_vram_strategy: VramStrategy = field(
@@ -4163,6 +4835,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @checkpoint_format.setter
     def checkpoint_format(self, value) -> None:
         self.format = value
+
+    @property
+    def model_rotation(self) -> Optional[str]:
+        """Model-wide rotation fused into the weights before quantization.
+
+        Generic pipeline code (model rotation, online Hadamard at load, fused
+        norms) must read this instead of `rotation`: a method may reuse the
+        `rotation` field for its own per-layer transform.
+        """
+        return self.rotation
 
     @property
     def runtime_bits(self):
@@ -4246,6 +4928,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -4282,7 +4965,55 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.offload_to_disk_path = self._offload_temp_dir.name
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
 
+    def _normalize_serialization_fields(self) -> None:
+        """Normalize fields that ``to_dict`` serializes with enum/dataclass assumptions.
+
+        Concrete configs that override ``__post_init__`` without delegating to
+        this base implementation must call this helper explicitly. The
+        ``test_every_concrete_config_normalizes_serialized_fields`` regression
+        covers that contract.
+        """
+
+        try:
+            self.auto_dtype_cast = AutoDtypeCast(self.auto_dtype_cast)
+        except ValueError as exc:
+            raise ValueError(
+                "auto_dtype_cast must be 'auto_nf12' or 'off'"
+            ) from exc
+
+        if isinstance(self.telemetry, dict):
+            self.telemetry = TelemetryConfig(**self.telemetry)
+        elif not isinstance(self.telemetry, TelemetryConfig):
+            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
+
+        self.mse = _normalize_mse(self.mse)
+        # `sym: null` is written by some third-party configs; it means "use the
+        # default" rather than an unknown tri-state. Normalize before the bool
+        # field validation runs.
+        if self.sym is None:
+            self.sym = True
+
+    def _validate_bool_fields(self) -> None:
+        for field_name in (
+            "sym",
+            "true_sequential",
+            "lm_head",
+            "compile",
+            "offload_to_disk",
+            "keep_processor_logs",
+            "auto_forward_data_parallel",
+            "wait_for_submodule_finalizers",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"{self.__class__.__name__}: `{field_name}` must be a bool, "
+                    f"got {type(value).__name__} ({value!r})."
+                )
+
     def __post_init__(self):
+        self._normalize_serialization_fields()
+        self._validate_bool_fields()
         self.method = _normalize_quant_method(self.method)
         format_family = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -4360,7 +5091,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if self.desc_act is None:
             self.desc_act = self.default_desc_act()
         elif not isinstance(self.desc_act, bool):
-            self.desc_act = bool(self.desc_act)
+            raise TypeError(
+                f"{self.__class__.__name__}: `desc_act` must be a bool or None, "
+                f"got {type(self.desc_act).__name__} ({self.desc_act!r})."
+            )
 
         if self.activation is not None:
             activation = ActivationConfig.from_value(self.activation)
@@ -4388,16 +5122,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
-        if isinstance(self.telemetry, dict):
-            self.telemetry = TelemetryConfig(**self.telemetry)
-        elif not isinstance(self.telemetry, TelemetryConfig):
-            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
-
-        self.mse = _normalize_mse(self.mse)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
-        if self.rotation and self.offload_to_disk:
+        if self.model_rotation and self.offload_to_disk:
             log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
             self.offload_to_disk = False
 
@@ -4416,6 +5144,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
         self.p2p = _normalize_p2p_config(self.p2p)
+        self.kernel = _normalize_kernel_config(self.kernel)
+        self._normalize_runtime_config()
 
         # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
         if self.calibration_data_device is not None:
@@ -4454,6 +5184,25 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     ) -> Union[Dict, int, bool, float]:
         return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
 
+    def has_dynamic_exclusions(self) -> bool:
+        """Return True when a `-:` rule leaves at least one module unquantized."""
+
+        return any(
+            isinstance(pattern, str) and pattern.startswith("-:")
+            for pattern in (self.dynamic or ())
+        )
+
+    def external_module_inclusions(self) -> Optional[Tuple[str, ...]]:
+        """Return Optimum's `modules_in_block_to_quantize` inclusion list.
+
+        `None` means the checkpoint did not declare one and every module in the
+        model tree is eligible.  A non-empty tuple restricts quantization to
+        modules whose block-relative name ends with one of the entries.
+        """
+
+        inclusions = getattr(self, "_external_module_inclusions", None)
+        return tuple(inclusions) if inclusions else None
+
     def resolve_module_config(self, module_name: str) -> ResolvedModuleConfig:
         """Snapshot the resolved dynamic rule for one quantizable module."""
         return resolve_module_config_snapshot(self, module_name)
@@ -4490,17 +5239,81 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
         return False
 
-    def extract_adapter_rank_patterns(self) -> Optional[Dict[str, int]]:
-        adapter_rank_patterns = {}
-        if not self.dynamic or not self.adapter:
-            return adapter_rank_patterns
+    def extract_adapter_rank_patterns(
+        self,
+        module_ranks: Optional[Mapping[str, int]] = None,
+    ) -> Dict[str, int]:
+        """Return one exact `rank_pattern` entry per trained module rank.
 
-        for k, v in self.dynamic.items():
-            adapter_override = v.get("adapter", None)
-            if adapter_override and isinstance(adapter_override, Dict):
-                rank = adapter_override.get("rank", None)
-                if rank and isinstance(rank, int):
-                    adapter_rank_patterns[k.lstrip("+:")] = rank
+        `dynamic` resolves first-match per module, while PEFT applies every
+        `rank_pattern` key independently with `(.*\\.)?(pattern)$`. Copying a
+        `dynamic` rule verbatim therefore does not reproduce the rank a module
+        was trained with: an earlier rule without an adapter override can
+        shadow it, and a prefix rule such as `model\\.layers\\.1\\.` matches no
+        module name at all.
+
+        The trained rank is the authoritative value, so the caller passes the
+        ranks it actually produced (`Lora.rank` of each EoRA result). Each one
+        is verified against `dynamic_get`, the lookup the quantizer used, and
+        emitted as one escaped exact pattern. Exact keys cannot shadow or
+        prefix-match each other, so declaration order no longer changes the
+        result. A module trained at the adapter base rank needs no entry.
+        """
+
+        if not self.dynamic or not self.adapter:
+            return {}
+
+        base_rank = getattr(self.adapter, "rank", None)
+        if isinstance(base_rank, bool) or not isinstance(base_rank, int) or base_rank <= 0:
+            raise ValueError(
+                f"QuantizeConfig: adapter base rank must be a positive integer to "
+                f"export rank patterns, actual = `{base_rank}`."
+            )
+        has_adapter_rank_rule = any(
+            isinstance(overrides, Mapping)
+            and isinstance(overrides.get("adapter"), Mapping)
+            and isinstance(overrides["adapter"].get("rank"), int)
+            for overrides in self.dynamic.values()
+        )
+        if not has_adapter_rank_rule:
+            return {}
+
+        if not module_ranks:
+            raise ValueError(
+                "QuantizeConfig: `dynamic` declares adapter ranks, but "
+                "`extract_adapter_rank_patterns` needs the ranks that were "
+                "actually trained; pass `module_ranks`."
+            )
+
+        adapter_rank_patterns: Dict[str, int] = {}
+        for name, rank in module_ranks.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    "QuantizeConfig: adapter rank pattern module name must be a "
+                    f"non-empty string, actual = `{name}`."
+                )
+            if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
+                raise ValueError(
+                    f"QuantizeConfig: trained adapter rank for `{name}` must be a "
+                    f"positive integer, actual = `{rank}`."
+                )
+            resolved = self.dynamic_get(
+                name, key="adapter", sub_key="rank", default=base_rank,
+            )
+            if resolved is False:
+                raise ValueError(
+                    f"QuantizeConfig: `{name}` has an EoRA adapter but `dynamic` "
+                    "excludes it from quantization; the exported rank_pattern "
+                    "cannot describe it."
+                )
+            if resolved != rank:
+                raise ValueError(
+                    f"QuantizeConfig: trained adapter rank for `{name}` is `{rank}` "
+                    f"but `dynamic` now resolves `{resolved}`; refusing to export a "
+                    "rank_pattern that PEFT would apply differently."
+                )
+            if rank != base_rank:
+                adapter_rank_patterns[_exact_rank_pattern(name)] = rank
 
         return adapter_rank_patterns
 
@@ -4532,6 +5345,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             format_auto_inferred = True
 
         field_names = _known_quantize_config_field_names()
+        # `quant_method` is a deprecated alias for the canonical `method`
+        # field. When both are present the canonical value wins: an RTN
+        # checkpoint exported as AWQ writes `method: gptq` with
+        # `quant_method: awq`, and the alias must not switch the quantizer.
+        canonical_method_present = any(
+            isinstance(key, str) and key.lower() == METHOD_FIELD_CODE
+            for key in quantize_cfg
+        )
 
         normalized = {
             METHOD_FIELD_CODE: METHOD.GPTQ,
@@ -4539,14 +5360,22 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         }
         format_field_present = format is not None
         legacy_checkpoint_format = None
+        external_exclusions: List[str] = []
+        external_inclusions: Optional[List[str]] = None
 
         for key, val in quantize_cfg.items():
             key = key.lower()
+            source_key = key
 
             if key == FORMAT_FIELD_COMPAT_MARLIN:
-                raise ValueError(
-                    "QuantizeConfig: `is_marlin_format` is no longer supported. Replace it with an explicit `format` field."
-                )
+                # Accept the `false` value that AutoGPTQ and hugging-quants
+                # checkpoints persist; only the removed `true` layout is an
+                # error.
+                if _is_truthy_compat_flag(val):
+                    raise ValueError(
+                        "QuantizeConfig: `is_marlin_format: true` is no longer supported. Replace it with an explicit `format` field."
+                    )
+                continue
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 if _looks_like_fp8_fmt(val):
@@ -4564,6 +5393,21 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     checkpoint_format_hint = legacy_checkpoint_format
                 continue
 
+            if key == MACAQ_ROTATION_FIELD:
+                # MACaQ's per-layer transform lives under its own key so the
+                # shared model-wide `rotation` stays null (#4225).
+                normalized[MACAQ_ROTATION_FIELD] = val
+                continue
+
+            if key in _EXTERNAL_EXCLUSION_KEYS:
+                external_exclusions.extend(_external_string_list(val))
+                if key == "ignore":
+                    # Not a config field; the derived `-:` rules carry it.
+                    continue
+            if key == _EXTERNAL_INCLUSION_KEY:
+                external_inclusions = _external_string_list(val)
+                continue
+
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
             elif key in QUANT_CONFIG_ARG_SYNONYMS_NEGATED and QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key] in field_names:
@@ -4571,6 +5415,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 val = not bool(val)
 
             if key == METHOD_FIELD_CODE:
+                if source_key == QUANT_METHOD_FIELD and canonical_method_present:
+                    continue
                 if isinstance(val, str) and val.lower() == FORMAT.MARLIN:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif isinstance(val, str) and val.lower() == FORMAT.BITBLAS:
@@ -4620,67 +5466,22 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.info("Detected llm-awq quantization format; FORMAT automatically set to FORMAT.LLM_AWQ.")
 
         meta_payload = normalized.get(META_FIELD)
-        meta_field_map = {
-            "telemetry": "telemetry",
-            "fallback": "fallback",
-            "hessian": "hessian",
-            "gptaq": "gptaq",
-            "foem": "foem",
-            "weight_only": "weight_only",
-            "preprocessors": "preprocessors",
-            "gc_mode": "gc_mode",
-            "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
-            "auto_forward_data_parallel": "auto_forward_data_parallel",
-            "dense_vram_strategy": "dense_vram_strategy",
-            "dense_vram_strategy_devices": "dense_vram_strategy_devices",
-            "moe_vram_strategy": "moe_vram_strategy",
-            "moe_vram_strategy_devices": "moe_vram_strategy_devices",
-            "moe": "moe",
-            "offload_to_disk": "offload_to_disk",
-            "offload_to_disk_path": "offload_to_disk_path",
-            "pack_impl": "pack_impl",
-            "mse": "mse",
-            "mock_quantization": "mock_quantization",
-            "act_group_aware": "act_group_aware",
-            "true_sequential": "true_sequential",
-            "damp_percent": "damp_percent",
-            "damp_auto_increment": "damp_auto_increment",
-            "opt_rotation_epochs": "opt_rotation_epochs",
-            "opt_finetune_epochs": "opt_finetune_epochs",
-            "opt_train_samples": "opt_train_samples",
-            "opt_validation_samples": "opt_validation_samples",
-            "opt_batch_size": "opt_batch_size",
-            "opt_rotation_lr": "opt_rotation_lr",
-            "opt_weight_lr": "opt_weight_lr",
-            "opt_quantizer_lr": "opt_quantizer_lr",
-            "opt_pair_ratio": "opt_pair_ratio",
-            "opt_seed": "opt_seed",
-            "opt_optimizer": "opt_optimizer",
-            "opt_weight_decay": "opt_weight_decay",
-            "opt_betas": "opt_betas",
-            "opt_eps": "opt_eps",
-            "opt_amsgrad": "opt_amsgrad",
-            "opt_sgd_momentum": "opt_sgd_momentum",
-            "opt_sgd_dampening": "opt_sgd_dampening",
-            "opt_sgd_nesterov": "opt_sgd_nesterov",
-            "opt_fused_rotation": "opt_fused_rotation",
-            "opt_gradient_checkpointing": "opt_gradient_checkpointing",
-            "opt_stage_cudagraph": "opt_stage_cudagraph",
-            "opt_amp": "opt_amp",
-            "opt_best_state_dtype": "opt_best_state_dtype",
-            "opt_train_on_noisy_inputs": "opt_train_on_noisy_inputs",
-            "opt_scope": "opt_scope",
-            "opt_stage_impl": "opt_stage_impl",
-            "opt_pair_impl": "opt_pair_impl",
-            "opt_quantizer_impl": "opt_quantizer_impl",
-            "opt_channel_scale_clamp_min": "opt_channel_scale_clamp_min",
-            "opt_channel_scale_clamp_max": "opt_channel_scale_clamp_max",
-            "scale_search_chunked_activations": "scale_search_chunked_activations",
-        }
-        if isinstance(meta_payload, dict):
-            for normalized_key, meta_key in meta_field_map.items():
-                if normalized_key not in normalized and meta_key in meta_payload:
-                    normalized[normalized_key] = meta_payload.get(meta_key)
+        normalized = _lift_serialized_meta_fields(normalized)
+
+        # GPTQModel 5.4.x wrote `meta.gptaq` as a boolean and kept the
+        # coefficient/device in sibling keys that have no config field of their
+        # own. Fold that legacy shape into the object form so the checkpoint
+        # keeps its measured settings instead of silently falling back to the
+        # defaults. A top-level boolean is accepted for the same reason.
+        legacy_meta = meta_payload if isinstance(meta_payload, dict) else {}
+        if isinstance(normalized.get("gptaq"), bool):
+            normalized["gptaq"] = _normalize_gptaq(
+                normalized["gptaq"],
+                legacy_alpha=legacy_meta.get(META_FIELD_GPTAQ_ALPHA),
+                legacy_device=legacy_meta.get(META_FIELD_GPTAQ_MEMORY_DEVICE),
+            )
+        if isinstance(normalized.get("foem"), bool):
+            normalized["foem"] = _normalize_foem(normalized["foem"])
 
         # `format` defaults to GPTQ above for legacy payloads. Weight-only
         # methods have their own defaults, and forcing FORMAT.GPTQ would make
@@ -4728,16 +5529,27 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
-        return target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
+        config = target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
+        _apply_external_checkpoint_module_filters(
+            config,
+            external_exclusions,
+            external_inclusions,
+        )
+        return config
 
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
         format = kwargs.pop("format", None)
+        subfolder = kwargs.pop("subfolder", None)
+        # The quantize config may live in a repo subfolder while the caller
+        # passes the repository root, so resolve it the same way the config,
+        # the weights, and the adapter manifest are resolved.
+        checkpoint_dir = resolve_checkpoint_subfolder(save_dir, subfolder)
 
         transformers_config = False
         resolved_config_file = None
         for quantize_config_filename in QUANT_CONFIG_FILENAME_COMPAT:
-            resolved_config_file = join(save_dir, quantize_config_filename)
+            resolved_config_file = join(checkpoint_dir, quantize_config_filename)
             if os.path.exists(resolved_config_file):
                 if quantize_config_filename == "config.json":
                     transformers_config = True
@@ -4755,7 +5567,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             config = cls.from_quant_config(args_from_json, format)
             if config.adapter is not None and config.adapter.path not in (None, ""):
                 config.adapter._gptqmodel_checkpoint_source = (
-                    os.path.abspath(save_dir), config.adapter.path,
+                    os.path.abspath(checkpoint_dir), config.adapter.path,
                 )
             return config
 
@@ -4788,11 +5600,18 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["telemetry"] = asdict(self.telemetry)
         meta_payload["p2p"] = self.p2p.to_dict() if self.p2p is not None else None
-        meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
+        # ``offload_to_disk_path`` is a local scratch directory chosen for this
+        # process (often an auto-created ``/tmp/gptqmodel_*``). Publishing it in
+        # a checkpoint makes the artifact machine-specific and leaks the
+        # quantizer's temporary path; a loader must choose its own directory.
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
+        # Calibration ordering is a real config field. Without it a serialized
+        # payload reloads with the class default (`True`), silently changing
+        # quantization order; the writer records the same key in `meta`.
+        meta_payload[META_FIELD_TRUE_SEQUENTIAL] = self.true_sequential
         meta_payload["dense_vram_strategy"] = (
             self.dense_vram_strategy.value
             if isinstance(self.dense_vram_strategy, VramStrategy)
@@ -4814,12 +5633,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
             "activation": self.activation,
+            "auto_dtype_cast": self.auto_dtype_cast.value,
             METHOD_FIELD_CODE: self.method,
-            QUANT_METHOD_FIELD: self.method,
+            QUANT_METHOD_FIELD: _serialize_export_quant_method(self.export_quant_method()),
             FORMAT_FIELD_CODE: self.format,
             FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
-            "rotation": self.rotation,
+            # The shared key is model-wide rotation only. Methods that reuse
+            # `rotation` for their own per-layer transform override
+            # `model_rotation` (MacaqConfig) and serialise it separately.
+            "rotation": resolve_model_rotation(self),
             META_FIELD: meta_payload,
         }
         self._update_output_payload(out)
@@ -4827,10 +5650,15 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         dynamic = out["dynamic"]
         if dynamic:
             dynamic = copy.deepcopy(dynamic)
-            for _, v in dynamic.items():
-                v.pop("adapter", None)
-                if "bits" in v:
-                    v["bits"] = serialize_quant_bits(v["bits"])
+            for _, overrides in dynamic.items():
+                if not isinstance(overrides, Mapping):
+                    continue
+                overrides.pop("adapter", None)
+                for key, value in overrides.items():
+                    if key == "bits":
+                        overrides[key] = serialize_quant_bits(value)
+                    else:
+                        overrides[key] = _serialize_dynamic_override_value(value)
             out["dynamic"] = dynamic
 
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
@@ -4867,7 +5695,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return not self.uses_weight_only_lifecycle()
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"compile": self.compile}
+        return {"compile": self.compile, "kernel": resolve_kernel_config(self)}
+
+    def _normalize_runtime_config(self) -> None:
+        if self.runtime is not None:
+            if not isinstance(self.runtime, RuntimeConfig):
+                raise TypeError("runtime must be a RuntimeConfig or None")
+            if self.kernel is not None:
+                raise ValueError("runtime= and legacy kernel= cannot be supplied together")
 
 
 @dataclass
@@ -5085,15 +5920,23 @@ class GPTQConfig(PreProcessorConfig):
             self.act_group_aware = False
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
-        if self.gptaq is None:
-            meta_payload["gptaq"] = None
-        elif self.foem is None:
+        # PreProcessorConfig writes the smoothing preprocessors here. Skipping
+        # this call dropped `smoother` from every GPTQ-family checkpoint, and
+        # QQQ/VPTQ inherit this hook.
+        super()._update_meta_payload(meta_payload)
+
+        # GPTAQ and FOEM are independent switches: a run can enable both, and
+        # the old `elif` chain wrote FOEM only when GPTAQ was also set while
+        # never writing `gptaq` itself.
+        if self.gptaq is not None:
             device = self.gptaq.device
             meta_payload["gptaq"] = {
                 "alpha": self.gptaq.alpha,
                 "device": device if isinstance(device, str) else str(device),
             }
         else:
+            meta_payload["gptaq"] = None
+        if self.foem is not None:
             device = self.foem.device
             meta_payload["foem"] = {
                 "alpha": self.foem.alpha,
@@ -5104,6 +5947,13 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse.norm
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        # Calibration controls do not take part in inference, so they live in
+        # `meta` (the writer already records them there). `to_dict()` must
+        # write the same values or a factory reload silently restores the
+        # defaults.
+        meta_payload["damp_percent"] = self.damp_percent
+        meta_payload["damp_auto_increment"] = self.damp_auto_increment
+        meta_payload["static_groups"] = self.static_groups
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
@@ -5126,6 +5976,10 @@ class AWQConfig(PreProcessorConfig):
     format: FORMAT = field(default=FORMAT.GEMM)
     gsq: Optional[GSQConfig] = field(default=None)
     gsq_training: Optional[GSQTrainingConfig] = field(default=None)
+    # HF Transformers and vLLM AutoAWQ only skip modules listed here. GPT-QModel
+    # expresses the same exclusions as `-:` rules in `dynamic`, so the writer
+    # mirrors them into this key for a checkpoint those loaders can consume.
+    modules_to_not_convert: Optional[List[str]] = field(default=None)
     scale_search_chunked_activations: bool = field(
         default=True,
         metadata={
@@ -5151,6 +6005,17 @@ class AWQConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         super().__post_init__()
+        # `modules_to_not_convert` is the AutoAWQ/HF compatibility spelling of
+        # an exclusion. Fold it into `-:` dynamic rules here as well, using the
+        # same translation the checkpoint parser applies, so quantize time and
+        # load time resolve the module identically. Without this the module is
+        # quantized (and qweight/scales saved) but reload builds a dense layer
+        # that silently keeps its random-init weights (#4195).
+        _apply_external_checkpoint_module_filters(
+            self,
+            _external_string_list(self.modules_to_not_convert),
+            None,
+        )
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled:
             if self.format not in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
@@ -5170,15 +6035,105 @@ class AWQConfig(PreProcessorConfig):
                 raise ValueError("AWQConfig: staged GSQ requires W4 GEMM export")
             if self.gsq is not None and self.gsq.enabled:
                 raise ValueError("AWQConfig: choose staged gsq_training or per-linear gsq")
+        self._awq_declared_dynamic = self._derived_declared_exclusions()
+        self._awq_post_init_done = True
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if (
+            name == "modules_to_not_convert"
+            and getattr(self, "_awq_post_init_done", False)
+            and not getattr(self, "_awq_syncing", False)
+        ):
+            self._resync_declared_exclusions()
+
+    def _derived_declared_exclusions(self) -> Tuple[str, ...]:
+        derived: List[str] = []
+        for value in _external_string_list(self.modules_to_not_convert):
+            pattern = _external_exclusion_dynamic_pattern(value)
+            if pattern is not None and pattern not in derived:
+                derived.append(pattern)
+        return tuple(derived)
+
+    def _resync_declared_exclusions(self) -> None:
+        """Refold a post-construction `modules_to_not_convert` assignment (#4309)."""
+
+        object.__setattr__(self, "_awq_syncing", True)
+        try:
+            dynamic = dict(self.dynamic or {})
+            for pattern in tuple(getattr(self, "_awq_declared_dynamic", ()) or ()):
+                dynamic.pop(f"-:{pattern}", None)
+            derived: List[str] = []
+            exported: List[str] = []
+            for value in _external_string_list(self.modules_to_not_convert):
+                pattern = _external_exclusion_dynamic_pattern(value)
+                if pattern is None:
+                    continue
+                dynamic[f"-:{pattern}"] = {}
+                if pattern not in derived:
+                    derived.append(pattern)
+                spelling = _external_export_pattern(value)
+                if spelling and spelling not in exported:
+                    exported.append(spelling)
+            self._awq_declared_dynamic = tuple(derived)
+            self._external_exclusion_patterns = tuple(exported)
+            self.modules_to_not_convert = exported or None
+            self.dynamic = dynamic or None
+        finally:
+            object.__setattr__(self, "_awq_syncing", False)
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
         out["version"] = self.format
         out[FORMAT_FIELD_CODE] = self.format
+        excluded = self.excluded_module_patterns()
+        if excluded:
+            out["modules_to_not_convert"] = excluded
         if self.gsq is not None:
             out["gsq"] = asdict(self.gsq)
         if self.gsq_training is not None:
             out["gsq_training"] = self.gsq_training.to_dict()
+
+    def excluded_module_patterns(self) -> List[str]:
+        """Return every module HF/vLLM must leave unquantized.
+
+        `-:` dynamic rules are the authoritative exclusion declaration; the
+        declared `modules_to_not_convert` list is a compatibility surface for
+        checkpoints produced by other tools, so it is preserved as well.
+        """
+
+        # Producer-declared exclusions are mirrored into `dynamic` as regex
+        # rules for the loader.  Emit the original spelling, not the derived
+        # regex, so a round-trip does not rewrite `down_proj` into a pattern.
+        #
+        # `-:` rules are authoritative: publish a declared entry only while its
+        # derived rule is still present in `dynamic`.  If `dynamic` was
+        # reassigned without it, the module is quantized and claiming it as
+        # excluded would corrupt the reload (#4309).
+        dynamic = self.dynamic or {}
+        negative = {
+            pattern[2:]
+            for pattern in dynamic
+            if isinstance(pattern, str) and pattern.startswith("-:")
+        }
+        external = tuple(getattr(self, "_external_exclusion_patterns", ()) or ())
+        derived: Dict[str, str] = {}
+        for pattern in external:
+            dynamic_pattern = _external_exclusion_dynamic_pattern(pattern)
+            if dynamic_pattern is not None:
+                derived.setdefault(dynamic_pattern, pattern)
+        patterns = [
+            pattern
+            for pattern in _dynamic_exclusion_patterns(
+                dynamic,
+                sorted(getattr(self, "_runtime_dynamic_exclusions", ()) or ()),
+            )
+            if pattern not in derived
+        ]
+        for pattern, original in derived.items():
+            if pattern in negative and original not in patterns:
+                patterns.append(original)
+        return patterns
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
@@ -5341,10 +6296,13 @@ class ParoConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "krot": self.krot,
         }
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        # PreProcessorConfig records the smoothing preprocessors here.
+        super()._update_meta_payload(meta_payload)
         meta_payload["opt_rotation_epochs"] = self.opt_rotation_epochs
         meta_payload["opt_finetune_epochs"] = self.opt_finetune_epochs
         meta_payload["opt_train_samples"] = self.opt_train_samples
@@ -5378,6 +6336,7 @@ class ParoConfig(PreProcessorConfig):
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
+        out["sym"] = self.sym
         out["krot"] = self.krot
         out[FORMAT_FIELD_CODE] = self.format
         if self.gsq is not None:
@@ -5567,6 +6526,7 @@ class VPTQConfig(GPTQConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "vector_lens": list(self.vector_lens),
             "num_centroids": list(self.num_centroids),
             "num_res_centroids": list(self.num_res_centroids),
@@ -5584,6 +6544,7 @@ class VPTQConfig(GPTQConfig):
         }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["sym"] = self.sym
         out["vector_lens"] = list(self.vector_lens)
         out["num_centroids"] = list(self.num_centroids)
         out["num_res_centroids"] = list(self.num_res_centroids)
@@ -5660,6 +6621,222 @@ class VPTQConfig(GPTQConfig):
                         f"VPTQConfig: dynamic entry for `{layer}` must be `False` or a dict of overrides."
                     )
 
+        super().__post_init__()
+
+
+@dataclass
+class MacaqConfig(PreProcessorConfig):
+    """Configuration for MACaQ MXFP4 (W4A4) quantization.
+
+    MACaQ is Huawei CSL's model-agnostic calibrated quantizer
+    (https://github.com/huawei-csl/MACaQ, Apache-2.0; arXiv:2611.10649).
+    It quantizes weights to OCP MXFP4 (E2M1 values with one E8M0 scale per
+    32-element block) and, at inference, applies the same D1 balance and
+    32-wide block-Hadamard transform to activations before a block-scaled
+    E2M1 GEMM.
+
+    The defaults follow the reference recipe: 32-wide MXFP4 groups, a 32-wide
+    block-Hadamard, the H-weighted exponent screen over offsets ``(1, 0, -1)``,
+    and up to 256 greedy flip sweeps with a ``1.0`` ridge.
+    """
+
+    bits: int = field(default=4, metadata={"choices": [4]})
+    method: METHOD = field(default=METHOD.MACAQ)
+    format: FORMAT = field(default=FORMAT.MXFP4_MACAQ)
+    # MXFP4 always uses 32 values per E8M0 scale.
+    group_size: int = field(default=32)
+    block_size: int = field(default=32)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    # Block-Hadamard width. 32 matches the MXFP4 scale group and enables the
+    # fused rotate+quantize Triton kernel; larger powers of two are supported.
+    had_block: int = field(default=32)
+    # Per-layer rotation of weights and activations. `hadamard` (default)
+    # applies the `had_block`-wide block Hadamard and stores `BH`. `none`
+    # trades accuracy for faster inference: quantization stays in the
+    # original frame and no `BH` is stored. With `pre_mode="none"` as well,
+    # layers hold only E2M1 nibbles and E8M0 scales, so the checkpoint format
+    # is plain `mxfp4` and the W4A16 forward is a plain MXFP4 matmul that
+    # also exports to stock MLX. Expect higher quantization error than with
+    # the rotation, most of all for W4A4 where it suppresses activation
+    # outliers. Layers read this from the quant config, not from tensors.
+    # This replaces the inherited model-wide `rotation`, which MACaQ does not
+    # use (see `model_rotation`).
+    rotation: Optional[str] = field(default="hadamard", metadata={"choices": list(MACAQ_ROTATIONS)})
+    # Greedy single-level flip refinement in the fixed Hessian metric.
+    do_flip: bool = field(default=True)
+    n_flip_iters: int = field(default=256)
+    fast_flip: bool = field(default=True)
+    # Compile the repeated sweep on supported NVIDIA CUDA or ROCm gfx1201.
+    compile_flip: bool = field(default=True)
+    ridge: float = field(default=1.0)
+    # D1 activation-aware diagonal pre-scale.
+    pre_mode: str = field(default="balance")
+    pre_alpha: float = field(default=0.75)
+    # Hessian-weighted per-(row, block) E8M0 exponent screen.
+    exp_screen: bool = field(default=True)
+    exp_offsets: Tuple[int, ...] = field(default=(1, 0, -1))
+    # Runtime activation precision. `w4a4` uses the native MXFP4 GEMM;
+    # `w4a16` keeps bf16 activations and only stores 4-bit weights.
+    activation_precision: str = field(default="w4a4")
+
+    _DYNAMIC_FIELDS = frozenset({
+        "had_block", "rotation", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
+        "pre_mode", "pre_alpha", "exp_screen", "exp_offsets",
+        "activation_precision",
+    })
+
+    @property
+    def model_rotation(self) -> Optional[str]:
+        # `rotation` is MACaQ's own per-layer transform, applied by its
+        # quantizer and kernels; nothing is rotated model-wide.
+        return None
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.MACAQ,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return MACAQ_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return False
+
+    def calculate_bits_per_weight(self):
+        bpw = 4.0 + 8.0 / self.block_size
+        log.info(
+            f"Estimated Quantization BPW (bits per weight): {bpw:.4f} bpw, "
+            f"based on [MXFP4 E2M1: 4 bits, E8M0 scale: 8 bits / {self.block_size}]"
+        )
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "kernel": self.kernel,
+            "block_size": self.block_size,
+            "had_block": self.had_block,
+            "activation_precision": self.activation_precision,
+            "pre_mode": self.pre_mode,
+            "pre_alpha": self.pre_alpha,
+            "rotation": self.rotation,
+        }
+
+    def checkpoint_format_for_settings(self) -> FORMAT:
+        """`mxfp4` when no quantized module stores an activation transform.
+
+        A module with `rotation="none"` and `pre_mode="none"` holds only the
+        packed E2M1 nibbles and E8M0 scales, which is plain OCP MXFP4. If the
+        base settings or any `dynamic` override keep `BH` or `pre_scale`, the
+        checkpoint is `mxfp4_macaq`.
+        """
+
+        def plain(rotation, pre_mode) -> bool:
+            return (str(rotation).strip().lower() == "none"
+                    and str(pre_mode).strip().lower() == "none")
+
+        if not plain(self.rotation, self.pre_mode):
+            return FORMAT.MXFP4_MACAQ
+        for pattern, override in (self.dynamic or {}).items():
+            if isinstance(pattern, str) and pattern.startswith("-:"):
+                continue
+            override = override or {}
+            if not plain(override.get("rotation", self.rotation), override.get("pre_mode", self.pre_mode)):
+                return FORMAT.MXFP4_MACAQ
+        return FORMAT.MXFP4
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["sym"] = self.sym
+        out["block_size"] = self.block_size
+        out["had_block"] = self.had_block
+        out["do_flip"] = self.do_flip
+        out["n_flip_iters"] = self.n_flip_iters
+        out["fast_flip"] = self.fast_flip
+        out["compile_flip"] = self.compile_flip
+        out["ridge"] = self.ridge
+        out["pre_mode"] = self.pre_mode
+        out["pre_alpha"] = self.pre_alpha
+        out["exp_screen"] = self.exp_screen
+        out["exp_offsets"] = list(self.exp_offsets)
+        out["activation_precision"] = self.activation_precision
+        # MACaQ's `rotation` is its own per-layer transform, not the
+        # model-wide one. Keep the shared `rotation` key null so earlier
+        # releases (which treat it as model-wide) keep loading new
+        # checkpoints (#4225).
+        out[MACAQ_ROTATION_FIELD] = self.rotation
+
+    def __post_init__(self):
+        if self.dynamic is not None:
+            # `dynamic={pattern: False}` is the documented exclusion form. The
+            # shared normalizer only understands a `-:` rule with a dict
+            # payload, so translate the boolean before it runs.
+            translated = {}
+            for pattern, override in self.dynamic.items():
+                if override is False:
+                    if isinstance(pattern, str):
+                        raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
+                        pattern = f"-:{raw}"
+                    override = {}
+                translated[pattern] = override
+            self.dynamic = translated
+        for pattern, override in (self.dynamic or {}).items():
+            if not isinstance(override, dict):
+                raise ValueError(f"MacaqConfig: dynamic rule `{pattern}` must be False or a dictionary.")
+            unknown = set(override) - self._DYNAMIC_FIELDS
+            if unknown:
+                raise ValueError(
+                    f"MacaqConfig: unsupported dynamic keys for `{pattern}`: {sorted(unknown)}."
+                )
+        self.pre_mode = str(self.pre_mode).strip().lower()
+        self.activation_precision = str(self.activation_precision).strip().lower()
+        if self.exp_offsets is None:
+            self.exp_offsets = ()
+        elif isinstance(self.exp_offsets, str):
+            self.exp_offsets = tuple(int(part) for part in self.exp_offsets.split(",") if part.strip())
+        else:
+            self.exp_offsets = tuple(int(part) for part in self.exp_offsets)
+
+        self.block_size = int(self.block_size)
+        self.had_block = int(self.had_block)
+        # Checkpoints written before `rotation` was configurable store `null`
+        # (the inherited default) and were always block-Hadamard rotated.
+        self.rotation = "hadamard" if self.rotation is None else str(self.rotation).strip().lower()
+        self.n_flip_iters = int(self.n_flip_iters)
+        self.ridge = float(self.ridge)
+        self.pre_alpha = float(self.pre_alpha)
+        self.do_flip = bool(self.do_flip)
+        self.fast_flip = bool(self.fast_flip)
+        self.compile_flip = bool(self.compile_flip)
+        self.exp_screen = bool(self.exp_screen)
+
+        if self.block_size != 32:
+            raise ValueError("MacaqConfig: OCP MXFP4 requires `block_size=32`.")
+        if self.had_block <= 0 or self.had_block & (self.had_block - 1):
+            raise ValueError("MacaqConfig: `had_block` must be a positive power of two.")
+        if self.had_block < 32:
+            raise ValueError("MacaqConfig: `had_block` must be at least 32.")
+        if self.n_flip_iters < 0:
+            raise ValueError("MacaqConfig: `n_flip_iters` must be non-negative.")
+        if self.ridge < 0:
+            raise ValueError("MacaqConfig: `ridge` must be non-negative.")
+        if self.rotation not in MACAQ_ROTATIONS:
+            raise ValueError("MacaqConfig: `rotation` must be `hadamard` or `none`.")
+        if self.pre_mode not in ("none", "balance"):
+            raise ValueError("MacaqConfig: `pre_mode` must be `none` or `balance`.")
+        if not 0.0 <= self.pre_alpha <= 1.0:
+            raise ValueError("MacaqConfig: `pre_alpha` must be between 0 and 1.")
+        if not self.exp_offsets:
+            raise ValueError("MacaqConfig: `exp_offsets` must contain at least one offset.")
+        if self.activation_precision not in ("w4a4", "w4a16"):
+            raise ValueError("MacaqConfig: `activation_precision` must be `w4a4` or `w4a16`.")
+
+        if self.lm_head:
+            raise ValueError("MacaqConfig: MACaQ does not quantize the LM head.")
+        self.group_size = self.block_size
+        self.bits = 4
+        self.desc_act = False
+        self.sym = True
+        self.format = self.checkpoint_format_for_settings()
         super().__post_init__()
 
 
@@ -5744,6 +6921,7 @@ class FP8Config(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -5755,25 +6933,39 @@ class FP8Config(PreProcessorConfig):
         if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
             raise ValueError("FP8Config: `group_size` is not used; keep it at `-1`.")
 
+        explicit_block_size = "weight_block_size" in layer_dict
         block_size = _normalize_fp8_weight_block_size(layer_dict.get("weight_block_size"))
         raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("fmt"))
         if raw_format is not None:
             layer_dict[FORMAT_FIELD_CODE] = _normalize_fp8_fmt(raw_format)
         layer_dict.pop("fmt", None)
-        if "weight_scale_method" in layer_dict or block_size is not None:
+        method_override_present = "weight_scale_method" in layer_dict
+        if method_override_present or explicit_block_size:
+            if explicit_block_size:
+                effective_block_size = block_size
+            elif str(layer_dict.get("weight_scale_method", "")).strip().lower() == "block":
+                # A per-module `block` rule without its own size keeps the
+                # global block size.
+                effective_block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
+            else:
+                effective_block_size = None
             layer_dict["weight_scale_method"] = _normalize_fp8_weight_scale_method(
                 layer_dict.get("weight_scale_method"),
-                weight_block_size=block_size,
+                weight_block_size=effective_block_size,
+            )
+            # Materialize the effective pair: a `row` rule must not inherit the
+            # global `weight_block_size` in the per-module clone.
+            layer_dict["weight_block_size"] = (
+                list(effective_block_size) if effective_block_size is not None else None
             )
         if "weight_scale_semantics" in layer_dict:
             layer_dict["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
                 layer_dict["weight_scale_semantics"]
             )
-        if "weight_block_size" in layer_dict:
-            layer_dict["weight_block_size"] = list(block_size) if block_size is not None else None
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "format": self.format,
             "weight_scale_method": self.weight_scale_method,
             "weight_block_size": self.weight_block_size,
@@ -5856,7 +7048,7 @@ class NF12Config(PreProcessorConfig):
             )
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"exp_base": self.exp_base}
+        return {"exp_base": self.exp_base, "kernel": self.kernel}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["exp_base"] = self.exp_base
@@ -5927,7 +7119,7 @@ class TTBlockfloatConfig(PreProcessorConfig):
         return False
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"block": self.block}
+        return {"block": self.block, "kernel": self.kernel}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["block"] = self.block
@@ -6030,6 +7222,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -6054,6 +7247,18 @@ class BitsAndBytesConfig(PreProcessorConfig):
         raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("bnb_quant_type"))
         if raw_format is not None:
             layer_dict[FORMAT_FIELD_CODE] = _normalize_bitsandbytes_format(raw_format, bits=dynamic_bits)
+        else:
+            # A bits-only rule inherits the global subtype, which may not exist
+            # at the new width (`nf4` has no 8-bit form). Materialize the
+            # effective subtype here so the per-module clone does not inherit
+            # an invalid one; an 8-bit module always resolves to `int8`.
+            effective_bits = quant_bits_width(dynamic_bits)
+            try:
+                effective_format = _normalize_bitsandbytes_format(self.format, bits=effective_bits)
+            except ValueError:
+                effective_format = _normalize_bitsandbytes_format(None, bits=effective_bits)
+            if effective_format != self.format:
+                layer_dict[FORMAT_FIELD_CODE] = effective_format
         if "block_size" in layer_dict or "bnb_block_size" in layer_dict:
             layer_dict["block_size"] = _normalize_bitsandbytes_block_size(
                 layer_dict.get("block_size", layer_dict.get("bnb_block_size"))
@@ -6067,6 +7272,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "format": self.format,
             "block_size": self.block_size,
             "compress_statistics": self.compress_statistics,
@@ -6169,6 +7375,12 @@ class EXL3Config(PreProcessorConfig):
 
     def __post_init__(self):
         self._normalize_preprocessor_state()
+        # EXL3 does not delegate to BaseQuantizeConfig.__post_init__, so it
+        # must run the serialization normalisation explicitly. Without it
+        # `to_dict()` sees raw strings/dicts for auto_dtype_cast, telemetry,
+        # and mse, and loaded checkpoints fail on re-save.
+        self._normalize_serialization_fields()
+        self._validate_bool_fields()
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
@@ -6255,7 +7467,7 @@ class EXL3Config(PreProcessorConfig):
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
-        if self.rotation and self.offload_to_disk:
+        if self.model_rotation and self.offload_to_disk:
             log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
             self.offload_to_disk = False
 
@@ -6274,6 +7486,8 @@ class EXL3Config(PreProcessorConfig):
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
         self.p2p = _normalize_p2p_config(self.p2p)
+        self.kernel = _normalize_kernel_config(self.kernel)
+        self._normalize_runtime_config()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         # EXL3 matrices always have an integer trellis width. Keep that type in
@@ -6431,22 +7645,27 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
 
         if bits_override_present or format_override_present:
             raw_bits = layer_dict.get("bits", self.bits)
-            raw_format = layer_dict.get(FORMAT_FIELD_CODE, self.format)
+            bits_implied_format = _gguf_bits_implies_format(raw_bits)
+            if format_override_present:
+                raw_format = layer_dict[FORMAT_FIELD_CODE]
+            elif bits_implied_format:
+                # The subtype already fixes the format. Inheriting the global
+                # subtype here rejected the common Q4_K_M + Q6_K recipe with
+                # "Unsupported GGUF combination".
+                raw_format = None
+            else:
+                raw_format = self.format
             normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config(raw_bits, raw_format)
+            _warn_gguf_quality_alias(normalized_runtime_bits)
 
             layer_dict["bits"] = normalized_bits
 
-            bits_implied_format = isinstance(raw_bits, GGUFBits)
-            if isinstance(raw_bits, str):
-                try:
-                    float(raw_bits.strip().lower().replace("-", "_"))
-                except ValueError:
-                    bits_implied_format = True
             if format_override_present or bits_implied_format:
                 layer_dict[FORMAT_FIELD_CODE] = normalized_format
 
@@ -6464,6 +7683,7 @@ class GGUFConfig(PreProcessorConfig):
         # avoid running that normalization twice.
         BaseQuantizeConfig.__post_init__(self)
         self._gguf_bits = _gguf_bits_from_components(self.bits, self.format)
+        _warn_gguf_quality_alias(self._gguf_bits)
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
@@ -6633,6 +7853,10 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
             "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports "
             "`rtn`, `gguf`, `fp8`, and `bitsandbytes`."
         )
+    # GGUF also has an `mxfp4` subtype; an explicit MACaQ method owns the
+    # plain `mxfp4` format, while a bare `mxfp4` stays GGUF.
+    if method == METHOD.MACAQ:
+        return MacaqConfig
     if (
         format_value == FORMAT.GGUF
         or method == METHOD.GGUF
@@ -6659,6 +7883,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig
+    if format_value == FORMAT.MXFP4_MACAQ:
+        return MacaqConfig
     if method == METHOD.NF12 or format_value == FORMAT.NF12:
         return NF12Config
     if method == METHOD.TT_BLOCKFLOAT or format_value == FORMAT.TT_BLOCKFLOAT:
@@ -6685,6 +7911,7 @@ def _known_quantize_config_field_names() -> set[str]:
         ParoConfig,
         QQQConfig,
         VPTQConfig,
+        MacaqConfig,
         NF12Config,
         TTBlockfloatConfig,
         FP8Config,

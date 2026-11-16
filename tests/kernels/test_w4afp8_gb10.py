@@ -6,7 +6,11 @@ import torch
 
 from gptqmodel.looper.gptq_processor import enable_w4afp8_replay
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
-from gptqmodel.nn_modules.qlinear.w4a_triton import _token_fp8_quant, fp8_linear_prepacked
+from gptqmodel.nn_modules.qlinear.w4a_triton import (
+    _token_fp8_quant,
+    fp8_linear_prepacked,
+    fp8_pack,
+)
 from gptqmodel.quantization.activation_floatx import fp8_token_qdq
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND, backend_for_activation
@@ -92,7 +96,11 @@ def test_exact_fp8_weight_operand_and_native_checkpoint():
     assert not hasattr(module, "_weight_e4m3")
     operand = module.fp8_weight_operand()
     torch.testing.assert_close(operand.float()[:, 0], expected, rtol=0, atol=0)
-    assert set(module.state_dict()) == {"qweight", "qzeros", "scales", "g_idx"}
+    # ``qzeros_format`` is the in-process layout marker every GPTQ kernel
+    # carries in ``state_dict()``; a checkpoint write strips it (#4152).
+    assert set(module.state_dict()) == {
+        "qweight", "qzeros", "scales", "g_idx", "qzeros_format",
+    }
     assert module.qweight.dtype == torch.int32
     # Re-staging is deterministic and leaves no cache behind.
     module.post_init()
@@ -275,3 +283,107 @@ def test_token_fp8_rounding_holds_at_e4m3_midpoint_neighbours():
     oracle = pre_round.to(torch.float8_e4m3fn)
     torch.testing.assert_close(scales, reference_scales.squeeze(1), rtol=0, atol=0)
     assert torch.equal(codes.view(torch.uint8), oracle.view(torch.uint8))
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+@pytest.mark.parametrize(
+    ("rows", "width", "dtype"),
+    [
+        # The issue's scale: plain `/` mismatched 102 of these codes.
+        (5120, 1024, torch.float16),
+        (7, 128, torch.bfloat16),
+        (1, 4096, torch.float16),
+        (3, 100, torch.bfloat16),
+    ],
+)
+def test_fp8_pack_is_bit_exact_with_fp8_token_qdq(rows, width, dtype):
+    """The Triton packer must reproduce the Torch reference bit for bit.
+
+    ``fp8_pack`` promises exact agreement with ``fp8_token_qdq``, the path
+    GPTQ replay calibrates against. Triton's approximate ``/`` is one ULP off
+    near E4M3 midpoints, which flips codes on random input; ``tl.div_rn`` is
+    the IEEE division the reference performs. Seed 8 over the first shape is
+    the measured worst case here (104 flipped codes before the fix).
+    """
+    generator = torch.Generator(device="cuda").manual_seed(8)
+    x = torch.randn((rows, width), device="cuda", dtype=dtype, generator=generator)
+    if rows > 1:
+        x[0].zero_()
+
+    codes, scales = fp8_pack(x)
+    torch.cuda.synchronize()
+
+    x32 = x.float()
+    amax = x32.abs().amax(dim=-1, keepdim=True)
+    reference_scale = amax / 448.0
+    reference_scale = torch.where(
+        reference_scale > 0, reference_scale, torch.ones_like(reference_scale)
+    )
+    reference_codes = (x32 / reference_scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+
+    assert torch.equal(scales, reference_scale.reshape(-1))
+    mismatches = int((codes.view(torch.uint8) != reference_codes.view(torch.uint8)).sum())
+    assert mismatches == 0, f"{mismatches} of {codes.numel()} codes differ from the reference"
+
+    dequantized = (codes.float() * scales[:, None]).to(x.dtype)
+    assert torch.equal(dequantized, fp8_token_qdq(x))
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+def test_fp8_pack_does_not_divide_by_an_underflowed_row_scale():
+    """A positive row maximum does not guarantee a positive `amax / 448`.
+
+    The smallest FP32 subnormals round that quotient to zero, and dividing by
+    it would turn the row's zeros into NaN and saturate the remaining values
+    into a wrong E4M3 code. The kernel must apply the same unscaled fallback as
+    `fp8_token_qdq` and stay bit-exact with it.
+    """
+    x = torch.tensor(
+        [
+            [0.0, 2.0**-149, -(2.0**-149)],
+            [0.0, 0.0, 0.0],
+            [0.0, 2.0**-141, -(2.0**-141)],
+            [0.0, 2.0**-140, -(2.0**-140)],
+        ],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    codes, scales = fp8_pack(x)
+    torch.cuda.synchronize()
+
+    x32 = x.float()
+    amax = x32.abs().amax(dim=-1, keepdim=True)
+    reference_scale = amax / 448.0
+    reference_scale = torch.where(
+        reference_scale > 0, reference_scale, torch.ones_like(reference_scale)
+    )
+    reference_codes = (x32 / reference_scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+
+    assert torch.isfinite(scales).all()
+    assert bool((scales > 0).all())
+    torch.testing.assert_close(scales, reference_scale.reshape(-1), rtol=0, atol=0)
+    assert torch.equal(codes.view(torch.uint8), reference_codes.view(torch.uint8))
+    assert torch.equal((codes.float() * scales[:, None]).to(x.dtype), fp8_token_qdq(x))
+
+
+@GLUON_FP8
+@FP8_HARDWARE
+def test_w4afp8_linear_runs_under_torch_compile():
+    """Inductor codegens the Gluon kernel without ``gl`` and raises NameError.
+
+    ``W4AFP8Linear.forward`` is ``torch.compiler.disable``-d so the launch stays
+    eager inside an otherwise compiled model (for example a static-cache
+    decode graph).
+    """
+    module = _packed_linear(device="cuda")
+    x = torch.randn((2, 3, 128), device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        eager = module(x)
+        compiled = torch.compile(module, backend="inductor")
+        actual = compiled(x)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, eager, rtol=2e-3, atol=2e-3)

@@ -300,6 +300,9 @@ class MacheteLinear(GPTQQuantLinear):
             self.bias = self.bias.to(device=device)
 
         super().post_init()
+        # ``qweight`` is now Machete-prepacked and ``qzeros`` is a float offset
+        # table (or empty); neither can be inverted back to checkpoint words.
+        self._native_shuffled = True
 
     def list_buffers(self) -> List:
         buf = super().list_buffers()
@@ -311,7 +314,10 @@ class MacheteLinear(GPTQQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        # Machete's matmul addresses the activation rows densely, so a strided
+        # view (for example `hidden_states[:, -1:, :]` with batch > 1) must be
+        # packed first.
+        input_2d = x.reshape(-1, x.shape[-1]).contiguous()
 
         if self.input_perm.numel() > 0:
             perm = self.input_perm

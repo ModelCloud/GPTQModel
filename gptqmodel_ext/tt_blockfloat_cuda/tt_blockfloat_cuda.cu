@@ -437,7 +437,8 @@ template <int BITS, typename T, bool B_DENSE>
 __global__ __launch_bounds__(PTHREADS) void linear_mma_kernel(
     const T* __restrict__ x, const uint8_t* __restrict__ codes,
     const int8_t* __restrict__ exponents, int64_t m, int64_t n, int64_t k,
-    const T* __restrict__ bias, T* __restrict__ out, const T* __restrict__ b_dense) {
+    const float* __restrict__ bias, T* __restrict__ out,
+    const T* __restrict__ b_dense) {
   __shared__ __align__(16) T As[2][PM][PA_LD];
   __shared__ __align__(16) T Bs[2][PN][PB_LD];
 
@@ -597,8 +598,8 @@ __global__ __launch_bounds__(PTHREADS) void linear_mma_kernel(
         // The fragment covers a pair of adjacent columns, but n may be odd, so
         // the second column of the last pair is out of range.
         const bool has_hi = gn + 1 < n;
-        const float b0 = bias ? bf_load<T>(&bias[gn]) : 0.0f;
-        const float b1 = (bias != nullptr && has_hi) ? bf_load<T>(&bias[gn + 1]) : 0.0f;
+        const float b0 = bias ? bias[gn] : 0.0f;
+        const float b1 = (bias != nullptr && has_hi) ? bias[gn + 1] : 0.0f;
         if (gm < m) {
           out[gm * n + gn] = bf_cast<T>(acc[i][j][0] + b0);
           if (has_hi) out[gm * n + gn + 1] = bf_cast<T>(acc[i][j][1] + b1);
@@ -716,13 +717,6 @@ struct CublasApi {
 inline const CublasApi& cublas_api() {
   static const CublasApi api = [] {
     CublasApi a;
-    // Escape hatch that forces the fused fallback.  It is the only way to
-    // exercise that path on a machine which does have cuBLAS, and it lets a
-    // build with no cuBLAS at all run the same tests.
-    if (const char* off = std::getenv("GPTQMODEL_BLOCKFLOAT_NO_CUBLAS");
-        off != nullptr && off[0] != '\0' && off[0] != '0') {
-      return a;
-    }
     static const char* kSonames[] = {"libcublas.so.13", "libcublas.so.12",
                                      "libcublas.so.11", "libcublas.so"};
     void* lib = nullptr;
@@ -856,11 +850,12 @@ class TemporaryBuffer {
 
 // Epilogue for the cuBLAS path: fp32 accumulator -> bias -> T.
 template <typename T>
-__global__ void epilogue_kernel(const float* __restrict__ c, const T* __restrict__ bias,
-                                T* __restrict__ out, int64_t m, int64_t n) {
+__global__ void epilogue_kernel(const float* __restrict__ c,
+                                const float* __restrict__ bias, T* __restrict__ out,
+                                int64_t m, int64_t n) {
   const int64_t col = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (col >= n) return;
-  const float b = bias != nullptr ? bf_load<T>(&bias[col]) : 0.0f;
+  const float b = bias != nullptr ? bias[col] : 0.0f;
   // gridDim.y is capped at 65535, so rows are strided instead of mapped 1:1.
   // A flattened batch/sequence dimension reaches that cap in long-context runs.
   for (int64_t row = blockIdx.y; row < m; row += gridDim.y) {
@@ -899,11 +894,23 @@ template <int BITS>
 cudaError_t launch_linear_f32(const void* x, const uint8_t* codes,
                               const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                               const void* bias, void* out, cudaStream_t stream) {
-  const dim3 grid((unsigned)((n + FN - 1) / FN), (unsigned)((m + FM - 1) / FM));
-  linear_f32_kernel<BITS><<<grid, 256, 0, stream>>>(
-      reinterpret_cast<const float*>(x), codes, exponents, m, n, k,
-      reinterpret_cast<const float*>(bias), reinterpret_cast<float*>(out));
-  return cudaGetLastError();
+  // gridDim.y is capped at 65535, so one launch covers at most
+  // 65535 * FM rows. Split larger batches into row chunks and shift the
+  // input/output pointers; the weight operands are indexed by column and are
+  // shared by every chunk.
+  const int64_t rows_per_launch = (int64_t)65535 * FM;
+  const float* xp = reinterpret_cast<const float*>(x);
+  float* op = reinterpret_cast<float*>(out);
+  for (int64_t off = 0; off < m; off += rows_per_launch) {
+    const int64_t rows = std::min<int64_t>(m - off, rows_per_launch);
+    const dim3 grid((unsigned)((n + FN - 1) / FN), (unsigned)((rows + FM - 1) / FM));
+    linear_f32_kernel<BITS><<<grid, 256, 0, stream>>>(
+        xp + off * k, codes, exponents, rows, n, k,
+        reinterpret_cast<const float*>(bias), op + off * n);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) return e;
+  }
+  return cudaSuccess;
 }
 
 template <typename T>
@@ -932,6 +939,7 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
                                  const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                                  const void* bias, void* out, cudaStream_t stream) {
   cublasHandle_t handle = nullptr;
+
   cudaError_t e = cublas_handle_for_stream(stream, &handle);
   if (e != cudaSuccess) return e;
   const CublasApi& api = cublas_api();
@@ -966,7 +974,7 @@ cudaError_t launch_linear_cublas(const void* x, const uint8_t* codes,
   const unsigned rows = (unsigned)std::min<int64_t>(m, 65535);
   const dim3 grid((unsigned)((n + 255) / 256), rows);
   epilogue_kernel<T><<<grid, 256, 0, stream>>>(
-      c32, reinterpret_cast<const T*>(bias), reinterpret_cast<T*>(out), m, n);
+      c32, reinterpret_cast<const float*>(bias), reinterpret_cast<T*>(out), m, n);
   return cudaGetLastError();
 }
 
@@ -977,37 +985,49 @@ template <int BITS, typename T>
 cudaError_t launch_linear_fused(const void* x, const uint8_t* codes,
                                 const int8_t* exponents, int64_t m, int64_t n, int64_t k,
                                 const void* bias, void* out, cudaStream_t stream) {
-  const dim3 grid((unsigned)((n + PN - 1) / PN), (unsigned)((m + PM - 1) / PM));
   const T* xp = reinterpret_cast<const T*>(x);
-  const T* bp = reinterpret_cast<const T*>(bias);
+  const float* bp = reinterpret_cast<const float*>(bias);
   T* op = reinterpret_cast<T*>(out);
-  // Up to one row tile the weights are dequantised exactly once either way, so
-  // keeping them in shared memory avoids the round trip through a workspace.
-  if (m <= PM) {
-    linear_mma_kernel<BITS, T, false><<<grid, PTHREADS, 0, stream>>>(
-        xp, codes, exponents, m, n, k, bp, op, nullptr);
-    return cudaGetLastError();
-  }
-  TemporaryBuffer buffer((size_t)n * k * sizeof(T), stream);
-  if (buffer.status() != cudaSuccess) return buffer.status();
-  T* w = reinterpret_cast<T*>(buffer.get());
-  cudaError_t e;
-  e = blockfloat_dequant(codes, exponents, BITS, n, k, w, dtype_of<T>(), stream);
-  if (e == cudaSuccess) {
+  // Same gridDim.y cap as the fp32 path; chunk very large row counts.
+  const int64_t rows_per_launch = (int64_t)65535 * PM;
+  for (int64_t off = 0; off < m; off += rows_per_launch) {
+    const int64_t rows = std::min<int64_t>(m - off, rows_per_launch);
+    const dim3 grid((unsigned)((n + PN - 1) / PN), (unsigned)((rows + PM - 1) / PM));
+    const T* chunk_x = xp + off * k;
+    T* chunk_out = op + off * n;
+    // Up to one row tile the weights are dequantised exactly once either way,
+    // so keeping them in shared memory avoids the round trip through a
+    // workspace.
+    if (rows <= PM) {
+      linear_mma_kernel<BITS, T, false><<<grid, PTHREADS, 0, stream>>>(
+          chunk_x, codes, exponents, rows, n, k, bp, chunk_out, nullptr);
+      const cudaError_t e = cudaGetLastError();
+      if (e != cudaSuccess) return e;
+      continue;
+    }
+    TemporaryBuffer buffer((size_t)n * k * sizeof(T), stream);
+    if (buffer.status() != cudaSuccess) return buffer.status();
+    T* w = reinterpret_cast<T*>(buffer.get());
+    cudaError_t e;
+    e = blockfloat_dequant(codes, exponents, BITS, n, k, w, dtype_of<T>(), stream);
+    if (e != cudaSuccess) return e;
     linear_mma_kernel<BITS, T, true><<<grid, PTHREADS, 0, stream>>>(
-        xp, codes, exponents, m, n, k, bp, op, w);
+        chunk_x, codes, exponents, rows, n, k, bp, chunk_out, w);
     e = cudaGetLastError();
+    if (e != cudaSuccess) return e;
   }
-  return e;
+  return cudaSuccess;
 }
 
 template <int BITS, typename T>
 cudaError_t launch_linear_mma(const void* x, const uint8_t* codes,
                               const int8_t* exponents, int64_t m, int64_t n, int64_t k,
-                              const void* bias, void* out, cudaStream_t stream) {
+                              const void* bias, void* out, cudaStream_t stream,
+                              bool allow_cublas) {
   if (m <= 0 || n <= 0 || k <= 0) return cudaErrorInvalidValue;
   constexpr int64_t kIntMax = std::numeric_limits<int>::max();
-  if (cublas_api().ready && m <= kIntMax && n <= kIntMax && k <= kIntMax) {
+  if (allow_cublas && cublas_api().ready && m <= kIntMax && n <= kIntMax &&
+      k <= kIntMax) {
     cudaError_t e =
         launch_linear_cublas<BITS, T>(x, codes, exponents, m, n, k, bias, out, stream);
     if (e != cudaErrorNotSupported) return e;
@@ -1090,17 +1110,19 @@ cudaError_t blockfloat_decompose(const float* x, int bits, int64_t rows, int64_t
 
 cudaError_t blockfloat_linear(const void* x, int dtype, const uint8_t* codes,
                         const int8_t* exponents, int bits, int64_t m, int64_t n,
-                        int64_t k, const void* bias, void* out, cudaStream_t stream) {
+                        int64_t k, const void* bias, void* out, cudaStream_t stream,
+                        int32_t allow_cublas) {
   if (k % BLOCK) return cudaErrorInvalidValue;
   if (m <= 0 || n <= 0 || k <= 0) return cudaErrorInvalidValue;
+  const bool cublas = allow_cublas != 0;
   if (bits == 4) {
     if (dtype == BLOCKFLOAT_DTYPE_F32) return launch_linear_f32<4>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<4, __half>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<4, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream);
+    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<4, __half>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
+    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<4, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
   } else if (bits == 8) {
     if (dtype == BLOCKFLOAT_DTYPE_F32) return launch_linear_f32<8>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<8, __half>(x, codes, exponents, m, n, k, bias, out, stream);
-    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<8, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream);
+    if (dtype == BLOCKFLOAT_DTYPE_F16) return launch_linear_mma<8, __half>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
+    if (dtype == BLOCKFLOAT_DTYPE_BF16) return launch_linear_mma<8, __nv_bfloat16>(x, codes, exponents, m, n, k, bias, out, stream, cublas);
   }
   return cudaErrorInvalidValue;
 }

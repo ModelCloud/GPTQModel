@@ -26,6 +26,11 @@ from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from .models._const import DEFAULT_MAX_SHARD_SIZE
+from .utils.checkpoint_paths import (
+    CheckpointPathError,
+    assert_auxiliary_copy_allowed,
+    validate_relative_checkpoint_path,
+)
 from .utils.logger import setup_logger
 
 
@@ -602,7 +607,18 @@ def _group_tensors(
 
     groups: Dict[str, List[_TensorRef]] = defaultdict(list)
     for name in sorted(refs):
-        groups[_resolve_layer_group(name, prefixes) or ""].append(refs[name])
+        group = _resolve_layer_group(name, prefixes) or ""
+        if group:
+            # The group becomes a directory under the staging root. Its prefix
+            # is derived from an untrusted tensor name, so a name such as
+            # `../../../victim/model.layers.0.w` must not escape that root.
+            try:
+                validate_relative_checkpoint_path(group, kind="reshard layer group name")
+            except CheckpointPathError as exc:
+                raise ValueError(
+                    f"Unsafe layer group derived from checkpoint tensor {name!r}: {exc}"
+                ) from exc
+        groups[group].append(refs[name])
 
     # Layer groups first (numerically ordered within each stack), then the ""
     # group holding every non-layer tensor.
@@ -736,8 +752,10 @@ def _copy_auxiliary_files(source_dir: str, staging_dir: str) -> None:
             lower = filename.lower()
             if lower.endswith(_WEIGHT_SUFFIXES) or lower.endswith(_INDEX_SUFFIXES):
                 continue
+            source_path = os.path.join(root, filename)
+            assert_auxiliary_copy_allowed(source_dir, source_path, kind="reshard auxiliary file")
             os.makedirs(target_root, exist_ok=True)
-            shutil.copy2(os.path.join(root, filename), os.path.join(target_root, filename))
+            shutil.copy2(source_path, os.path.join(target_root, filename))
             copied += 1
     log.debug("reshard: copied %d auxiliary files", copied)
 

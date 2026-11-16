@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import transformers
+from module_tree.looper_doubles import no_auto_dtype_cast_forward
 
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models._const import EXPERT_INDEX_PLACEHOLDER
@@ -117,6 +118,7 @@ def _looper(plan: ModulePlan) -> ModuleLooper:
         layer_modules_strict=False,
         lm_head="lm_head",
         quant_region_timer=None,
+        _maybe_auto_dtype_cast_forward_module=no_auto_dtype_cast_forward,
     )
     looper.layer_module_coverage = _CoverageRecorder()
     looper.input_embeddings_name = None

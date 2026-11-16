@@ -54,24 +54,6 @@ def test_transformers_device_map_compat_reports_upstream_api_change(monkeypatch)
     assert exc_info is True, "the warning must carry the upstream traceback"
 
 
-def test_paroquant_quantizer_compat_reports_upstream_api_change(monkeypatch):
-    """Same guarantee for the ParoQuant shim."""
-    # Simulate upstream moving GPTQConfig: the shim's import then fails even
-    # though transformers itself is still installed.
-    import transformers.utils.quantization_config as quantization_config
-
-    recording = _RecordingLogger()
-    monkeypatch.setattr(gptqmodel, "log", recording)
-    monkeypatch.delattr(quantization_config, "GPTQConfig")
-
-    gptqmodel._patch_transformers_paroquant_quantizer_compat()
-
-    assert recording.warning_calls, "an upstream rename was reported at no level at all"
-    msg, exc_info = recording.warning_calls[0]
-    assert "ParoQuant quantizer compat is inactive" in msg
-    assert exc_info is True, "the warning must carry the upstream traceback"
-
-
 class _RecordingLogger:
     """Minimal stand-in for the project logger that records call levels."""
 
@@ -462,8 +444,8 @@ def test_generation_config_is_loaded_not_silently_skipped(tmp_path):
 
     assert cfg is not None, "generation config silently failed to load"
     assert cfg.max_new_tokens == 7
-    # _sanitize_generation_config forces sampling on.
-    assert cfg.do_sample is True
+    # The checkpoint declared greedy decoding; normalization must preserve it.
+    assert cfg.do_sample is False
 
 
 def test_generation_config_enables_sampling_before_validation(tmp_path):

@@ -6,13 +6,25 @@
 from types import SimpleNamespace
 
 import torch
-from transformers import AutoModelForCausalLM, AutoModelForPreTraining
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForPreTraining,
+    MllamaForCausalLM,
+    MllamaTextConfig,
+)
 
 from ...utils.model import get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+
+
+# Transformers 5.22 ships `MllamaForCausalLM` for the text-only model but does
+# not register `MllamaTextConfig` with `AutoModelForCausalLM`, so
+# `AutoModelForCausalLM.from_config(MllamaTextConfig)` raises "Unrecognized
+# configuration class" and `mllama_text_model` checkpoints cannot load.
+AutoModelForCausalLM.register(MllamaTextConfig, MllamaForCausalLM, exist_ok=True)
 
 
 # TODO FIXME: we currently do not support quantizing cross attention layer (pixel_values)
@@ -82,6 +94,12 @@ class MLlamaQModel(BaseQModel):
             language_model = get_module(model, prefix)
             if language_model is not None:
                 return language_model
+
+        # Text-only `MllamaForCausalLM` exposes the decoder as `model.model`
+        # (an `MllamaTextModel`) instead of either multimodal layout above.
+        inner = getattr(model, "model", None)
+        if inner is not None and getattr(inner, "layers", None) is not None:
+            return inner
 
         raise AttributeError("Unable to resolve an Mllama language model layout.")
 
@@ -165,14 +183,38 @@ class MLlamaQModel(BaseQModel):
                 setattr(language_model, attr_name, move_to(module, device=CPU))
 
     @staticmethod
-    def _prepare_first_layer_attention_mask(attention_mask):
+    def _prepare_first_layer_attention_mask(
+        attention_mask,
+        *,
+        text_config,
+        inputs_embeds,
+        past_key_values,
+        position_ids,
+    ):
         if attention_mask is None or not torch.is_tensor(attention_mask):
             return attention_mask
 
-        if attention_mask.ndim <= 2 and bool(attention_mask.to(dtype=torch.bool).all().item()):
+        if attention_mask.ndim > 2:
+            return attention_mask
+
+        if bool(attention_mask.to(dtype=torch.bool).all().item()):
             return None
 
-        return attention_mask
+        # Mllama's text model builds the 4-D causal mask itself; the capture
+        # path must do the same or the raw `[B, S]` long padding mask reaches
+        # the decoder layer and batch_size > 1 calibration fails.
+        from transformers.masking_utils import create_causal_mask
+
+        attention_mask = move_to(attention_mask, device=inputs_embeds.device)
+        if torch.is_tensor(position_ids):
+            position_ids = move_to(position_ids, device=inputs_embeds.device)
+        return create_causal_mask(
+            config=text_config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+        )
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         input_ids = example.get("input_ids")
@@ -203,7 +245,13 @@ class MLlamaQModel(BaseQModel):
             position_ids = position_ids.to(device=inputs_embeds.device)
 
         position_embeddings = language_model.rotary_emb(inputs_embeds, position_ids=position_ids)
-        first_layer_attention_mask = self._prepare_first_layer_attention_mask(attention_mask)
+        first_layer_attention_mask = self._prepare_first_layer_attention_mask(
+            attention_mask,
+            text_config=language_model.config,
+            inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+        )
 
         return language_model.layers[0](
             inputs_embeds,

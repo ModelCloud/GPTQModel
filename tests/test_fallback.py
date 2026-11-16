@@ -14,8 +14,10 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
+    AWQConfig,
     Fallback,
     FallbackStrategy,
+    GPTQConfig,
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
@@ -24,7 +26,303 @@ from gptqmodel.quantization.config import (
 )
 from gptqmodel.quantization.fallback_smooth import smooth_block
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.utils.fallback import should_use_fallback
+from gptqmodel.utils.fallback import normalize_fallback, should_use_fallback
+
+
+def test_dict_fallback_keeps_the_dataclass_threshold_default():
+    """A dict that omits ``threshold`` must not double the default to 1.0%.
+
+    The ``Fallback`` dataclass default is 0.5%. ``fallback={"strategy": ...}``
+    and ``fallback={"smooth": ...}`` used to take a separate hard-coded 1.0%
+    default, silently moving experts from GPTQ to RTN.
+    """
+
+    default = Fallback().threshold
+    assert default == "0.5%"
+
+    for config_cls in (GPTQConfig, AWQConfig):
+        plain = config_cls(bits=4, group_size=128)
+        assert plain.fallback.threshold == default
+        for override in ({"strategy": "rtn"}, {"smooth": "mad"}):
+            config = config_cls(bits=4, group_size=128, fallback=override)
+            assert config.fallback.threshold == default, (config_cls.__name__, override)
+
+    # An explicit threshold still wins.
+    explicit = GPTQConfig(bits=4, group_size=128, fallback={"threshold": "2.0%"})
+    assert explicit.fallback.threshold == "2.0%"
+
+    # The per-module override path shares the same normalizer and default.
+    assert normalize_fallback({"strategy": "rtn"}, Fallback()).threshold == default
+
+
+def test_normalize_fallback_merges_every_field_including_smooth():
+    """A dict override must keep its own smoother and the inherited one.
+
+    Issue #4121 item 5: forwarding only ``strategy`` and ``threshold`` to the
+    config normalizer silently dropped ``smooth`` from both the override and
+    the inherited default.
+    """
+
+    inherited = Fallback(
+        strategy=FallbackStrategy.MEAN,
+        threshold="2%",
+        smooth=SmoothMAD(k=2.0),
+    )
+
+    # No smoother in the override: the inherited one survives.
+    merged = normalize_fallback({"threshold": "3%"}, inherited)
+    assert merged.strategy is FallbackStrategy.MEAN
+    assert merged.threshold == "3%"
+    assert isinstance(merged.smooth, SmoothMAD)
+    assert merged.smooth.k == 2.0
+
+    # The override's own smoother wins over the inherited one.
+    replaced = normalize_fallback({"smooth": SmoothPercentile(percentile=99.5)}, inherited)
+    assert isinstance(replaced.smooth, SmoothPercentile)
+    assert replaced.smooth.percentile == 99.5
+
+    # A smoother named through one of the alias keys also replaces it.
+    aliased = normalize_fallback({"smooth_percentile": 99.9}, inherited)
+    assert isinstance(aliased.smooth, SmoothPercentile)
+    assert aliased.smooth.percentile == 99.9
+
+    # Nothing inherited, nothing named: still no smoother.
+    assert normalize_fallback({"threshold": "1%"}, Fallback()).smooth is None
+
+
+def _build_tiny_dense_fixture(model_dir):
+    """Save a one-layer Llama checkpoint that a real CPU quantize can finish."""
+
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from tokenizers.trainers import WordLevelTrainer
+    from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+
+    texts = [
+        "tiny fallback calibration sample one with enough tokens to survive minimum length filtering",
+        "tiny fallback calibration sample two exercising the dynamic fallback override path",
+        "another synthetic calibration example that is intentionally verbose so filtering keeps it",
+    ] * 2
+
+    tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    trainer = WordLevelTrainer(special_tokens=["[PAD]", "[UNK]", "[BOS]", "[EOS]"])
+    tokenizer.train_from_iterator(texts, trainer=trainer)
+    fast_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+    )
+    fast_tokenizer.save_pretrained(model_dir)
+
+    config = LlamaConfig(
+        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=96,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=128,
+        max_position_embeddings=128,
+        pad_token_id=0,
+        bos_token_id=2,
+        eos_token_id=3,
+    )
+    LlamaForCausalLM(config).save_pretrained(model_dir)
+
+    calibration = []
+    for text in texts:
+        encoded = fast_tokenizer(text, return_tensors="pt")
+        calibration.append(
+            {"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"]}
+        )
+    return calibration
+
+
+@pytest.mark.cpu
+def test_dynamic_fallback_override_survives_a_real_quantize(tmp_path, monkeypatch):
+    """The real looper must resolve a per-module fallback override.
+
+    Issue #4121 item 4: ``clone_gptq_config_for_module`` applied the override
+    and then overwrote it with the processor-level fallback. The looper always
+    passes ``quantize_config.fallback`` (``stage_subset`` -> ``preprocess``),
+    so the override never reached quantization. The unit test in
+    ``tests/test_dynamic.py`` called ``preprocess(module)`` without a
+    ``fallback`` argument, which is why it missed this.
+    """
+
+    from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+    from gptqmodel.looper.gptq_processor import GPTQProcessor
+
+    model_dir = tmp_path / "native"
+    model_dir.mkdir()
+    calibration = _build_tiny_dense_fixture(model_dir)
+
+    resolved = {}
+    original = GPTQProcessor.preprocess
+
+    def recording_preprocess(self, module, fallback=None, **kwargs):
+        original(self, module, fallback=fallback, **kwargs)
+        task = self.tasks.get(module.name)
+        if task is not None:
+            resolved[module.full_name] = (fallback, task.fallback)
+
+    monkeypatch.setattr(GPTQProcessor, "preprocess", recording_preprocess)
+
+    quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        device="cpu",
+        dynamic={
+            r"+:.*\.mlp\.down_proj$": {
+                "fallback": {"strategy": "median", "threshold": 1e9},
+            },
+        },
+    )
+    model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
+    model.quantize(
+        calibration,
+        batch_size=1,
+        backend=BACKEND.TORCH,
+        calibration_data_min_length=1,
+    )
+
+    down_proj = "model.layers.0.mlp.down_proj"
+    assert down_proj in resolved, sorted(resolved)
+    # The looper really passed a processor-level fallback.
+    processor_fallback, down_proj_fallback = resolved[down_proj]
+    assert isinstance(processor_fallback, Fallback)
+    assert processor_fallback.strategy is FallbackStrategy.RTN
+    # ... and the per-module override still won.
+    assert down_proj_fallback.strategy is FallbackStrategy.MEDIAN
+    assert float(down_proj_fallback.threshold) == 1e9
+
+    # Sibling modules keep the processor fallback.
+    gate_fallback = resolved["model.layers.0.mlp.gate_proj"][1]
+    assert gate_fallback.strategy is FallbackStrategy.RTN
+    assert gate_fallback.threshold == "0.5%"
+
+
+def _processor_and_config(method):
+    """Return the processor class and config constructor for one method."""
+
+    from gptqmodel.looper.gptq_processor import GPTQProcessor
+    from gptqmodel.looper.macaq_processor import MacaqProcessor
+    from gptqmodel.looper.qqq_processor import QQQProcessor
+    from gptqmodel.looper.vptq_processor import VPTQProcessor
+    from gptqmodel.quantization.config import (
+        GPTQConfig,
+        MacaqConfig,
+        QQQConfig,
+        VPTQConfig,
+    )
+
+    cases = {
+        "gptq": (GPTQProcessor, GPTQConfig, {"bits": 4, "group_size": 32}),
+        "qqq": (QQQProcessor, QQQConfig, {"bits": 4, "group_size": 32}),
+        "vptq": (VPTQProcessor, VPTQConfig, {"bits": 2, "group_size": -1}),
+        "macaq": (MacaqProcessor, MacaqConfig, {"bits": 4, "group_size": 32}),
+    }
+    return cases[method]
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("method", ["gptq", "qqq"])
+def test_processor_merges_the_processor_fallback_under_the_override(method, monkeypatch):
+    """GPTQ and QQQ must resolve `dynamic` > processor > config.
+
+    Issue #4121 item 4: the processors applied the per-module override and then
+    overwrote it with the processor-level fallback. QQQ also never applied the
+    override at all.
+    """
+
+    from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+    from gptqmodel.looper.named_module import NamedModule
+
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+
+    processor_cls, config_cls, config_kwargs = _processor_and_config(method)
+    qcfg = config_cls(
+        **config_kwargs,
+        device="cpu",
+        fallback=Fallback(strategy="rtn", threshold="0.5%"),
+        dynamic={"model.proj": {"fallback": {"strategy": "median", "threshold": "2%"}}},
+    )
+    processor = processor_cls(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=CalibrationConfig(
+            dataset=[{"input_ids": [0], "attention_mask": [1]}],
+            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
+        ),
+    )
+    processor_fallback = Fallback(strategy="rtn", threshold="5%")
+
+    overridden = NamedModule(
+        nn.Linear(32, 32, bias=False), name="proj", full_name="model.proj", layer_index=0
+    )
+    processor.preprocess(overridden, fallback=processor_fallback)
+    resolved = processor.tasks["proj"].fallback
+    assert resolved.strategy == "median"
+    assert resolved.threshold == "2%"
+
+    sibling = NamedModule(
+        nn.Linear(32, 32, bias=False), name="other", full_name="model.other", layer_index=0
+    )
+    processor.preprocess(sibling, fallback=processor_fallback)
+    inherited = processor.tasks["other"].fallback
+    assert inherited.strategy == "rtn"
+    assert inherited.threshold == "5%"
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("method", ["vptq", "macaq"])
+def test_vptq_and_macaq_apply_the_processor_fallback_without_dynamic_overrides(method, monkeypatch):
+    """VPTQ and MACaQ configs reject per-module `fallback`, so only two layers exist.
+
+    ``VPTQConfig._normalize_dynamic_layer_config`` rejects every dynamic key and
+    ``MacaqConfig`` only accepts ``_DYNAMIC_FIELDS``, so a per-module fallback
+    cannot be expressed through the public config. Their `preprocess` used the
+    same overwrite as GPTQ, so the fix is applied for uniformity and the
+    processor-level fallback must still land on the task.
+    """
+
+    from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+    from gptqmodel.looper.named_module import NamedModule
+
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+
+    processor_cls, config_cls, config_kwargs = _processor_and_config(method)
+    qcfg = config_cls(
+        **config_kwargs,
+        device="cpu",
+        fallback=Fallback(strategy="rtn", threshold="0.5%"),
+    )
+    processor = processor_cls(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=CalibrationConfig(
+            dataset=[{"input_ids": [0], "attention_mask": [1]}],
+            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
+        ),
+    )
+    module = NamedModule(
+        nn.Linear(32, 32, bias=False), name="proj", full_name="model.proj", layer_index=0
+    )
+    processor.preprocess(module, fallback=Fallback(strategy="rtn", threshold="5%"))
+    resolved = processor.tasks["proj"].fallback
+    assert resolved.strategy == "rtn"
+    assert resolved.threshold == "5%"
+
+    with pytest.raises(ValueError):
+        config_cls(
+            **config_kwargs,
+            device="cpu",
+            dynamic={"model.proj": {"fallback": {"strategy": "median"}}},
+        )
 
 
 def test_smooth_mad_uses_sigma_normalized_window():
@@ -383,24 +681,16 @@ def _assert_fallback_bounds(
     ):
         assert math.isfinite(err), f"{label}, group={group_size}: {name}_err is not finite ({err})"
 
-    min_val = weights.min().item()
-    max_val = weights.max().item()
-    one_sided = min_val > 0.0 or max_val < 0.0
-
-    if one_sided:
-        floor = rtn_err * 5.0
-        assert midpoint_err >= floor, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
-        assert mean_err >= floor, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert median_err >= floor, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
-        assert std_err >= floor, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
-        assert asym_err >= floor, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
-    else:
-        ceiling = rtn_err * 3.0
-        assert midpoint_err <= ceiling, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
-        assert mean_err <= ceiling, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert median_err <= ceiling, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
-        assert std_err <= ceiling, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
-        assert asym_err <= ceiling, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
+    # Every strategy fits a range that includes zero, so a one-sided group uses
+    # the same representable grid as RTN instead of being shifted by roughly its
+    # group minimum. The former "one-sided is at least 5x worse than RTN" floor
+    # encoded that group-offset bug (fixed for #3978).
+    ceiling = rtn_err * 3.0
+    assert midpoint_err <= ceiling, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
+    assert mean_err <= ceiling, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+    assert median_err <= ceiling, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
+    assert std_err <= ceiling, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+    assert asym_err <= ceiling, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
 
 
 def _assert_finite_errors(label: str, group_size: int, errors: dict) -> None:
@@ -849,13 +1139,22 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
         codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
     else:
         if strategy == FallbackStrategy.MIDPOINT:
-            center = (source.amin(1, keepdim=True) + source.amax(1, keepdim=True)) / 2
+            lo = source.amin(1, keepdim=True)
+            hi = source.amax(1, keepdim=True)
         elif strategy == FallbackStrategy.MEAN:
             center = source.mean(1, keepdim=True)
+            dev = (source - center).abs().amax(1, keepdim=True).clamp(min=1e-8)
+            lo, hi = center - dev, center + dev
         else:
             center = source.median(1, keepdim=True).values
-        expected_zero = (7.5 - center / expected_scale).round().clamp(0, 15)
-        codes = ((source - center) / expected_scale + 7.5).round().clamp(0, 15)
+            dev = (source - center).abs().amax(1, keepdim=True).clamp(min=1e-8)
+            lo, hi = center - dev, center + dev
+        # The fitted range includes zero, so a group that does not cross zero
+        # keeps a representable zero point instead of clamping to a boundary.
+        lo = torch.minimum(lo, torch.zeros_like(lo))
+        hi = torch.maximum(hi, torch.zeros_like(hi))
+        expected_zero = (-lo / expected_scale).round().clamp(0, 15)
+        codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
     expected = (codes - expected_zero) * expected_scale
     torch.testing.assert_close(scale.double(), expected_scale, rtol=1e-6, atol=0)
     torch.testing.assert_close(zero.double(), expected_zero, rtol=0, atol=0)

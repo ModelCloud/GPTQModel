@@ -464,6 +464,10 @@ class _FusionGroup:
             if suppress_restore:
                 for module in self.modules:
                     module.__dict__.pop("_suspend_fused_train_restore", None)
+        # Sources and the executor now consume the fused views. A native
+        # descriptor's per-call operand snapshot would still own the replaced
+        # standalone allocations; keep the descriptors, release the snapshots.
+        self.kernel.release_operand_snapshots((*self.modules, fused))
         self.invalidate()
         self.packed = fused
         self.packed_key = self._key()

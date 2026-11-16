@@ -3,22 +3,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import itertools
-from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Dict
 
-import torch
 from transformers import AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched_conversations
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from . import LlamaQModel
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
+
+
+_GEMMA3_REPLAY_MASK_MAPPING = "__gptqmodel_gemma3_replay_mask_mapping"
 
 
 class Gemma3QModel(LlamaQModel):
@@ -136,21 +141,94 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                "q_proj:0:q",
-                "k_proj:0:k",
-                "v_proj:0:v",
+                "q_proj:0:q:in=x",
+                "k_proj:0:k:in=x",
+                "v_proj:0:v:in=x",
                 "q_norm:!",
                 "k_norm:!",
                 "o_proj:1:o",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!",),
-            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         }
     ]
 
     lm_head_module = "model.lm_head"
+
+    def _language_model(self):
+        return self.model.model.language_model
+
+    def _start_replay_mask_capture(self) -> None:
+        """Capture the per-layer-type masks Gemma-3's outer model builds.
+
+        ``Gemma3Model.forward`` hands the text decoder a ``full_attention`` /
+        ``sliding_attention`` mask dict built from ``token_type_ids`` so image
+        tokens attend bidirectionally inside each image block. The first-layer
+        hook only sees the tensor selected for layer 0, so keep the whole dict
+        for replay instead of rebuilding it without the image-block overlay.
+        """
+
+        self._stop_replay_mask_capture()
+        language_model = self._language_model()
+
+        def capture_outer_inputs(module, args, kwargs):
+            del args
+            attention_mask = kwargs.get("attention_mask")
+            if isinstance(attention_mask, dict):
+                setattr(module, _GEMMA3_REPLAY_MASK_MAPPING, attention_mask)
+
+        self._gemma3_mask_capture_handle = language_model.register_forward_pre_hook(
+            capture_outer_inputs,
+            with_kwargs=True,
+        )
+
+    def _stop_replay_mask_capture(self) -> None:
+        handle = getattr(self, "_gemma3_mask_capture_handle", None)
+        if handle is not None:
+            handle.remove()
+            delattr(self, "_gemma3_mask_capture_handle")
+
+        language_model = self._language_model()
+        if hasattr(language_model, _GEMMA3_REPLAY_MASK_MAPPING):
+            delattr(language_model, _GEMMA3_REPLAY_MASK_MAPPING)
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        layer_input_kwargs = super().capture_first_layer_input_kwargs(
+            args,
+            kwargs,
+            batch_device,
+            layer_input_kwargs,
+        )
+        mask_mapping = getattr(self._language_model(), _GEMMA3_REPLAY_MASK_MAPPING, None)
+        if isinstance(mask_mapping, dict):
+            layer_input_kwargs[_GEMMA3_REPLAY_MASK_MAPPING] = nested_move_to(
+                mask_mapping,
+                device=batch_device,
+            )
+        return layer_input_kwargs
+
+    def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        mask_mapping = additional_inputs.pop(_GEMMA3_REPLAY_MASK_MAPPING, None)
+        additional_inputs = super().prepare_layer_replay_kwargs(
+            layer,
+            layer_input,
+            additional_inputs,
+            target_device,
+        )
+        if not isinstance(mask_mapping, dict):
+            return additional_inputs
+
+        layer_types = self._declared_layer_types() or ()
+        layer_type = self._resolve_layer_replay_type(layer, layer_types)
+        mask = mask_mapping.get(layer_type) if layer_type is not None else None
+        if mask is None:
+            # Single-type stacks keep the layer-0 mask for every layer.
+            mask = next(iter(mask_mapping.values()), None)
+        if mask is not None:
+            additional_inputs["attention_mask"] = move_to(mask, device=target_device)
+        return additional_inputs
 
     def pre_quantize_generate_hook_start(self):
         language_model = self.model.model.language_model
@@ -159,8 +237,10 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         self.shell_module_materialize(language_model.norm, self.quantize_config.device)
         self.shell_module_materialize(self.model.model.vision_tower, self.quantize_config.device)
         self.shell_module_materialize(self.model.model.multi_modal_projector, self.quantize_config.device)
+        self._start_replay_mask_capture()
 
     def pre_quantize_generate_hook_end(self):
+        self._stop_replay_mask_capture()
         language_model = self.model.model.language_model
         if self.quantize_config.offload_to_disk:
             offload_to_disk(
@@ -202,14 +282,6 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
 
-    @staticmethod
-    def _is_pretokenized_sample(sample) -> bool:
-        if isinstance(sample, Mapping):
-            return "input_ids" in sample and sample.keys() <= {"input_ids", "attention_mask"}
-        if isinstance(sample, (list, tuple)):
-            return bool(sample) and all(isinstance(token, int) for token in sample)
-        return torch.is_tensor(sample)
-
     @classmethod
     def prepare_inputs_for_conversations(
         cls,
@@ -225,20 +297,17 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        iterator = iter(calibration_dataset)
-        try:
-            first_sample = next(iterator)
-        except StopIteration:
-            return super().prepare_dataset([], batch_size=batch_size, **kwargs)
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
 
-        samples = itertools.chain((first_sample,), iterator)
-        if self._is_pretokenized_sample(first_sample):
-            samples = (dict(sample) if isinstance(sample, Mapping) else sample for sample in samples)
-            return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
-
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(samples, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )

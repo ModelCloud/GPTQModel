@@ -302,7 +302,7 @@ def test_prepare_remote_model_init_compat_bridges_legacy_vision2seq_auto_map(mon
 
     config = _FakeOpenVLAConfig()
 
-    prepare_remote_model_init_compat("/tmp/fake-openvla-7b", config)
+    prepare_remote_model_init_compat("/tmp/fake-openvla-7b", config, trust_remote_code=True)
 
     bridged = AutoModelForImageTextToText._model_mapping[_FakeOpenVLAConfig]
     assert issubclass(bridged, module.OpenVLAForActionPrediction)

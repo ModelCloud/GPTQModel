@@ -17,6 +17,7 @@ from .cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    loaded_op,
 )
 from .rocm import IS_ROCM
 
@@ -185,6 +186,26 @@ def _extension_api():
     return extension_api
 
 
+# Identity guard for the dispatch fast path: tests replace ``_extension_api``
+# with a fake, and the memoised torch.ops handles must not shadow that fake.
+_EXLLAMAV2_EXTENSION_API = _extension_api
+
+
+def _exllamav2_op(name: str, op_name: str):
+    """Return an ExLlamaV2 torch.ops handle without re-resolving the loader."""
+
+    if _extension_api is _EXLLAMAV2_EXTENSION_API:
+        extension = (
+            _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION
+            if name == "exllamav2_awq"
+            else _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION
+        )
+        op = loaded_op(extension, op_name)
+        if op is not None:
+            return op
+    return _extension_api().op(name, op_name)
+
+
 def clear_exllamav2_gptq_extension_cache() -> None:
     _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION.clear_cache()
 
@@ -237,7 +258,7 @@ def exllamav2_make_q_matrix(
     already_shuffled=False,
 ) -> int:
     return int(
-        _extension_api().op("exllamav2", "make_q_matrix")(
+        _exllamav2_op("exllamav2", "make_q_matrix")(
             q_weight,
             q_perm,
             q_invperm,
@@ -253,7 +274,7 @@ def exllamav2_make_q_matrix(
 
 
 def exllamav2_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
-    _extension_api().op("exllamav2", "gemm_half_q_half")(a, int(q_handle), c, bool(force_cuda))
+    _exllamav2_op("exllamav2", "gemm_half_q_half")(a, int(q_handle), c, bool(force_cuda))
 
 
 def clear_exllamav2_awq_extension_cache() -> None:
@@ -306,7 +327,7 @@ def exllamav2_awq_make_q_matrix(
     already_shuffled=False,
 ) -> int:
     return int(
-        _extension_api().op("exllamav2_awq", "make_q_matrix_awq")(
+        _exllamav2_op("exllamav2_awq", "make_q_matrix_awq")(
             q_weight,
             q_perm,
             q_invperm,
@@ -322,7 +343,7 @@ def exllamav2_awq_make_q_matrix(
 
 
 def exllamav2_awq_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
-    _extension_api().op("exllamav2_awq", "gemm_half_q_half_awq")(a, int(q_handle), c, bool(force_cuda))
+    _exllamav2_op("exllamav2_awq", "gemm_half_q_half_awq")(a, int(q_handle), c, bool(force_cuda))
 
 
 def exllamav2_clone_q_matrix(module, *, awq=False, compact=False):
@@ -332,7 +353,7 @@ def exllamav2_clone_q_matrix(module, *, awq=False, compact=False):
     if compact:
         tensors = [tensor.contiguous() for tensor in tensors]
     metadata = getattr(module, "q_tensors", None) or {}
-    handle = _extension_api().op(name, "clone_q_matrix" + suffix)(
+    handle = _exllamav2_op(name, "clone_q_matrix" + suffix)(
         int(module.q_handle), *tensors, metadata.get("q_perm"), metadata.get("q_invperm"))
     return int(handle), tensors  # Keep compact temporaries alive until the consuming launch returns.
 
@@ -340,4 +361,4 @@ def exllamav2_clone_q_matrix(module, *, awq=False, compact=False):
 def exllamav2_free_q_matrix(handle, *, awq=False):
     name, suffix = ("exllamav2_awq", "_awq") if awq else ("exllamav2", "")
     if handle is not None:
-        _extension_api().op(name, "free_q_matrix" + suffix)(int(handle))
+        _exllamav2_op(name, "free_q_matrix" + suffix)(int(handle))

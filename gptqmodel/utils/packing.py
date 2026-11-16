@@ -273,6 +273,7 @@ def _restore_gptq_runtime_qzeros(module: BaseQuantLinear) -> None:
         bits=module.bits,
         pack_dtype=getattr(module, "pack_dtype", torch.int32),
     )
+    module._checkpoint_format_on_disk = FORMAT.GPTQ
 
 
 def _select_kernel_class(
@@ -684,6 +685,7 @@ def hf_pack_layer(
             requested_format = getattr(module, "format", None) or FORMAT.GPTQ
         requested_format = _normalize_format(requested_format)
         if requested_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            module._checkpoint_format_on_disk = requested_format
             # The v1-checkpoint convention (stored zero point minus one) only
             # applies to kernels that require the v2 runtime layout; other
             # kernels keep the raw packer words for both checkpoint flavors,
@@ -795,10 +797,15 @@ def _instantiate_kernel(
 
 
 def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None:
-    source_state = source.state_dict()
-    target_state = target.state_dict()
+    source_tensors: Dict[str, torch.Tensor] = {}
+    source_tensors.update(dict(source.named_parameters()))
+    source_tensors.update(dict(source.named_buffers()))
 
-    if not any(key in source_state for key in ("qweight", "qzeros")):
+    target_tensors: Dict[str, torch.Tensor] = {}
+    target_tensors.update(dict(target.named_parameters()))
+    target_tensors.update(dict(target.named_buffers()))
+
+    if not any(key in source_tensors for key in ("qweight", "qzeros")):
         raise ValueError(
             f"hf_repack_layer: `{type(source).__name__}` has no packed tensors; "
             "pack the layer before repacking."
@@ -807,7 +814,7 @@ def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None
     missing = [
         key
         for key in _PACKED_STATE_KEYS
-        if key in source_state and key not in target_state
+        if key in source_tensors and key not in target_tensors
     ]
     if missing:
         raise NotImplementedError(
@@ -815,9 +822,14 @@ def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None
             f"{missing} required to copy a `{type(source).__name__}` layout."
         )
 
-    shared = {key: value for key, value in source_state.items() if key in target_state}
+    shared = {key: value for key, value in source_tensors.items() if key in target_tensors}
     _preserve_checkpoint_buffer_dtypes(target, shared)
-    target.load_state_dict(shared, strict=False)
+    with torch.no_grad():
+        for key, value in shared.items():
+            target_tensors[key].copy_(value)
+
+    if hasattr(source, "_checkpoint_format_on_disk"):
+        target._checkpoint_format_on_disk = source._checkpoint_format_on_disk
 
     source_qzero_format = getattr(source, "qzero_format", None)
     target_qzero_format = getattr(target, "qzero_format", None)

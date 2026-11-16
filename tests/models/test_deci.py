@@ -20,6 +20,7 @@ class TestDeci(ModelTest):
     TRUST_REMOTE_CODE = True
     USE_VLLM = False
     USE_FLASH_ATTN = False  # Deci remote code rejects flash_attention_2 during model init.
+    ASSERT_INFERENCE = True
     EVAL_BATCH_SIZE = 6
 
     def test_deci(self):

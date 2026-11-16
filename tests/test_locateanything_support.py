@@ -115,7 +115,7 @@ def test_locateanything_remote_attention_compat(monkeypatch):
         auto_map={"AutoModel": "modeling_locateanything.DummyOuterModel"},
     )
 
-    prepare_remote_model_init_compat("/tmp/LocateAnything-3B", config)
+    prepare_remote_model_init_compat("/tmp/LocateAnything-3B", config, trust_remote_code=True)
     model = DummyOuterModel()
     results = [
         model._check_and_adjust_attn_implementation(

@@ -20,17 +20,27 @@ import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
-from ..looper.loop_processor import CalibrationTypes, LoopProcessor
+from ..looper.loop_processor import (
+    CalibrationTypes,
+    LoopProcessor,
+    prepare_layer_runtime_weights_for_forward,
+)
 from ..looper.named_module import NamedModule
 from ..models._const import META
 from ..models.module_plan import _model_module_plan
-from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy, normalize_bypass_batch_size
+from ..quantization.config import (
+    ExpertsRoutingBypass,
+    GcMode,
+    VramStrategy,
+    _dynamic_lock_for,
+    normalize_bypass_batch_size,
+)
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
@@ -166,6 +176,36 @@ def _collect_worker_results(futures, prior_error: Optional[BaseException] = None
     if worker_error is not None:
         raise worker_error
     return results
+
+
+def _record_dynamic_exclusion(qcfg, full_name: str) -> None:
+    """Record one runtime-pruned module under the config's dynamic lock.
+
+    The uncovered-MoE prune path mutates the same tracked mapping that the
+    previous layer's async finalizers may be iterating under GIL=0. Every other
+    writer in ``quantization.config`` serializes through
+    ``_dynamic_lock_for``; this path must do the same.
+    """
+
+    if qcfg.dynamic is None:
+        qcfg.dynamic = {}
+    with _dynamic_lock_for(qcfg.dynamic):
+        pattern = f"-:{pcre.escape(full_name)}"
+        if pattern not in qcfg.dynamic:
+            qcfg.dynamic[pattern] = {}
+            runtime_exclusions = getattr(
+                qcfg,
+                "_runtime_dynamic_exclusions",
+                None,
+            )
+            if runtime_exclusions is None:
+                runtime_exclusions = set()
+                setattr(
+                    qcfg,
+                    "_runtime_dynamic_exclusions",
+                    runtime_exclusions,
+                )
+            runtime_exclusions.add(pattern)
 
 
 def _resolve_cache_flush_device(
@@ -655,6 +695,16 @@ def build_layer_subset_plans(
 ) -> List[SubsetPlan]:
     """Build every subset plan for one processor before layer execution starts."""
 
+    # Concurrent tree branches may declare different quantizable leaves.  Use
+    # the branch that owns this layer instead of the flat union so a text layer
+    # is never asked to resolve a vision-only leaf (and vice versa).
+    branch_layer_modules = looper.layer_modules_for_prefix(layers_prefix, planning=False)
+    if branch_layer_modules is not None:
+        layer_modules = branch_layer_modules
+    branch_planning_modules = looper.layer_modules_for_prefix(layers_prefix, planning=True)
+    if branch_planning_modules is not None:
+        planning_layer_modules = branch_planning_modules
+
     forward = processor.forward
     if embedding_module_name is not None:
         module_name_groups = [[embedding_module_name]]
@@ -845,7 +895,7 @@ def _run_single_subset_pass(
     layer_index: int,
     full,
     fallback,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     pb,
     logger,
     is_awq_processor: bool,
@@ -925,6 +975,22 @@ def _run_single_subset_pass(
                     named_module=named_module,
                     fallback_device=cur_layer_device,
                 )
+                # Keep the NamedModule in the layer inventory even after
+                # AUTO_NF12 swapped the live module for a packed wrapper.
+                # `prepare_layer_runtime_weights_for_forward` can only reach a
+                # processor's deferred replay state (EXL3's META placeholder,
+                # issue #4063) through the wrapper; a raw module in `full` is
+                # skipped and the next layer forward copies out of META.
+                # `_prepare_layer_direct_state_for_forward` already unwraps
+                # `.module`, so exclusion still targets the live tree module.
+        # The layer forward executes every module, not only this subset.
+        # Projections packed by an earlier subset still hold the processor's
+        # META placeholder, so refresh the whole inventory before running.
+        prepare_layer_runtime_weights_for_forward(
+            processors=getattr(looper, "processors", ()),
+            full=full,
+            fallback_device=cur_layer_device,
+        )
 
     # Determine MoE block name for hook selection
     moe_block_name = None
@@ -1383,27 +1449,31 @@ def _run_single_subset_pass(
                 if task_map is not None:
                     task_map.pop(name, None)
 
+                # AUTO_NF12 stores the calibration source in `nf12_*` buffers
+                # and only the quant-source step restores the dense module.
+                # A pruned module never reaches that step below, so restore it
+                # here; otherwise the packed source survives into `save()` and
+                # the writer's NF12 ownership check aborts the export. Modules
+                # without a deferred source are already dense and stay as-is.
+                if (
+                    skipped_module.state.get("auto_dtype_cast_source_spec") is not None
+                    or isinstance(
+                        skipped_module.state.get("quant_source_module"), torch.nn.Module
+                    )
+                ):
+                    looper._prepare_named_module_for_quantization(
+                        processor=processor,
+                        named_module=skipped_module,
+                        fallback_device=cur_layer_device,
+                    )
+                    skipped_module.state.pop("auto_dtype_cast_was_applied", False)
+
                 # No calibration data was routed to these MoE expert modules.
                 # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
                 if calibration_coverage_policy.record_dynamic_exclusions:
-                    if processor.qcfg.dynamic is None:
-                        processor.qcfg.dynamic = {}
-                    pattern = f"-:{pcre.escape(skipped_module.full_name)}"
-                    if pattern not in processor.qcfg.dynamic:
-                        processor.qcfg.dynamic[pattern] = {}
-                        runtime_exclusions = getattr(
-                            processor.qcfg,
-                            "_runtime_dynamic_exclusions",
-                            None,
-                        )
-                        if runtime_exclusions is None:
-                            runtime_exclusions = set()
-                            setattr(
-                                processor.qcfg,
-                                "_runtime_dynamic_exclusions",
-                                runtime_exclusions,
-                            )
-                        runtime_exclusions.add(pattern)
+                    _record_dynamic_exclusion(
+                        processor.qcfg, skipped_module.full_name
+                    )
 
     quant_target_devices: Dict[str, torch.device] = {}
     active_subset_names = [name for name in subset_names if name in subset]
@@ -1420,6 +1490,12 @@ def _run_single_subset_pass(
                 named_module=named_module,
                 fallback_device=cur_layer_device,
             )
+            # Keep the inventory entry as the NamedModule. Replacing it with
+            # the restored raw quant source made every AUTO_NF12 projection
+            # invisible to `prepare_layer_runtime_weights_for_forward`, which
+            # left EXL3's deferred replay weight on META for the next layer
+            # forward (issue #4063).
+            named_module.state.pop("auto_dtype_cast_was_applied", False)
         else:
             target_device = get_device(named_module.module)
             if target_device == META:
@@ -1595,7 +1671,7 @@ def run_subset_stage(
     layer_index: int,
     full,
     fallback: bool,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     pb,
     log=None,
     region_timer=None,

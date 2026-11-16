@@ -16,7 +16,13 @@ import pytest
 import torch
 from accelerate import init_empty_weights
 from torch import nn
-from transformers import AutoConfig, AutoModel, AutoModelForImageTextToText, AutoModelForPreTraining
+from transformers import (
+    AutoConfig,
+    AutoModelForImageTextToText,
+    AutoModelForMultimodalLM,
+    AutoModelForPreTraining,
+    Llama4Config,
+)
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
@@ -132,6 +138,44 @@ def test_declared_norm_path_falls_back_to_language_model_layout():
     assert torch.allclose(output[0][0], nn.RMSNorm(8)(value), atol=1e-6)
 
 
+def test_llama4_lm_head_resolves_under_language_model():
+    """Llama4's causal head lives on the inner `Llama4ForCausalLM`."""
+
+    config = Llama4Config(
+        text_config={
+            "vocab_size": 64,
+            "hidden_size": 32,
+            "intermediate_size": 48,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 8,
+            "num_local_experts": 2,
+            "num_experts_per_tok": 1,
+            "pad_token_id": 0,
+            "bos_token_id": 1,
+            "eos_token_id": 2,
+        },
+        vision_config={
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "image_size": 16,
+            "patch_size": 8,
+            "num_channels": 3,
+        },
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    with init_empty_weights(include_buffers=True):
+        model = AutoModelForImageTextToText.from_config(config)
+
+    assert Llama4QModel.lm_head == "language_model.lm_head"
+    assert model.get_submodule(Llama4QModel.lm_head) is model.language_model.lm_head
+
+
 def test_qwen3_vl_base_candidates_cover_wrapped_and_direct_layouts():
     """Qwen3-VL's base definition covers both supported wrapper layouts."""
 
@@ -156,7 +200,7 @@ _META_CASES = [
     (Glm4vGPTQ, AutoModelForImageTextToText, "GLM-4.1V-9B-Thinking", "model.language_model.norm"),
     (VoxtralGPTQ, AutoModelForPreTraining, "Voxtral-Mini-3B-2507", "model.language_model.norm"),
     (Ovis2QModel, AutoModelForImageTextToText, "Ovis2-2B-hf", "model.language_model.norm"),
-    (GlmASRGPTQ, AutoModel, "GLM-ASR-Nano-2512", "language_model.norm"),
+    (GlmASRGPTQ, AutoModelForMultimodalLM, "GLM-ASR-Nano-2512", "model.language_model.norm"),
     (Qwen2VLQModel, AutoModelForImageTextToText, "Qwen2-VL-2B-Instruct", "model.language_model.norm"),
     (Ernie4_5_VLMoeQModel, AutoModelForImageTextToText, "ERNIE-4.5-VL-28B-A3B-PT", "model.language_model.norm"),
     (Qwen3_VL_MoeQModel, AutoModelForImageTextToText, "Qwen3-VL-30B-A3B-Instruct", "model.language_model.norm"),

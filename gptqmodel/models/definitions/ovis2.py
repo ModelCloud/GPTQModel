@@ -15,6 +15,11 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ._vlm_calibration import (
+    finalize_conversation_batches,
+    pop_conversation_calibration_options,
+    split_calibration_dataset,
+)
 from .qwen2 import Qwen2QModel
 
 
@@ -96,9 +101,15 @@ class Ovis2QModel(BaseQModel):
         return image_inputs
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        label = type(self).__name__
+        pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+        if pretokenized is not None:
+            return super().prepare_dataset(pretokenized, batch_size=batch_size, **kwargs)
+
+        sort, min_length = pop_conversation_calibration_options(kwargs, label=label)
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )
@@ -112,4 +123,6 @@ class Ovis2QModel(BaseQModel):
             )
             calib_data.append(inputs)
         del processor
-        return calib_data
+        return finalize_conversation_batches(
+            calib_data, sort=sort, min_length=min_length, label=label
+        )

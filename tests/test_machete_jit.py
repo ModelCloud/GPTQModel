@@ -154,7 +154,30 @@ def test_machete_static_runtime_error_checks_optin_shared_memory(monkeypatch):
     assert "98304" in error
 
 
-def test_machete_registers_checkpoint_compatible_qzeros_shape_for_symmetric_gptq():
+@pytest.fixture
+def machete_extension_mocked(monkeypatch):
+    """Treat the Machete JIT extension as built for layout-only unit tests.
+
+    The module constructor validates the kernel, so a host without the compiled
+    CUTLASS extension cannot even allocate the checkpoint buffers these tests
+    inspect. Patching the classmethod keeps the real lru-cache empty, so
+    teardown restores a probe that still reflects the host.
+    """
+
+    monkeypatch.setattr(
+        machete_linear_module, "machete_extension_available", lambda: True
+    )
+    # Replacing the classmethod (rather than calling it) keeps the real
+    # ``lru_cache`` unpopulated, so ``monkeypatch.undo()`` restores a probe that
+    # still reflects the host.
+    monkeypatch.setattr(
+        machete_linear_module.MacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda cls: (True, None)),
+    )
+
+
+def test_machete_registers_checkpoint_compatible_qzeros_shape_for_symmetric_gptq(machete_extension_mocked):
     module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
@@ -170,7 +193,7 @@ def test_machete_registers_checkpoint_compatible_qzeros_shape_for_symmetric_gptq
     assert module.qzeros.dtype == torch.int32
 
 
-def test_machete_load_state_dict_accepts_checkpoint_qzeros_shape():
+def test_machete_load_state_dict_accepts_checkpoint_qzeros_shape(machete_extension_mocked):
     module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
@@ -189,7 +212,7 @@ def test_machete_load_state_dict_accepts_checkpoint_qzeros_shape():
     assert module.qzeros.shape == (64, 384)
 
 
-def test_machete_post_init_discards_loaded_qzeros_for_symmetric_gptq(monkeypatch):
+def test_machete_post_init_discards_loaded_qzeros_for_symmetric_gptq(machete_extension_mocked, monkeypatch):
     module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=128,
@@ -246,7 +269,7 @@ def test_machete_validate_accepts_asymmetric_gptq(monkeypatch):
     assert err is None
 
 
-def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(monkeypatch):
+def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(machete_extension_mocked, monkeypatch):
     module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=64,
@@ -286,7 +309,7 @@ def test_machete_post_init_transforms_loaded_qzeros_for_asymmetric_gptq(monkeypa
     assert module.has_zero_points is True
 
 
-def test_machete_forward_rejects_missing_qzeros_for_asymmetric_gptq():
+def test_machete_forward_rejects_missing_qzeros_for_asymmetric_gptq(machete_extension_mocked):
     module = machete_linear_module.MacheteLinear(
         bits=4,
         group_size=64,
@@ -796,6 +819,10 @@ def _dense_asymmetric_gptq_reference(
 def test_machete_cuda_smoke_build_only_with_forced_arch_override(tmp_path):
     if shutil.which("nvcc") is None:
         pytest.skip("nvcc required")
+    if shutil.which("ninja") is None:
+        # Torch's JIT extension builder shells out to ninja; without it the
+        # build fails with a toolchain error rather than an unavailable kernel.
+        pytest.skip("ninja required for the torch.ops JIT build")
 
     scratch_root = _jit_scratch_root(tmp_path, "machete-build-only")
     env = os.environ.copy()

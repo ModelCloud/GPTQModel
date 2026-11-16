@@ -30,7 +30,6 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
-from ...utils.env import env_flag
 from ...utils.paroquant import (
     apply_paroquant_rotation,
     apply_paroquant_rotation_autograd,
@@ -880,11 +879,7 @@ def _apply_rotation(
     if x.dim() != 2:
         raise ValueError(f"ParoQuant optimization expects a rank-2 tensor, got {tuple(x.shape)}.")
 
-    use_fused_rotation = (
-        env_flag("GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION", default=True)
-        if fused_rotation is None
-        else bool(fused_rotation)
-    )
+    use_fused_rotation = True if fused_rotation is None else bool(fused_rotation)
 
     if use_fused_rotation:
         scale_tensor = None if scales is None else scales.view(1, -1)
@@ -970,13 +965,64 @@ def _calc_affine_qparams(
     group_size: int,
     bits: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute affine quantizer parameters from transformed weights."""
+    """Fit a zero-inclusive affine grid using at least float32 arithmetic.
+
+    The asymmetric code range is ``[0, qmax]`` and the represented value at code
+    ``c`` is ``(c - zero_point) * scale``. Fitting ``scale`` from
+    ``(max - min) / qmax`` and then clamping the zero point into ``[0, qmax]``
+    only works when zero already lies inside ``[min, max]``. A one-sided or
+    constant group (all values positive or all negative) has no representable
+    zero point, so the clamped zero point shifts the grid and the group's values
+    are clipped to 0 or ``qmax``.
+
+    Zero also carries no training signal here: the affine straight-through
+    gradient with respect to ``zero_point_float`` cancels exactly, so a bad
+    initial grid cannot be repaired by the optimizer. Fit the range, zero point
+    and scale jointly instead:
+
+    1. include zero in the fitted range so a valid integer zero point exists;
+    2. round the zero point to that grid;
+    3. re-fit the scale for each side with available codes.
+
+    A small opposite-sign endpoint can round to zero when the integer zero point
+    is 0 or ``qmax``. The existing scale bounds also permit saturation outside
+    the representable range; this is not a lossless quantizer.
+
+    Returns ``(scale, zero_point_float)`` where the runtime code zero point is
+    ``-round(zero_point_float)``. Low-precision weights receive float32 qparams;
+    the pseudo-quantized output retains the weight dtype.
+    """
     view = weight.reshape(-1, group_size)
     min_val = view.amin(dim=1, keepdim=True)
     max_val = view.amax(dim=1, keepdim=True)
+    # Reductions select exact stored values, but the range subtraction and grid
+    # arithmetic must not overflow or round in the model's fp16/bf16 dtype.
+    if weight.dtype in (torch.float16, torch.bfloat16):
+        min_val = min_val.float()
+        max_val = max_val.float()
     qmax = 2**bits - 1
-    scale = (max_val - min_val).clamp(min=1e-5) / qmax
-    zero_point_float = min_val / scale
+    zeros = torch.zeros_like(min_val)
+    # Include zero so a one-sided group still has a representable zero point.
+    low = torch.minimum(min_val, zeros)
+    high = torch.maximum(max_val, zeros)
+    # Normalize before multiplying by qmax so an exactly balanced range keeps
+    # its half-integer zero-point tie instead of dividing by a rounded scale.
+    span = (high - low).clamp(min=1e-5)
+    zero_point = (-low / span * qmax).round().clamp(0, qmax)
+    # Re-fit around the integer zero point without clipping either side that
+    # has a nonzero code budget.
+    negative_scale = torch.where(
+        zero_point > 0,
+        -low / zero_point.clamp(min=1),
+        zeros,
+    )
+    positive_scale = torch.where(
+        zero_point < qmax,
+        high / (qmax - zero_point).clamp(min=1),
+        zeros,
+    )
+    scale = torch.maximum(negative_scale, positive_scale).clamp(min=1e-5, max=1e5)
+    zero_point_float = -zero_point
     return scale, zero_point_float
 
 
@@ -1029,7 +1075,10 @@ class GroupLinearQuantizer(nn.Module):
 
     def pack_params(self, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Convert learned qparams into the runtime scale/zero-point tensors."""
-        scales = _reshape_group_params(weight, self.group_size, self.scale.detach())
+        # Export the effective scale used by pseudo quantization, including
+        # learned parameters that an optimizer moved outside the bounds.
+        bounded_scale = self.scale.detach().clamp(min=1e-5, max=1e5)
+        scales = _reshape_group_params(weight, self.group_size, bounded_scale)
         if self.sym:
             zeros = torch.full_like(scales, 2 ** (self.bits - 1))
         else:
@@ -1131,16 +1180,17 @@ def _maybe_compile_large_train_quant(
     scale: Optional[torch.Tensor] = None,
     zero_point_float: Optional[torch.Tensor] = None,
     use_ste: bool = True,
+    compile_quant: bool = True,
 ) -> torch.Tensor:
-    """Compile only large training-time quant calls where the compile tax amortizes."""
+    """Compile large training calls when explicitly enabled and worth amortizing."""
     global _LARGE_TRAIN_QUANT_COMPILE_DISABLED
 
     should_compile = (
         bool(use_ste)
+        and bool(compile_quant)
         and not _LARGE_TRAIN_QUANT_COMPILE_DISABLED
         and weight.device.type == "cuda"
         and weight.numel() >= _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL
-        and env_flag("GPTQMODEL_PAROQUANT_OPT_LARGE_TRAIN_QUANT_COMPILE", default=True)
     )
     if should_compile:
         compiled = _get_large_train_quant_compile()
@@ -1825,7 +1875,7 @@ def _should_use_paroquant_stage_cudagraph(
     deadlock, so the capture is skipped before it starts.
     """
     if stage_cudagraph is None:
-        stage_cudagraph = env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True)
+        stage_cudagraph = True
     if not bool(stage_cudagraph):
         return False
     if IS_ROCM:

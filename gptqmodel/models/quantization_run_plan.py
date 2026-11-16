@@ -25,6 +25,7 @@ class ProcessorStep(str, Enum):
     GPTQ = "gptq"
     QQQ = "qqq"
     VPTQ = "vptq"
+    MACAQ = "macaq"
     AWQ = "awq"
     PARO = "paroquant"
     EXL3 = "exl3"
@@ -37,6 +38,7 @@ _CALIBRATED_PRIMARY = {
     METHOD.GPTQ: ProcessorStep.GPTQ,
     METHOD.QQQ: ProcessorStep.QQQ,
     METHOD.VPTQ: ProcessorStep.VPTQ,
+    METHOD.MACAQ: ProcessorStep.MACAQ,
     METHOD.AWQ: ProcessorStep.AWQ,
     METHOD.PARO: ProcessorStep.PARO,
     METHOD.EXL3: ProcessorStep.EXL3,
@@ -50,6 +52,7 @@ _CHECKPOINT_ROLE_BY_STEP = {
     ProcessorStep.QQQ: "primary",
     ProcessorStep.AWQ: "primary",
     ProcessorStep.PARO: "primary",
+    ProcessorStep.MACAQ: "primary",
     ProcessorStep.EXL3: "primary",
     ProcessorStep.WEIGHT_ONLY: "primary",
     ProcessorStep.EORA: "secondary",
@@ -60,6 +63,7 @@ _PROCESSOR_TYPES = {
     ProcessorStep.GPTQ: ("gptq_processor", "GPTQProcessor"),
     ProcessorStep.QQQ: ("qqq_processor", "QQQProcessor"),
     ProcessorStep.VPTQ: ("vptq_processor", "VPTQProcessor"),
+    ProcessorStep.MACAQ: ("macaq_processor", "MacaqProcessor"),
     ProcessorStep.AWQ: ("awq_processor", "AWQProcessor"),
     ProcessorStep.PARO: ("paroquant_processor", "ParoQuantProcessor"),
     ProcessorStep.EXL3: ("exllamav3_processor", "EXL3Processor"),

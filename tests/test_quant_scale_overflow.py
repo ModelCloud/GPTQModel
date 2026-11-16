@@ -130,6 +130,48 @@ def test_packer_rejects_scale_lost_at_fp16_storage_boundary(method, scale):
         getattr(module, method)(source, scales, zeros, g_idx)
 
 
+@pytest.mark.parametrize("method", ["pack_block", "pack_original", "pack_gpu"])
+def test_packers_preserve_source_bfloat16_bias_bits(method):
+    if method == "pack_gpu" and not torch.cuda.is_available():
+        pytest.skip("pack_gpu requires a CUDA or ROCm device")
+    device = "cuda" if method == "pack_gpu" else "cpu"
+    source = torch.nn.Linear(
+        32,
+        32,
+        bias=True,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    with torch.no_grad():
+        source.weight.zero_()
+        source.bias.fill_(100000.0)
+
+    module = TorchLinear(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=32,
+        out_features=32,
+        bias=True,
+        name="layer.q_proj",
+    )
+    scales = torch.ones((32, 1), dtype=torch.float32, device=device)
+    zeros = torch.zeros_like(scales)
+    g_idx = torch.zeros(32, dtype=torch.int32, device=device)
+
+    getattr(module, method)(source, scales, zeros, g_idx)
+
+    assert module.bias.dtype is torch.bfloat16
+    assert torch.isfinite(module.bias).all()
+    torch.testing.assert_close(
+        module.bias,
+        source.bias.detach().cpu(),
+        rtol=0,
+        atol=0,
+    )
+
+
 def _packed_words(codes, bits):
     """Independent Python-integer writer, with no production packing helpers."""
     packed = []

@@ -42,18 +42,22 @@ class GlmMoeDsaQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
+            "input_layernorm": ("input_layernorm:!:nosrc",),
             "self_attn": (
                 # GLM-5 / GLM-5.1 use MLA attention plus a DSA indexer. `q_proj`
                 # is an optional fallback path; current public configs use q_a/q_b.
-                "q_proj:0",
-                "q_a_proj:0",
-                "kv_a_proj_with_mqa:0",
-                "indexer.wk:0",
-                "q_b_proj:1:in=q_a",
-                "kv_b_proj:1:in=kv_a",
-                "indexer.wq_b:1",
-                "o_proj:2",
+                "q_a_layernorm:!:nosrc",
+                "kv_a_layernorm:!:nosrc",
+                "indexer.k_norm:!:nosrc",
+                "indexer.weights_proj:!:nosrc",
+                "q_proj:0:nosrc",
+                "q_a_proj:0:nosrc",
+                "kv_a_proj_with_mqa:0:nosrc",
+                "indexer.wk:0:nosrc",
+                "q_b_proj:1:in=q_a:nosrc",
+                "kv_b_proj:1:in=kv_a:nosrc",
+                "indexer.wq_b:1:nosrc",
+                "o_proj:2:nosrc",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {

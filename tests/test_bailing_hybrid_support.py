@@ -45,6 +45,9 @@ def test_bailing_hybrid_simple_layer_modules_cover_attention_and_mlp():
         # MLA extras.
         "self_attn.kv_a_proj_with_mqa",
         "self_attn.kv_b_proj",
+        # Remote-code `bailing_moe` attention layout (Ling 2.0).
+        "attention.query_key_value",
+        "attention.dense",
         # Dense (delta/linear-attention) MLP.
         "mlp.gate_proj",
         "mlp.up_proj",
@@ -64,8 +67,6 @@ def test_bailing_hybrid_simple_layer_modules_cover_attention_and_mlp():
         }
 
     assert expected <= flat_modules
-    assert not any(name.startswith("attention.") for name in flat_modules)
-    assert "attention.query_key_value" not in flat_modules
     # Regression: only the plural `shared_experts` container exists.
     assert not any(name.startswith("mlp.shared_expert.") for name in flat_modules)
 

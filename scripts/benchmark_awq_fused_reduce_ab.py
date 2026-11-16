@@ -133,10 +133,9 @@ def _dense_reference(
 
 
 def _set_fused_reduce_disabled(disabled: bool) -> None:
-    if disabled:
-        os.environ["GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE"] = "1"
-    else:
-        os.environ.pop("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE", None)
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+    configure_kernel(KernelConfig(awq_fused_splitk_reduce=not disabled))
 
 
 def _benchmark_ms(fn, device: torch.device, warmup: int, iters: int, fused_reduce_disabled: bool) -> float:
@@ -168,6 +167,7 @@ def _run_gemm(
     split_k_iters: int,
 ) -> torch.Tensor:
     from gptqmodel.utils.awq import awq_gemm_forward
+    from gptqmodel.utils.kernel import get_kernel_config
 
     return awq_gemm_forward(
         x,
@@ -176,6 +176,7 @@ def _run_gemm(
         qzeros,
         split_k_iters,
         fp32_accum=True,
+        fused_splitk_reduce=get_kernel_config().awq_fused_splitk_reduce,
     )
 
 

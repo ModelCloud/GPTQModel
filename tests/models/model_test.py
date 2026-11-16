@@ -266,6 +266,10 @@ class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE_MIN = 128
     GENERATE_EVAL_SIZE_MAX = 128
     APPLY_CHAT_TEMPLATE = False
+    # ARC accuracy alone never calls `generate()`, so a broken transformers-5
+    # KV-cache contract stays invisible (#4121 item 3). Families that rely on
+    # the remote `prepare_inputs_for_generation` opt in here.
+    ASSERT_INFERENCE = False
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
 
@@ -802,10 +806,14 @@ class ModelTest(unittest.TestCase):
         return flat
 
 
-    def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
+    def assertInference(self, model, tokenizer=None, keywords=None, prompt=None):
         # gptqmodel can auto init tokenizer internally
         if keywords is None:
             keywords = self.INFERENCE_RESULT_KEYWORDS
+        # Resolve from the instance so a family can override the prompt without
+        # inheriting the class-definition-time default.
+        if prompt is None:
+            prompt = self.INFERENCE_PROMPT
         if tokenizer is None:
             tokenizer = model.tokenizer
 
@@ -1006,9 +1014,13 @@ class ModelTest(unittest.TestCase):
             return BACKEND.PARO
         if self.METHOD == METHOD.GGUF:
             return BACKEND.GGUF_TORCH
+        if self.METHOD == METHOD.MACAQ:
+            return BACKEND.MACAQ_TORCH
         return BACKEND.TORCH
 
     def _torch_fused_backend(self) -> BACKEND:
+        if self.METHOD == METHOD.MACAQ:
+            return BACKEND.MACAQ_TORCH
         return BACKEND.TORCH_FUSED_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH_FUSED
 
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
@@ -1027,7 +1039,7 @@ class ModelTest(unittest.TestCase):
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
-        elif format_family == FORMAT.PAROQUANT:
+        elif format_family in (FORMAT.PAROQUANT, FORMAT.VPTQ, FORMAT.MXFP4_MACAQ):
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
@@ -2082,6 +2094,10 @@ class ModelTest(unittest.TestCase):
                         "The Stage-2 evaluation fallback is disabled."
                     )
         self.check_results(task_results)
+        if self.ASSERT_INFERENCE and self.model is not None:
+            # Quantize+ARC passes even when `generate()` cannot run at all;
+            # assert real generated text before the model is released.
+            self.assertInference(self.model)
         self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)
 
     def check_results(self, task_results):

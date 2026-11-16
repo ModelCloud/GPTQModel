@@ -33,7 +33,7 @@ quantizer validated bit-for-bit against the upstream `tt-llk` helpers and fused
 dequantize+GEMM microkernels for scalar, AVX2+FMA and AVX-512. This makes it
 possible to check a converted checkpoint, reproduce a TT numerical result, or
 develop against the block-float formats on a laptop or CI runner. Build it with
-`make -C gptqmodel_ext/ttbfp`; it is not imported by `gptqmodel`. See
+`make -C gptqmodel_ext/ttbfp` for CPU development and testing. See
 [`docs/tt-blockfloat-cpu.md`](tt-blockfloat-cpu.md) for the dtype definition,
 layouts, dispatch, and measured performance.
 
@@ -160,6 +160,49 @@ flowchart LR
 
 A checkpoint whose architecture cannot be resolved fails at save time instead
 of writing an entry point that only loads Llama.
+
+## Block-float kernel dispatch
+
+`TTBlockfloatEmbedding` accepts a wider `block` than the hardware format so a
+converted table can still be exercised on CPU. The native block-float kernels,
+however, bind exactly one exponent per 16 values: `check_exponents()` requires
+`exponents.numel() == rows * (k / 16)`. A wider-block table therefore has no
+native geometry and must stay on the Torch reference path on every device.
+
+```mermaid
+flowchart TD
+    A["TTBlockfloatEmbedding._kernel_embedding"] --> B{"hip_dispatch(ids)"}
+    C["TTBlockfloatTiedHead.forward<br/>embedding._kernel_linear(hidden)"] --> D{"hip_dispatch(hidden)"}
+    B -- "yes: block == 16 and HIP ready" --> E["tt_blockfloat_hip.embedding"]
+    D -- "yes: block == 16 and HIP ready" --> F["tt_blockfloat_hip.linear"]
+    B -- no --> G{"cuda_dispatch(ids)"}
+    D -- no --> H{"cuda_dispatch(hidden)"}
+    G -- "yes: block == 16 and CUDA ready" --> I["tt_blockfloat_cuda.embedding"]
+    H -- "yes: block == 16 and CUDA ready" --> J["tt_blockfloat_cuda.linear"]
+    G -- "no: block != 16" --> K["dequantize + F.embedding"]:::fallback
+    H -- "no: block != 16" --> L["dequantize + F.linear"]:::fallback
+    G -- "no: other unsupported condition" --> K
+    H -- "no: other unsupported condition" --> L
+
+    classDef fallback fill:#fef3c7,stroke:#b45309,color:#78350f;
+```
+
+`cuda_dispatch()` is the CUDA counterpart of the existing `hip_dispatch()`: it
+checks the device, the storage bits, `block == 16`, and only then calls
+`tt_blockfloat_cuda.ready(device)`. The block check runs before readiness so a
+wider block never builds or enters the extension.
+
+| Old mechanism | New mechanism | Evidence |
+| --- | --- | --- |
+| `_kernel_embedding()` checked device, bits, dtype and `ready()`, but not `block` | `cuda_dispatch()` rejects `block != 16` before `ready()` and the native call | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:120-138`, `:454` |
+| `_kernel_linear()` had the same missing gate for the tied head | the same predicate covers the linear path | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:247` |
+| HIP already required `block == 16` | unchanged | `gptqmodel/nn_modules/qlinear/tt_blockfloat.py:102-118` |
+
+The failure path the guard removes: with `block=32`, the table stores
+`in_features // 32` exponents per row, so the native embedding validation
+raises `RuntimeError: exponents must be [rows, k / 16]` instead of returning a
+result. Before this change, the CUDA branch admitted that geometry; the
+Torch fallback is now selected before the native entry point is reached.
 
 ## Native TTNN execution path
 
@@ -565,6 +608,36 @@ upload for the whole model needs those ops on device too — that is a TT-native
 model runner, not a linear replacement, and it is the explicit next step rather
 than something this change claims to have delivered.
 
+## Device-resident Llama decode
+
+`gptqmodel/utils/tt_llama.py` (`TTLlama`) runs Llama prefill and decode on the
+chip for a block-float checkpoint written with `block_axis="out"`. The flow,
+storage lifecycle, paged KV cache, active-row attention and the 8k-64k
+measurements are in [Tenstorrent Llama serving](tt-llama-paged-serving.md).
+`scripts/tt_llama_decode.py` wraps it (`generate`, `bench`, `passkey`).
+
+Short-context throughput, 4x p300c, 32 users per card, one process per card
+(measured with the contiguous-cache runner in #3998):
+
+| context position | per card, traced | 4 cards, traced |
+| --- | --- | --- |
+| 0 | ~3,700 tok/s | 14,840 tok/s |
+| 512 | ~3,050 tok/s | 12,181 tok/s |
+| 1024 | ~2,650 tok/s | 10,625 tok/s |
+
+What was measured to matter:
+
+| lever | effect |
+| --- | --- |
+| out-axis checkpoint | exact upload; an in-axis checkpoint is re-quantized (8 % bf4 output error) |
+| matmul `core_grid` per projection | `down_proj` 0.147 -> 0.048 ms, `o_proj` 0.039 -> 0.019 ms; step 9.2 -> 6.6 ms |
+| trace capture | 16.1 -> 9.2 ms per step before grid tuning |
+| HiFi4 vs HiFi2 | +2 % step time, top-1 96.8 -> 98.1 % |
+| one process per card vs a 1x4 `MeshDevice` | linear scaling vs ~2x slower per step on the mesh |
+| attention over active rows only | one user at 16k: 54 -> 13.5 ms per step |
+| fused gate/up | no gain over two tuned matmuls, not used |
+| bf8 KV cache | 16k full batch 96 -> 61 ms per step; opt-in |
+
 ## GPTQ kernel conversion matrix
 
 `XLALinear` and `TTNNLinear` both declare `DEVICE.XLA`, because Tenstorrent
@@ -689,6 +762,25 @@ that complete set, the script installs the local GPT-QModel checkout with
 PYTHON_BIN="$HOME/.pyenv/versions/3.12.16/bin/python" \
   requirements/install-tenstorrent-py312.sh /path/to/gptqmodel
 ```
+
+### Torch safety gate
+
+The pinned `torch 2.11.0+cpu` is below the patch for
+[GHSA-rrmf-rvhw-rf47](https://github.com/advisories/GHSA-rrmf-rvhw-rf47)
+(CVE-2025-3000), and Tenstorrent's PJRT plugin has no newer compatible
+Torch/XLA stack. This validated environment therefore opts into the documented
+startup-gate override:
+
+```bash
+export GPTQ_BYPASS_SAFETY_CHECKS=1
+```
+
+The installer exports it, verifies that `import gptqmodel` succeeds with it, and
+warns if the import ever starts succeeding without it (which would mean the
+pinned manifest has moved past the advisory range and the override should be
+removed). The override must be set in every shell that imports GPT-QModel from
+this environment. See [PyTorch runtime safety gate](torch-runtime-safety-gate.md)
+for the affected ranges and the override contract.
 
 The validated Python pins are listed below. This records installed package
 versions; it is not permission to replace GPT-QModel's global requirements.
@@ -863,4 +955,3 @@ The following remain future work and are not claimed here:
 - On-device GPTQ quantization and calibration.
 - Promoting `TTNNLinear` into `AUTO`. It stays explicit-only until model-level
   token parity is measured, matching the standard set by `XLALinear`.
-

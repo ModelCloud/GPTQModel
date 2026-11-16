@@ -170,7 +170,7 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
 
     monkeypatch.setattr(qqq_module, "qqq_gemm", fake_gemm)
 
-    x = torch.randn((2, module.in_features), dtype=torch.float32)
+    x = torch.randn((2, module.in_features), dtype=torch.float16)
     out = module(x)
 
     assert calls["gemm"] == {
@@ -188,7 +188,7 @@ def test_qqq_forward_uses_jit_kernel(monkeypatch):
         "max_par": module.max_par,
     }
     assert out.shape == (2, module.out_features)
-    assert out.dtype == torch.float32
+    assert out.dtype == torch.float16
     assert torch.allclose(out, torch.full_like(out, 3.0))
 
 
@@ -269,7 +269,7 @@ def test_qqq_grouped_cuda_matches_torch_rounding_and_saturation():
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("tokens", [1, 17])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
     if torch.cuda.get_device_capability()[0] < 8:
@@ -307,6 +307,21 @@ def test_qqq_grouped_cuda_matches_torch_for_regular_values(tokens, dtype):
 
     assert cuda_output.dtype == dtype
     torch.testing.assert_close(cuda_output, torch_output, rtol=0.02, atol=0.02)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_qqq_grouped_cuda_rejects_bfloat16():
+    """QQQLinear is FP16-only; BF16 callers must use BACKEND.QQQ_TORCH."""
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    module = _build_module()
+    with pytest.raises(NotImplementedError, match="FP16 kernel"):
+        module(torch.randn(2, module.in_features, dtype=torch.bfloat16).cuda())
 
 
 @pytest.mark.cuda

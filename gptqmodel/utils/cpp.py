@@ -383,6 +383,20 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def _source_checkout_root() -> Path:
+    """Root of the checkout whose tracked sources must never be hipified in place."""
+
+    return Path(__file__).resolve().parents[2]
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _torch_ops_file_lock_timeout_seconds() -> float:
     """Resolve how long one process waits on another's in-flight JIT build."""
 
@@ -875,6 +889,9 @@ def rocm_supplemental_device_lib_flags() -> list[str]:
 
 
 _CUDA_ARCH_TOKEN_RE = pcre.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\+PTX)?$")
+_CUDA_ARCH_FLAG_TOKEN_RE = pcre.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<suffix>a?)(?P<ptx>\+PTX)?$"
+)
 
 
 def _supported_cuda_arch_pairs() -> list[tuple[int, int]]:
@@ -930,6 +947,47 @@ def _merge_cuda_arch_override_with_visible_caps(raw_override: str) -> str:
     return ";".join(requested_tokens)
 
 
+def _cuda_arch_flags_for_list(arch_list: str) -> list[str]:
+    """Translate a ``TORCH_CUDA_ARCH_LIST`` string into explicit NVCC flags."""
+
+    flags: list[str] = []
+    seen: set[str] = set()
+    for token in pcre.split(r"[;\s,]+", arch_list.strip()):
+        if not token or token == "native":
+            continue
+        match = _CUDA_ARCH_FLAG_TOKEN_RE.match(token)
+        if not match:
+            continue
+        sm = f"{int(match.group('major'))}{int(match.group('minor'))}{match.group('suffix')}"
+        gencode = f"-gencode=arch=compute_{sm},code=sm_{sm}"
+        if gencode not in seen:
+            flags.append(gencode)
+            seen.add(gencode)
+        if match.group("ptx"):
+            ptx = f"-gencode=arch=compute_{sm},code=compute_{sm}"
+            if ptx not in seen:
+                flags.append(ptx)
+                seen.add(ptx)
+    return flags
+
+
+def _merged_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
+    """Return explicit flags for a merged override, or ``[]`` when Torch owns it.
+
+    Passing these flags through ``extra_cuda_cflags`` makes Torch skip its own
+    ``TORCH_CUDA_ARCH_LIST`` expansion, so the build never has to mutate the
+    process environment while another thread may be compiling.
+    """
+
+    override = os.getenv("TORCH_CUDA_ARCH_LIST")
+    if not override or not merge_visible_caps:
+        return []
+    merged_override = _merge_cuda_arch_override_with_visible_caps(override)
+    if merged_override == override:
+        return []
+    return _cuda_arch_flags_for_list(merged_override)
+
+
 def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
     """Return the effective NVCC arch flags Torch will emit for this host."""
 
@@ -938,35 +996,10 @@ def _effective_cuda_arch_flags(*, merge_visible_caps: bool) -> list[str]:
         if override and merge_visible_caps:
             merged_override = _merge_cuda_arch_override_with_visible_caps(override)
             if merged_override != override:
-                os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
-                try:
-                    return list(_get_cuda_arch_flags())
-                finally:
-                    os.environ["TORCH_CUDA_ARCH_LIST"] = override
+                return _cuda_arch_flags_for_list(merged_override)
         return list(_get_cuda_arch_flags())
     except Exception:
         return []
-
-
-@contextmanager
-def _temporary_merged_cuda_arch_override(*, enabled: bool = True):
-    """Temporarily include the visible CUDA capability in manual arch overrides."""
-
-    override = os.getenv("TORCH_CUDA_ARCH_LIST")
-    if not enabled or not override:
-        yield
-        return
-
-    merged_override = _merge_cuda_arch_override_with_visible_caps(override)
-    if merged_override == override:
-        yield
-        return
-
-    os.environ["TORCH_CUDA_ARCH_LIST"] = merged_override
-    try:
-        yield
-    finally:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = override
 
 
 def resolved_cuda_arch_flags() -> list[str]:
@@ -1130,6 +1163,7 @@ class TorchOpsJitExtension:
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
         prebuilt_library_env: Optional[str] = None,
+        stage_hip_sources: bool = True,
     ) -> None:
         self.name = name
         self.namespace = namespace
@@ -1150,6 +1184,11 @@ class TorchOpsJitExtension:
         self.python_abi_dependent = python_abi_dependent
         self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
         self.prebuilt_library_env = prebuilt_library_env
+        # torch's HIP loader hipifies out-of-tree sources next to the
+        # originals, which mutates (or fails on) a read-only install. Staging
+        # is the default for every HIP build; a caller may only opt out when
+        # the sources live outside the checkout (see ``_stage_hip_sources``).
+        self.stage_hip_sources = bool(stage_hip_sources)
         self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
         self._load_result = False
@@ -1188,6 +1227,120 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return _dedupe_path_strings(include_paths)
         return cuda_include_paths_with_fallback(include_paths)
+
+    def _staging_root(self) -> Path:
+        """Writable directory that receives a copy of the HIP kernel sources."""
+
+        return self.base_build_root() / "_src"
+
+    def _stage_hip_sources(
+        self,
+        sources: Sequence[str],
+        include_paths: Sequence[str],
+    ) -> tuple[list[str], list[str]]:
+        """Copy the source tree into the build cache before hipification.
+
+        torch's ROCm loader writes ``<name>_hip.{hip,cpp}`` next to each source
+        it hipifies. Passing checkout paths directly therefore mutates the
+        shipped ``gptqmodel_ext`` tree -- hipify also rewrites ``cuda`` to
+        ``hip`` in output paths, so a CUDA-only kernel can overwrite a tracked
+        hand-written ``*.hip`` source -- and fails when site-packages is
+        read-only. Every HIP build stages by default; a caller may only opt out
+        when none of its sources or include roots live inside the checkout,
+        because hipifying those in place is always a source-tree mutation.
+
+        The staged tree keeps every generated file under the writable cache and
+        preserves the relative layout so local ``#include`` directives and the
+        caller's include paths keep resolving. Include roots inside the
+        checkout but outside the staged source root (for example Machete's
+        ``gptqmodel_ext`` headers) are staged too, because hipify rewrites
+        every header under its include roots.
+        """
+
+        resolved_sources = [str(source) for source in sources]
+        resolved_includes = [str(path) for path in include_paths]
+        if not IS_ROCM or not resolved_sources:
+            return resolved_sources, resolved_includes
+
+        source_paths = [Path(source).expanduser().resolve(strict=False) for source in resolved_sources]
+        include_paths_resolved = [Path(include).expanduser().resolve(strict=False) for include in resolved_includes]
+        checkout = _source_checkout_root()
+        in_checkout_sources = [path for path in source_paths if _path_is_within(path, checkout)]
+
+        if not self.stage_hip_sources:
+            unsafe = [path for path in [*source_paths, *include_paths_resolved] if _path_is_within(path, checkout)]
+            if unsafe:
+                raise RuntimeError(
+                    f"{self.display_name}: refusing to hipify `{unsafe[0]}` in place inside the "
+                    f"source checkout `{checkout}`; HIP builds must stage their sources. Remove "
+                    f"`stage_hip_sources=False` or choose a build root outside the checkout."
+                )
+            return resolved_sources, resolved_includes
+
+        # Sources that live outside the checkout (for example a downloaded
+        # CUTLASS/Machete generated tree) are already writable and not tracked;
+        # staging them would only copy an unrelated tree. Stage the tracked
+        # sources, or every source when none is inside the checkout (tests and
+        # third-party callers use a scratch tree).
+        staging_root = self._staging_root()
+        # A loader may already stage its own sources (NF12 HIP does). Staging
+        # them again would copy the cache into itself.
+        if all(_path_is_within(path, staging_root) for path in source_paths):
+            source_root = staging_root
+        else:
+            staged_inputs = in_checkout_sources or source_paths
+            source_root = Path(os.path.commonpath([str(path.parent) for path in staged_inputs]))
+            if source_root == Path(source_root.anchor):
+                raise RuntimeError(
+                    f"{self.display_name}: HIP sources span unrelated filesystem roots and cannot be "
+                    f"staged together; move them under one build tree."
+                )
+            if staging_root == source_root or _path_is_within(staging_root, source_root):
+                raise RuntimeError(
+                    f"{self.display_name}: the JIT build root `{staging_root}` is inside the "
+                    f"source tree `{source_root}`; choose a build root outside the checkout."
+                )
+            staging_root.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+
+        def staged(path: Path) -> Path | None:
+            try:
+                relative = path.relative_to(source_root)
+            except ValueError:
+                return None
+            return staging_root / relative
+
+        staged_sources: list[str] = []
+        for path in source_paths:
+            target = staged(path)
+            staged_sources.append(str(target) if target is not None else str(path))
+
+        staged_includes: list[str] = []
+        for include, resolved in zip(resolved_includes, include_paths_resolved):
+            target = staged(resolved) if resolved.exists() else None
+            if target is not None:
+                staged_includes.append(str(target))
+                continue
+            if resolved.exists() and _path_is_within(resolved, checkout):
+                # An include root inside the checkout outside the staged source
+                # root is still hipified in place; stage it under the cache.
+                # Refresh on every call: the cache fingerprint hashes the
+                # *staged* copy, so a stale stage would hide a header edit and
+                # reuse a binary built against the old header.
+                external = staging_root / "_checkout" / resolved.relative_to(checkout)
+                external.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(resolved, external, dirs_exist_ok=True)
+                staged_includes.append(str(external))
+                continue
+            staged_includes.append(include)
+        return staged_sources, _dedupe_path_strings(staged_includes)
+
+    def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
+        """Resolve sources and includes, staging HIP sources when requested."""
+
+        sources = self._resolve_sequence(self.sources)
+        include_paths = self._resolved_extra_include_paths()
+        return self._stage_hip_sources(sources, include_paths)
 
     def _with_stable_abi_target(self, flags: Sequence[str]) -> list[str]:
         resolved = list(flags)
@@ -1451,10 +1604,9 @@ class TorchOpsJitExtension:
         """Hash the effective op surface and source metadata to avoid stale cache reuse."""
 
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
-        sources = self._resolve_sequence(self.sources)
+        sources, include_paths = self._resolved_sources_and_include_paths()
         extra_cflags = self._resolved_extra_cflags()
         extra_cuda_cflags = self._resolved_extra_cuda_cflags()
-        include_paths = self._resolved_extra_include_paths()
         python_abi_dependent, torch_stable_abi = self._resolved_abi_flags(sources, include_paths)
         if python_abi_dependent:
             payload.append(f"python_abi={_python_abi_tag()}")
@@ -1532,6 +1684,45 @@ class TorchOpsJitExtension:
     def _ops_available(self) -> bool:
         namespace = getattr(torch.ops, self.namespace, None)
         return namespace is not None and all(hasattr(namespace, op_name) for op_name in self.required_ops)
+
+    def loadable_without_build(self) -> bool:
+        """Whether a load can succeed without compiling a new binary.
+
+        Mirrors the pre-build stages of :meth:`load`: registered operators and an
+        existing cached binary are authoritative, and a configured prebuilt
+        library disables the source build, so it must exist. Callers use this as
+        a capability probe before selecting a native-only path.
+        """
+
+        configured_prebuilt = self._configured_prebuilt_library()
+        if configured_prebuilt is not None:
+            return configured_prebuilt.is_file()
+        if self._ops_available():
+            return True
+        return any(path.is_file() for path in self._candidate_binary_paths(self.build_root()))
+
+    def configured_prebuilt_library(self) -> Optional[Path]:
+        """Return the explicitly configured prebuilt library, if any."""
+
+        return self._configured_prebuilt_library()
+
+    def cuda_source_build_available(self) -> bool:
+        """Whether torch's CUDA JIT can compile this extension on this host.
+
+        torch's extension loader raises when ``CUDA_HOME`` is unset and needs
+        ``nvcc`` under it plus ``ninja``. A CUDA runtime wheel installed without
+        a toolkit provides neither, so a first-use build is guaranteed to fail;
+        callers use this to keep the portable fallback instead of running
+        native-only assertions.
+        """
+
+        if not self.requires_cuda or not torch.cuda.is_available():
+            return False
+        if not CUDA_HOME:
+            return False
+        if not (Path(CUDA_HOME) / "bin" / "nvcc").is_file():
+            return False
+        return shutil.which("ninja") is not None
 
     def _refresh_runtime_cache(self) -> bool:
         namespace = getattr(torch.ops, self.namespace, None)
@@ -1745,7 +1936,7 @@ class TorchOpsJitExtension:
             )
         return ""
 
-    def load(self) -> bool:
+    def load(self, *, verbose: bool | None = None) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
 
         stable_abi_error = self._stable_abi_runtime_error()
@@ -1849,14 +2040,17 @@ class TorchOpsJitExtension:
                 started = time.perf_counter()
                 build_invocation_succeeded = False
                 try:
-                    resolved_sources = self._resolve_sequence(self.sources)
-                    extra_include_paths = self._resolved_extra_include_paths()
+                    resolved_sources, extra_include_paths = self._resolved_sources_and_include_paths()
                     kwargs = {
                         "name": self.name,
                         "sources": resolved_sources,
                         "build_directory": str(build_root),
                         "is_python_module": False,
-                        "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
+                        "verbose": (
+                            bool(verbose)
+                            if verbose is not None
+                            else (env_flag(self.verbose_env, default=False) if self.verbose_env else False)
+                        ),
                     }
                     extra_cflags = self._resolved_extra_cflags()
                     if extra_cflags:
@@ -1869,10 +2063,15 @@ class TorchOpsJitExtension:
                     extra_ldflags = self._resolved_extra_ldflags()
                     if extra_ldflags:
                         kwargs["extra_ldflags"] = extra_ldflags
-                    with _temporary_merged_cuda_arch_override(
-                        enabled=self.merge_visible_cuda_arch_override
-                    ):
-                        load(**kwargs)
+                    arch_flags = _merged_cuda_arch_flags(
+                        merge_visible_caps=self.merge_visible_cuda_arch_override
+                    )
+                    if arch_flags:
+                        # Explicit arch flags make Torch skip its own env-based
+                        # expansion; never mutate TORCH_CUDA_ARCH_LIST for the
+                        # duration of a multi-minute JIT build.
+                        kwargs["extra_cuda_cflags"] = [*extra_cuda_cflags, *arch_flags]
+                    load(**kwargs)
                     build_invocation_succeeded = True
                 except Exception as exc:  # pragma: no cover - build depends on host toolchain
                     elapsed = time.perf_counter() - started
@@ -1953,6 +2152,33 @@ class TorchOpsJitExtension:
         op = getattr(namespace, op_name)
         self._op_cache[op_name] = op
         return op
+
+
+def loaded_op(extension: "TorchOpsJitExtension", op_name: str):
+    """Return a handle from an already-loaded extension without touching the loader.
+
+    The dispatch wrappers call this on the hot path so a forward does not pay
+    for extension-name normalization, two ``import_module`` calls, the build
+    lock, support probes, or ``os.environ`` rebuild checks. ``None`` means the
+    extension has no live torch.ops namespace yet (or the op is not part of the
+    loaded library), and the caller must fall back to the loader.
+
+    ``TorchOpsJitExtension.clear_cache()`` resets ``_namespace_cache`` and
+    ``_op_cache``, so every ``clear_*_extension_cache()`` invalidates this fast
+    path as well.
+    """
+
+    namespace = getattr(extension, "_namespace_cache", None)
+    if namespace is None:
+        return None
+    op = extension._op_cache.get(op_name)
+    if op is not None:
+        return op
+    op = getattr(namespace, op_name, None)
+    if op is None:
+        return None
+    extension._op_cache[op_name] = op
+    return op
 
 
 def safe_load_cpp_ext(
@@ -2151,17 +2377,11 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     try:
         from gptqmodel import extension as extension_api
 
-        previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
-        if verbose:
-            os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
-        try:
-            _PACK_BLOCK_EXTENSION = extension_api.load(name="pack_block_cpu")["pack_block_cpu"]
-        finally:
-            if verbose:
-                if previous_verbose is None:
-                    os.environ.pop("GPTQMODEL_EXT_VERBOSE", None)
-                else:
-                    os.environ["GPTQMODEL_EXT_VERBOSE"] = previous_verbose
+        # Pass verbosity explicitly instead of rewriting the process-wide
+        # environment for the duration of a JIT build.
+        _PACK_BLOCK_EXTENSION = extension_api.load(
+            name="pack_block_cpu", verbose=True if verbose else None
+        )["pack_block_cpu"]
         log.debug("pack_block_cpu extension loaded from %s", source_path)
     except Exception as exc:  # pragma: no cover - environment-specific
         log.debug("pack_block_cpu extension build failed: %s", exc)
@@ -2185,17 +2405,9 @@ def load_floatx_cpu_extension(*, verbose: bool = False) -> Optional[object]:
     try:
         from gptqmodel import extension as extension_api
 
-        previous_verbose = os.environ.get("GPTQMODEL_EXT_VERBOSE")
-        if verbose:
-            os.environ["GPTQMODEL_EXT_VERBOSE"] = "1"
-        try:
-            extension = extension_api.load(name="floatx_cpu")["floatx_cpu"]
-        finally:
-            if verbose:
-                if previous_verbose is None:
-                    os.environ.pop("GPTQMODEL_EXT_VERBOSE", None)
-                else:
-                    os.environ["GPTQMODEL_EXT_VERBOSE"] = previous_verbose
+        extension = extension_api.load(
+            name="floatx_cpu", verbose=True if verbose else None
+        )["floatx_cpu"]
         log.debug("floatx_cpu extension loaded from %s", source_path)
         return extension
     except Exception as exc:  # pragma: no cover - environment-specific

@@ -10,6 +10,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class JambaQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"jamba"})
+
     # `feed_forward` is the MoE root on sparse layers, so the fusion planner
     # must not treat it as a dense gate/up parent. Only attention is admitted.
     fusable = FusableConfig("jamba").merge(LlamaFusableConfig(), profiles=("qkv",))
@@ -37,8 +39,14 @@ class JambaQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "mamba": ("in_proj:0", "out_proj:1"),
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
+            # `x_proj` consumes the convolved `in_proj` output and `out_proj`
+            # consumes the SSM output built from `x_proj`. Declaring `x_proj`
+            # keeps it inside the quantization plan instead of silently
+            # leaving a called `nn.Linear` unquantized.
+            # `conv1d` and `dt_proj` are checkpoint-owned but are not part of
+            # the quantizable projection plan.
+            "mamba": ("in_proj:0", "x_proj:1", "out_proj:2", "conv1d:!", "dt_proj:!"),
             "pre_ff_layernorm": ("pre_ff_layernorm:!",),
             # Expert layers route through `feed_forward.experts`, while dense
             # layers keep the projections directly on `feed_forward`. The
@@ -49,9 +57,9 @@ class JambaQModel(BaseQModel):
                 # so its weight is owned by the plan rather than undeclared.
                 "router:!": (),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         },
     ]

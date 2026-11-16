@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -64,6 +65,64 @@ def test_causal_conv1d_update_supports_state_indices_and_cache_seqlens():
 
     torch.testing.assert_close(out, expected_out)
     torch.testing.assert_close(conv_state, expected_state)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_causal_conv1d_update_chunk_longer_than_state_keeps_newest_tokens(device):
+    """Regression for #3868: duplicate circular indices raced on CUDA."""
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    state = torch.zeros(1, 1, 2, device=device)
+    weight = torch.tensor([[1.0, 0.0, 0.0]], device=device)
+
+    first = causal_conv1d.causal_conv1d_update(
+        torch.tensor([[[1.0, 2.0, 3.0, 4.0]]], device=device),
+        state,
+        weight,
+        cache_seqlens=torch.tensor([0], device=device),
+    )
+    assert first.tolist() == [[[0.0, 0.0, 1.0, 2.0]]]
+    # Only the final two tokens fit in the cache.
+    assert state.tolist() == [[[3.0, 4.0]]]
+
+    next_out = causal_conv1d.causal_conv1d_update(
+        torch.tensor([[5.0]], device=device),
+        state,
+        weight,
+        cache_seqlens=torch.tensor([4], device=device),
+    )
+    assert next_out.tolist() == [[3.0]]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_causal_conv1d_update_long_chunk_wraps_to_unique_indices(device):
+    """A chunk longer than the cache must still land on unique slots."""
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    state = torch.zeros(1, 1, 4, device=device)
+    weight = torch.tensor([[1.0, 0.0, 0.0]], device=device)
+
+    causal_conv1d.causal_conv1d_update(
+        torch.tensor([[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]], device=device),
+        state,
+        weight,
+        cache_seqlens=torch.tensor([3], device=device),
+    )
+    # Tokens 1..6 start at slot 3: 1->3, 2->0, 3->1, 4->2, 5->3, 6->0.
+    # The surviving state is tokens 3..6 in circular order.
+    assert state.tolist() == [[[6.0, 3.0, 4.0, 5.0]]]
+
+    next_out = causal_conv1d.causal_conv1d_update(
+        torch.tensor([[7.0]], device=device),
+        state,
+        weight,
+        cache_seqlens=torch.tensor([9], device=device),
+    )
+    assert next_out.tolist() == [[5.0]]
 
 
 def test_local_mamba_chunk_scan_combined_returns_expected_state():

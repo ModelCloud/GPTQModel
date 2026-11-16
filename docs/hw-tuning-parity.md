@@ -54,7 +54,7 @@ the pipeline is registered in `TUNED_PIPELINES` — but its *default* is
 family-dependent rather than unconditional. On ROCm the fused Triton GEMM
 replaces the vendor HIP kernel for `M >= 16` (2.4x-6.3x on gfx1201). On Ada
 the vendor cuBLAS path wins on every shape tested, so the `ada` entry exists
-for the contract and for forced A/B runs behind `GPTQMODEL_BNB_TRITON=1`, not
+for the contract and for forced A/B runs behind `KernelConfig(bitsandbytes_triton=True)`, not
 as the default. Below `M = 16` bitsandbytes' own GEMV is kept on both
 families. Parity here means *a measured tile exists and is gated*, not that
 every family ships it enabled.

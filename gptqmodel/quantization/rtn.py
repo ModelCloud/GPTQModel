@@ -20,7 +20,7 @@ from ..looper.named_module import NamedModule
 from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
-from .quantizer import HF_OPTIMUM, Quantizer
+from .quantizer import HF_OPTIMUM, SCALE_STORAGE_FLOOR, Quantizer
 
 
 _MLX_RTN_MIN_ELEMENTS = 256 * 1024
@@ -214,6 +214,7 @@ class RTN:
                         maxq,
                         steps=mse_steps,
                         maxshrink=mse_maxshrink,
+                        eps=SCALE_STORAGE_FLOOR,
                     )
                 else:
                     block_mod, scale_factor = smooth_block(
@@ -221,7 +222,18 @@ class RTN:
                         self._primary,
                         group_size=effective_group_size,
                     )
-                    self.quantizer.find_params(block_mod, weight=True)
+                    # Row/column smoothing restores ``scale_factor`` after
+                    # quantization, so bound the normalized scale in the final
+                    # weight domain before selecting codes.
+                    scale_min = (
+                        SCALE_STORAGE_FLOOR if scale_factor is None
+                        else SCALE_STORAGE_FLOOR / scale_factor
+                    )
+                    self.quantizer.find_params(
+                        block_mod,
+                        weight=True,
+                        scale_min=scale_min.flatten() if isinstance(scale_min, torch.Tensor) else scale_min,
+                    )
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale
                     zero = self.quantizer.zero
@@ -252,12 +264,15 @@ class RTN:
 
         module_name = self._named_module.full_name if self._named_module is not None else self.name
         if gsq_enabled_for(self.qcfg.gsq, module_name):
+            packing = {FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
+                       FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}.get(
+                           self.qcfg.format, "gptq")
             fitted = refine_affine_scalar(
                 quantized.to(self.module.weight.dtype), scale, zero, g_idx,
                 target=weights[:, :valid_cols], bits=self.qcfg.bits, config=self.qcfg.gsq,
-                packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
-                         FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}.get(
-                             self.qcfg.format, "gptq"),
+                packing=packing,
+                scale_dtype=(scale.dtype if packing == "awq_gemm" and
+                             scale.dtype in (torch.float16, torch.bfloat16) else torch.float16),
             )
             quantized, scale, zero, g_idx = fitted.weight, fitted.scales, fitted.zeros, fitted.g_idx
             self.gsq_diagnostics = {

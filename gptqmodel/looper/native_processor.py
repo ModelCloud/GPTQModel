@@ -34,6 +34,11 @@ class NativeProcessor(LoopProcessor):
             required=True,
             replay_after_process=False,
             all_modules_in_single_pass=True,
+            # This pass only records raw inputs. No quantization task follows
+            # it, so a packed AUTO_NF12 wrapper would stay in the model tree and
+            # the quantizer would find a parameterless module instead of the
+            # dense source.
+            allow_auto_dtype_cast=False,
         ),
     )
 
@@ -54,6 +59,47 @@ class NativeProcessor(LoopProcessor):
         )
 
         self.native_inp_caches = {}
+        # GPTAQ and FOEM (alpha > 0) consume one native entry per *sample*:
+        # GPTQProcessor preserves the batch keep-mask and calls `add_batch`
+        # once per sample, while this processor captures one entry per
+        # forward batch. Capturing per sample here keeps the two lists
+        # aligned; other quantizers still receive one entry per batch.
+        foem = getattr(qcfg, "foem", None)
+        self._native_per_sample = bool(
+            getattr(qcfg, "gptaq", None) is not None
+            or (foem is not None and getattr(foem, "alpha", 0) != 0)
+        )
+        # Preserve the raw [B, S, H] input so the per-sample keep-mask can be
+        # applied here exactly as GPTQProcessor applies it to its own input.
+        self.preserve_batch_keep_mask = self._native_per_sample
+
+    @staticmethod
+    def _split_batch_samples(inp: torch.Tensor, keep_mask, target_device) -> list:
+        """Split one forward batch into per-sample masked native entries.
+
+        ``keep_mask`` is the ``[B, S]`` sequence mask GPTQProcessor uses for
+        the same forward pass. Samples with no kept tokens are skipped, which
+        mirrors GPTQProcessor's per-sample `add_batch` calls. A missing or
+        non-matching mask keeps the historical one-entry-per-batch layout.
+        """
+
+        if (
+            not torch.is_tensor(inp)
+            or inp.dim() < 3
+            or not torch.is_tensor(keep_mask)
+            or keep_mask.ndim != 2
+            or keep_mask.shape[0] != inp.shape[0]
+            or keep_mask.shape[1] != inp.shape[1]
+        ):
+            return [inp.to(device=target_device)]
+
+        mask = keep_mask.to(device=inp.device, dtype=torch.bool)
+        entries = []
+        for sample_index, sample_has_tokens in enumerate(mask.any(dim=1).tolist()):
+            if not sample_has_tokens:
+                continue
+            entries.append(inp[sample_index][mask[sample_index]].to(device=target_device))
+        return entries
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because capture setup is fixed at construction."""
@@ -61,9 +107,18 @@ class NativeProcessor(LoopProcessor):
         raise NotImplementedError("NativeProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule):
-        """Allocates the per-module cache used by the forward hook."""
+        """Allocates the per-module cache used by the forward hook.
 
-        self.native_inp_caches[module.name] = []
+        Routed experts are marked by the module plan before this runs. Their
+        native inputs cannot be paired with the quantized-path inputs (the
+        router sends a different token subset), so GPTAQ/FOEM fall back to
+        ``dXXT = 0`` for them and the capture is skipped to save memory. The
+        empty list keeps ``module.state`` shape-compatible for the consumers.
+        """
+
+        self.native_inp_caches[module.name] = (
+            None if module.state.get("is_routed_expert", False) else []
+        )
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports that native input capture currently runs for every eligible module."""
@@ -76,6 +131,10 @@ class NativeProcessor(LoopProcessor):
 
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Copies the module input to the configured GPTAQ staging device."""
+
+            if self.native_inp_caches.get(name) is None:
+                # Routed expert: native and quantized routing differ.
+                return
 
             # gptq is mutable.
             inp = inp[0].detach()
@@ -98,7 +157,17 @@ class NativeProcessor(LoopProcessor):
             else:
                 target_device = DEVICE_1
 
-            self.native_inp_caches[name] += [inp.to(device=target_device)]
+            if self._native_per_sample:
+                keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+                entries = self._split_batch_samples(inp, keep_mask, target_device)
+                # Tag each per-sample entry with the calibration batch it came
+                # from. GPTAQ/FOEM replay batches can complete out of order
+                # across devices, so the consumer must pair by this key rather
+                # than by list position.
+                batch_index = self.current_batch_index()
+                self.native_inp_caches[name] += [(batch_index, entry) for entry in entries]
+            else:
+                self.native_inp_caches[name] += [inp.to(device=target_device)]
             del inp, out
 
         return tmp
@@ -114,7 +183,7 @@ class NativeProcessor(LoopProcessor):
     ):
         """Moves the captured input list into module state for downstream use."""
 
-        module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name)
+        module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name) or []
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Clears cached native inputs after module finalization."""

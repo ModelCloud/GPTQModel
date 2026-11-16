@@ -17,6 +17,11 @@ from ..fusable import FusableConfig, LlamaFusableConfig
 class ApertusQModel(BaseQModel):
     fusable = FusableConfig("apertus").merge(LlamaFusableConfig(), profiles=("qkv",))
 
+    # q/k/v share the post-norm hidden state. Apertus' MLP has no gate projection,
+    # so there is no gate/up pair to tag. Verified against a real (tiny, CPU)
+    # forward in tests/module_tree/test_shared_input_cpu_forward.py.
+    shared_input_verified_model_types = frozenset({"apertus"})
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
@@ -24,10 +29,13 @@ class ApertusQModel(BaseQModel):
         "layers",
         "#",
         {
-            "attention_layernorm": ("attention_layernorm:!"),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "feedforward_layernorm": ("feedforward_layernorm:!"),
-            "mlp": ("up_proj:0", "down_proj:1"),
+            "attention_layernorm": ("attention_layernorm:!",),
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
+            "feedforward_layernorm": ("feedforward_layernorm:!",),
+            # The MLP activation (xIELU by default) is not positively
+            # homogeneous, so ``up_proj`` cannot be an AWQ scale source for
+            # ``down_proj``.
+            "mlp": ("up_proj:0:nosrc", "down_proj:1"),
         }
     ]
 
@@ -56,15 +64,15 @@ class Apertus1p5QModel(BaseQModel):
         {
             "attention_layernorm": ("attention_layernorm:!",),
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:in=x",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
                 "q_norm:!",
                 "k_norm:!",
                 "o_proj:1",
             ),
             "feedforward_layernorm": ("feedforward_layernorm:!",),
-            "mlp": ("up_proj:0", "down_proj:1"),
+            "mlp": ("up_proj:0:nosrc", "down_proj:1"),
         },
     ]
 

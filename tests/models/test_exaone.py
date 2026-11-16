@@ -20,6 +20,7 @@ class TestExaone(ModelTest):
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
+    ASSERT_INFERENCE = True
 
     @classmethod
     def setUpClass(cls):

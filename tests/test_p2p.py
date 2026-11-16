@@ -6,6 +6,7 @@
 import subprocess
 import sys
 import textwrap
+import threading
 
 import pytest
 import torch
@@ -128,6 +129,103 @@ def test_enable_peer_access_idempotent(monkeypatch):
     assert second is first
     # Cached: no second enablement call per direction.
     assert sorted(calls) == [(0, 1), (1, 0)]
+
+
+def test_policy_change_invalidates_a_cached_verdict(monkeypatch):
+    """A cached classification must not survive a stricter policy (#3947)."""
+
+    _fake_topology(
+        monkeypatch,
+        {(0, 1): True, (1, 0): True},
+        bandwidth=lambda src, dst: (10.0, 1.0),
+    )
+
+    p2p.configure_p2p({"probe": True, "min_gbps": 5.0})
+    loose = p2p.enable_peer_access([0, 1])
+    assert loose.state(0, 1) == p2p.STATE_ENABLED
+
+    # Same measured 10 GB/s link, stricter gate: it is not fast enough now.
+    p2p.configure_p2p({"probe": True, "min_gbps": 20.0})
+    strict = p2p.enable_peer_access([0, 1])
+
+    assert strict is not loose
+    assert strict.state(0, 1) == p2p.STATE_DEGRADED
+
+
+def test_policy_change_during_a_probe_does_not_cache_a_stale_verdict(monkeypatch):
+    """A probe that finishes after reconfiguration must not repopulate the cache.
+
+    ``configure_p2p`` swaps the policy and clears the cache. A probe that was
+    already running under the previous policy used to finish afterwards and
+    reinsert its verdict, so a stricter ``min_gbps`` gate was silently bypassed
+    for that device pair. The interleaving below is deterministic: thread A is
+    parked inside the bandwidth probe while thread B installs the new policy.
+    """
+
+    started = threading.Event()
+    release = threading.Event()
+    probes = {"count": 0}
+
+    def slow_bandwidth(src, dst):
+        probes["count"] += 1
+        if probes["count"] == 1:
+            started.set()
+            # Bounded so a stuck probe fails the test instead of hanging it.
+            assert release.wait(10), "the reconfiguration never released the probe"
+        return 10.0, 1.0
+
+    _fake_topology(
+        monkeypatch,
+        {(0, 1): True, (1, 0): True},
+        bandwidth=slow_bandwidth,
+    )
+
+    p2p.configure_p2p({"probe": True, "min_gbps": 5.0})
+
+    verdicts = {}
+
+    def probe_under_loose_policy():
+        verdicts["loose"] = p2p.enable_peer_access([0, 1])
+
+    worker = threading.Thread(target=probe_under_loose_policy, name="p2p-probe")
+    worker.start()
+    assert started.wait(10), "the probe never started"
+
+    # Thread B: 10 GB/s is below this new 20 GB/s gate.
+    p2p.configure_p2p({"probe": True, "min_gbps": 20.0})
+    release.set()
+    worker.join(10)
+    assert not worker.is_alive(), "the probe thread hung"
+
+    # The in-flight verdict is still returned to its own caller, which measured
+    # under the policy it started with...
+    assert verdicts["loose"].state(0, 1) == p2p.STATE_ENABLED
+
+    # ...but it is not reused under the policy that replaced it.
+    current = p2p.enable_peer_access([0, 1])
+    assert current is not verdicts["loose"]
+    assert current.state(0, 1) == p2p.STATE_DEGRADED
+
+
+def test_status_cache_is_keyed_by_policy_generation(monkeypatch):
+    """The cache key must include the policy generation, not only the devices."""
+
+    _fake_topology(
+        monkeypatch,
+        {(0, 1): True, (1, 0): True},
+        bandwidth=lambda src, dst: (10.0, 1.0),
+    )
+
+    p2p.configure_p2p({"probe": True, "min_gbps": 5.0})
+    p2p.enable_peer_access([0, 1])
+    first_generation = p2p._policy_snapshot()[0]
+    assert any(key[0] == first_generation for key in p2p._STATUS_CACHE)
+
+    p2p.configure_p2p({"probe": True, "min_gbps": 20.0})
+    second_generation = p2p._policy_snapshot()[0]
+    assert second_generation > first_generation
+    # The clear removed the old entries, so nothing can be answered from them.
+    assert not any(key[0] == first_generation for key in p2p._STATUS_CACHE)
 
 
 def test_p2p_config_disable(monkeypatch):
@@ -799,12 +897,25 @@ def _activate_rocm_non_native_guard(monkeypatch):
     p2p.clear_p2p_cache()
 
 
-def _activate_pytorch_enablement(monkeypatch):
-    """Force the "PyTorch owns enablement" condition on any test host."""
+def _activate_pytorch_enablement(monkeypatch, *, ndev=2, capability=None):
+    """Force the "PyTorch owns enablement" condition on any test host.
+
+    These are policy-only tests: the allocator and raw-copy predicates are
+    replaced, so the link verdict must not depend on how many GPUs the host
+    actually has. Install a synthetic peer topology alongside the policy stubs.
+    """
 
     monkeypatch.setattr(p2p, "_raw_peer_copy_unsafe", lambda: True)
     monkeypatch.setattr(p2p, "_rocm_peer_link_unusable", lambda: False)
     monkeypatch.setattr(p2p, "_pytorch_owns_peer_enablement", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: ndev)
+    peers = capability if capability is not None else {(0, 1): True, (1, 0): True}
+    monkeypatch.setattr(
+        torch.cuda,
+        "can_device_access_peer",
+        lambda src, dst: bool(peers.get((src, dst), False)),
+    )
     p2p.clear_p2p_cache()
 
 
@@ -887,6 +998,16 @@ def test_pytorch_enablement_keeps_direct_moves(monkeypatch):
 
     assert p2p.can_transfer_directly("cuda:0", "cuda:1") is True
     assert p2p.can_transfer_directly("cuda:1", "cuda:0") is True
+
+
+def test_pytorch_enablement_verdict_follows_the_synthetic_topology(monkeypatch):
+    """The verdict must come from the stubbed topology, not the host GPU count."""
+
+    _activate_pytorch_enablement(monkeypatch, capability={})
+
+    assert p2p.can_transfer_directly("cuda:0", "cuda:1") is False
+    # A single-device host cannot have this pair, so a same-device query stays safe.
+    assert p2p.can_transfer_directly("cuda:0", "cuda:0") is True
 
 
 def test_pytorch_enablement_withholds_only_the_raw_copy(monkeypatch):

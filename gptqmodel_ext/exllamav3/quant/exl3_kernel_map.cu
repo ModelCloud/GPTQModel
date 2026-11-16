@@ -3,6 +3,8 @@
 #include <c10/util/Exception.h>
 #include <cstdint>
 #include <map>
+#include <mutex>
+#include <shared_mutex>
 
 #include "../util.h"
 #include "exl3_devctx.cuh"
@@ -26,8 +28,21 @@ struct TPackedTable
     const uint16_t* payload;
 };
 
+// The tuned-kernel cache is process-wide and is filled on first use, so GIL=0
+// callers can reach it from several threads at once.  An unsynchronized
+// find/insert pair on a std::map is a data race that can corrupt the container.
+// The steady state only reads, so a shared lock keeps concurrent dispatches
+// parallel and the exclusive lock is taken only to publish a new key.  std::map
+// nodes are stable and nothing erases, so the pointer returned to the caller
+// stays valid after the lock is released.
 std::map<uint64_t, TResult> tuning_cache = {};
-TResult forced_result;
+std::shared_mutex tuning_cache_mutex;
+
+// The forced-shape result is written per call, so it cannot be shared between
+// threads: a second caller would overwrite the record the first is still
+// reading.  Thread-local storage gives each caller its own record and keeps the
+// existing pointer-returning contract.
+thread_local TResult forced_result;
 
 int exl3_gemm_tilesize_k[] = {EXL3_GEMM_TILESIZE_K};
 int exl3_gemm_tilesize_n[] = {EXL3_GEMM_TILESIZE_N};
@@ -170,6 +185,22 @@ TResult* select_exl3_gemm_kernel_tuned
                    (((uint64_t) cb)     <<  1) |
                    (c_fp32 ? 0x01ull : 0x00ull);
 
+    // Steady state: a shared lock, so dispatches for keys that are already
+    // cached still run in parallel.  std::map nodes are stable and nothing
+    // erases, so the returned pointer stays valid after the lock is released.
+    {
+        std::shared_lock<std::shared_mutex> guard(tuning_cache_mutex);
+        auto lookup = tuning_cache.find(key);
+        if (lookup != tuning_cache.end())
+        {
+            return &(lookup->second);
+        }
+    }
+
+    // First use of this key: build the record and publish it under the exclusive
+    // lock, so no concurrent reader can observe a half-written entry.  Re-check
+    // first, because another thread may have inserted while this one waited.
+    std::unique_lock<std::shared_mutex> guard(tuning_cache_mutex);
     auto lookup = tuning_cache.find(key);
     if (lookup == tuning_cache.end())
     {
@@ -190,14 +221,13 @@ TResult* select_exl3_gemm_kernel_tuned
         int max_slices = size_k / tilesize_k * size_n / tilesize_n;
         int num_sms = MAX(MIN(max_slices, tuned_num_sms), 1);
 
-        tuning_cache[key] = TResult {
+        lookup = tuning_cache.emplace(key, TResult {
             get_gemm_kernel_ptr(K, shape_idx, c_fp32, cb),
             shape_idx,
             num_sms,
             exl3_gemm_blockdim[shape_idx]
-        };
+        }).first;
     }
 
-    lookup = tuning_cache.find(key);
     return &(lookup->second);
 }

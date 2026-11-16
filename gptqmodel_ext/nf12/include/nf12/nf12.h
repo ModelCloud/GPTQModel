@@ -26,7 +26,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef NF12_HIP
+/* ROCm build: the torch extension is backend-agnostic (it calls this API), so
+ * provide the CUDA spellings the shared C++ layer uses as HIP aliases. This is
+ * a type alias, not a second implementation. */
+#include <hip/hip_runtime_api.h>
+typedef hipStream_t cudaStream_t;
+typedef hipError_t cudaError_t;
+#define cudaSuccess hipSuccess
+#define cudaErrorNotSupported hipErrorNotSupported
+#define cudaGetErrorString hipGetErrorString
+#define cudaMemcpyAsync hipMemcpyAsync
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaStreamSynchronize hipStreamSynchronize
+#else
 #include <cuda_runtime_api.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +89,16 @@ nf12_status_t nf12_encode(const void* w_bf16, int64_t n, int64_t k, int64_t ldw,
 
 /* Row-major BF16 output [n, k], with row stride ldo in elements. */
 nf12_status_t nf12_decode(const nf12_weight_t* w, void* out_bf16, int64_t ldo, cudaStream_t stream);
+
+/* Row-major FP32 output [n, k], with row stride ldo in elements. Same elements
+ * as nf12_decode widened exactly (BF16 -> FP32 is a bit shift), so no BF16
+ * matrix is materialized. out_fp32 must be 32-byte aligned. */
+nf12_status_t nf12_decode_fp32(const nf12_weight_t* w, void* out_fp32, int64_t ldo, cudaStream_t stream);
+
+/* out_fp32 = decode_fp32(W) - wq_fp32, fused so the FP32 source copy is never
+ * materialized. wq_fp32 and out_fp32 are row-major [n, k] and must not alias. */
+nf12_status_t nf12_sub_fp32(const nf12_weight_t* w, const void* wq_fp32, void* out_fp32, int64_t ldo,
+                            cudaStream_t stream);
 
 /* y = x @ W.T + bias, with BF16 input/output and FP32 accumulation.
  * x is [m, k], y is [m, n], and ldx/ldy are row strides in elements. bias may be NULL.

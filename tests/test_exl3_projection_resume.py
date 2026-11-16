@@ -29,6 +29,7 @@ from gptqmodel.utils.exl3_projection_checkpoint import (
     EXL3ProjectionCheckpointStore,
     build_projection_request,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 class _Capture:
@@ -217,7 +218,7 @@ def test_process_resumes_from_packed_checkpoint_without_requantizing(
             route_evidence=None,
         )
     )
-    monkeypatch.setenv("GPTQMODEL_EXL3_CAPTURE_FRONTIER", str(frontier_root))
+    configure_kernel(KernelConfig(exl3_capture_frontier=str(frontier_root)))
 
     def fail_requantization(*args, **kwargs):
         raise AssertionError("checkpoint hit attempted to run trellis quantization")
@@ -313,8 +314,12 @@ def test_capture_memory_limit_trims_only_unallocated_cuda_cache(
         return next(summaries)
 
     processor.log_capture_memory_summary = log_summary
-    monkeypatch.setenv(processor_module.HOST_RSS_LIMIT_ENV, "200")
-    monkeypatch.setenv(processor_module.CUDA_ALLOCATION_LIMIT_ENV, "90")
+    configure_kernel(
+        KernelConfig(
+            exl3_host_rss_limit_bytes=200,
+            exl3_cuda_allocation_limit_bytes=90,
+        )
+    )
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: trims.append(True))
 
     result = processor._enforce_capture_memory_limits(context="batch-64")

@@ -400,10 +400,23 @@ def test_awq_layer_train_mode_uses_differentiable_dequant_path(bias):
     assert layer.linear_mode == "train"
     assert layer._cpu_transformed is True
     assert output.dtype == torch.bfloat16
-    reference = x.detach() @ weight
+    # The training fallback reduces in FP32 and rounds once, so the reference
+    # must not add a BF16 accumulation round of its own: ``x @ weight`` in BF16
+    # differs from that by a full output ulp.
+    reference = x.detach().float() @ weight.float()
     if bias:
-        reference = (reference.float() + layer.bias.float()).to(torch.bfloat16)
-    torch.testing.assert_close(output, reference, atol=2e-3, rtol=2e-3)
+        reference = reference + layer.bias.float()
+    reference = reference.to(torch.bfloat16)
+    visible_ulp = (
+        torch.nextafter(reference, torch.full_like(reference, float("inf"))).float()
+        - reference.float()
+    ).abs().max().item()
+    torch.testing.assert_close(
+        output.float(),
+        reference.float(),
+        rtol=0,
+        atol=max(visible_ulp, torch.finfo(torch.bfloat16).tiny),
+    )
     expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
     torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
 
@@ -612,7 +625,10 @@ def test_aten_awq_layer_matches_affine_oracle(dtype, checkpoint_scale_dtype):
     assert layer.linear_mode == "inference"
     assert layer._cpu_transformed is True
     assert layer._cpu_transform_dtype == dtype
-    assert layer.scales.dtype == torch.float32
+    # The checkpoint scale buffer keeps the dtype it was loaded with (#4178);
+    # the wider FP32 affine metadata is the packed runtime tensor.
+    assert layer.scales.dtype == checkpoint_scale_dtype
+    assert layer.scales_and_zeros.dtype == torch.float32
     torch.testing.assert_close(output, reference_fp32.to(dtype), atol=2e-3, rtol=2e-3)
     normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
     assert normalized_error.item() < 2e-3
