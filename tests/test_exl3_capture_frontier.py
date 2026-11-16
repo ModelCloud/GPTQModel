@@ -12,7 +12,6 @@ import pytest
 import torch
 
 import gptqmodel.utils.exl3_capture_frontier as frontier_module
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureDescriptor,
@@ -20,6 +19,7 @@ from gptqmodel.utils.exl3_capture_frontier import (
     EXL3CaptureFrontierStore,
     EXL3CaptureState,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 FAMILY_JOIN = {"source": {"revision": "test"}, "corpus": {"sha256": "a" * 64}}
