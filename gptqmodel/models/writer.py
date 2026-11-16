@@ -2455,6 +2455,12 @@ def ModelWriter(cls):
 
     def get_model_with_quantize(self, qcfg, model_id_or_path):
 
+        # Re-saving a loaded quantized model rebuilds the shell here. transformers'
+        # ``from_config`` wraps construction in ``local_torch_dtype``, a
+        # process-global ``torch.set_default_dtype``; without the shared lock this
+        # save-side build races concurrent loads (issue #4204, regression of #4129).
+        from .loader import model_load_lock
+
         ensure_qwen_drive_registered(model_id_or_path)
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -2463,7 +2469,7 @@ def ModelWriter(cls):
         normalize_hf_config_compat(config, trust_remote_code=self.trust_remote_code)
         model_dtype = get_hf_config_dtype(config)
 
-        with suspend_hf_weight_init():
+        with model_load_lock(), suspend_hf_weight_init():
             model = self.loader.from_config(
                 config, dtype=model_dtype
             )
