@@ -70,18 +70,29 @@ class ScalarType:
     (not applicable for integer types)
     """
 
+    def _nan_repr_member(self) -> NanRepr:
+        """Return ``nan_repr`` as a :class:`NanRepr` member.
+
+        ``NanRepr`` is an ordinary ``Enum``, so its members never compare equal
+        to their integer values. Normalizing here keeps every predicate correct
+        for both an enum member (the declared type) and a raw ``int`` supplied
+        by a caller that mirrors the C++ ``NanRepr`` encoding.
+        """
+        if isinstance(self.nan_repr, NanRepr):
+            return self.nan_repr
+        return NanRepr(self.nan_repr)
+
     def _floating_point_max_int(self) -> int:
         assert (
             self.mantissa <= 52 and self.exponent <= 11
         ), f"Cannot represent max/min as a double for type {self.__str__()}"
 
         max_mantissa = (1 << self.mantissa) - 1
-        if self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN:
+        if self._nan_repr_member() is NanRepr.EXTD_RANGE_MAX_MIN:
             max_mantissa = max_mantissa - 1
 
         max_exponent = (1 << self.exponent) - 2
-        if (self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN
-                or self.nan_repr == NanRepr.NONE):
+        if self._nan_repr_member() in (NanRepr.EXTD_RANGE_MAX_MIN, NanRepr.NONE):
             assert (
                 self.exponent < 11
             ), f"Cannot represent max/min as a double for type {self.__str__()}"
@@ -157,7 +168,7 @@ class ScalarType:
         or_and_advance(self.signed, 1)
         or_and_advance(self.bias, 32)
         or_and_advance(self._finite_values_only, 1)
-        or_and_advance(self.nan_repr.value, 8)
+        or_and_advance(self._nan_repr_member().value, 8)
 
         assert offset <= 64, \
             f"ScalarType fields too big {offset} to fit into an int64"
@@ -209,14 +220,14 @@ class ScalarType:
         return not self._finite_values_only
 
     def has_nans(self) -> bool:
-        return self.nan_repr != NanRepr.NONE.value
+        return self._nan_repr_member() is not NanRepr.NONE
 
     def is_ieee_754(self) -> bool:
         """
         If the type is a floating point type that follows IEEE 754
         conventions
         """
-        return self.nan_repr == NanRepr.IEEE_754.value and \
+        return self._nan_repr_member() is NanRepr.IEEE_754 and \
             not self._finite_values_only
 
     def __str__(self) -> str:
@@ -239,7 +250,7 @@ class ScalarType:
             if not self.is_ieee_754():
                 if self._finite_values_only:
                     ret = ret + "f"
-                if self.nan_repr != NanRepr.NONE:
+                if self._nan_repr_member() is not NanRepr.NONE:
                     ret = ret + "n"
 
             return ret
@@ -294,7 +305,11 @@ class ScalarType:
         (i.e. does not follow IEEE 754 conventions).
         """
         assert (mantissa > 0 and exponent > 0)
-        assert (nan_repr != NanRepr.IEEE_754), (
+        # Normalize first: a raw ``int`` mirroring the C++ encoding must not slip
+        # past the IEEE-754 guard and build a type through the wrong constructor.
+        if not isinstance(nan_repr, NanRepr):
+            nan_repr = NanRepr(nan_repr)
+        assert (nan_repr is not NanRepr.IEEE_754), (
             "use `float_IEEE754` constructor for floating point types that "
             "follow IEEE 754 conventions")
         ret = cls(exponent, mantissa, True, 0, finite_values_only, nan_repr)
