@@ -65,43 +65,35 @@ def _deterministic_segment_sum(
     into a different checkpoint for the same seed and calibration (issue
     #4137).
 
-    Sort the rows by bucket, take one cumulative sum, then difference it at
-    each bucket's end and start. The stable sort, integer ``bincount``,
-    ``cumsum`` and gather all run in a fixed order, so repeated runs are
-    bitwise identical. This is deliberately local:
-    ``torch.use_deterministic_algorithms`` is a process-global switch, and
-    quantization runs on a device worker pool, so enabling it around this call
-    would also re-route a concurrent worker's kernels and can raise for an op
-    that has no deterministic implementation.
+    Sort the rows by bucket, then reduce each contiguous bucket with
+    ``torch.segment_reduce``. The stable sort fixes the row order, and
+    ``segment_reduce`` is a per-segment reduction kernel with no floating-point
+    atomics, so the summation order is fixed and repeated runs are bitwise
+    identical. A cumulative sum is not an option: ``torch.cumsum`` over a
+    floating-point CUDA tensor is itself nondeterministic (issue #4224).
+    This is deliberately local: ``torch.use_deterministic_algorithms`` is a
+    process-global switch, and quantization runs on a device worker pool, so
+    enabling it around this call would also re-route a concurrent worker's
+    kernels and can raise for an op that has no deterministic implementation.
     """
+
+    result = torch.zeros(
+        (num_buckets, *source.shape[1:]), dtype=source.dtype, device=source.device
+    )
+    if index.numel() == 0:
+        return result
 
     order = torch.argsort(index, stable=True)
     sorted_source = source.index_select(0, order)
     counts = torch.bincount(index, minlength=num_buckets)
     nonzero = counts > 0
-    cumulative = torch.cumsum(counts, dim=0)[nonzero]
-    ends = cumulative - 1
-    starts = cumulative - counts[nonzero]
-    # A float32 prefix over the whole sorted array loses low bits to
-    # cancellation when a late bucket is differenced, so accumulate in float64
-    # and round once at the end. The result is still a fixed-order reduction.
-    # Scan the last dimension of a contiguous tensor: a dim-0 scan of the
-    # row-major `[num_vectors, vector_len]` layout is strided and takes the slow
-    # path (~90 ms vs ~1 ms at 524288x8 on R9700).
-    prefix = torch.cumsum(
-        sorted_source.double().movedim(0, -1).contiguous(), dim=-1
-    ).movedim(-1, 0)
-    ends_sum = prefix.index_select(0, ends)
-    previous_sum = torch.where(
-        (starts > 0).view(-1, *([1] * (ends_sum.dim() - 1))),
-        prefix.index_select(0, (starts - 1).clamp_min(0)),
-        torch.zeros_like(ends_sum),
+    # A float32 reduction over a whole bucket loses low bits, so accumulate in
+    # float64 and round once at the end. The result is still a fixed-order
+    # reduction.
+    totals = torch.segment_reduce(
+        sorted_source.double(), "sum", lengths=counts[nonzero]
     )
-    totals = (ends_sum - previous_sum).to(source.dtype)
-    result = torch.zeros(
-        (num_buckets, *source.shape[1:]), dtype=source.dtype, device=source.device
-    )
-    result[nonzero] = totals
+    result[nonzero] = totals.to(source.dtype)
     return result
 
 
