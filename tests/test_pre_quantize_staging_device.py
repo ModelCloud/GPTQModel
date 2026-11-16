@@ -145,3 +145,9 @@ def test_cpu_run_stages_on_cpu(monkeypatch):
     model = _bare_model(DEVICE.CPU)
 
     assert _stage_device(monkeypatch, model, _meta_layer()) == torch.device("cpu")
+
+def test_indexed_config_device_is_staged_directly(monkeypatch):
+    # Direct config users pass an explicit ordinal; keep honoring it.
+    model = _bare_model("cuda:1")
+
+    assert _stage_device(monkeypatch, model, _meta_layer()) == torch.device("cuda:1")
