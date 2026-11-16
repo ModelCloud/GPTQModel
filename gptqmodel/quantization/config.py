@@ -5764,6 +5764,17 @@ class AWQConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         super().__post_init__()
+        # `modules_to_not_convert` is the AutoAWQ/HF compatibility spelling of
+        # an exclusion. Fold it into `-:` dynamic rules here as well, using the
+        # same translation the checkpoint parser applies, so quantize time and
+        # load time resolve the module identically. Without this the module is
+        # quantized (and qweight/scales saved) but reload builds a dense layer
+        # that silently keeps its random-init weights (#4195).
+        _apply_external_checkpoint_module_filters(
+            self,
+            _external_string_list(self.modules_to_not_convert),
+            None,
+        )
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled:
             if self.format not in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
