@@ -149,7 +149,7 @@ processor = ExampleProcessor(
 )
 ```
 
-`ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationConfig` contains the dataset and its preparation policy. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy. `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
+`ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationConfig` contains the dataset and its preparation policy. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy; a pruned module is handed to `LoopProcessor.prune_uncovered_module`, which a processor that tracks per-layer state beyond `tasks` (AWQ) must extend so the module neither gates layer completion nor reaches `submodule_finalize` ([uncovered-module prune](quantizer-moe.md#5-uncovered-module-prune-with-fallbacknone)). `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
 
 The checkpoint adapter accepts `(PRIMARY,)` and `(PRIMARY, SECONDARY)`. Other chains raise `NotImplementedError` before the quantization loop starts.
 

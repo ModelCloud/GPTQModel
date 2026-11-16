@@ -76,38 +76,47 @@ class NativeProcessor(LoopProcessor):
         # Sibling modules (q/k/v, gate/up) receive the same source activation in
         # the same forward pass, so their per-sample masked entries are
         # bitwise-identical copies. Keep one entry per (batch, source tensor,
-        # mask) and hand the same storage to every sibling. The cache is
-        # thread-local because capture hooks run on data-parallel workers, and
-        # it is dropped as soon as the active batch/mask changes so it never
-        # pins a finished batch.
-        self._native_share_tls = threading.local()
-        # ``process()`` runs after a forward pass has captured every module of
-        # the layer. Bumping the epoch there invalidates the share cache before
-        # the next layer, even when a worker replays the same batch index and
-        # keep-mask object and the allocator recycles the previous source
-        # address.
-        self._native_share_epoch = 0
+        # mask) and hand the same storage to every sibling. Capture hooks run on
+        # data-parallel workers, so each capture thread owns its own cache slot,
+        # keyed by thread id. The slot is replaced as soon as that thread moves
+        # to another batch/mask, and ``process()``/``finalize()`` drop every
+        # slot at once so a finished layer's activations are not pinned after
+        # its forward pass or after ``quantize()`` returns.
+        self._native_share_lock = threading.Lock()
+        self._native_share_caches: Dict[int, Tuple[tuple, dict]] = {}
 
     def _native_share_cache(self, batch_index: Optional[int], keep_mask) -> dict:
-        """Return the sibling-share cache for the active (batch, mask) pair.
+        """Return the calling thread's sibling-share cache for (batch, mask).
 
-        The token changes when the capture moves to another calibration batch,
-        another keep-mask, or another forward pass. Dropping the cache at that
-        point releases the previous entries instead of keeping them alive for
-        the rest of the layer, and prevents a recycled source address in a
-        later layer from matching a stale entry.
+        The token changes when the capture moves to another calibration batch
+        or another keep-mask. Replacing the slot at that point releases the
+        previous entries instead of keeping them alive for the rest of the
+        layer.
         """
 
-        tls = self._native_share_tls
-        token = (
-            self._native_share_epoch,
-            batch_index,
-            id(keep_mask) if keep_mask is not None else None,
-        )
-        if getattr(tls, "token", None) != token:
-            tls.token = token
-            tls.entries = {}
-        return tls.entries
+        token = (batch_index, id(keep_mask) if keep_mask is not None else None)
+        thread_id = threading.get_ident()
+        with self._native_share_lock:
+            slot = self._native_share_caches.get(thread_id)
+            if slot is None or slot[0] != token:
+                slot = (token, {})
+                self._native_share_caches[thread_id] = slot
+        return slot[1]
+
+    def _release_native_share_cache(self) -> None:
+        """Drop every thread's sibling-share cache.
+
+        Called once a forward pass has captured every module of the layer, and
+        again when the processor finalizes. After this, the only references to
+        the captured entries are the per-module ``native_inp_caches`` lists
+        handed to the consumers, so the source activations and keep-masks the
+        cache held for address stability are released. A recycled source
+        address in a later layer cannot match a stale entry either, because no
+        entry survives the release.
+        """
+
+        with self._native_share_lock:
+            self._native_share_caches.clear()
 
     def _split_batch_samples(
         self,
@@ -119,9 +128,12 @@ class NativeProcessor(LoopProcessor):
         """Split one forward batch into per-sample masked native entries.
 
         ``keep_mask`` is the ``[B, S]`` sequence mask GPTQProcessor uses for
-        the same forward pass. Samples with no kept tokens are skipped, which
-        mirrors GPTQProcessor's per-sample `add_batch` calls. A missing or
-        non-matching mask keeps the historical one-entry-per-batch layout.
+        the same forward pass. Both input layouts GPTQProcessor splits per
+        sample are split the same way here: a ``[B, S, H]`` input yields
+        ``inp[b][mask[b]]`` and a flattened ``[B*S, H]`` input yields
+        ``inp[b*S:(b+1)*S][mask[b]]``. Samples with no kept tokens are skipped,
+        which mirrors GPTQProcessor's per-sample `add_batch` calls. A missing
+        or non-matching mask keeps the historical one-entry-per-batch layout.
 
         Siblings fed by the same source tensor and mask in the same batch reuse
         one entry, because their masked slices are bitwise-identical. This is
@@ -133,14 +145,18 @@ class NativeProcessor(LoopProcessor):
         already makes.
         """
 
-        if (
-            not torch.is_tensor(inp)
-            or inp.dim() < 3
-            or not torch.is_tensor(keep_mask)
-            or keep_mask.ndim != 2
-            or keep_mask.shape[0] != inp.shape[0]
-            or keep_mask.shape[1] != inp.shape[1]
-        ):
+        if not torch.is_tensor(inp) or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return [inp.to(device=target_device)]
+        if inp.dim() >= 3 and tuple(keep_mask.shape) == tuple(inp.shape[:2]):
+            flattened = False
+        elif inp.dim() == 2 and inp.shape[0] == keep_mask.numel():
+            # HF qwen2_moe's ``shared_expert`` (and any module fed
+            # ``hidden_states.view(-1, H)``) sees flattened ``[B*S, H]`` rows.
+            # GPTQProcessor's hook slices the same rows per sample with the
+            # same keep mask, so the native side must do the same or GPTAQ/FOEM
+            # pair a ``B*S``-row native entry with an ``S_kept``-row sample.
+            flattened = True
+        else:
             return [inp.to(device=target_device)]
 
         cache = self._native_share_cache(batch_index, keep_mask)
@@ -155,12 +171,18 @@ class NativeProcessor(LoopProcessor):
         shared = cache.get(key)
         if shared is None:
             mask = keep_mask.to(device=inp.device, dtype=torch.bool)
+            seq_len = int(mask.shape[1])
             entries = []
             for sample_index, sample_has_tokens in enumerate(mask.any(dim=1).tolist()):
                 if not sample_has_tokens:
                     entries.append(None)
                     continue
-                entries.append(inp[sample_index][mask[sample_index]].to(device=target_device))
+                if flattened:
+                    start = sample_index * seq_len
+                    sample_rows = inp[start:start + seq_len]
+                else:
+                    sample_rows = inp[sample_index]
+                entries.append(sample_rows[mask[sample_index]].to(device=target_device))
             # Hold the source and mask so the storage/data_ptr in ``key`` cannot
             # be recycled by a later allocation while the entry is cached.
             shared = (inp, mask, tuple(entries))
@@ -253,7 +275,7 @@ class NativeProcessor(LoopProcessor):
 
         # A forward pass has finished capturing every module of this layer, so
         # the sibling cache for that pass is no longer needed.
-        self._native_share_epoch += 1
+        self._release_native_share_cache()
         module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name) or []
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
@@ -264,6 +286,7 @@ class NativeProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Releases processor-level caches once the full loop has completed."""
 
+        self._release_native_share_cache()
         del self.native_inp_caches
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:

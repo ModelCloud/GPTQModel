@@ -12,10 +12,12 @@ mutating the shared entry.
 """
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
 import torch.nn as nn
+from torch.multiprocessing.reductions import StorageWeakRef
 
 from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
@@ -302,3 +304,65 @@ def test_consumers_read_shared_entries_without_mutating(kind):
         for entry, expected in zip(shared[name], before[name]):
             assert torch.equal(entry, expected)
 
+
+
+def _capture_on_worker(processor, modules, mask, worker, *, batch_index: int = 0):
+    """Fire one capture pass on a long-lived worker thread, like the forward pool.
+
+    Returns weak references to the source activation and keep-mask storages;
+    the caller drops every strong reference it holds.
+    """
+
+    named = {}
+    for name, module in modules.items():
+        named[name] = _named(module, name)
+        processor.preprocess(named[name])
+
+    def forward():
+        x = torch.randn(2, 4, 8)
+        _bind_batch(processor, mask, batch_index)
+        for name, module in modules.items():
+            processor.pre_process_fwd_hook(name)(module, (x,), None)
+        # ModuleLooper clears the active keep-mask after the forward pass.
+        processor._mask_tls.value = None
+        return StorageWeakRef(x.untyped_storage())
+
+    source_ref = worker.submit(forward).result()
+    return named, source_ref
+
+
+@pytest.mark.parametrize("release", ["process", "finalize"])
+def test_share_cache_does_not_pin_source_after_layer(release):
+    """The sibling-share cache must not keep the last batch's activation alive (#4463).
+
+    Capture hooks run on long-lived forward workers while ``process()`` and
+    ``finalize()`` run elsewhere. A per-thread cache that is only invalidated
+    lazily kept ``(source, mask, entries)`` alive on every worker until its
+    next capture, i.e. through the rest of the layer and after ``quantize()``.
+    """
+
+    torch.manual_seed(8)
+    mask = torch.tensor([[True, True, True, False], [True, True, False, False]])
+    mask_ref = StorageWeakRef(mask.untyped_storage())
+    modules = _sibling_modules()
+    processor = _processor("gptaq")
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        named, source_ref = _capture_on_worker(processor, modules, mask, worker)
+        del mask
+        if release == "process":
+            # ``process()`` runs on another thread than the capture worker.
+            _finish(processor, named)
+        else:
+            processor.finalize(model=None)
+
+        # The worker thread is still alive, so a thread-local cache would
+        # still be reachable here.
+        assert source_ref.expired()
+        assert mask_ref.expired()
+
+    if release == "process":
+        # The consumer-owned per-sample copies are unaffected.
+        entries = _entries(named["q_proj"])
+        assert len(entries) == 2
+        assert entries[0].untyped_storage().data_ptr() == _entries(named["k_proj"])[0].untyped_storage().data_ptr()
