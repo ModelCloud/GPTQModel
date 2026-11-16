@@ -23,6 +23,7 @@ from ..looper.loop_processor import (
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureMixin
 from ..models import BaseQModel
 from ..models._const import DEVICE
 from ..models.writer import (
@@ -48,7 +49,7 @@ from ..utils.torch import CPU
 
 log = setup_logger()
 
-class QQQProcessor(LoopProcessor):
+class QQQProcessor(SharedInputCaptureMixin, LoopProcessor):
     """Captures activations and quantizes modules with the QQQ workflow."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -73,6 +74,7 @@ class QQQProcessor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
@@ -176,6 +178,13 @@ class QQQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the QQQ task."""
 
+        if self.shared_input_leader(name) is not None:
+            def skip(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                del inp, out
+            return skip
+
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for QQQ statistics accumulation."""
 
@@ -183,6 +192,12 @@ class QQQProcessor(LoopProcessor):
             q = self.tasks[name]  # noqa: F821
             q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
+
+    def _shared_input_task_enabled(self, task: QQQ) -> bool:
+        # QQQ's GSQ path consumes its own calibration moments rather than the
+        # GPTQ-style Hessian, so a plain H copy would not make the follower
+        # numerically equal to an independent capture.
+        return not getattr(task, "_gsq_enabled", False)
 
     def process(
         self,
