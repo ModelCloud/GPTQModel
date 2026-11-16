@@ -14,8 +14,11 @@ Two optional backends compile the same portable kernel source:
 
 Both are optional. Callers retain the eager autograd implementation when
 runtime compilation is unavailable or the geometry is unsupported.
-BF16 logits retain BF16 softmax probabilities; FP32 Q/K logits retain FP32
-probabilities, matching the eager candidate and gradient precision.
+The relaxation exponent and softmax probabilities are evaluated in FP32 for
+every input dtype, matching the eager candidate and gradient precision. Only
+the draws keep the uniform tensor's own precision: the eager path derives its
+Gumbel noise from that same BF16 tensor, so the BF16 noise chain below is that
+shared rounding, not an extra one.
 
 ``cuda_relaxed_scalar_weights`` only serves the W3/W4 geometry: it requires a
 five-choice ``logits`` tensor and a non-None ``initial`` offset, while ``initial``
@@ -78,7 +81,7 @@ __device__ __forceinline__ float load_choice(const void* values, int offset, int
 __global__ void gsq_forward(
     const void* logits, const float* scales, const float* initial,
     const unsigned char* valid, const void* uniform,
-    float* output, void* probability, float* expected,
+    float* output, float* probability, float* expected,
     int n, int columns, int groups, int group_size, float temperature, float multiplier, int fp32)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -93,12 +96,17 @@ __global__ void gsq_forward(
         float scaled = load_choice(logits, offset, fp32) * multiplier;
         if (fp32) {
             noise = -logf(-logf(u + 1.0e-8f) + 1.0e-8f);
-            score[j] = (scaled + noise) / temperature;
         } else {
+            // Load-bearing: eager derives the Gumbel noise from the BF16
+            // uniform tensor, so torch.log rounds both stages to BF16. This
+            // chain reproduces that rounding; nothing below it is rounded.
             float inner = bf(-bf(logf(bf(u + 1.0e-8f))) + 1.0e-8f);
             noise = bf(-bf(logf(inner)));
-            score[j] = bf(bf(bf(scaled) + noise) / temperature);
         }
+        // Widen the exponent like _ScalarRelaxation._compute_dtype does. A BF16
+        // exponent moved the relaxation output by up to 5.9e-4, past the 1e-4
+        // contract that the eager oracle is held to.
+        score[j] = (scaled + noise) / temperature;
         if (score[j] > maximum) maximum = score[j];
     }
     float exponent[5];
@@ -110,12 +118,10 @@ __global__ void gsq_forward(
     float shift_sum = 0.0f;
     for (int j = 0; j < 5; ++j) {
         float p = exponent[j] / total;
-        if (fp32) ((float*)probability)[j*n+i] = p;
-        else {
-            unsigned short rounded = to_bf16(p);
-            ((unsigned short*)probability)[j*n+i] = rounded;
-            p = from_bf16(rounded);
-        }
+        // Eager saves the FP32 probability and only then casts it to the FP32
+        // candidate dtype. Storing BF16 probabilities changed both `expected`
+        // and the softmax Jacobian that the backward pass consumes.
+        probability[j*n+i] = p;
         shift_sum += p * (float)(j-2);
     }
     float value = initial[i] + shift_sum;
@@ -127,7 +133,7 @@ __global__ void gsq_forward(
 }
 
 __global__ void gsq_backward(
-    const float* grad_output, const void* probability,
+    const float* grad_output, const float* probability,
     const float* expected, const float* scales,
     void* grad_logits, float* scale_terms,
     int n, int columns, int groups, int group_size, float temperature, float multiplier, int fp32)
@@ -144,10 +150,10 @@ __global__ void gsq_backward(
     float dot = 0.0f;
     for (int j = 0; j < 5; ++j) {
         categorical[j] = output_grad * (float)(j-2);
-        dot += categorical[j] * load_choice(probability, j*n+i, fp32);
+        dot += categorical[j] * probability[j*n+i];
     }
     for (int j = 0; j < 5; ++j) {
-        float p = load_choice(probability, j*n+i, fp32);
+        float p = probability[j*n+i];
         float delta = categorical[j] - dot;
         float result = (p*delta) * multiplier;
         if (fp32) ((float*)grad_logits)[j*n+i] = result / temperature;
@@ -456,7 +462,9 @@ class _GSQCudaRelaxation(torch.autograd.Function):
         groups = scales.shape[1]
         count = rows*columns
         output = torch.empty_like(initial)
-        probability = torch.empty_like(logits)
+        # Always FP32: the fused probabilities feed both the relaxation output
+        # and the softmax Jacobian, matching eager `_ScalarRelaxation`.
+        probability = torch.empty(logits.shape, dtype=torch.float32, device=logits.device)
         expected = torch.empty_like(initial)
         fp32 = int(logits.dtype == torch.float32)
         block = _warp_multiple_block(_REDUCE_BLOCK, backend.warp_size)

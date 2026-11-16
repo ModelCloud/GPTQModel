@@ -194,6 +194,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Embedding checkpoint shard replacement](embedding-checkpoint-shard-replacement.md)
 - [GSQ paper reproduction: Llama 3.2 1B and distributed Llama 3.1 8B](experiments/gsq-paper-reproduction.md)
 - [GSQ CUDA empty-geometry dispatch](gsq-cuda-empty-geometry.md)
+- [GSQ fused relaxation precision contract](gsq-fused-relaxation-precision.md)
 - [Runtime LoRA output composition](lora-runtime-output.md)
 - [PEFT LoRA Training and Adapter Loading](peft.md)
 
