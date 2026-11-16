@@ -11,7 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
@@ -2597,18 +2597,145 @@ class AWQProcessor(LoopProcessor):
         return resolver(num_experts)
 
     @contextmanager
-    def _moe_replay_routing(self, module: nn.Module):
+    def _moe_replay_routing(
+            self,
+            module: nn.Module,
+            module2inspect: Optional[nn.Module] = None,
+            replay_targets=(),
+    ):
         """Run a replay with the same MoE routing that captured its features."""
 
-        override = self._replay_moe_routing_override()
-        if not override:
+        with ExitStack() as stack:
+            override = self._replay_moe_routing_override()
+            if override:
+                state = set_moe_topk(module, override)
+                stack.callback(restore_moe_topk, state)
+
+            bypass = self._moe_bypass_replay(module, module2inspect)
+            if bypass is not None:
+                hooks, moe_block, experts_module = bypass
+                stack.enter_context(
+                    self._all_experts_replay_forward(
+                        hooks, moe_block, experts_module, replay_targets,
+                    )
+                )
+            yield
+
+    def _moe_bypass_replay(self, module: nn.Module, module2inspect: Optional[nn.Module]):
+        """Resolve the all-experts replay scaffolding for a bypass-mode MoE layer.
+
+        ``MoEConfig(routing=ExpertsRoutingBypass())`` makes ``ForwardExecutor``
+        enter ``ModuleLooper.MoELifecycleContext``, which feeds the block input
+        to every expert before the routed forward. AWQ replays ``module2inspect``
+        directly, so without re-entering that lifecycle only the natively routed
+        experts execute and the coverage guard rejects the whole group (#4223).
+        """
+
+        if module2inspect is None or module2inspect is module:
+            return None
+        routing_bypass = getattr(self.qcfg, "moe_routing_bypass", None)
+        if not callable(routing_bypass) or not routing_bypass():
+            return None
+        gptq_model = getattr(self, "gptq_model", None)
+        if gptq_model is None:
+            return None
+        hooks = getattr(gptq_model, "moe_lifecycle_hooks", None)
+        if hooks is None:
+            return None
+        try:
+            moe_block = hooks.get_moe_block_for_subset(module, gptq_model)
+        except Exception:
+            return None
+        if moe_block is None:
+            return None
+        # The replay boundary must contain the MoE block that owns the experts.
+        if not any(child is moe_block for child in module2inspect.modules()):
+            return None
+        experts_module = hooks.get_experts_module(moe_block, gptq_model)
+        if experts_module is None or not hasattr(experts_module, "__iter__"):
+            return None
+        return hooks, moe_block, experts_module
+
+    @contextmanager
+    def _all_experts_replay_forward(
+            self,
+            hooks,
+            moe_block: nn.Module,
+            experts_module,
+            replay_targets,
+    ):
+        """Feed every replayed expert the block input, like the bypass lifecycle.
+
+        The wrapper mirrors ``ExpertProjectionMoELifecycleHooks.forward_to_all_experts``:
+        each expert in the scale group runs on the block input, then the original
+        (natively routed) forward produces the output the loss compares against.
+        """
+
+        targets = {id(target) for _name, target in replay_targets}
+        gate_name = getattr(hooks, "gate_proj_name", None)
+        up_name = getattr(hooks, "up_proj_name", None)
+        down_name = getattr(hooks, "down_proj_name", None)
+        if not targets or not gate_name or not up_name:
             yield
             return
-        state = set_moe_topk(module, override)
+
+        experts = []
+        for expert in experts_module:
+            gate = getattr(expert, gate_name, None)
+            up = getattr(expert, up_name, None)
+            down = getattr(expert, down_name, None) if down_name else None
+            if (
+                id(gate) in targets
+                or id(up) in targets
+                or (down is not None and id(down) in targets)
+            ):
+                experts.append((expert, gate, up, down))
+        if not experts:
+            yield
+            return
+
+        original_forward = moe_block.forward
+
+        def all_experts_forward(hidden_states, **kwargs):
+            if hidden_states.dim() == 3:
+                hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+            else:
+                hidden_states_2d = hidden_states
+            for expert, gate, up, down in experts:
+                gate_ref = gate if gate is not None and id(gate) in targets else None
+                up_ref = up if up is not None and id(up) in targets else None
+                down_ref = down if down is not None and id(down) in targets else None
+                if gate_ref is None and up_ref is None and down_ref is None:
+                    continue
+                anchor = gate_ref if gate_ref is not None else up_ref
+                if anchor is None:
+                    anchor = down_ref if down_ref is not None else expert
+                expert_device = get_device(anchor)
+                expert_input = move_to(hidden_states_2d, expert_device)
+                gate_out = gate_ref(expert_input) if gate_ref is not None else None
+                up_out = up_ref(expert_input) if up_ref is not None else None
+                if down_ref is not None:
+                    if gate_out is None and gate is not None:
+                        gate_out = gate(expert_input)
+                    if up_out is None and up is not None:
+                        up_out = up(expert_input)
+                    if gate_out is not None and up_out is not None:
+                        intermediate = hooks.apply_expert_activation(
+                            experts_module=experts_module,
+                            expert=expert,
+                            gate_out=gate_out,
+                            up_out=up_out,
+                        )
+                        down_ref(intermediate)
+                        del intermediate
+                del gate_out, up_out, expert_input
+            return original_forward(hidden_states, **kwargs)
+
+        moe_block.forward = all_experts_forward
         try:
             yield
         finally:
-            restore_moe_topk(state)
+            moe_block.forward = original_forward
 
     @torch.inference_mode()
     def _search_best_scale(
@@ -2707,7 +2834,7 @@ class AWQProcessor(LoopProcessor):
         # did. Otherwise an all-expert override captures every expert but the
         # replay executes native top-k only, and the coverage guard below
         # rejects the otherwise complete group (#4151).
-        with self._moe_replay_routing(module):
+        with self._moe_replay_routing(module, module2inspect, replay_targets):
             try:
                 for _name, target in replay_targets:
                     handles.append(target.register_forward_pre_hook(record_target))
