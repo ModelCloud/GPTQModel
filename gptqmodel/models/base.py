@@ -90,6 +90,7 @@ from ..utils.device_telemetry import emit_device_telemetry, with_quantization_de
 from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
+from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.model import (
     MODALITY,
     _module_has_meta_tensors,
@@ -3985,16 +3986,41 @@ class BaseQModel(nn.Module):
             self.post_quantize(norm)
         return inputs
 
+    def _pre_quantize_device(self) -> torch.device:
+        """Concrete device on which `pre_quantize` stages one layer.
+
+        ``quantize_config.device`` carries only the accelerator family (the
+        loader strips ordinals through ``normalize_device``), so resolving it
+        directly yields the index-less family device, i.e. the *current*
+        device (cuda:0). A caller who restricted the run through
+        ``compute_device_filter`` (``device=("cuda:1",)``) then gets every
+        layer staged on an excluded GPU, which OOMs when that GPU is full
+        (issue #4233). Follow the same filtered pool the loopers use.
+        """
+
+        base_device = normalize_device_like(getattr(self.quantize_config, "device", None))
+        if base_device is None:
+            return CPU
+        devices = select_forward_devices(base_device)
+        compute_device_filter = getattr(self.quantize_config, "compute_device_filter", None)
+        if compute_device_filter is not None:
+            filtered = compute_device_filter(devices)
+            # The loopers keep the full pool when the filter rejects everything.
+            if filtered:
+                devices = list(filtered)
+        return as_torch_device(devices[0] if devices else base_device)
+
     def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
-            if self._materialize_floatx_layer_shell(module, self.quantize_config.device):
+            device = self._pre_quantize_device()
+            if self._materialize_floatx_layer_shell(module, device):
                 return module
             return self.shell_module_materialize(
                 target_submodule=module,
-                device=self.quantize_config.device,
+                device=device,
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
-            return move_to(module, device=self.quantize_config.device)
+            return move_to(module, device=self._pre_quantize_device())
         else:
             return module
 
