@@ -151,29 +151,36 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
-# Processor steps that accumulate an input Hessian/Gram from calibration
-# activations and then invert or consume it. Their fp32 GEMMs must run on
-# rocBLAS to be reproducible across processes (issues #4075, #4092, #4123).
-_HESSIAN_PROCESSOR_STEPS = frozenset({
+# Processor steps whose quantization GEMMs must run on rocBLAS to be
+# reproducible across processes (issues #4075, #4092, #4123, #4460).
+#
+# GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
+# Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
+# ParoQuant accumulates no Hessian, but its rotation optimization runs
+# fp16/bf16 GEMMs and hipBLASLt selects kernels per process, so two runs with
+# the same seed produced different checkpoints (21.26 vs 21.44 PPL on ROCm).
+# Pinning rocBLAS makes those GEMMs bitwise reproducible at the cost of the
+# faster hipBLASLt kernels. AWQ and weight-only (RTN) keep hipBLASLt.
+_DETERMINISTIC_BLAS_PROCESSOR_STEPS = frozenset({
     ProcessorStep.GPTQ,
     ProcessorStep.QQQ,
     ProcessorStep.VPTQ,
     ProcessorStep.MACAQ,
+    ProcessorStep.PARO,
     ProcessorStep.EXL3,
     ProcessorStep.FP8_GSQ,
 })
 
 
 def _needs_deterministic_hessian(run_plan: QuantizationRunPlan) -> bool:
-    """Whether a run accumulates a Hessian whose GEMMs must be reproducible.
+    """Whether a run's quantization GEMMs must be reproducible on ROCm.
 
-    GPTQ, QQQ, VPTQ, MACaQ and calibrated FP8 GSQ accumulate an input
-    Hessian/Gram from the calibration activations; EXL3 reuses GPTQ's capture.
-    AWQ, ParoQuant and weight-only (RTN) do not, so they keep hipBLASLt for the
-    fp16/bf16 GEMMs that are 8-14x faster there on gfx1201.
+    The name predates ParoQuant: the original set accumulated an input
+    Hessian/Gram. ParoQuant is included because hipBLASLt chooses GEMM kernels
+    per process, which made checkpoints from identical seeded runs differ.
     """
 
-    return not _HESSIAN_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
+    return not _DETERMINISTIC_BLAS_PROCESSOR_STEPS.isdisjoint(run_plan.processors)
 
 
 # Model types whose definition class declares `supports_rotation`. This is the
@@ -2399,16 +2406,20 @@ class BaseQModel(nn.Module):
         # load there (issue #1455).
         self._warn_fused_unit_dynamic_overrides()
 
-        # On ROCm the deterministic rocBLAS selection is scoped to methods that
-        # accumulate a Hessian (GPTQ, QQQ, VPTQ, MACaQ, EXL3, calibrated FP8
-        # GSQ). Their calibration forward and replay produce the activations
+        # On ROCm the deterministic rocBLAS selection is scoped to methods
+        # whose quantization GEMMs must be reproducible (GPTQ, QQQ, VPTQ,
+        # MACaQ, EXL3, calibrated FP8 GSQ, and ParoQuant). For the Hessian
+        # builders, the calibration forward and replay produce the activations
         # accumulated into the Hessian, so those GEMMs must be reproducible
         # too: pinning only the fp32 X^T X GEMM regressed Qwen2.5-0.5B to
-        # 332/795 differing tensors across processes. Methods without a Hessian
-        # (AWQ, ParoQuant, RTN) keep hipBLASLt, which is 8-14x faster for their
-        # fp16/bf16 GEMMs on gfx1201. Every run pins its backend for the whole
-        # run; a concurrent run that needs the other one waits rather than
-        # flipping it mid-run (issue #4123).
+        # 332/795 differing tensors across processes. ParoQuant accumulates no
+        # Hessian, but hipBLASLt selects its rotation-optimization GEMM kernels
+        # per process, so seeded runs diverged (issue #4460); rocBLAS is the
+        # documented speed-for-reproducibility trade-off. AWQ and RTN keep
+        # hipBLASLt, which is 8-14x faster for their fp16/bf16 GEMMs on
+        # gfx1201. Every run pins its backend for the whole run; a concurrent
+        # run that needs the other one waits rather than flipping it mid-run
+        # (issue #4123).
         blas_context = quant_blas_backend(
             deterministic=_needs_deterministic_hessian(run_plan)
         )
