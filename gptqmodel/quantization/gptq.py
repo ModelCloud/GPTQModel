@@ -2295,8 +2295,15 @@ class GPTQ:
         if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(torch.diag(self.H), descending=True)
             try:
-                W = W[:, perm]
-                self.H = self.H[perm][:, perm]
+                # Gather H before W: H needs two ``cols x cols`` temporaries
+                # and is the allocation most likely to exhaust the device.
+                # Both results stay in locals until both gathers succeed, so
+                # the fallback below always sees an unpermuted ``W`` and
+                # ``self.H``.  Assigning ``W`` first would leave it permuted
+                # when the H gather raises and make the fallback permute it
+                # a second time.
+                H_permuted = self.H[perm][:, perm]
+                W_permuted = W[:, perm]
             except RuntimeError as exc:
                 if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
@@ -2309,6 +2316,9 @@ class GPTQ:
                 W = W.to(device=cpu_device)[:, perm]
                 self.H = self.H.to(device=cpu_device)[perm][:, perm]
                 self.quantizer.find_params(W, weight=True)
+            else:
+                W = W_permuted
+                self.H = H_permuted
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
@@ -2325,8 +2335,11 @@ class GPTQ:
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             final_perm = extend_perm_with_tail(final_perm, self.columns)
             try:
-                W = W[:, final_perm]
-                self.H = self.H[final_perm][:, final_perm]
+                # See the desc_act branch above: keep both permutations in
+                # locals so a failed H gather leaves W unpermuted for the
+                # CPU fallback.
+                H_permuted = self.H[final_perm][:, final_perm]
+                W_permuted = W[:, final_perm]
             except RuntimeError as exc:
                 if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
@@ -2339,6 +2352,9 @@ class GPTQ:
                 W = W.to(device=cpu_device)[:, final_perm]
                 self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
                 self.quantizer.find_params(W, weight=True)
+            else:
+                W = W_permuted
+                self.H = H_permuted
 
         static_group_perm = None
         if self.qcfg.static_groups:
