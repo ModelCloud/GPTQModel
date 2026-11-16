@@ -36,21 +36,31 @@ class RicursiveQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!:norm",),
+            # With `use_valres` `v_proj` reads
+            # `lerp(value_residual, input_layernorm(h), ...)`: folding a scale
+            # into this norm changes only the lerp's normalized half, which no
+            # single v_proj weight scale can undo. The norm therefore may not
+            # be a fold source; attention falls back to plain quantization.
+            "input_layernorm": ("input_layernorm:!:norm:nosrc",),
             # `value_res_lambda` is a direct parameter on the attention
             # container when value residuals are enabled.
             "self_attn:!": (
                 "q_norm:!:norm",
                 "k_norm:!:norm",
-                # `q_proj`, `k_proj` and `g_proj` all read the raw hidden states. `v_proj`
-                # deliberately carries no `in=` tag: with `use_valres` it reads
-                # `lerp(value_residual, hidden_states, sigmoid(value_res_lambda))`, which is
-                # a different tensor, so grouping it with q/k would corrupt its Hessian.
+                # `q_proj`, `k_proj` and `g_proj` all read the input norm.
+                # `g_proj` is a sigmoid gate applied to the attention output,
+                # not `o_proj`'s input, so it may not be a fold source.
+                # With `use_valres` `v_proj` reads
+                # `lerp(value_residual, normed, sigmoid(value_res_lambda))`,
+                # which is not the norm output; keep it in its own stage so it
+                # is quantized plainly (the fold into `g_proj` is then dropped).
+                # `o_proj` still consumes `v_proj`'s output and keeps that fold
+                # when the value width matches the attention output width.
                 "q_proj:0:q:in=x",
                 "k_proj:0:k:in=x",
-                "v_proj:0:v",
-                "g_proj:0:in=x",
-                "o_proj:1:o",
+                "g_proj:0:in=x:nosrc",
+                "v_proj:1:v",
+                "o_proj:2:o",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
             "pre_feedforward_layernorm": ("pre_feedforward_layernorm:!:norm",),
