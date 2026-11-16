@@ -164,6 +164,20 @@ _workspace_registry_lock = threading.Lock()
 _workspace_buffers = {}
 
 
+def clear_tile_workspace() -> None:
+    """Drop the process-wide per-stream tile scratch.
+
+    ``_workspace_buffers`` keeps one scratch pair per device/K/stream so tile
+    launches on the same stream can reuse it. Nothing else owns those tensors,
+    so without this call a completed run leaves them allocated for the life of
+    the process (512 MiB per stream at K=4, 2 GiB at K=2). Call it once the
+    run's worker streams have drained.
+    """
+
+    with _workspace_registry_lock:
+        _workspace_buffers.clear()
+
+
 def _stream_temp_buffers(device, K: int, stream):
     """Return the writable tile scratch owned by *stream*.
 
