@@ -409,7 +409,32 @@ def _save_model_configs_without_weights(
     can_generate = getattr(model, "can_generate", None)
     generation_config = getattr(model, "generation_config", None)
     if callable(can_generate) and can_generate() and generation_config is not None:
+        _save_generation_config(generation_config, save_dir)
+
+
+def _save_generation_config(generation_config, save_dir: str) -> None:
+    """Save a generation config without rewriting its declared ``do_sample``.
+
+    Transformers >= 5 refuses to save a config whose sampling-only fields
+    contradict a non-sampling ``do_sample``. GPT-QModel preserves the
+    checkpoint's declared value, so fall back to the same serializer without
+    that strict check instead of flipping ``do_sample`` on.
+    """
+    try:
         generation_config.save_pretrained(save_dir)
+        return
+    except ValueError as exc:
+        if "Fix these issues to save the configuration." not in str(exc):
+            raise
+
+    to_json_file = getattr(generation_config, "to_json_file", None)
+    if not callable(to_json_file):
+        raise
+    to_json_file(
+        os.path.join(save_dir, "generation_config.json"),
+        use_diff=True,
+        keys_to_pop=["compile_config"],
+    )
 
 
 def _quantized_module_types(model: torch.nn.Module) -> tuple[type, ...]:
@@ -2016,7 +2041,7 @@ def ModelWriter(cls):
             if generation_config is not None and (
                 not callable(can_generate) or can_generate()
             ):
-                generation_config.save_pretrained(save_dir)
+                _save_generation_config(generation_config, save_dir)
             log.info(
                 f"Saved tt-blockfloat checkpoint to {save_dir}: "
                 f"{info['layers']} packed modules, {info['payload_bytes'] / (1 << 20):.2f} MiB "
