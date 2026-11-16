@@ -949,24 +949,75 @@ def _get_ggml_bridge() -> _GGMLBridge:
         return _GGML_BRIDGE
 
 
+# The native ggml matmul quantizes activations to Q8_0/Q8_1 (legacy layouts) or
+# Q8_K (K-quant layouts) before the integer dot product; ``ggml_mul_mat`` has no
+# full-precision activation path, so the loss is a property of the kernel rather
+# than of the packed weights or of the Python glue. Measured against an FP64
+# matmul of exactly dequantized weights, over every supported layout, M in
+# {1, 8, 32} and FP32/FP16/BF16 activations:
+#
+# * CPU: 4.9e-3 .. 7.9e-3. The native result reproduces an independent Q8 round
+#   trip of the activations to ~1e-7, so the whole CPU error is activation
+#   quantization.
+# * CUDA: 4.9e-3 .. 1.5e-2 for FP32/BF16 activations (ggml-cuda adds
+#   low-precision accumulation), and 5.9e-4 .. 9.3e-4 for FP16 activations,
+#   which take a different kernel.
+#
+# 2e-2 is the documented bound; ``GGUF_TORCH`` is the exact path. See
+# ``docs/gguf-cpp-activation-quantization.md`` and
+# ``tests/kernels/test_gguf_cpp_activation_quantization.py``.
+GGML_NATIVE_MATMUL_ERROR_BOUND = 2e-2
+
+
+def _ggml_native_output_needs_exact_epilogue(
+    *,
+    device_type: str,
+    bias_present: bool,
+    native_dtype: torch.dtype,
+) -> bool:
+    """Whether the native ggml product must be recomputed in FP32 for the bias.
+
+    The rule is a pure function of static configuration: the backend, whether
+    the layer owns a bias buffer, and the dtype ggml chose for the product. It
+    never inspects activation values, never times the two paths, and never
+    depends on call order, so a given checkpoint takes the same path in every
+    process (#4219).
+
+    Only a biased layer needs it: with ``bias is None`` the native product *is*
+    the answer, and its Q8 activation loss is bounded by
+    ``GGML_NATIVE_MATMUL_ERROR_BOUND``. A biased layer cannot add the bias to a
+    product that has already been rounded (FP16/BF16 output) or that overflowed
+    inside ggml's low-precision accumulation -- ggml-cuda's FP32 output tensor
+    can still hold ``inf``/``nan`` for a finite result (measured: Q4_0 with FP32
+    activations of magnitude 1e4 returns NaN), so an FP32 bias would not cancel
+    it. Those cases recompute exactly instead (#3789).
+    """
+
+    if not bias_present:
+        return False
+    return device_type == "cuda" or native_dtype in (torch.float16, torch.bfloat16)
+
+
 def _finish_ggml_output(
     module: GGUFTorchLinear, x_flat: torch.Tensor, output: torch.Tensor
 ) -> torch.Tensor:
     """Add the stored bias before rounding a ggml result to the input dtype.
 
-    Tolerance: the native ggml kernel quantizes activations to Q8_1/Q8_K before
-    the K-quant dot product, so an unbiased result differs from an FP32
-    dequantized-weight oracle by roughly 1e-2 relative error (see #4219). That
-    loss is inherent to ``GGUF_CPP``; ``GGUF_TORCH`` is the exact path. The
-    biased case below is recomputed in FP32 instead, because a low-precision
-    ggml output may already have rounded or overflowed the dot product (for
-    example ``inf`` for a finite sum) before the bias can cancel it, so adding
-    the bias to the ggml result would not be reproducible either.
+    The native ggml kernel quantizes activations to Q8_0/Q8_1/Q8_K before the
+    dot product, so its result differs from an FP32 dequantized-weight oracle by
+    up to ``GGML_NATIVE_MATMUL_ERROR_BOUND`` (see the module constant). On CPU it
+    stays within 1e-2 (measured 4.9e-3 .. 7.9e-3); the documented bound is wider
+    because the CUDA FP32/BF16 paths add ggml-cuda's low-precision accumulation
+    (measured up to 1.5e-2). That loss is inherent to ``GGUF_CPP``;
+    ``GGUF_TORCH`` is the exact path. Biased layers take the exact FP32 epilogue
+    described by ``_ggml_native_output_needs_exact_epilogue``.
     """
 
     bias = module.bias
-    if bias is not None and (
-        x_flat.device.type == "cuda" or output.dtype in (torch.float16, torch.bfloat16)
+    if _ggml_native_output_needs_exact_epilogue(
+        device_type=x_flat.device.type,
+        bias_present=bias is not None,
+        native_dtype=output.dtype,
     ):
         # A low-precision ggml output has already rounded the dot product.
         # GGML CUDA can also return an FP32 tensor whose product has already
