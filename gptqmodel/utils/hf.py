@@ -99,6 +99,7 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+_TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
@@ -936,6 +937,74 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
     return True, model_type, getattr(model_cls, "__name__", str(model_cls))
 
 
+@lru_cache(maxsize=None)
+def _checkpoint_config_payload(model_id_or_path: str) -> Optional[dict]:
+    """Read the checkpoint's raw ``config.json`` without executing its code.
+
+    ``resolve_trust_remote_code`` already loaded this file through
+    ``AutoConfig``, so the read is served from the same cache. Reading the raw
+    payload keeps the layout probe independent of the installed native config
+    class and never imports a snapshot module.
+    """
+
+    try:
+        config_path = cached_file(model_id_or_path, "config.json")
+    except Exception:
+        return None
+
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+@lru_cache(maxsize=None)
+def _checkpoint_remote_layout_overrides_native(
+    model_id_or_path: str,
+    native_model_cls_name: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    """Whether a checkpoint's own model code declares a non-native layout.
+
+    ``model_type`` alone cannot distinguish two checkpoints that share a
+    native config type. Ling-2.6-flash declares ``bailing_hybrid`` but ships
+    its own ``BailingMoeV2_5ForCausalLM`` (``attention.query_key_value`` /
+    ``attention.g_proj`` and, when ``q_lora_rank`` is set, MLA projections),
+    while the installed transformers ``BailingHybridForCausalLM`` keeps
+    ``self_attn`` and has no ``q_lora_rank``. Honour the caller's explicit
+    trust only when the checkpoint's ``auto_map`` names a different model class
+    (or carries the remote-only MLA marker); a checkpoint whose ``auto_map``
+    points at the installed native class still loads natively.
+    """
+
+    payload = _checkpoint_config_payload(model_id_or_path)
+    if payload is None:
+        return False, None
+
+    auto_map = payload.get("auto_map")
+    if not isinstance(auto_map, dict):
+        return False, None
+
+    remote_class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(remote_class_ref, str) or not remote_class_ref:
+        return False, None
+
+    remote_class_name = remote_class_ref.rsplit(".", 1)[-1]
+    if native_model_cls_name is not None and remote_class_name != native_model_cls_name:
+        return True, remote_class_name
+
+    # A same-named remote class can still own a different layout. The remote
+    # `bailing_hybrid` MLA branch is the case this guard exists for; the native
+    # config has no `q_lora_rank` field at all.
+    model_type = str(payload.get("model_type") or "").lower()
+    if model_type == "bailing_hybrid" and payload.get("q_lora_rank"):
+        return True, remote_class_name
+
+    return False, remote_class_name
+
+
 def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
     # Keep registration ahead of the trust-remote-code probe as well as the
     # main loader's AutoConfig call.  The probe runs very early in every public
@@ -946,6 +1015,21 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
 
     native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
     if not native_supported:
+        return True
+
+    remote_layout, remote_model_cls_name = _checkpoint_remote_layout_overrides_native(
+        str(model_id_or_path), model_cls_name
+    )
+    if remote_layout:
+        log_key = (str(model_id_or_path), remote_model_cls_name or "unknown", model_cls_name or "unknown")
+        if log_key not in _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED:
+            log.info(
+                "HF: keeping trust_remote_code=True for `%s` because the checkpoint ships remote model code `%s` whose layout differs from native `%s`.",
+                model_id_or_path,
+                remote_model_cls_name or "unknown",
+                model_cls_name or "unknown",
+            )
+            _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED.add(log_key)
         return True
 
     warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
