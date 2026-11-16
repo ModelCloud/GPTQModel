@@ -48,6 +48,20 @@ def _gemma4_module_tree():
             # residual add, so it is a post-norm too.
             "post_per_layer_input_norm": ("post_per_layer_input_norm:!:postnorm",),
             "per_layer_projection": ("per_layer_projection:1",),
+            # `enable_moe_block=True` adds a routed expert branch beside the
+            # dense MLP. The router is a tiny gate and keeps its dtype.
+            "router": {
+                "proj": ("proj:!",),
+                "scale": ("scale:!",),
+                "per_expert_scale": ("per_expert_scale:!",),
+            },
+            "experts:moe": {
+                "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+            },
+            # MoE-only norms. They are checkpoint-owned and never quantized.
+            "pre_feedforward_layernorm_2": ("pre_feedforward_layernorm_2:!",),
+            "post_feedforward_layernorm_1": ("post_feedforward_layernorm_1:!:postnorm",),
+            "post_feedforward_layernorm_2": ("post_feedforward_layernorm_2:!:postnorm",),
         },
     ]
 
@@ -198,6 +212,11 @@ class Gemma4TextQModel(LlamaQModel):
     shared_input_verified_model_types = frozenset({"gemma4_text"})
 
 
+    # Native Gemma 4 MoE keeps routed experts as 3-D
+    # `Gemma4TextExperts.gate_up_proj`/`down_proj` parameters and Defuser has no
+    # `gemma4` registry entry, so run its generic experts pass explicitly.
+    defuser_generic_experts = True
+    dynamic_expert_index = "num_experts"
     # Gemma 4 mixes optional KV projections and per-layer residual adapters across variants.
     layer_modules_strict = False
     # Gemma 4 input preparation uses per-layer embeddings, so batch quantization stays conservative.
@@ -205,6 +224,12 @@ class Gemma4TextQModel(LlamaQModel):
     pre_lm_head_norm_module = "model.norm"
     rotary_embedding = "model.rotary_emb"
     module_tree = _gemma4_module_tree()
+
+    @classmethod
+    def get_num_experts(cls, model_config):
+        # Dense variants expose `num_experts=None`; treat that as zero so the
+        # expert placeholders are not emitted for a model with no MoE layers.
+        return super().get_num_experts(model_config) or 0
 
     def capture_first_layer_positional_inputs(self, args, kwargs, batch_device):
         """Keep Gemma 4 per-layer adapter inputs when decoder layers are replayed in isolation."""
@@ -243,11 +268,17 @@ class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
     fusable = FusableConfig("gemma4").merge(Gemma4TextQModel.fusable)
 
 
+    defuser_generic_experts = True
+    dynamic_expert_index = "num_experts"
     # Gemma 4 composite checkpoints share the same decoder quirks as the text-only model.
     layer_modules_strict = False
     support_batch_quantize = False
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
+
+    @classmethod
+    def get_num_experts(cls, model_config):
+        return super().get_num_experts(model_config) or 0
 
     module_tree = [
         "model",
@@ -281,6 +312,17 @@ class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
             "per_layer_input_gate": ("per_layer_input_gate:0",),
             "post_per_layer_input_norm": ("post_per_layer_input_norm:!:postnorm",),
             "per_layer_projection": ("per_layer_projection:1",),
+            "router": {
+                "proj": ("proj:!",),
+                "scale": ("scale:!",),
+                "per_expert_scale": ("per_expert_scale:!",),
+            },
+            "experts:moe": {
+                "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
+            },
+            "pre_feedforward_layernorm_2": ("pre_feedforward_layernorm_2:!",),
+            "post_feedforward_layernorm_1": ("post_feedforward_layernorm_1:!:postnorm",),
+            "post_feedforward_layernorm_2": ("post_feedforward_layernorm_2:!:postnorm",),
         },
     ]
 

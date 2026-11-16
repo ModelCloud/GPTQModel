@@ -218,11 +218,19 @@ def test_fp8_native_multiplier_dequant_and_forward_match_fp64_oracle(method, blo
 
     if method != "block":
         # ``torch._scaled_mm`` consumes the multiplier directly, not its
-        # reciprocal. A block layout never reaches this path.
+        # reciprocal. Rowwise scaling needs one scale per output column, so a
+        # per-tensor scale is broadcast to that shape. A block layout never
+        # reaches this path.
         weight_scale = kernel._scaled_mm_weight_scale(device=torch.device("cuda"))
+        expected_scale = _expanded_fp64(kernel)
+        expected_scale = (
+            expected_scale.reshape(1, 1).expand(weight_scale.shape)
+            if expected_scale.numel() == 1
+            else expected_scale.reshape(1, -1)
+        )
         torch.testing.assert_close(
             weight_scale.to(torch.float64),
-            _expanded_fp64(kernel).reshape(weight_scale.shape),
+            expected_scale,
             rtol=1e-6,
             atol=0,
         )

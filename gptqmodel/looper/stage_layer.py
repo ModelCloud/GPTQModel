@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from concurrent.futures import as_completed
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 from defuser.modeling.replace_modules import materialize_model
@@ -310,7 +310,7 @@ def _replay_layer_outputs(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_lm_head_module: bool,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     layer_index: int,
     layer_descriptor: str,
     full,
@@ -450,7 +450,7 @@ def _capture_pristine_group_context(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_lm_head_module: bool,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     layer_index: int,
     layer_descriptor: str,
     full,
@@ -519,7 +519,7 @@ def run_layer_stage(
     planning_layer_modules: List[List[str]],
     layer_names: Optional[List[str]],
     fallback,
-    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    shared_kv_cache_dict: Dict[Tuple[int, int], Any],
     pb,
     layer_count: int,
     region_timer,
@@ -1485,6 +1485,12 @@ def run_layer_stage(
                     raise_in_place=True,
                 )
 
+                # A layer is only a durable resume point when every finalize
+                # task completed. The async branch has no checkpoint (see
+                # ``_should_drain_finalize_futures_synchronously``), so it
+                # cannot gate a boundary commit here.
+                finalize_ok = True
+
                 if finalize_futures_snapshot:
                     known_layers = sorted(
                         {
@@ -1583,7 +1589,7 @@ def run_layer_stage(
                     if drain_sync:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
-                        _drain_finalize_futures(
+                        finalize_ok = _drain_finalize_futures(
                             [future for future, *_ in finalize_futures_snapshot],
                             finalize_pb,
                             finalize_count,
@@ -1628,7 +1634,25 @@ def run_layer_stage(
                             layer_index if not is_lm_head_module else "lm_head",
                         )
 
-                if layer_boundary_checkpoint is not None and not is_embeddings_module:
+                if (
+                    layer_boundary_checkpoint is not None
+                    and not is_embeddings_module
+                    and not finalize_ok
+                ):
+                    # `_drain_finalize_futures` already requested the loop stop
+                    # with the original failure. Do not publish a boundary that
+                    # claims modules were packed/offloaded when they were not.
+                    log.warning(
+                        "StageLayer: layer=%s finalize incomplete; "
+                        "skipping durable boundary commit",
+                        layer_index,
+                    )
+
+                if (
+                    layer_boundary_checkpoint is not None
+                    and not is_embeddings_module
+                    and finalize_ok
+                ):
                     if callable(input_lifetime_diagnostic):
                         log.info(
                             "StageLayer: input lifetime diagnostic layer=%s result=%s",
@@ -1672,12 +1696,18 @@ def run_layer_stage(
             )
 
         # `layer_index - 1`'s cached output (e.g. this model's DSA-style
-        # indexer top-k indices, threaded via reuse_kv) is only ever read
-        # during layer_index's own forward/quantize/replay work above, which
-        # has just finished. Evict it now -- otherwise shared_kv_cache_dict
-        # grows by one entry per layer for the whole run and is never
-        # reclaimed (harmless per-entry, but unbounded over many layers).
-        shared_kv_cache_dict.pop(layer_index - 1, None)
+        # indexer top-k indices or Hymba's cross-layer KV, threaded via
+        # reuse_kv) is only ever read during layer_index's own
+        # forward/quantize/replay work above, which has just finished. The
+        # cache is keyed by (layer, batch), so evict every batch of that
+        # layer -- otherwise shared_kv_cache_dict grows by one entry per
+        # (layer, batch) for the whole run and is never reclaimed (harmless
+        # per-entry, but unbounded over many layers).
+        stale_layer = layer_index - 1
+        for key in list(shared_kv_cache_dict):
+            key_layer = key[0] if isinstance(key, tuple) and key else key
+            if key_layer == stale_layer:
+                shared_kv_cache_dict.pop(key, None)
 
     if planned_steps is not None:
         pb.close()

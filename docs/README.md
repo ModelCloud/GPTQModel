@@ -37,6 +37,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)
 - [Packed payloads and save-time source materialization](fp8-save-offload.md)
 - [FP8 checkpoint scale semantics](fp8-scale-semantics.md)
+- [FP8 weight-only dispatch: W8A16 vs W8A8](fp8-weight-only-dispatch.md)
 - [Native fusion inference on CPU, CUDA and ROCm](fusion-device-validation.md)
 - [Fusion model qualification](fusion-model-coverage.md)
 - [Post-quantization fusion planner](fusion-planner.md)
@@ -154,6 +155,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Hugging Face interoperability](hf-interop.md)
 - [Lazy checkpoint materialization](lazy-checkpoint-materialization.md)
 - [Looper checkpoint/resume](looper-checkpoint-redesign.md)
+- [Cross-layer shared KV cache](looper-shared-kv-cache.md)
 - [Offload index resolution](offload-index-resolution.md)
 - [Quantized checkpoint subfolder resolution](quantized-checkpoint-subfolder-resolution.md)
 - [Reshard source selection](reshard-source-selection.md)
@@ -179,6 +181,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [ROCm JIT toolkit path resolution](rocm-jit-toolkit-paths.md)
 - [AMD RDNA4 (gfx1200 / gfx1201 / gfx1250) support](rocm-rdna4.md)
 - [Device thread pool error propagation](thread-pool-error-contract.md)
+- [Torch thread caps](thread-caps.md)
 
 ### Adapters and accuracy recovery
 

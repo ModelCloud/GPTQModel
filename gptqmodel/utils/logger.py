@@ -253,7 +253,7 @@ def format_quantize_summary(
     """
 
     result = result or {}
-    layers = len(result)
+    layers = _summary_layer_count(result)
     modules = sum(len(entries or ()) for entries in result.values())
     parts = [
         f"Quantize summary: {layers} layer(s), {modules} module(s), "
@@ -262,6 +262,24 @@ def format_quantize_summary(
     if peak_vram_gib is not None:
         parts.append(f"peak VRAM {peak_vram_gib:.2f} GiB (per-device max)")
     return ", ".join(parts)
+
+
+def _summary_layer_count(result: Dict[str, Sequence[Any]]) -> int:
+    """Count distinct decoder layers, not result containers.
+
+    ``ModuleLooper._loop_impl`` keys the result by processor name (for example
+    ``{"gptq": [...]}``), so ``len(result)`` is the number of processors. Each
+    processor's records carry their decoder-layer index under ``"layer"``.
+    Callers that key the result by layer directly (older shape, and the tests
+    that pin it) have no such key, so fall back to ``len(result)``.
+    """
+
+    layers = set()
+    for entries in result.values():
+        for entry in entries or ():
+            if isinstance(entry, dict) and "layer" in entry:
+                layers.add(entry["layer"])
+    return len(layers) if layers else len(result)
 
 
 class QuantizationRegionTimer:

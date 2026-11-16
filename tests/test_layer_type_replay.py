@@ -465,3 +465,106 @@ def test_model_override_consumes_private_layer_type_capture_key(qmodel_cls):
         f"{qmodel_cls.__name__} leaked private replay state into layer kwargs"
     )
     assert prepared["attention_mask"] is not None
+
+
+def _gemma3_layer_type_kwargs(model, qmodel):
+    """Capture the per-layer-type replay kwargs exactly as the input stage does."""
+
+    input_ids = torch.arange(3, 3 + SEQ).unsqueeze(0)
+    attention_mask = torch.ones(1, SEQ, dtype=torch.long)
+    hidden = model.model.embed_tokens(input_ids)
+    position_ids = torch.arange(SEQ, dtype=torch.long).unsqueeze(0)
+    qmodel.begin_input_capture_example(
+        {"input_ids": input_ids, "attention_mask": attention_mask},
+        torch.device("cpu"),
+    )
+    try:
+        layer_type_kwargs = qmodel._build_layer_type_replay_kwargs(
+            args=(hidden,),
+            kwargs={
+                "hidden_states": hidden,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+            },
+            batch_device=torch.device("cpu"),
+        )
+    finally:
+        qmodel.end_input_capture_example()
+    assert layer_type_kwargs is not None
+    return layer_type_kwargs
+
+
+def test_awq_token_row_replay_uses_the_layer_attention_type():
+    """AWQ token-row replay must use the layer's own mask, not layer 0's (#4176 item 2).
+
+    ``_token_row_replay_kwargs`` read only ``inputs_cache.attention_masks``,
+    which holds the first decoder layer's mask. On a mixed sliding/full model
+    (gemma-3, OLMo 3) a full-attention layer was therefore replayed with the
+    sliding window: zero allowed pairs at distance >= ``sliding_window``.
+    """
+
+    from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
+    from gptqmodel.looper.loop_processor import CalibrationConfig
+    from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+
+    model, qmodel_cls = _gemma3_text()
+    qmodel = object.__new__(qmodel_cls)
+    nn.Module.__init__(qmodel)
+    qmodel.model = model
+
+    layers = model.model.layers
+    layer_types = list(model.config.layer_types)
+    assert layer_types == ["sliding_attention", "full_attention"]
+
+    # The capture stage stores layer 0's (sliding) mask in `attention_masks`
+    # and every declared type in the private replay key.
+    native, _ = _native_forward(
+        model,
+        torch.arange(3, 3 + SEQ).unsqueeze(0),
+        torch.ones(1, SEQ, dtype=torch.long),
+    )
+    sliding_mask = native[0]["attention_mask"]
+    assert sliding_mask is not None
+
+    processor = AWQProcessor(
+        tokenizer=None,
+        qcfg=QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=8),
+        calibration=CalibrationConfig(),
+        gptq_model=qmodel,
+        model=model,
+    )
+    module_name = "self_attn.q_proj"
+    full_layer = layers[1]
+    state = _AWQLayerState(modules={module_name: object()}, layer_module=full_layer)
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+    processor.inputs_cache = types.SimpleNamespace(
+        attention_masks=[sliding_mask],
+        position_ids=[torch.arange(SEQ, dtype=torch.long).unsqueeze(0)],
+        layer_input_kwargs=[
+            {_LAYER_TYPE_REPLAY_KWARGS_KEY: _gemma3_layer_type_kwargs(model, qmodel)}
+        ],
+    )
+    processor.tasks[module_name] = {
+        "inputs": [torch.zeros(1, SEQ, 4)],
+        "batch_indices": [0],
+    }
+
+    processor._layer_input_features(state)
+
+    replay = processor._awq_feature_kwargs[module_name]
+    mask = replay["attention_mask"]
+    allowed = mask[0, 0]
+    if allowed.dtype != torch.bool:
+        allowed = allowed >= 0
+    # A full-attention layer must see across the whole sequence. The sliding
+    # mask (window=2) allows nothing at distance >= 2.
+    assert bool(allowed[SEQ - 1, 0]), (
+        "full-attention layer replayed with the sliding mask: "
+        f"allowed pairs at distance {SEQ - 1} = {bool(allowed[SEQ - 1, 0])}"
+    )
+    assert bool(allowed[SEQ - 1, :].all())
+    # And it must not become one causal block across documents: with one
+    # document here the mask is the native causal grid.
+    assert not bool(allowed[0, SEQ - 1])

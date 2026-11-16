@@ -33,8 +33,43 @@ def _make_fp8_kernel(*, in_features: int = 64, out_features: int = 64) -> fp8_mo
         register_buffers=False,
     )
     kernel.pack_original(linear=linear, scales=None, zeros=None)
-    kernel._scaled_mm_hard_disabled = True
     return kernel.eval()
+
+
+def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> torch.Tensor:
+    """Decode the packed FP8 payload with independent FP64 arithmetic.
+
+    This does not call ``dequantize_weight`` or any other code under test.
+    """
+
+    codes = kernel.weight.to(torch.float64)
+    scale = kernel.weight_scale_inv.to(torch.float64)
+
+    def apply_scale(weight: torch.Tensor, scale_tensor: torch.Tensor) -> torch.Tensor:
+        if kernel.weight_scale_semantics == "multiplier":
+            return weight * scale_tensor
+        return weight / scale_tensor
+
+    if kernel.weight_scale_method == "tensor":
+        decoded = apply_scale(codes, scale)
+    elif kernel.weight_scale_method == "row":
+        decoded = apply_scale(codes, scale.reshape(-1, 1))
+    else:
+        block_rows, block_cols = kernel.weight_block_size
+        decoded = apply_scale(
+            codes.reshape(
+                kernel.out_features // block_rows,
+                block_rows,
+                kernel.in_features // block_cols,
+                block_cols,
+            ),
+            scale[:, None, :, None],
+        ).reshape(kernel.out_features, kernel.in_features)
+
+    output = x.to(torch.float64) @ decoded.t()
+    if kernel.bias is not None:
+        output = output + kernel.bias.to(torch.float64)
+    return output
 
 
 @pytest.mark.skipif(
@@ -50,6 +85,7 @@ def test_fp8_empty_cuda_forward_preserves_scaled_mm_for_later_tokens(monkeypatch
         bits=8, group_size=-1, desc_act=False, sym=True,
         in_features=64, out_features=64, bias=biased,
         format="float8_e4m3fn", weight_scale_method="tensor",
+        activation_quant_method="per_token",
     )
     module.pack_original(linear, scales=None, zeros=None)
     module = module.eval().to(device="cuda")
@@ -178,13 +214,15 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
     )
     kernel.pack_original(linear=linear, scales=None, zeros=None)
     kernel = kernel.to(device=device).eval()
-    kernel._scaled_mm_hard_disabled = True
 
     x_dtype = torch.float32 if device == "cpu" else torch.float16
     x = torch.randn(5, 64, device=device, dtype=x_dtype)
 
     with torch.inference_mode():
         out = kernel(x)
+        if device == "cuda":
+            # The shipped default is W8A16: it must not quantize activations.
+            assert not kernel._can_use_scaled_mm(x.reshape(-1, 64))
         expected = torch.matmul(
             x,
             kernel.dequantize_weight(device=device, dtype=x_dtype),
@@ -193,6 +231,135 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
             expected = expected + kernel.bias.to(device=device, dtype=x_dtype)
 
     torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-3)
+
+
+def _packed_gpu_kernel(
+    *,
+    fmt: str = "float8_e4m3fn",
+    weight_scale_method: str = "tensor",
+    bias: bool = True,
+    activation_quant_method: str | None = None,
+) -> fp8_module.TorchFP8Linear:
+    torch.manual_seed(3)
+    linear = nn.Linear(64, 64, bias=bias).eval()
+    block_size = (16, 16) if weight_scale_method == "block" else None
+    kwargs = {}
+    if activation_quant_method is not None:
+        kwargs["activation_quant_method"] = activation_quant_method
+    kernel = fp8_module.TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=64,
+        out_features=64,
+        bias=bias,
+        pack_dtype=torch.int32,
+        format=fmt,
+        weight_scale_method=weight_scale_method,
+        weight_block_size=block_size,
+        register_buffers=False,
+        **kwargs,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    return kernel.eval()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+@pytest.mark.parametrize("fmt", ["float8_e4m3fn", "float8_e5m2"])
+@pytest.mark.parametrize("weight_scale_method", ["tensor", "row", "block"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp8_default_forward_is_w8a16(fmt: str, weight_scale_method: str, dtype: torch.dtype):
+    """The shipped default must dequantize the weight and keep activations wide."""
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("BF16 arithmetic unavailable on this device")
+
+    kernel = _packed_gpu_kernel(fmt=fmt, weight_scale_method=weight_scale_method).to("cuda")
+    x = torch.randn(5, 64, device="cuda", dtype=dtype)
+
+    # No activation quantization unless it was explicitly requested.
+    assert not kernel._can_use_scaled_mm(x)
+
+    with torch.inference_mode():
+        out = kernel(x)
+
+    oracle = _weight_only_oracle(kernel, x)
+    assert out.dtype == dtype
+    torch.testing.assert_close(out, oracle.to(dtype), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+@pytest.mark.parametrize("fmt", ["float8_e4m3fn", "float8_e5m2"])
+def test_fp8_default_forward_is_batch_invariant(fmt: str):
+    """Rows must not depend on the largest activation batched beside them."""
+    kernel = _packed_gpu_kernel(fmt=fmt, weight_scale_method="tensor").to("cuda")
+    rows = torch.randn(4, 64, device="cuda", dtype=torch.float16)
+    outlier = torch.full((1, 64), 2000.0, device="cuda", dtype=torch.float16)
+
+    assert not kernel._can_use_scaled_mm(rows)
+
+    with torch.inference_mode():
+        alone = kernel(rows)
+        batched = kernel(torch.cat([rows, outlier], dim=0))[:4]
+
+    torch.testing.assert_close(batched, alone, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+def test_fp8_w8a8_is_opt_in_and_uses_per_token_scales():
+    """W8A8 is reachable only through the explicit method, and per token."""
+    default = _packed_gpu_kernel(bias=False).to("cuda")
+    opted = _packed_gpu_kernel(
+        bias=False, activation_quant_method="per_token"
+    ).to("cuda")
+
+    rows = torch.randn(4, 64, device="cuda", dtype=torch.float16)
+    outlier = torch.full((1, 64), 2000.0, device="cuda", dtype=torch.float16)
+
+    assert not default._can_use_scaled_mm(rows)
+    assert opted._can_use_scaled_mm(rows)
+
+    with torch.inference_mode():
+        codes_alone, scale_alone = opted._quantize_input_for_scaled_mm(rows)
+        codes_batched, scale_batched = opted._quantize_input_for_scaled_mm(
+            torch.cat([rows, outlier], dim=0)
+        )
+
+    assert scale_alone.shape == (4, 1)
+    assert scale_batched.shape == (5, 1)
+    # One scale per token: a neighbour's 2000.0 cannot move these rows.
+    assert torch.equal(scale_alone, scale_batched[:4])
+    assert torch.equal(codes_alone, codes_batched[:4])
+
+    # The method is the switch; the default module never takes the path.
+    default.set_activation_quant_method("per_token")
+    assert default._can_use_scaled_mm(rows)
+    default.set_activation_quant_method("none")
+    assert not default._can_use_scaled_mm(rows)
+    with pytest.raises(ValueError, match="activation quantization"):
+        default.set_activation_quant_method("per_tensor")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+@pytest.mark.parametrize("fmt", ["float8_e4m3fn"])
+def test_fp8_w8a8_forward_is_batch_invariant(fmt: str):
+    kernel = _packed_gpu_kernel(
+        fmt=fmt, bias=False, activation_quant_method="per_token"
+    ).to("cuda")
+    rows = torch.randn(4, 64, device="cuda", dtype=torch.float16)
+    outlier = torch.full((1, 64), 2000.0, device="cuda", dtype=torch.float16)
+
+    if not kernel._can_use_scaled_mm(rows):
+        pytest.skip("Native FP8 rowwise scaled matmul unavailable on this GPU")
+
+    with torch.inference_mode():
+        alone = kernel(rows)
+    assert not kernel._scaled_mm_hard_disabled, "W8A8 opt-in silently fell back"
+
+    with torch.inference_mode():
+        batched = kernel(torch.cat([rows, outlier], dim=0))[:4]
+
+    torch.testing.assert_close(batched, alone, rtol=2e-3, atol=2e-3)
 
 
 def test_fp8_forward_dequantizes_per_call_without_dense_cache(monkeypatch):
@@ -350,6 +517,7 @@ def test_fp8_scaled_mm_matches_dense_reference(fmt: str, weight_scale_method: st
         pack_dtype=torch.int32,
         format=fmt,
         weight_scale_method=weight_scale_method,
+        activation_quant_method="per_token",
         register_buffers=False,
     )
     kernel.pack_original(linear=linear, scales=None, zeros=None)
