@@ -104,6 +104,10 @@ compatible deployment engine.
   Compression settings trade model size, calibration cost, speed, and quality.
 - **Preserve causal replay.** Bloom AWQ keeps captured attention context and
   rejects unsafe residual folds; see [Bloom replay safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-bloom-replay.md).
+- **Replay each calibration document separately.** AWQ token-row replay rebuilds
+  a block-diagonal per-document mask and keeps each row's original position;
+  additive masks treat `0` as attended. See
+  [AWQ calibration aggregation](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md).
 
 ### Inference and deployment 🚢
 
