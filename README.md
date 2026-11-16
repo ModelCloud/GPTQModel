@@ -80,23 +80,34 @@ compatible deployment engine.
 - **Choose where to spend precision.** Mix bit widths, keep sensitive modules
   unquantized, and use activation-quantization or preprocessing policies where
   supported. Quantization protocols let you organize multi-stage recipes.
+- **Keep floating activation searches finite.** NVFP4 block-scale ranking
+  normalizes candidate error by an exact power of two so large finite
+  activations cannot overflow the comparison and silently return zeros; see
+  [NVFP4 candidate ranking](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gptq-w4a-gb10.md#candidate-ranking-and-the-finite-scale-contract).
 - **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
   execution help manage memory and recover interrupted jobs. Distributed EXL3
   workflows support durable replay and resume.
 - **Recover accuracy.** Use [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) refinement, [EoRA](https://github.com/ModelCloud/GPTQModel/wiki/EoRA) low-rank compensation, [rotation](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#rotations),
   [smoothing](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#weight-smoothing), and [norm tuning](https://github.com/ModelCloud/GPTQModel/wiki/Rotation-Smoothing-and-Norm-Tuning#post-quantization-norm-tuning) for supported recipes. [LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) training and adapter
-  loading support further task adaptation. AWQ GSQ uses the
+  loading support further task adaptation. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
   [packed-code scoring contract](docs/gsq-awq-code-recovery.md) to evaluate exported candidates.
 - **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
   a quantized block, including multimodal wrappers and hybrid layer shapes; see
   the [AWQ scaling groups](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md) contract. Scale search keeps
   routing in the original-input coordinates, validates replay coverage, and
   restores temporary weights on failure; see [search safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md#scale-search-safety).
+- **Reject unrepresentable AWQ pack scales.** The native GEMM/GEMV packers
+  validate the actual FP16 storage cast before replacing module state; see
+  [AWQ pack-time scale representability](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-scale-representability.md).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.
 - **Preserve causal replay.** Bloom AWQ keeps captured attention context and
   rejects unsafe residual folds; see [Bloom replay safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-bloom-replay.md).
+- **Replay each calibration document separately.** AWQ token-row replay rebuilds
+  a block-diagonal per-document mask and keeps each row's original position;
+  additive masks treat `0` as attended. See
+  [AWQ calibration aggregation](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md).
 
 ### Inference and deployment 🚢
 

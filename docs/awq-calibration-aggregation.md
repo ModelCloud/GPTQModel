@@ -134,14 +134,21 @@ attention implementation consumes the tensor.
 | `additive` | `[B, 1, S, S]` float with `finfo.min` | float block grid, `min` for masked cells | Hugging Face eager attention sums the mask into the logits |
 | `bool_keep` | `[B, 1, S, S]` bool, `True` = attended (SDPA) | bool block grid, `True` = attended | SDPA takes a keep mask |
 | `bool_masked` | `[B, 1, S, S]` bool, `True` = masked (TeleChat2 `triu(1)`) | bool block grid, `True` = masked | the consumer calls `masked_fill`, which rejects a float mask |
+| `positive_keep` | `[B, 1, S, S]` integer 0/1, `1` = attended (LLaDA2 `tril * padding`) | integer block grid, `1` = attended | the consumer multiplies or masks with the 0/1 grid |
 | planar | `[B, S]` keep mask | `[1, retained]` keep mask | FlashAttention takes a rank-2 keep mask; cross-document separation is not expressible |
 
 A bool mask's polarity is read from its diagonal: `True` on the diagonal means
 the keep convention, an all-`False` diagonal means `masked_fill`. An additive
-mask's polarity is read from whether it contains negative values. When the
-capture stored no mask at all (`batch_size=1` on a model that builds its own
-causal mask), the additive block-diagonal fallback is used; it is the explicit
-form of the causal path the module already took.
+**float** mask is normalized as `m >= 0` unconditionally: it is summed into the
+logits, so `0` is attended and only negatives suppress a key. An all-zero float
+grid (an unpadded `batch_size>1` batch) therefore keeps every diagonal entry. A
+square **integer** grid is not additive: it is a multiplicative 0/1 keep mask
+(LLaDA2 expands the tokenizer mask with `tril * padding`) and is normalized as
+`m > 0`, so `0` means masked. A planar `[B, S]` numeric mask is a keep
+indicator, not an additive grid, and keeps the Hugging Face `1`/`0` convention.
+When the capture stored no mask at all (`batch_size=1` on a model that builds
+its own causal mask), the additive block-diagonal fallback is used; it is the
+explicit form of the causal path the module already took.
 
 ```mermaid
 flowchart TD
@@ -150,6 +157,7 @@ flowchart TD
     C -- additive --> D["float block grid, finfo.min masked"]
     C -- bool_keep --> E["bool block grid, True attended"]
     C -- bool_masked --> F["bool block grid, True masked"]
+    C -- positive_keep --> P["0/1 block grid, 1 attended"]
     C -- planar --> G["1, retained keep mask"]
     C -- none --> D
     B --> H["AWQProcessor._token_row_source_structure"]
@@ -158,6 +166,7 @@ flowchart TD
     J --> D
     J --> E
     J --> F
+    J --> P
     style G fill:#ffe9b3,stroke:#b38600
 ```
 
@@ -199,6 +208,7 @@ to the memory bound.
 | `batch_size>1`, batched capture | replay ran with `attention_mask=None`; `Qwen2Attention.forward` raised `TypeError` and the synthetic sequence attended across documents | replay carries a per-document block mask and original positions |
 | Captured `masked_fill` bool grid (TeleChat2) | converted to an additive float mask; `masked_fill` raised `RuntimeError: only supports boolean masks` | rebuilt as a bool grid with `True` = masked |
 | Real padded `batch_size>1` bool grid | keep came from `any(dim=-1)`, so padding rows counted and the structure was never recovered | keep comes from the diagonal; the document grid and positions are recovered |
+| Unpadded `batch_size>1` additive grid (all zeros) | `(m > 0)` marked every position masked, so `_token_row_source_structure` returned `None` and the replay fell back to one causal sequence across the whole batch | `m >= 0` keeps every diagonal entry; the replay is block-diagonal per document |
 | Cached mask does not match the captured rows | mask dropped, cross-document attention | each capture batch replayed as one contiguous document |
 | No cached mask entries at all | `attention_mask=None` | kwargs left unchanged |
 | Captured masks are all `None` (`batch_size=1`) | `attention_mask=None`, synthetic positions | additive block-diagonal fallback with original positions |

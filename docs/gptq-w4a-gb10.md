@@ -41,6 +41,70 @@ Four-Over-Six scale search: every emitted value is still E2M1 and every local
 scale is still E4M3. Runtime activation storage and GEMM operands remain one
 FP4 code per value plus the standard E4M3 block scales.
 
+### Candidate ranking and the finite-scale contract
+
+`_nvfp4_mse_quantize_blocks` ranks E4M3 block scales by their block squared
+error. Before this change, that error was accumulated as the absolute FP32 SSE
+`sum((values * scale - blocks) ** 2)` (`activation_floatx.py:222-232` on main).
+For large but finite activations the square overflows to infinity for every
+candidate. Because `best_error` also started at infinity and `best_values`
+started at zero, `error < best_error` never became true and the zero default
+was returned.
+
+The error is now accumulated in units of a per-block power of two:
+
+```mermaid
+flowchart TD
+    A["_nvfp4_mse_quantize_blocks(blocks, global_scale)"] --> B["block_amax = max(abs(blocks))"]
+    B --> C["block_exponent = frexp(block_amax)"]
+    C --> D["evaluate(local)"]
+    D --> E["scale = local * global_scale"]
+    E --> F{"scale finite and positive?"}
+    F -->|"no"| X["candidate error = inf"]:::fail
+    F -->|"yes"| G["scaled_blocks = ldexp(blocks, -exponent)<br/>scaled_scale = ldexp(scale, -exponent)"]
+    G --> H["error = sum((values * scaled_scale - scaled_blocks) ** 2)"]
+    H --> I["compare error with best_error"]
+    I --> J{"best_error finite?"}
+    J -->|"no"| Y["raise ValueError<br/>no finite candidate"]:::fail
+    J -->|"yes"| Z["return best E4M3 scale and E2M1 values"]
+
+    classDef fail fill:#ffdddd,stroke:#cc0000,color:#660000
+```
+
+Scaling by a power of two is exact for finite values, so the candidate ordering
+for ordinary activations is unchanged; an A/B check across every recipe and
+input magnitudes from `1e-6` to `1e15` found no selected-scale or output
+difference. For large finite activations the scaled form stays finite, so a
+real candidate replaces the all-zero default.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| Error accumulation | absolute FP32 SSE; overflows to `inf` | per-block power-of-two scaled SSE; stays finite |
+| Initial candidate | `best_error = inf`, `best_values = 0`; an overflowing candidate never wins | the first candidate with a finite error wins |
+| Invalid scale | divides by zero or infinity and can still return the zero default | contributes `inf` error |
+| All candidates invalid | silently returns zeros | raises `ValueError` |
+
+| Input: 16 increasing finite values, maximum | Input dtype | Before relative L2 | After relative L2 | Independent FP64 grid optimum |
+| --- | --- | ---: | ---: | ---: |
+| `1e20` | FP32 | 1.0 (all zeros) | 0.0939 | 0.0892 |
+| `1e20` | BF16 | 1.0 (all zeros) | 0.0936 | 0.0899 |
+
+The FP64 optimum comes from enumerating the finite positive E4M3 block scales
+and the E2M1 reconstruction values independently of the production search. The
+production search is local, so it is not required to reach that optimum; the
+contract is that it must not discard every finite candidate.
+
+The GPU Triton packer initializes from a valid Four-Over-Six candidate instead
+of an infinite best error, so it did not return the all-zero result; its
+selection was checked separately against the same input. The Torch and Triton
+paths keep the same candidate set and the same normal-magnitude selection.
+
+Contracts:
+
+- A candidate whose scale is zero or non-finite contributes `inf` error.
+- If no candidate has a finite error, the search raises `ValueError`.
+- Normal-magnitude candidate selection is unchanged.
+
 New NVFP4 checkpoints serialize an explicit recipe, for example
 `{"mode": "w4a_nvfp4", "recipe": "least_squares"}`. `nvidia` uses
 NVIDIA's max-to-6 block rule, while `four_six` and `least_squares` use the hardware-valid

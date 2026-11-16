@@ -211,6 +211,47 @@ which raises `RuntimeError` when
 The `offload_to_disk` meta shell is exempt from the dtype and meta checks
 because it is intentionally meta until `LazyTurtle` fills each layer.
 
+#### Declared float32 pins are exempt
+
+transformers keeps the modules named by a model's `_keep_in_fp32_modules`
+(applied for fp16 loads) and `_keep_in_fp32_modules_strict` (applied for fp16
+and bf16 loads) in float32 on purpose: `_get_dtype_plan` maps each declared name
+to `torch.float32` and `core_model_loading` applies it while copying each
+checkpoint tensor. A uniform-dtype assertion therefore rejected valid
+checkpoints (issue #4170: Ernie4.5-MoE `gate.weight` / `moe_statics`, GPT-OSS
+norms, T5/mT5 `wo`, DeepSeek-V3.2 `indexer.weights_proj`).
+
+`assert_loaded_model_state` excludes a floating parameter from both dtype checks
+only when it is **float32** *and* its full parameter name matches one of the
+model's declarations. Matching mirrors transformers 5.22: each declaration is
+compiled as a regex (`*` becomes `.*`) and searched against the whole parameter
+name, so the usual module substrings (`gate.weight`, `wo`, `norm`) behave as
+substring matches. Declarations are collected from the model and every
+submodule, because a composite model can register them on a child.
+
+```mermaid
+flowchart TD
+    A["named_parameters()"] --> B{"floating"}
+    B -- no --> Z["ignore"]
+    B -- yes --> C{"is_meta"}
+    C -- yes --> D["meta violation"]
+    C -- no --> E{"dtype is float32"}
+    E -- no --> F["count dtype"]
+    E -- yes --> G{"_compile_keep_in_fp32_matcher(name)"}
+    G -- "matches" --> Z
+    G -- "no match" --> F
+    F --> H{"expected_dtype set"}
+    H -- yes --> I{"dtype != expected_dtype"}
+    H -- no --> J{"uniform required and more than one dtype"}
+    I -- yes --> K["dtype violation"]
+    J -- yes --> K
+```
+
+The exemption is deliberately narrow. A parameter that is float32 but not
+declared still counts, so a genuinely mixed model (the #4140 corruption) still
+raises; so does a declared module left in a dtype other than float32, or a
+declared parameter stranded on the meta device.
+
 ### Init suspension is reference-counted
 
 `suspend_hf_weight_init` (`gptqmodel/utils/hf.py`) patches process-wide torch
@@ -243,13 +284,17 @@ and defaults to 1.
 | `fullgraph=True` capture failure | exception propagates; no silent fallback |
 | Two `GPTQModel.load()` calls overlap | the second waits, then builds; both models are consistent |
 | A load leaves a mixed dtype, a meta tied weight, or a changed default dtype | `RuntimeError`; the corrupted model is never returned |
+| A float32 parameter is declared by `_keep_in_fp32_modules` / `_keep_in_fp32_modules_strict` | exempt from the dtype checks; still must be materialized |
+| A float32 parameter is *not* declared, or a declared module is left in a half dtype | `RuntimeError`; the corrupted model is never returned |
 | Overlapping `suspend_hf_weight_init` scopes | patches stay installed until the last exit |
 
 ## Validation
 
 The regressions are covered by `tests/test_concurrency_guards.py`,
-`tests/test_triton_patch_api.py`, `tests/test_awq_triton_cold_jit.py`, and
-`tests/test_torch_compile_fallback.py`. The cold-JIT test runs a child process
+`tests/test_load_state_assertions.py`, `tests/test_concurrent_load.py`,
+`tests/test_hf_init_guard.py`, `tests/test_triton_patch_api.py`,
+`tests/test_awq_triton_cold_jit.py`, and `tests/test_torch_compile_fallback.py`.
+The cold-JIT test runs a child process
 with `PYTHON_GIL=0`, an empty `TRITON_CACHE_DIR`, and 24 threads, and asserts a
 clean exit; it is skipped on GIL builds and when the AWQ checkpoint is absent.
 
