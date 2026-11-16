@@ -519,6 +519,145 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 log = setup_logger()
 
 
+# Methods whose packing kernel may be accelerator-only. The quantize loop packs
+# every layer and ``post_quantize`` leaves it on CPU, so an in-session forward
+# must use a kernel that supports the model's final device (issue #4381).
+_IN_SESSION_KERNEL_METHODS = frozenset({METHOD.AWQ, METHOD.QQQ, METHOD.GGUF})
+
+
+def _kernel_supports_device(kernel, device) -> bool:
+    """Whether a quant-linear class declares support for ``device``."""
+
+    supported = getattr(kernel, "SUPPORTS_DEVICES", None)
+    if not supported:
+        return True
+    family = normalize_device(device)
+    return DEVICE.ALL in supported or family in supported
+
+
+def select_in_session_quant_linear(qcfg, device):
+    """Select a quant-linear kernel that can execute on the final device.
+
+    ``quantize()`` selects its packing kernel from ``quantize_config.device``,
+    which may be an accelerator while the finished layers live on CPU. Resolve
+    the same method/format for the device the model actually occupies instead
+    of reusing the calibration-time choice.
+    """
+
+    method = qcfg.export_quant_method()
+    return select_quant_linear(
+        bits=qcfg.runtime_bits,
+        dynamic=qcfg.dynamic,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        backend=BACKEND.AUTO,
+        format=resolve_quant_format(qcfg.format, method),
+        quant_method=method,
+        device=normalize_device(device),
+        pack=True,
+        pack_dtype=qcfg.pack_dtype,
+    )
+
+
+def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
+    """Reinterpret one packed module with another layout-compatible kernel.
+
+    The portable Torch kernels read the same packed buffers as their
+    accelerator-only counterparts (AWQ GEMM, QQQ, GGUF). Swapping the class
+    keeps the packed state and hooks intact while changing only the compute
+    path, which is exactly the kernel switch the in-session model needs.
+    """
+
+    module.__class__ = target_cls
+    backends = getattr(target_cls, "SUPPORTS_BACKENDS", None) or ()
+    if backends:
+        module.backend = backends[0]
+    if not hasattr(module, "compute_dtype"):
+        scales = getattr(module, "scales", None)
+        module.compute_dtype = (
+            scales.dtype
+            if isinstance(scales, torch.Tensor) and scales.dtype in (torch.float16, torch.bfloat16)
+            else torch.float16
+        )
+    clear = getattr(module, "clear_weight_cache", None)
+    if callable(clear):
+        clear()
+    post_init = getattr(module, "post_init", None)
+    if callable(post_init):
+        post_init()
+
+
+def rehome_quantized_kernel(model) -> None:
+    """Make the in-session quantized layers runnable on their final device.
+
+    The quantize loop deliberately leaves packed layers on CPU. For AWQ, QQQ
+    and GGUF the calibration-time kernel can be CUDA-only, so the first
+    in-session forward would fail. Switch those modules to the portable Torch
+    kernel for the final device, or raise the reload-the-checkpoint guidance
+    when no layout-compatible kernel exists.
+    """
+
+    qcfg = getattr(model, "quantize_config", None)
+    if qcfg is None or qcfg.export_quant_method() not in _IN_SESSION_KERNEL_METHODS:
+        return
+
+    modules = [
+        module
+        for module in model.model.modules()
+        if isinstance(module, BaseQuantLinear)
+    ]
+    if not modules:
+        return
+
+    device = next(
+        (
+            runtime_device
+            for module in modules
+            if (runtime_device := module.runtime_device()) is not None
+            and runtime_device.type != "meta"
+        ),
+        None,
+    )
+    if device is None:
+        return
+
+    current = getattr(model, "qlinear_kernel", None)
+    unsupported = [module for module in modules if not _kernel_supports_device(type(module), device)]
+    if not unsupported:
+        if current is not None and not _kernel_supports_device(current, device):
+            model.qlinear_kernel = select_in_session_quant_linear(qcfg, device)
+        return
+
+    selection_error = None
+    try:
+        target = select_in_session_quant_linear(qcfg, device)
+    except Exception as exc:  # pragma: no cover - defensive
+        target = None
+        selection_error = exc
+
+    if target is not None:
+        for module in unsupported:
+            # Only reinterpret kernels this run actually produced. A dynamic
+            # per-module format may have selected a different class; leaving it
+            # untouched lets the final check raise the actionable error below.
+            if current is not None and not isinstance(module, current):
+                continue
+            _switch_quant_linear_class(module, target)
+
+    remaining = [module for module in modules if not _kernel_supports_device(type(module), device)]
+    if remaining:
+        kernels = ", ".join(sorted({type(module).__name__ for module in remaining}))
+        raise RuntimeError(
+            "Quantize: quantized layers use kernels that cannot run on the final "
+            f"device `{device}` ({kernels}). The in-session model cannot run "
+            "inference; reload the saved checkpoint on this device (or use the "
+            "portable Torch backend) before using it."
+        ) from selection_error
+
+    model.qlinear_kernel = target
+
+
 # Class methods are intentionally kept as the public model-definition API.  At
 # runtime, however, an instance can have a module tree selected by a quantizer
 # method override or by auto-detection.  This context lets those class methods
@@ -2302,6 +2441,12 @@ class BaseQModel(nn.Module):
         # Some definitions need the complete layer stack before they can
         # restore cross-branch aliases (for example DiffusionGemma's decoder).
         self.after_quantize()
+
+        # The loop leaves packed layers on CPU, so an accelerator-only packing
+        # kernel (AWQ GEMM, QQQ, GGUF Triton) would fail the first in-session
+        # forward. Match the runtime kernel to the device the model now lives
+        # on, or raise the reload-the-checkpoint guidance (issue #4381).
+        rehome_quantized_kernel(self)
 
         if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             from ..nn_modules.qlinear.w4a_floatx import W4AFP8Linear
