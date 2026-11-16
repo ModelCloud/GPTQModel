@@ -23,10 +23,10 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     _dequantize_int8_weight,
 )
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.quantization.config import BitsAndBytesConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.model_dequant import dequantize_model, detect_format
 
 

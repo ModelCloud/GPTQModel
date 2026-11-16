@@ -16,11 +16,11 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedLinear
-from gptqmodel.utils.model import find_modules
-
 
 # Keep CPU benchmark isolated from optional BitBLAS/TVM import side effects.
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.model import find_modules
+
 
 configure_kernel(KernelConfig(disable_bitblas=True))
 

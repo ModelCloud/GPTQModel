@@ -138,3 +138,20 @@ def test_loader_exposes_the_kernel_argument():
     source = inspect.getsource(loader_module.ModelLoader)
     assert "kernel: Optional[Union[KernelConfig, Dict]] = None" in source
     assert "configure_kernel(kernel)" in source
+
+
+def test_paroquant_triton_linear_reads_the_policy():
+    """Every kernel that reads the policy must import the accessor.
+
+    A missing import compiles fine and only raises when the class is built, so
+    the default backend selection never reached it on a CPU-only host. Import
+    the module and assert the symbol resolves before any device work.
+    """
+
+    from gptqmodel.nn_modules.qlinear import paroquant_triton
+
+    assert paroquant_triton.resolve_kernel_config is resolve_kernel_config
+
+    # The constructor path that reads the policy must resolve its name.
+    source = inspect.getsource(paroquant_triton.ParoQuantTritonLinear.__init__)
+    assert "resolve_kernel_config(" in source

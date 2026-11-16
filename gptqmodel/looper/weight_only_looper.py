@@ -47,6 +47,7 @@ from ..quantization.config import (
 from ..utils import has_gil_disabled
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
+from ..utils.kernel import configure_kernel
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.looper_helpers import (
     device_ctx,
@@ -56,7 +57,6 @@ from ..utils.looper_helpers import (
     plan_layer_count,
     select_forward_devices,
 )
-from ..utils.kernel import configure_kernel
 from ..utils.model import (
     find_modules,
     get_layer_name,

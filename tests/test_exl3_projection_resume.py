@@ -18,7 +18,6 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.utils.exl3_capture_frontier import EXL3CaptureRecord
 from gptqmodel.utils.exl3_error_ledger import append_exl3_error_journal
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.exl3_inline_mixed import (
     INLINE_MIXED_META_KEY,
     InlineMixedPolicy,
@@ -30,6 +29,7 @@ from gptqmodel.utils.exl3_projection_checkpoint import (
     EXL3ProjectionCheckpointStore,
     build_projection_request,
 )
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 class _Capture:

@@ -19,7 +19,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFa
 
 import gptqmodel.models.loader as loader_module
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.definitions.mimo_v2 import _compatible_mask
@@ -31,6 +30,7 @@ from gptqmodel.quantization.config import (
     QuantizeConfig,
 )
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.fixture
