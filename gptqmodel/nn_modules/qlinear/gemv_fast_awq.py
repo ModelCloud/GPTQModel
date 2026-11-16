@@ -18,7 +18,7 @@ from ...utils.awq import (
 )
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
-from ...utils.packing_math import scaled_zero_offset
+from ...utils.packing_math import scale_to_storage_dtype, scaled_zero_offset
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
@@ -269,7 +269,8 @@ class AwqGEMVFastLinear(AWQuantLinear):
             dtype=torch.float16,
             device=scales.device,
         )
-        qscales[:, : scales.shape[1]] = scales
+        # Reject an unrepresentable FP16 scale before replacing module state.
+        qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
         # GEMV_FAST/LLM_AWQ store FP16 offsets in the checkpoint. Reject an
         # unrepresentable offset before replacing any packed module state.
         offsets = scaled_zero_offset(qscales[:, : scales.shape[1]], zeros)

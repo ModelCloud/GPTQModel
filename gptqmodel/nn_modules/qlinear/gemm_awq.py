@@ -23,6 +23,7 @@ from ...utils.awq import (
 )
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
+from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
 
 
@@ -331,7 +332,10 @@ class AwqGEMMLinear(AWQuantLinear):
         scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
-        self.register_buffer("scales", scales.clone().to(scale_dtype))
+        # Validate the storage cast before replacing any module state: a scale
+        # that overflows or underflows here would silently corrupt every code.
+        stored_scales = scale_to_storage_dtype(scales, scale_dtype).clone()
+        self.register_buffer("scales", stored_scales)
         if linear.bias is not None:
             bias_dtype = linear.bias.dtype if linear.bias.dtype in (torch.float16, torch.bfloat16) else scale_dtype
             self.register_buffer("bias", linear.bias.clone().to(bias_dtype))
