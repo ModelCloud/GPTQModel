@@ -365,24 +365,35 @@ def checkpoint_chain_supported(roles) -> bool:
     }
 
 
-def record_quant_log(model, processor_logs) -> list:
-    """Publish the run's per-module log on ``model.quant_log`` (issue #4321).
+def record_quant_log(model, processors) -> list:
+    """Publish one row per module from the run's primary quantization processor.
 
-    ``processor_logs`` yields ``(processor_name, entries)`` pairs in run-plan
-    order. Every processor that recorded per-module statistics contributes, so a
-    quantization method cannot lose its log because its processor name is
-    missing from a hard-coded allow-list. This is the single place the model-level
-    log is assembled: both the calibrated and the weight-only loopers call it, and
-    the writer only has to look at ``model.quant_log`` to decide whether to emit
-    ``quant_log.csv``.
+    ``processors`` is the loop's processor chain in run-plan order. The earliest
+    processor that recorded per-module rows and owns the quantization log
+    supplies ``model.quant_log``. Auxiliary processors such as EoRA set
+    ``owns_quant_log = False`` because their rows carry adapter timing, not
+    quantization loss/samples/damp; concatenating them produced a second, blank
+    row for every module (#4367).
+
+    Selecting the first owning log rather than a hard-coded processor name keeps
+    every quantizer's rows publishable (FOEM, QQQ, VPTQ, ParoQuant, FP8-GSQ, RTN,
+    ...; issue #4321). When no owning processor recorded rows, an existing
+    ``model.quant_log`` is preserved: the standalone EoRA-generation loop has no
+    primary quantizer, so it cannot replace a restored quantization log with
+    adapter rows.
     """
 
-    entries = []
-    for _name, processor_log in processor_logs:
-        if processor_log:
-            entries.extend(processor_log)
-    model.quant_log = entries
-    return entries
+    for processor in processors:
+        if not getattr(processor, "owns_quant_log", True):
+            continue
+        entries = getattr(processor, "log", None)
+        if entries:
+            model.quant_log = list(entries)
+            return model.quant_log
+
+    if getattr(model, "quant_log", None) is None:
+        model.quant_log = []
+    return model.quant_log
 
 
 @dataclass
@@ -424,6 +435,11 @@ def get_resolved_module_config(module):
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
+
+    # Auxiliary processors (EoRA) record their own per-module timing rows but do
+    # not own the quantization log. ``record_quant_log`` skips them so they
+    # neither duplicate nor replace the primary quantizer's rows.
+    owns_quant_log: bool = True
 
     @property
     def forward(self) -> ForwardConfig:

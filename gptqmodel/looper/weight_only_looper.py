@@ -1046,9 +1046,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self._quantize_embedding_targets(embedding_targets, layer_count=layer_count, pb=pb)
             if embed_only:
                 total_log = {self.processor.name(): self.processor.log}
-                record_quant_log(
-                    self.gptq_model, ((self.processor.name(), self.processor.log),)
-                )
+                record_quant_log(self.gptq_model, (self.processor,))
                 self.processor.finalize(model=self.gptq_model)
                 self.gptq_model._model_free_weight_only_replacements_only = True
                 return total_log
@@ -1183,9 +1181,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         total_log = {self.processor.name(): self.processor.log}
-        record_quant_log(
-            self.gptq_model, ((self.processor.name(), self.processor.log),)
-        )
+        record_quant_log(self.gptq_model, (self.processor,))
         self.processor.finalize(model=self.gptq_model)
         return total_log
 

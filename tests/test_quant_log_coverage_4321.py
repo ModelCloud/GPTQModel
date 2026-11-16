@@ -7,8 +7,7 @@
 the processor name was one of `gptq/gptaq/awq/exl3/macaq`, so FOEM, QQQ, VPTQ,
 ParoQuant and FP8-GSQ runs ended with an empty log and the writer skipped
 `quant_log.csv` (issue #4321). The model-level log is now assembled in one place
-from every processor that recorded per-module statistics, and both loopers use
-it.
+from the first log-owning processor, and both loopers use it.
 """
 
 import csv
@@ -36,30 +35,84 @@ class _Model:
     quant_log = ["stale-entry"]
 
 
-def test_record_quant_log_publishes_every_processor():
+class _Processor:
+    """Minimal processor exposing the attributes ``record_quant_log`` reads."""
+
+    def __init__(self, name, log=None, *, owns_quant_log=True):
+        self._name = name
+        self.log = [] if log is None else log
+        self.owns_quant_log = owns_quant_log
+
+    def name(self):
+        return self._name
+
+
+@pytest.mark.parametrize("name", _LOGGING_PROCESSORS)
+def test_record_quant_log_publishes_every_processor(name):
     model = _Model()
-    logs = [(name, [{"module": f"{name}-0"}, {"module": f"{name}-1"}]) for name in _LOGGING_PROCESSORS]
+    processor_log = [{"module": f"{name}-0"}, {"module": f"{name}-1"}]
 
-    entries = record_quant_log(model, logs)
+    entries = record_quant_log(model, [_Processor(name, processor_log)])
 
-    assert model.quant_log == entries
-    assert [entry["module"] for entry in entries] == [
-        f"{name}-{index}" for name in _LOGGING_PROCESSORS for index in (0, 1)
-    ]
+    assert model.quant_log == processor_log
+    assert entries == processor_log
 
 
 def test_record_quant_log_skips_processors_without_entries():
     model = _Model()
-    record_quant_log(model, [("native", []), ("foem", [{"module": "a"}]), ("eora", None)])
+    record_quant_log(
+        model,
+        [
+            _Processor("native"),
+            _Processor("foem", [{"module": "a"}]),
+            _Processor("eora", None, owns_quant_log=False),
+        ],
+    )
     assert model.quant_log == [{"module": "a"}]
 
 
 def test_record_quant_log_does_not_alias_the_processor_log():
     model = _Model()
     processor_log = [{"module": "a"}]
-    record_quant_log(model, [("qqq", processor_log)])
+    record_quant_log(model, [_Processor("qqq", processor_log)])
     model.quant_log.append({"module": "b"})
     assert processor_log == [{"module": "a"}]
+
+
+def test_record_quant_log_does_not_concatenate_auxiliary_rows():
+    """#4367: the EoRA pass must not append a second row per module."""
+
+    model = _Model()
+    primary = [{"module": "a", "loss": "1.0"}]
+    adapter = [{"module": "a"}]
+
+    record_quant_log(
+        model,
+        [
+            _Processor("gptq", primary),
+            _Processor("eora", adapter, owns_quant_log=False),
+        ],
+    )
+
+    assert model.quant_log == primary
+
+
+def test_record_quant_log_preserves_restored_log_for_auxiliary_only_pass():
+    """#4367: the standalone EoRA-generate loop has no primary log to publish."""
+
+    restored = [{"module": "a", "loss": "1.0"}]
+    model = _Model()
+    model.quant_log = list(restored)
+
+    record_quant_log(
+        model,
+        [
+            _Processor("dequantize"),
+            _Processor("eora", [{"module": "a"}], owns_quant_log=False),
+        ],
+    )
+
+    assert model.quant_log == restored
 
 
 def _tiny_llama(path):
