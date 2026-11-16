@@ -1671,6 +1671,7 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         prepared_forward=None,
         bits=None,
         group_sizes=None,
+        syms=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
@@ -1739,6 +1740,7 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         prepared_forward=None,
         bits=None,
         group_sizes=None,
+        syms=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
@@ -1774,7 +1776,7 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     w = torch.ones(64, 16, dtype=torch.float16)
     input_feat = torch.ones(4, 16, dtype=torch.float16)
 
-    def nan_quantize(src, dst, abs_max=None, bits=None, group_size=None):
+    def nan_quantize(src, dst, abs_max=None, bits=None, group_size=None, sym=None):
         assert group_size == processor.qcfg.group_size
         dst.fill_(float("nan"))
 
@@ -2102,8 +2104,11 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         prepared_forward=None,
         bits=None,
         group_sizes=None,
+        syms=None,
     ):
         assert group_sizes == [self.qcfg.group_size] * len(layers_arg)
+        # Per-layer symmetry is resolved and forwarded alongside bits/group_sizes.
+        assert syms == [self.qcfg.sym] * len(layers_arg)
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
             _compute_legacy_w_mean(layers_arg, self.qcfg.group_size).detach().to(torch.float32).cpu()
