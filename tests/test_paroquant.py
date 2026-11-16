@@ -6402,6 +6402,87 @@ def test_paroquant_pair_grad_sweep_is_race_free(cta_m, row_pad):
         assert torch.equal(g_out, first_g)
         assert torch.equal(theta_grad, first_theta_grad)
 
+    # The sweep's input-side output is the un-rotated activation, so rebuild the
+    # forward in fp64 from it and differentiate <grad_out, R(theta) x> by theta.
+    theta64 = theta.double().requires_grad_(True)
+    forward = apply_paroquant_rotation_reference(
+        first_x.double(), pairs, theta64, group_size=group_size
+    )
+    torch.testing.assert_close(forward, rotated.double(), rtol=0, atol=1e-4)
+    (forward * grad_out.double()).sum().backward()
+    torch.testing.assert_close(first_theta_grad.double(), theta64.grad, rtol=1e-4, atol=1e-2)
+
+
+@pytest.mark.parametrize("path", ["rotate_pair_grad", "grad_theta", "torch"])
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_paroquant_fused_rotation_theta_grad_matches_autograd(monkeypatch, path, with_scales):
+    """Guard the fused rotation's theta gradient against fp64 autograd.
+
+    The backward sweeps the activation and the gradient back through each
+    rotation, so it holds the rotation's input and the input-side gradient
+    ``R^T g_out``; the derivative is then ``sum(g_i x_j - g_j x_i)`` with no
+    sin/cos factor. Applying the output-side formula
+    ``A cos(theta) - B sin(theta)`` there is only right at ``theta == 0``, so
+    use angles well away from zero and check every backward path.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant fused rotation backward.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+    if path != "rotate_pair_grad":
+        monkeypatch.setattr(paroquant_utils_module, "_fused_rotate_pair_grad_op", lambda: None)
+    if path == "torch":
+        monkeypatch.setattr(paroquant_utils_module, "_fused_grad_theta_op", lambda: None)
+
+    in_features = 256
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(13)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.8, 0.8, generator=generator)
+    x = torch.randn((48, in_features), generator=generator)
+    grad_out = torch.randn((48, in_features), generator=generator)
+    scales = (torch.rand((1, in_features), generator=generator) + 0.5) if with_scales else None
+
+    theta_cuda = theta.to("cuda").requires_grad_(True)
+    x_cuda = x.to("cuda").requires_grad_(True)
+    scales_cuda = None if scales is None else scales.to("cuda").requires_grad_(True)
+    out = paroquant_utils_module._ParoQuantRotateTensorFunc.apply(
+        x_cuda, pairs, theta_cuda, scales_cuda, group_size
+    )
+    (out * grad_out.to("cuda")).sum().backward()
+
+    theta64 = theta.double().to("cuda").requires_grad_(True)
+    x64 = x.double().to("cuda").requires_grad_(True)
+    scales64 = None if scales is None else scales.double().to("cuda").requires_grad_(True)
+    reference = apply_paroquant_rotation_reference(
+        x64, pairs, theta64, scales=scales64, group_size=group_size
+    )
+    (reference * grad_out.double().to("cuda")).sum().backward()
+
+    torch.testing.assert_close(out.double(), reference, rtol=0, atol=1e-4)
+    torch.testing.assert_close(theta_cuda.grad.double(), theta64.grad, rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(x_cuda.grad.double(), x64.grad, rtol=1e-4, atol=1e-4)
+    if scales is not None:
+        torch.testing.assert_close(scales_cuda.grad.double(), scales64.grad, rtol=1e-4, atol=1e-3)
+
 
 @pytest.mark.parametrize("rows", [1, 1000, 1001])
 def test_paroquant_pair_grad_is_launch_plan_invariant(rows):
