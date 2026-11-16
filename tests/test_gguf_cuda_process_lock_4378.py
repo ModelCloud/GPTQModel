@@ -166,7 +166,7 @@ def test_cross_device_forwards_never_overlap_in_backend(monkeypatch):
 
     serial = [layer.forward(x) for layer, x in zip(layers, inputs)]
     barrier = threading.Barrier(len(layers))
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
     outputs: list[tuple[int, torch.Tensor]] = []
 
     def worker(index: int) -> None:
@@ -174,7 +174,7 @@ def test_cross_device_forwards_never_overlap_in_backend(monkeypatch):
             barrier.wait(timeout=5)
             for _ in range(25):
                 outputs.append((index, layers[index].forward(inputs[index])))
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # re-raised below
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(index,)) for index in range(len(layers))]
@@ -199,7 +199,7 @@ def test_cross_device_lock_entries_serialize():
     bridge = _make_bare_bridge()
     tracker = _Concurrency()
     barrier = threading.Barrier(2)
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def worker(device_index: int) -> None:
         try:
@@ -208,7 +208,7 @@ def test_cross_device_lock_entries_serialize():
                 with bridge.cuda_backend_lock(device_index):
                     with tracker.track():
                         time.sleep(0.01)
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # re-raised below
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
