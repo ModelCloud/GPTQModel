@@ -2598,8 +2598,14 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..looper.loop_processor import CalibrationConfig
+        from ..looper.loop_processor import CalibrationConfig, _reusable_calibration_dataset
         from ..looper.module_looper import ModuleLooper
+
+        # The native and EoRA steps each prepare their calibration input, so a
+        # one-shot iterator must be materialised once here or the second
+        # processor sees an exhausted dataset (issue #4307).
+        calibration = _reusable_calibration_dataset(calibration)
+        adapter_calibration_dataset = _reusable_calibration_dataset(adapter_calibration_dataset)
 
         if run_plan is None:
             from ..adapter.adapter import Lora
