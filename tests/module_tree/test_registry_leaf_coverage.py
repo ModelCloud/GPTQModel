@@ -61,11 +61,80 @@ def _gemma4_moe(config):
     text_config.moe_intermediate_size = 256
 
 
+def _nemotron_h_latent(config):
+    # `moe_latent_size` adds `fc1_latent_proj`/`fc2_latent_proj` to every MoE
+    # mixer; the default config omits that layout branch.
+    config.moe_latent_size = 64
+
+
+def _qwen4_exp_text_config():
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+
+    return Qwen4ExpTextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+        num_experts=3,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+        layer_types=["linear_attention", "indexed_attention"],
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        linear_conv_kernel_dim=2,
+        hc_count=2,
+        hc_lowrank=4,
+        # A non-empty PLE layer set exercises `ple.*`, which is optional.
+        ple_layer_ids=[1],
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+        indexer_n_heads=2,
+        indexer_kv_heads=1,
+        indexer_head_dim=4,
+        indexer_budget=8,
+        indexer_compress_ratio=2,
+    )
+
+
+def _qwen4_exp_text(config):
+    # The auto config's derived `ple_embed_dim`/cache fields are stale after
+    # shrinking the model, so return a fresh tiny config instead of mutating.
+    return _qwen4_exp_text_config()
+
+
+def _qwen4_exp(config):
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import (
+        Qwen4ExpConfig,
+        Qwen4ExpVisionConfig,
+    )
+
+    # The outer auto config has no default `text_config`/`vision_config`.
+    return Qwen4ExpConfig(
+        text_config=_qwen4_exp_text_config(),
+        vision_config=Qwen4ExpVisionConfig(
+            depth=1,
+            hidden_size=16,
+            num_heads=2,
+            intermediate_size=16,
+        ),
+    )
+
+
 CONFIG_OVERRIDES = {
     "gemma4": _gemma4_moe,
     "gemma4_text": _gemma4_moe,
     "llama4": _llama4_mixed_layers,
     "llama4_text": _llama4_mixed_layers,
+    "nemotron_h": _nemotron_h_latent,
+    "qwen4_exp": _qwen4_exp,
+    "qwen4_exp_text": _qwen4_exp_text,
 }
 
 # Local-config models this issue fixes. A construction failure here is a
@@ -83,6 +152,8 @@ REQUIRED_MODELS = frozenset(
         "nemotron_h",
         "phi3",
         "phimoe",
+        "qwen4_exp",
+        "qwen4_exp_text",
         "voxtral",
         "zamba",
         "zamba2",
@@ -119,7 +190,9 @@ def _build_meta_model(model_type):
     config = transformers.AutoConfig.for_model(model_type)
     override = CONFIG_OVERRIDES.get(model_type)
     if override is not None:
-        override(config)
+        replacement = override(config)
+        if replacement is not None:
+            config = replacement
 
     definition = _definition_for(model_type, config)
     with torch.device("meta"):
