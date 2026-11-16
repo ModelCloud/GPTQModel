@@ -63,6 +63,13 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # `tl.max` drops NaN, so a NaN block would keep a finite E4M3 scale and
+    # the NaN would fold into a finite code. E4M3 0x7F is NaN and every
+    # consumer multiplies by this scale; Inf has no finite scale either, so
+    # both take the same path and stay consistent across recipes.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse_four = tl.minimum(tl.maximum(tl.div_rn(maximum, 4.0 * global_scale), 2.0**-9), 448.0)
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
@@ -85,6 +92,8 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
@@ -102,6 +111,10 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse = tl.minimum(
         tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0
     )
@@ -115,6 +128,8 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
@@ -131,6 +146,10 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
                 row < M, other=0).to(tl.float32)
     global_scale = tl.load(GlobalScale).to(tl.float32)
     maximum = tl.max(tl.abs(x), axis=1)
+    # Same NaN/Inf scale poisoning as `_quantize_nvfp4_input_four_six`.
+    nonfinite = (tl.max((x != x).to(tl.int32), axis=1) > 0) | (
+        maximum == float("inf")
+    )
     inverse_four = tl.minimum(tl.maximum(tl.div_rn(maximum, 4.0 * global_scale), 2.0**-9), 448.0)
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
@@ -231,6 +250,8 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
         group * PADDED_M * 8 + (row // 128) * 1024 + (block // 4) * 512
         + (row % 32) * 16 + ((row % 128) // 32) * 4 + block % 4
     )
+    # Never store a finite scale for a block that held a NaN/Inf value.
+    local = tl.where(nonfinite, float("nan"), local.to(tl.float32))
     tl.store(SwizzledScales + scale_offset, tl.where(row < M, local, 0.0))
 
 
