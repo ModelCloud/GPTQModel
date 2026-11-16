@@ -63,7 +63,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TORCH]
     SUPPORTS_METHODS = [METHOD.MACAQ]
-    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 100}
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 100, FORMAT.MXFP4: 100}
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -94,6 +94,7 @@ class MacaqLinear(WeightOnlyQuantLinear):
         activation_precision: str = "w4a4",
         pre_mode: str = "balance",
         pre_alpha: float = 0.5,
+        rotation: str = "hadamard",
         dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
@@ -113,8 +114,9 @@ class MacaqLinear(WeightOnlyQuantLinear):
         self.block_size = int(block_size)
         self.had_block = int(had_block)
         self.activation_precision = str(activation_precision).strip().lower()
-        self.pre_mode = str(pre_mode)
+        self.pre_mode = str(pre_mode).strip().lower()
         self.pre_alpha = float(pre_alpha)
+        self.rotation = str(rotation).strip().lower()
         if self.block_size != macaq_core.MXFP4_BLOCK:
             raise ValueError("MacaqLinear: OCP MXFP4 requires `block_size=32`.")
         if self.had_block < 32 or self.had_block & (self.had_block - 1):
@@ -126,22 +128,39 @@ class MacaqLinear(WeightOnlyQuantLinear):
             )
         if self.activation_precision not in ("w4a4", "w4a16"):
             raise ValueError("MacaqLinear: `activation_precision` must be `w4a4` or `w4a16`.")
+        if self.rotation not in ("hadamard", "none"):
+            raise ValueError("MacaqLinear: `rotation` must be `hadamard` or `none`.")
+        if self.pre_mode not in ("balance", "none"):
+            raise ValueError("MacaqLinear: `pre_mode` must be `balance` or `none`.")
 
         self.compute_dtype = (
             dtype if dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.bfloat16
         )
         self._triton_disabled = False
+        # Identity BH for the fused W4A4 Triton kernel when `rotation="none"`;
+        # built on first use, never saved.
+        self._kernel_identity_bh = None
 
-        # `BH`/`pre_scale` are small and always materialized so the module has
-        # a real device to allocate the packed storage on later (the looper
+        # The quant config decides which activation transforms exist:
+        # `rotation="hadamard"` stores `BH` and `pre_mode="balance"` stores
+        # `pre_scale`. With neither, the layer is plain OCP MXFP4 (`W_packed`,
+        # `W_scales`, optional `bias`) and the checkpoint format is `mxfp4`.
+        # When present they are small and materialized eagerly so the module
+        # has a real device to allocate packed storage on later (the looper
         # moves the module to the quantization device before calling `pack`).
         device = next(iter(self._parameters.values())).device if self._parameters else torch.device("cpu")
-        self.register_buffer(
-            "BH", macaq_core.make_hadamard(self.had_block, device=device, dtype=self.compute_dtype)
-        )
-        self.register_buffer(
-            "pre_scale", torch.ones(self.in_features, dtype=self.compute_dtype, device=device)
-        )
+        if self.rotation == "hadamard":
+            self.register_buffer(
+                "BH", macaq_core.make_hadamard(self.had_block, device=device, dtype=self.compute_dtype)
+            )
+        else:
+            self.BH = None
+        if self.pre_mode == "balance":
+            self.register_buffer(
+                "pre_scale", torch.ones(self.in_features, dtype=self.compute_dtype, device=device)
+            )
+        else:
+            self.pre_scale = None
         if bias:
             self.register_buffer(
                 "bias", torch.zeros(self.out_features, dtype=self.compute_dtype, device=device)
@@ -155,10 +174,17 @@ class MacaqLinear(WeightOnlyQuantLinear):
     # ------------------------------------------------------------------
     # buffers
     # ------------------------------------------------------------------
-    def _allocate_buffers(self, *, bias: bool) -> None:
+    def _storage_device(self) -> torch.device:
+        for buffer in self._buffers.values():
+            if buffer is not None:
+                return buffer.device
+        return torch.device("cpu")
+
+    def _allocate_buffers(self, *, bias: bool, device: Optional[torch.device] = None) -> None:
         """Allocate packed storage outside inference mode."""
 
-        device = self.BH.device
+        if device is None:
+            device = self._storage_device()
         groups = self.in_features // self.block_size
         with torch.inference_mode(False):
             if "W_packed" not in self._buffers:
@@ -190,14 +216,25 @@ class MacaqLinear(WeightOnlyQuantLinear):
                 f"MacaqLinear `{self.name}`: unexpected W_scales shape {tuple(self.W_scales.shape)}; "
                 f"expected {(self.out_features, groups)}."
             )
-        if tuple(self.pre_scale.shape) != (self.in_features,):
+        if self.pre_scale is not None and tuple(self.pre_scale.shape) != (self.in_features,):
             raise ValueError(f"MacaqLinear `{self.name}`: unexpected pre_scale shape.")
-        if tuple(self.BH.shape) != (self.had_block, self.had_block):
+        if self.BH is not None and tuple(self.BH.shape) != (self.had_block, self.had_block):
             raise ValueError(f"MacaqLinear `{self.name}`: unexpected BH shape.")
 
     def post_init(self):
         self._validate_loaded_state()
         super().post_init()
+
+    @property
+    def plain_mxfp4(self) -> bool:
+        """Whether the layer is plain OCP MXFP4 with no activation transform.
+
+        True for ``rotation="none"`` with ``pre_mode="none"``, which trades
+        accuracy for faster inference: the W4A16 forward is a plain MXFP4
+        dequantize-matmul.
+        """
+
+        return self.BH is None and self.pre_scale is None
 
     # ------------------------------------------------------------------
     # packing
@@ -212,19 +249,33 @@ class MacaqLinear(WeightOnlyQuantLinear):
             )
         bias = None if linear is None else getattr(linear, "bias", None)
         if "W_packed" not in self._buffers:
-            self._allocate_buffers(bias=bias is not None)
+            device = None if self._buffers else macaq_result.W_packed.device
+            self._allocate_buffers(bias=bias is not None, device=device)
         self.load_quant_result(macaq_result, bias=bias)
 
     @torch.no_grad()
     def load_quant_result(self, result, bias: Optional[torch.Tensor] = None) -> None:
         device = self.W_packed.device
+        if self.BH is None:
+            eye = torch.eye(result.BH.shape[0], dtype=result.BH.dtype, device=result.BH.device)
+            if not torch.equal(result.BH, eye):
+                raise ValueError(
+                    f"MacaqLinear `{self.name}`: `rotation=\"none\"` layer received a rotated result."
+                )
+        if self.pre_scale is None and result.pre_scale is not None:
+            raise ValueError(
+                f"MacaqLinear `{self.name}`: `pre_mode=\"none\"` layer received a D1 pre-scale."
+            )
         self.W_packed.data.copy_(result.W_packed.to(device=device, dtype=torch.uint8))
         self.W_scales.data.copy_(result.W_scales.to(device=device).view(torch.uint8))
-        if result.pre_scale is not None:
-            self.pre_scale.data.copy_(result.pre_scale.to(device=device, dtype=self.compute_dtype))
-        else:
-            self.pre_scale.data.fill_(1.0)
-        self.BH.data.copy_(result.BH.to(device=device, dtype=self.compute_dtype))
+        if self.pre_scale is not None:
+            if result.pre_scale is not None:
+                self.pre_scale.data.copy_(result.pre_scale.to(device=device, dtype=self.compute_dtype))
+            else:
+                # Zero-sample fallback modules skip D1 inside a D1 layout.
+                self.pre_scale.data.fill_(1.0)
+        if self.BH is not None:
+            self.BH.data.copy_(result.BH.to(device=device, dtype=self.compute_dtype))
         if bias is not None and self.bias is not None:
             self.bias.data.copy_(bias.to(device=device, dtype=self.compute_dtype))
 
@@ -243,26 +294,35 @@ class MacaqLinear(WeightOnlyQuantLinear):
 
     def _forward_torch(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize()
+        pre_scale, bh = self.pre_scale, self.BH
         if self.activation_precision == "w4a4":
             xb = macaq_core.macaq_quantize_activations(
-                x_flat, self.pre_scale, self.BH, self.block_size
+                x_flat, pre_scale, bh, self.block_size
             ).to(self.compute_dtype)
         else:
             xb = x_flat.to(self.compute_dtype)
-            if self.pre_scale is not None:
-                xb = xb * self.pre_scale.to(xb.dtype)
-            if self.BH is not None:
-                xb = macaq_core.rotate_blocks(xb, self.BH)
+            if pre_scale is not None:
+                xb = xb * pre_scale.to(xb.dtype)
+            if bh is not None:
+                xb = macaq_core.rotate_blocks(xb, bh)
         return torch.nn.functional.linear(xb, weight, self.bias)
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
         if self.activation_precision == "w4a4":
+            # The fused rotate+quantize kernel needs a BH: its unfused
+            # `bh=None` fallback costs more than rotating by an identity.
+            bh = self.BH
+            if bh is None:
+                bh = self._kernel_identity_bh
+                if bh is None or bh.device != x_flat.device:
+                    bh = torch.eye(self.had_block, dtype=self.compute_dtype, device=x_flat.device)
+                    self._kernel_identity_bh = bh
             return mxfp4_w4a4_linear(
                 x_flat,
                 self.W_packed,
                 self.W_scales,
                 pre_scale=self.pre_scale,
-                bh=self.BH,
+                bh=bh,
                 bias=self.bias,
             )
         return mxfp4_w4a16_linear(
@@ -315,7 +375,7 @@ class MacaqTritonLinear(MacaqLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TRITON]
     SUPPORTS_METHODS = [METHOD.MACAQ]
-    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 100}
+    SUPPORTS_FORMATS = {FORMAT.MXFP4_MACAQ: 100, FORMAT.MXFP4: 100}
     SUPPORTS_BITS = [4]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False

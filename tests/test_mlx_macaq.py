@@ -20,21 +20,25 @@ requires_metal = pytest.mark.skipif(
 )
 
 
-def _quantized_layer(in_features=256, out_features=64, activation_precision="w4a4"):
+def _quantized_layer(in_features=256, out_features=64, activation_precision="w4a4", bias=True,
+                     **quant_kwargs):
     from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear
     from gptqmodel.quantization import macaq as macaq_core
 
     torch.manual_seed(11)
-    linear = torch.nn.Linear(in_features, out_features, bias=True)
+    linear = torch.nn.Linear(in_features, out_features, bias=bias)
     calibration = torch.randn(16, in_features) * 0.2
     hessian = (calibration.T @ calibration).float()
     result = macaq_core.macaq_quantize_weight(
         linear.weight.detach().float(), hessian, calibration.shape[0],
-        do_flip=True, n_flip_iters=8,
+        do_flip=True, n_flip_iters=8, **quant_kwargs,
     )
+    # The layer's transforms come from the same settings as the quantizer.
     source = MacaqLinear(
         bits=4, group_size=32, in_features=in_features, out_features=out_features,
-        bias=True, dtype=torch.bfloat16, activation_precision=activation_precision,
+        bias=bias, dtype=torch.bfloat16, activation_precision=activation_precision,
+        rotation=quant_kwargs.get("rotation", "hadamard"),
+        pre_mode=quant_kwargs.get("pre_mode", "balance"),
     )
     source.pack(linear, macaq_result=result)
     return source, result
@@ -163,6 +167,128 @@ def test_macaq_mlx_w4a4_matches_its_own_activation_quantization(monkeypatch):
         np.array(actual.astype(mx.float32)), reference,
         atol=0.12 * max(float(np.abs(reference).max()), 1e-6),
     )
+
+
+def test_macaq_mlx_pre_scale_only_layer_skips_the_rotation(monkeypatch):
+    """`rotation="none"` keeps D1 but needs no rotate dispatch."""
+    from gptqmodel.nn_modules.qlinear.mlx_macaq import MlxMACaQLinear
+
+    source, _ = _quantized_layer(activation_precision="w4a16", rotation="none")
+    model, config = _transfer(monkeypatch, source)
+    assert isinstance(model.proj, MlxMACaQLinear)
+    assert config["_gptqmodel_custom_mlx_runtime"]
+    assert model.proj.apply_rotation is False
+    assert model.proj.apply_pre_scale is True
+
+    rng = np.random.default_rng(17)
+    x = rng.normal(0, 0.2, (5, source.in_features)).astype(np.float32)
+    actual = model(mx.array(x))
+    mx.eval(actual)
+    reference = source._forward_torch(torch.from_numpy(x).to(torch.bfloat16)).float().numpy()
+    np.testing.assert_allclose(np.array(actual.astype(mx.float32)), reference, rtol=2e-2, atol=5e-3)
+
+
+def _plain_mxfp4_layer(in_features=256, out_features=64, bias=True):
+    return _quantized_layer(
+        in_features=in_features, out_features=out_features, bias=bias,
+        activation_precision="w4a16", rotation="none", pre_mode="none",
+    )
+
+
+def test_macaq_mlx_plain_mxfp4_layer_is_a_stock_quantized_linear(monkeypatch):
+    """No transform + W4A16 is exactly MLX's own MXFP4 QuantizedLinear."""
+    source, _ = _plain_mxfp4_layer()
+    assert source.plain_mxfp4
+    model, config = _transfer(monkeypatch, source)
+    assert isinstance(model.proj, nn.QuantizedLinear)
+    assert model.proj.mode == "mxfp4"
+    assert "_gptqmodel_custom_mlx_runtime" not in config
+    assert config["quantization"] == {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+
+    # Bytes pass through unchanged: no requantization by MLX's own RTN.
+    words = source.W_packed.numpy().view(np.uint32).reshape(source.out_features, -1)
+    np.testing.assert_array_equal(np.array(model.proj.weight), words)
+    np.testing.assert_array_equal(np.array(model.proj.scales), source.W_scales.numpy())
+
+    rng = np.random.default_rng(19)
+    x = rng.normal(0, 0.2, (5, source.in_features)).astype(np.float32)
+    actual = model(mx.array(x).astype(mx.bfloat16))
+    mx.eval(actual)
+    reference = source._forward_torch(torch.from_numpy(x).to(torch.bfloat16)).float().numpy()
+    np.testing.assert_allclose(np.array(actual.astype(mx.float32)), reference, rtol=2e-2, atol=1e-2)
+
+
+def test_macaq_plain_mxfp4_exports_to_stock_mlx_lm(tmp_path):
+    """The stock export path must write a checkpoint stock `mlx_lm` loads."""
+    import json
+
+    from mlx_lm.utils import load_model, save_config, save_model
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+
+    torch.manual_seed(5)
+    config = LlamaConfig(
+        vocab_size=128, hidden_size=64, intermediate_size=128,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+        max_position_embeddings=64,
+    )
+    model = LlamaForCausalLM(config)
+    # Llama projections are bias-free; the stock layer must match that.
+    source, _ = _plain_mxfp4_layer(in_features=64, out_features=64, bias=False)
+    model.model.layers[0].self_attn.q_proj = source
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "config.json").write_text(json.dumps(model.config.to_dict()))
+    gptq_config = {"bits": 4, "group_size": 32, "desc_act": False, "sym": True,
+                   "format": "mxfp4", "method": "macaq", "dynamic": None}
+
+    mlx_model, mlx_config = convert_gptq_to_mlx_weights(
+        str(source_dir), model, dict(gptq_config), "lm_head", stock_compatible=True,
+    )
+    assert "_gptqmodel_custom_mlx_runtime" not in mlx_config
+    q_proj = mlx_model.model.layers[0].self_attn.q_proj
+    assert isinstance(q_proj, nn.QuantizedLinear) and q_proj.mode == "mxfp4"
+
+    export_dir = tmp_path / "mlx"
+    save_model(str(export_dir), mlx_model)
+    save_config(mlx_config, config_path=str(export_dir / "config.json"))
+    reloaded, _ = load_model(export_dir)
+    reloaded_q = reloaded.model.layers[0].self_attn.q_proj
+    assert isinstance(reloaded_q, nn.QuantizedLinear) and reloaded_q.mode == "mxfp4"
+    np.testing.assert_array_equal(np.array(reloaded_q.weight), np.array(q_proj.weight))
+    np.testing.assert_array_equal(np.array(reloaded_q.scales), np.array(q_proj.scales))
+
+    tokens = mx.array(np.array([[1, 2, 3, 4]], dtype=np.int32))
+    expected, actual = mlx_model(tokens), reloaded(tokens)
+    mx.eval(expected, actual)
+    np.testing.assert_array_equal(np.array(actual), np.array(expected))
+
+
+def test_macaq_rotated_layer_is_not_stock_exportable(tmp_path):
+    import json
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.utils.mlx import convert_gptq_to_mlx_weights
+
+    config = LlamaConfig(
+        vocab_size=128, hidden_size=64, intermediate_size=128,
+        num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+        max_position_embeddings=64,
+    )
+    model = LlamaForCausalLM(config)
+    model.model.layers[0].self_attn.q_proj, _ = _quantized_layer(
+        in_features=64, out_features=64, activation_precision="w4a16",
+    )
+    (tmp_path / "config.json").write_text(json.dumps(model.config.to_dict()))
+    with pytest.raises(ValueError, match="requires transferable packed weights"):
+        convert_gptq_to_mlx_weights(
+            str(tmp_path), model,
+            {"bits": 4, "group_size": 32, "desc_act": False, "sym": True,
+             "format": "mxfp4_macaq", "method": "macaq", "dynamic": None},
+            "lm_head", stock_compatible=True,
+        )
 
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])

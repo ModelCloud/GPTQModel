@@ -56,6 +56,7 @@ from ..quantization.config import (
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
     normalize_norm_types,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.dtype import (
@@ -2120,7 +2121,7 @@ class BaseQModel(nn.Module):
                 )
 
         # rotate model
-        if self.quantize_config.rotation:
+        if resolve_model_rotation(self.quantize_config):
             from gptqmodel.models.definitions.llama import LlamaQModel
             from gptqmodel.models.definitions.qwen2 import Qwen2QModel
             if not isinstance(self, (LlamaQModel, Qwen2QModel)):
@@ -2133,7 +2134,7 @@ class BaseQModel(nn.Module):
             # only after embeddings, head, norms and attention have already
             # been rotated and fused.
             validate_rotation_dimensions(
-                self.model.config, self.quantize_config.rotation
+                self.model.config, resolve_model_rotation(self.quantize_config)
             )
 
             if self.model.config.tie_word_embeddings:
@@ -2159,12 +2160,12 @@ class BaseQModel(nn.Module):
             )
             if rotation_device is not None and rotation_device.type == "mps":
                 rotation_device = CPU
-            self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
+            self.model, _ = rotate_model(model=self.model, rotate_mode=resolve_model_rotation(self.quantize_config),
                                             device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
 
-        if self.quantize_config.rotation:
+        if resolve_model_rotation(self.quantize_config):
             backend = normalize_backend(backend, quant_method=self.quantize_config.method)
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GPTQ_TORCH
@@ -2265,7 +2266,7 @@ class BaseQModel(nn.Module):
                 attention_mode=self.quantize_config.activation_attention_mode,
                 attention_recipe=self.quantize_config.activation_attention_recipe,
                 mlp_fp8_layers=self.quantize_config.activation_mlp_fp8_layers,
-                fused_norms=bool(self.quantize_config.rotation),
+                fused_norms=bool(resolve_model_rotation(self.quantize_config)),
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -2274,7 +2275,7 @@ class BaseQModel(nn.Module):
 
         _setup_rotation_online_had(
             self.model,
-            self.quantize_config.rotation,
+            resolve_model_rotation(self.quantize_config),
             module_plan=self.module_plan(),
             layer_prefixes=self.extract_layers_node(),
         )

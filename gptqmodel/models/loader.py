@@ -58,6 +58,7 @@ from ..quantization.config import (
     configure_dynamic_override_cache_for_model,
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
@@ -202,7 +203,7 @@ _EXTERNAL_BACKEND_FORMATS = {
 
 def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format_code, adapter):
     """Select MLX when its Metal runtime can use the checkpoint directly."""
-    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
+    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or resolve_model_rotation(qcfg):
         return backend
     if quant_method == METHOD.GGUF and getattr(getattr(qcfg, "runtime_bits", None), "name", None) not in {
             "q1_0", "q1_0_g128", "q2_0", "q4_0", "q8_0", "q4_k", "q4_k_s", "q4_k_m",
@@ -2716,7 +2717,7 @@ def ModelLoader(cls):
                     log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
-            if qcfg.rotation:
+            if resolve_model_rotation(qcfg):
                 if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
                     raise NotImplementedError(
                         f"`rotation` is only supported for GPTQ/GPTQ_V2 checkpoints, got `{format_code}`."
@@ -3269,7 +3270,7 @@ def ModelLoader(cls):
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(
             instance.model,
-            qcfg.rotation,
+            resolve_model_rotation(qcfg),
             module_plan=instance.module_plan(),
             layer_prefixes=instance.extract_layers_node(),
         )

@@ -64,6 +64,7 @@ from ..quantization.config import (
     dynamic_get,
     dynamic_matching_pattern,
     quant_bits_width,
+    resolve_model_rotation,
     resolve_quant_format,
 )
 from ..quantization.module_config import resolve_module_constructor_config
@@ -1815,7 +1816,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             attention_mode=quantize_config.activation_attention_mode,
             attention_recipe=quantize_config.activation_attention_recipe,
             mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
-            fused_norms=bool(quantize_config.rotation),
+            fused_norms=bool(resolve_model_rotation(quantize_config)),
         )
 
     torch_empty_cache()
