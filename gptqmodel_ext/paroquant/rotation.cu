@@ -375,9 +375,15 @@ std::tuple<at::Tensor, at::Tensor> dispatch_rotate_pair_variant(at::Tensor x, at
 // state is kept in shared memory, every rotation's gradient contribution is
 // accumulated in registers, and only the cross-tile reduction is left over.
 //
-// Each thread owns exactly one (i, j) column pair per rotation, so the readback
-// after `apply_one` only touches columns the calling thread just wrote; a single
-// barrier per rotation covers the shared-memory staging.
+// Shared-memory ordering. Each thread owns exactly one (i, j) column pair per
+// rotation, so the readback after `apply_one` only touches columns the calling
+// thread just wrote and needs no barrier of its own (same-thread program order).
+// The hazards are across rotations: rotation r-1 pairs columns differently, so
+// its `apply_one` reads columns other threads wrote for rotation r (read after
+// write) and overwrites columns other threads may still be reading back for
+// rotation r (write after read). The single barrier therefore sits after the
+// readback, which orders both: every write and every read of rotation r
+// completes before any thread starts rotation r-1 (#4461).
 template <typename scalar_t, int CTA_M, int GROUP_SIZE, int KROT, int ROW_PAD>
 __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
                                         const scalar_t *__restrict__ g,
@@ -414,10 +420,11 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
     const float tr = reg_theta[r];
     RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(x_grp, reg_idx[r], -tr);
     RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE, GROUP_SIZE>(g_grp, reg_idx[r], -tr);
-    __syncthreads();
 
-    const int i = reg_idx[r] & 0xFFFF;
-    const int j = reg_idx[r] >> 16;
+    // Same masking as apply_one, so the readback addresses exactly the columns
+    // this thread just rotated.
+    const int i = static_cast<uint16_t>(reg_idx[r] & 0xFFFF) % GROUP_SIZE;
+    const int j = static_cast<uint16_t>((reg_idx[r] >> 16) & 0xFFFF) % GROUP_SIZE;
     float sum_a = 0.0f;
     float sum_b = 0.0f;
 #pragma unroll
@@ -434,6 +441,10 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
     float sn, cs;
     __sincosf(tr, &sn, &cs);
     partials[r * row_tiles * hh + tile * hh + grp * HALF_GROUP + t] = sum_a * cs - sum_b * sn;
+    // Orders this rotation's readback before the next rotation's apply_one
+    // writes, and this rotation's writes before the next rotation's reads
+    // (and before store_group after the last rotation).
+    __syncthreads();
   }
 
   RotateAccess<scalar_t>::template store_group<CTA_M, ROW_STRIDE, GROUP_SIZE>(out_x, x_grp, s, h,

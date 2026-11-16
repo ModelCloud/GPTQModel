@@ -6342,6 +6342,62 @@ def test_paroquant_pair_grad_reduce_folds_tiles_in_ascending_order():
         assert torch.equal(fused, reference)
 
 
+@pytest.mark.parametrize("cta_m", [4, 8, 16])
+@pytest.mark.parametrize("row_pad", [0, 2])
+def test_paroquant_pair_grad_sweep_is_race_free(cta_m, row_pad):
+    """Guard the fused backward sweep against the shared-memory write-after-read race (#4461).
+
+    Rotation r-1 overwrites columns that other threads are still reading back for
+    rotation r's gradient unless a barrier separates the readback from the next
+    ``apply_one``. The race only surfaces with many resident blocks and only
+    corrupts the rotation gradient (the rotated operands stay exact), so repeat
+    a wide launch, require bit-identical results and check the gradient against
+    an fp64 autograd oracle.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant fused rotation backward.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 2048
+    group_size = 128
+    krot = 8
+    rows = 1024
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    rotated = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    grad_out = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    pair_grad = paroquant_utils_module._paroquant_rotation_op("rotate_pair_grad")
+
+    results = [
+        pair_grad(rotated, grad_out, pairs, theta, group_size, cta_m, row_pad) for _ in range(20)
+    ]
+    first_x, first_g, first_theta_grad = results[0]
+    for x_out, g_out, theta_grad in results[1:]:
+        assert torch.equal(x_out, first_x)
+        assert torch.equal(g_out, first_g)
+        assert torch.equal(theta_grad, first_theta_grad)
+
+
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     """Guard that cached BF16 rotation metadata preserves the runtime dtype and values."""
     if not torch.cuda.is_available():
