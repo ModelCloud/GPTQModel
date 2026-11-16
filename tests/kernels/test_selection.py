@@ -159,6 +159,11 @@ def _pick_sym(cls):
 
 
 def _pick_bits(cls):
+    # GGUF kernels gate on the resolved tensor layout, not the bit width:
+    # width 4 is Q4_0 by default, which the fused Triton kernel rejects.
+    # Ask for a layout every current GGUF kernel accepts instead.
+    if getattr(cls, "SUPPORTS_GGUF_QTYPES", None):
+        return "q4_k"
     supported_bits = list(getattr(cls, "SUPPORTS_BITS", []))
     for candidate in supported_bits:
         if candidate in {2, 3, 4, 5, 6, 8}:
@@ -484,7 +489,7 @@ def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkey
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
-        bits=4,
+        bits="q4_k",
         group_size=-1,
         desc_act=False,
         sym=True,
@@ -737,7 +742,7 @@ def test_cuda_pack_auto_select_prioritizes_triton_for_gguf(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
-        bits=4,
+        bits="q4_k",
         group_size=-1,
         desc_act=False,
         sym=True,
@@ -820,7 +825,7 @@ def test_explicit_gguf_triton_backend_selects_triton_kernel(monkeypatch):
         classmethod(lambda qlinear_cls: (True, None)),
     )
     qlinear_cls = select_quant_linear(
-        bits=4,
+        bits="q4_k",
         group_size=-1,
         desc_act=False,
         sym=True,
