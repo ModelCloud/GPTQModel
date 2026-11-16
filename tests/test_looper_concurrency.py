@@ -133,6 +133,114 @@ def test_loop_processor_accepts_nonempty_prepared_calibration(monkeypatch, tmp_p
     assert processor.total_calibration_tokens == 48
 
 
+class _UnsizedCalibrationStream:
+    """Iterable calibration input with the same contract as ``datasets.IterableDataset``."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+def test_loop_processor_accepts_unsized_calibration_dataset(monkeypatch, tmp_path):
+    # Regression for #4192: prepare_dataset accepts IterableDataset and generic
+    # iterables, so the pre-prepare checks must not force a length on them.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    rows = [
+        {"input_ids": torch.arange(16), "attention_mask": torch.ones(16, dtype=torch.long)},
+        {"input_ids": torch.arange(32), "attention_mask": torch.ones(32, dtype=torch.long)},
+    ]
+    stream = _UnsizedCalibrationStream([{"text": "a"}, {"text": "b"}])
+    prepare_dataset_func = MagicMock(return_value=rows)
+
+    processor = LoopProcessor(
+        tokenizer=None,
+        qcfg=MagicMock(),
+        calibration=CalibrationConfig(dataset=stream, prepare_dataset=prepare_dataset_func),
+    )
+
+    # The raw stream must reach prepare_dataset untouched instead of being
+    # traversed or materialised by the size checks.
+    assert prepare_dataset_func.call_args.kwargs["calibration_dataset"] is stream
+    assert processor.num_batches == 2
+    assert processor.total_calibration_tokens == 48
+
+
+def test_loop_processor_accepts_hf_iterable_dataset(monkeypatch, tmp_path):
+    datasets = pytest.importorskip("datasets")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    rows = [
+        {"input_ids": torch.arange(16), "attention_mask": torch.ones(16, dtype=torch.long)},
+        {"input_ids": torch.arange(32), "attention_mask": torch.ones(32, dtype=torch.long)},
+    ]
+    stream = datasets.IterableDataset.from_generator(
+        lambda: ({"text": text} for text in ("a", "b"))
+    )
+    assert isinstance(stream, datasets.IterableDataset)
+
+    processor = LoopProcessor(
+        tokenizer=None,
+        qcfg=MagicMock(),
+        calibration=CalibrationConfig(
+            dataset=stream,
+            prepare_dataset=MagicMock(return_value=rows),
+        ),
+    )
+
+    assert processor.num_batches == 2
+
+
+def test_loop_processor_materializes_unsized_prepared_calibration(monkeypatch, tmp_path):
+    # A model-specific prepare_dataset override may hand back a one-shot
+    # iterable; the processor replays it per layer and therefore needs a
+    # reusable, sized dataset.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    rows = [
+        {"input_ids": torch.arange(16), "attention_mask": torch.ones(16, dtype=torch.long)},
+        {"input_ids": torch.arange(32), "attention_mask": torch.ones(32, dtype=torch.long)},
+    ]
+
+    processor = LoopProcessor(
+        tokenizer=None,
+        qcfg=MagicMock(),
+        calibration=CalibrationConfig(
+            dataset=_UnsizedCalibrationStream([{"text": "a"}, {"text": "b"}]),
+            prepare_dataset=lambda **kwargs: (row for row in rows),
+        ),
+    )
+
+    assert processor.calibration_dataset == rows
+    assert processor.num_batches == 2
+    assert processor.total_calibration_tokens == 48
+
+
+def test_loop_processor_rejects_empty_unsized_calibration(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    with pytest.raises(ValueError, match="empty after CalibrationConfig.prepare_dataset"):
+        LoopProcessor(
+            tokenizer=None,
+            qcfg=MagicMock(),
+            calibration=CalibrationConfig(
+                dataset=_UnsizedCalibrationStream([]),
+                prepare_dataset=lambda **kwargs: [],
+            ),
+        )
+
+
 def test_collect_worker_results_preserves_submission_order():
     events = []
     futures = [

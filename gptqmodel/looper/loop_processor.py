@@ -58,6 +58,35 @@ def remove_processor_log(log_path: Optional[str], *, keep: bool = True) -> bool:
         log.debug("Failed to remove processor log file %s", log_path, exc_info=True)
         return False
 
+
+def _calibration_dataset_length(dataset) -> Optional[int]:
+    """Return ``len(dataset)`` when the calibration input exposes a size.
+
+    ``datasets.IterableDataset`` and plain generators are valid calibration
+    inputs (``prepare_calibration_dataset`` materialises them), but they do not
+    implement ``__len__``. Callers must treat ``None`` as "unknown" instead of
+    forcing a length the input cannot provide.
+    """
+
+    try:
+        return len(dataset)
+    except TypeError:
+        return None
+
+
+def _sized_calibration_dataset(dataset):
+    """Return a re-iterable calibration dataset that supports ``len()``.
+
+    Model-specific ``prepare_dataset`` overrides may return a one-shot
+    iterable. The processor replays the prepared batches once per layer, so an
+    unsized result is materialised here rather than failing later on ``len()``.
+    """
+
+    if _calibration_dataset_length(dataset) is None:
+        return list(dataset)
+    return dataset
+
+
 _PROJECT_LOG_DIR = Path("logs")
 
 # Device-SMI handles are process-scoped diagnostic helpers. Once the vendor tool
@@ -431,14 +460,20 @@ class LoopProcessor:
         # prepare dataset
         calibration_dataset = self.calibration.dataset
         if calibration_dataset is not None:
-            if len(calibration_dataset) == 0:
-                raise ValueError("Calibration dataset must not be empty.")
-
             min_calibration_dataset_size = 256
             min_calibration_dataset_input_ids_avg_length = 256
-            if len(calibration_dataset) < min_calibration_dataset_size:
+
+            # ``datasets.IterableDataset`` and plain generators are valid
+            # calibration inputs but do not implement ``__len__``. Only run the
+            # pre-prepare checks when the caller supplied a sized container;
+            # emptiness is verified again on the prepared result below.
+            raw_calibration_size = _calibration_dataset_length(calibration_dataset)
+            if raw_calibration_size == 0:
+                raise ValueError("Calibration dataset must not be empty.")
+
+            if raw_calibration_size is not None and raw_calibration_size < min_calibration_dataset_size:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                               f"Current: {len(calibration_dataset)}.")
+                               f"Current: {raw_calibration_size}.")
 
             if self.calibration.prepare_dataset is None:
                 raise ValueError("CalibrationConfig.prepare_dataset must be provided when calibration data is supplied.")
@@ -451,13 +486,24 @@ class LoopProcessor:
                 calibration_concat_separator=self.calibration.concat_separator,
             )
 
-            if len(calibration_dataset) == 0:
+            # A model-specific ``prepare_dataset`` override may return a
+            # one-shot iterable; normalise it before the checks below and
+            # before the per-layer replay, which needs a reusable dataset.
+            calibration_dataset = _sized_calibration_dataset(calibration_dataset)
+            prepared_calibration_size = len(calibration_dataset)
+
+            if prepared_calibration_size == 0:
                 raise ValueError(
                     "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
                     "all samples (for example, every input_ids was shorter than "
                     "calibration_data_min_length). Lower calibration_data_min_length "
                     "or provide longer calibration samples."
                 )
+
+            # The size is only knowable after preparation for unsized inputs.
+            if raw_calibration_size is None and prepared_calibration_size < min_calibration_dataset_size:
+                log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+                               f"Current: {prepared_calibration_size}.")
 
             # A disk-backed calibration sequence can provide exact scalar
             # accounting without being traversed merely for a warning.  This
