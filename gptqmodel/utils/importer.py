@@ -1271,6 +1271,21 @@ def hf_select_quant_linear_v2(
 
 
 # auto select the correct/optimal QuantLinear class
+def _auto_select_priority(cls: Type[BaseQuantLinear], fmt: FORMAT, dtype) -> int:
+    """Effective AUTO rank for one candidate at the requested activation dtype.
+
+    ``SUPPORTS_FORMATS`` is a dtype-independent rank. A kernel may lower its
+    own rank for a dtype whose path is a slow fallback. Test doubles that only
+    declare ``SUPPORTS_FORMATS`` keep working through the fallback.
+    """
+
+    resolver = getattr(cls, "auto_select_priority", None)
+    if resolver is not None:
+        return resolver(fmt, dtype)
+    formats = getattr(cls, "SUPPORTS_FORMATS", None) or {}
+    return formats.get(fmt, 0)
+
+
 def select_quant_linear(
         bits,
         group_size: int,
@@ -1396,6 +1411,14 @@ def select_quant_linear(
         allow_quant_linears = list(get_auto_backend_kernel_mapping()[quant_method].get(format, {}).items())
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
+        # Re-rank for the requested activation dtype: a kernel whose dtype path
+        # is a slow fallback (for example ExLlamaV2 reconstructs a dense weight
+        # for BF16) must not outrank a native kernel. The sort is stable, so
+        # equal ranks keep the declared order.
+        allow_quant_linears.sort(
+            key=lambda item: _auto_select_priority(item[1], format, dtype),
+            reverse=True,
+        )
 
         last_err = None
         global message_logged

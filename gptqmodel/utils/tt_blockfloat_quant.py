@@ -2151,8 +2151,13 @@ def build_blockfloat_model(
         )
     # Build through the dtype-aware constructor, then cast per tensor. A blanket
     # ``.to(dtype)`` would also narrow Llama's float32 rotary ``inv_freq``, which
-    # ``from_pretrained`` deliberately leaves alone.
-    model = getattr(transformers, class_name)._from_config(config)
+    # ``from_pretrained`` deliberately leaves alone. ``_from_config`` mutates the
+    # process-global default dtype, so it must share the model-construction lock
+    # (issue #4204).
+    from ..models.loader import model_load_lock
+
+    with model_load_lock():
+        model = getattr(transformers, class_name)._from_config(config)
     _cast_model_dtype(model, dtype)
     _sync_config_dtype(model.config, dtype)
 

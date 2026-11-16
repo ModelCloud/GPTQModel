@@ -45,6 +45,7 @@ from ...utils.allspark import (
     allspark_supported,
     prewarm_allspark_extension,
 )
+from ...utils.allspark_bias import narrow_bias_for_kernel
 from ...utils.allspark_hip import (
     allspark_hip_available,
     allspark_hip_gemm,
@@ -152,6 +153,8 @@ class AllSparkAwqLinear(AWQuantLinear):
                 self.bias = self.bias.to(dtype=torch.float32)
         self._repacked = False
         self._packed_key = None
+        self._bias_key = None
+        self._bias_value = None
         # Pick the kernel family once. The two extensions use different packed
         # layouts (WMMA fragments on ROCm, N32K16 on CUDA), and pairing a buffer
         # with the wrong kernel yields garbage rather than an error.
@@ -159,6 +162,9 @@ class AllSparkAwqLinear(AWQuantLinear):
 
     def _apply(self, fn, recurse=True):
         """Move an FP32 checkpoint bias without narrowing its stored values."""
+        # The derived kernel bias belongs to the old device/dtype.
+        self._bias_key = None
+        self._bias_value = None
         bias = getattr(self, "bias", None)
         if bias is None or bias.dtype != torch.float32:
             return super()._apply(fn, recurse=recurse)
@@ -169,6 +175,28 @@ class AllSparkAwqLinear(AWQuantLinear):
             return fn(tensor)
 
         return super()._apply(preserve_bias_width, recurse=recurse)
+
+    def _kernel_bias(self):
+        """Return the bias buffer the kernel should read.
+
+        ``self.bias`` keeps the checkpoint width so an out-of-range value
+        survives save/load and a dtype move. The kernel only needs FP32 when a
+        value is not exactly representable; otherwise a buffer in the activation
+        dtype keeps the HIP prefill branch on the half-precision ``addmm``
+        instead of an FP32 matmul.
+
+        In-place writes through the tensor advance its version and re-derive
+        here. A ``.data`` write does not, so call :meth:`clear_weight_cache`
+        after one, exactly like the packed weight layout.
+        """
+        bias = getattr(self, "bias", None)
+        if bias is None:
+            return None
+        key = tensor_cache_key(bias)
+        if self._bias_key != key:
+            self._bias_value = narrow_bias_for_kernel(bias, self.compute_dtype)
+            self._bias_key = key
+        return self._bias_value
 
     @property
     def _kernel_group_size(self) -> int:
@@ -256,6 +284,10 @@ class AllSparkAwqLinear(AWQuantLinear):
         """
         self._repacked = False
         self._packed_key = None
+        # The kernel bias is derived from ``self.bias`` and is invalidated by
+        # the same events as the packed layout.
+        self._bias_key = None
+        self._bias_value = None
 
     @torch.no_grad()
     def _ensure_repacked(self) -> None:
@@ -305,7 +337,7 @@ class AllSparkAwqLinear(AWQuantLinear):
             self._ensure_repacked()
         shape = x.shape[:-1] + (self.out_features,)
         x2d = x.reshape(-1, self.in_features).contiguous()
-        bias = getattr(self, "bias", None)
+        bias = self._kernel_bias()
         if self._hip:
             out = allspark_hip_gemm(
                 x2d,

@@ -29,7 +29,7 @@ from ...utils.planar_packing import (
     planar_unpack_cols,
     planar_unpack_rows,
 )
-from ...utils.safe import THREADPOOLCTL
+from ...utils.safe import threadpool_limits
 from ..compiled_state import compiled_module_getstate
 from ._fused_train_state import QZEROS_FORMAT_BUFFER
 from ._runtime_cache import tensor_cache_key
@@ -648,6 +648,18 @@ class BaseQuantLinear(nn.Module):
             return True
         supported = cls.SUPPORTS_DTYPES
         return supported is None or dtype in supported
+
+    @classmethod
+    def auto_select_priority(cls, fmt: FORMAT, dtype: Optional[t.dtype] = None) -> int:
+        """AUTO-selection rank for one format and activation dtype.
+
+        ``SUPPORTS_FORMATS`` is a dtype-independent rank. A kernel whose
+        non-native dtype path is a slow fallback can lower its rank for that
+        dtype here without giving up explicit backend selection. ``dtype=None``
+        means the caller did not constrain the activation dtype, so the
+        declared rank is returned unchanged.
+        """
+        return cls.SUPPORTS_FORMATS.get(fmt, 0)
 
     @classmethod
     def supports_gguf_qtype(cls, bits) -> bool:
@@ -2388,7 +2400,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
-        with THREADPOOLCTL.threadpool_limits(1):
+        with threadpool_limits(limits=1):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
             # W = linear.weight.data.clone()
             W = linear.weight.data

@@ -1233,12 +1233,25 @@ def compare_versions(installed_version, required_version, operator):
 _MODEL_LOAD_LOCK = threading.RLock()
 
 
+def model_load_lock():
+    """Return the process-wide, re-entrant lock guarding model construction.
+
+    Every site that builds a model through transformers -- ``from_pretrained``,
+    ``from_quantized``, the save-side shell rebuild, the dequant path and the
+    TT block-float path -- must enter this same lock. Look the lock up through
+    this accessor (not a module-level import of ``_MODEL_LOAD_LOCK``) so the
+    single lock object is shared and can be spied on in tests.
+    """
+
+    return _MODEL_LOAD_LOCK
+
+
 def _serialized_model_load(method):
     """Serialize a model-construction entry point across threads."""
 
     @wraps(method)
     def wrapper(*args, **kwargs):
-        with _MODEL_LOAD_LOCK:
+        with model_load_lock():
             return method(*args, **kwargs)
 
     return wrapper

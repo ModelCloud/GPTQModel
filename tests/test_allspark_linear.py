@@ -150,6 +150,103 @@ def test_fp32_bias_survives_module_dtype_move(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_representable_bias_is_handed_to_the_kernel_narrowed(dtype):
+    """A bias the activation dtype holds exactly keeps the fast prefill path."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, _, _ = _fp32_bias_module(dtype, k=256, n=128, bias_value=-32768.0)
+    # The checkpoint-facing buffer keeps its FP32 width ...
+    assert mod.bias.dtype == torch.float32
+    # ... while the kernel reads the lossless narrow copy.
+    kernel_bias = mod._kernel_bias()
+    assert kernel_bias.dtype == dtype
+    assert torch.equal(kernel_bias.to(torch.float32), mod.bias)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_unrepresentable_bias_stays_fp32_for_the_kernel(dtype):
+    """-100000 needs 17 mantissa bits and is outside the FP16 range."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, _, _ = _fp32_bias_module(dtype, k=256, n=128, bias_value=-100000.0)
+    assert mod._kernel_bias().dtype == torch.float32
+
+
+def test_kernel_bias_cache_follows_in_place_edits():
+    """An in-place bias write must re-derive the kernel buffer."""
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    mod, _, _ = _fp32_bias_module(torch.float16, k=256, n=128, bias_value=0.5)
+    assert mod._kernel_bias().dtype == torch.float16
+    with torch.no_grad():
+        mod.bias.fill_(-100000.0)
+    assert mod._kernel_bias().dtype == torch.float32
+    with torch.no_grad():
+        mod.bias.fill_(0.5)
+    assert mod._kernel_bias().dtype == torch.float16
+    # A ``.data`` write does not advance the version counter, so the documented
+    # invalidation point is ``clear_weight_cache`` (same contract as the packed
+    # weight layout).
+    with torch.no_grad():
+        mod.bias.data.fill_(-100000.0)
+    mod.clear_weight_cache()
+    assert mod._kernel_bias().dtype == torch.float32
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("m", [1, 17, 64])
+def test_narrowed_bias_matches_fp64_oracle(m, dtype):
+    """The narrowed buffer must not move the result off the FP64 oracle.
+
+    m spans the fused ``M <= 16`` kernel and the prefill fallback, which is the
+    branch the narrow bias selects.
+    """
+    if not _kernel_supported():
+        pytest.skip("AllSpark needs compute capability >= 8.0 or gfx1200/gfx1201")
+    assert _prewarm()
+
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    k, n = 256, 128
+    gen = torch.Generator(device="cuda").manual_seed(4100 + m)
+    weight = torch.randn(k, n, dtype=dtype, device="cuda", generator=gen) * 0.02
+    scale = (weight.abs().amax(dim=0) / 127).clamp_min(1e-8)
+    codes = (weight / scale).round().add(128).clamp(0, 255).to(torch.int32)
+    shifts = (torch.arange(4, device="cuda", dtype=torch.int32) * 8).view(1, 4, 1)
+    qweight = (codes.view(k // 4, 4, n) << shifts).sum(dim=1).to(torch.int32)
+
+    mod = AllSparkLinear(
+        bits=8, group_size=-1, desc_act=False, sym=True,
+        in_features=k, out_features=n, bias=True, dtype=dtype,
+    ).cuda()
+    mod.qweight.data.copy_(qweight)
+    mod.scales.data.copy_(scale.view(1, n).to(dtype))
+    # FP32 checkpoint bias whose values are exact in the activation dtype.
+    bias = (torch.randn(n, device="cuda", dtype=torch.float32, generator=gen) * 2).to(dtype).float()
+    mod.bias.data.copy_(bias)
+    mod.post_init()
+    assert mod._kernel_bias().dtype == dtype
+
+    x = torch.randn(m, k, dtype=dtype, device="cuda", generator=gen) * 0.02
+    out = mod(x)
+    # Independent FP64 oracle straight from the uint8 codes and the FP32 bias.
+    dense = (codes.double() - 128.0) * scale.double()[None, :]
+    ref = x.double() @ dense + bias.double()[None, :]
+    assert out.dtype == dtype
+    rounded = ref.to(dtype)
+    ulp = (torch.nextafter(rounded, torch.full_like(rounded, float("inf"))).double()
+           - rounded.double()).abs()
+    excess = ((out.double() - ref).abs() - ulp).clamp_min(0)
+    assert torch.all(excess <= 2e-3 + 2e-3 * ref.abs()), float(excess.max())
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_linear_bias_does_not_expand_persistent_storage(dtype):
     """Bias handling must not add a dense or FP32 weight cache."""
     if not _kernel_supported():

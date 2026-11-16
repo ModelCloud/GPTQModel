@@ -292,7 +292,7 @@ def _budget_dp(gained, unit_costs, budget, n_layers, n_options):
             pass
     steps = unit_costs.tolist()
     try:
-        from threadpoolctl import threadpool_limits
+        from ..utils.safe import threadpool_limits
     except Exception:
         return _budget_dp_torch(gained, steps, budget, n_layers, n_options)
     # Tiny tensors are dominated by thread-pool wake-ups; one thread is several

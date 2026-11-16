@@ -45,6 +45,27 @@ def _rank_pattern_matches(pattern: str, weight_key: str, *, ignore_case: bool = 
     return pcre.compile(rf"(.*\.)?({pattern})$", flags).match(weight_key) is not None
 
 
+def _reject_unsupported_adapter_tensors(weights: Dict[str, torch.Tensor]) -> None:
+    """Fail closed on adapter tensors this runtime cannot apply.
+
+    The LoRA path consumes only `lora_A` / `lora_B`. A checkpoint that also
+    carries DoRA magnitude vectors, trained biases, or `modules_to_save`
+    parameters would have those tensors dropped, so the adapter would load and
+    run as a different (plain LoRA) model. Rejecting them keeps the load honest
+    instead of silently wrong.
+    """
+
+    for key in weights:
+        if ".lora_magnitude_vector" in key:
+            raise ValueError(
+                f"Adapter: DoRA is not supported (`lora_magnitude_vector` tensor found: `{key}`)"
+            )
+        if ".modules_to_save." in key:
+            raise ValueError(f"Adapter: `modules_to_save` is not supported (`{key}`)")
+        if key.endswith(".bias"):
+            raise ValueError(f"Adapter: adapter bias tensors are not supported (`{key}`)")
+
+
 class AdapterCache():
     """Caches loaded adapter configs and tensors by source path."""
 
@@ -292,6 +313,7 @@ class Lora(Adapter):
             assert lora_cache is not None
 
         lora_cfg, lora_weights = lora_cache
+        _reject_unsupported_adapter_tensors(lora_weights)
         self._lora_config = lora_cfg
         return lora_cfg, lora_weights
 

@@ -11,6 +11,15 @@ GGUF quantization and loading share one kernel selector,
 | 25 | `GGUFCppKernel` | CPU ggml bridge formats |
 | 15 | `GGUFTorchLinear` | every `GGUFBits` layout |
 
+The native C++ engines are the fast path but not the exact one: `ggml_mul_mat`
+quantizes activations to Q8_0/Q8_1/Q8_K, so `GGUF_CPP` carries a
+5e-3..1.5e-2 relative error against an FP64 dequantized-weight oracle even for
+FP32 activations. That loss, its bound, and the static native-vs-exact path rule
+are documented in
+[GGUF C++ activation quantization](gguf-cpp-activation-quantization.md);
+`GGUF_TORCH` is the exact engine. The C++ engines stay ahead of `GGUF_TORCH` in
+AUTO because they are 40-97x faster per layer on CPU.
+
 A GGUF **bit width is not a layout**. Width 4 is Q4_0 by default, but Q4_K and
 IQ4_NL are also 4-bit; width 5 is Q5_K_M by default but Q5_0 is also 5-bit.
 Selection therefore resolves the concrete `GGUFBits` spec to a ggml tensor type
