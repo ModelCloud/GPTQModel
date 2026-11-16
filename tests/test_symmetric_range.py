@@ -20,6 +20,7 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel.models._const import normalize_device
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import QQQConfig, QuantizeConfig, RTNConfig
 from gptqmodel.quantization.qqq import QQQ
@@ -174,6 +175,41 @@ def test_all_positive_group_reaches_the_top_code(dtype, bits, expected_fraction)
     assert float(dequant.max()) > 0.6
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=CUDA)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("bits", BITS)
+@pytest.mark.parametrize("method", ["gptq", "qqq"])
+def test_non_negative_fit_rounding_neighbors_and_saturation(device, dtype, bits, method):
+    # This bound makes the corrected scale exactly one, even in BF16. The
+    # expected codes can therefore be derived in FP64 without rounding ties
+    # introduced by scale fitting or reciprocal multiplication.
+    maxq = 2**bits - 1
+    midpoint = 2 ** (bits - 1)
+    bound = maxq / 2
+    group = torch.full((ROWS, WIDTH), bound, dtype=dtype, device=device)
+    if method == "gptq":
+        quantizer = _find_params(group, bits, device)
+    else:
+        quantizer = QQQQuantizer().to(device)
+        quantizer.configure(bits=bits, perchannel=True, sym=True, groupsize=WIDTH)
+        quantizer.find_params(group, weight=True)
+    assert torch.equal(quantizer.scale, torch.ones_like(quantizer.scale))
+    assert torch.all(quantizer.zero == midpoint)
+
+    half = torch.tensor([-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5], dtype=dtype)
+    neighbors = torch.stack((
+        torch.nextafter(half, torch.full_like(half, -float("inf"))),
+        half,
+        torch.nextafter(half, torch.full_like(half, float("inf"))),
+    ), dim=1).flatten()
+    endpoints = torch.tensor([-2 * bound, -bound, -0.0, 0.0, bound, 2 * bound], dtype=dtype)
+    probes = torch.cat((neighbors, endpoints)).repeat(ROWS, 1).to(device)
+    expected_codes = (probes.double().round() + midpoint).clamp(0, maxq)
+    actual = quantizer.quantize(probes)
+    assert torch.equal(actual, (expected_codes - midpoint).float())
+    assert torch.equal((actual.double() + midpoint).to(torch.int64), expected_codes.to(torch.int64))
+
+
 @pytest.mark.parametrize(
     "dtype", [torch.float32, torch.float16, torch.bfloat16]
 )
@@ -202,51 +238,35 @@ def test_symmetric_grid_covers_both_extremes(dtype, bits, expected_positive):
     assert abs(negative + bound) <= scale + 1e-6, (negative, scale)
 
 
-@pytest.mark.parametrize(
-    "dtype,expected", [(torch.float32, 14.0 / 15.0), (torch.float16, 14.0 / 15.0),
-                       (torch.bfloat16, 14.0 / 15.0)]
-)
-def test_rtn_all_positive_group_packed_decode(dtype, expected):
-    """The real RTN path must pack and decode an all-ones INT4 group.
-
-    The weight goes through the production packer and
-    ``TorchLinear.dequantize_weight``, so the stored ``qweight``/``qzeros``/
-    ``scales`` bytes are covered, not only the in-memory dequantization.
-    """
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=CUDA)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("bits", BITS)
+def test_rtn_all_positive_group_packed_decode(dtype, bits, device):
+    """Check real RTN output and complete packed bytes against a golden grid."""
 
     out_features, in_features, group_size = 32, 64, 32
-    layer = nn.Linear(in_features, out_features, bias=False, dtype=dtype)
+    maxq, midpoint = 2**bits - 1, 2 ** (bits - 1)
+    layer = nn.Linear(in_features, out_features, bias=False, dtype=dtype, device=device)
     layer.weight.data.fill_(1.0)
 
     qcfg = RTNConfig(
-        bits=4,
+        bits=bits,
         group_size=group_size,
         sym=True,
         desc_act=False,
         offload_to_disk=False,
-        device="cpu",
+        device=normalize_device(device),
     )
     quantized, scale, zero, g_idx, *_ = RTN(layer, qcfg=qcfg).quantize()
 
-    # RTN stores the dequantized weight back in the source dtype, so the
-    # expectation is only exact to that dtype's epsilon.
-    atol = float(torch.finfo(dtype).eps)
-    assert torch.all(zero == 8), zero
-    assert torch.allclose(
-        scale.flatten(),
-        torch.full_like(scale.flatten(), 2.0 / 15.0),
-        rtol=0,
-        atol=atol,
-    ), scale
-    torch.testing.assert_close(
-        quantized.float(),
-        torch.full_like(quantized.float(), expected),
-        rtol=0,
-        atol=atol,
-    )
+    expected_scale = torch.tensor(2.0, device=device) / torch.tensor(maxq, device=device)
+    expected_weight = ((maxq - midpoint) * expected_scale).to(dtype)
+    assert torch.all(zero == midpoint)
+    torch.testing.assert_close(scale, expected_scale.expand_as(scale), rtol=0, atol=0)
+    torch.testing.assert_close(quantized, expected_weight.expand_as(quantized), rtol=0, atol=0)
 
     packed = TorchLinear(
-        bits=4,
+        bits=bits,
         group_size=group_size,
         sym=True,
         desc_act=True,
@@ -256,24 +276,32 @@ def test_rtn_all_positive_group_packed_decode(dtype, expected):
         backend=BACKEND.TORCH,
         bias=False,
     )
-    packed.pack_block(layer, scale, zero, g_idx=g_idx.to(torch.int32))
+    packed.pack_block(
+        layer.to("cpu"), scale.cpu(), zero.cpu(), g_idx=g_idx.to(device="cpu", dtype=torch.int32)
+    )
+    # Every weight must use the top code. A continuous little-endian stream
+    # also covers three-bit codes that straddle int32 words.
+    assert torch.equal(packed.qweight, torch.full_like(packed.qweight, -1))
+    zero_stream = sum(midpoint << (bits * index) for index in range(out_features))
+    zero_words = [
+        ((zero_stream >> (32 * index)) + 2**31) % 2**32 - 2**31
+        for index in range(bits)
+    ]
+    expected_qzeros = torch.tensor(zero_words, dtype=torch.int32).repeat(in_features // group_size, 1)
+    assert torch.equal(packed.qzeros, expected_qzeros)
+    expected_stored_scale = torch.full(packed.scales.shape, 2.0 / maxq, dtype=torch.float16)
+    assert torch.equal(packed.scales, expected_stored_scale)
+    expected_g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    assert torch.equal(packed.g_idx, expected_g_idx)
     packed.post_init()
 
     decoded = packed.dequantize_weight().T
-    # The packer's storage layout decodes in the checkpoint dtype, so compare
-    # the decoded grid value against that dtype's epsilon.
-    decoded_atol = float(torch.finfo(decoded.dtype).eps)
+    # Stored scales and visible weights each have their own dtype rounding.
+    expected_decoded = torch.full_like(decoded, 2.0 / maxq) * (maxq - midpoint)
+    torch.testing.assert_close(decoded, expected_decoded, rtol=0, atol=0)
+    roundtrip_atol = max(float(torch.finfo(dtype).eps), float(torch.finfo(decoded.dtype).eps))
     torch.testing.assert_close(
-        decoded.float(),
-        torch.full_like(decoded.float(), expected),
-        rtol=0,
-        atol=decoded_atol,
-    )
-    # The packed bytes must agree with the in-memory dequantization.
-    # Checkpoints store group scales as FP16, so a source weight in a wider
-    # dtype can differ by one storage step after the round trip.
-    torch.testing.assert_close(
-        decoded, quantized.to(decoded.dtype), rtol=0, atol=decoded_atol
+        decoded, quantized.to(device=decoded.device, dtype=decoded.dtype), rtol=0, atol=roundtrip_atol
     )
 
 
@@ -298,21 +326,22 @@ def test_qqq_quantizer_all_positive_group_is_zero_centered():
     )
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_qqq_grouped_quantize_reconstructs_positive_groups(dtype):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=CUDA)])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_qqq_grouped_quantize_reconstructs_positive_groups(dtype, device):
     """The real QQQ grouped path must not saturate an all-ones group at 7/15."""
 
     torch.manual_seed(0)
-    layer = nn.Linear(128, 8, bias=False, dtype=dtype)
+    layer = nn.Linear(128, 8, bias=False, dtype=dtype, device=device)
     layer.weight.data.fill_(1.0)
     task = QQQ(
         layer,
-        QQQConfig(bits=4, group_size=128, desc_act=False, device="cpu"),
+        QQQConfig(bits=4, group_size=128, desc_act=False, device=normalize_device(device)),
     )
     task.quantizer.configure(
         4, perchannel=True, sym=True, mse=False, norm=2.4, groupsize=128
     )
-    task.add_batch(torch.randn(4, 128, dtype=dtype), None)
+    task.add_batch(torch.randn(4, 128, dtype=dtype, device=device), None)
 
     weight, scale, zero = task.quantize()[:3]
 
