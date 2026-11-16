@@ -288,7 +288,11 @@ def _resolve_source_input(from_model) -> Tuple[str, Optional[str]]:
             return path, None
         if os.path.isfile(path) and path.endswith((".safetensors", ".safetensors.index.json")):
             selected_file = os.path.abspath(path)
-            return os.path.dirname(selected_file), selected_file
+            source_dir = os.path.dirname(selected_file)
+            indexed = _index_containing_file(source_dir, selected_file)
+            if indexed is not None:
+                source_dir, _ = indexed
+            return source_dir, selected_file
         raise FileNotFoundError(f"`from_model` is not a checkpoint directory or safetensors file: {path!r}")
 
     local_path = getattr(from_model, "model_local_path", None)
@@ -441,38 +445,46 @@ def _scan_unindexed_checkpoint(
     return refs, metadata
 
 
-def _index_containing_file(source_dir: str, selected_file: str) -> Optional[str]:
+def _index_containing_file(source_dir: str, selected_file: str) -> Optional[Tuple[str, str]]:
     """Keep a named shard attached to its complete standard checkpoint."""
+    selected_file = os.path.abspath(selected_file)
+    candidate_dir = os.path.abspath(source_dir)
     selected_index: Optional[str] = None
     selected_map: Optional[Dict[str, str]] = None
-    for index_name in _SOURCE_INDEX_NAMES:
-        index_path = os.path.join(source_dir, index_name)
-        if not os.path.isfile(index_path):
-            continue
-        try:
-            with open(index_path, encoding="utf-8") as handle:
-                index = json.load(handle)
-            weight_map = index.get("weight_map")
-            if not isinstance(weight_map, dict) or not weight_map:
+    while True:
+        for index_name in _SOURCE_INDEX_NAMES:
+            index_path = os.path.join(candidate_dir, index_name)
+            if not os.path.isfile(index_path):
                 continue
-            resolved_map = {
-                str(name): _resolve_shard_path(source_dir, str(shard))
-                for name, shard in weight_map.items()
-            }
-        except (OSError, ValueError, AttributeError):
-            # An unrelated invalid index must not override a named file.
-            continue
-        if selected_file not in resolved_map.values():
-            continue
-        if selected_map is not None and resolved_map != selected_map:
-            raise ValueError(
-                f"Selected shard '{selected_file}' belongs to conflicting checkpoint "
-                f"indexes '{selected_index}' and '{index_path}'; select an index file explicitly."
-            )
-        selected_index, selected_map = index_path, resolved_map
-    return selected_index
+            try:
+                with open(index_path, encoding="utf-8") as handle:
+                    index = json.load(handle)
+                weight_map = index.get("weight_map")
+                if not isinstance(weight_map, dict) or not weight_map:
+                    continue
+                resolved_map = {
+                    str(name): _resolve_shard_path(candidate_dir, str(shard))
+                    for name, shard in weight_map.items()
+                }
+            except (OSError, ValueError, AttributeError):
+                continue
+            if selected_file not in resolved_map.values():
+                continue
+            if selected_map is not None and resolved_map != selected_map:
+                raise ValueError(
+                    f"Selected shard '{selected_file}' belongs to conflicting checkpoint "
+                    f"indexes '{selected_index}' and '{index_path}'; select an index file explicitly."
+                )
+            selected_index, selected_map = index_path, resolved_map
 
+        parent_dir = os.path.dirname(candidate_dir)
+        if parent_dir == candidate_dir:
+            break
+        candidate_dir = parent_dir
 
+    if selected_index is None:
+        return None
+    return os.path.dirname(selected_index), selected_index
 def _scan_checkpoint(
     source_dir: str, selected_file: Optional[str] = None
 ) -> Tuple[Dict[str, _TensorRef], Dict[str, str]]:
@@ -482,9 +494,10 @@ def _scan_checkpoint(
         if selected_file.endswith(".safetensors.index.json"):
             refs, metadata = _scan_indexed_checkpoint(source_dir, selected_file)
         else:
-            index_path = _index_containing_file(source_dir, selected_file)
-            if index_path is not None:
-                refs, metadata = _scan_indexed_checkpoint(source_dir, index_path)
+            indexed = _index_containing_file(source_dir, selected_file)
+            if indexed is not None:
+                checkpoint_dir, index_path = indexed
+                refs, metadata = _scan_indexed_checkpoint(checkpoint_dir, index_path)
             else:
                 refs, metadata = _scan_unindexed_checkpoint(source_dir, (selected_file,))
     else:

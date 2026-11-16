@@ -581,6 +581,19 @@ def test_reshard_named_shard_keeps_its_complete_indexed_checkpoint(tmp_path):
     _assert_tensors_equal(load_file(str(target / "model.safetensors")), state)
 
 
+def test_reshard_nested_named_shard_keeps_checkpoint_root(tmp_path):
+    source = tmp_path / "source"
+    state = _build_source(source)
+    nested = tmp_path / "nested"
+    reshard(source, nested)
+
+    target = tmp_path / "target"
+    reshard(nested / "model.layers.0" / "layer.safetensors", target, ShardLayout.SINGLE)
+
+    _assert_tensors_equal(load_file(str(target / "model.safetensors")), state)
+    assert (target / "config.json").is_file()
+    assert (target / "tokenizer_config.json").is_file()
+
 def test_reshard_named_shard_rejects_conflicting_standard_indexes(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
