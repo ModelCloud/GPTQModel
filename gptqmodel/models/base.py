@@ -2830,6 +2830,7 @@ class BaseQModel(nn.Module):
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
+        from ..utils.offload import release_private_offload_root
 
         self.quantize_config.adapter = adapter
 
@@ -2893,6 +2894,8 @@ class BaseQModel(nn.Module):
             module_looper.layer_module_coverage.report(type(self).__name__)
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
+        # The adapter is written; the EoRA pass no longer reads its scratch tree.
+        release_private_offload_root(self)
         return
 
     def to(self, device: Union[str, torch.device]):

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import atexit
 import contextlib
 import copy
 import hashlib
@@ -11,6 +12,7 @@ import os
 import shutil
 import struct
 import uuid
+import weakref
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -32,6 +34,13 @@ from .torch import CPU, META
 
 
 _SMALL_MODULE_OFFLOAD_BYTES = 4 * 1024  # Skip disk writes for <4KB payloads
+_RUN_ROOT_ATTR = "_offload_run_root"
+_RUN_BASE_ATTR = "_offload_run_base"
+_RUN_FINALIZER_ATTR = "_offload_run_finalizer"
+# Run roots created by this process and not yet released. The finalizer below
+# removes a run root when its model is collected; this set is the safety net for
+# models that cannot be weakly referenced and for interpreter shutdown.
+_ACTIVE_RUN_ROOTS: Set[str] = set()
 
 log = setup_logger()
 
@@ -76,6 +85,51 @@ def is_meta_module(m: nn.Module) -> bool:
     return False
 
 
+def _remove_offload_run_root(run_root: str) -> None:
+    """Delete one private run directory; never raises (finalizer/atexit safe)."""
+
+    _ACTIVE_RUN_ROOTS.discard(run_root)
+    shutil.rmtree(run_root, ignore_errors=True)
+
+
+def _cleanup_active_offload_run_roots() -> None:
+    for run_root in tuple(_ACTIVE_RUN_ROOTS):
+        _remove_offload_run_root(run_root)
+
+
+atexit.register(_cleanup_active_offload_run_roots)
+
+
+def release_private_offload_root(model: nn.Module) -> Optional[str]:
+    """Remove a model's private offload directory and cancel its finalizer.
+
+    The bundles in that directory are the live storage for the quantized
+    modules until the model is torn down, so a successful ``save()`` cannot
+    delete them: an in-session forward still materializes weights from the
+    bundles. Cleanup therefore happens when the model is collected, when the
+    quantization run fails, and before the same model starts another run.
+
+    Returns the removed directory, or ``None`` when no run was bound.
+    """
+
+    run_root = getattr(model, _RUN_ROOT_ATTR, None)
+    if run_root is None:
+        return None
+
+    finalizer = getattr(model, _RUN_FINALIZER_ATTR, None)
+    if finalizer is not None:
+        finalizer.detach()
+    for attribute in (_RUN_FINALIZER_ATTR, _RUN_ROOT_ATTR):
+        try:
+            delattr(model, attribute)
+        except AttributeError:
+            pass
+
+    _remove_offload_run_root(run_root)
+    log.debug("Offload: removed private run directory `%s`.", run_root)
+    return run_root
+
+
 def bind_private_offload_root(model: nn.Module) -> Optional[str]:
     """Bind a private offload namespace to one quantization run.
 
@@ -90,6 +144,9 @@ def bind_private_offload_root(model: nn.Module) -> Optional[str]:
     Give the run its own subdirectory under the configured root and keep a
     private config copy on the model, so a later run on another model cannot
     move this model's save-time bundle lookup.
+
+    The directory is owned by the model: it is removed when the model is
+    collected, when the run fails, and when the same model binds a new run.
     """
     config = getattr(model, "quantize_config", None)
     if config is None or not getattr(config, "offload_to_disk", False):
@@ -99,13 +156,35 @@ def bind_private_offload_root(model: nn.Module) -> Optional[str]:
     if not configured:
         return None
 
-    base = os.path.abspath(os.path.expanduser(os.fspath(configured)))
+    # A model that starts another run no longer needs the previous run's
+    # bundles; its modules have been replaced or are about to be.
+    release_private_offload_root(model)
+
+    # A later run on the same model sees the previous private path in
+    # ``offload_to_disk_path``; remember the caller's root so runs stay siblings
+    # instead of nesting inside the directory being released.
+    base = getattr(model, _RUN_BASE_ATTR, None)
+    if base is None:
+        base = os.path.abspath(os.path.expanduser(os.fspath(configured)))
     run_root = os.path.join(base, f"run-{uuid.uuid4().hex[:16]}")
     os.makedirs(run_root, exist_ok=True)
+    _ACTIVE_RUN_ROOTS.add(run_root)
 
     private_config = copy.copy(config)
     private_config.offload_to_disk_path = run_root
     model.quantize_config = private_config
+
+    try:
+        finalizer = weakref.finalize(model, _remove_offload_run_root, run_root)
+    except TypeError:
+        # Lightweight model doubles (e.g. ``types.SimpleNamespace``) are not
+        # weak-referenceable; the atexit safety net removes their roots.
+        finalizer = None
+
+    setattr(model, _RUN_ROOT_ATTR, run_root)
+    setattr(model, _RUN_BASE_ATTR, base)
+    if finalizer is not None:
+        setattr(model, _RUN_FINALIZER_ATTR, finalizer)
     log.debug("Offload: bound private run directory `%s`.", run_root)
     return run_root
 
