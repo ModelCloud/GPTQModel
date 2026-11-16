@@ -55,8 +55,6 @@ def prepare_model_for_bitblas_load(
             dtype=dtype,
             checkpoint=model_save_name,
             device_map=device_map,
-            offload_state_dict=True,
-            offload_buffers=True,
         )
     else:
         # Loading the GPTQ checkpoint to do the conversion.
@@ -69,8 +67,6 @@ def prepare_model_for_bitblas_load(
                 dtype=dtype,
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
             )
         # Convert model to bitblas, repacking weights into BitBLAS format.
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=True, dtype=dtype)

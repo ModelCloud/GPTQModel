@@ -3083,6 +3083,21 @@ def ModelLoader(cls):
             enable_for_devices(map_devices)
 
         load_checkpoint_in_model = native_gguf_qspec is None
+        load_extra_kwargs = {}
+        if "offload_folder" in kwargs:
+            load_extra_kwargs["offload_folder"] = kwargs["offload_folder"]
+        elif (
+            getattr(qcfg, "offload_to_disk_path", None) is not None
+            and isinstance(device_map, dict)
+            and "disk" in device_map.values()
+        ):
+            load_extra_kwargs["offload_folder"] = qcfg.offload_to_disk_path
+
+        if "offload_state_dict" in kwargs:
+            load_extra_kwargs["offload_state_dict"] = kwargs["offload_state_dict"]
+        if "offload_buffers" in kwargs:
+            load_extra_kwargs["offload_buffers"] = kwargs["offload_buffers"]
+
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
         if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
             load_checkpoint_in_model_then_tie_weights(
@@ -3091,9 +3106,8 @@ def ModelLoader(cls):
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                offload_state_dict=True,
-                offload_buffers=True,
                 key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             load_checkpoint_in_model = False
@@ -3199,9 +3213,8 @@ def ModelLoader(cls):
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
-                # offload_state_dict=True,
-                # offload_buffers=True,
                 key_converter=_checkpoint_key_converter(cls, model, to_runtime=True),
+                **load_extra_kwargs,
             )
 
             if format_code == FORMAT.GPTQ_V2:
