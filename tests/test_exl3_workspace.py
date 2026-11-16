@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize as implementation
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 def test_workspace_is_private_per_stream(monkeypatch):
@@ -14,7 +15,7 @@ def test_workspace_is_private_per_stream(monkeypatch):
     calls = []
     allocated = []
 
-    monkeypatch.delenv("GPTQMODEL_EXL3_TILE_BATCH", raising=False)
+    configure_kernel(KernelConfig())
 
     def allocate(device, K, batch):
         allocated.append((device, K, batch))
@@ -46,14 +47,17 @@ def test_workspace_is_private_per_stream(monkeypatch):
     assert calls[2][4] is not calls[0][4]
 
 
-def test_tile_batch_defaults_and_clamps(monkeypatch):
+def test_tile_batch_defaults_and_clamps():
     """The scratch slot count is opt-in: unchanged by default, bounded when set."""
-    monkeypatch.delenv("GPTQMODEL_EXL3_TILE_BATCH", raising=False)
+    configure_kernel(KernelConfig())
     assert implementation._tile_batch_size() == 256
 
-    for value, expected in (("8", 8), ("1", 1), ("0", 1), ("-5", 1), ("4096", 256), ("junk", 256)):
-        monkeypatch.setenv("GPTQMODEL_EXL3_TILE_BATCH", value)
+    for value, expected in ((8, 8), (1, 1), (4096, 256)):
+        configure_kernel(KernelConfig(exl3_tile_batch=value))
         assert implementation._tile_batch_size() == expected, value
+
+    with pytest.raises(ValueError):
+        KernelConfig(exl3_tile_batch=0)
 
 
 def test_oversized_tile_sets_are_split_into_launches(monkeypatch):
@@ -72,7 +76,7 @@ def test_oversized_tile_sets_are_split_into_launches(monkeypatch):
         SimpleNamespace(quantize_tiles=lambda tiles, out, idx, *rest: calls.append(tiles.shape[0])),
     )
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device: object())
-    monkeypatch.setenv("GPTQMODEL_EXL3_TILE_BATCH", "2")
+    configure_kernel(KernelConfig(exl3_tile_batch=2))
 
     tiles = torch.zeros((5, 256))
     implementation._quantize_tiles_with_workspace(

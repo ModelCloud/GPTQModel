@@ -174,6 +174,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [ExLlamaV2 descriptor lifecycle](exllamav2-descriptor-lifecycle.md)
 - [Packed FP8 weight lifecycle](fp8-packed-weight-lifecycle.md)
 - [Input capture cleanup lifecycle](input-capture-cleanup-lifecycle.md)
+- [Kernel and thread selection (KernelConfig)](kernel-config.md)
 - [Kernel validation and cache lifecycle](kernel-validation-and-cache-lifecycle.md)
 - [Multi-GPU quantization](multi_gpu_quantization.md)
 - [Multi-GPU memory retention](multi-gpu-memory.md)

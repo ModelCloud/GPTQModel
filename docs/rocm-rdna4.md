@@ -113,19 +113,21 @@ nondeterministic, independently of BLAS. See
 for the flow and the full table.
 
 An explicit `ROCBLAS_USE_HIPBLASLT=1` (or
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt`, or the opt-out spellings `""`, `0`, `off`
+`KernelConfig(rocm_quant_blas="hipblaslt")`, or the opt-out spellings `""`, `0`, `off`
 and `default`) opts back into hipBLASLt. It is faster but not reproducible
 across processes: `ROCBLAS_USE_HIPBLASLT=1` gave 224/483
 differing tensors across two GPTQ runs, and four
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` runs split into two kernel-selection
+`KernelConfig(rocm_quant_blas="hipblaslt")` runs split into two kernel-selection
 groups differing in 222/483 (the issue measured 224/482). GPT-QModel warns once
 whenever the pin is skipped, including the opt-out spellings.
 
 Cold hipBLASLt library loading also dominates a cold quantize on CDNA.
 hipBLASLt remains available as an explicit experiment:
 
-```bash
-GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt python quantize.py
+```python
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+configure_kernel(KernelConfig(rocm_quant_blas="hipblaslt"))
 ```
 
 `gptqmodel.utils.rocm.quantize_tuning(device)` returns
@@ -316,7 +318,7 @@ cases on an RDNA4 host. Dense-weight residency is judged from the module's
 persistent state after the first *and* repeated forwards (the fused GEMV/GEMM,
 the RDNA4 BF16 split path, and the CPU dequantize+matmul fallback at M=1 and
 small M): no dense/dequantized copy is installed, `qweight`/`scales`/`qzeros`
-remain the only full-size resident tensors, and `GPTQ_TORCH_CACHE_WEIGHTS` stays
+remain the only full-size resident tensors, and `KernelConfig.torch_cache_weights` stays
 unset.
 
 ### Bias epilogue on ROCm (fused before rounding)
@@ -621,7 +623,7 @@ within 3.5e-04 (FP16) and 2.7e-03 (BF16) of the output maximum.
 
 Ada keeps bitsandbytes' cublas-backed kernels, which are measured faster than
 the Triton tile on every shape tested; the `ada` launch entry exists for the
-parity contract and for forced A/B runs (`GPTQMODEL_BNB_TRITON=1`).
+parity contract and for forced A/B runs (`KernelConfig(bitsandbytes_triton=True)`).
 
 ## Known limitations
 

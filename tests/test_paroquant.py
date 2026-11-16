@@ -43,6 +43,7 @@ from gptqmodel.quantization.paroquant.optimization import (
 )
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 from gptqmodel.utils.paroquant import (
     _rotation_launch_config,
     apply_paroquant_rotation,
@@ -2589,8 +2590,7 @@ def test_paroquant_rotation_launch_config_honors_env_overrides(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
 
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", "16")
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", "0")
+    configure_kernel(KernelConfig(paroquant_rotate_cta_m=16, paroquant_rotate_row_pad=0))
 
     assert prewarm_paroquant_rotation_extension(
         fused_rotation=True,
@@ -2612,11 +2612,7 @@ def test_paroquant_rotation_launch_config_autotunes_once_per_shape(tmp_path, mon
     # in-process cache and skip the native autotune this test measures.
     monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
     clear_paroquant_rotation_autotune_cache()
-    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", raising=False)
-    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", raising=False)
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE", "1")
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_WARMUP", "1")
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_ITERS", "1")
+    configure_kernel(KernelConfig(paroquant_rotate_autotune=True))
 
     assert prewarm_paroquant_rotation_extension(
         fused_rotation=True,
@@ -6978,7 +6974,7 @@ def test_rotation_autotune_disk_cache_writes_and_honours_kill_switch(tmp_path, m
     """Writes land under the configured cache dir and can be disabled."""
     utils = paroquant_utils_module
     monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
-    monkeypatch.delenv("GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE", raising=False)
+    configure_kernel(KernelConfig())
 
     key = (0, torch.float32, 8, 896, 128, 8, True, -2, -2)
     utils._persist_rotation_autotune_entry(key, (4, 0), 0)
@@ -6986,7 +6982,7 @@ def test_rotation_autotune_disk_cache_writes_and_honours_kill_switch(tmp_path, m
     assert path.exists()
     assert str(path).startswith(str(tmp_path))
 
-    monkeypatch.setenv("GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE", "0")
+    configure_kernel(KernelConfig(paroquant_autotune_cache=False))
     assert utils._rotation_autotune_cache_enabled() is False
     # Identical GPUs share one hardware-fingerprint path, so remove the first
     # entry and prove the kill switch prevents rewriting that same file.

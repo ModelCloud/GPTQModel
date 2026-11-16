@@ -133,17 +133,14 @@ def _tile_batch_size() -> int:
     The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
     at the default batch of 256. That is allocated once per CUDA stream, and the
     quantization pool runs one stream per worker thread, so a wide run can hold
-    several GiB of pure scratch per device. ``GPTQMODEL_EXL3_TILE_BATCH`` lowers
+    several GiB of pure scratch per device. ``KernelConfig.exl3_tile_batch`` lowers
     the slot count for memory-constrained hosts; tiles are quantized
     independently, so a smaller batch only means more launches.
     """
 
-    import os
+    from .....utils.kernel import get_kernel_config
 
-    try:
-        batch = int(os.environ.get("GPTQMODEL_EXL3_TILE_BATCH", _DEFAULT_TILE_BATCH))
-    except ValueError:
-        batch = _DEFAULT_TILE_BATCH
+    batch = get_kernel_config().exl3_tile_batch
     return max(1, min(_DEFAULT_TILE_BATCH, batch))
 
 

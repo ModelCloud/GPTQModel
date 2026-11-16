@@ -283,9 +283,11 @@ def test_native_path_is_not_chosen_by_timing(monkeypatch):
     def timing_forbidden(*args, **kwargs):
         raise AssertionError("the ggml/dense choice must not benchmark the paths")
 
+    from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
     monkeypatch.setattr(cpp, "_benchmark_forward_runner", timing_forbidden)
     monkeypatch.setattr(cpp, "_autotune", timing_forbidden)
-    monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
+    configure_kernel(KernelConfig(gguf_cpp_native_matmul=None))
     x = torch.zeros(2, IN_FEATURES)
     assert cpp._use_ggml_cpu_matmul(x) is True
     assert cpp._use_ggml_cpu_matmul(x) is True

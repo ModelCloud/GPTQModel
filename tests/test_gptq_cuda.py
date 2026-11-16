@@ -3,6 +3,7 @@ import torch
 
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -51,10 +52,7 @@ def test_fused_gptq_matches_eager_exactly(
     factor.diagonal().fill_(1.0)
 
     def quantize(disable_fusion):
-        if disable_fusion:
-            monkeypatch.setenv("GPTQMODEL_DISABLE_GPTQ_CUDA", "1")
-        else:
-            monkeypatch.delenv("GPTQMODEL_DISABLE_GPTQ_CUDA", raising=False)
+        configure_kernel(KernelConfig(gptq_fused_block_update=not disable_fusion))
 
         layer = torch.nn.Linear(columns, 13, bias=False, device=device)
         layer.weight.data.copy_(weight)
@@ -96,7 +94,7 @@ def test_fused_gptq_matches_eager_exactly(
 def test_falls_back_when_cuda_extension_is_unavailable(monkeypatch):
     from gptqmodel.quantization import gptq_cuda
 
-    monkeypatch.delenv("GPTQMODEL_DISABLE_GPTQ_CUDA", raising=False)
+    configure_kernel(KernelConfig(gptq_fused_block_update=True))
     monkeypatch.setattr(gptq_cuda, "block_update_available", lambda: False)
 
     def should_not_run(*_args, **_kwargs):

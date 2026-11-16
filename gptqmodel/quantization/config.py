@@ -29,6 +29,7 @@ from packaging import version
 from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.hf import resolve_checkpoint_subfolder
+from ..utils.kernel import KernelConfig
 from ..utils.logger import setup_logger
 from ..utils.p2p import P2PConfig
 from ..utils.vptq import vptq_index_bits
@@ -4015,6 +4016,18 @@ def _normalize_p2p_config(
     return P2PConfig(**value)
 
 
+def _normalize_kernel_config(
+    value: Optional[Union[KernelConfig, Dict[str, Any]]],
+) -> Optional[KernelConfig]:
+    if value is None:
+        return None
+    if isinstance(value, KernelConfig):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("QuantizeConfig: `kernel` must be a KernelConfig, dict, or None.")
+    return KernelConfig(**value)
+
+
 def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> Optional[MoEConfig]:
     if value is None:
         return None
@@ -4743,6 +4756,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                   "use_torch_replicate=...) or an equivalent dict. None uses the defaults."},
     )
 
+    # Kernel, numerical-path and thread-count selection. This is a runtime-only
+    # choice: it is not serialized into the checkpoint, because the kernels and
+    # the host that will load the checkpoint are not the ones that quantized it.
+    # ``None`` uses the KernelConfig defaults. Replaces the former
+    # GPTQMODEL_* / GPTQ_TORCH_* behaviour switches.
+    kernel: Optional[Union[KernelConfig, Dict[str, Any]]] = field(
+        default=None,
+        metadata={"help": "Kernel, numerical-path and thread-count selection. "
+                  "Pass KernelConfig(...) or an equivalent dict. None uses the defaults."},
+    )
+
     # User-facing dense-pool strategy. The dense pool owns the serial path:
     # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
     dense_vram_strategy: VramStrategy = field(
@@ -5114,6 +5138,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
         self.p2p = _normalize_p2p_config(self.p2p)
+        self.kernel = _normalize_kernel_config(self.kernel)
 
         # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
         if self.calibration_data_device is not None:
@@ -5659,7 +5684,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return not self.uses_weight_only_lifecycle()
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"compile": self.compile}
+        return {"compile": self.compile, "kernel": self.kernel}
 
 
 @dataclass
@@ -6253,6 +6278,7 @@ class ParoConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "krot": self.krot,
         }
 
@@ -6482,6 +6508,7 @@ class VPTQConfig(GPTQConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "vector_lens": list(self.vector_lens),
             "num_centroids": list(self.num_centroids),
             "num_res_centroids": list(self.num_res_centroids),
@@ -6668,6 +6695,7 @@ class MacaqConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "block_size": self.block_size,
             "had_block": self.had_block,
             "activation_precision": self.activation_precision,
@@ -6919,6 +6947,7 @@ class FP8Config(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "format": self.format,
             "weight_scale_method": self.weight_scale_method,
             "weight_block_size": self.weight_block_size,
@@ -7001,7 +7030,7 @@ class NF12Config(PreProcessorConfig):
             )
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"exp_base": self.exp_base}
+        return {"exp_base": self.exp_base, "kernel": self.kernel}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["exp_base"] = self.exp_base
@@ -7072,7 +7101,7 @@ class TTBlockfloatConfig(PreProcessorConfig):
         return False
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
-        return {"block": self.block}
+        return {"block": self.block, "kernel": self.kernel}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["block"] = self.block
@@ -7225,6 +7254,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
+            "kernel": self.kernel,
             "format": self.format,
             "block_size": self.block_size,
             "compress_statistics": self.compress_statistics,
@@ -7438,6 +7468,7 @@ class EXL3Config(PreProcessorConfig):
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
         self.p2p = _normalize_p2p_config(self.p2p)
+        self.kernel = _normalize_kernel_config(self.kernel)
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         # EXL3 matrices always have an integer trellis width. Keep that type in

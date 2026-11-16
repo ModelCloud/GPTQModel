@@ -71,6 +71,7 @@ from ..utils.linalg_warmup import (  # noqa: E402
     kick_torch_quantize_prewarm,
 )
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
+from ..utils.kernel import KernelConfig, configure_kernel  # noqa: E402
 from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import normalize_device  # noqa: E402
@@ -823,12 +824,19 @@ class GPTQModel:
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ):
         if type(fuse) is not bool:
             raise TypeError("Fusion enabled must be bool")
         kwargs["fuse"] = fuse
+        if kernel is None:
+            if isinstance(quantize_config, Dict):
+                kernel = quantize_config.get("kernel")
+            elif quantize_config is not None:
+                kernel = getattr(quantize_config, "kernel", None)
+        configure_kernel(kernel)
         if quantize_config is not None:
             _kick_quantize_prewarms(device, device_map, kwargs)
             _prebuild_device_thread_pool(device)
@@ -853,6 +861,13 @@ class GPTQModel:
                 quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
         elif quantize_config is not None:
             p2p = quantize_config.p2p
+        if kernel is not None:
+            if quantize_config is not None:
+                quantize_config.kernel = (
+                    KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+                )
+        elif quantize_config is not None:
+            kernel = quantize_config.kernel
 
         backend = normalize_backend(backend)
         profile = normalize_profile(profile)
@@ -914,6 +929,7 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 p2p=p2p,
+                kernel=kernel,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
@@ -935,6 +951,7 @@ class GPTQModel:
                 profile=profile,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
+                kernel=kernel,
                 module_tree=module_tree,
                 **kwargs,
             )
@@ -955,12 +972,18 @@ class GPTQModel:
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **model_init_kwargs,
     ) -> BaseQModel:
         if p2p is not None and quantize_config is not None:
             # The looper installs this policy before it enables peer access.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+        if kernel is not None and quantize_config is not None:
+            # The looper installs this policy before it selects a kernel.
+            quantize_config.kernel = (
+                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+            )
 
         if quantize_config is not None:
             _kick_quantize_prewarms(
@@ -1030,6 +1053,7 @@ class GPTQModel:
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=tokenizer_trust_remote_code,
                 p2p=p2p,
+                kernel=kernel,
                 module_tree=module_tree,
                 **model_init_kwargs,
             )
@@ -1076,6 +1100,7 @@ class GPTQModel:
             adapter_revision: Optional[str] = None,
             adapter_sha256: Optional[str] = None,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ) -> BaseQModel:
@@ -1108,6 +1133,7 @@ class GPTQModel:
             device_map=device_map,
             device=device,
             p2p=p2p,
+            kernel=kernel,
             backend=backend,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,

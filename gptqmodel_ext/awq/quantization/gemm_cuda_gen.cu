@@ -155,12 +155,6 @@ static void validate_bf16_device(torch::Device device);
 
 namespace {
 
-bool fused_splitk_reduce_enabled()
-{
-  const char* disable_value = std::getenv("GPTQMODEL_AWQ_DISABLE_FUSED_SPLITK_REDUCE");
-  return disable_value == nullptr || std::atoi(disable_value) == 0;
-}
-
 template <typename output_t>
 __global__ void reduce_splitk_fp32_to_output_kernel(
     const float* __restrict__ partials,
@@ -214,9 +208,14 @@ torch::Tensor fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor,
   return result;
 }
 
-torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(torch::Tensor out_feats_tensor, at::ScalarType output_dtype)
+torch::Tensor maybe_fused_reduce_splitk_fp32_to_output(
+    torch::Tensor out_feats_tensor,
+    at::ScalarType output_dtype,
+    bool fused_splitk_reduce)
 {
-  if (!fused_splitk_reduce_enabled())
+  // The fused reduce is a kernel choice, not an environment switch: the caller
+  // passes it from KernelConfig so the same shape always takes the same path.
+  if (!fused_splitk_reduce)
   {
     return out_feats_tensor.sum(0).to(output_dtype);
   }
@@ -1464,7 +1463,8 @@ torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
     torch::Tensor scaling_factors_tensor,
     torch::Tensor zeros_tensor,
     int split_k_iters,
-    at::ScalarType output_dtype)
+    at::ScalarType output_dtype,
+    bool fused_splitk_reduce)
 {
     int num_in_feats = in_feats_tensor.size(0);
     int num_in_channels = in_feats_tensor.size(1);
@@ -1504,7 +1504,7 @@ torch::Tensor launch_gemm_forward_cuda_fp32_reduce(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
 
-    return maybe_fused_reduce_splitk_fp32_to_output(out_feats_tensor, output_dtype);
+    return maybe_fused_reduce_splitk_fp32_to_output(out_feats_tensor, output_dtype, fused_splitk_reduce);
 }
 
 torch::Tensor gemm_forward_cuda(
@@ -1513,11 +1513,14 @@ torch::Tensor gemm_forward_cuda(
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
     int split_k_iters,
-    bool fp32_accum)
+    bool fp32_accum,
+    bool fused_splitk_reduce)
 {
     if (fp32_accum)
     {
-        return gemm_forward_cuda_fp32_reduce(_in_feats, _kernel, _scaling_factors, _zeros, split_k_iters);
+        return gemm_forward_cuda_fp32_reduce(
+            _in_feats, _kernel, _scaling_factors, _zeros, split_k_iters, false,
+            fused_splitk_reduce);
     }
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
@@ -1540,7 +1543,8 @@ torch::Tensor gemm_forward_cuda_fp32_reduce(
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
     int split_k_iters,
-    bool fp32_output)
+    bool fp32_output,
+    bool fused_splitk_reduce)
 {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
     // The split-K partials are always float32.  Asking for a float32 result
@@ -1555,7 +1559,9 @@ torch::Tensor gemm_forward_cuda_fp32_reduce(
 
     if (in_feats.scalar_type() == at::kBFloat16)
     {
-        return launch_gemm_forward_cuda_fp32_reduce<nv_bfloat16>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
+        return launch_gemm_forward_cuda_fp32_reduce<nv_bfloat16>(
+            in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype, fused_splitk_reduce);
     }
-    return launch_gemm_forward_cuda_fp32_reduce<half>(in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype);
+    return launch_gemm_forward_cuda_fp32_reduce<half>(
+        in_feats, kernel, scaling_factors, zeros, split_k_iters, output_dtype, fused_splitk_reduce);
 }

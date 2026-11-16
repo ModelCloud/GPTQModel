@@ -23,6 +23,7 @@ import torch
 import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
+from ..utils.kernel import KernelConfig, configure_kernel
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
@@ -1704,12 +1705,18 @@ def ModelLoader(cls):
             device: Optional[Union[str, int, torch.device, Sequence[Union[str, int, torch.device]]]] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **model_init_kwargs,
     ):
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+        if kernel is not None and quantize_config is not None:
+            # The loopers read this field and install it before kernel selection.
+            quantize_config.kernel = (
+                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
+            )
 
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
@@ -2128,6 +2135,7 @@ def ModelLoader(cls):
             adapter_sha256: Optional[str] = None,
             fuse: bool = False,
             p2p: Optional[Union[P2PConfig, Dict]] = None,
+            kernel: Optional[Union[KernelConfig, Dict]] = None,
             module_tree: Optional[Union[str, List[Any], tuple]] = None,
             **kwargs,
     ):
@@ -2145,6 +2153,8 @@ def ModelLoader(cls):
         # Install the peer-to-peer policy before any multi-device load so the
         # pre-enablement below and the inference-time copies use it.
         configure_p2p(p2p)
+        # Install the kernel policy before any quantized module is built.
+        configure_kernel(kernel)
 
         # post-quant is safe with GIL=0 and torch.compile/graphs
 

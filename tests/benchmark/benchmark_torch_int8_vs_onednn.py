@@ -20,7 +20,9 @@ from gptqmodel.utils.logger import render_table
 
 
 # Keep this CPU benchmark isolated from optional GPU backend import side effects.
-os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+configure_kernel(KernelConfig(disable_bitblas=True))
 
 from gptqmodel.nn_modules.qlinear.torch_int8 import Int8PackedModule
 

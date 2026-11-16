@@ -22,7 +22,7 @@ from ...quantization.config import (
 )
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
-from ...utils.env import env_flag
+from ...utils.kernel import get_kernel_config
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -46,7 +46,6 @@ _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES = (
 _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
 _MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
 _MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
-_CPU_PACKED_ENV = "GPTQMODEL_BITSANDBYTES_CPU_PACKED"
 _CPU_PACKED_SMALL_WEIGHT_ELEMENTS = 512 * 512
 _CPU_PACKED_SMALL_WEIGHT_MAX_M = 512
 _CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M = 64
@@ -54,7 +53,6 @@ _CPU_PACKED_WIDE_WEIGHT_MAX_M = 48
 _CPU_PACKED_SINGLE_THREAD_MAX_M = 32
 _CPU_PACKED_SMALL_WEIGHT_MIN_THREADS = 4
 _CPU_PACKED_REL_TOL = 2e-3
-_CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
 _CPU_INT8_DENSE_MIN_ROWS = 64
 _CPU_INT8_DENSE_MAX_ROWS = 256
 _CPU_INT8_DENSE_SQUARE = 512
@@ -369,7 +367,7 @@ def _cpu_int8_dense_should_use(
     retains a dense weight.
     """
 
-    if not env_flag(_CPU_INT8_DENSE_ENV, default=True):
+    if not get_kernel_config().bitsandbytes_cpu_int8_dense:
         return False
     if not has_avx512_bf16():
         return False
@@ -634,7 +632,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         return self.quant_state
 
     def _cpu_packing_supported(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if self._cpu_packing_disabled or not env_flag(_CPU_PACKED_ENV, default=False):
+        if self._cpu_packing_disabled or not get_kernel_config().bitsandbytes_cpu_packed:
             return False
         if not self.is_4bit or self.training or self.weight.device.type != "cpu":
             return False

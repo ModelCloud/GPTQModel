@@ -36,7 +36,6 @@ _OPTIONAL_MODULES = ("bitsandbytes", "bitblas", "llama_cpp")
 _SCRUBBED_ENV = (
     "DEBUG",
     "GPTQMODEL_DEBUG_KERNEL_MAPS",
-    "GPTQMODEL_DISABLE_BITBLAS",
     "PYTHONPATH",
     "PYTHONSTARTUP",
 )
@@ -723,7 +722,6 @@ def test_legacy_map_names_accept_module_attribute_overrides(monkeypatch):
     monkeypatch.setattr(importer, "AUTO_BACKEND_KERNEL_MAPPING", sentinel)
     assert importer.get_auto_backend_kernel_mapping() is sentinel
 
-    monkeypatch.delenv("GPTQMODEL_DISABLE_BITBLAS", raising=False)
     monkeypatch.undo()
     assert importer.get_auto_backend_kernel_mapping() is not sentinel
     assert importer.get_auto_backend_kernel_mapping()

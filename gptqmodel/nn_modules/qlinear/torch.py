@@ -5,7 +5,6 @@
 
 
 import math
-import os
 import warnings
 from collections.abc import Iterable
 from typing import Optional
@@ -25,6 +24,7 @@ from ...utils.arch import gemm_fused_max_out_features as _arch_gemm_max_out_feat
 from ...utils.arch import is_cuda_fused as _arch_is_cuda_fused
 from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.planar_packing import planar_decode_rows
 from ...utils.rocm import IS_ROCM
@@ -242,8 +242,9 @@ class TorchLinear(PackableQuantLinear):
             **kwargs)
 
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
-        self._streaming_enabled = bool(int(os.environ.get("GPTQ_TORCH_STREAMING", "0")))
-        self._stream_tile_cols = int(os.environ.get("GPTQ_TORCH_STREAM_TILE", "512"))
+        kernel = resolve_kernel_config(kwargs.get("kernel"))
+        self._streaming_enabled = kernel.torch_streaming
+        self._stream_tile_cols = kernel.torch_stream_tile
         self._stream_double_buffers = 2
         self._g_idx_long_cache = None
         self._g_idx_long_cache_state = None
@@ -254,16 +255,14 @@ class TorchLinear(PackableQuantLinear):
         self._embedding_row_state = None
         self._stream_dequant_streams = {}
         self._cache_enabled = False
-        triton_flag = os.environ.get("GPTQ_TORCH_TRITON_DEQUANT")
+        triton_flag = kernel.torch_triton_dequant
         if triton_flag is None:
             self._triton_dequant_enabled = _TRITON_DEQUANT_AVAILABLE
         else:
-            self._triton_dequant_enabled = (
-                triton_flag not in {"0", "false", "False"}
-            ) and _TRITON_DEQUANT_AVAILABLE
+            self._triton_dequant_enabled = triton_flag and _TRITON_DEQUANT_AVAILABLE
         self._lookahead_enabled = False
-        self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
-        self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
+        self._rocm_gemv_enabled = kernel.torch_rocm_gemv
+        self._rocm_gemm_enabled = kernel.torch_rocm_gemm
         # Keyed by g_idx identity and version so a checkpoint load, move,
         # deepcopy, or in-place write cannot leave a stale dispatch choice.
         self._gptq_gemm_uniform_value = False
@@ -271,9 +270,9 @@ class TorchLinear(PackableQuantLinear):
         self._gptq_gemm_uniform_version = None
         self._lookahead_next = None
         self._weight_metadata = _LinearWeightMetadata(self)
-        if bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0"))):
+        if kernel.torch_cache_weights:
             self.enable_weight_cache(True)
-        if bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0"))):
+        if kernel.torch_lookahead:
             self.enable_lookahead(True)
 
         # if self.group_size != self.in_features:

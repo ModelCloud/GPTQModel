@@ -46,7 +46,7 @@ from typing import Optional
 
 import torch
 
-from gptqmodel.utils.env import env_flag
+from gptqmodel.utils.kernel import get_kernel_config
 
 
 try:  # pragma: no cover - exercised implicitly by the availability probe
@@ -65,19 +65,11 @@ except Exception:  # pragma: no cover - Triton is an optional accelerator
 
 _AFFINE_STE_BLOCK = 1024
 
-# Kill switch for hosts where the Triton kernels cannot be exercised safely.
-_AFFINE_STE_TRITON_ENABLED = env_flag("GPTQMODEL_PAROQUANT_AFFINE_STE_TRITON", default=True)
-
 # The Triton backward collapses the elementwise partials into one kernel (six
 # launches instead of twelve) at the cost of materialising three full-size
 # partial tensors. On gfx950 that extra traffic eats the launch win: nine
 # interleaved warm ParoQuant runs measured 4.19 s for the hybrid backward against
 # 4.24 s for the Triton one, while both beat the torch fused node on launches and
-# host time. The hybrid stays the default and the Triton backward is kept behind
-# the env switch for hosts where the launch cost dominates the extra traffic.
-_AFFINE_STE_TRITON_BACKWARD = env_flag("GPTQMODEL_PAROQUANT_AFFINE_STE_TRITON_BACKWARD", default=False)
-
-
 if _AFFINE_STE_TRITON_AVAILABLE:
 
     @triton.jit
@@ -317,7 +309,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
 
 def affine_quant_dequant_ste_available() -> bool:
     """Report whether the fused Triton affine STE kernels can run on this host."""
-    return _AFFINE_STE_TRITON_AVAILABLE and _AFFINE_STE_TRITON_ENABLED
+    return _AFFINE_STE_TRITON_AVAILABLE and get_kernel_config().paroquant_affine_ste_triton
 
 
 def affine_quant_dequant_ste_forward(
@@ -352,5 +344,9 @@ def affine_quant_dequant_ste(
     """Run the fused Triton affine STE path, or return None when it cannot apply."""
     if not affine_quant_dequant_ste_available():
         return None
-    node = _AffineQuantDequantTritonSTE if _AFFINE_STE_TRITON_BACKWARD else _AffineQuantDequantHybridSTE
+    node = (
+        _AffineQuantDequantTritonSTE
+        if get_kernel_config().paroquant_affine_ste_triton_backward
+        else _AffineQuantDequantHybridSTE
+    )
     return node.apply(weight, scale, zero_point_float, qmin, qmax, group_size)

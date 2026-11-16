@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from gptqmodel import rocm_llc
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 class _Props:
@@ -30,7 +31,7 @@ def _clean_state(monkeypatch):
 
     rocm_llc.unapply()
     monkeypatch.setattr(rocm_llc, "_STATE", {"applied": False, "restore": [], "status": {}})
-    monkeypatch.delenv("GPTQMODEL_NO_ROCM_LLC", raising=False)
+    configure_kernel(KernelConfig())
     yield
     rocm_llc.unapply()
 
@@ -45,11 +46,11 @@ def test_apply_is_idempotent_and_never_raises():
         assert isinstance(value, str) and value
 
 
-def test_env_opt_out(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_NO_ROCM_LLC", "1")
+def test_config_opt_out():
+    configure_kernel(KernelConfig(rocm_llc=False))
     status = rocm_llc.apply()
     assert status["props"].startswith("skipped")
-    assert "GPTQMODEL_NO_ROCM_LLC" in status["props"]
+    assert "rocm_llc=False" in status["props"]
     assert set(status) == {"props"}
 
 

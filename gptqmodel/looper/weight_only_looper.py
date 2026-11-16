@@ -56,6 +56,7 @@ from ..utils.looper_helpers import (
     plan_layer_count,
     select_forward_devices,
 )
+from ..utils.kernel import configure_kernel
 from ..utils.model import (
     find_modules,
     get_layer_name,
@@ -113,6 +114,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # summary, and never blocks quantization when a link is unsupported.
         cross_device_pool = self._cross_device_pool()
         configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
+        configure_kernel(getattr(self.gptq_model.quantize_config, "kernel", None))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 

@@ -25,7 +25,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
+from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     _marlin_all_visible_devices_supported,
@@ -155,7 +155,7 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
-        self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
+        self.fp32 = resolve_kernel_config(kwargs.get("kernel")).marlin_fp32
 
         super().__init__(
             bits=bits,
@@ -173,7 +173,7 @@ class MarlinLinear(GPTQQuantLinear):
 
         if not self.fp32:
             log.warn.once(
-                "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
+                "Kernel: KernelConfig.marlin_fp32 is disabled. Marlin will use reduced-precision reduction.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,

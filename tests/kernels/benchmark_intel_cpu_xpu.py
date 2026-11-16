@@ -20,7 +20,9 @@ from gptqmodel.utils.model import find_modules
 
 
 # Keep CPU benchmark isolated from optional BitBLAS/TVM import side effects.
-os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+
+configure_kernel(KernelConfig(disable_bitblas=True))
 
 log = LogBar.shared()
 bench_cols = log.columns(

@@ -212,7 +212,17 @@ def linear(
         raise ValueError(f"K={k} must be a multiple of the block size {BLOCKFLOAT_BLOCK}")
     n = _exponent_rows(exponents, k)
     out = torch.empty((x.size(0), n), dtype=x.dtype, device=x.device)
-    _ops().blockfloat_linear(x, codes, exponents, int(bits), bias, out)
+    from .kernel import get_kernel_config
+
+    _ops().blockfloat_linear(
+        x,
+        codes,
+        exponents,
+        int(bits),
+        bias,
+        out,
+        get_kernel_config().blockfloat_cublas,
+    )
     return out
 
 

@@ -26,6 +26,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.env import env_flag
+from ..utils.kernel import resolve_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.p2p import p2p_all_enabled, safe_move_to
 from ..utils.rocm import quant_blas_backend
@@ -1861,7 +1862,10 @@ class GPTQ:
                     diag_view.add_(damp * mean)
                     try:
                         if H.device.type == "npu":
-                            return npu_inverse_cholesky_factor(H)
+                            return npu_inverse_cholesky_factor(
+                                H,
+                                block_size=resolve_kernel_config(self.qcfg).npu_cholesky_block_size,
+                            )
 
                         # ``cholesky_ex`` reports a non positive-definite input through
                         # ``info`` instead of raising, so failed probes stay cheap.
@@ -2487,7 +2491,7 @@ class GPTQ:
             and self.quantizer._maxq_value == (1 << self.qcfg.bits) - 1
             and not self.qcfg.mock_quantization
             and type(self.quantizer) is Quantizer
-            and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+            and resolve_kernel_config(self.qcfg).gptq_fused_block_update
         ):
             from .gptq_cuda import block_update_available, gptq_block_update
 

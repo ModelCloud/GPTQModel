@@ -39,7 +39,7 @@ class BACKEND(str, Enum):
     # Marlin kernels
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
-    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by KernelConfig.marlin_fp32
 
     # Machete kernels
     # A single backend covers both Machete sub-kernels. The quantization method

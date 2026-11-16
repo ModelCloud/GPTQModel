@@ -598,7 +598,6 @@ def _run_paroquant_case(
 ) -> dict[str, Any]:
     if sym is not True:
         raise ValueError("ParoQuant benchmark: `sym=False` is disabled; use `sym=True`.")
-    os.environ["GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION"] = "1" if fused_opt_rotation else "0"
     normalized_dtype = _normalize_model_dtype(model_dtype)
 
     calibration_dataset = load_nm_calibration(calibration_rows)
