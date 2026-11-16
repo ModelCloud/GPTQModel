@@ -3191,13 +3191,15 @@ def test_norm_dim0_error_feedback_uses_channel_scaled_hessian(monkeypatch):
     )
     quantizer = build_quantizer(weight, qcfg)
     captured = []
-    original_pass = quantizer._vptq_pass
+    original_inverse = quantizer._inverse_hessian_cholesky
 
-    def spy(**kwargs):
-        captured.append(kwargs["hessian"].detach().clone())
-        return original_pass(**kwargs)
+    def spy(hessian):
+        # `_vptq_pass` no longer recomputes the inverse itself; the matrix it
+        # consumes is the argument to the single factorization per module.
+        captured.append(hessian.detach().clone())
+        return original_inverse(hessian)
 
-    monkeypatch.setattr(quantizer, "_vptq_pass", spy)
+    monkeypatch.setattr(quantizer, "_inverse_hessian_cholesky", spy)
     quantizer.quantize_weight(weight, hessian)
 
     assert captured, "the quantizer never ran the error-feedback pass"
