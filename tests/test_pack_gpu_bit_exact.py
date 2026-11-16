@@ -11,6 +11,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+import gptqmodel.nn_modules.qlinear as qlinear_module
+from gptqmodel.nn_modules.qlinear import _pack_gpu_block_in
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.packing import _normalize_pack_impl
 
@@ -139,6 +141,68 @@ def test_pack_gpu_rejects_embeddings():
             g_idx=torch.zeros(256, dtype=torch.int32, device="cuda"),
             device="cuda",
         )
+
+
+@pytest.mark.parametrize(
+    ("out_features", "requested", "expected"),
+    [
+        # 4 Mi elements per block, rounded down to a 32-channel word boundary.
+        (14336, 8192, 288),
+        (8192, 8192, 512),
+        (4096, 8192, 1024),
+        # Narrow projections keep the caller's block: the budget is an upper
+        # bound, not a target.
+        (256, 8192, 8192),
+        (512, 128, 128),
+        # A projection wider than the whole budget still gets one word.
+        (1 << 25, 8192, 32),
+    ],
+)
+def test_pack_gpu_block_budget_derivation(out_features, requested, expected):
+    assert _pack_gpu_block_in(out_features, requested, 32) == expected
+
+
+def test_pack_gpu_derived_block_is_bit_exact(monkeypatch):
+    """A budget-derived block split must not change a single packed bit.
+
+    The element budget is shrunk so a small matrix spans many blocks; the
+    result must still equal the old whole-matrix CPU packer
+    (``block_in=8192``), which is the reference both GPU paths are pinned to.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/ROCm device required for GPU packing test")
+
+    torch.cuda.set_device(0)
+    out_features, in_features = 512, 4096
+    group_size = 128
+    linear, scales, zeros, g_idx = _inputs(out_features, in_features, 4, group_size)
+
+    monkeypatch.setattr(qlinear_module, "PACK_GPU_MAX_BLOCK_ELEMS", 64 << 10)
+
+    # Old whole-matrix packing, computed by the CPU reference packer.
+    whole = _make_module(out_features, in_features, 4, group_size)
+    whole.pack_block(
+        linear=linear,
+        scales=scales.clone(),
+        zeros=zeros.clone(),
+        g_idx=g_idx.clone(),
+        block_in=8192,
+        workers=1,
+    )
+
+    derived = _make_module(out_features, in_features, 4, group_size)
+    derived.pack_gpu(
+        linear=linear.to("cuda"),
+        scales=scales.to("cuda").clone(),
+        zeros=zeros.to("cuda").clone(),
+        g_idx=g_idx.to("cuda").clone(),
+        device="cuda",
+    )
+
+    assert torch.equal(derived.qweight, whole.qweight)
+    assert torch.equal(derived.qzeros, whole.qzeros)
+    assert torch.equal(derived.scales, whole.scales)
 
 
 def test_auto_pack_impl_prefers_accelerator(monkeypatch):

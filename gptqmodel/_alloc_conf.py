@@ -184,6 +184,99 @@ def allocator_backend() -> str | None:
         return None
 
 
+def _effective_alloc_conf() -> str | None:
+    """The allocator settings Torch is actually running with, if known.
+
+    Torch parses the settings once, when the caching allocator is created. The
+    private ``_accelerator_getAllocatorSettings`` accessor returns that parsed
+    value (including a runtime ``_set_allocator_settings`` call) on releases
+    that expose it. Older releases only have the environment, so fall back to
+    the same precedence Torch uses: the HIP-only alias first on ROCm, then
+    ``PYTORCH_ALLOC_CONF`` before the legacy ``PYTORCH_CUDA_ALLOC_CONF``.
+    """
+
+    try:
+        import torch
+
+        getter = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+        if getter is not None:
+            parsed = getter()
+            if parsed:
+                return parsed
+    except Exception:  # pragma: no cover - private API may be absent or fail
+        pass
+
+    if running_on_rocm():
+        value = os.environ.get(HIP_ALLOC_CONF_ENV_VAR)
+        if value:
+            return value
+    for name in ALLOC_CONF_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def max_split_bytes_from_conf(conf: str | None) -> int | None:
+    """Parse ``max_split_size_mb`` from an allocator settings string.
+
+    ``None`` means unlimited (Torch's default): every block may be split.
+    ``0`` is the documented "disable the cap" spelling, so it is unlimited too.
+    """
+
+    if not conf:
+        return None
+    for item in conf.split(","):
+        key, separator, value = item.partition(":")
+        if not separator or key.strip() != "max_split_size_mb":
+            continue
+        try:
+            megabytes = int(value.strip())
+        except ValueError:
+            return None
+        if megabytes <= 0:
+            return None
+        return megabytes << 20
+    return None
+
+
+def allocator_max_split_bytes() -> int | None:
+    """Largest block size the active caching allocator will split, in bytes.
+
+    A request below this size cannot be served from a free block at or above
+    it, so a workspace sized just under the cap maps a new segment for every
+    caller instead of reusing the cache. ``None`` means the allocator splits
+    every block (the CUDA default with expandable segments).
+    """
+
+    return max_split_bytes_from_conf(_effective_alloc_conf())
+
+
+def clamp_budget_below_allocator_split(
+    budget: int,
+    *,
+    headroom: int = 2 << 20,
+) -> int:
+    """Keep a scratch-workspace budget below the allocator's split cap.
+
+    The caching allocator rounds a segment up to a 2 MiB multiple and refuses
+    to serve a request smaller than ``max_split_size`` from a free block at or
+    above it. A workspace that lands in the last 2 MiB below the cap therefore
+    allocates a fresh segment for every module: reserved VRAM grows with the
+    module count while active memory stays flat. Sizing below ``cap - headroom``
+    keeps the segment itself splittable, so the next module reuses it.
+
+    This only bounds chunking; every candidate is still evaluated over the same
+    axes, so clip-search results are unchanged. Without a configured split cap
+    the budget is returned untouched.
+    """
+
+    cap = allocator_max_split_bytes()
+    if cap is None:
+        return budget
+    return min(budget, max(1 << 20, cap - headroom))
+
+
 def large_hessian_alloc_hint() -> str | None:
     """Actionable hint for an OOM that only the native allocator would hit."""
 
@@ -203,10 +296,13 @@ __all__ = [
     "HIP_ALLOC_CONF_ENV_VAR",
     "LARGE_HESSIAN_ALLOC_CONF",
     "ROCM_DEFAULT_ALLOC_CONF",
+    "allocator_max_split_bytes",
     "allocator_backend",
     "alloc_conf_env_vars",
     "alloc_conf_configured",
     "apply_default_alloc_conf",
+    "clamp_budget_below_allocator_split",
     "default_alloc_conf",
     "large_hessian_alloc_hint",
+    "max_split_bytes_from_conf",
 ]

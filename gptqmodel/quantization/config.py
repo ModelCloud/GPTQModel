@@ -1739,8 +1739,11 @@ class MSEConfig:
 
     ``None`` selects a device-derived default (16 MiB on CPU, 256 MiB on GPU);
     ``0`` forces single-candidate chunking (and one-token product tiles for
-    AWQ). These settings only affect calibration-time scratch, never the
-    stored quantized weights.
+    AWQ). When the active caching allocator pins ``max_split_size_mb``, the AWQ
+    clip budget is additionally capped just below that size so its scratch
+    segments stay splittable; that cap only changes chunk sizes, never the
+    selected bounds. These settings only affect calibration-time scratch, never
+    the stored quantized weights.
     """
 
     norm: float = field(
