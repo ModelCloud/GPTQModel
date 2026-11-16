@@ -2653,6 +2653,12 @@ def ModelWriter(cls):
                 # lossy (issue #4303).
                 dtype=None,
                 checkpoint=self.checkpoint_file_name,
+                # The shell allocates non-quantized buffers (for example a
+                # quantized module's bias) in the model dtype. When a legacy
+                # checkpoint stores one at another dtype, restore the
+                # checkpoint value instead of republishing the narrowed shell
+                # slot (issue #4379).
+                restore_checkpoint_buffer_dtypes=True,
                 # Load each tensor exactly once. With ``device_map=None``
                 # accelerate 1.15 calls ``set_model_state_dict`` once per
                 # checkpoint file, so the whole module ``load_state_dict``

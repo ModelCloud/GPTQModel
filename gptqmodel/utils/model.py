@@ -3068,6 +3068,55 @@ def _checkpoint_tensor_shapes(checkpoint) -> Dict[str, Tuple[int, ...]]:
     return shapes
 
 
+def _checkpoint_tensor_dtypes(checkpoint) -> Dict[str, torch.dtype]:
+    """Read each safetensors tensor's stored dtype without loading its data.
+
+    A re-save must publish the dtype the checkpoint actually stores, not the
+    dtype the export shell happened to allocate. Header reads are cheap and do
+    not materialize any payload.
+    """
+
+    if checkpoint is None:
+        return {}
+    path = os.fspath(checkpoint)
+    if isinstance(path, bytes):
+        path = path.decode()
+    files: List[str] = []
+    if os.path.isdir(path):
+        files = [
+            os.path.join(path, name)
+            for name in os.listdir(path)
+            if name.endswith(".safetensors")
+        ]
+    elif path.endswith(".index.json"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map", {})
+        except (OSError, ValueError):
+            return {}
+        base = os.path.dirname(path)
+        files = sorted({os.path.join(base, name) for name in weight_map.values()})
+    elif path.endswith(".safetensors"):
+        files = [path]
+
+    safe_name_to_dtype = {
+        safe_name: dtype for dtype, (safe_name, _size) in _DTYPE_SAFE_MAP.items()
+    }
+    dtypes: Dict[str, torch.dtype] = {}
+    for file in files:
+        try:
+            with safe_open(file, framework="pt", device="cpu") as handle:
+                for key in handle.keys():
+                    dtype = safe_name_to_dtype.get(handle.get_slice(key).get_dtype())
+                    if dtype is not None:
+                        dtypes[key] = dtype
+        except Exception:
+            # A malformed or non-safetensors shard is accelerate's problem to
+            # report; dtype discovery is best effort.
+            continue
+    return dtypes
+
+
 def _prepare_variable_quant_buffers(model, checkpoint) -> None:
     """Resize data-dependent quant buffers to the checkpoint's stored shapes."""
 
@@ -3183,6 +3232,9 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
     packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
+    restore_checkpoint_buffer_dtypes = bool(
+        kwargs.pop("restore_checkpoint_buffer_dtypes", False)
+    )
     converted_checkpoint = None
     if callable(key_converter) and checkpoint is not None:
         converted_checkpoint = _remap_safetensors_checkpoint_keys(checkpoint, key_converter)
@@ -3217,6 +3269,28 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 for buffer_name in ("scales", "bias"):
                     if isinstance(module._buffers.get(buffer_name), torch.Tensor):
                         restore_dtypes[f"{prefix}{buffer_name}"] = None
+        if restore_checkpoint_buffer_dtypes:
+            # The export shell allocates its buffers in the model dtype. A
+            # legacy checkpoint may store some of them (biases, EXL3 sign
+            # vectors, ...) at a different dtype, and accelerate's dtype=None
+            # copy narrows them to the shell slot. Restore every such buffer
+            # from the checkpoint at its stored dtype so a re-save publishes
+            # exactly what it read.
+            checkpoint_dtypes = _checkpoint_tensor_dtypes(
+                kwargs.get("checkpoint", checkpoint)
+            )
+            for name, checkpoint_dtype in checkpoint_dtypes.items():
+                if name in restore_dtypes:
+                    continue
+                module_name, _, buffer_name = name.rpartition(".")
+                module = model.get_submodule(module_name) if module_name else model
+                current = module._buffers.get(buffer_name)
+                if (
+                    isinstance(current, torch.Tensor)
+                    and current.is_floating_point()
+                    and current.dtype != checkpoint_dtype
+                ):
+                    restore_dtypes[name] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
                 model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
