@@ -233,6 +233,8 @@ covers backend selection, generation, and adapters. Only enable
 `trust_remote_code=True` for checkpoint code you trust.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
+In-session QQQ kernel rehoming and cache initialization are documented in
+[docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
 
 ### Quantization 🗜️
 

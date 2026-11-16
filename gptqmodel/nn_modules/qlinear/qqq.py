@@ -685,7 +685,11 @@ class QQQTorchLinear(QQQLinear):
     def clear_weight_cache(self) -> None:
         self._torch_packed_cache = None
         self._torch_packed_cache_key = None
-        self._torch_int_mm_failed_shapes.clear()
+        failed_shapes = getattr(self, "_torch_int_mm_failed_shapes", None)
+        if failed_shapes is None:
+            failed_shapes = set()
+            self._torch_int_mm_failed_shapes = failed_shapes
+        failed_shapes.clear()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:

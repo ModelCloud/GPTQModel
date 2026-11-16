@@ -17,7 +17,11 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.models._const import DEVICE
-from gptqmodel.models.base import rehome_quantized_kernel, select_in_session_quant_linear
+from gptqmodel.models.base import (
+    _switch_quant_linear_class,
+    rehome_quantized_kernel,
+    select_in_session_quant_linear,
+)
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
@@ -199,6 +203,36 @@ def test_rehome_quantized_kernel_switches_cuda_only_module(monkeypatch):
     assert fake_model.qlinear_kernel is AwqTorchLinear
     assert module.qweight.device.type == "cpu"
 
+
+
+def test_rehome_qqq_initializes_torch_cache_after_class_switch(monkeypatch):
+    monkeypatch.setattr(
+        QQQLinear,
+        "validate_once",
+        classmethod(lambda cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        QQQLinear,
+        "validate",
+        classmethod(lambda cls, **kwargs: (None, None)),
+    )
+    module = QQQLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+    )
+
+    assert not hasattr(module, "_torch_int_mm_failed_shapes")
+    _switch_quant_linear_class(module, QQQTorchLinear)
+
+    assert type(module) is QQQTorchLinear
+    assert module._torch_int_mm_failed_shapes == set()
 
 def test_rehome_quantized_kernel_raises_when_no_portable_kernel(monkeypatch):
     module = AwqTorchLinear(
