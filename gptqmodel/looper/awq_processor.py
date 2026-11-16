@@ -1467,6 +1467,7 @@ class AWQProcessor(LoopProcessor):
     _MASK_FORM_ADDITIVE = "additive"
     _MASK_FORM_BOOL_KEEP = "bool_keep"
     _MASK_FORM_BOOL_MASKED = "bool_masked"
+    _MASK_FORM_POSITIVE_KEEP = "positive_keep"
 
     @staticmethod
     def _captured_mask_form(mask: Optional[torch.Tensor]) -> Optional[str]:
@@ -1479,17 +1480,22 @@ class AWQProcessor(LoopProcessor):
 
         if not torch.is_tensor(mask) or mask.dim() < 2:
             return None
-        if mask.dtype != torch.bool:
+        if mask.dtype == torch.bool:
+            m = mask
+            if m.dim() == 4:
+                m = m[:, 0]
+            if m.dim() == 3 and m.shape[-1] == m.shape[-2] and m.shape[0] > 0:
+                if bool(m.diagonal(dim1=-2, dim2=-1).any()):
+                    return AWQProcessor._MASK_FORM_BOOL_KEEP
+                return AWQProcessor._MASK_FORM_BOOL_MASKED
+            # A planar [batch, seq] mask is a keep mask by construction.
+            return AWQProcessor._MASK_FORM_BOOL_KEEP
+        if mask.dtype.is_floating_point:
+            # Additive masks are summed into the floating-point logits.
             return AWQProcessor._MASK_FORM_ADDITIVE
-        m = mask
-        if m.dim() == 4:
-            m = m[:, 0]
-        if m.dim() == 3 and m.shape[-1] == m.shape[-2] and m.shape[0] > 0:
-            if bool(m.diagonal(dim1=-2, dim2=-1).any()):
-                return AWQProcessor._MASK_FORM_BOOL_KEEP
-            return AWQProcessor._MASK_FORM_BOOL_MASKED
-        # A planar [batch, seq] mask is a keep mask by construction.
-        return AWQProcessor._MASK_FORM_BOOL_KEEP
+        # Integer square grids are multiplicative 0/1 keep masks, not additive
+        # masks (LLaDA2 expands the tokenizer mask with `tril * padding`).
+        return AWQProcessor._MASK_FORM_POSITIVE_KEEP
 
     @staticmethod
     def _token_row_source_structure(
@@ -1526,8 +1532,16 @@ class AWQProcessor(LoopProcessor):
             # tokens and the structure would never be recovered.
             if m.dtype == torch.bool:
                 allowed_grid = m if form == AWQProcessor._MASK_FORM_BOOL_KEEP else ~m
+            elif form == AWQProcessor._MASK_FORM_POSITIVE_KEEP:
+                # Multiplicative 0/1 keep grid: positive marks an attended key.
+                allowed_grid = m > 0
             else:
-                allowed_grid = (m >= 0) if bool((m < 0).any()) else (m > 0)
+                # An additive mask is summed into the logits: 0 is attended and
+                # only negatives suppress, so an all-zero (unpadded) grid means
+                # "everything attended". There is no positive-only additive
+                # convention; bool, planar and 0/1 keep masks are classified
+                # above.
+                allowed_grid = m >= 0
             keep = allowed_grid.diagonal(dim1=-2, dim2=-1)
         else:
             try:
@@ -1595,6 +1609,7 @@ class AWQProcessor(LoopProcessor):
         # to a planar [batch, seq] keep mask.
         grid_mask = False
         form = None
+        mask_dtype = None
 
         grouped: Dict[int, List[Tuple[int, int]]] = {}
         for packed_index, (source_index, row_index) in enumerate(provenance):
@@ -1615,6 +1630,8 @@ class AWQProcessor(LoopProcessor):
                     grid_mask = True
                 if form is None:
                     form = self._captured_mask_form(mask)
+                if mask_dtype is None:
+                    mask_dtype = mask.dtype
 
             packed_indices = torch.tensor([item[0] for item in entries], dtype=torch.long)
             local_rows = torch.tensor([item[1] for item in entries], dtype=torch.long)
@@ -1667,6 +1684,11 @@ class AWQProcessor(LoopProcessor):
         elif form == self._MASK_FORM_BOOL_KEEP:
             # Preserve the captured polarity: True marks an attended key.
             attention_mask = allowed.unsqueeze(0).unsqueeze(0)
+        elif form == self._MASK_FORM_POSITIVE_KEEP:
+            # Preserve the captured multiplicative 0/1 keep grid (LLaDA2).
+            attention_mask = allowed.to(
+                dtype=mask_dtype if mask_dtype is not None else torch.int64
+            ).unsqueeze(0).unsqueeze(0)
         else:
             # Additive block-diagonal form. This is also the fallback when no
             # mask was captured: the module then relied on its internal causal
