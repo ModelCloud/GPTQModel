@@ -2346,6 +2346,9 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.VPTQ,
 )
+# Per-layer rotations MACaQ supports: the block Hadamard, or none.
+MACAQ_ROTATIONS: Tuple[str, ...] = ("hadamard", "none")
+
 MACAQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.MXFP4_MACAQ,
 )
@@ -4301,6 +4304,21 @@ def _is_truthy_compat_flag(value: Any) -> bool:
     return bool(value)
 
 
+def resolve_model_rotation(qcfg: Any) -> Optional[str]:
+    """Return the model-wide rotation a config asks for, or `None`.
+
+    Real configs answer through `model_rotation`, which a method can override
+    when it reuses `rotation` for its own per-layer transform. Lightweight
+    stand-ins that only carry `rotation` keep working.
+    """
+
+    if qcfg is None:
+        return None
+    if hasattr(qcfg, "model_rotation"):
+        return qcfg.model_rotation
+    return getattr(qcfg, "rotation", None)
+
+
 @dataclass
 class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 7, 8]})
@@ -4488,6 +4506,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @checkpoint_format.setter
     def checkpoint_format(self, value) -> None:
         self.format = value
+
+    @property
+    def model_rotation(self) -> Optional[str]:
+        """Model-wide rotation fused into the weights before quantization.
+
+        Generic pipeline code (model rotation, online Hadamard at load, fused
+        norms) must read this instead of `rotation`: a method may reuse the
+        `rotation` field for its own per-layer transform.
+        """
+        return self.rotation
 
     @property
     def runtime_bits(self):
@@ -4767,7 +4795,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
-        if self.rotation and self.offload_to_disk:
+        if self.model_rotation and self.offload_to_disk:
             log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
             self.offload_to_disk = False
 
@@ -6174,14 +6202,17 @@ class MacaqConfig(PreProcessorConfig):
     # Block-Hadamard width. 32 matches the MXFP4 scale group and enables the
     # fused rotate+quantize Triton kernel; larger powers of two are supported.
     had_block: int = field(default=32)
-    # Rotate weights and activations by the block Hadamard (default `True`).
-    # `False` trades accuracy for faster inference: quantization stays in the
-    # original frame (an identity `BH` is stored, so the checkpoint layout is
-    # unchanged) and, with `pre_mode="none"` and `w4a16`, the runtime has no
-    # online activation transform, so the layer is a plain MXFP4 matmul that
-    # also exports to stock MLX. Expect higher quantization error than with
-    # the rotation, most of all for W4A4 where it suppresses activation outliers.
-    hadamard: bool = field(default=True)
+    # Per-layer rotation of weights and activations. `hadamard` (default)
+    # applies the `had_block`-wide block Hadamard. `none` trades accuracy for
+    # faster inference: quantization stays in the original frame (an identity
+    # `BH` is stored, so the checkpoint layout is unchanged) and, with
+    # `pre_mode="none"` and `w4a16`, the runtime has no online activation
+    # transform, so the layer is a plain MXFP4 matmul that also exports to
+    # stock MLX. Expect higher quantization error than with the rotation, most
+    # of all for W4A4 where it suppresses activation outliers. This replaces
+    # the inherited model-wide `rotation`, which MACaQ does not use (see
+    # `model_rotation`).
+    rotation: Optional[str] = field(default="hadamard", metadata={"choices": list(MACAQ_ROTATIONS)})
     # Greedy single-level flip refinement in the fixed Hessian metric.
     do_flip: bool = field(default=True)
     n_flip_iters: int = field(default=256)
@@ -6200,10 +6231,16 @@ class MacaqConfig(PreProcessorConfig):
     activation_precision: str = field(default="w4a4")
 
     _DYNAMIC_FIELDS = frozenset({
-        "had_block", "hadamard", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
+        "had_block", "rotation", "do_flip", "n_flip_iters", "fast_flip", "compile_flip", "ridge",
         "pre_mode", "pre_alpha", "exp_screen", "exp_offsets",
         "activation_precision",
     })
+
+    @property
+    def model_rotation(self) -> Optional[str]:
+        # `rotation` is MACaQ's own per-layer transform, applied by its
+        # quantizer and kernels; nothing is rotated model-wide.
+        return None
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.MACAQ,)
@@ -6237,7 +6274,6 @@ class MacaqConfig(PreProcessorConfig):
         out["sym"] = self.sym
         out["block_size"] = self.block_size
         out["had_block"] = self.had_block
-        out["hadamard"] = self.hadamard
         out["do_flip"] = self.do_flip
         out["n_flip_iters"] = self.n_flip_iters
         out["fast_flip"] = self.fast_flip
@@ -6282,7 +6318,9 @@ class MacaqConfig(PreProcessorConfig):
 
         self.block_size = int(self.block_size)
         self.had_block = int(self.had_block)
-        self.hadamard = bool(self.hadamard)
+        # Checkpoints written before `rotation` was configurable store `null`
+        # (the inherited default) and were always block-Hadamard rotated.
+        self.rotation = "hadamard" if self.rotation is None else str(self.rotation).strip().lower()
         self.n_flip_iters = int(self.n_flip_iters)
         self.ridge = float(self.ridge)
         self.pre_alpha = float(self.pre_alpha)
@@ -6301,6 +6339,8 @@ class MacaqConfig(PreProcessorConfig):
             raise ValueError("MacaqConfig: `n_flip_iters` must be non-negative.")
         if self.ridge < 0:
             raise ValueError("MacaqConfig: `ridge` must be non-negative.")
+        if self.rotation not in MACAQ_ROTATIONS:
+            raise ValueError("MacaqConfig: `rotation` must be `hadamard` or `none`.")
         if self.pre_mode not in ("none", "balance"):
             raise ValueError("MacaqConfig: `pre_mode` must be `none` or `balance`.")
         if not 0.0 <= self.pre_alpha <= 1.0:
@@ -6917,7 +6957,7 @@ class EXL3Config(PreProcessorConfig):
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
-        if self.rotation and self.offload_to_disk:
+        if self.model_rotation and self.offload_to_disk:
             log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
             self.offload_to_disk = False
 

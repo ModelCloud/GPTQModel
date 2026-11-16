@@ -167,10 +167,10 @@ def test_macaq_mlx_w4a4_matches_its_own_activation_quantization(monkeypatch):
 
 
 def test_macaq_mlx_pre_scale_only_layer_skips_the_rotation(monkeypatch):
-    """`hadamard=False` keeps D1 but needs no rotate dispatch."""
+    """`rotation="none"` keeps D1 but needs no rotate dispatch."""
     from gptqmodel.nn_modules.qlinear.mlx_macaq import MlxMACaQLinear
 
-    source, _ = _quantized_layer(activation_precision="w4a16", hadamard=False)
+    source, _ = _quantized_layer(activation_precision="w4a16", rotation="none")
     model, config = _transfer(monkeypatch, source)
     assert isinstance(model.proj, MlxMACaQLinear)
     assert config["_gptqmodel_custom_mlx_runtime"]
@@ -188,7 +188,7 @@ def test_macaq_mlx_pre_scale_only_layer_skips_the_rotation(monkeypatch):
 def _plain_mxfp4_layer(in_features=256, out_features=64, bias=True):
     return _quantized_layer(
         in_features=in_features, out_features=out_features, bias=bias,
-        activation_precision="w4a16", hadamard=False, pre_mode="none",
+        activation_precision="w4a16", rotation="none", pre_mode="none",
     )
 
 

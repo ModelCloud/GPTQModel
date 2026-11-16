@@ -490,7 +490,7 @@ def macaq_quantize_weight(
     *,
     block_size: int = MXFP4_BLOCK,
     had_block: int = MXFP4_BLOCK,
-    hadamard: bool = True,
+    rotation: str = "hadamard",
     n_flip_iters: int = 256,
     ridge: float = 1.0,
     do_flip: bool = True,
@@ -504,11 +504,12 @@ def macaq_quantize_weight(
 ) -> MacaqQuantResult:
     """Quantize one ``[out, in]`` weight matrix with the MACaQ recipe.
 
-    ``hadamard=False`` skips the rotation and quantizes in the original
-    (optionally D1-scaled) frame. ``BH`` is then the identity, so the packed
-    layout is unchanged and runtimes can detect that no rotation is needed.
-    This trades accuracy for faster inference: no online activation rotation
-    is needed, but quantization error is higher than with the rotation.
+    ``rotation="none"`` skips the block Hadamard and quantizes in the
+    original (optionally D1-scaled) frame. ``BH`` is then the identity, so the
+    packed layout is unchanged and runtimes can detect that no rotation is
+    needed. This trades accuracy for faster inference: no online activation
+    rotation is needed, but quantization error is higher than with
+    ``rotation="hadamard"`` (the default).
     """
 
     device = weight.device
@@ -521,13 +522,16 @@ def macaq_quantize_weight(
             f"and had_block={had_block}."
         )
 
+    if rotation not in ("hadamard", "none"):
+        raise ValueError(f"MACaQ: `rotation` must be `hadamard` or `none`, got `{rotation}`.")
+
     pre_scale = None
     if pre_mode != "none":
         pre_scale = balance_pre_scale(weight, hessian, n_tokens, alpha=pre_alpha)
         weight = weight / pre_scale.unsqueeze(0)
         hessian = hessian * pre_scale.unsqueeze(0) * pre_scale.unsqueeze(1)
 
-    if hadamard:
+    if rotation == "hadamard":
         bh_bf16 = make_hadamard(had_block, device=device, dtype=torch.float32).to(torch.bfloat16)
         rotated_weight = rotate_blocks(weight, bh_bf16)
         rotated_hessian = rotate_blocks(rotate_blocks(hessian, bh_bf16).T, bh_bf16).T
@@ -758,7 +762,7 @@ class Macaq:
             n_tokens=max(self.nsamples, 1),
             block_size=int(self.qcfg.block_size),
             had_block=int(self.qcfg.had_block),
-            hadamard=bool(self.qcfg.hadamard),
+            rotation=str(self.qcfg.rotation),
             n_flip_iters=int(self.qcfg.n_flip_iters),
             ridge=float(self.qcfg.ridge),
             do_flip=False if fallback_used else bool(self.qcfg.do_flip),

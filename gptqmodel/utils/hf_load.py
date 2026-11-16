@@ -28,7 +28,7 @@ from safetensors import safe_open
 from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import resolve_quant_format
+from ..quantization.config import resolve_model_rotation, resolve_quant_format
 from .backend import BACKEND, backend_for_activation, normalize_backend
 from .hf import get_hf_config_dtype
 from .logger import setup_logger
@@ -220,7 +220,7 @@ def _resolve_backend_for_checkpoint(qcfg: QuantizeConfig, backend: Optional[Unio
     export_quant_method = qcfg.export_quant_method()
     backend = normalize_backend(backend, quant_method=export_quant_method)
 
-    if qcfg.rotation:
+    if resolve_model_rotation(qcfg):
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
             raise NotImplementedError(
@@ -410,7 +410,7 @@ def hf_gptqmodel_post_init_for_load(
     # weights; the H has to be re-applied to activations at inference. Without
     # this the rotated weights consume untransformed activations and produce
     # silently wrong outputs, so mirror the normal loader's post-init step.
-    _setup_rotation_online_had(model, qcfg.rotation)
+    _setup_rotation_online_had(model, resolve_model_rotation(qcfg))
 
     # Paged Flash Attention is not CUDA-graph capture safe; the normal loader
     # opts paged models out of graph capture so ``generate_batch`` /

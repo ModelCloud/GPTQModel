@@ -22,7 +22,7 @@ from safetensors import safe_open
 from safetensors.torch import save
 
 from ..adapter.adapter import Lora
-from ..quantization.config import METHOD
+from ..quantization.config import METHOD, resolve_model_rotation
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.offload import set_submodule
 from ..utils.tensor import tensor_bytes
@@ -295,7 +295,7 @@ def validate_checkpoint_support(model, *, embed_quant_config=None, adapter=None)
         or (adapter is not None and type(adapter) is not Lora)
         or config.lm_head
         or embed_quant_config is not None
-        or getattr(config, "rotation", None)
+        or resolve_model_rotation(config)
         or (config.adapter is not None and type(config.adapter) is not Lora)
     ):
         raise NotImplementedError(

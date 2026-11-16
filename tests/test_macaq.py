@@ -21,6 +21,7 @@ import copy
 import math
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +30,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.quantization import FORMAT, METHOD, MacaqConfig, QuantizeConfig
 from gptqmodel.quantization import macaq as macaq
+from gptqmodel.quantization.config import resolve_model_rotation
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.macaq_triton import triton_mxfp4_available
 
@@ -1209,19 +1211,19 @@ def test_hf_from_pretrained_refuses_macaq_checkpoint(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# rotation-free (hadamard=False) weight-only MXFP4
+# rotation-free (rotation="none") weight-only MXFP4
 # ---------------------------------------------------------------------------
 def _identity_bh(device="cpu"):
     return torch.eye(32, dtype=torch.bfloat16, device=device)
 
 
-def test_hadamard_false_quantizes_in_the_original_frame():
+def test_rotation_none_quantizes_in_the_original_frame():
     torch.manual_seed(41)
     weight = torch.randn(16, 128)
     hessian = torch.eye(128)
 
     result = macaq.macaq_quantize_weight(
-        weight, hessian, 128, hadamard=False, pre_mode="none",
+        weight, hessian, 128, rotation="none", pre_mode="none",
         do_flip=False, exp_offsets=(0,), return_dequantized=True,
     )
 
@@ -1234,13 +1236,13 @@ def test_hadamard_false_quantizes_in_the_original_frame():
     assert torch.equal(result.dequantized_weight, expected_values)
 
 
-def test_hadamard_false_flip_refinement_reduces_hessian_error():
+def test_rotation_none_flip_refinement_reduces_hessian_error():
     torch.manual_seed(43)
     weight = torch.randn(32, 128)
     calibration = torch.randn(512, 128) * torch.linspace(0.1, 3.0, 128)
     hessian = calibration.T @ calibration
 
-    common = {"hadamard": False, "pre_mode": "none", "return_dequantized": True}
+    common = {"rotation": "none", "pre_mode": "none", "return_dequantized": True}
     rtn = macaq.macaq_quantize_weight(weight, hessian, 512, do_flip=False, exp_screen=False, **common)
     refined = macaq.macaq_quantize_weight(weight, hessian, 512, n_flip_iters=64, **common)
 
@@ -1250,11 +1252,11 @@ def test_hadamard_false_flip_refinement_reduces_hessian_error():
     )
 
 
-def test_macaq_quantizer_honors_hadamard_false():
+def test_macaq_quantizer_honors_rotation_none():
     torch.manual_seed(47)
     layer = torch.nn.Linear(128, 16, bias=False)
     config = MacaqConfig(
-        hadamard=False, pre_mode="none", activation_precision="w4a16",
+        rotation="none", pre_mode="none", activation_precision="w4a16",
         n_flip_iters=16, offload_to_disk=False,
     )
     quantizer = macaq.Macaq(layer, config)
@@ -1270,19 +1272,41 @@ def test_macaq_quantizer_honors_hadamard_false():
     assert relative < 0.2
 
 
-def test_macaq_config_hadamard_roundtrip_and_legacy_default():
-    config = MacaqConfig(hadamard=False, activation_precision="w4a16", offload_to_disk=False)
-    payload = config.to_dict()
-    assert payload["hadamard"] is False
-    assert QuantizeConfig.from_quant_config(payload).hadamard is False
+def test_macaq_config_rotation_roundtrip_and_legacy_default():
+    assert MacaqConfig(offload_to_disk=False).rotation == "hadamard"
 
-    # Checkpoints written before the field existed were always rotated.
-    legacy = dict(payload)
-    legacy.pop("hadamard")
-    assert QuantizeConfig.from_quant_config(legacy).hadamard is True
+    config = MacaqConfig(rotation="none", activation_precision="w4a16", offload_to_disk=False)
+    payload = config.to_dict()
+    assert payload["rotation"] == "none"
+    assert QuantizeConfig.from_quant_config(payload).rotation == "none"
+
+    # Checkpoints written before the field was configurable store the
+    # inherited `null` and were always rotated.
+    legacy = dict(payload, rotation=None)
+    assert QuantizeConfig.from_quant_config(legacy).rotation == "hadamard"
+    legacy.pop("rotation")
+    assert QuantizeConfig.from_quant_config(legacy).rotation == "hadamard"
+
+    assert MacaqConfig(rotation=" None ", offload_to_disk=False).rotation == "none"
+    with pytest.raises(ValueError, match="rotation"):
+        MacaqConfig(rotation="random", offload_to_disk=False)
 
     # Accepted as a per-module `dynamic` override.
-    MacaqConfig(dynamic={"mlp": {"hadamard": False}}, offload_to_disk=False)
+    MacaqConfig(dynamic={"mlp": {"rotation": "none"}}, offload_to_disk=False)
+
+
+@pytest.mark.parametrize("rotation", ["hadamard", "none"])
+def test_macaq_rotation_is_not_a_model_wide_rotation(rotation):
+    # The inherited `rotation` drives model-wide rotation (fused norms, online
+    # Hadamard at load, no disk offload). MACaQ's per-layer value must not.
+    config = MacaqConfig(rotation=rotation)
+    assert config.model_rotation is None
+    assert resolve_model_rotation(config) is None
+    assert config.offload_to_disk is True
+
+    assert resolve_model_rotation(QuantizeConfig(rotation="hadamard", offload_to_disk=False)) == "hadamard"
+    assert resolve_model_rotation(SimpleNamespace(rotation="random")) == "random"
+    assert resolve_model_rotation(None) is None
 
 
 def _packed_module(result, *, activation_precision, backend=BACKEND.MACAQ_TORCH, cls=MacaqLinear,
@@ -1304,7 +1328,7 @@ def _rotation_free_result(device="cpu", in_features=128, out_features=16):
     weight = torch.randn(out_features, in_features, device=device)
     calibration = torch.randn(256, in_features, device=device)
     return macaq.macaq_quantize_weight(
-        weight, calibration.T @ calibration, 256, hadamard=False, pre_mode="none",
+        weight, calibration.T @ calibration, 256, rotation="none", pre_mode="none",
         n_flip_iters=8,
     )
 

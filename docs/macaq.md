@@ -31,7 +31,7 @@ The per-Linear recipe is:
 2. **Block-Hadamard rotation.** Right-multiply the scaled weight by a
    block-diagonal Hadamard matrix whose block is the MXFP4 group (32 by
    default). Rotating `H` by the same transform gives the metric used below.
-   `hadamard=False` skips this step, trading accuracy for faster inference (see
+   `rotation="none"` skips this step, trading accuracy for faster inference (see
    [Rotation-free weight-only MXFP4](#rotation-free-weight-only-mxfp4)).
 3. **OCP MXFP4 round-to-nearest.** Per 32-value block, set the E8M0 exponent to
    `floor(log2(amax)) - 2 + offset` and round each value to the nearest E2M1
@@ -427,7 +427,7 @@ E2M1 GEMM on NVIDIA CUDA and ROCm `gfx1201` for W4A4. Other ROCm
 architectures use Torch until their numerical behavior and launch plan are
 validated.
 
-`dynamic` may exclude modules with `False` or override `had_block`, `hadamard`, `do_flip`,
+`dynamic` may exclude modules with `False` or override `had_block`, `rotation`, `do_flip`,
 `n_flip_iters`, `fast_flip`, `compile_flip`, `ridge`, `pre_mode`, `pre_alpha`, `exp_screen`,
 `exp_offsets`, and `activation_precision` per module. The MXFP4 block size,
 bit width, and symmetric format remain fixed.
@@ -435,15 +435,19 @@ bit width, and symmetric format remain fixed.
 ### Rotation-free weight-only MXFP4
 
 ```python
-MacaqConfig(hadamard=False, pre_mode="none", activation_precision="w4a16")
+MacaqConfig(rotation="none", pre_mode="none", activation_precision="w4a16")
 ```
 
-`hadamard=False` trades accuracy for faster inference. It keeps the
+MACaQ's `rotation` selects its per-layer transform (`"hadamard"`, the
+default, or `"none"`); it is not the model-wide rotation that the field
+means for GPTQ, and MACaQ never rotates the model as a whole. Checkpoints
+that store `rotation: null` load as `"hadamard"`.
+
+`rotation="none"` trades accuracy for faster inference. It keeps the
 calibrated parts of the recipe — the Hessian-weighted exponent
 screen and flip refinement — and drops both online activation transforms. The
 quantizer works in the original weight frame and stores an identity `BH` and a
-unit `pre_scale`, so the checkpoint layout is unchanged and older loaders
-still run it correctly. `MacaqLinear` (Torch and Triton W4A16) detects the
+unit `pre_scale`, so the checkpoint layout is unchanged. `MacaqLinear` (Torch and Triton W4A16) detects the
 identity transforms at load and skips them, which is exact, so the forward is
 a plain MXFP4 dequantize-matmul with no extra activation pass. Torch W4A4
 skips them too; Triton W4A4 keeps its fused rotate+quantize kernel, which is
@@ -466,7 +470,7 @@ Wikitext-2 test chunks of 512 tokens (32,704 predicted tokens):
 |---|---:|---:|
 | BF16 | 19.39 | — |
 | MXFP4 RTN, no rotation (`exp_screen=False`, `do_flip=False`) | 23.68 | +22.1% |
-| MACaQ, rotation-free (`hadamard=False`, `pre_mode="none"`) | 21.27 | +9.7% |
+| MACaQ, rotation-free (`rotation="none"`, `pre_mode="none"`) | 21.27 | +9.7% |
 | MACaQ, default (D1 + block Hadamard) | 20.46 | +5.5% |
 
 The calibrated screen and flips alone close 56% of the RTN-to-BF16 gap with
@@ -474,8 +478,8 @@ no runtime transform; the rotation and D1 close 75%.
 
 Use it when the runtime cost of the rotation matters more than the accuracy
 the rotation buys, or when the checkpoint must load in a stock MXFP4 runtime. For W4A4 the rotation is what tames activation outliers, so
-`hadamard=False` is mainly useful with `w4a16`. `pre_mode="balance"`
-can be kept with `hadamard=False`; the forward then applies only the
+`rotation="none"` is mainly useful with `w4a16`. `pre_mode="balance"`
+can be kept with `rotation="none"`; the forward then applies only the
 diagonal pre-scale.
 
 ### Configuration
@@ -485,7 +489,7 @@ diagonal pre-scale.
 | `bits` | 4 | MXFP4 only |
 | `block_size` / `group_size` | 32 | OCP MXFP4 scale group |
 | `had_block` | 32 | block-Hadamard width (power of two, >= 32) |
-| `hadamard` | `True` | rotate by the block Hadamard; `False` stores an identity `BH` and trades accuracy for faster inference |
+| `rotation` | `"hadamard"` | per-layer rotation: `"hadamard"` (block Hadamard) or `"none"`, which stores an identity `BH` and trades accuracy for faster inference |
 | `do_flip` | `True` | enable greedy level refinement |
 | `n_flip_iters` | 256 | maximum flip sweeps |
 | `fast_flip` | `True` | active-set sweep (bit-identical to the dense sweep) |

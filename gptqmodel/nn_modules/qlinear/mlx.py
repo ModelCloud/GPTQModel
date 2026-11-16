@@ -1110,7 +1110,7 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
     def stock_compatible(cls, module):
         """Whether the layer is exactly a stock MLX ``QuantizedLinear(mode="mxfp4")``.
 
-        A W4A16 layer quantized with ``hadamard=False`` and
+        A W4A16 layer quantized with ``rotation="none"`` and
         ``pre_mode="none"`` has no activation transform, so its packed words
         and E8M0 bytes are a plain MXFP4 linear that stock ``mlx_lm.load``
         reconstructs. W4A4 layers keep the custom runtime: stock MLX-LM only
@@ -1148,7 +1148,7 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
             "scales": module.W_scales.detach().view(torch.uint8).to("cpu").numpy(),
             "pre_scale": pre_scale.numpy(),
             "BH": bh.numpy(),
-            # Identity transforms (`hadamard=False`, `pre_mode="none"`)
+            # Identity transforms (`rotation="none"`, `pre_mode="none"`)
             # let the MLX layer skip its pre-rotate dispatch.
             "apply_rotation": not identity_bh,
             "apply_pre_scale": not unit_pre_scale,
