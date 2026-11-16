@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import numbers
 import os
 import random
 from collections.abc import Mapping
@@ -132,6 +133,37 @@ def _iter_calibration_rows(dataset):
         yield from zip(example["input_ids"], example["attention_mask"])
 
 
+def _is_integer_scalar(value: Any) -> bool:
+    """Return True for a scalar token id (Python, NumPy, or 0-D torch)."""
+
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, numbers.Integral):
+        return True
+    if torch.is_tensor(value):
+        return (
+            value.numel() == 1
+            and value.dtype != torch.bool
+            and not value.is_floating_point()
+            and not value.is_complex()
+        )
+    return False
+
+
+def _is_integer_sequence(value: Any) -> bool:
+    """Return True when a nested list/tuple holds only scalar token ids."""
+
+    if isinstance(value, (list, tuple)):
+        return all(_is_integer_sequence(item) for item in value)
+    if torch.is_tensor(value):
+        return (
+            value.dtype != torch.bool
+            and not value.is_floating_point()
+            and not value.is_complex()
+        )
+    return _is_integer_scalar(value)
+
+
 def prepare_calibration_dataset(
     qmodel,
     calibration_dataset: CalibrationInputType,
@@ -169,6 +201,12 @@ def prepare_calibration_dataset(
 
     if len(raw_examples) == 0:
         raise ValueError("Quantize: calibration dataset is empty.")
+
+    if calibration_dataset_sort not in (None, "asc", "desc", "shuffle"):
+        raise ValueError(
+            f"Quantize: unsupported `calibration_dataset_sort` {calibration_dataset_sort!r}. "
+            "Expected `asc`, `desc`, `shuffle`, or None."
+        )
 
     message_examples = 0
     message_template_name = None
@@ -222,21 +260,21 @@ def prepare_calibration_dataset(
 
     def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
         try:
-            tensor = torch.as_tensor(value, dtype=torch.long)
+            tensor = torch.as_tensor(value)
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
+
+        if tensor.dtype == torch.bool or tensor.is_floating_point() or tensor.is_complex():
+            raise ValueError(
+                f"Quantize: `{name}` for calibration item {idx} must contain integers, "
+                f"got dtype {tensor.dtype}."
+            )
+        tensor = tensor.to(dtype=torch.long)
 
         if tensor.ndim == 0:
             raise ValueError(f"Quantize: `{name}` for calibration item {idx} must be 1D or 2D, got scalar.")
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
-        elif tensor.ndim > 2 and name == "attention_mask":
-            # Some tokenizers emit causal masks shaped like [B, 1, T, T] or [B, T, T].
-            # Collapse those higher-rank masks back to the token presence mask expected here.
-            tensor = tensor.ne(0)
-            for dim in range(tensor.ndim - 2, 0, -1):
-                tensor = tensor.any(dim=dim)
-            tensor = tensor.to(torch.long)
         elif tensor.ndim != 2:
             raise ValueError(
                 f"Quantize: `{name}` for calibration item {idx} must be rank 1 or 2, got rank {tensor.ndim}."
@@ -278,6 +316,12 @@ def prepare_calibration_dataset(
 
     def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
+
+        if ids_tensor.shape[0] == 0 or ids_tensor.shape[1] == 0:
+            raise ValueError(
+                f"Quantize: calibration item {idx} has empty `input_ids` with shape "
+                f"{tuple(ids_tensor.shape)}; every item needs at least one token."
+            )
 
         if mask_value is None:
             mask_tensor = torch.ones_like(ids_tensor, dtype=torch.long)
@@ -382,7 +426,7 @@ def prepare_calibration_dataset(
             continue
 
         if isinstance(example, (list, tuple)):
-            if all(isinstance(x, int) for x in example):
+            if _is_integer_sequence(example):
                 processed_examples.append(_pack_ids(list(example), None, idx))
                 continue
             raise ValueError(
@@ -467,15 +511,37 @@ def prepare_calibration_dataset(
         )
 
     dropped_padded_row_count = 0
+    too_short_row_count = 0
 
-    for example in calibration_dataset:
+    for example_index, example in enumerate(calibration_dataset):
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
+
+        if len(input_ids) == 0:
+            raise ValueError(
+                f"Quantize: calibration item {example_index} has no token rows."
+            )
+        if len(input_ids) != len(attention_mask):
+            raise ValueError(
+                f"Quantize: calibration item {example_index} has {len(input_ids)} input_ids "
+                f"rows but {len(attention_mask)} attention_mask rows."
+            )
 
         rows_changed = False
         prepared_rows = []
 
-        for row_ids, row_mask in zip(input_ids, attention_mask):
+        for row_index, (row_ids, row_mask) in enumerate(zip(input_ids, attention_mask)):
+            if len(row_ids) == 0:
+                raise ValueError(
+                    f"Quantize: calibration item {example_index} row {row_index} is empty; "
+                    "every row needs at least one token."
+                )
+            if len(row_ids) != len(row_mask):
+                raise ValueError(
+                    f"Quantize: calibration item {example_index} row {row_index} has "
+                    f"{len(row_ids)} tokens but an attention_mask of length {len(row_mask)}."
+                )
+
             row_len = len(row_ids)
             if max_positions is not None and row_len > max_positions:
                 trimmed_row_count += 1
@@ -503,6 +569,14 @@ def prepare_calibration_dataset(
             # row needed trimming.
             if not any(row_mask):
                 dropped_padded_row_count += 1
+                rows_changed = True
+                continue
+
+            # The minimum-length filter is per row and measures real tokens from
+            # the attention mask, not the padded width. Otherwise a long first
+            # row hides later rows that are mostly padding.
+            if sum(1 for keep in row_mask if keep) <= calibration_data_min_length:
+                too_short_row_count += 1
                 rows_changed = True
                 continue
 
@@ -539,10 +613,6 @@ def prepare_calibration_dataset(
             input_ids = [row_ids for row_ids, _ in prepared_rows]
             attention_mask = [row_mask for _, row_mask in prepared_rows]
 
-        if len(input_ids[0]) <= calibration_data_min_length:
-            too_short_calibration_data_count += 1
-            continue
-
         new_calibration_dataset.append(
             {
                 "input_ids": input_ids,
@@ -553,6 +623,13 @@ def prepare_calibration_dataset(
     if too_short_calibration_data_count > 0:
         log.warn(
             f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+            f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
+        )
+
+    if too_short_row_count > 0:
+        log.warn(
+            f"Quantize: {too_short_row_count} calibration rows with <= {calibration_data_min_length} "
+            "non-padding tokens were removed. "
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
         )
 
