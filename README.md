@@ -230,7 +230,10 @@ print(model.tokenizer.decode(tokens))
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
 covers backend selection, generation, and adapters. Only enable
-`trust_remote_code=True` for checkpoint code you trust.
+`trust_remote_code=True` for checkpoint code you trust. For model types the
+installed Transformers implements natively, the native class is used unless the
+checkpoint declares a remote-only layout; see
+[`docs/trust-remote-code-isolation.md`](docs/trust-remote-code-isolation.md#native-override-of-explicit-trust).
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
