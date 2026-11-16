@@ -71,8 +71,10 @@ from ..utils.model import (
 from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
+    materialize_remaining_meta_modules,
     offload_to_disk,
     release_private_offload_root,
+    restore_disk_offloaded_modules,
     restore_offloaded_modules,
 )
 from ..utils.p2p import (
@@ -1876,6 +1878,20 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._offloaded_base_modules = []
         restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
 
+    def _restore_disk_offloaded_modules(self) -> None:
+        """Bring the disk-offloaded quantized modules back into memory.
+
+        Offload bounds host memory while the loop runs. Once it returns, the
+        in-session model must not depend on the run's bundles (issue #4450).
+        """
+
+        restore_disk_offloaded_modules(self.gptq_model.model, device=CPU, strict=True)
+
+    def _materialize_remaining_meta_modules(self) -> None:
+        """Load modules the lazy shell left on meta (e.g. an untied lm_head)."""
+
+        materialize_remaining_meta_modules(self.gptq_model, device=CPU)
+
     def _release_run_workspace(self) -> None:
         """Release processor-owned scratch shared across the whole run."""
 
@@ -1903,6 +1919,8 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 # run must release it too.
                 self._release_run_workspace()
             self._restore_offloaded_base_modules(strict=True)
+            self._restore_disk_offloaded_modules()
+            self._materialize_remaining_meta_modules()
             return result
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:

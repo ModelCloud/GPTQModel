@@ -11,7 +11,10 @@ write the first model's weights ([#4202], [PR #4297]).
 The run directory is scratch space owned by the model that created it. It is
 removed when that model is collected, when the quantization run fails, and
 before the same model binds another run. A successful `save()` does **not**
-remove it, because the live model still reads those bundles. The automatic
+remove it, because export-only reference offloads (EXL3) and save overlays
+still resolve through it. The in-session model does not read it: the loop
+materializes every disk-offloaded module back into memory before
+`quantize()` returns ([in-session model after offload](in-session-model-after-offload.md)). The automatic
 temporary root keeps its existing interpreter-exit cleanup; a run directory
 under an explicit root is removed by the same ownership rule.
 
@@ -21,11 +24,11 @@ under an explicit root is removed by the same ownership rule.
 stateDiagram-v2
     [*] --> Bound: bind_private_offload_root creates run-uuid
     Bound --> InUse: looper writes module bundles
-    InUse --> Saved: save() streams bundles, model stays meta-backed
+    InUse --> Detached: loop exit restores offloaded modules into memory
     InUse --> Failed: loop raises
-    Saved --> InUse: in-session forward reads bundles
-    Saved --> Saved: a later save() reads the same bundles
-    InUse --> Released: model collected or rebind
+    Detached --> Saved: save() reads in-memory tensors (reference offloads via the run directory)
+    Saved --> Saved: a later save() reads the same state
+    Detached --> Released: model collected or rebind
     Saved --> Released: model collected
     Failed --> Released: release_private_offload_root in loop except
     Released --> [*]: run directory deleted
@@ -42,7 +45,7 @@ flowchart TD
     F --> G["private config copy points at run-uuid"]
     G --> H{"run outcome"}
     H -- "loop raises" --> I["looper except: release_private_offload_root"]
-    H -- "save() completes" --> K["bundles retained: model still materializes from them"]
+    H -- "save() completes" --> K["run directory retained for reference offloads; in-session model reads nothing from it"]
     H -- "model collected" --> L["finalizer: _remove_private_offload_root"]
     K --> L
     classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
@@ -58,16 +61,15 @@ still works for it.
 
 ## Why `save()` does not delete the run directory
 
-`save_quantized()` resolves every meta module through
-`get_state_dict_for_save(model, offload_root=...)`, streams the tensors to the
-checkpoint, and clears the temporary state dict. It does **not** materialize
-the quantized modules back into memory. The modules stay on the meta device
-with their accelerate offload hook pointing at the run directory, so an
-in-session `model.generate()` after `save()` still reads those bundles
-(`tests/test_planar_model_e2e.py` does exactly that). Deleting the directory at
-the end of `save()` turns a supported in-session forward into a
-`FileNotFoundError`. The bundles are released at teardown, which is when the
-model stops being able to use them.
+`save_quantized()` resolves every remaining meta module through
+`get_state_dict_for_save(model, offload_root=...)`. After [#4450] the loop
+restores every hooked module into memory, so for ordinary runs nothing is meta
+and nothing is read from the run directory. EXL3 reference offloads
+(`offload_to_safetensors_reference`) are the exception: they stay meta by
+design and their index lives in the run directory, so a second `save()` still
+needs it. The directory is released at teardown. Because the in-session model
+no longer reads it, the teardown finalizer can delete it while a caller keeps
+using `model.model` (`tests/test_offload_quantized_modules_restored_4450.py`).
 
 ## Before and after
 
@@ -86,7 +88,7 @@ model stops being able to use them.
 | --- | --- |
 | Quantization loop raises (including a checkpoint stop) | Run directory is deleted; published checkpoint artifacts are store-owned copies and resume recreates the disposable indexes |
 | `save()` raises | Run directory is kept so the caller can retry the save; teardown removes it later |
-| `save()` succeeds | Run directory is kept because the live model still reads it |
+| `save()` succeeds | Run directory is kept for reference-offloaded modules; the live model does not read it |
 | Model is not weak-referenceable | No per-model finalizer; callers can use `release_private_offload_root()` |
 | Process is killed with `SIGKILL` | Out of scope: no Python cleanup hook runs. The directory remains under the explicit root |
 
@@ -96,6 +98,7 @@ the live model still needs.
 
 [#4202]: https://github.com/ModelCloud/GPTQModel/issues/4202
 [#4368]: https://github.com/ModelCloud/GPTQModel/issues/4368
+[#4450]: https://github.com/ModelCloud/GPTQModel/issues/4450
 [PR #4297]: https://github.com/ModelCloud/GPTQModel/pull/4297
 [PR #4409]: https://github.com/ModelCloud/GPTQModel/pull/4409
 [PR #4412]: https://github.com/ModelCloud/GPTQModel/pull/4412

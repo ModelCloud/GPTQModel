@@ -89,7 +89,9 @@ Quantized kernels keep only packed weights resident; shared per-device scratch a
 - **Fit larger models.** Multi-GPU calibration, CPU/disk offload, and checkpointed
   execution help manage memory and recover interrupted jobs. [Disk-offload run
   directories](https://github.com/ModelCloud/GPTQModel/blob/main/docs/offload-run-directories.md)
-  are per-run scratch space and are removed at teardown or failure;
+  are per-run scratch space and are removed at teardown or failure, and the
+  [in-session model](https://github.com/ModelCloud/GPTQModel/blob/main/docs/in-session-model-after-offload.md)
+  is fully materialized when `quantize()` returns;
   [reference offload](https://github.com/ModelCloud/GPTQModel/blob/main/docs/safetensors-reference-offload.md)
   keeps untouched base modules as source-checkpoint references instead of
   second copies, and releases pinned staging memory. Quantized MoE reloads park

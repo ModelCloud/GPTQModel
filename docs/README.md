@@ -160,6 +160,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Cross-layer shared KV cache](looper-shared-kv-cache.md)
 - [Offload index resolution](offload-index-resolution.md)
 - [Offload run directories](offload-run-directories.md)
+- [In-session model after disk-offloaded quantization](in-session-model-after-offload.md)
 - [Quantized checkpoint subfolder resolution](quantized-checkpoint-subfolder-resolution.md)
 - [Reshard source selection](reshard-source-selection.md)
 - [Torch INT8 checkpoint lifecycle and group-preserving layout](torch-int8-checkpoint-lifecycle.md)

@@ -68,8 +68,11 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     is_meta_module,
+    materialize_remaining_meta_modules,
     offload_to_disk,
     release_private_offload_root,
+    replace_inference_parameters,
+    restore_disk_offloaded_modules,
     restore_offloaded_modules,
 )
 from ..utils.p2p import configure_p2p, enable_for_devices
@@ -893,6 +896,20 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._offloaded_base_modules = []
         restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
 
+    def _restore_disk_offloaded_modules(self) -> None:
+        """Bring the disk-offloaded quantized modules back into memory.
+
+        Offload bounds host memory while the loop runs. Once it returns, the
+        in-session model must not depend on the run's bundles (issue #4450).
+        """
+
+        restore_disk_offloaded_modules(self.gptq_model.model, device=CPU, strict=True)
+
+    def _materialize_remaining_meta_modules(self) -> None:
+        """Load modules the lazy shell left on meta (e.g. an untied lm_head)."""
+
+        materialize_remaining_meta_modules(self.gptq_model, device=CPU)
+
     def _materialize_meta_base_modules(self, *, strict: bool) -> None:
         """Fill base modules that the lazy shell never materialized.
 
@@ -923,6 +940,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                     device=CPU,
                     module_path=name,
                 )
+                # Keep the in-session model movable with ``model.to()``
+                # (issue #4450).
+                replace_inference_parameters(module)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warn("Weight-only: failed to materialize base module `%s`: %s", name, exc)
             if is_meta_module(module):
@@ -955,7 +975,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 release_private_offload_root(self.gptq_model)
             raise
         self._restore_offloaded_base_modules(strict=True)
+        self._restore_disk_offloaded_modules()
         self._materialize_meta_base_modules(strict=True)
+        self._materialize_remaining_meta_modules()
         return result
 
     def _loop_impl(self, **kwargs):
@@ -1219,12 +1241,12 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
                     self._finalize_subset_modules(self._quantize_subset_modules(subset_named_modules))
 
-                # Submodule-level offload may swap packed tensors to meta/disk placeholders.
-                # Skip the layer-wide CPU move in that case to avoid `.to()` on meta buffers.
-                if getattr(self.gptq_model.quantize_config, "offload_to_disk", False):
-                    if not is_lm_head_module:
-                        layers[layer_index] = module
-                elif is_lm_head_module:
+                # Move the finished layer to CPU even when its packed modules
+                # are disk-offloaded: `post_quantize` leaves their meta
+                # placeholders alone, while the layer norms and other
+                # non-quantized state must not stay on the accelerator next to
+                # a CPU-resident model (issue #4450).
+                if is_lm_head_module:
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
