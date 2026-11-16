@@ -39,6 +39,30 @@ from ._runtime_cache import tensor_cache_key
 
 log = setup_logger()
 
+#: Element budget for one ``pack_gpu`` input block. The packer keeps several
+#: ``[out_features, block_in]`` tensors live (fp32 rounding, int32 transpose,
+#: int64 shifts), about 32 bytes per element, so a whole-matrix block peaks at
+#: ~15x the fp16 weight. Capping the block keeps the transient bounded without
+#: changing the packed output: blocks only partition the input axis into
+#: disjoint output rows.
+PACK_GPU_MAX_BLOCK_ELEMS = 4 << 20
+
+
+def _pack_gpu_block_in(out_features: int, block_in: int, word_bits: int) -> int:
+    """Cap ``pack_gpu``'s input block by :data:`PACK_GPU_MAX_BLOCK_ELEMS`.
+
+    The per-block transient is roughly ``out_features * block_in`` elements
+    times the number of live dtype views, so bounding the element count bounds
+    peak memory independently of the matrix width. Rounded down to a whole
+    packing word so every block ends on a word boundary.
+    """
+
+    max_block_in = (
+        PACK_GPU_MAX_BLOCK_ELEMS // max(out_features, 1) // word_bits * word_bits
+    )
+    block_in = min(block_in, max_block_in)
+    return max(word_bits, (block_in // word_bits) * word_bits)
+
 
 def _device_family(device: DEVICE | t.device | str):
     """Map a device selector onto its declared support family.
@@ -2435,7 +2459,12 @@ class PackableQuantLinear(GPTQQuantLinear):
             packed = _pack_rows_3_values(int32_blk_32xN)
             dst[dst_rows_base:dst_rows_base + 3] = packed.to(self.pack_dtype)
 
-        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        # Derive the block from an element budget instead of trusting the
+        # caller's 8192 default, which covers a whole 4096-wide matrix and
+        # peaks at ~15x the fp16 weight transient. The input-axis split only
+        # assigns disjoint output rows, so qweight/qzeros stay bitwise
+        # identical.
+        block_in = _pack_gpu_block_in(out_features, block_in, word_bits)
         for i0 in range(0, in_features, block_in):
             i1 = min(i0 + block_in, in_features)
             blk = i1 - i0

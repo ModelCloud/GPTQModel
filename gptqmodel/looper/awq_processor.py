@@ -19,6 +19,7 @@ import torch
 from torch import nn
 from torch.nn import Module
 
+from .._alloc_conf import clamp_budget_below_allocator_split
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -3104,6 +3105,15 @@ class AWQProcessor(LoopProcessor):
             mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
             device,
         )
+        # The caching allocator refuses to serve a sub-cap request from a free
+        # block at or above `max_split_size`, so a workspace sized just under
+        # the cap (the 256 MiB GPU default) maps one new segment per module:
+        # MoE layers grew reserved VRAM by ~256 MiB per expert projection while
+        # allocated memory stayed flat. Staying below the cap keeps every
+        # segment splittable, so the next module reuses it. This only changes
+        # chunk sizes; each candidate is still reduced over the same axes, so
+        # the clip search results are bitwise unchanged.
+        budget = clamp_budget_below_allocator_split(budget)
         row_elems = oc_batch_size * n_group * group_w
         out_elems = oc_batch_size * n_tokens * n_group
         cand_chunk = max(
