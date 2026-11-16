@@ -12,10 +12,12 @@ import importlib.util
 import json
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
+from safetensors.torch import load_file
 from tokenizers import Tokenizer
 
 from gptqmodel_compiler import compile_program, llama32_1b
@@ -77,7 +79,23 @@ def main():
         optimized_artifact.write(args.artifacts / "optimized")
     print("Loading generated eager model", file=sys.stderr, flush=True)
     eager = load_safetensors(eager_artifact.instantiate(), args.checkpoint)
-    raw = {p.name: eager.parameter_view(p.name).detach() for p in program.parameters}
+    # Read oracle weights independently: reading through generated parameter
+    # views could hide a checkpoint-binding or slice-offset bug in the compiler.
+    original = load_file(args.checkpoint / "model.safetensors")
+
+    class ReferenceWeights(Mapping):
+        def __len__(self):
+            return len(original)
+
+        def __iter__(self):
+            return iter(original)
+
+        def __getitem__(self, key):
+            # Keep native checkpoint storage and bound temporary FP32 casts to
+            # the current oracle operation rather than retaining another 5 GB.
+            return original[key].to(getattr(torch, args.dtype))
+
+    raw = ReferenceWeights()
     a = next(op.attributes for b in program.blocks for op in b.body if op.kind == "rope")
     oracle_config = {"layers": 16, "eps": 1e-5, **a}
     print("Independent equation oracle", file=sys.stderr, flush=True)
@@ -138,6 +156,7 @@ def main():
         "independent_reference_sha256": hashlib.sha256(
             Path(__file__).with_name("reference.py").read_bytes()
         ).hexdigest(),
+        "reference_weight_source": "independent safetensors read; per-operation dtype conversion; no generated views",
         "checkpoint": "unsloth/Llama-3.2-1B-Instruct",
         "checkpoint_revision": "5a8abab4a5d6f164389b1079fb721cfab8d7126c",
         "checkpoint_sha256": checkpoint_hash,

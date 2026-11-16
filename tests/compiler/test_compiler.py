@@ -59,8 +59,19 @@ def oracle_config(p):
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 def test_both_targets_match_independent_oracle_and_cached_chunks(dtype):
     p = tiny(dtype)
-    eager = compile_program(p).instantiate().initialize_for_test(13)
-    source = weights(eager)
+    generator = torch.Generator().manual_seed(13)
+    source = {}
+    for parameter in p.parameters:
+        if not parameter.alias_of:
+            value = (
+                torch.ones(parameter.shape)
+                if len(parameter.shape) == 1
+                else torch.randn(parameter.shape, generator=generator) * 0.02
+            )
+            source[parameter.name] = value.to(getattr(torch, dtype))
+        else:
+            source[parameter.name] = source[parameter.alias_of]
+    eager = compile_program(p).instantiate().load_weights(source)
     models = [eager]
     if dtype == "float32":
         optimized = compile_program(p, target="optimized").instantiate(compile_graph=False).load_weights(source)
