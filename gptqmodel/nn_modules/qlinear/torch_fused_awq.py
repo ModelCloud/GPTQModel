@@ -28,7 +28,13 @@ from ._fused_train_state import (
 )
 from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
-from .torch_fused import Int4PackedOp, TorchFusedLinear, _validate_cpu_int4pack_group_size, pack_scales_and_zeros
+from .torch_fused import (
+    Int4PackedOp,
+    TorchFusedLinear,
+    _validate_cpu_int4pack_group_size,
+    _validate_cpu_int4pack_out_features,
+    pack_scales_and_zeros,
+)
 
 
 log = setup_logger()
@@ -154,8 +160,13 @@ class TorchFusedAwqLinear(AWQuantLinear):
         )
         if not ok:
             return ok, err
-        return _validate_cpu_int4pack_group_size(
+        ok, err = _validate_cpu_int4pack_group_size(
             cls, group_size=group_size, in_features=in_features, device=device
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls, out_features=out_features, device=device
         )
 
     def post_init(self):

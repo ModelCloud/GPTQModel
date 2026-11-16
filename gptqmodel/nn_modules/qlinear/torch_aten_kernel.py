@@ -23,7 +23,12 @@ from ._fused_train_state import (
 )
 from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
-from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
+from .torch_fused import (
+    _cpu_int4pack_mm,
+    _validate_cpu_int4pack_group_size,
+    _validate_cpu_int4pack_out_features,
+    pack_scales_and_zeros,
+)
 
 
 log = setup_logger()
@@ -89,7 +94,11 @@ class TorchAtenLinear(PackableQuantLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    # ``aten::_convert_weight_to_int4pack_for_cpu`` requires N % 16 == 0.
+    # Declaring [1] let AUTO select this kernel for a layer whose first
+    # forward then failed inside the packer instead of falling through to
+    # ``TorchLinear``.
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
     SUPPORTS_DEVICES = [DEVICE.CPU]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
@@ -103,6 +112,62 @@ class TorchAtenLinear(PackableQuantLinear):
 
     gemm_int4_forward_kernel = None
     _fused_op_handles_bias = False
+
+    @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE | torch.device] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ):
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        if cls.QUANT_TYPE != "torch_aten_kernel":
+            # Subclasses such as the AVX512-BF16 kernel reuse this class for
+            # its storage/dequant helpers but execute a different packed
+            # kernel with a wider group-size contract.
+            return True, None
+        # ``group_size == in_features`` is a per-channel encoding that bypasses
+        # the declared group-size set. The aten op still only accepts its own
+        # group sizes, so apply that contract to the resolved value as well.
+        # This kernel is CPU-only, so a construction-time check with no device
+        # still targets the CPU contract.
+        ok, err = _validate_cpu_int4pack_group_size(
+            cls,
+            group_size=group_size,
+            in_features=in_features,
+            device=device if device is not None else DEVICE.CPU,
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls,
+            out_features=out_features,
+            device=device if device is not None else DEVICE.CPU,
+        )
 
     def __init__(
         self,
@@ -446,6 +511,9 @@ class TorchAtenLinear(PackableQuantLinear):
 
 
 def dequantize_model(model: PreTrainedModel):
+    # Keep the checkpoint's compute dtype; hard-coding fp16 silently changed
+    # bf16 checkpoints and their exported config.
+    target_dtype = None
     for name, module in model.named_modules():
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchAtenLinear):
             raise ValueError(
@@ -454,9 +522,29 @@ def dequantize_model(model: PreTrainedModel):
             )
 
         if isinstance(module, TorchAtenLinear):
-            new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = torch.nn.Parameter(module.bias)
+            if target_dtype is None:
+                scales = getattr(module, "scales", None)
+                target_dtype = (
+                    scales.dtype
+                    if scales is not None and scales.is_floating_point()
+                    else torch.float16
+                )
+            new_module = nn.Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+            )
+            new_module.weight = nn.Parameter(
+                module.dequantize_weight().T.detach().to("cpu", target_dtype)
+            )
+            # ``nn.Parameter(None)`` is a shape-[0] tensor, not an absent
+            # bias. Every bias-less layer (all of Llama, for example) then
+            # failed in forward.
+            new_module.bias = (
+                nn.Parameter(module.bias.detach().to("cpu", target_dtype))
+                if module.bias is not None
+                else None
+            )
 
             parent = model
             if "." in name:

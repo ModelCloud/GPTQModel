@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...adapter.adapter import Adapter
+from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
@@ -30,7 +31,12 @@ from .torch_aten_kernel import (
     _cpu_int4pack_zero_offsets,
     _has_local_int4pack_cpu_ops,
 )
-from .torch_fused import _cpu_int4pack_mm, pack_scales_and_zeros
+from .torch_fused import (
+    _cpu_int4pack_mm,
+    _validate_cpu_int4pack_group_size,
+    _validate_cpu_int4pack_out_features,
+    pack_scales_and_zeros,
+)
 
 
 log = setup_logger()
@@ -122,6 +128,52 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
+
+    @classmethod
+    def _validate(
+        cls,
+        bits: int = 4,
+        group_size: int = 128,
+        desc_act: bool = False,
+        sym: bool = False,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        in_features: int = None,
+        out_features: int = None,
+        device: Optional[DEVICE | torch.device] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ):
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+        ok, err = _validate_cpu_int4pack_group_size(
+            cls,
+            group_size=group_size,
+            in_features=in_features,
+            device=device if device is not None else DEVICE.CPU,
+        )
+        if not ok:
+            return ok, err
+        return _validate_cpu_int4pack_out_features(
+            cls,
+            out_features=out_features,
+            device=device if device is not None else DEVICE.CPU,
+        )
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
