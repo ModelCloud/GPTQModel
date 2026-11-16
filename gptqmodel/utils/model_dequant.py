@@ -342,6 +342,10 @@ def _discover_compressed_tensors_module_schemes(
     )
     normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
+    # ``from_config`` mutates process-global torch state (default dtype,
+    # init hooks); serialize it against loads/saves with the shared lock.
+    from ..models.loader import model_load_lock
+
     loader_candidates = (
         deps["AutoModelForCausalLM"],
         deps["AutoModelForSeq2SeqLM"],
@@ -356,11 +360,12 @@ def _discover_compressed_tensors_module_schemes(
 
         with init_empty_weights(include_buffers=True):
             try:
-                model = loader.from_config(
-                    config,
-                    trust_remote_code=trust_remote_code,
-                    dtype=torch.float32,
-                )
+                with model_load_lock():
+                    model = loader.from_config(
+                        config,
+                        trust_remote_code=trust_remote_code,
+                        dtype=torch.float32,
+                    )
             except Exception as exc:  # pragma: no cover - depends on available loaders
                 loader_errors.append((loader.__name__, exc))
                 continue
