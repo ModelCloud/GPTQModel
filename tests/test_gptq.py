@@ -231,6 +231,19 @@ def test_gptq_attention_sink_default_and_flat_inputs_are_unchanged():
     )
 
 
+@pytest.mark.parametrize("method_kwargs", [{"gptaq": GPTAQConfig()}, {"foem": FOEMConfig()}])
+def test_gptq_exclude_attention_sinks_rejects_methods_with_their_own_hessian(method_kwargs):
+    # GPTAQ/FOEM override process_batch, so the opt-in would be silently
+    # ignored; reject the combination instead of pretending it applies.
+    with pytest.raises(ValueError, match="only implemented for the plain GPTQ Hessian path"):
+        GPTQConfig(
+            bits=4,
+            group_size=128,
+            exclude_attention_sinks=True,
+            **method_kwargs,
+        ).validate()
+
+
 def _make_embedding_gptq(*, group_size: int = 2, desc_act: bool = False) -> GPTQ:
     embedding = nn.Embedding(5, 3, dtype=torch.float32).eval()
     with torch.no_grad():

@@ -5864,6 +5864,12 @@ class GPTQConfig(PreProcessorConfig):
                 f"got {type(self.exclude_attention_sinks).__name__} "
                 f"({self.exclude_attention_sinks!r})."
             )
+        if self.exclude_attention_sinks and (self.gptaq is not None or self.foem is not None):
+            raise ValueError(
+                "QuantizeConfig:: `exclude_attention_sinks` is only implemented for the "
+                "plain GPTQ Hessian path; GPTAQ/FOEM accumulate their own Hessian and "
+                "ignore it. Leave it False for those methods."
+            )
 
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
