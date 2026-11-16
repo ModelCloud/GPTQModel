@@ -473,6 +473,8 @@ def _module_source_reference_index(
             if os.path.commonpath((os.path.realpath(path), offload_real)) == offload_real:
                 return None
         except ValueError:
+            # Paths on different drives (Windows) have no common prefix, so the
+            # source cannot be inside the offload dir; keep the reference.
             pass
 
         try:
