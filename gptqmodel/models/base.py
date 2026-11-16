@@ -88,6 +88,7 @@ from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
+from ..utils.kv_cache import estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.model import (
     MODALITY,
@@ -313,6 +314,15 @@ def _log_quantize_summary(
             peak_vram_gib=_peak_vram_gib(devices=vram_devices),
         )
     )
+
+
+def _log_kv_cache_estimate(model: object) -> None:
+    """State what context costs, since weight quantization does not change it."""
+
+    config = getattr(getattr(model, "model", None), "config", None)
+    estimate = estimate_kv_cache(config)
+    if estimate is not None:
+        log.info(estimate.format())
 
 
 class _QuantizedCheckpointSource:
@@ -2288,6 +2298,7 @@ class BaseQModel(nn.Module):
             run_started=run_started,
             vram_devices=vram_devices,
         )
+        _log_kv_cache_estimate(self)
         return result
 
     @staticmethod
