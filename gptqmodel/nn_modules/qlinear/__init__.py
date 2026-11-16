@@ -1437,6 +1437,12 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         # GPTQ v1/v2 conversions only apply to GPTQ-style qzero storage.
         self._qzeros_format = 1
+        # The line above is only a placeholder: a fresh module owns no words in
+        # a known layout yet. ``qzero_format(format=...)`` records a resolved
+        # layout (packing, loading, an explicit conversion); the load hook must
+        # not mistake the placeholder for a layout that matches an incoming
+        # marker (issue #4377).
+        self._qzeros_format_established = False
 
         if register_buffers:
             self._register_gptq_buffers(
@@ -1547,6 +1553,27 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         return getattr(self, "_qzeros_format", 1)
 
+    def _load_target_qzeros_format(self) -> int:
+        """Layout this module's kernel decodes once the load completes.
+
+        ``_qzeros_format`` starts as a constructor placeholder (v1) and only
+        records a real layout after :meth:`qzero_format` resolves it (packing,
+        loading, or an explicit conversion). A ``REQUIRES_FORMAT_V2`` kernel
+        decodes v2 even while that placeholder still says v1, so a copied v1
+        marker must be converted instead of being treated as an exact match
+        (issue #4377). An established v1 layout is left alone: the public
+        ``convert_gptq_v2_to_v1_format`` path deliberately holds v1 words.
+        """
+
+        runtime_format = self._runtime_qzeros_format()
+        if (
+            runtime_format == 1
+            and getattr(self, "REQUIRES_FORMAT_V2", False)
+            and not getattr(self, "_qzeros_format_established", False)
+        ):
+            return 2
+        return runtime_format
+
     def qzero_format(self, format: int = None) -> int:
         if format is None:
             return self._runtime_qzeros_format()
@@ -1555,6 +1582,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
 
         self._qzeros_format = format
+        self._qzeros_format_established = True
         # Keep the persistent marker in sync with the words actually held by the
         # live buffers. ``accelerate`` builds a shard's load dict from these
         # buffers, so a stale placeholder would label v2 words as v1 and make
@@ -1778,6 +1806,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         """Convert the copied qzeros words to this kernel's runtime layout."""
 
         requires_v2 = getattr(self, "REQUIRES_FORMAT_V2", False)
+        self._qzeros_format_established = True
         if incoming_format == 1:
             if requires_v2:
                 # The checkpoint v1 convention stores `zero_point - 1`, but
@@ -1831,8 +1860,14 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             if layout_code in (1, 2):
                 # The marker travels with the words it labels. When it already
                 # matches this kernel's live layout the copy is a no-op, which
-                # is what makes a repeated load idempotent.
-                if layout_code != self._runtime_qzeros_format():
+                # is what makes a repeated load idempotent. A fresh module only
+                # holds the constructor placeholder, so even a matching marker
+                # must resolve the label; ``_restore_qzeros_format`` leaves the
+                # words untouched when no conversion is required.
+                if (
+                    layout_code != self._load_target_qzeros_format()
+                    or not getattr(self, "_qzeros_format_established", False)
+                ):
                     self._restore_qzeros_format(layout_code)
             elif layout_code == 0:
                 # A runtime-layout payload; the receiver is in the same layout
