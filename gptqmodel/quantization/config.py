@@ -3273,6 +3273,18 @@ def _validate_unique_preprocessors(preprocessors: List[BasePreProcessorConfig]) 
         codes_seen.add(preprocessor.code)
 
 
+def _exact_rank_pattern(module_name: str) -> str:
+    """Return a `rank_pattern` key that selects exactly one module name.
+
+    PEFT wraps every key as `(.*\\.)?(key)$`, and that optional prefix group
+    anchors the match at a dot boundary. Escaping the full dotted name is
+    therefore enough: no leading `^`, which the wrapper group would invalidate
+    for names that carry a `base_model.model.` prefix.
+    """
+
+    return re.escape(module_name)
+
+
 def _select_dynamic_value(overrides: Mapping, key: Optional[str], default: Any, sub_key: Optional[str]) -> Any:
     if key is None:
         return overrides
@@ -4929,17 +4941,81 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     return version.parse(_version) >= version.parse(MIN_VERSION_WITH_V2)
         return False
 
-    def extract_adapter_rank_patterns(self) -> Optional[Dict[str, int]]:
-        adapter_rank_patterns = {}
-        if not self.dynamic or not self.adapter:
-            return adapter_rank_patterns
+    def extract_adapter_rank_patterns(
+        self,
+        module_ranks: Optional[Mapping[str, int]] = None,
+    ) -> Dict[str, int]:
+        """Return one exact `rank_pattern` entry per trained module rank.
 
-        for k, v in self.dynamic.items():
-            adapter_override = v.get("adapter", None)
-            if adapter_override and isinstance(adapter_override, Dict):
-                rank = adapter_override.get("rank", None)
-                if rank and isinstance(rank, int):
-                    adapter_rank_patterns[k.lstrip("+:")] = rank
+        `dynamic` resolves first-match per module, while PEFT applies every
+        `rank_pattern` key independently with `(.*\\.)?(pattern)$`. Copying a
+        `dynamic` rule verbatim therefore does not reproduce the rank a module
+        was trained with: an earlier rule without an adapter override can
+        shadow it, and a prefix rule such as `model\\.layers\\.1\\.` matches no
+        module name at all.
+
+        The trained rank is the authoritative value, so the caller passes the
+        ranks it actually produced (`Lora.rank` of each EoRA result). Each one
+        is verified against `dynamic_get`, the lookup the quantizer used, and
+        emitted as one escaped exact pattern. Exact keys cannot shadow or
+        prefix-match each other, so declaration order no longer changes the
+        result. A module trained at the adapter base rank needs no entry.
+        """
+
+        if not self.dynamic or not self.adapter:
+            return {}
+
+        base_rank = getattr(self.adapter, "rank", None)
+        if isinstance(base_rank, bool) or not isinstance(base_rank, int) or base_rank <= 0:
+            raise ValueError(
+                f"QuantizeConfig: adapter base rank must be a positive integer to "
+                f"export rank patterns, actual = `{base_rank}`."
+            )
+        has_adapter_rank_rule = any(
+            isinstance(overrides, Mapping)
+            and isinstance(overrides.get("adapter"), Mapping)
+            and isinstance(overrides["adapter"].get("rank"), int)
+            for overrides in self.dynamic.values()
+        )
+        if not has_adapter_rank_rule:
+            return {}
+
+        if not module_ranks:
+            raise ValueError(
+                "QuantizeConfig: `dynamic` declares adapter ranks, but "
+                "`extract_adapter_rank_patterns` needs the ranks that were "
+                "actually trained; pass `module_ranks`."
+            )
+
+        adapter_rank_patterns: Dict[str, int] = {}
+        for name, rank in module_ranks.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    "QuantizeConfig: adapter rank pattern module name must be a "
+                    f"non-empty string, actual = `{name}`."
+                )
+            if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
+                raise ValueError(
+                    f"QuantizeConfig: trained adapter rank for `{name}` must be a "
+                    f"positive integer, actual = `{rank}`."
+                )
+            resolved = self.dynamic_get(
+                name, key="adapter", sub_key="rank", default=base_rank,
+            )
+            if resolved is False:
+                raise ValueError(
+                    f"QuantizeConfig: `{name}` has an EoRA adapter but `dynamic` "
+                    "excludes it from quantization; the exported rank_pattern "
+                    "cannot describe it."
+                )
+            if resolved != rank:
+                raise ValueError(
+                    f"QuantizeConfig: trained adapter rank for `{name}` is `{rank}` "
+                    f"but `dynamic` now resolves `{resolved}`; refusing to export a "
+                    "rank_pattern that PEFT would apply differently."
+                )
+            if rank != base_rank:
+                adapter_rank_patterns[_exact_rank_pattern(name)] = rank
 
         return adapter_rank_patterns
 
