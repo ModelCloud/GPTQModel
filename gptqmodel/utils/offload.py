@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
 import shutil
 import struct
+import uuid
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -72,6 +74,40 @@ def is_meta_module(m: nn.Module) -> bool:
         if b.is_meta:
             return True
     return False
+
+
+def bind_private_offload_root(model: nn.Module) -> Optional[str]:
+    """Bind a private offload namespace to one quantization run.
+
+    A ``QuantizeConfig`` (and therefore its automatic temporary directory or
+    explicit ``offload_to_disk_path``) is commonly shared by several models:
+    ``copy.copy``/``copy.deepcopy`` deliberately keep the same temporary
+    directory. Bundle directory names are derived from the module path alone,
+    so without a per-run namespace a later run overwrites the earlier model's
+    finalized bundles in place and its ``save()`` silently writes the other
+    model's weights.
+
+    Give the run its own subdirectory under the configured root and keep a
+    private config copy on the model, so a later run on another model cannot
+    move this model's save-time bundle lookup.
+    """
+    config = getattr(model, "quantize_config", None)
+    if config is None or not getattr(config, "offload_to_disk", False):
+        return None
+
+    configured = getattr(config, "offload_to_disk_path", None)
+    if not configured:
+        return None
+
+    base = os.path.abspath(os.path.expanduser(os.fspath(configured)))
+    run_root = os.path.join(base, f"run-{uuid.uuid4().hex[:16]}")
+    os.makedirs(run_root, exist_ok=True)
+
+    private_config = copy.copy(config)
+    private_config.offload_to_disk_path = run_root
+    model.quantize_config = private_config
+    log.debug("Offload: bound private run directory `%s`.", run_root)
+    return run_root
 
 
 def capture_offloaded_base_modules(

@@ -68,6 +68,7 @@ from ..utils.model import (
     untie_word_embeddings,
 )
 from ..utils.offload import (
+    bind_private_offload_root,
     capture_offloaded_base_modules,
     offload_to_disk,
     restore_offloaded_modules,
@@ -208,6 +209,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Base modules offloaded at the start of the run are restored when the
         # loop exits so the model stays usable in-session.
         self._offloaded_base_modules: List[Tuple[str, nn.Module, torch.device]] = []
+        self._bind_private_offload_namespace()
         # Concurrent module-tree branches can declare different quantizable
         # leaves.  Cache each branch's leaf blocks so a layer is never asked to
         # resolve a sibling branch's modules.
@@ -1789,6 +1791,23 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             embed_quant_mode=self.embed_quant_mode,
             layer_names=layer_names,
         )
+
+    def _bind_private_offload_namespace(self) -> None:
+        """Give this run a private offload root under the configured path."""
+
+        config = getattr(self.gptq_model, "quantize_config", None)
+        if config is None:
+            return
+        run_root = bind_private_offload_root(self.gptq_model)
+        if run_root is None:
+            return
+        private_config = self.gptq_model.quantize_config
+        # Processors are built before the looper and may hold the shared config
+        # object; point them at the private copy so every offload write during
+        # this run lands in the same namespace the model saves from.
+        for processor in self.processors:
+            if getattr(processor, "qcfg", None) is config:
+                processor.qcfg = private_config
 
     def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
         entries = getattr(self, "_offloaded_base_modules", None)

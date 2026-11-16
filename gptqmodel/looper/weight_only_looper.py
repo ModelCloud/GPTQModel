@@ -64,6 +64,7 @@ from ..utils.model import (
     get_module_by_name_prefix,
 )
 from ..utils.offload import (
+    bind_private_offload_root,
     capture_offloaded_base_modules,
     offload_to_disk,
     restore_offloaded_modules,
@@ -94,6 +95,7 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Base modules offloaded at the start of the run are restored when the
         # loop exits so the model stays usable in-session.
         self._offloaded_base_modules: List[Tuple[str, torch.nn.Module, torch.device]] = []
+        self._bind_private_offload_namespace()
         self.extensions = LoopExtensions(extensions)
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -863,6 +865,22 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if targets:
             self.processor.layer_count = layer_count
         return quantized_names
+
+    def _bind_private_offload_namespace(self) -> None:
+        """Give this run a private offload root under the configured path."""
+
+        config = getattr(self.gptq_model, "quantize_config", None)
+        if config is None:
+            return
+        run_root = bind_private_offload_root(self.gptq_model)
+        if run_root is None:
+            return
+        private_config = self.gptq_model.quantize_config
+        # The processor is built before the looper and may hold the shared
+        # config object; point it at the private copy so every offload write
+        # during this run lands in the namespace the model saves from.
+        if getattr(self.processor, "qcfg", None) is config:
+            self.processor.qcfg = private_config
 
     def _restore_offloaded_base_modules(self, *, strict: bool) -> None:
         entries = getattr(self, "_offloaded_base_modules", None)
