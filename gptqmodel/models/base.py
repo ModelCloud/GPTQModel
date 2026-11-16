@@ -2900,7 +2900,9 @@ class BaseQModel(nn.Module):
             self.model = self.model.to(device)
             return self
         else:
-            raise f"{self.model.__class__.__name__} does not support the to() method"
+            raise NotImplementedError(
+                f"{self.model.__class__.__name__} does not support the to() method"
+            )
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)

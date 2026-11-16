@@ -43,6 +43,12 @@ from ..utils.planar_packing import (
 
 LOG = logging.getLogger(__name__)
 
+# Quantization-only metadata must not survive into a dense export: leaving it
+# behind makes loaders route the dense checkpoint back through from_quantized.
+_DENSE_OUTPUT_EXCLUDED_FILES = frozenset(
+    {"quantize_config.json", "quant_config.json", "quant_log.csv"}
+)
+
 # Reuse the shared dtype registries so checkpoint detection stays aligned with
 # the CPU dequant kernels and config normalization paths.
 _FLOAT8_DTYPES = available_float8_dtypes()
@@ -2166,5 +2172,9 @@ def dequantize_model(
     new_config["dtype"] = str(target_dtype).split(".")[-1]
     write_json(output_path / "config.json", new_config)
 
-    skip_files = set(files) | {"config.json", "model.safetensors.index.json"}
+    skip_files = (
+        set(files)
+        | {"config.json", "model.safetensors.index.json"}
+        | _DENSE_OUTPUT_EXCLUDED_FILES
+    )
     copy_aux_files(model_path, output_path, skip_files, dirs_exist_ok=resume)

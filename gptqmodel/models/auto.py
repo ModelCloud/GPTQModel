@@ -1153,9 +1153,15 @@ class GPTQModel:
 
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
+        normalized_format = str(format).strip().lower()
+        if normalized_format not in ("hf", "mlx"):
+            raise ValueError(
+                f"Unsupported export format: {format!r}. Expected 'hf' or 'mlx'."
+            )
+
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
 
-        if format == "hf":
+        if normalized_format == "hf":
             # Export through the checkpoint-level dequantizer: it understands
             # every stored layout (AWQ, GPTQ, quantized embeddings, legacy
             # quantize_config.json) instead of assuming a TorchLinear runtime.
@@ -1207,9 +1213,13 @@ class GPTQModel:
             backend = BACKEND.GPTQ_TORCH
 
         # load gptq model
-        gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
+        gptq_model = GPTQModel.load(
+            model_id_or_path,
+            backend=backend,
+            trust_remote_code=trust_remote_code,
+        )
 
-        if format == "mlx":
+        if normalized_format == "mlx":
             try:
                 from mlx_lm.utils import save_config, save_model
 
