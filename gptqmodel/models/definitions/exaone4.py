@@ -2,10 +2,16 @@ from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 from .base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 class Exaone4QModel(BaseQModel):
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.exaone4.Exaone4TextConfig",
+        model_class="gptqmodel.models.ports.exaone4.Exaone4ForCausalLM",
+    )
 
     fusable = FusableConfig("exaone4").merge(LlamaFusableConfig())
 
@@ -19,6 +25,10 @@ class Exaone4QModel(BaseQModel):
     # Exaone4 uses GQA (Grouped Query Attention) architecture
     # o_proj must match v_proj shape for AWQ scaling optimizations
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Post-norm residuals and QK normalization are not qualified fold sources.
+        return []
 
     module_tree = [
         "model",
@@ -60,6 +70,8 @@ class Exaone4_5QModel(BaseQwen3VLGPTQ):
 
     # GQA makes o_proj shape-incompatible with the Q/K/V AWQ scale group.
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
+
+    awq_get_modules_for_scaling = Exaone4QModel.awq_get_modules_for_scaling
 
     # EXAONE 4.5 wraps the EXAONE 4 decoder in a multimodal model and keeps
     # the visual tower outside the language-layer quantization tree.
