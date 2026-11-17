@@ -1,19 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Native LFM3 decoder ownership, public consumers and plain-AWQ regression.
+"""Native LFM3/VL and package-owned Omni consumer and plain-AWQ regressions."""
 
-The Omni fixture exercises only its native LFM3 text decoder contract, not an
-unavailable native Omni wrapper. The legacy variant renames the real per-head
-gate to the audited checkpoint spelling; no checkpoint Python is executed.
-"""
-
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
 import torch
 from torch import nn
-from transformers import Lfm3Config, Lfm3ForCausalLM, Lfm3Model, Lfm3VlConfig, Lfm3VlForConditionalGeneration
+from transformers import Lfm3Config, Lfm3ForCausalLM, Lfm3VlConfig, Lfm3VlForConditionalGeneration
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -24,14 +18,21 @@ from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
 from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.module_plan import ModulePlan
+from gptqmodel.models.ports.lfm3_omni.modeling_lfm3_omni import Lfm3OmniForConditionalGeneration
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig, Fallback, QuantizeConfig
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
+from tests.test_lfm3_omni_local_port import tiny_config as tiny_omni_config
 
 
 DEFINITIONS: dict[str, type[LFM3QModel]] = {
     "lfm3": LFM3QModel, "lfm3_vl": LFM3VLQModel, "lfm3_omni": LFM3OmniQModel,
 }
+LAYOUTS = [
+    ("lfm3", "native"), ("lfm3", "legacy_gate"), ("lfm3", "ungated"),
+    ("lfm3_vl", "native"), ("lfm3_vl", "ungated"),
+    ("lfm3_omni", "native"), ("lfm3_omni", "unsandwiched"),
+]
 MLP = {"feed_forward.w1", "feed_forward.w3", "feed_forward.w2"}
 QUANTIZED = {
     "conv": {"conv.in_proj", "conv.out_proj"} | MLP,
@@ -54,23 +55,6 @@ def bounded_cpu_rng():
         torch.set_num_threads(previous)
 
 
-class _OmniTextCore(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.language_model = Lfm3Model(config)
-
-
-class _OmniTextFixture(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = SimpleNamespace(model_type="lfm3_omni", use_cache=False)
-        self.model = _OmniTextCore(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-    def forward(self, input_ids, **kwargs):
-        return self.lm_head(self.model.language_model(input_ids, **kwargs).last_hidden_state)
-
-
 def _fixture(kind, *, device="cpu", layout="native", dtype=torch.float32, fallback=None):
     config = Lfm3Config(
         vocab_size=64, hidden_size=32, intermediate_size=48, num_hidden_layers=3,
@@ -78,7 +62,7 @@ def _fixture(kind, *, device="cpu", layout="native", dtype=torch.float32, fallba
         layer_types=["conv", "full_attention", "sliding_attention"],
         conv_L_cache=3, conv_bias=True, attention_bias=True, sliding_window=8,
         max_position_embeddings=64, pad_token_id=0, bos_token_id=1, eos_token_id=2,
-        use_attention_gate=layout != "ungated", use_sandwich_norm=layout != "ungated",
+        use_attention_gate=layout != "ungated", use_sandwich_norm=layout not in {"ungated", "unsandwiched"},
     )
     config._attn_implementation = "eager"
     with torch.device(device):
@@ -96,7 +80,10 @@ def _fixture(kind, *, device="cpu", layout="native", dtype=torch.float32, fallba
                 vision_start_token_id=62, vision_end_token_id=63,
             ))
         else:
-            model = _OmniTextFixture(config)
+            omni_config = tiny_omni_config(bias=True, sandwich=config.use_sandwich_norm)
+            config = type(omni_config.text_config)(**config.to_dict())
+            omni_config.text_config = config
+            model = Lfm3OmniForConditionalGeneration(omni_config)
     model = cast(nn.Module, model).to(dtype=dtype).eval()
     definition = DEFINITIONS[kind]
     _convert_model_with_defuser(definition, model, cleanup_original=False)
@@ -141,9 +128,8 @@ def _logits(model):
     return output.logits if hasattr(output, "logits") else output
 
 
-@pytest.mark.parametrize("kind", DEFINITIONS)
+@pytest.mark.parametrize("kind,layout", LAYOUTS)
 @pytest.mark.parametrize("device", ["cpu", "meta"])
-@pytest.mark.parametrize("layout", ["native", "legacy_gate", "ungated"])
 def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
     model, wrapper, layers, config = _fixture(kind, device=device, layout=layout)
     plan = wrapper.module_plan()
@@ -152,25 +138,31 @@ def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
     full = {name for block in _consumer_blocks(wrapper, planning=True) for name in block}
     assert len(layers) == 3
     assert selected == set.union(*QUANTIZED.values())
+    gates = {"lfm3": ("g_proj", "gate_proj"), "lfm3_vl": ("g_proj",), "lfm3_omni": ("gate_proj",)}[kind]
+    conv_blocks = [["conv.in_proj"], ["conv.conv:!"], ["conv.out_proj"]]
+    if kind == "lfm3_vl":
+        conv_blocks = [["conv.in_proj"], ["conv.out_proj"], ["conv.conv:!"]]
     assert _consumer_blocks(wrapper, planning=True) == [
         ["operator_norm:!"], ["post_operator_norm:!"],
-        ["conv.in_proj"], ["conv.conv:!"], ["conv.out_proj"],
+        *conv_blocks,
         ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!",
-         "self_attn.v_proj", "self_attn.g_proj:!", "self_attn.gate_proj:!"],
+         "self_attn.v_proj", *(f"self_attn.{gate}:!" for gate in gates)],
         ["self_attn.o_proj"], ["ffn_norm:!"], ["post_ffn_norm:!"],
         ["feed_forward.w1", "feed_forward.w3"], ["feed_forward.w2"],
     ]
-    for name in ("conv.conv", "self_attn.g_proj", "self_attn.gate_proj"):
+    for name in ("conv.conv", *(f"self_attn.{gate}" for gate in gates)):
         spec = plan.find(name)
         assert spec is not None, f"undeclared source-dtype owner: {name}"
         assert "!" in spec.flags and not spec.quantize and not spec.capture_only
         assert name not in selected
         assert f"{name}:!" in full
+    for gate in {"g_proj", "gate_proj"} - set(gates):
+        assert plan.find(f"self_attn.{gate}") is None
     assert config.layer_types is not None
     for layer_type, layer in zip(config.layer_types, layers.values()):
         owners = {key.rsplit(".", 1)[0] for key in layer.state_dict()}
         dense = {"operator_norm", "ffn_norm"}
-        if layout != "ungated":
+        if config.use_sandwich_norm:
             dense |= {"post_operator_norm", "post_ffn_norm"}
         if layer_type == "conv":
             dense.add("conv.conv")
@@ -180,8 +172,8 @@ def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
             assert conv.weight.shape == (32, 1, 3)
         else:
             dense |= {"self_attn.q_norm", "self_attn.k_norm"}
-            if layout != "ungated":
-                gate = "gate_proj" if layout == "legacy_gate" else "g_proj"
+            if config.use_attention_gate:
+                gate = "gate_proj" if kind == "lfm3_omni" or layout == "legacy_gate" else "g_proj"
                 dense.add(f"self_attn.{gate}")
                 gate_module = layer.get_submodule(f"self_attn.{gate}")
                 assert isinstance(gate_module, nn.Linear)
@@ -203,8 +195,7 @@ def test_real_decoder_owners_tags_and_public_consumer(kind, device, layout):
             assert torch.isfinite(_logits(model)).all()
 
 
-@pytest.mark.parametrize("kind", DEFINITIONS)
-@pytest.mark.parametrize("layout", ["native", "legacy_gate", "ungated"])
+@pytest.mark.parametrize("kind,layout", LAYOUTS)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("fallback", [None, Fallback()], ids=["no-fallback", "rtn-fallback"])
 def test_plain_awq_quantizes_and_packs_every_projection_without_mutating_dense_owners(
