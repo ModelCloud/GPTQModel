@@ -97,6 +97,23 @@ def test_compile_clean_kernel_keeps_auto_compile():
     assert harness._generation_compile_kwargs({}) == {}
 
 
+def test_native_exl3_linear_is_not_compile_clean():
+    """The native EXL3 kernel breaks graphs but is not a ``BaseQuantLinear``.
+
+    ``_ensure_inner`` holds an RLock and, in bf16, reads a host scalar, so the
+    static-cache auto-compile was 2.4-14x slower than eager. Because the kernel
+    lives outside ``qlinear/``, the policy search missed it and a native EXL3
+    model looked dense, which kept the compile on (#4917).
+    """
+
+    from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
+
+    harness = _Harness(ExllamaV3Linear(in_features=8, out_features=8, name="proj"))
+
+    assert harness._kernels_support_compile() is False
+    assert harness._generation_compile_kwargs({}) == {"disable_compile": True}
+
+
 def test_an_explicit_disable_compile_false_is_respected():
     """A caller who asks to compile keeps compiling, even on a breaking kernel."""
 

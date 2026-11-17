@@ -3371,7 +3371,15 @@ class BaseQModel(nn.Module):
             # Nothing to inspect (a test double or a foreign runtime): keep the
             # caller's policy instead of guessing.
             return True
-        modules = find_modules(model, layers=[BaseQuantLinear, ExllamaV3TorchLinear])
+        # The native EXL3 kernel is a plain `nn.Module`, not a `BaseQuantLinear`,
+        # so it has to be named here or a native EXL3 model looks dense and
+        # keeps the auto-compile its `_ensure_inner` RLock breaks on every
+        # layer (#4917). It declares no `SUPPORTS_COMPILE`, so the lookup below
+        # answers False for it.
+        modules = find_modules(
+            model,
+            layers=[BaseQuantLinear, ExllamaV3Linear, ExllamaV3TorchLinear],
+        )
         if not modules:
             return True
         return all(getattr(module, "SUPPORTS_COMPILE", False) for module in modules.values())
