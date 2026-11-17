@@ -154,8 +154,15 @@ class AwqGemmFn(torch.autograd.Function):
                 **({"kernel": kernel} if kernel is not None else {}),
             )
 
-        out = out.reshape(out_shape)
-        return out
+        if out.shape == out_shape:
+            # The GEMM allocated this tensor, so return it as-is: a no-op
+            # `reshape` would still hand autograd a view created inside this
+            # Function, and an in-place update on it is forbidden (#4974).
+            return out
+        # A batched result needs the leading dimensions back, and the reshape
+        # view of this Function's own output must be materialized for the same
+        # reason.
+        return out.reshape(out_shape).clone()
 
     @staticmethod
     def backward(ctx, grad_output):

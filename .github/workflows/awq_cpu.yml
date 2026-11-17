@@ -8,6 +8,9 @@ on:
       - 'gptqmodel/quantization/**'
       - 'gptqmodel/models/**'
       - 'gptqmodel/nn_modules/qlinear/torch_awq.py'
+      - 'gptqmodel/nn_modules/qlinear/_numerics.py'
+      - 'gptqmodel/nn_modules/qlinear/gemm_awq.py'
+      - 'gptqmodel/nn_modules/qlinear/gemm_awq_triton.py'
       - 'docs/**'
       - 'tests/test_awq_*.py'
       - 'tests/test_docs_contract_refs.py'
@@ -61,6 +64,8 @@ jobs:
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
                 tests/test_awq_cohere2_moe_parallel_norm_4898.py \
+                tests/test_training_kernel_inplace_4974.py \
+                tests/test_peft_adalora_training_4974.py \
                 tests/module_tree/test_awq_relationships.py \
                 tests/module_tree/test_granitemoehybrid_model_tree.py \
                 tests/module_tree/test_registered_module_plans.py \
