@@ -164,7 +164,12 @@ def test_resave_refuses_when_expert_shell_is_not_defused(quantized_olmoe, monkey
         lambda *args, **kwargs: False,
     )
 
-    with pytest.raises(ValueError, match="Refusing to re-save"):
+    # Since #4810 the refusal fires earlier, while ``save()`` rebuilds the
+    # un-defused shell: the loader rejects the missing per-expert tensors
+    # before the re-save guard runs.  Either way nothing is written.
+    with pytest.raises(
+        (ValueError, RuntimeError), match="Refusing to re-save|does not provide tensors"
+    ):
         model.save(refused)
 
     assert not (refused / "model.safetensors").exists()
