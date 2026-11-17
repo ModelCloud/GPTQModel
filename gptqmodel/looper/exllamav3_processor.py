@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import ctypes
 import gc
 import math
 import os
@@ -116,6 +115,7 @@ from ..utils.exl3_router_candidates import (
     learned_router_ranked_choices,
 )
 from ..utils.exllamav3 import _resolve_linear_shape, create_exllamav3_module
+from ..utils.host_memory import malloc_trim
 from ..utils.kernel import get_kernel_config
 from ..utils.logger import setup_logger
 from ..utils.model import recurse_setattr
@@ -1634,13 +1634,7 @@ class EXL3Processor(SharedInputCaptureProcessor):
     def _malloc_trim() -> int | None:
         """Return unused glibc arenas when the platform exposes malloc_trim."""
 
-        try:
-            trim = getattr(ctypes.CDLL(None), "malloc_trim")
-        except (AttributeError, OSError):
-            return None
-        trim.argtypes = [ctypes.c_size_t]
-        trim.restype = ctypes.c_int
-        return int(trim(0))
+        return malloc_trim()
 
     def release_host_memory(
         self, context: str, model: Any | None = None
