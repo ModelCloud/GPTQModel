@@ -1,0 +1,18 @@
+GPT-QModel legacy InternVL chat port
+
+The wrapper, vision configuration and vision modeling originate from
+OpenGVLab/InternVL under the MIT license retained in LICENSE. The separately
+attributed FastChat-derived conversation implementation retains its Apache-2.0
+license in LICENSE-FASTCHAT. Original source notices remain in those files.
+
+InternVLTokenizerFactory is Copyright 2026 ModelCloud.ai, Apache-2.0.
+It selects existing package/native implementations and does not contain a copy
+of the InternLM2 tokenizer. That implementation and its source attribution live
+in the sibling internlm and internlm2 port packages.
+
+The tokenizer asset manifest records immutable Hugging Face release revisions
+and SHA-256 hashes. The historical reference records Transformers 4.37.2
+LlamaTokenizerFast output vectors. See README.md for source URLs, measured
+parity, decoder/provider coverage and the explicit Tokenicer profile contract.
+Downloaded checkpoint assets retain their upstream licenses; trained checkpoint
+weights are not redistributed by this package.
