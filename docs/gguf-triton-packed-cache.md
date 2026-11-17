@@ -1,9 +1,34 @@
 # GGUF Triton packed metadata cache
 
 `GGUFTritonKernel` decodes compact scales, minima, and bit layouts from packed
-GGUF `qweight` blocks once per device and format. The decoded metadata remains
-packed or block-sized; a full dequantized layer is never retained. The cache
-must be rebuilt whenever the source `qweight` changes.
+GGUF `qweight` blocks once per device and format. The cache holds only compact
+derived metadata: the per-sub-block scale/min values and, for Q1_0, the u32
+sign words used by the SM80 specialization. The packed code bytes (`qs`, `ql`,
+`qh`, and the Q1_0 sign bytes) are strided views of `qweight` itself, so they
+add no resident memory. A full dequantized layer and a second copy of the
+packed codes are never retained. The cache must be rebuilt whenever the source
+`qweight` changes.
+
+## Resident memory cost
+
+Beyond `qweight`, the cache keeps the scale/min metadata only:
+
+| Format | Packed bytes per block/row | Retained metadata per block/row | Extra VRAM |
+| --- | ---: | ---: | ---: |
+| Q1_0 | 130 | 2 (scale) | 0.015x |
+| Q4_K | 144 | 32 (scale + min, FP16) | 0.22x |
+| Q5_K | 176 | 32 (scale + min, FP16) | 0.18x |
+| Q6_K | 210 | 32 (16 signed scales, FP16) | 0.15x |
+
+The metadata widens to FP32 when the K-scale range guard flags a block, which
+doubles those columns. The code bytes stay zero-copy regardless.
+
+Before #4748 the cache also materialized a permuted contiguous copy of every
+code array, so a model held roughly 2.1x its packed weight bytes. On an RTX
+4090 with Llama-3.1-8B Q4_K_M that was 5.61 GiB after load and 9.68 GiB after
+one token, with a 4.06 GiB cache against 3.66 GiB of packed weights. With the
+views the same model retains the packed weights plus about 0.5 GiB of
+scale/min metadata.
 
 ## Cache flow
 
@@ -47,6 +72,12 @@ weights in place, then compare the fused GPU result with an independent NumPy
 GGUF decoder and FP64 Torch dot product. They also cover buffer replacement,
 checkpoint load, device move, repeated cache hits, and the explicit-clear
 contract for inference tensors.
+
+`tests/kernels/test_gguf_triton_packed_weight_memory_4748.py` measures the real
+device bytes retained after one forward. For Q4_K, Q5_K, and Q6_K it requires
+the retained bytes to stay below 0.6x the packed weight bytes, and it checks
+the strided-code forward against an independent FP64 dequantized oracle at
+M=1 and M=16.
 
 On an NVIDIA GB10 (SM 12.1), PyTorch 2.15.0+cu132, and Triton 3.9.0,
 Q4_K with K=N=1024 retained 655,360 bytes (0.625 MiB) of compact metadata
