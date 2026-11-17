@@ -14,6 +14,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear import qqq as qqq_module
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 _OLD_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
@@ -160,6 +161,62 @@ def test_qqq_native_forward_passes_the_shared_scratch_as_c(monkeypatch):
         ((1024, 256), calls[0][1]),
         ((1024, 128), calls[0][1]),
     ]
+
+
+def test_qqq_reduce_scratch_is_exclusive_per_stream():
+    """Two live streams must not share the writable C reduction scratch.
+
+    The native kernel reads and writes ``C`` for the whole call, so an
+    allocation lock is not enough: the buffer must belong to the stream whose
+    work will use it.  ``stream`` lets this run without a CUDA device; the
+    CUDA test below exercises the real ``torch.cuda.current_stream`` lookup.
+    """
+
+    qqq_module._clear_reduce_scratch()
+    device = torch.device("cpu")
+
+    first = qqq_module._shared_reduce_scratch(device, 64, stream="stream-a")
+    second = qqq_module._shared_reduce_scratch(device, 64, stream="stream-b")
+    assert first.untyped_storage().data_ptr() != second.untyped_storage().data_ptr()
+
+    # Calls on one stream are ordered by that stream and may reuse its buffer.
+    first_again = qqq_module._shared_reduce_scratch(device, 64, stream="stream-a")
+    assert first_again.untyped_storage().data_ptr() == first.untyped_storage().data_ptr()
+
+    # A device with no stream keeps one shared buffer, as before.
+    qqq_module._clear_reduce_scratch()
+    plain = qqq_module._shared_reduce_scratch(device, 64)
+    plain_again = qqq_module._shared_reduce_scratch(device, 64)
+    assert plain.untyped_storage().data_ptr() == plain_again.untyped_storage().data_ptr()
+    qqq_module._clear_reduce_scratch()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or IS_ROCM,
+    reason="QQQ's native kernel is CUDA-only; HIP exposes CUDA streams too",
+)
+def test_qqq_reduce_scratch_is_exclusive_per_cuda_stream():
+    """Concurrent CUDA streams get independent reduce scratch, not one alias."""
+
+    qqq_module._clear_reduce_scratch()
+    device = torch.device("cuda", torch.cuda.current_device())
+    first_stream = torch.cuda.Stream(device=device)
+    second_stream = torch.cuda.Stream(device=device)
+    try:
+        with torch.cuda.stream(first_stream):
+            first = qqq_module._shared_reduce_scratch(device, 64)
+        with torch.cuda.stream(second_stream):
+            second = qqq_module._shared_reduce_scratch(device, 64)
+        with torch.cuda.stream(first_stream):
+            first_again = qqq_module._shared_reduce_scratch(device, 64)
+
+        assert first.data_ptr() != second.data_ptr()
+        assert first_again.data_ptr() == first.data_ptr()
+    finally:
+        first_stream.synchronize()
+        second_stream.synchronize()
+        qqq_module._clear_reduce_scratch()
 
 
 def test_qqq_torch_unpack_uint4_matches_int64_oracle_bitwise():
