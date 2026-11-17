@@ -17,7 +17,7 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.looper.loop_processor import _reusable_calibration_dataset
 from gptqmodel.quantization.config import GPTAQConfig
@@ -66,7 +66,7 @@ def test_generator_calibration_with_gptaq(tiny_llama_dir):
         QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig()),
     )
 
-    model.quantize(_generator(), batch_size=4)
+    model.quantize(CalibrationConfig(dataset=_generator(), batch_size=4))
 
     assert model.quantized
 
@@ -76,7 +76,7 @@ def test_generator_calibration_with_lora_adapter(tiny_llama_dir, tmp_path):
     lora_dir = tmp_path / "lora"
     model = GPTQModel.load(tiny_llama_dir, QuantizeConfig(bits=4, group_size=128))
 
-    model.quantize(_generator(), batch_size=4, adapter=Lora(rank=4, path=str(lora_dir)))
+    model.quantize(CalibrationConfig(dataset=_generator(), batch_size=4), adapter=Lora(rank=4, path=str(lora_dir)))
 
     assert model.quantized
     # EoRA adapters are generated during quantize() and persisted by save().
@@ -84,15 +84,17 @@ def test_generator_calibration_with_lora_adapter(tiny_llama_dir, tmp_path):
 
 
 def test_generator_adapter_calibration_dataset(tiny_llama_dir, tmp_path):
-    """``adapter_calibration_dataset`` is shared the same way."""
+    """``CalibrationConfig.adapter_dataset`` is shared the same way."""
     lora_dir = tmp_path / "lora"
     model = GPTQModel.load(tiny_llama_dir, QuantizeConfig(bits=4, group_size=128))
 
     model.quantize(
-        _texts(),
-        batch_size=4,
+        CalibrationConfig(
+            dataset=_texts(),
+            batch_size=4,
+            adapter_dataset=(text for text in _texts()),
+        ),
         adapter=Lora(rank=4, path=str(lora_dir)),
-        adapter_calibration_dataset=(text for text in _texts()),
     )
 
     assert model.lora_results

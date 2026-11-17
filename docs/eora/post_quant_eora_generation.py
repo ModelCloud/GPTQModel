@@ -24,7 +24,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 from eora_calibration_data_construction import construct_ARC, construct_c4, construct_mmlu
 
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import CalibrationConfig, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 
 
@@ -75,7 +75,6 @@ if __name__ == '__main__':
         adapter=eora,
         model_id_or_path=args.model,
         quantized_model_id_or_path=args.quantized_model,
-        calibration_dataset=calibration_dataset,
-        calibration_dataset_concat_size=0,
+        calibration=CalibrationConfig(dataset=calibration_dataset),
     )
 

@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig, LlamaForCausalLM
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -325,7 +326,7 @@ def test_default_offload_quantize_leaves_a_normal_in_session_model(tmp_path, met
     assert qcfg.offload_to_disk
 
     qmodel = GPTQModel.load(str(model_dir), quantize_config=qcfg, backend=BACKEND.TORCH)
-    qmodel.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    qmodel.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
 
     hf = qmodel.model
     run_root = qmodel._private_offload_run_root

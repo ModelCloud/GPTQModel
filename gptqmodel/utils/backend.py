@@ -69,9 +69,9 @@ class BACKEND(str, Enum):
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
 
-    # ParoQuant kernels
-    PAROQUANT_CUDA = "paroquant_cuda"
-    PAROQUANT_TRITON = "paroquant_triton"
+    # Paro kernels
+    PARO_CUDA = "paro_cuda"
+    PARO_TRITON = "paro_triton"
 
     # FP8 kernels
     FP8_TORCH = "fp8_torch"
@@ -119,7 +119,7 @@ class BACKEND(str, Enum):
     TORCH_FUSED_AWQ = "torch_fused_awq"
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"
-    PARO = "paroquant"
+    PARO = "paro"
 
 
 class PROFILE(str, Enum):
@@ -154,8 +154,8 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.BITBLAS_AWQ: BACKEND.AWQ_BITBLAS,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
-    "paroquant": {
-        BACKEND.PARO: BACKEND.PAROQUANT_CUDA,
+    "paro": {
+        BACKEND.PARO: BACKEND.PARO_CUDA,
     },
     "fp8": {
         BACKEND.TORCH: BACKEND.FP8_TORCH,

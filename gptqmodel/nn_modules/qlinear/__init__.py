@@ -34,6 +34,7 @@ from ...utils.planar_packing import (
 )
 from ...utils.safe import threadpool_limits
 from ..compiled_state import compiled_module_getstate
+from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
@@ -336,6 +337,33 @@ class BaseQuantLinear(nn.Module):
 
     # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
+
+    # Whether a compiled generation path (transformers' static-cache
+    # auto-compile, a CUDA-graph decode loop) is not a pessimization for this
+    # kernel. False does not mean the forward is untraceable: most kernels
+    # here break the graph on every linear because they call a custom op
+    # without a fake implementation or branch on host values (`data_ptr()`,
+    # `id()`, `._version`) inside `forward`. When capture fails, each decode
+    # step pays for dozens of graph fragments and the guard checks, so the
+    # static cache ends up 2-4x slower than eager (#4669). A kernel opts in
+    # only with a measurement on the hardware it claims; an opt-in on a
+    # graph-breaking kernel whose eager path is already fast is strictly
+    # slower than eager.
+    SUPPORTS_COMPILE: bool = False
+
+    # Highest `torch.compile` level this kernel's `forward` reaches, measured
+    # with the probes in `_compile_support.LEVEL_PROBES`. Every concrete kernel
+    # must declare it explicitly (no silent inheritance), because the answer
+    # differs per kernel and a wrong `CUDAGRAPH` claim turns a decode loop into
+    # a capture failure. See docs/kernel-compile-matrix.md.
+    SUPPORTS_COMPILE_LEVEL: COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+
+    # Whether the eager `forward` may run inside `torch.cuda.graph(...)`:
+    # no host sync, no tensor->host transfer, no Python allocation or device
+    # decision, no data-dependent branch. Independent of dynamo tracing: a
+    # custom op without a fake implementation can be capture-safe and still
+    # fail to trace. Every concrete kernel declares it explicitly.
+    SUPPORTS_GRAPH_CAPTURE: bool = False
 
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None

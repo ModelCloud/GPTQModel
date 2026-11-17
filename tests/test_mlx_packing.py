@@ -672,7 +672,7 @@ def _convert_tiny_qwen2(path, dynamic, desc_act=False, stock_compatible=False):
     _tiny_qwen2_dir(path)
     qcfg = RTNConfig(bits=4, group_size=128, sym=False, desc_act=desc_act, dynamic=dynamic)
     model = GPTQModel.load(str(path), quantize_config=qcfg, device="cpu")
-    model.quantize(calibration=None)
+    model.quantize()
     quantized = path.parent / (path.name + "_quantized")
     model.save(str(quantized))
     # Export reloads the saved checkpoint; do the same so the source tensors

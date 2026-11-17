@@ -78,7 +78,7 @@ def _assert_arc_scores(
 def test_requantize_both_save_reload_and_generate(tmp_path):
     """Check ARC before/after requantization, then reload and generate."""
 
-    from gptqmodel import GPTQModel
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.nn_modules.qlinear import BaseQuantLinear
     from gptqmodel.quantization.config import QuantizeEmbed
     from gptqmodel.utils.backend import BACKEND
@@ -117,12 +117,14 @@ def test_requantize_both_save_reload_and_generate(tmp_path):
         add_special_tokens=True,
     )
     model.requantize(
-        calibration=[dict(calibration)],
+        CalibrationConfig(
+            dataset=[dict(calibration)],
+            concat_size=None,
+            sort=None,
+            batch_size=1,
+            min_length=8,
+        ),
         embed_quant_mode=QuantizeEmbed.BOTH,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
-        calibration_data_min_length=8,
         backend=BACKEND.AUTO,
     )
 

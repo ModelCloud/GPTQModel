@@ -19,10 +19,9 @@ import torch
 import torch.nn as nn
 from torch.multiprocessing.reductions import StorageWeakRef
 
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY, NativeProcessor
-from gptqmodel.quantization.config import FOEMConfig, GPTAQConfig, QuantizeConfig
+from gptqmodel.quantization.config import CalibrationConfig, FOEMConfig, GPTAQConfig, QuantizeConfig
 from gptqmodel.quantization.foem import FOEM
 from gptqmodel.quantization.gptaq import GPTAQ
 

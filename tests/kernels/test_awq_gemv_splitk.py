@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import pack_intweight
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq_columns
 from gptqmodel.utils.awq import (
@@ -266,7 +267,7 @@ def test_real_qwen25_awq_gemv_greedy_decode_stays_finite(tmp_path):
         }
         for _ in range(4)
     ]
-    model.quantize(calibration, batch_size=1, calibration_concat_size=0)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
     model.save(str(tmp_path))
     del model
 

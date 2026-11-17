@@ -37,8 +37,8 @@ the compatibility reference. Inference kernels are a separate effort.
 | 9 | GGUF `TQ2_0` block packing | Existing ternary layout |
 | 10 | GGUF `MXFP4` block packing | Existing microscaling layout |
 | 11 | FOEM correction | `alpha` and `beta` options over GPTQ |
-| 12 | ParoQuant pair rotation | Forward and inverse transformed-domain math |
-| 13 | ParoQuant group quantization | Learned scale and zero-point packing |
+| 12 | Paro pair rotation | Forward and inverse transformed-domain math |
+| 13 | Paro group quantization | Learned scale and zero-point packing |
 | 14 | QQQ quantization | Existing QQQ packed weights and scales |
 | 15 | FP8 quantization | Existing FP8 scale and payload format |
 | 16 | EXL3 quantization | Existing EXL3 codebook and packed layout |

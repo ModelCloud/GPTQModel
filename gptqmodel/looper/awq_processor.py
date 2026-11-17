@@ -23,7 +23,6 @@ from .._alloc_conf import clamp_budget_below_allocator_split
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -51,7 +50,7 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
-from ..quantization.config import FORMAT, METHOD, MSEConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import FORMAT, METHOD, CalibrationConfig, MSEConfig, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device

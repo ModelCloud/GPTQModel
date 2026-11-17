@@ -68,8 +68,8 @@ def test_defaults_are_the_retired_environment_defaults():
         ("npu_cholesky_block_size", 0),
         ("floatx_cpu_simd_level", -1),
         ("swordfish_dense_m", -1),
-        ("paroquant_rotate_cta_m", 5),
-        ("paroquant_rotate_row_pad", 1),
+        ("paro_rotate_cta_m", 5),
+        ("paro_rotate_row_pad", 1),
         ("awq_triton_schedule", "fused"),
         ("cpu_workers", 0),
         ("rocm_quant_blas", 7),
@@ -140,7 +140,7 @@ def test_loader_exposes_the_kernel_argument():
     assert "configure_kernel(kernel)" in source
 
 
-def test_paroquant_triton_linear_reads_the_policy():
+def test_paro_triton_linear_reads_the_policy():
     """Every kernel that reads the policy must import the accessor.
 
     A missing import compiles fine and only raises when the class is built, so
@@ -148,10 +148,10 @@ def test_paroquant_triton_linear_reads_the_policy():
     the module and assert the symbol resolves before any device work.
     """
 
-    from gptqmodel.nn_modules.qlinear import paroquant_triton
+    from gptqmodel.nn_modules.qlinear import paro_triton
 
-    assert paroquant_triton.resolve_kernel_config is resolve_kernel_config
+    assert paro_triton.resolve_kernel_config is resolve_kernel_config
 
     # The constructor path that reads the policy must resolve its name.
-    source = inspect.getsource(paroquant_triton.ParoQuantTritonLinear.__init__)
+    source = inspect.getsource(paro_triton.ParoTritonLinear.__init__)
     assert "resolve_kernel_config(" in source

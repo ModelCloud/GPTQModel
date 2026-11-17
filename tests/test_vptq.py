@@ -35,7 +35,7 @@ from transformers import PreTrainedTokenizerFast
 from transformers.models.gpt2.modeling_gpt2 import GPT2Config, GPT2LMHeadModel
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear import vptq_torch as vptq_torch_module
 from gptqmodel.nn_modules.qlinear.vptq_cuda import (
@@ -2692,7 +2692,7 @@ def test_tiny_qwen3_vptq_quantization_smoke(tmp_path: Path):
         device="cpu",
     )
     model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.VPTQ_TORCH)
 
     expected_modules = [
         f"model.model.layers.0.self_attn.{projection}"
@@ -2777,7 +2777,7 @@ def test_tiny_gpt2_vptq_conv1d_quantize_save_reload(tmp_path: Path):
         device="cpu",
     )
     model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.VPTQ_TORCH)
 
     expected_modules = {
         "model.transformer.h.0.attn.c_attn": (32, 96),
@@ -2843,7 +2843,7 @@ def test_tiny_qwen3_vptq_grouped_checkpoint_roundtrip(tmp_path: Path):
         device="cpu",
     )
     model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.VPTQ_TORCH)
 
     grouped = {
         name: module for name, module in model.named_modules() if isinstance(module, VPTQLinear)
@@ -2900,7 +2900,7 @@ def test_tiny_qwen3_vptq_cuda_smoke(tmp_path: Path):
         backend=BACKEND.VPTQ_TORCH,
         dtype=torch.bfloat16,
     )
-    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.VPTQ_TORCH)
 
     module = dict(model.named_modules())["model.model.layers.0.self_attn.q_proj"]
     assert isinstance(module, VPTQLinear)
@@ -2956,7 +2956,7 @@ def test_tiny_qwen3_vptq_cuda_auto_reload_uses_the_native_kernel(tmp_path: Path)
         kmeans_iters=8,
     )
     model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.VPTQ_TORCH)
     model.save(quantized_dir)
 
     importer.clear_validation_cache()

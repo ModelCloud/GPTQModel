@@ -24,7 +24,7 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from tests.test_awq_clip_consistency import _ClipTestAWQProcessor, _sequential_clip_grid
@@ -107,8 +107,12 @@ def test_awq_quantize_partial_output_tile_cpu(tmp_path: Path, hidden_size: int):
         )
         model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
         model.quantize(
-            calibration, batch_size=1, backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
+            backend=BACKEND.TORCH,
         )
 
         packed = {

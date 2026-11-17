@@ -917,9 +917,9 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     affine_fit_lock = threading.Lock()
     affine_fit_next_device = [0]
 
-    def paroquant_affine_fit() -> bool:
+    def paro_affine_fit() -> bool:
         """Qualify reduced-precision extrema, grid fitting and pseudo quantization."""
-        from gptqmodel.quantization.paroquant.optimization import _calc_affine_qparams, pseudo_quantize_dequant
+        from gptqmodel.quantization.paro.optimization import _calc_affine_qparams, pseudo_quantize_dequant
 
         with affine_fit_lock:
             if not hasattr(affine_fit_thread, "device"):
@@ -1064,7 +1064,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "AWQ tiled dequantize_gemm": awq_tiled_dequantize,
         "GPTQ FP16 scale storage guard": gptq_scale_storage_guard,
         "GPTQ weight scale floor": gptq_weight_scale_floor,
-        "ParoQuant affine fit": paroquant_affine_fit,
+        "Paro affine fit": paro_affine_fit,
         "VPTQ deterministic segment sum": vptq_segment_sum,
         "gptqmodel_nf12.prefill_gate": nf12_prefill_gate,
         "torch.cuda.current_stream": lambda: str(torch.cuda.current_stream()),
@@ -1169,7 +1169,7 @@ def _requires_two_gpus(name: str) -> bool:
                 "AWQ tiled dequantize_gemm",
                 "GPTQ FP16 scale storage guard",
                 "GPTQ weight scale floor",
-                "ParoQuant affine fit",
+                "Paro affine fit",
                 "VPTQ deterministic segment sum",
             ))
 

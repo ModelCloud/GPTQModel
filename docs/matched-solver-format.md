@@ -13,7 +13,7 @@ The existing method-based API and `GPTQModel.export` remain unchanged.
 
 ```python
 import torch
-from gptqmodel import GPTQModel, MatchedQuantizeConfig, Matcher, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, MatchedQuantizeConfig, Matcher, QuantizeConfig
 from gptqmodel import formats, solvers
 
 model = GPTQModel.load(
@@ -38,18 +38,27 @@ plan = model.plan(config=config)
 assert plan.success  # bool(plan) has the same meaning
 
 # quantize() ALWAYS builds/prints a fresh plan before consuming calibration.
-model.quantize(calibration, config=config, calibration_exclude_attention_sinks=True)
+model.quantize(
+    CalibrationConfig(dataset=calibration, exclude_attention_sinks=True),
+    config=config,
+)
 model.save("qwen-mxfp4")
 restored = GPTQModel.load("qwen-mxfp4", device="cpu")
 ```
 
-`calibration` may contain strings (with a tokenizer), integer token sequences,
-or mappings containing `input_ids` and optional `attention_mask`. This initial
-runner accepts one sequence per row (`batch_size=1`), preserves caller order,
-and excludes padding from Hessian statistics. It does not use the legacy
-sort/minimum-length/concatenation machinery. Supply at least two tokens per row.
-`calibration_exclude_attention_sinks=True` uses the existing
-`CalibrationConfig.exclude_attention_sinks` policy: every attended tokenizer
+Pass an unbound `CalibrationConfig`, not a bare dataset or old calibration
+keywords. Its `dataset` uses the shared model-owned preparation: text, token
+rows, mappings/columns, tensors and generators are normalized, filtered,
+optionally concatenated and sorted before replay. The defaults are
+`sort="desc"` and `min_length=10` (rows with at most ten attended tokens are
+dropped); use `sort=None` for caller order and `min_length=0` for short fixtures.
+The CPU runner requires `batch_size=1` and at least two tokens per prepared row.
+Adapter calibration is not qualified and is rejected before consuming data.
+An explicit `tokenizer=` becomes the model tokenizer through Tokenicer, as in
+the existing quantization path, and is also used by save/load and generation.
+
+`CalibrationConfig.exclude_attention_sinks=True` uses the existing policy:
+every attended tokenizer
 BOS token is excluded from statistics, including interior document boundaries.
 The forward attention mask and tokens stay unchanged. The runner reports the
 excluded count and retained sample counts. With a BOS-less tokenizer such as
@@ -60,7 +69,7 @@ replay or weight mutation.
 A scalar, unmatched config targets **all declared eligible linears**:
 
 ```python
-model.quantize(calibration, config=QuantizeConfig(
+model.quantize(CalibrationConfig(dataset=calibration), config=QuantizeConfig(
     solver=solvers.GPTQ(), format=formats.MXFP4(),
 ))
 ```
@@ -89,7 +98,8 @@ selector resolves successfully.
 | Empty match, overlap, bad 32-column geometry | Failed plan; no calibration or weight mutation |
 | Unsupported solver, format, model, or device | Failed plan with specific reasons |
 | Remote code, fusion, lazy source, already/partly quantized | Rejected before replay |
-| Unsupported legacy `quantize` options | Rejected after printing the plan, before calibration |
+| Bare datasets or old calibration keywords | Rejected; use `CalibrationConfig(dataset=...)` |
+| Unsupported `quantize`/calibration options | Rejected after printing the plan, before calibration |
 | Invalid calibration | Error before weight replacement; capture hooks removed |
 | Numerical error after replacement begins | Model marked incomplete; retry/save rejected; reload dense source |
 
@@ -104,23 +114,30 @@ qualified model lifecycle yet**. Their CPU mathematical proofs are separate.
 
 ```mermaid
 flowchart TD
-    A[BaseQModel.quantize: config] --> B[BaseQModel.plan: resolve_plan]
-    B --> C[ModulePlan roles and declared paths]
-    C --> D{Solver/format/model lifecycle supported?}
-    D -->|no| X[Print errors; fail before calibration]
-    D -->|yes| E[Print all assignments; validate call options]
-    E --> F[quantize_model: capture first decoder inputs]
-    F --> G[Replay stage group; Hessian.capture excludes padding and configured BOS rows]
-    G --> H[solve_gptq_hessian: legal E2M1 on stored E8M0 scales]
-    H --> I[MXFP4Linear: packed bytes and scale bytes only]
-    I --> J[Replay updated layer; propagate hidden states]
+    A["BaseQModel.quantize: validate unbound CalibrationConfig"] --> B["BaseQModel.plan: resolve_plan"]
+    A -->|invalid API| X["Fail before weight mutation"]
+    B --> C["ModulePlan roles and declared paths"]
+    C --> D{"Solver/format/model lifecycle supported?"}
+    D -->|no| X
+    D -->|yes| E["Print all assignments; validate call options"]
+    E -->|unsupported options| X
+    E -->|valid| P["CalibrationConfig.bind: model.prepare_dataset"]
+    P --> Q["Normalize, filter, concatenate, sort and batch"]
+    Q -->|invalid data| X
+    Q -->|valid| R["Separate statistic masks from forward masks"]
+    R -->|no retained statistics| X
+    R -->|valid| F["quantize_model: capture first decoder inputs"]
+    F --> G["Replay stage group; Hessian.capture excludes padding and configured BOS rows"]
+    G --> H["solve_gptq_hessian: legal E2M1 on stored E8M0 scales"]
+    H --> I["MXFP4Linear: packed bytes and scale bytes only"]
+    I --> J["Replay updated layer; propagate hidden states"]
     J -->|next group/layer| G
-    J -->|complete| K[BaseQModel.save: save_checkpoint]
-    G -->|failure| Y[Remove hooks; incomplete model cannot retry/save]
-    K --> L[Staging: safetensors shards and solution manifest]
-    L -->|publish| M[GPTQModel.load: load_checkpoint]
-    M --> N[Validate schema/layout/dtypes; reconstruct packed modules]
-    N --> O[Forward with bounded temporary decode; no dense cache]
+    J -->|complete| K["BaseQModel.save: save_checkpoint"]
+    G -->|failure| Y["Remove hooks; incomplete model cannot retry/save"]
+    K --> L["Staging: safetensors shards and solution manifest"]
+    L -->|publish| M["GPTQModel.load: load_checkpoint"]
+    M --> N["Validate schema/layout/dtypes; reconstruct packed modules"]
+    N --> O["Forward with bounded temporary decode; no dense cache"]
     classDef failure fill:#fee,stroke:#c22
     class X,Y failure
 ```
@@ -129,9 +146,15 @@ flowchart TD
 | --- | --- | --- |
 | Configuration | `QuantizeConfigMeta.__call__` routes method/format to legacy classes | Typed solver/format with optional inherited matcher |
 | Admission | `BaseQModel.quantize` selects a method processor | `BaseQModel.plan` resolves assignments and fails closed |
+| Calibration | Bound `CalibrationConfig` through the shared model preparer | Same preparation and BOS-sink policy; only batch size 1, no adapters |
 | Execution | `ModuleLooper` with existing processor contracts | `quantize_model` CPU-only qualified replay adapter |
 | Save | Existing `BaseQModel.save`/writer dispatch | `save_checkpoint` publishes representation plus per-module provenance |
 | Load | Existing `GPTQModel.load`/loader dispatch | Versioned `solver_format` manifest reconstructs packed CPU modules |
+
+The previous matched prototype took a raw dataset and bypassed sorting,
+minimum-length filtering and concatenation. It now follows the public
+[CalibrationConfig contract](calibration-config.md); `config=` still selects
+solver/format targets independently of the calibration policy.
 
 The new runner is intentionally bounded rather than pretending the legacy
 method-homogeneous looper can already execute arbitrary mixed solutions.
@@ -160,7 +183,7 @@ The matcher is recipe metadata, not part of the encoded weight format.
 ## Validation
 
 ```bash
-python -m pytest tests/test_matched_quantize_config.py tests/test_mxfp4_solver_kernel.py -q
+python -m pytest tests/test_matched_quantize_config.py tests/test_calibration_config.py tests/test_calibration_attention_sinks.py tests/test_mxfp4_solver_kernel.py -q -ra
 python -m scripts.validate_matched_mxfp4 --output /path/to/new-validation-directory --exclude-attention-sinks
 ```
 
@@ -170,7 +193,10 @@ tokens for held-out next-token loss. It checks finite logits, generation,
 packed state hashes, and exact logits/generation after public save/load.
 The tiny real-Qwen2 tests additionally cover repeated save/load, mixed GPTQ
 settings, unmatched state preservation, padded SDPA replay, failure cleanup,
-and configuration snapshot isolation. Independent scalar decoding and fresh
+and configuration snapshot isolation. Calibration API tests cover shared
+filtering/sort/concatenation, five dataset representations including one-shot
+generators, BOS separators and padded tails, tokenizer override/save/reload,
+and caller-owned configuration reuse. Independent scalar decoding and fresh
 normal-equation solves establish the codec/kernel/blocked solver oracles.
 
 Observed with Torch 2.15.0, Transformers 5.22.2, Python 3.12, four CPU threads:
@@ -187,6 +213,14 @@ Observed with Torch 2.15.0, Transformers 5.22.2, Python 3.12, four CPU threads:
 | Peak process RSS | 4,206,080 KiB |
 | Reload packed/dense state and logits | Exact |
 | Reload greedy generated token IDs | Exact |
+
+The public `CalibrationConfig` migration was revalidated with the same corpus
+windows and sink option enabled. All 458 checkpoint tensors, held-out logit
+hashes, generation and perplexity match the pre-migration run exactly;
+save/load/re-save checks still pass. The shared preparation removes no rows
+from these equal-length 128-token samples, and the BOS-less tokenizer still
+excludes zero sink rows. This rerun took 242.3 seconds for quantization;
+the table above retains the initial measurements.
 
 Loss covers 1,016 next-token predictions with context reset per 128-token row;
 the perplexity increase is real, not claimed accuracy parity. These figures are

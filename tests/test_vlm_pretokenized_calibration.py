@@ -190,7 +190,7 @@ def test_vlm_mixed_rows_are_rejected_clearly(cls):
 def test_vlm_conversation_path_rejects_concat_size(cls):
     model = _make_model(cls)
 
-    with pytest.raises(ValueError, match="calibration_concat_size"):
+    with pytest.raises(ValueError, match=r"CalibrationConfig\.concat_size"):
         model.prepare_dataset(
             [_conversation("hello")],
             batch_size=1,

@@ -10,7 +10,7 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
@@ -61,7 +61,7 @@ def test_tiny_llama_quantize_save_reload(tmp_path, activation, recipe, backend, 
         "A short calibration sentence about a fox. A short calibration sentence about a fox.",
         "Another sentence about the moon. Another sentence about the moon.",
     ]
-    model.quantize(calibration, batch_size=1, backend=backend)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1), backend=backend)
     selected = [(name, module) for name, module in model.model.named_modules() if isinstance(module, kernel)]
     assert len(selected) == 14
     assert not isinstance(model.model.lm_head, kernel)
@@ -151,7 +151,7 @@ def test_tiny_llama_mixed_fp8_attention_nvfp4_mlp(tmp_path):
         "A short calibration sentence about a fox. A short calibration sentence about a fox.",
         "Another sentence about the moon. Another sentence about the moon.",
     ]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.GPTQ_W4A_NVFP4)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1), backend=BACKEND.GPTQ_W4A_NVFP4)
     selected = [(name, module) for name, module in model.model.named_modules()
                 if isinstance(module, W4ANVFP4Linear)]
     assert len(selected) == 14
@@ -223,7 +223,7 @@ def test_tiny_llama_per_layer_mlp_fp8_override(tmp_path):
         "A short calibration sentence about a fox. A short calibration sentence about a fox.",
         "Another sentence about the moon. Another sentence about the moon.",
     ]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.GPTQ_W4A_NVFP4)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1), backend=BACKEND.GPTQ_W4A_NVFP4)
     selected = [module for _, module in model.model.named_modules()
                 if isinstance(module, W4ANVFP4Linear)]
     assert len(selected) == 14
@@ -264,8 +264,8 @@ def test_tiny_llama_gptaq_retains_native_reference(tmp_path, monkeypatch):
 
     original = GPTAQ.process_batch
     cross_terms = []
-    def record_cross_term(self, inp):
-        original(self, inp)
+    def record_cross_term(self, inp, batch_index=None):
+        original(self, inp, batch_index=batch_index)
         cross_terms.append(float(self.dXXT.abs().max()))
     monkeypatch.setattr(GPTAQ, "process_batch", record_cross_term)
     test_tiny_llama_quantize_save_reload(
@@ -349,7 +349,7 @@ def test_fixed_producer_scales_installed_during_fresh_quantization(tmp_path):
         "A short calibration sentence about a fox. A short calibration sentence about a fox.",
         "Another sentence about the moon. Another sentence about the moon.",
     ]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.GPTQ_W4A_NVFP4)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1), backend=BACKEND.GPTQ_W4A_NVFP4)
     assert model.model._w4a_stream_global_scales == fixed
     quantizers = [module for module in model.model.modules()
                   if isinstance(module, NVFP4BoundaryQuantizer)]

@@ -42,8 +42,8 @@ the BOS row dominates.
 
 The PR author re-ran Llama-3.2-1B QQQ4 (128 C4 calibration documents, bf16,
 `group_size=128`, 80 × 512 wikitext-2 test tokens) on an RTX 4090. With
-`calibration_concat_size=512` the result was 18.8 at `damp_percent=0.005` and
-27.0 at `0.05`; with `calibration_concat_size=2048` it was 27.4 and 56.1. On
+`CalibrationConfig(concat_size=512)` the result was 18.8 at `damp_percent=0.005` and
+27.0 at `0.05`; with `concat_size=2048` it was 27.4 and 56.1. On
 this harness the lower damp was better, i.e. the opposite direction from the
 issue's Llama table. That matches the issue's own note that the effect depends
 on the model and calibration. The default is raised anyway because it matches

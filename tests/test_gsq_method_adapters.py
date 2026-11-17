@@ -74,7 +74,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
     from tokenizers.models import WordLevel
     from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-    from gptqmodel import GPTQModel
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.models._const import DEVICE
     from gptqmodel.models.definitions.llama import LlamaQModel
     from gptqmodel.quantization import AWQConfig, FP8Config, GSQConfig
@@ -117,7 +117,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
                                   opt_finetune_epochs=1, opt_train_samples=8,
                                   opt_validation_samples=4, opt_batch_size=4,
                                   opt_stage_cudagraph=False, gsq=gsq)
-        backend = BACKEND.PAROQUANT_CUDA
+        backend = BACKEND.PARO_CUDA
     else:
         quant_config = RTNConfig(bits=4, group_size=32, device=DEVICE.CPU,
                                  offload_to_disk=False, gsq=gsq)
@@ -140,8 +140,13 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
         monkeypatch.setattr(FP8GSQProcessor, "process", record_fitted_payload)
     wrapper = LlamaQModel(model=model, quantized=False, quantize_config=quant_config,
                           tokenizer=tokenizer, model_local_path=str(source))
-    wrapper.quantize([{"input_ids": list(range(1, 17))}], backend=backend,
-                     calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": list(range(1, 17))}],
+            min_length=1,
+        ),
+        backend=backend,
+    )
     if method == "fp8_calibrated":
         assert fitted_payloads
         for name, (fitted_weight, fitted_scale) in fitted_payloads.items():
@@ -283,7 +288,7 @@ def test_qqq_gsq_torch_checkpoint_roundtrip(tmp_path):
     from tokenizers.models import WordLevel
     from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-    from gptqmodel import GPTQModel
+    from gptqmodel import CalibrationConfig, GPTQModel
     from gptqmodel.models._const import DEVICE
     from gptqmodel.models.definitions.llama import LlamaQModel
     from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
@@ -306,8 +311,13 @@ def test_qqq_gsq_torch_checkpoint_roundtrip(tmp_path):
                              device=DEVICE.CPU, offload_to_disk=False, gsq=gsq)
     wrapper = LlamaQModel(model=model, quantized=False, quantize_config=quant_config,
                           tokenizer=tokenizer, model_local_path=str(source))
-    wrapper.quantize([{"input_ids": list(range(1, 17))}], backend=BACKEND.QQQ_TORCH,
-                     calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": list(range(1, 17))}],
+            min_length=1,
+        ),
+        backend=BACKEND.QQQ_TORCH,
+    )
     for layer in wrapper.model.model.layers:
         for name in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
                      "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"):

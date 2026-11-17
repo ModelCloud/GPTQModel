@@ -11,7 +11,7 @@ import torch.cuda
 from models.model_test import ModelTest
 from safetensors.torch import load_file
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.utils.tensor import tensor_parameters
 
 
@@ -62,7 +62,7 @@ class TestsParameterCount(ModelTest):
         model = GPTQModel.load(model_id, quant_config)
 
         # increase `batch_size` to match gpu/vram specs to speed up quantization
-        model.quantize(calibration_dataset, batch_size=8)
+        model.quantize(CalibrationConfig(dataset=calibration_dataset, batch_size=8))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(tmp_dir)

@@ -9,7 +9,7 @@ import pytest
 import torch
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
-from gptqmodel import MatchedQuantizeConfig, Matcher, QuantizeConfig, formats, solvers
+from gptqmodel import CalibrationConfig, MatchedQuantizeConfig, Matcher, QuantizeConfig, formats, solvers
 from gptqmodel.models.definitions.qwen2 import Qwen2QModel
 
 
@@ -31,6 +31,23 @@ def target(matcher):
 def calibration():
     generator = torch.Generator().manual_seed(12)
     return [{"input_ids": torch.randint(3, 64, (1, 16), generator=generator)} for _ in range(3)]
+
+
+def test_calibration_config_object_reaches_matched_sink_statistics(model):
+    rows = calibration()
+    for row in rows:
+        row["input_ids"][0, 0] = 1
+    model.tokenizer = SimpleNamespace(bos_token_id=1, pad_token_id=0)
+    other = Qwen2QModel(copy.deepcopy(model.model), quantized=False, quantize_config=None)
+    other.tokenizer = model.tokenizer
+    config = CalibrationConfig(dataset=rows, exclude_attention_sinks=True)
+    records = model.quantize(config, config=target(Matcher.attention()))
+    repeated = other.quantize(config, config=target(Matcher.attention()))
+    assert records == repeated
+    assert all(torch.equal(value, other.model.state_dict()[name]) for name, value in model.model.state_dict().items())
+    assert all(row["tokens"] == 45 and row["excluded_attention_sink_tokens"] == 3 for row in records)
+    assert config.prepare_dataset is None and config.dataset is rows
+    assert all(row["input_ids"][0, 0] == 1 for row in rows)
 
 
 def test_matched_config_inherits_and_keeps_legacy_factory():
@@ -70,7 +87,7 @@ def test_unsupported_plan_blocks_before_calibration(model, configs):
         yield
 
     with pytest.raises(ValueError, match="plan"):
-        model.quantize(forbidden_calibration(), config=configs)
+        model.quantize(CalibrationConfig(dataset=forbidden_calibration()), config=configs)
     for name, value in model.model.state_dict().items():
         assert torch.equal(value, before[name])
 
@@ -81,7 +98,7 @@ def test_quantize_automatically_plans_and_preserves_unmatched(model, capsys):
     config = [target(Matcher.attention(projections=("q", "k", "v")))]
     config_copy = copy.deepcopy(config)
     mlp = model.model.model.layers[0].mlp.gate_proj.weight.detach().clone()
-    model.quantize(calibration(), config=config)
+    model.quantize(CalibrationConfig(dataset=calibration()), config=config)
     assert "model.layers.1.self_attn.v_proj" in capsys.readouterr().out
     packed = [module for module in model.model.modules() if isinstance(module, MXFP4Linear)]
     assert len(packed) == 6
@@ -101,7 +118,8 @@ def test_quantize_automatically_plans_and_preserves_unmatched(model, capsys):
 def test_public_save_load_resave_exact_payloads(model, tmp_path):
     from gptqmodel import GPTQModel
 
-    model.quantize(calibration(), config=QuantizeConfig(solver=solvers.GPTQ(), format=formats.MXFP4()))
+    model.quantize(CalibrationConfig(dataset=calibration()),
+                   config=QuantizeConfig(solver=solvers.GPTQ(), format=formats.MXFP4()))
     inputs = calibration()[0]
     with torch.inference_mode():
         expected = model.model(**inputs).logits.clone()
@@ -131,7 +149,7 @@ def test_plan_has_independent_config_snapshots_and_per_module_policies(model):
     assert all(entry.config.solver.damp_percent == (0.01 if entry.name.endswith("q_proj") else 0.1)
                for entry in plan.assignments)
     assert all(not hasattr(entry.config, "matcher") for entry in plan.assignments)
-    model.quantize(calibration(), config=[first, second])
+    model.quantize(CalibrationConfig(dataset=calibration()), config=[first, second])
     assert all(spec["solver"]["damp_percent"] == (0.2 if name.endswith("q_proj") else 0.1)
                for name, spec in model._format_solutions.items())
 
@@ -166,7 +184,7 @@ def test_partial_failure_removes_hooks_and_blocks_retry_save(model, tmp_path, mo
     monkeypatch.setattr(runner, "solve_gptq_hessian", fail_second)
     cfg = target(Matcher.attention())
     with pytest.raises(RuntimeError, match="injected"):
-        model.quantize(calibration(), config=cfg)
+        model.quantize(CalibrationConfig(dataset=calibration()), config=cfg)
     assert calls == 2 and model._solver_format_partial
     assert all(not module._forward_pre_hooks for module in model.model.modules())
     with pytest.raises(ValueError, match="incomplete"):
@@ -177,8 +195,8 @@ def test_partial_failure_removes_hooks_and_blocks_retry_save(model, tmp_path, mo
 
 
 def test_invalid_calibration_leaves_model_untouched(model):
-    with pytest.raises(ValueError, match="mask"):
-        model.quantize([{"input_ids": [[1, 2]], "attention_mask": [[0, 0]]}],
+    with pytest.raises(ValueError, match="empty"):
+        model.quantize(CalibrationConfig(dataset=[{"input_ids": [[1, 2]], "attention_mask": [[0, 0]]}]),
                        config=target(Matcher.glob("*q_proj")))
     assert not model.quantized
     assert not getattr(model, "_solver_format_partial", False)
@@ -188,7 +206,7 @@ def test_invalid_calibration_leaves_model_untouched(model):
 def test_save_failure_does_not_publish_and_can_retry(model, tmp_path, monkeypatch):
     from gptqmodel.models import solver_format_checkpoint as checkpoint
 
-    model.quantize(calibration(), config=target(Matcher.glob("*q_proj")))
+    model.quantize(CalibrationConfig(dataset=calibration()), config=target(Matcher.glob("*q_proj")))
     original = checkpoint.save_file
 
     def fail(*args, **kwargs):
@@ -210,7 +228,7 @@ def test_save_failure_does_not_publish_and_can_retry(model, tmp_path, monkeypatc
 def test_load_rejects_manifest_layout_mismatch(model, tmp_path):
     from gptqmodel import GPTQModel
 
-    model.quantize(calibration(), config=target(Matcher.glob("*q_proj")))
+    model.quantize(CalibrationConfig(dataset=calibration()), config=target(Matcher.glob("*q_proj")))
     path = tmp_path / "checkpoint"
     model.save(str(path))
     config = json.loads((path / "config.json").read_text())
@@ -225,7 +243,7 @@ def test_sdpa_and_padded_calibration(model):
     model.model.config._attn_implementation = "sdpa"
     rows = calibration()
     rows[0]["attention_mask"] = torch.tensor([[0] * 3 + [1] * 13])
-    records = model.quantize(rows, config=target(Matcher.attention()))
+    records = model.quantize(CalibrationConfig(dataset=rows, min_length=0), config=target(Matcher.attention()))
     assert all(row["tokens"] == 45 for row in records)
     with torch.inference_mode():
         assert torch.isfinite(model.model(**rows[0]).logits).all()
@@ -238,7 +256,7 @@ def test_model_dtype_roundtrip(model, tmp_path, dtype):
     from gptqmodel import GPTQModel
 
     model.model = AutoModelForCausalLM.from_config(copy.deepcopy(model.model.config), dtype=dtype).eval()
-    model.quantize(calibration(), config=target(Matcher.attention()))
+    model.quantize(CalibrationConfig(dataset=calibration()), config=target(Matcher.attention()))
     with torch.inference_mode():
         expected = model.model(**calibration()[0], use_cache=False).logits.clone()
     path = tmp_path / "checkpoint"
@@ -282,8 +300,9 @@ def test_attention_sink_config_reaches_hessian_without_changing_forward_context(
         return original(weight, hessian, solver)
 
     monkeypatch.setattr(runner, "solve_gptq_hessian", check_hessian)
-    records = model.quantize(rows, config=target(Matcher.glob("model.layers.0.self_attn.q_proj")),
-                             tokenizer=SimpleNamespace(bos_token_id=1), calibration_exclude_attention_sinks=True)
+    model.tokenizer = SimpleNamespace(bos_token_id=1, pad_token_id=0)
+    records = model.quantize(CalibrationConfig(dataset=rows, min_length=0, exclude_attention_sinks=True),
+                             config=target(Matcher.glob("model.layers.0.self_attn.q_proj")))
     assert len(calls) == 1
     assert records[0]["tokens"] == 6 and records[0]["excluded_attention_sink_tokens"] == 4
     for row, old in zip(rows, before):
@@ -296,9 +315,9 @@ def test_attention_sink_option_without_tokenizer_bos_is_bitwise_noop(model):
     rows[0]["input_ids"][0, 0] = 1
     model.model.config.bos_token_id = other.model.config.bos_token_id = 1
     cfg = target(Matcher.attention())
-    baseline = model.quantize(rows, config=cfg, calibration_exclude_attention_sinks=False)
-    filtered = other.quantize(rows, config=cfg, tokenizer=SimpleNamespace(bos_token_id=None),
-                              calibration_exclude_attention_sinks=True)
+    other.tokenizer = SimpleNamespace(bos_token_id=None, pad_token_id=0)
+    baseline = model.quantize(CalibrationConfig(dataset=rows), config=cfg)
+    filtered = other.quantize(CalibrationConfig(dataset=rows, exclude_attention_sinks=True), config=cfg)
     assert baseline == filtered
     assert all(row["tokens"] == 48 and row["excluded_attention_sink_tokens"] == 0 for row in filtered)
     assert all(torch.equal(value, other.model.state_dict()[name]) for name, value in model.model.state_dict().items())
@@ -306,9 +325,10 @@ def test_attention_sink_option_without_tokenizer_bos_is_bitwise_noop(model):
 
 def test_all_sink_tokens_fail_before_replay_or_weight_changes(model):
     before = {name: tensor.clone() for name, tensor in model.model.state_dict().items()}
+    model.tokenizer = SimpleNamespace(bos_token_id=1, pad_token_id=0)
     with pytest.raises(ValueError, match="No calibration tokens"):
-        model.quantize([[1, 1, 1]], config=target(Matcher.attention()),
-                       tokenizer=SimpleNamespace(bos_token_id=1), calibration_exclude_attention_sinks=True)
+        model.quantize(CalibrationConfig(dataset=[[1, 1, 1]], min_length=0, exclude_attention_sinks=True),
+                       config=target(Matcher.attention()))
     assert all(torch.equal(value, model.model.state_dict()[name]) for name, value in before.items())
     assert all(not module._forward_pre_hooks for module in model.model.modules())
 
@@ -319,4 +339,95 @@ def test_attention_sink_flag_requires_boolean_before_reading_calibration(model):
         yield
 
     with pytest.raises(TypeError, match="exclude_attention_sinks"):
-        model.quantize(unreadable(), config=target(Matcher.attention()), calibration_exclude_attention_sinks=1)
+        model.quantize(CalibrationConfig(dataset=unreadable(), exclude_attention_sinks=1),
+                       config=target(Matcher.attention()))
+
+
+@pytest.mark.parametrize("form", ["rows", "mappings", "columns", "tensors", "generator"])
+@pytest.mark.parametrize("sort", [None, "asc", "desc"])
+def test_shared_preparation_reaches_forward_and_statistics(model, form, sort):
+    rows = [[1, 3, 4, 1, 5, 6], [1, 7], [8, 1, 9, 10]]
+    dataset = rows
+    if form == "mappings":
+        dataset = [{"input_ids": row} for row in rows]
+    elif form == "columns":
+        dataset = {"input_ids": rows}
+    elif form == "tensors":
+        dataset = [torch.tensor(row) for row in rows]
+    elif form == "generator":
+        dataset = (row for row in rows)
+    model.tokenizer = SimpleNamespace(bos_token_id=1, pad_token_id=0)
+    calibration_config = CalibrationConfig(dataset=dataset, min_length=2, sort=sort, exclude_attention_sinks=True)
+    seen = []
+    handle = model.model.register_forward_pre_hook(
+        lambda module, args, kwargs: seen.append(kwargs["input_ids"].clone()), with_kwargs=True)
+    try:
+        records = model.quantize(calibration_config, config=target(Matcher.attention()))
+    finally:
+        handle.remove()
+    expected = [rows[2], rows[0]] if sort == "asc" else [rows[0], rows[2]]
+    assert [row.tolist()[0] for row in seen] == expected
+    assert len(records) == 6
+    assert all(row["tokens"] == 7 and row["excluded_attention_sink_tokens"] == 3 for row in records)
+    assert calibration_config.dataset is dataset and calibration_config.prepare_dataset is None
+
+
+def test_text_concatenation_tokenizer_override_and_sink_roundtrip(model, tmp_path):
+    from transformers import Qwen2TokenizerFast
+
+    from gptqmodel import GPTQModel
+
+    vocab = {"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "[UNK]": 63}
+    vocab.update({chr(97 + i): i + 3 for i in range(26)})
+    vocab.update({f"unused{i}": i for i in range(29, 63)})
+    tokenizer = Qwen2TokenizerFast(vocab=vocab, merges=[], bos_token="[BOS]", eos_token="[EOS]",
+                                   pad_token="[PAD]", unk_token="[UNK]", model_max_length=128)
+    model.model.config.bos_token_id = 1
+    model.model.config.eos_token_id = 2
+    model.model.config.pad_token_id = 0
+    config = CalibrationConfig(dataset=["abc", "defg"], min_length=0, sort=None,
+                               concat_size=6, concat_separator="[BOS]", exclude_attention_sinks=True)
+    seen = []
+    handle = model.model.register_forward_pre_hook(
+        lambda module, args, kwargs: seen.append((kwargs["input_ids"].clone(), kwargs["attention_mask"].clone())),
+        with_kwargs=True)
+    try:
+        records = model.quantize(config, config=target(Matcher.attention()), tokenizer=tokenizer)
+    finally:
+        handle.remove()
+    assert [ids.tolist()[0] for ids, mask in seen] == [[3, 4, 5, 1, 6, 7], [8, 9, 0, 0, 0, 0]]
+    assert [mask.tolist()[0] for ids, mask in seen] == [[1] * 6, [1, 1, 0, 0, 0, 0]]
+    assert all(row["tokens"] == 7 and row["excluded_attention_sink_tokens"] == 1 for row in records)
+    inputs = model.tokenizer("ab", return_tensors="pt")
+    with torch.inference_mode():
+        expected = model.model(**inputs).logits
+    path = tmp_path / "packed"
+    model.save(str(path))
+    restored = GPTQModel.load(str(path), device="cpu")
+    assert restored.tokenizer.bos_token_id == 1
+    assert restored.tokenizer("ab")["input_ids"] == [3, 4]
+    with torch.inference_mode():
+        assert torch.equal(restored.model(**inputs).logits, expected)
+
+
+@pytest.mark.parametrize("options,match", [({"batch_size": 2}, "batch_size"),
+                                        ({"adapter_dataset": [[1, 2]]}, "options")])
+def test_unsupported_calibration_options_fail_before_consumption(model, options, match):
+    def unreadable():
+        pytest.fail("unsupported calibration policy consumed data")
+        yield
+
+    with pytest.raises(ValueError, match=match):
+        model.quantize(CalibrationConfig(dataset=unreadable(), **options), config=target(Matcher.attention()))
+    assert not model.quantized
+    assert all(not module._forward_pre_hooks for module in model.model.modules())
+
+
+def test_matched_calibration_rejects_old_api_and_bound_config(model):
+    config = target(Matcher.attention())
+    with pytest.raises(TypeError, match="CalibrationConfig"):
+        model.quantize(calibration(), config=config)
+    with pytest.raises(TypeError, match="calibration_exclude_attention_sinks"):
+        model.quantize(CalibrationConfig(dataset=calibration()), config=config, calibration_exclude_attention_sinks=True)
+    with pytest.raises(ValueError, match="unbound"):
+        model.quantize(CalibrationConfig(dataset=calibration()).bind(model.prepare_dataset), config=config)

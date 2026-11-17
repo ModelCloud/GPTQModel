@@ -7,7 +7,7 @@ import torch
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.awq import awq_gemm_forward, awq_runtime_available
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel
-from gptqmodel.utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers
+from gptqmodel.utils.paro import apply_paro_rotation, build_identity_rotation_buffers
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
@@ -90,8 +90,8 @@ def test_awq_cuda_fp32_reduce_reduces_dense_error():
     assert candidate_abs.mean().item() < legacy_abs.mean().item() * 0.1
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant CUDA fp32-reduce test")
-def test_paroquant_cuda_fp32_reduce_reduces_dense_error():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Paro CUDA fp32-reduce test")
+def test_paro_cuda_fp32_reduce_reduces_dense_error():
     if not awq_runtime_available():
         pytest.skip("AWQ CUDA fp32-reduce extension entrypoint unavailable.")
 
@@ -118,7 +118,7 @@ def test_paroquant_cuda_fp32_reduce_reduces_dense_error():
     )
     theta.uniform_(-0.2, 0.2)
     channel_scales.uniform_(0.75, 1.25)
-    rotated = apply_paroquant_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
+    rotated = apply_paro_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
 
     reference = _dense_reference(rotated, qweight, qzeros, scales, bits=bits, group_size=group_size)
 
@@ -163,9 +163,9 @@ def test_awq_cuda_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     assert torch.equal(candidate, baseline)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant fused split-K reduction test")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Paro fused split-K reduction test")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_paroquant_fused_splitk_reduce_matches_default(dtype, monkeypatch):
+def test_paro_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     if not awq_runtime_available():
         pytest.skip("AWQ CUDA extension entrypoint unavailable.")
 
@@ -191,7 +191,7 @@ def test_paroquant_fused_splitk_reduce_matches_default(dtype, monkeypatch):
     )
     theta.uniform_(-0.2, 0.2)
     channel_scales.uniform_(0.75, 1.25)
-    rotated = apply_paroquant_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
+    rotated = apply_paro_rotation(x, pairs, theta, scales=channel_scales, group_size=group_size)
 
     configure_kernel(KernelConfig(awq_fused_splitk_reduce=False))
     with torch.inference_mode():

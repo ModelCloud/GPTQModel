@@ -19,7 +19,7 @@ import torch
 from tokenizers import Tokenizer, models
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.quantization import QuantizeConfig
@@ -113,10 +113,12 @@ def test_cancelled_or_failed_quantize_restores_inflight_layer(tmp_path, error):
 
     with pytest.raises(error):
         qmodel.quantize(
-            CALIBRATION,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=CALIBRATION,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.GPTQ_TORCH,
-            calibration_data_min_length=1,
         )
 
     _assert_layer_restored_to_cpu(qmodel.model)

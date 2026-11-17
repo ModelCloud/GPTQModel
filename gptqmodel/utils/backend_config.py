@@ -131,12 +131,12 @@ class GGUFCUDAConfig(BackendConfig):
 
 
 @dataclass(frozen=True)
-class ParoQuantConfig(BackendConfig):
-    backend: ClassVar[BACKEND] = BACKEND.PAROQUANT_CUDA
+class ParoCUDAConfig(BackendConfig):
+    backend: ClassVar[BACKEND] = BACKEND.PARO_CUDA
     _kernel_fields: ClassVar[dict[str, str]] = {
         "fused_splitk_reduce": "awq_fused_splitk_reduce",
         **{
-        name: f"paroquant_{name}" for name in (
+        name: f"paro_{name}" for name in (
             "cache_runtime_dtype", "auto_cache_bf16_runtime_dtype", "cache_rotation_dtype",
             "auto_cache_bf16_rotation_dtype", "cpu_avx512",
         )
@@ -152,11 +152,11 @@ class ParoQuantConfig(BackendConfig):
 
 
 @dataclass(frozen=True)
-class ParoQuantTritonConfig(ParoQuantConfig):
-    backend: ClassVar[BACKEND] = BACKEND.PAROQUANT_TRITON
+class ParoTritonConfig(ParoCUDAConfig):
+    backend: ClassVar[BACKEND] = BACKEND.PARO_TRITON
     _kernel_fields: ClassVar[dict[str, str]] = {
-        **ParoQuantConfig._kernel_fields,
-        **{name: f"paroquant_triton_{name}" for name in (
+        **ParoCUDAConfig._kernel_fields,
+        **{name: f"paro_triton_{name}" for name in (
             "autotune", "autotune_warmup", "autotune_iters", "autotune_margin", "decode_max_rows",
         )},
     }
@@ -211,13 +211,13 @@ class RuntimeConfig(_KernelSettings):
     gsq_disable_hip_relaxation: bool = False
     rocm_quant_blas: Optional[str] = None
     rocm_llc: bool = True
-    paroquant_sym_ste_triton: bool = True
-    paroquant_affine_ste_triton: bool = True
-    paroquant_affine_ste_triton_backward: bool = False
-    paroquant_rotate_autotune: bool = True
-    paroquant_rotate_cta_m: Optional[int] = None
-    paroquant_rotate_row_pad: Optional[int] = None
-    paroquant_autotune_cache: bool = True
+    paro_sym_ste_triton: bool = True
+    paro_affine_ste_triton: bool = True
+    paro_affine_ste_triton_backward: bool = False
+    paro_rotate_autotune: bool = True
+    paro_rotate_cta_m: Optional[int] = None
+    paro_rotate_row_pad: Optional[int] = None
+    paro_autotune_cache: bool = True
     exl3_tile_batch: int = 256
     exl3_host_rss_limit_bytes: int = 0
     exl3_cuda_allocation_limit_bytes: int = 0
@@ -331,6 +331,6 @@ def resolve_quantize_backend(backend, qcfg, kernel=None, runtime=None, *, inheri
 __all__ = [
     "BackendConfig", "MarlinConfig", "TorchConfig", "AwqTorchConfig", "AwqGemmConfig",
     "AwqTritonConfig", "SwordfishConfig", "GGUFTorchConfig", "GGUFCPPConfig", "GGUFCUDAConfig",
-    "ParoQuantConfig", "ParoQuantTritonConfig", "BitsAndBytesConfig", "TTBlockFloatConfig",
+    "ParoCUDAConfig", "ParoTritonConfig", "BitsAndBytesConfig", "TTBlockFloatConfig",
     "RuntimeConfig",
 ]

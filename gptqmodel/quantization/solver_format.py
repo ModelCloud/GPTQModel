@@ -72,19 +72,21 @@ class Hessian:
         self.tokens += value.shape[0]
 
 
-def _calibration_batches(calibration, tokenizer, batch_size):
-    if type(batch_size) is not int or batch_size != 1:
+def _calibration_batches(calibration):
+    if calibration.batch_size != 1:
         raise ValueError("CPU solver/format calibration currently requires batch_size=1")
-    if calibration is None:
+    if calibration.dataset is None:
         raise ValueError("GPTQ requires calibration")
+    prepared = calibration.prepare_dataset(
+        calibration_dataset=calibration.dataset,
+        calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort,
+        batch_size=calibration.batch_size,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator,
+    )
     batches = []
-    for example in calibration:
-        if isinstance(example, str):
-            if tokenizer is None:
-                raise ValueError("Text calibration requires a tokenizer")
-            example = tokenizer(example, return_tensors="pt")
-        elif isinstance(example, (list, tuple, torch.Tensor)):
-            example = {"input_ids": example}
+    for example in prepared:
         if not isinstance(example, Mapping) or "input_ids" not in example:
             raise ValueError("Calibration needs text or input_ids mappings/rows")
         if set(example) - {"input_ids", "attention_mask"}:
@@ -133,13 +135,12 @@ def _next_inputs(args, kwargs, output):
 
 
 @torch.no_grad()
-def quantize_model(wrapper, calibration, plan, *, tokenizer=None):
-    tokenizer = tokenizer if tokenizer is not None else wrapper.tokenizer
-    batches = _calibration_batches(calibration.dataset, tokenizer, calibration.batch_size)
+def quantize_model(wrapper, calibration, plan):
+    batches = _calibration_batches(calibration)
     masks = [batch["attention_mask"] for batch in batches]
     excluded = 0
     if calibration.exclude_attention_sinks:
-        bos = tokenizer_bos_token_id(tokenizer)
+        bos = tokenizer_bos_token_id(wrapper.tokenizer)
         if bos is None:
             print("Calibration: tokenizer has no BOS token; attention-sink exclusion leaves statistics unchanged")
         masks = [exclude_attention_sinks(mask, bos_token_positions(batch["input_ids"], mask, bos))

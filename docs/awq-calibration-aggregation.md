@@ -117,7 +117,7 @@ larger replay tensor costs more without recovering PPL. The default budget and
 the packed-sample `x_mean` are therefore retained. The sampling bias remains a
 known property of the bounded sample; a future change must move both the grid
 and the loss sample together, and must beat the default on this table.
-`quantize(calibration_exclude_attention_sinks=True)` removes the BOS rows
+`CalibrationConfig(exclude_attention_sinks=True)` removes the BOS rows
 from the captures before sampling, so the grid and the loss sample move
 together; see [calibration attention-sink
 exclusion](calibration-attention-sinks.md) for its measured effect.

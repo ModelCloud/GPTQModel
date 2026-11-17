@@ -3,11 +3,11 @@
 ## Usage
 
 ```python
-from gptqmodel import CheckpointConfig, CheckpointStopped
+from gptqmodel import CalibrationConfig, CheckpointConfig, CheckpointStopped
 
 try:
     model.quantize(
-        calibration,
+        CalibrationConfig(dataset=calibration),
         checkpoint=CheckpointConfig(
             # Defaults to the quantization config's offload_to_disk_path.
             path="auto",
@@ -21,10 +21,10 @@ except CheckpointStopped:
     pass
 ```
 
-The adapter supports the GPTQ (including RTN), AWQ, QQQ, ParoQuant, EXL3,
+The adapter supports the GPTQ (including RTN), AWQ, QQQ, Paro, EXL3,
 FP8, GGUF and bitsandbytes processor paths for Llama and Qwen3 MoE, with
 `offload_to_disk=True`. EoRA continuation is supported for GPTQ, AWQ, QQQ
-and ParoQuant, the methods that support EoRA generation without checkpointing.
+and Paro, the methods that support EoRA generation without checkpointing.
 Packed formats use explicit constructor schemas and the same kernel/config
 validation as ordinary quantization; checkpointing does not enable unavailable
 kernels or deprecated export formats. Other model families, rotation,
@@ -64,7 +64,7 @@ from each attempt's private offload directory, so rerunning with the same
 | CheckpointExtension | Frequency, safe-stop policy, capture/publish coordination |
 | QuantizationCheckpointAdapter | Compose packed modules, dense weights, processor continuations, scheduler and RNG |
 | Processor continuation protocol | Own caches, counters, results, statistics and method-specific state |
-| Packed-module schemas | Explicit constructors for standard, QQQ, ParoQuant, EXL3 and BNB modules |
+| Packed-module schemas | Explicit constructors for standard, QQQ, Paro, EXL3 and BNB modules |
 | ContinuationCodec | Versioned tagged values and tensors; no pickle |
 | CheckpointStore | Writer lease, immutable objects, publication and integrity |
 
@@ -86,10 +86,10 @@ Without a checkpoint extension, normal asynchronous finalization is preserved.
 2. Freeze the complete InputCache (masks, positions, kwargs and source inputs),
    shared state, every processor's continuation, Python/NumPy/Torch CPU/CUDA RNG
    state, scheduler/device assignments and quantized-module specifications.
-   Preserve materialized nonpacked weights/buffers as well: AWQ/ParoQuant can
+   Preserve materialized nonpacked weights/buffers as well: AWQ/Paro can
    modify normalization weights. Preserve tied parameter identity. EoRA stores
    completed LoRA tensors and rank/path metadata through an explicit schema;
-   ParoQuant stores clean replay inputs and AWQ stores calibration counters.
+   Paro stores clean replay inputs and AWQ stores calibration counters.
 3. Stream new finalized artifacts into content-addressed objects. Earlier
    artifacts are reused by immutable reference, not recopied into RAM.
 4. Persist a manifest naming the continuation and **all** completed artifacts.
@@ -197,7 +197,7 @@ All calibration batches and earlier subsets within that interrupted layer are
 re-executed. Only fully committed layers are skipped.
 Cross-device Hessian partials are reduced in stable device-index order, not
 worker-arrival order, to avoid restart-dependent floating-point rounding.
-ParoQuant activation batches are ordered by calibration index before optimizer
+Paro activation batches are ordered by calibration index before optimizer
 sample selection. EXL3 uses private, seeded random generators rather than
 resetting global RNG state from concurrent workers. CUDA events order EXL3's
 shared writable scratch-buffer use across streams without allocating a large
@@ -347,17 +347,17 @@ Completed validation includes:
 | Dual-GPU recovery, looper and thread-pool regression suite | 121 passed, 2 skipped, 1 xpassed |
 | CPU dense/MoE recovery, including partial-Hessian kills | 16 passed |
 | Full local Llama-3.2-1B, SIGTERM and mid-Hessian SIGKILL | 2 passed, exact saved tensors and GPU placement |
-| QQQ/ParoQuant with EoRA, dense/MoE signal and kill recovery | 8 passed |
+| QQQ/Paro with EoRA, dense/MoE signal and kill recovery | 8 passed |
 | AWQ with EoRA, dense/MoE signal, kill and publication-error recovery | 8 passed |
 | GPTQ with EoRA, dense/MoE seven fault modes | All 14 cases passed, including the repeated timeout case noted below |
 | AWQ without EoRA, dense/MoE four fault modes | 8 passed |
 | RTN/FP8/GGUF/BNB dense four fault modes | 16 passed |
-| RTN/FP8/GGUF/BNB/QQQ/ParoQuant/EXL3 MoE signal and kill recovery | All 14 cases passed after the EXL3 workspace fix |
+| RTN/FP8/GGUF/BNB/QQQ/Paro/EXL3 MoE signal and kill recovery | All 14 cases passed after the EXL3 workspace fix |
 | Additional GPTQ v2/P and AWQ GEMV/GEMV_FAST/LLM-AWQ layouts with EoRA | 5 passed |
-| QQQ/ParoQuant/EXL3 dense faults plus ParoQuant eager-mode recovery | 13 passed |
+| QQQ/Paro/EXL3 dense faults plus Paro eager-mode recovery | 13 passed |
 | Export-layout tests and unsupported-export guards | 11 passed; optional BitBLAS skipped in the default environment |
 | AWQ BitBLAS, explicitly installed with CUDA toolchain configured | 1 passed, exact SIGKILL/resume comparison |
-| Explicit packed schemas: GPTQ widths/layouts, every GGUF alias, FP8 scales, BNB, QQQ, ParoQuant, EXL3 | 33 passed (also included above) |
+| Explicit packed schemas: GPTQ widths/layouts, every GGUF alias, FP8 scales, BNB, QQQ, Paro, EXL3 | 33 passed (also included above) |
 
 The method matrix is executed in separate selections, not as the entire
 repository test suite. GPTQ/GPTQ+EoRA device tests assert that both GPU indices

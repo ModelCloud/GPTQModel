@@ -13,7 +13,7 @@ from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-from gptqmodel import NormConfig, NormType
+from gptqmodel import CalibrationConfig, NormConfig, NormType
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.norm_tuning import _probe_gain_offset, resolve_norm_params, tune_norm_params
 
@@ -175,8 +175,13 @@ def test_skip_applies_before_unsupported_tag_validation_through_public_api():
     wrapper = _head_model(nn.Linear(8, 8))
     wrapper.prepare_dataset = lambda **kwargs: pytest.fail('selection should be empty before dataset preparation')
     with pytest.raises(ValueError, match='no `:norm` modules matching'):
-        wrapper.requantize([], norm=NormConfig(teacher='must-not-load', types=(NormType.LAYERNORM,),
-                                              skip=('layers.0.norm', 'head')))
+        wrapper.requantize(
+            CalibrationConfig(
+                dataset=[],
+            ),
+            norm=NormConfig(teacher='must-not-load', types=(NormType.LAYERNORM,),
+                                              skip=('layers.0.norm', 'head')),
+        )
 
 
 class SharedNormLM(nn.Module):

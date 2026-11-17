@@ -23,6 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization import QuantizeConfig
 
@@ -1312,7 +1313,7 @@ class TestCalibrationDataDeviceIntegration:
         quantize_config = self._create_quantize_config(calibration_data_device="cpu")
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_data, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_data, batch_size=1))
 
         save_path = str(tmp_path / "quantized")
         model.save(save_path)
@@ -1337,7 +1338,7 @@ class TestCalibrationDataDeviceIntegration:
         quantize_config = self._create_quantize_config(calibration_data_device="balanced")
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_data, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_data, batch_size=1))
 
         save_path = str(tmp_path / "quantized_balanced")
         model.save(save_path)
@@ -1401,7 +1402,7 @@ def test_run_input_capture_replaces_out_of_range_input_ids():
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_data, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=self.calibration_data, batch_size=1))
 
         save_path = str(tmp_path / "quantized_cuda1")
         model.save(save_path)

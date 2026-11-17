@@ -16,7 +16,7 @@ import torch
 from safetensors.torch import load_file
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import QuantizeConfig
 from tests.models.test_w4a_tiny_llama_lifecycle import _tokenizer
 from tests.w4a_hardware_marks import FP8_HARDWARE
@@ -106,7 +106,7 @@ def _round_trip(tmp_path, source_format, target_format):
         activation={"mode": "w4afp8"}, format=source_format, offload_to_disk=False,
     )
     model = GPTQModel.load(str(source), qcfg, device="cuda", dtype=torch.bfloat16)
-    model.quantize(CALIBRATION, batch_size=1, backend=BACKEND.GPTQ_W4AFP8)
+    model.quantize(CalibrationConfig(dataset=CALIBRATION, batch_size=1), backend=BACKEND.GPTQ_W4AFP8)
     first = tmp_path / "first"
     model.save(str(first))
     del model

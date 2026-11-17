@@ -216,7 +216,7 @@ def test_chunked_hessian_accumulation_enters_the_override_per_chunk(monkeypatch)
     ["GPTQ", "QQQ", "VPTQ", "MACAQ", "EXL3", "FP8_GSQ", "PARO"],
 )
 def test_hessian_methods_need_the_deterministic_pin(step):
-    """Every Hessian builder and ParoQuant must accumulate on rocBLAS (#4123, #4460)."""
+    """Every Hessian builder and Paro must accumulate on rocBLAS (#4123, #4460)."""
 
     from types import SimpleNamespace
 
@@ -379,11 +379,11 @@ def test_wait_timeout_adopts_the_active_backend(monkeypatch):
     assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
 
 
-def test_paroquant_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
-    """ParoQuant's rotation-optimization GEMMs must run on rocBLAS (#4460).
+def test_paro_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
+    """Paro's rotation-optimization GEMMs must run on rocBLAS (#4460).
 
     hipBLASLt chooses GEMM kernels per process, so two identically seeded
-    ParoQuant runs produced different checkpoints. ROCm hardware is not needed
+    Paro runs produced different checkpoints. ROCm hardware is not needed
     to validate the selection: mock the platform and assert the run plan maps
     to a rocBLAS pin.
     """
@@ -402,7 +402,7 @@ def test_paroquant_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
     assert _needs_deterministic_hessian(run_plan)
 
     with rocm.quant_blas_backend(deterministic=_needs_deterministic_hessian(run_plan)):
-        assert fake.current.name == "Cublas", "ParoQuant must run on rocBLAS"
+        assert fake.current.name == "Cublas", "Paro must run on rocBLAS"
 
     assert fake.calls == ["hipblas", "cublaslt"]
     assert fake.current.name == "Cublaslt"

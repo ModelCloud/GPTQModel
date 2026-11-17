@@ -10,7 +10,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models.writer import QUANT_LOG_NSAMPLES
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
@@ -77,11 +77,12 @@ def test_qwen3_moe_awq_aggregates_variable_length_features_across_batches():
     }
 
     model.quantize(
-        calibration,
-        batch_size=1,
-        calibration_concat_size=0,
-        calibration_sort=None,
-        calibration_data_min_length=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            sort=None,
+            min_length=1,
+        ),
     )
     rows = _log_by_module(model)
 

@@ -11,7 +11,7 @@ reference inventories, not a promise that every combination works on every devic
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 | AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
-| ParoQuant                 | ✅          | x | x | x | ✅             |
+| Paro                 | ✅          | x | x | x | ✅             |
 | GGUF                      | ✅          | x | x | x | x             |
 | FP8                       | ✅          | x | x | x | x             |
 | Exllama V3 / EXL3         | ✅          | x | x | x | x             |
@@ -25,9 +25,9 @@ reference inventories, not a promise that every combination works on every devic
 | Rotation                  | ✅          | x | x | x | x             |
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
-| GSQ (GPTQ, AWQ, RTN, QQQ, FP8, ParoQuant) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
+| GSQ (GPTQ, AWQ, RTN, QQQ, FP8, Paro) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
-`GGUF`, `FP8`, `EXL3`, `ParoQuant`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `FP8`, `EXL3`, `Paro`, `VPTQ`, `MACaQ`, and `NF12` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 † GSQ preserves the initializer's checkpoint format; it does not add a runtime format.
 
@@ -71,7 +71,7 @@ which can mix precisions inside a merged module.
 | `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.MACHETE`, `BACKEND.MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`, `BACKEND.AWQ_GEMV_TRITON`, `BACKEND.AWQ_TORCH` (CPU in-session reader)<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.MACHETE`, `BACKEND.MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
 | `METHOD.GPTQ` / `METHOD.AWQ` Swordfish | `FORMAT.GPTQ` / `FORMAT.GEMM` | `BACKEND.SWORDFISH` |
 | `METHOD.GPTQ` / `METHOD.AWQ` AllSpark | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2` / `FORMAT.GEMM` | `BACKEND.ALLSPARK` (per-channel 8-bit) |
-| `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
+| `METHOD.PARO` | `FORMAT.PARO` | `BACKEND.PARO_CUDA`, `BACKEND.PARO_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
 | `METHOD.MACAQ` | `FORMAT.MXFP4_MACAQ` | `BACKEND.MACAQ_TRITON`, `BACKEND.MACAQ_TORCH` |
@@ -90,13 +90,13 @@ See also [CPU dispatch](kernel-dispatch-cpu.md), [MLX](mlx-runtime.md),
 
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`); NF12 and block-float CUDA `sm_80+`; backend-specific limits apply | Machete, Marlin, Swordfish, AllSpark, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, MACaQ Triton/Torch, GGUF CUDA/Triton, QQQ, VPTQ, NF12, `bf4_b`/`bf8_b` CUDA, BitBLAS, Triton, BitsAndBytes, Torch |
-| 🐧 Linux | AMD GPU | ✅ | `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4); backend-specific limits apply | AWQ Triton GEMM/GEMV, ParoQuant Triton, MACaQ Triton (`gfx1201`) / Torch, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, NF12 HIP (RDNA4), AllSpark (gfx1200/1201), `bf4_b`/`bf8_b` HIP, FP8 Torch, Torch |
+| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`); NF12 and block-float CUDA `sm_80+`; backend-specific limits apply | Machete, Marlin, Swordfish, AllSpark, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, Paro CUDA/Triton, MACaQ Triton/Torch, GGUF CUDA/Triton, QQQ, VPTQ, NF12, `bf4_b`/`bf8_b` CUDA, BitBLAS, Triton, BitsAndBytes, Torch |
+| 🐧 Linux | AMD GPU | ✅ | `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4); backend-specific limits apply | AWQ Triton GEMM/GEMV, Paro Triton, MACaQ Triton (`gfx1201`) / Torch, GGUF Triton, BitsAndBytes 4-bit Triton, QQQ, NF12 HIP (RDNA4), AllSpark (gfx1200/1201), `bf4_b`/`bf8_b` HIP, FP8 Torch, Torch |
 | 🐧 Linux | Tenstorrent | ✅ | `Blackhole p300c`, `DEVICE.XLA` | Packed GPTQ via Torch/XLA/PJRT or native TTNN; opt-in `bf8_b` TTNN; multi-card execution |
-| 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
+| 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, Paro, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | x86-64; AVX2, AVX512-BF16, or AMX for applicable optimized paths | GPTQ/AWQ AVX512-BF16, TorchFused, TorchFusedAWQ, TorchAten int4, GPTQ INT8 (8-bit sources), GGUF C++, BitsAndBytes, VPTQ, NF12 Torch, `ttbfp` block floats, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference (GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, MACaQ, NF12, EXL3); MPS/Torch, FP8 Torch, NF12 Torch |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native MLX quantization and packed inference (GPTQ, AWQ, Paro, QQQ, GGUF, FP8, MACaQ, NF12, EXL3); MPS/Torch, FP8 Torch, NF12 Torch |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 Availability depends on each backend's architecture, dtype, shape, and runtime

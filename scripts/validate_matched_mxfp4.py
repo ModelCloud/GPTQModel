@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 from datasets import load_dataset
 
-from gptqmodel import GPTQModel, MatchedQuantizeConfig, Matcher, formats, solvers
+from gptqmodel import CalibrationConfig, GPTQModel, MatchedQuantizeConfig, Matcher, formats, solvers
 from gptqmodel.nn_modules.qlinear.mxfp4 import MXFP4Linear
 
 
@@ -76,7 +76,8 @@ def main():
                                     solver=solvers.GPTQ(), format=formats.MXFP4())]
     dense_bytes = sum(t.numel() * t.element_size() for t in model.model.parameters())
     started = time.perf_counter()
-    records = model.quantize(calibration, config=targets, calibration_exclude_attention_sinks=args.exclude_attention_sinks)
+    records = model.quantize(
+        CalibrationConfig(dataset=calibration, exclude_attention_sinks=args.exclude_attention_sinks), config=targets)
     elapsed = time.perf_counter() - started
     quantized, predictions = evaluate(model, heldout)
     expected_payloads = payload_hashes(model)

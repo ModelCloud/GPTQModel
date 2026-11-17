@@ -57,6 +57,7 @@ from ...utils.ttnn_runtime import (
     open_mesh,
     ttnn_device_count,
 )
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 
 
@@ -104,6 +105,10 @@ def _ttnn_arch(ttnn):
 
 class TTNNLinear(GPTQQuantLinear):
     """Packed 4-bit GPTQ linear executed by native TTNN ops on Tenstorrent."""
+
+    # TTNN device tensors; no torch graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TTNN]
     SUPPORTS_METHODS = [METHOD.GPTQ]

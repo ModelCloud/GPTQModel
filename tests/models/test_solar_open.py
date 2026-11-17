@@ -17,7 +17,7 @@ from tokenizers.trainers import WordLevelTrainer
 from torch import nn
 from transformers import PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.solar_open import SolarOpenQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -218,10 +218,12 @@ def test_solar_open_tiny_quantization_smoke(tmp_path):
         attn_implementation="eager",
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(quantized_dir)
 

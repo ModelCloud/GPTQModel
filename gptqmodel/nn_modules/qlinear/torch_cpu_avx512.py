@@ -13,6 +13,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
+from ._compile_support import COMPILE_LEVEL
 from .torch_aten_kernel import TorchAtenLinear
 
 
@@ -107,6 +108,12 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     SUPPORTS_DTYPES = [torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # Not buildable here: aarch64 host without AVX512-BF16. It inherits
+    # TorchAtenLinear's RLock-guarded forward, which already breaks dynamo, and
+    # the kernel is CPU-only: conservative EAGER, no capture measured.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_cpu_avx512"
 

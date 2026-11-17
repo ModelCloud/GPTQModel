@@ -24,7 +24,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from logbar import LogBar
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 
 
 log = LogBar.shared()
@@ -64,7 +64,7 @@ class TestGroupSize(unittest.TestCase):
             self.pretrained_model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(self.calibration_dataset, batch_size=1, calibration_concat_size=2048)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=1, concat_size=2048))
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
 

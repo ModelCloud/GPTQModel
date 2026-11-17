@@ -12,7 +12,7 @@ import tempfile
 from models.model_test import ModelTest
 from parameterized import parameterized
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models._const import DEVICE
 
 
@@ -33,7 +33,7 @@ class TestInferenceResultXPU(ModelTest):
         )
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
         calibration_dataset = self.load_dataset(tokenizer, rows=128)
-        origin_model.quantize(calibration_dataset, backend=BACKEND.TORCH)
+        origin_model.quantize(CalibrationConfig(dataset=calibration_dataset), backend=BACKEND.TORCH)
 
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)

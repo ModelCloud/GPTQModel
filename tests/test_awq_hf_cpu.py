@@ -14,7 +14,7 @@ from huggingface_hub import snapshot_download
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization.config import AWQConfig
 
@@ -75,7 +75,7 @@ def test_real_checkpoint_awq_cpu_roundtrip(repo, revision, expected_linears, tmp
             dtype=torch.float16, attn_implementation="eager", trust_remote_code=False,
         )
         calibration = [dict(tokenizer(text, return_tensors="pt")) for text in _CALIBRATION]
-        model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
         packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
         assert len(packed) == expected_linears
         assert all(module.qweight.dtype == torch.int32 for module in packed.values())

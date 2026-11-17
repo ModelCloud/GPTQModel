@@ -210,7 +210,7 @@ def linear_wide_bias(
         # weight copy) and keeps a split reduction wide, but ATen requires both
         # operands to share a dtype. A reconstructed FP32 weight beside FP16 or
         # BF16 activations is the normal shape of a wide dequantizing fallback
-        # (ParoQuant's dense path, for example), so promote the pair rather than
+        # (Paro's dense path, for example), so promote the pair rather than
         # asking for an output dtype the operands cannot satisfy.
         if (
             x.device.type == "cuda"

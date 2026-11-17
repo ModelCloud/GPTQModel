@@ -61,7 +61,7 @@ def _awq_extra_cuda_cflags() -> list[str]:
     )
 
 
-# Shared singleton so every AWQ/ParoQuant caller uses the same torch.ops JIT
+# Shared singleton so every AWQ/Paro caller uses the same torch.ops JIT
 # cache, force-rebuild controls, and user-facing compile spinner.
 _AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_AWQ_OPS_NAME,

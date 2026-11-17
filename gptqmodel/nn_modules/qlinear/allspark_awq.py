@@ -57,6 +57,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -91,6 +92,12 @@ class AllSparkAwqLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "allspark"
+
+    # Unavailable here: AllSpark needs compute capability 80-120, this GB10 is
+    # sm_121. Forward calls `packed_ready()` -> `tensor_cache_key` (data_ptr)
+    # and a custom op, so dynamo breaks and capture is unsafe.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     @classmethod
     def validate_device(cls, device):

@@ -26,7 +26,7 @@ from transformers import (
     WhisperFeatureExtractor,
 )
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions import qwen2_audio as qwen2_audio_definition
 from gptqmodel.models.definitions.qwen2_audio import Qwen2AudioGPTQ
@@ -313,10 +313,12 @@ def test_tiny_qwen2_audio_gptq_quantization_smoke(tmp_path):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(quantized_dir)
 
