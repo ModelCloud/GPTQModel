@@ -410,25 +410,16 @@ def test_subset_callback_in_place_propagates_without_spurious_warning(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_unreadable_config_json_is_reported(tmp_path, monkeypatch):
-    """A corrupt config.json must not silently read as "not DeepSeek-VL2"."""
+def test_unreadable_config_json_is_reported(tmp_path):
+    """A corrupt config.json must fail the public config loader before dispatch."""
     from gptqmodel.utils import hf as hf_utils
 
     model_dir = tmp_path / "broken-model"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{ this is not json", encoding="utf-8")
 
-    calls = []
-
-    class FakeLogger:
-        def debug(self, msg, *args, **kwargs):
-            calls.append((msg, kwargs.get("exc_info")))
-
-    monkeypatch.setattr(hf_utils, "log", FakeLogger())
-
-    assert hf_utils._is_deepseek_vl_v2_model_path(str(model_dir)) is False
-    assert calls, "a corrupt config.json was silently ignored"
-    assert calls[0][1] is True
+    with pytest.raises(OSError, match="not a valid JSON file"):
+        hf_utils.load_model_config(str(model_dir))
 
 
 def test_generation_config_is_loaded_not_silently_skipped(tmp_path):

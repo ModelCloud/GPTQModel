@@ -14,11 +14,14 @@ definition ownership corrections alongside the package-owned ports.
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
 | `DeepSeekV3QModel` / `deepseek_v3`, `kimi_k2` | [Native bridge, checkpoint conversion and pinned Kimi/DeepSeek provenance](../gptqmodel/models/ports/deepseek_v3/PROVENANCE.md) | Dense/split-Q MLA, published-layout grouped routing, cache/generation, MTP ownership, malicious metadata isolation and safetensors reload | Real CPU plain AWQ/INT4 packing, no scale folding | Kimi partial-group routing rejected; no GPU, trained-checkpoint accuracy or production FP8 qualification |
 | `DeepSeekV4QModel` / `deepseek_v4` | [Native Transformers 5.23 and pinned BF16 checkpoint schema](../gptqmodel/models/ports/deepseek_v4/README.md) | Six sliding/CSA/HCA and expert variants, full 34,223-key target schema, source routing oracle, cache/generation and malicious metadata isolation | Plain AWQ packs 16 tiny linears across six layouts; no scale groups | BF16 checkpoint metadata gated (HTTP 401); no trained weights, GPU, FP8/FP4, MTP accuracy or packed export qualification |
+| `DeepSeekVLV2QModel` / `deepseek_vl_v2` | [Local vision, language and processor port; pinned source, licenses and notices](../gptqmodel/models/ports/deepseek_vl_v2/PORTING.md) | Published tiny/small/base meta key inventories (2582/5639/6973); independent dense/MLA, vision and MoE oracles, image-dependent logits, cache/generation, safetensors reload and hostile metadata isolation | Actual CPU plain AWQ staging/packing for decoder linears; no scale groups | Eager text attention only; no trained-weight accuracy, GPU/FlashAttention, tensor/expert parallel or fusion qualification |
 | `DeciLMQModel` / `deci`, `nemotron-nas` | [Heterogeneous GQA, sink cache, pinned source and Apache license](../gptqmodel/models/ports/decilm/README.md) | Nine NAS attention/FFN combinations, exact published meta ownership, sink boundaries, cache failure/retry through LM output, generation and safetensors reload | Actual CPU plain AWQ pack/save/reload; no scale groups | No GPU/trained evaluation or native AWQ folding; shifted-sink continuation chunks must be shorter than window minus sinks; eager/SDPA only |
 | `DreamQModel` / `dream` | [Pinned Dream source and Apache license](../gptqmodel/models/ports/dream/README.md), [diffusion flow](../gptqmodel/models/ports/dream/docs/local-loading-and-diffusion-generation.md) | MHA/GQA/MQA, bidirectional masks, four diffusion samplers, cache and restart, 339-key published meta schema, malicious metadata isolation and safetensors reload | Actual CPU plain AWQ packing of 14 linears; no scale groups | No trained 7B evaluation, GPU, FlashAttention or sliding-window qualification; uncached Hub/tokenizer loading unverified |
 | `ChatGLMQModel` / `chatglm` | [GLM2/3/4 pinned sources and licenses](../gptqmodel/models/ports/chatglm/PROVENANCE.md), [selection/cache coverage](../gptqmodel/models/ports/chatglm/COVERAGE.md) | Published 200/200/284-key meta schemas; independent FP32/FP16/BF16 MQA/MHA equations, prefix tuning, generation, cache retry/reorder, repeated safetensors reload and public hostile metadata matrix | Eight actual CPU plain-AWQ quantize/save/reload variants; no scale groups | No trained-checkpoint quality, GPU or long-context qualification; GLM2 rotary uses GLM3-style FP32 frequencies; static/sliding caches and tokenizer-specific chat helpers unsupported; ChatGLM1 rejected |
 | `CodeGenQModel` / `codegen` | [CodeGen/CodeGen2 partition and checkpoint provenance](../gptqmodel/models/ports/codegen/PROVENANCE.md); native four partitions, package-owned eight partitions | Independent per-head equations, exact native four-partition parity, legacy metadata/mask validation, cache/generation, FP32/FP16/BF16 safetensors reload, public hostile metadata matrix and full-size meta ownership | Actual plain quantization of all four decoder linears; no scale groups | No trained multi-GB/GPU accuracy, packed quantized reload or multi-GPU concurrency qualification; ambiguous legacy metadata requires explicit `qkv_layout` |
-| `DbrxConvertedQModel` / `dbrx_converted` | [Converted DBRX sources, Databricks license and notice](../gptqmodel/models/ports/dbrx_converted/PROVENANCE.md) | Both pinned 2203-key indexes match full meta state; independent FP32/FP16/BF16 MHA/GQA/MQA and MoE equations, dynamic/static cache, beam generation, public hostile metadata matrix and safetensors reload | Public CPU plain-AWQ quantize/pack/save/reload of all 26 tiny linears; routers and norms stay dense | Eager only; no GPU, trained 132B quality, compilation, SDPA/FlashAttention, training, fusion or AWQ scale-fold/search qualification |
+| `DbrxConvertedQModel` / `dbrx_converted` | [Converted DBRX sources, Databricks license and cache/mask lifecycle](../gptqmodel/models/ports/dbrx_converted/PROVENANCE.md) | Both pinned 2203-key indexes match full meta state; independent FP32/FP16/BF16 equations, failed decoder/head/loss cache invalidation and reset/retry, physical-position static padding masks, beam generation, hostile metadata isolation and safetensors reload | Public CPU plain-AWQ quantize/pack/save/reload of all 26 tiny linears; routers and norms stay dense | Cache failure requires reset and full-prefix refill; arbitrary 4D masks unsupported for router loss; eager only, no GPU, trained 132B quality, compilation, SDPA/FlashAttention or fusion qualification |
+| `Ernie4_5_MoeQModel` / `ernie4_5_moe` | [Native Transformers 5.23 selection and checkpoint ownership](../gptqmodel/models/ports/ernie4_5_moe/README.md) | Pinned 5504-key checkpoint index, numbered/native expert conversion, dense router-statistics ownership, cache/generation, hostile metadata isolation, and FP16/BF16 exact-FP32 router reload | Actual CPU plain-AWQ quantize/pack/reload of 23 projections; no scale groups | Native MTP remains excluded; no GPU, trained 21B, non-dynamic cache or fusion qualification |
+| `Exaone4QModel`, `Exaone4_5QModel` / `exaone4`, `exaone4_5_text`, `exaone4_5` | [Native text/vision alias, checkpoint schemas and flow](../gptqmodel/models/ports/exaone4/README.md) | Published 707/1064-key reduced index contracts, MHA/GQA, cache/generation, image/video processor input, hostile metadata isolation and safetensors reload | Actual CPU plain-AWQ quantization of decoder linears; no scale groups | Native MTP omitted; no trained-checkpoint quality, GPU packed kernels or fusion qualification |
 | `BailingMoeQModel` / `bailing_moe`, `bailing_hybrid` | [Ling dense/MLA/hybrid/MTP provenance](../gptqmodel/models/ports/bailing_moe/README.md) | Three full meta indexes; dense GQA, normalized heads, low-rank/dense-query MLA, recurrence, MTP replay, generation, safetensors reload and head/loss failure-reset coverage | Actual CPU plain quantization/packing/inference; no scale groups | No GPU, trained evaluation, fused FLA or full public quantize/save/load qualification |
 | `ApertusQModel`, `Apertus1p5TextQModel`, `Apertus1p5QModel` / `apertus`, `apertus1p5_text`, `apertus1p5` | [Native Apertus and package-owned 1.5 text/multimodal qualification](../gptqmodel/models/ports/apertus/README.md); pinned Apache-2.0 Swiss AI fork | Native text oracle; full/pruned output vocabularies, bias/activation variants, live CPU/meta ownership, eager/decoder-SDPA cache/generation and safetensors reload, actual image/audio processor and embedding splice, public hostile metadata matrix | Actual CPU plain quantization of every decoder projection across layouts, including failure/retry; no scale folding/search | Official gated checkpoint returned HTTP 401: no trained weights, official tokenizer/chat template or checkpoint key audit; no GPU/FlashAttention/CUDA xIELU, packed GPTQ/AWQ roundtrip or fusion qualification; vision attention remains the source's fixed implementation |
 | `AgnesQModel` / `agnes` | [Agnes 3.0 Flash multimodal port and pinned Apache-2.0 provenance](../gptqmodel/models/ports/agnes/README.md) | Full 1506-key checkpoint schema; independent FP64 delta recurrence and image/video patch oracles; mixed/homogeneous attention and parallel FFN layouts, media/cache/beam/failure-reset behavior, real local processor save/reload, public malicious model/processor metadata matrix | Actual plain AWQ quantization for both FFN layouts; delta state/norm/convolution tensors stay dense; no scale groups | No GPU/FP16, trained-checkpoint load/quality, video file decoder or fused FLA/CUDA qualification; recurrent crop/assisted rollback explicitly unsupported |
@@ -110,9 +113,15 @@ Transformers 5 implementations. V4 uses the native `AutoModelForCausalLM` mappin
 directly: `DeepSeekV4QModel.loader` explicitly overrides the V3 local loader,
 which cannot construct V4 layers or read its `mlp_layer_types`. Kimi-K2
 canonicalizes its source alias for V3 checkpoint conversion and rejects
-partial-group routing. Deci/Nemotron-NAS and Dream have package-owned models;
+partial-group routing. DeepSeek-VL2 owns its vision/text model and processor;
+selecting it no longer patches the global Transformers Llama attention class.
+ERNIE MoE uses the exact native Transformers 5 implementation, including its
+strict FP32 router policy on quantized reload. EXAONE 4 uses native model
+execution for both its canonical and legacy 4.5 text identities; 4.5 vision
+also remains native. Deci/Nemotron-NAS and Dream have package-owned models;
 the former handles heterogeneous attention/FFN and sink caches, while Dream
-uses full-sequence bidirectional denoising for generation.
+uses full-sequence bidirectional denoising for generation. DBRX invalidates a
+caller cache on post-write failures and requires reset/full-prefix refill.
 
 ```mermaid
 flowchart TD
@@ -122,6 +131,10 @@ flowchart TD
     D -->|no| X["ValueError before model or checkpoint Python"]
     D -->|yes| E["Native Transformers MLA and MoE computation"]
     B -->|"deepseek_v4"| F["AutoModelForCausalLM: native V4 config/model"]
+    B -->|"deepseek_vl_v2"| V["LocalModelLoader: DeepseekVLV2Config / model / processor"]
+    V --> V2["Vision, projector, dense or MLA text attention"]
+    B -->|"ernie4_5_moe"| R["Native ERNIE model; preserve strict FP32 router on reload"]
+    B -->|"exaone4_5_text"| N["Exaone4TextConfig: canonicalize to native exaone4"]
     B -->|"deci / nemotron-nas"| G["LocalModelLoader: DeciLMConfig / DeciLMForCausalLM"]
     G --> H["Fork cache, run decoder, LM head, loss, output encoding"]
     H --> I{"Entire output succeeded?"}
@@ -137,9 +150,29 @@ flowchart TD
 | Selection or state boundary | Before | Shipped behavior and evidence |
 | --- | --- | --- |
 | DeepSeek V4 model construction | `definitions/deepseek_v4.py:1410` inherited V3's package loader after the V3 port; a V4 config failed `mlp_layer_types` validation | `DeepSeekV4QModel.loader = AutoModelForCausalLM` selects the native V4 model; public hostile-map loading and V3/V4 sibling tests exercise both paths |
+| DeepSeek-VL2 configuration | `definitions/deepseek_vl_v2.py:24-25,168-169` required checkpoint Python and `AutoProcessor` discovery | `DeepSeekVLV2QModel.loader` selects local config/model/processor and reuses the selected tokenizer and config; poisoned checkpoint maps cannot replace them |
+| DeepSeek-VL2 global attention | `utils/hf.py:1696-1830` installed a `DeepSeekVLV2CompatLlamaAttention` globally before reading the local config; an unrelated native Llama forward failed with three attention outputs | `patch_remote_code_before_config_load` is inert; the local port uses its own attention implementation and an actual public load followed by native Llama forward stays intact |
+| ERNIE MoE strict FP32 router | `utils/model.py:3452-3590` restored explicit quantized metadata only, narrowing native `gate.weight` and `moe_statics` on reload | `_native_fp32_checkpoint_names` selects exact native-policy dense slots and `_restore_checkpoint_buffers` restores FP32 values, including disk-offloaded payloads, without widening packed quantized state |
+| EXAONE 4.5 text alias | `definitions/exaone4.py:8` inherited AutoModel; no `exaone4_5_text` AutoConfig mapping existed | `Exaone4TextConfig.from_pretrained` validates the alias and builds native `Exaone4Config` / `Exaone4ForCausalLM` without checkpoint Python |
 | Kimi-K2 routing | Checkpoint alias required remote modeling code and offered partial-group semantics that differ from native V3 | `ports/deepseek_v3/configuration_deepseek_v3.py` retains the source alias while canonicalizing the native config; invalid grouping raises before model loading |
 | Deci cache ownership | Decoder could publish a warm cache before LM head, loss or tuple encoding failed | `ports/decilm/modeling_decilm.py` stages the decoder cache through the complete LM output; failures leave caller identities, tensors and counters intact |
+| DBRX cache and static padding | `ports/dbrx_converted/modeling_dbrx.py:263-298,354-379` left a mutated cache reusable after head/loss failures; `:270-271,367-369` rejected static 4D generation masks or selected future padding for router loss | Nested cache guards invalidate on post-write failure and require reset/full prefill; model-owned causal masking and physical cache positions preserve padding semantics |
 | Dream generation | Old checkpoint code supplied diffusion sampling and attempted a remote RoPE compatibility shim | `ports/dream/generation_utils.py` runs four local sampling algorithms over full sequences; no checkpoint Python is selected or global RoPE registry patched |
+
+```mermaid
+flowchart TD
+    A["DbrxModel.forward / DbrxForCausalLM.forward"] --> B{"Caller Cache invalid?"}
+    B -->|yes, nonempty| X["ValueError: reset every layer and prefill full prompt"]
+    B -->|no or fully reset| C["DbrxAttention: advance write version before Cache.update"]
+    C --> D["Decoder, LM head, loss, auxiliary loss and output encoding"]
+    D -->|exception after write attempt| Y["Mark Cache invalid; preserve original exception"]
+    D -->|success| E["Return caller-owned Cache"]
+    F["Generation 2D padding mask"] --> G["DbrxModel creates causal mask once"]
+    G --> H["Auxiliary loss uses physical start plus query positions"]
+    I["Arbitrary 4D mask with router loss"] --> Z["Reject before cache mutation"]
+    classDef failure fill:#ffdddd,stroke:#cc0000
+    class X,Y,Z failure
+```
 
 The exact model plans and license/weight-provenance boundaries are recorded in
 the linked per-model references above. CPU/meta qualification and plain-AWQ

@@ -59,6 +59,31 @@ def test_definition_owns_local_model_and_processor():
     assert DeepSeekVLV2QModel.loader.processor_class.endswith(".DeepseekVLV2Processor")
 
 
+def test_public_deepseek_load_preserves_native_llama_attention(tmp_path):
+    from transformers import LlamaConfig, LlamaForCausalLM
+    from transformers.models.llama import modeling_llama
+
+    from gptqmodel import GPTQModel
+
+    original_attention = modeling_llama.LlamaAttention
+    llama = LlamaForCausalLM(LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+    )).eval()
+    DeepseekVLV2ForCausalLM(tiny_config()).save_pretrained(tmp_path)
+    tokenizer_fixture(tmp_path)
+    (tmp_path / "processor_config.json").write_text("{}", encoding="utf-8")
+
+    assert isinstance(GPTQModel.load(str(tmp_path), device="cpu").model, DeepseekVLV2ForCausalLM)
+    assert modeling_llama.LlamaAttention is original_attention
+    with torch.no_grad():
+        assert llama(torch.tensor([[1, 3, 5]])).logits.shape == (1, 3, 32)
+
+
 @pytest.mark.parametrize("mla", [False, True])
 def test_tiny_forward(mla):
     model = DeepseekVLV2ForCausalLM(tiny_config(mla)).eval()
