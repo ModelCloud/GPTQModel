@@ -1277,6 +1277,31 @@ def _auto_select_priority(cls: Type[BaseQuantLinear], fmt: FORMAT, dtype) -> int
     return formats.get(fmt, 0)
 
 
+def _portable_cpu_fallback(quant_method: METHOD, fmt: FORMAT):
+    """Return the declared explicit-only CPU reader for one layout, if any.
+
+    Some checkpoint layouts have no AUTO-eligible CPU kernel: the accelerator
+    kernel is CUDA-only and the portable reader is priority 0 so it cannot
+    change accelerator AUTO order. When AUTO resolves nothing for a CPU-only
+    target, the ``PORTABLE_CPU_FALLBACK`` kernel keeps loading and in-session
+    inference possible instead of raising ``No valid quant linear`` (issue
+    #4554).
+    """
+
+    for cls in iter_quant_linear_kernels():
+        if not getattr(cls, "PORTABLE_CPU_FALLBACK", False):
+            continue
+        if quant_method not in (cls.SUPPORTS_METHODS or ()):
+            continue
+        if fmt not in (cls.SUPPORTS_FORMATS or {}):
+            continue
+        devices = cls.SUPPORTS_DEVICES or ()
+        if DEVICE.ALL not in devices and DEVICE.CPU not in devices:
+            continue
+        return cls
+    return None
+
+
 def select_quant_linear(
         bits,
         group_size: int,
@@ -1519,6 +1544,30 @@ def select_quant_linear(
                     "Reload with a trainable backend before fine-tuning."
                 )
                 return auto_inference_only_fallback
+            portable = (
+                _portable_cpu_fallback(quant_method, format)
+                if selector_families == {DEVICE.CPU}
+                else None
+            )
+            if portable is not None:
+                portable_ok, portable_err = validate_candidate(portable,
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=desc_act,
+                    sym=sym,
+                    pack_dtype=pack_dtype,
+                    dtype=dtype,
+                    dynamic=dynamic,
+                    trainable=trainable,
+                    adapter=adapter,
+                )
+                if portable_ok:
+                    log.info(
+                        f"Kernel: AUTO has no CPU kernel for `{format}`; "
+                        f"selected portable fallback `{portable.__name__}`."
+                    )
+                    return [portable] if multi_select else portable
+                last_err = portable_err or last_err
             if last_err:
                 raise last_err
             raise ValueError("No valid quant linear")

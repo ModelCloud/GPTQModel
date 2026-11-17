@@ -454,8 +454,109 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
         return out.reshape(out_shape)
 
 
+class AwqGEMVTorchLinear(AwqGEMVLinear):
+    """Portable CPU reader for the packed ``FORMAT.GEMV`` layout (issue #4554).
+
+    The native GEMV extension is CUDA-only and the Triton reader needs an
+    accelerator, so a quantize run that finishes on CPU had no in-session kernel
+    for a GEMV checkpoint and ``quantize()`` raised after the whole calibration.
+    This kernel reads the exact same packed ``qweight``/``qzeros``/``scales``
+    buffers and dequantizes them to a dense FP32 tile per forward, which keeps
+    the checkpoint format unchanged and makes the in-session model runnable.
+
+    It is a documented fallback, not an AUTO replacement: the priority-0
+    ``SUPPORTS_FORMATS`` entry keeps the accelerator AUTO order (native CUDA
+    GEMV, explicit Triton GEMV) untouched, and ``select_quant_linear`` only
+    reaches it for a CPU-only target through ``PORTABLE_CPU_FALLBACK``.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    # 0 => supported for this layout, never auto-selected on an accelerator.
+    SUPPORTS_FORMATS = {FORMAT.GEMV: 0}
+    SUPPORTS_BITS = [4]
+    # Same packed layout as the native GEMV, so a CPU-packed checkpoint keeps
+    # the contract the CUDA extension reads.
+    SUPPORTS_GROUP_SIZE = [-1, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16]
+    QUANT_TYPE = "awq_gemv_torch"
+    # Consumed by select_quant_linear() when AUTO has no CPU kernel for GEMV.
+    PORTABLE_CPU_FALLBACK = True
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("backend", BACKEND.AWQ_TORCH)
+        super().__init__(*args, **kwargs)
+
+    def _dequantize_weight(self) -> torch.Tensor:
+        """Return the packed GEMV words as a dense ``[in_features, out_features]``.
+
+        Nibble ``i`` of word ``w`` holds input column ``w * pack_factor + i``;
+        the group axis of ``qzeros``/``scales`` is padded to whole words, so the
+        real group index selects the column. The product is formed in FP32, the
+        same precision the native/Triton kernels accumulate in.
+        """
+
+        qweight = self.qweight
+        qzeros = self.qzeros
+        if qweight.dtype != torch.int32:
+            qweight = qweight.to(torch.int32)
+        if qzeros.dtype != torch.int32:
+            qzeros = qzeros.to(torch.int32)
+
+        out_features, words = qweight.shape
+        in_features = words * self.pack_factor
+        shifts = torch.arange(self.pack_factor, device=qweight.device, dtype=torch.int32) * self.bits
+        code_mask = (1 << self.bits) - 1
+        codes = ((qweight[:, :, None] >> shifts) & code_mask).reshape(out_features, in_features)
+        zeros = ((qzeros[:, :, None] >> shifts) & code_mask).reshape(out_features, -1)
+
+        groups = in_features // self.group_size
+        group_index = torch.arange(in_features, device=qweight.device) // self.group_size
+        zeros = zeros.index_select(1, group_index)
+        scales = self.scales[:, :groups].index_select(1, group_index)
+        weight = (codes.to(torch.float32) - zeros.to(torch.float32)) * scales.to(torch.float32)
+        return weight.t().contiguous()
+
+    def forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
+        inputs = x.reshape(-1, x.shape[-1])
+        input_dtype = inputs.dtype
+
+        weight = self._dequantize_weight()
+        if weight.device != inputs.device:
+            weight = weight.to(device=inputs.device)
+
+        # One wide reduction and a single rounding at the end: the FP32
+        # accumulator is what the accelerator GEMV kernels use, so the portable
+        # path is a reference for them rather than a lower-precision shortcut.
+        output = torch.matmul(inputs.to(torch.float32), weight)
+        if self.bias is not None:
+            output = output + self.bias.to(device=output.device, dtype=torch.float32)
+        output = output.to(dtype=input_dtype)
+
+        if self.adapter:
+            output = self.adapter.apply(x=inputs, out=output)
+
+        return output.reshape(out_shape)
+
+
 __all__ = [
     "AWQ_GEMV_ROCM_UNSUPPORTED",
     "AwqGEMVLinear",
     "AwqGEMVTritonLinear",
+    "AwqGEMVTorchLinear",
 ]
