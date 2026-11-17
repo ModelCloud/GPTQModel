@@ -774,23 +774,6 @@ def _awq_gemv_row(in_features, out_features, device, l2, args):
     }
 
 
-    if "paro" in sections:
-        from gptqmodel.quantization.paro.modules.triton import gemm as pg
-
-        for in_features, out_features in PARO_SHAPES:
-            for n_rows in PARO_ROWS:
-                row = _paro_row(in_features, out_features, n_rows, device, l2, args)
-                rows.append(row)
-                _print_row(row)
-            torch.cuda.empty_cache()
-
-    if "awq_gemv" in sections:
-        for in_features, out_features in AWQ_GEMV_SHAPES:
-            row = _awq_gemv_row(in_features, out_features, device, l2, args)
-            rows.append(row)
-        torch.cuda.empty_cache()
-
-
 def run(args: argparse.Namespace) -> int:
     from gptqmodel.utils import arch
 
