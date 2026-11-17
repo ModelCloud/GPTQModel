@@ -150,6 +150,10 @@ def resolve_blockfloat_dtype(dtype, config=None) -> torch.dtype:
 #: Values per shared exponent.
 BLOCKFLOAT_BLOCK = 16
 
+#: Largest shared exponent the format can store: ``2**127`` is the last finite
+#: power of two in float32, and the exponent itself is stored as an ``int8``.
+_MAX_BLOCK_EXPONENT = 127.0
+
 
 #: Buffer names transformers deliberately keeps in float32 inside a bf16 model.
 #: ``from_pretrained`` never casts them -- they are built with an explicit
@@ -253,7 +257,8 @@ def quantize_blockfloat(
     # Shared exponent from the block maximum; floor(log2) keeps the largest
     # value inside the mantissa range rather than scaling it out.
     safe = magnitude.clamp_min(torch.finfo(torch.float32).tiny)
-    base_exponent = torch.floor(torch.log2(safe))
+    base_exponent = torch.floor(torch.log2(safe)).clamp_max(_MAX_BLOCK_EXPONENT)
+    base_scale = torch.pow(2.0, base_exponent)
 
     mant_bits = stored_mantissa_bits(total_bits)
     # ``mant_bits`` explicit bits plus one implicit leading bit.
@@ -261,11 +266,24 @@ def quantize_blockfloat(
     # Clamp to the representable range for an exponent: [0, 2) in normalised
     # space with one implicit bit, i.e. below 2x the shared scale.
     limit = 2.0 - 1.0 / levels
+    # Rank the candidates inside the block's own binade: scale the block by its
+    # base scale once and measure each candidate on that normalised grid.
+    # Dividing and multiplying by a power of two is exact, so the grid and the
+    # codes are unchanged, but every squared error is now O(1) instead of
+    # O(2**(2*exponent)). Comparing the raw errors instead pins the base
+    # candidate at both extremes -- they overflow to ``inf`` for large blocks
+    # (no candidate is ``< inf``) and underflow to ``0`` for tiny ones (a strict
+    # ``<`` never replaces the incumbent) -- even when another exponent is the
+    # closer one by a wide margin.
+    unit = blocks / base_scale
 
-    def _round_with(exp: torch.Tensor) -> torch.Tensor:
-        scale = torch.pow(2.0, exp)
-        rounded = torch.round(blocks / scale * levels) / levels
-        return rounded.clamp(min=-limit, max=limit) * scale
+    def _round_unit(delta: float) -> torch.Tensor:
+        step = 2.0**delta
+        rounded = torch.round(unit / step * levels) / levels
+        return rounded.clamp(min=-limit, max=limit) * step
+
+    def _error(candidate: torch.Tensor) -> torch.Tensor:
+        return (candidate - unit).pow(2).sum(dim=-1, keepdim=True)
 
     # ``floor(log2(block_max))`` is not always the exponent with the lowest
     # error: the grid only reaches ``limit * 2**exp``, so a block whose maximum
@@ -273,18 +291,22 @@ def quantize_blockfloat(
     # largest value. Neighbouring exponents trade that clipping against a
     # coarser step, and the winner differs per block. Pick it per block by
     # measured squared error; the grid itself is unchanged.
-    best = _round_with(base_exponent)
-    best_err = (best - blocks).pow(2).sum(dim=-1, keepdim=True)
+    best_unit = _round_unit(0.0)
+    best_err = _error(best_unit)
     best_exp = base_exponent
     for delta in (-1, 1):
-        cand = _round_with(base_exponent + delta)
-        err = (cand - blocks).pow(2).sum(dim=-1, keepdim=True)
-        take = err < best_err
-        best = torch.where(take.expand_as(best), cand, best)
+        cand_unit = _round_unit(delta)
+        err = _error(cand_unit)
+        # An exponent past the int8 range has no finite scale: every value on
+        # its grid is ``inf``, so it cannot be stored.
+        admissible = base_exponent + delta <= _MAX_BLOCK_EXPONENT
+        take = (err < best_err) & admissible
+        best_unit = torch.where(take.expand_as(best_unit), cand_unit, best_unit)
         best_exp = torch.where(take, base_exponent + delta, best_exp)
         best_err = torch.where(take, err, best_err)
 
     exponent = best_exp
+    best = best_unit * base_scale
     out = best.reshape(*shape[:-1], x.shape[-1])
     if pad:
         out = out[..., :last]
@@ -387,7 +409,10 @@ def _block_exponents(weight: torch.Tensor, block: int = BLOCKFLOAT_BLOCK) -> tor
         w = torch.nn.functional.pad(w, (0, pad))
     blocks = w.reshape(*w.shape[:-1], -1, block)
     safe = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
-    return torch.floor(torch.log2(safe)).squeeze(-1)
+    # Keep the exponent inside the int8 storage range; ``floor(log2(FLT_MAX))``
+    # rounds to 128 in float32 and would make ``2**exp`` overflow to inf.
+    exponent = torch.floor(torch.log2(safe)).clamp_max(_MAX_BLOCK_EXPONENT)
+    return exponent.squeeze(-1)
 
 
 def _round_with_exponents(

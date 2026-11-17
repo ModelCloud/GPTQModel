@@ -206,10 +206,25 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
     mag = fmaxf(mag, fabsf(block[i]));
   }
   const float safe = fmaxf(mag, FLT_MIN);
-  const int base = floor_log2_exact(safe);
+  // ``floor(log2(FLT_MAX))`` is 128: the largest finite power of two is
+  // ``2**127`` and an int8 exponent cannot hold 128.
+  const int base = min(floor_log2_exact(safe), 127);
 
   // Three candidates: base, base-1, base+1.  Strict `<` keeps the earlier one
   // on ties, matching the reference's sequential torch.where updates.
+  //
+  // The errors are measured on the block normalised by ``2**base``, exactly as
+  // the reference does. Dividing by a power of two is exact, so the compared
+  // grid is unchanged, but the sums stay O(1): raw squared errors overflow to
+  // inf for large blocks (so no candidate can win) and underflow to 0 for tiny
+  // ones (so a strict `<` never leaves the base candidate).
+  // Dividing by the scale (rather than multiplying by its reciprocal) stays
+  // exact for every exponent: ``2**-127`` is subnormal and would be flushed.
+  const float base_scale = exp2f((float)base);
+  float unit[BLOCK];
+#pragma unroll
+  for (int i = 0; i < BLOCK; ++i) unit[i] = block[i] / base_scale;
+
   int best_exp = base;
   float best_err = CUDART_INF_F;
   int best_code[BLOCK];
@@ -217,20 +232,26 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
 #pragma unroll
   for (int t = 0; t < 3; ++t) {
     const int ex = base + deltas[t];
-    const float scale = exp2f((float)ex);
+    if (ex > 127) continue;
+    const float step = (t == 0) ? 1.0f : (t == 1 ? 0.5f : 2.0f);
     float err = 0.0f;
     int cand[BLOCK];
 #pragma unroll
     for (int i = 0; i < BLOCK; ++i) {
-      const float q = rintf(block[i] / scale * (float)levels);
+      const float q = rintf(unit[i] / step * (float)levels);
       int qi = (int)q;
       qi = qi > offset ? offset : (qi < -offset ? -offset : qi);
       cand[i] = qi;
-      const float v = (float)qi * (1.0f / levels) * scale;
-      const float d = v - block[i];
+      // Reconstructed value on the normalised grid: exact float arithmetic.
+      const float u = (float)qi * (1.0f / levels) * step;
+      const float d = u - unit[i];
       err += d * d;
     }
-    if (err < best_err) {
+    // Candidate 0 is taken unconditionally, matching the reference's
+    // ``best = _round_with(base_exponent)``.  A strict comparison against
+    // INFINITY would leave ``best_code`` uninitialised when every candidate
+    // overflows, which used to happen for inputs near FLT_MAX.
+    if (t == 0 || err < best_err) {
       best_err = err;
       best_exp = ex;
 #pragma unroll
@@ -279,7 +300,7 @@ __global__ void decompose_kernel(const float* __restrict__ x, int64_t rows, int6
   float mag = 0.0f;
 #pragma unroll
   for (int i = 0; i < BLOCK; ++i) mag = fmaxf(mag, fabsf(p[i]));
-  const int base = floor_log2_exact(fmaxf(mag, FLT_MIN));
+  const int base = min(floor_log2_exact(fmaxf(mag, FLT_MIN)), 127);
 
   // Same candidate order as decompose_blockfloat.
   const int shifts[4] = {0, 1, -1, 2};

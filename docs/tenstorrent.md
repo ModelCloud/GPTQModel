@@ -953,9 +953,13 @@ R9700: 207-208 us and 262 us against 185 us at the time.
 Any `in_features` that is a multiple of 16 is supported, including one that is
 not a multiple of the tile width: the last tile of such a `k` stages a partial
 span, and the kernel zero-fills past `k` instead of dropping the span. The
-quantiser likewise takes its base exponent candidate unconditionally, so a block
-whose squared error overflows -- inputs near `FLT_MAX` -- still produces the
-reference codes rather than zeros.
+quantiser's exponent search is scale invariant: it scores the base exponent and
+both neighbours on the block normalised by `2**base`, so a block whose raw
+squared error would overflow (near `FLT_MAX`) or underflow (a tiny block) still
+picks the closest exponent instead of keeping `floor(log2(block_max))` by
+default. The base exponent is clamped to 127, the largest finite power of two,
+because `floor(log2(FLT_MAX))` rounds to 128 in float32 and would be stored as
+`inf`.
 
 `bfloat2_b` is the third block-float width the Tensix packer understands
 (`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the

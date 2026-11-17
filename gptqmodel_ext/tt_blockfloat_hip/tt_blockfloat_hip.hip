@@ -294,7 +294,23 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
         magnitude = fmaxf(magnitude, fabsf(xp[i]));
     }
     const float safe = fmaxf(magnitude, 1.17549435e-38f);  // FLT_MIN
-    const int base = static_cast<int>(floorf(log2f(safe)));
+    // floor(log2(FLT_MAX)) is 128; the largest finite power of two is 2**127
+    // and the exponent is stored as an int8.
+    const int base = min(static_cast<int>(floorf(log2f(safe))), 127);
+
+    // Every candidate is compared on the block normalised by 2**base, exactly
+    // as the reference does.  Scaling by a power of two is exact, so the grid
+    // is unchanged, but the error stays O(1): the raw squared error overflows
+    // to inf for large blocks (no candidate can then win) and underflows to 0
+    // for tiny ones (a strict `<` never replaces the base candidate).
+    // Dividing by the scale (rather than multiplying by its reciprocal) stays
+    // exact for every exponent: ``2**-127`` is subnormal and would be flushed.
+    const float base_scale = ttbf_exp2i(base);
+    float unit[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        unit[i] = xp[i] / base_scale;
+    }
 
     float best_error = INFINITY;
     int best_exponent = base;
@@ -303,19 +319,21 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
 #pragma unroll
     for (int candidate = 0; candidate < 3; ++candidate) {
         const int exponent = base + (candidate == 0 ? 0 : (candidate == 1 ? -1 : 1));
-        const float scale = ttbf_exp2i(exponent);
+        if (exponent > 127) continue;
+        const float step = (candidate == 0 ? 1.0f : (candidate == 1 ? 0.5f : 2.0f));
         float error = 0.0f;
         int code[16];
 #pragma unroll
         for (int i = 0; i < 16; ++i) {
-            // Divide first: the reference does ``x / scale * levels``, and a
-            // reciprocal would overflow for the tiny exponent of a zero block.
-            float q = rintf((xp[i] / scale) * static_cast<float>(G::kLevels));
+            // Divide first: a reciprocal of ``step`` is exact (power of two),
+            // and the reference does ``x / step * levels`` on the normalised
+            // block.
+            float q = rintf((unit[i] / step) * static_cast<float>(G::kLevels));
             q = fminf(fmaxf(q, -static_cast<float>(G::kOffset)),
                       static_cast<float>(G::kOffset));
             code[i] = static_cast<int>(q);
-            const float reconstructed = (q * G::kInvLevels) * scale;
-            const float diff = reconstructed - xp[i];
+            const float reconstructed = (q * G::kInvLevels) * step;
+            const float diff = reconstructed - unit[i];
             error = error + diff * diff;
         }
         // The base candidate is taken unconditionally, matching the reference
@@ -432,7 +450,7 @@ __global__ void decompose_kernel(const float* __restrict__ x,
             magnitude = fmaxf(magnitude, fabsf(xp[i]));
         }
         const float safe = fmaxf(magnitude, 1.17549435e-38f);
-        const int base = static_cast<int>(floorf(log2f(safe)));
+        const int base = min(static_cast<int>(floorf(log2f(safe))), 127);
 
         int chosen_code[16] = {0};
         int chosen_exponent = base;
