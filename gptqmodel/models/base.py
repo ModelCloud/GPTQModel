@@ -3754,6 +3754,15 @@ class BaseQModel(nn.Module):
         return self.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        """Compile the quantized kernels and the model ``forward``.
+
+        The ``forward`` is compiled in place so ``generate()`` enters the
+        compiled path; wrapping ``self.model`` did not, because transformers'
+        ``generate`` calls the original module's own ``forward`` (#4669). The
+        first ``generate()`` after this call pays the compile cost, and a
+        graph-breaking kernel runs slower compiled than eager.
+        """
+
         if not self.quantized:
             log.warn("model is not quantized, skip compiling...")
             return self
@@ -3779,7 +3788,26 @@ class BaseQModel(nn.Module):
         # torch._dynamo.config.suppress_errors = True
         log.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
-        self.model = torch_compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
+        # ``generate()`` resolves to the original module's ``generate``, which
+        # calls the original eager ``forward``. Replacing ``self.model`` with a
+        # ``torch.compile`` wrapper (an ``OptimizedModule``) therefore compiled
+        # nothing that ``generate()`` ran: its ``__getattr__`` hands ``generate``
+        # back to the unwrapped module (#4669). Compile the forward in place so
+        # both a direct ``model(...)`` call and ``generate()`` enter the compiled
+        # path, and keep the compile fallback for a deferred backend failure.
+        model = getattr(self.model, "_orig_mod", self.model)
+        # A repeated ``optimize()`` must not stack compile wrappers: the
+        # fallback proxy records the eager callable it wraps, so compile that
+        # one again and let dynamo reuse its cache.
+        eager_forward = getattr(
+            model.forward, "_torchdynamo_orig_callable", model.forward
+        )
+        compiled_forward = torch_compile(
+            eager_forward, fullgraph=fullgraph, backend=backend, mode=mode
+        )
+        if compiled_forward is not eager_forward:
+            model.forward = compiled_forward
+        self.model = model
 
         #trigger kernel compilation hooks
         # if self.compiled:

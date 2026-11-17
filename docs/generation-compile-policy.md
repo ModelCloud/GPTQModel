@@ -107,13 +107,26 @@ still synchronise the host inside `forward`.
 and the per-family `test_kernel_compile_levels_*.py` files re-measure them on
 real hardware with `tests/kernels/compile_probe.py`.
 
+## `optimize()` and `generate()`
+
+`generate()` resolves to the original module's `generate`, and transformers'
+`generate` calls `self(...)` — the module's own `forward`. Wrapping the model in
+a `torch.compile` `OptimizedModule` therefore compiled nothing that `generate()`
+ran: `OptimizedModule.__getattr__` handed `generate` back to the unwrapped
+module (#4669 item 2). `BaseQModel.optimize()` now compiles `forward` in place
+instead of replacing `self.model`, so a direct `model(...)` call and `generate()`
+both enter the compiled path. `self.model` stays the original `nn.Module`; a
+repeated `optimize()` unwraps the previous proxy and recompiles the eager
+callable, so wrappers do not stack. The compile fallback and `fullgraph`
+semantics are unchanged.
+
+This is an explicit opt-in: for a graph-breaking kernel the compiled forward is
+still slower than eager, which is exactly why the static-cache auto-compile is
+off by default for those kernels. Compiling can also change the reduction order
+and therefore a greedy token, as documented for FP8/AWQ above.
+
 ## What remains
 
-- `optimize()` still compiles `self.model`, which `generate()` does not call:
-  `OptimizedModule.__getattr__` resolves `generate` to the original module, so
-  the compiled wrapper is bypassed. Fixing that means compiling the forward
-  `generate()` actually runs, which changes what `self.model` is; it is a
-  separate change.
 - A kernel can flip `SUPPORTS_COMPILE` to `True` after it gains a fake
   implementation for its custom op and moves its identity/version guards out of
   the traced `forward`.
