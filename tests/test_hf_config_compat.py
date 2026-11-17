@@ -369,6 +369,34 @@ def test_normalize_hf_config_compat_restores_default_rope_init_alias(monkeypatch
     assert attention_factor == 1.0
 
 
+@pytest.mark.parametrize("trust", [False, True])
+def test_local_brumby_normalization_ignores_remote_compatibility_shims(monkeypatch, trust):
+    import transformers.modeling_rope_utils as rope_utils
+
+    from gptqmodel.models.ports.brumby.configuration_brumby import BrumbyConfig
+    from gptqmodel.models.ports.brumby.modeling_brumby import BrumbyForCausalLM
+
+    monkeypatch.delitem(rope_utils.ROPE_INIT_FUNCTIONS, "default", raising=False)
+    config = BrumbyConfig(
+        vocab_size=24, hidden_size=16, intermediate_size=24, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+        max_position_embeddings=32, chunk_size=4,
+    )
+    original_rope = dict(config.rope_parameters)
+    normalize_hf_config_compat(config, trust_remote_code=trust)
+    assert config.rope_parameters == original_rope
+    assert "default" not in rope_utils.ROPE_INIT_FUNCTIONS
+
+    model = BrumbyForCausalLM(config).eval()
+    tokens = torch.tensor([[2, 4, 6, 8, 10]])
+    with torch.inference_mode():
+        expected = model(tokens, use_cache=False).logits
+        prefix = model(tokens[:, :3], use_cache=True)
+        actual = model(tokens[:, 3:], past_key_values=prefix.past_key_values, use_cache=True).logits
+    assert expected.std() > 0.001
+    torch.testing.assert_close(actual, expected[:, 3:], rtol=1e-4, atol=1e-5)
+
+
 def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeypatch):
     monkeypatch.delattr(cache_utils.Cache, "get_max_length", raising=False)
     monkeypatch.delattr(cache_utils.Cache, "get_usable_length", raising=False)

@@ -38,6 +38,26 @@ continue to override remote trust. A known remote-only checkpoint layout
 (currently Bailing Hybrid MLA, selected by `q_lora_rank`) cannot silently fall
 back to an incompatible native model.
 
+`normalize_hf_config_compat` also resolves definition ownership before applying
+remote compatibility shims. Local configs retain their own field contract even
+when a direct caller passes raw trust; ordinary RoPE metadata backfill still
+runs. The old Brumby remote RoPE/padding rewrites are removed because its
+packaged config/model own those fields.
+
+```mermaid
+flowchart TD
+    A["normalize_hf_config_compat: caller trust and config.model_type"] --> B{"local_model_loader selects a package loader?"}
+    B -- yes --> C["Disable remote compatibility; preserve local field contract"]
+    B -- no --> D["Keep caller remote compatibility permission"]
+    C --> E["_normalize_rope_parameters_config_compat: ordinary metadata backfill"]
+    D --> E
+    E --> F{"Remote compatibility still permitted?"}
+    F -- no --> G["Return without checkpoint-code field shims"]
+    F -- yes --> H["_patch_transformers_remote_code_compat and legacy field normalization"]
+    H --> I["Invalid legacy config: propagate construction error"]
+    style I fill:#ffcdd2,stroke:#b71c1c
+```
+
 For GGUF checkpoints, the explicitly selected `gguf_file` remains the config
 source through the data read, trust preflight and final construction, including
 when a subfolder is selected. An unrelated `config.json` cannot veto that

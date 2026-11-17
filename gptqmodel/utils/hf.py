@@ -2131,7 +2131,7 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
             from transformers.utils import is_flash_attn_2_available
             config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
 
-    if model_type_lower == "dream" or model_type == "brumby":
+    if model_type_lower == "dream":
         import transformers.modeling_rope_utils as rope_utils
         # dream remote models expect "default"
         if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
@@ -2140,13 +2140,6 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         # transformers 5.x expects rope_parameters["factor"] for linear RoPE
         if getattr(config, "rope_parameters", None):
             config.rope_parameters.setdefault("factor", 1.0)
-
-    # BrumbyConfig remote config may not define pad_token_id.
-    # Ensure the attribute exists to avoid AttributeError in transformers 5.x.
-    if model_type == "brumby":
-        rope_scaling = getattr(config, "rope_scaling", None)
-
-        config.pad_token_id = getattr(config, "pad_token_id", None)
 
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
@@ -2218,6 +2211,12 @@ def deci_init_compat(config):
 
 
 def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) -> None:
+    from ..models.local import local_model_loader
+
+    # Definition-owned configs carry their own compatibility contract. A raw
+    # caller trust flag cannot opt them into checkpoint-code field rewrites.
+    trust_remote_code = bool(trust_remote_code) and local_model_loader(getattr(config, "model_type", None)) is None
+
     # Some transformers 5.x model classes now read `config.rope_parameters`
     # directly during `from_config()`, but older local configs may only carry
     # legacy RoPE fields or nothing but a default `rope_theta`.
