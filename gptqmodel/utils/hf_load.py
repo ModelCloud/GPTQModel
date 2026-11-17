@@ -300,6 +300,21 @@ def hf_gptqmodel_prepare_model_for_load(
 
     model_type = str(getattr(model.config, "model_type", "")).lower()
     model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # The checkpoint may use a legacy layout (for example the Transformers 4.x
+    # ``language_model.model.layers.*`` keys of a Gemma-3 VL checkpoint) while
+    # the live model exposes runtime names. Convert the manifest the same way
+    # the native loader does before matching it to ``find_modules`` (#4802).
+    key_converter = getattr(model_definition, "checkpoint_key_for_load", None)
+    if not callable(key_converter):
+        from ..models.loader import _checkpoint_key_converter
+
+        key_converter = _checkpoint_key_converter(model_definition, model, to_runtime=True)
+    if callable(key_converter):
+        quantized_module_names = tuple(
+            sorted({key_converter(name) for name in quantized_module_names})
+        )
+
     defuser.replace_fused_blocks(model_type)
 
     # Rebuild fused model structures before matching serialized module names.
