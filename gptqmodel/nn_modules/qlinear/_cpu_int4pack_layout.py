@@ -148,6 +148,54 @@ def rebuild_gptq_qweight(module) -> torch.Tensor:
     return packed
 
 
+def avx512_checkpoint_byte_index(module) -> torch.Tensor | None:
+    """Byte permutation that restores the checkpoint channel order, or ``None``.
+
+    ``ret_idx`` maps runtime input channels to checkpoint channels. When every
+    runtime pair ``(2k, 2k + 1)`` stays adjacent - true for the group-sorted
+    ``g_idx`` the CPU packer consumes - the reorder can run on the checkpoint
+    *bytes*, half the size of the unpacked codes. Any other permutation returns
+    ``None`` so the caller uses the code-level path.
+    """
+
+    in_features = module.in_features
+    ret_idx = module._build_ret_idx()
+    if ret_idx.numel() != in_features:
+        return None
+    starts = ret_idx[0::2]
+    if not torch.equal(ret_idx[1::2], starts + 1):
+        return None
+    if not bool(torch.all(starts % 2 == 0)):
+        return None
+    return (starts // 2).to(torch.long)
+
+
+def _checkpoint_bytes_from_codes(
+    codes: torch.Tensor, out_features: int, in_features: int
+) -> torch.Tensor:
+    """Pack ``[out, in]`` 4-bit codes into checkpoint bytes ``[out, in // 2]``."""
+
+    pairs = codes.reshape(out_features, in_features // 2, 2)
+    return torch.bitwise_or(
+        pairs[..., 0],
+        torch.bitwise_left_shift(pairs[..., 1], 4),
+    )
+
+
+def _checkpoint_words(
+    checkpoint_bytes: torch.Tensor, out_features: int, in_features: int
+) -> torch.Tensor:
+    """View checkpoint bytes as ``[in // 8, out]`` little-endian int32 words."""
+
+    words_per_row = in_features // 8
+    words = (
+        checkpoint_bytes.reshape(out_features, words_per_row, 4)
+        .permute(1, 0, 2)
+        .contiguous()
+    )
+    return words.view(torch.int32).reshape(words_per_row, out_features)
+
+
 def rebuild_avx512_qweight(module) -> torch.Tensor:
     """Rebuild the GPTQ checkpoint ``qweight`` from the AVX512 runtime words.
 
@@ -160,36 +208,46 @@ def rebuild_avx512_qweight(module) -> torch.Tensor:
     path is pure Torch and works without the ATen int4pack ops. The result is
     verified against the pre-transform bytes by
     ``finalize_fused_train_state`` before the duplicate is dropped.
+
+    The checkpoint bytes are built in one pass over the packed tensor and four
+    of them are viewed as one little-endian ``int32`` word, replacing the old
+    ``codes.t().reshape(...)`` plus eight strided shift/OR passes (issue
+    #4884). A ``desc_act`` channel order is applied at the byte level when it
+    keeps input pairs adjacent and at the code level otherwise; both emit the
+    same bytes.
     """
 
-    from .torch_cpu_avx512 import unpack_hf_int4
+    from .torch_cpu_avx512 import avx512_checkpoint_bytes, unpack_hf_int4
 
-    codes = unpack_hf_int4(
-        module.qweight,
-        out_features=module.out_features,
-        in_features=module.in_features,
+    out_features = module.out_features
+    in_features = module.in_features
+    checkpoint_bytes = avx512_checkpoint_bytes(
+        module.qweight, out_features=out_features, in_features=in_features
     )
     if not module._ret_idx_is_identity():
         # The transform gathers the input channels; the checkpoint stores them
         # in their original order, so scatter them back the same way
         # ``dequantize_weight`` does.
-        ret_idx = module._build_ret_idx().to(device=codes.device, dtype=torch.long)
-        restored = torch.empty_like(codes)
-        restored[:, ret_idx] = codes
-        codes = restored
-
-    pack_factor = module.pack_factor
-    out_features = module.out_features
-    grouped = codes.t().reshape(-1, pack_factor, out_features).to(torch.int32)
-    shifts = torch.arange(
-        pack_factor, dtype=torch.int32, device=codes.device
-    ) * module.bits
-    packed = torch.zeros(
-        (grouped.shape[0], out_features), dtype=torch.int32, device=codes.device
-    )
-    for index in range(pack_factor):
-        packed.bitwise_or_(grouped[:, index, :] << shifts[index])
-    return packed
+        byte_index = avx512_checkpoint_byte_index(module)
+        if byte_index is not None:
+            restored_bytes = torch.empty_like(checkpoint_bytes)
+            restored_bytes.index_copy_(1, byte_index, checkpoint_bytes)
+            checkpoint_bytes = restored_bytes
+        else:
+            ret_idx = module._build_ret_idx().to(
+                device=checkpoint_bytes.device, dtype=torch.long
+            )
+            codes = unpack_hf_int4(
+                module.qweight,
+                out_features=out_features,
+                in_features=in_features,
+            )
+            restored = torch.empty_like(codes)
+            restored.index_copy_(1, ret_idx, codes)
+            checkpoint_bytes = _checkpoint_bytes_from_codes(
+                restored, out_features, in_features
+            )
+    return _checkpoint_words(checkpoint_bytes, out_features, in_features)
 
 
 def rebuild_awq_qweight(module) -> torch.Tensor:

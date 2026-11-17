@@ -41,19 +41,24 @@ DOC_FILES = (
     "docs/eora/README.md",
 )
 
-# `(doc, source path, symbol, cited line)`. The doc must cite `path:N` and the
-# source must define `symbol` within `LINE_WINDOW` of `N`.
+# `(doc, source path, symbol, cited)`. `cited` is either a line number, where the
+# doc must cite `path:N` and the source must define `symbol` within
+# `LINE_WINDOW` of `N`, or the string `"symbol"`, where the doc must cite
+# `path::symbol` instead. Use the symbol form for any citation into a file that
+# keeps growing (`models/base.py` has broken this guard in three separate
+# rounds); a symbol cannot drift when unrelated code moves above it.
 LINE_WINDOW = 8
+SYMBOL_CITATION = "symbol"
 CONTRACT_REFS = (
     ("docs/adapter-rank-pattern-matching.md", "gptqmodel/quantization/config.py",
      "extract_adapter_rank_patterns", 5595),
-    ("docs/awq-scale-folding.md", "gptqmodel/models/base.py", "_select_prev_op", 5489),
+    ("docs/awq-scale-folding.md", "gptqmodel/models/base.py", "_select_prev_op", SYMBOL_CITATION),
     ("docs/calibration-replay.md", "gptqmodel/models/base.py",
-     "capture_layer_type_replay_kwargs", 4022),
+     "capture_layer_type_replay_kwargs", SYMBOL_CITATION),
     ("docs/calibration-replay.md", "gptqmodel/models/base.py",
-     "_build_layer_type_position_embeddings", 4005),
+     "_build_layer_type_position_embeddings", SYMBOL_CITATION),
     ("docs/fp8-scale-semantics.md", "gptqmodel/models/base.py",
-     "_decoder_fp8_scale_semantics", 4752),
+     "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
     ("docs/layer-type-replay-masks.md", "gptqmodel/looper/awq_processor.py",
      "_rotary_layer_type_kwargs", 4471),
@@ -183,6 +188,11 @@ def test_contract_reference_resolves(doc, source, symbol, cited):
     assert hits, f"{doc} cites `{symbol}`, which is not defined in {source}"
 
     if cited is None:
+        return
+
+    if cited == SYMBOL_CITATION:
+        citation = f"{Path(source).name}::{symbol}"
+        assert citation in _read(doc), f"{doc} no longer cites {citation}"
         return
 
     assert f"{Path(source).name}:{cited}" in _read(doc), (

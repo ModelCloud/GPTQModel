@@ -797,7 +797,35 @@ def _capture_accepts_position_ids(model: object) -> bool:
     )
 
 
-def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[str, Any]:
+def _model_computes_own_position_ids(model: object) -> bool:
+    """Whether ``model`` builds its own multimodal (mRoPE) position ids.
+
+    Qwen3-VL/Qwen3.5/GLM-4V/Hunyuan-VL-class models call ``get_rope_index`` or
+    ``compute_3d_position_ids`` from ``forward`` only when ``position_ids`` is
+    None. Handing them the mask-derived 2-D text ids replaces the t/h/w grid
+    ids, so image tokens are calibrated at sequential positions (#4933). The
+    capability lives on the inner multimodal model, not the outer conditional
+    generation wrapper, so inspect the module tree.
+    """
+
+    if not isinstance(model, nn.Module):
+        return False
+    for module in model.modules():
+        if callable(getattr(module, "compute_3d_position_ids", None)):
+            return True
+        if callable(getattr(module, "get_rope_index", None)):
+            return True
+        if callable(getattr(module, "compute_mrope_position_ids", None)):
+            return True
+    return False
+
+
+def _with_capture_position_ids(
+    model: object,
+    example: Dict[str, Any],
+    *,
+    derive: Optional[bool] = None,
+) -> Dict[str, Any]:
     """Derive ``position_ids`` from the attention mask for a padded batch.
 
     A left-padded calibration batch otherwise embeds every real token at
@@ -806,6 +834,10 @@ def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[s
     model never produces at inference. ``generate()`` derives the same ids, and
     they equal the default ``arange`` for an unpadded row, so this is a no-op
     there (issue #4861).
+
+    ``derive=None`` auto-detects the model: an mRoPE vision-language model must
+    keep ``position_ids`` unset so its own ``get_rope_index`` /
+    ``compute_3d_position_ids`` build the image/video grid ids (#4933).
     """
 
     if "position_ids" in example:
@@ -814,6 +846,10 @@ def _with_capture_position_ids(model: object, example: Dict[str, Any]) -> Dict[s
     if not torch.is_tensor(mask) or mask.ndim != 2 or mask.numel() == 0:
         return example
     if not _capture_accepts_position_ids(model):
+        return example
+    if derive is None:
+        derive = not _model_computes_own_position_ids(model)
+    if not derive:
         return example
     # Exactly what `generate()` does: running positions for real tokens, 1 for
     # pad slots (attention masks those out).
@@ -977,6 +1013,13 @@ class BaseQModel(nn.Module):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
 
     INPUT_EMBEDDING_EXTRA_ARGS = None
+
+    # `run_input_capture` derives 2-D position_ids from the attention mask for
+    # a padded batch (#4861). Leave None to auto-detect: a model that computes
+    # its own multimodal (mRoPE) ids must keep `position_ids` unset (#4933).
+    # Set explicitly only for a model whose capability the auto-detection
+    # cannot see.
+    CAPTURE_DERIVE_POSITION_IDS: Optional[bool] = None
 
     # Some models (e.g. ovis2_6_moe) do not contain MoE layers directly.
     # The actual experts live inside submodules (e.g. Qwen3MoeModel.mlp.experts),
@@ -3269,7 +3312,14 @@ class BaseQModel(nn.Module):
                 **self.INPUT_EMBEDDING_EXTRA_ARGS,
             )
 
-        return self.model(**_with_capture_position_ids(self.model, example), use_cache=use_cache)
+        return self.model(
+            **_with_capture_position_ids(
+                self.model,
+                example,
+                derive=getattr(self, "CAPTURE_DERIVE_POSITION_IDS", None),
+            ),
+            use_cache=use_cache,
+        )
 
     def _sanitize_input_ids_for_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.dtype not in (torch.int32, torch.int64):

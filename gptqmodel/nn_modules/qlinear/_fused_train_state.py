@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import torch
@@ -49,6 +50,66 @@ class RebuildCandidate:
 
 #: Entries that describe the checkpoint layout instead of naming a buffer.
 _DESCRIBED_ENTRIES = (RebuiltCheckpointTensor, RebuildCandidate)
+
+#: Layouts whose rebuilt checkpoint bytes were already proven bitwise
+#: identical to a captured clone in this process. The first module of each
+#: key pays one full rebuild; every later module of the same layout only
+#: checks the captured shape/dtype. This is what keeps the ``#4783`` memory
+#: win without making every ``state_dict()``/first forward rebuild every
+#: weight (issue #4884).
+_VERIFIED_REBUILD_LAYOUTS: set[tuple] = set()
+#: Free-threaded builds can finalize several layers at once; the set only
+#: guards membership and insertion, never the rebuild itself.
+_VERIFIED_REBUILD_LAYOUTS_LOCK = threading.Lock()
+
+
+def _rebuild_layout_key(module: nn.Module, rebuild) -> tuple:
+    """Identify a module layout whose inverse has been proven in this process.
+
+    The key carries the inverse implementation itself, so a subclass override
+    or a runtime monkeypatch re-verifies instead of inheriting an unrelated
+    proof. The forward packer is part of the key too: the proof says that this
+    inverse reproduces *that* packer, so a different kernel must re-verify.
+    Shapes and the ``ret_idx`` rebuild mode are included because they select
+    different inverse branches.
+    """
+
+    function = getattr(rebuild, "__func__", rebuild)
+    parts: list = [type(module), function]
+    for name in (
+        "_FUSED_TRAIN_STATE_REBUILD",
+        "_cpu_runtime_layout",
+        "bits",
+        "group_size",
+        "pack_factor",
+        "out_features",
+        "in_features",
+    ):
+        parts.append(getattr(module, name, None))
+    for name in ("pack_gptq_int4_kernel", "pack_awq_int4_kernel"):
+        parts.append(getattr(module, name, None))
+    if getattr(module, "_FUSED_TRAIN_STATE_REBUILD", None) in ("gptq", "awq"):
+        from ._cpu_int4pack_layout import int4pack_block_size
+
+        parts.append(int4pack_block_size())
+    identity = getattr(module, "_ret_idx_is_identity", None)
+    if not callable(identity):
+        parts.append(None)
+        return tuple(parts)
+    try:
+        if identity():
+            parts.append("identity")
+        elif getattr(module, "_FUSED_TRAIN_STATE_REBUILD", None) == "avx512_gptq":
+            from ._cpu_int4pack_layout import avx512_checkpoint_byte_index
+
+            parts.append(
+                "bytes" if avx512_checkpoint_byte_index(module) is not None else "codes"
+            )
+        else:
+            parts.append("reordered")
+    except Exception:
+        parts.append(None)
+    return tuple(parts)
 
 
 def _entry_shape(entry):
@@ -168,6 +229,11 @@ def finalize_fused_train_state(module: nn.Module) -> bool:
     a fused operand order, an unsupported dtype) keeps the resident clone, so
     the exported checkpoint stays byte-identical either way.
 
+    The comparison runs once per layout in a process: the inverse is a
+    deterministic function of the layout, so a later module of the same layout
+    only needs the captured shape/dtype. Without that cache every module
+    rebuilds its whole weight here (issue #4884).
+
     Returns whether any clone was dropped.
     """
 
@@ -185,13 +251,19 @@ def finalize_fused_train_state(module: nn.Module) -> bool:
         if not isinstance(expected, torch.Tensor):
             continue
         descriptor = RebuiltCheckpointTensor(entry.shape, entry.dtype)
-        try:
-            rebuilt = _materialize_snapshot_entry(module, descriptor)
-        except Exception:
-            # Fail closed: an unverified inverse keeps the resident clone.
-            continue
-        if rebuilt is None or not torch.equal(rebuilt, expected):
-            continue
+        key = _rebuild_layout_key(module, rebuild)
+        with _VERIFIED_REBUILD_LAYOUTS_LOCK:
+            verified = key in _VERIFIED_REBUILD_LAYOUTS
+        if not verified:
+            try:
+                rebuilt = _materialize_snapshot_entry(module, descriptor)
+            except Exception:
+                # Fail closed: an unverified inverse keeps the resident clone.
+                continue
+            if rebuilt is None or not torch.equal(rebuilt, expected):
+                continue
+            with _VERIFIED_REBUILD_LAYOUTS_LOCK:
+                _VERIFIED_REBUILD_LAYOUTS.add(key)
         # Publish the descriptor before dropping the clone so a reader that
         # resolves the snapshot entry never sees a name whose buffer is gone
         # (issue #4788). `state_dict()` also holds `_cpu_transform_lock`, which

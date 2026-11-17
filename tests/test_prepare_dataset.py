@@ -421,8 +421,10 @@ def test_prepare_dataset_normalizes_rank_4_attention_mask():
     )
 
     assert len(batches) == 1
-    assert batches[0]["input_ids"].tolist() == [[1, 2, 3, 0, 0]]
-    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 0, 0]]
+    # The rank-4 mask collapses to the 2-D keep mask, and the trailing mask-0
+    # positions are tokenizer padding, stripped since #4889.
+    assert batches[0]["input_ids"].tolist() == [[1, 2, 3]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1]]
 
 
 def test_prepare_dataset_prefers_apply_chat_template_for_messages():
