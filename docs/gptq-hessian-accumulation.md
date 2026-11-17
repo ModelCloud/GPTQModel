@@ -93,6 +93,52 @@ without the capture observing the change. Tests:
 `::test_gptq_snapshot_hessian_embedding_survives_later_finalization`, and
 `::test_gptq_snapshot_hessian_is_writable_without_touching_the_capture`.
 
+## desc_act sink-row cap
+
+`desc_act=True` disables `act_group_aware`, so a few massive-activation
+("attention sink") rows own the largest Hessian diagonal and `desc_act`
+saturates the columns correlated with them (issue #4742).
+`GPTQ.resolve_sink_row_cap_threshold` bounds each row's norm at
+`min(p99.9, HessianConfig.sink_row_cap_median_multiple x median)` and
+`GPTQ.compute_hessian_xtx` scales the row before the fp32 `X^T X` GEMM.
+`add_batch` runs inside the layer forward hooks, so the whole decision is
+tensor-only: a `bool()`/`float()` there drains the CUDA queue on every batch
+(issue #4950).
+
+```mermaid
+flowchart TD
+    A["compute_hessian_xtx(matrix)"] --> B["resolve_hessian_chunk_size"]
+    B --> C["resolve_sink_row_cap_threshold(matrix, chunk_size)"]
+    C --> D{"sink_row_cap_median_multiple()"}
+    D -- None --> E["no cap"]
+    D -- "N > 0" --> F["_sink_row_norms: fp32 row L2, chunk-staged"]
+    F --> G["torch.sort(norms) once"]
+    G --> H["threshold = min(ordered[p99.9], N x ordered[median])"]
+    H --> I{"every norm finite and threshold > 0?"}
+    I -- No --> J["threshold = +inf, so every scale is 1"]
+    I -- Yes --> K["keep threshold"]
+    K --> L["_sink_row_cap_scale_from_threshold: clamp(threshold / norm, max=1)"]
+    J --> L
+    L --> M{"chunk_size is None?"}
+    M -- Yes --> N["fp32 fast path: (X * s)^T (X * s)"]
+    M -- No --> O["chunk lease: (X_c * s_c)^T (X_c * s_c) per chunk"]
+    classDef bad fill:#fdd,stroke:#c33
+    class J bad
+```
+
+| Mechanism | Before (#4909) | After |
+| --- | --- | --- |
+| Cap decision | four host reads per `add_batch` (`bool(isfinite(...))`, `float(threshold)`) | tensor-only `torch.where`; a non-finite or non-positive threshold becomes `+inf` |
+| Capped batch layout | left the fp32 `matmul` fast path for the chunk-workspace lease (`chunk_size = rows`) | folded into the fp32 fast-path GEMM |
+| Quantiles | two `kthvalue` calls | one `torch.sort` |
+| Numerics | per-batch `min(p99.9, N x median)` | unchanged: bitwise `H`, same PPL |
+
+Caching the threshold on the first batch (the cheapest way to skip the sort) is
+rejected: it decides later batches against a stale bound, and on
+Qwen2.5-0.5B-Instruct it moved wikitext-2 PPL from 20.32 to 20.78. The
+regression is `tests/test_descact_cap_sync_4950.py`; the quality contract stays
+`tests/test_descact_sink_4742.py`.
+
 ## Shared-input dedup for calibrated quantizers
 
 `SharedInputPlan` already groups sibling projections that read the same
