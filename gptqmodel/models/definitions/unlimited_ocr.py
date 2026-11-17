@@ -19,6 +19,7 @@ from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class UnlimitedOCRQModel(BaseQModel):
@@ -252,14 +253,22 @@ class UnlimitedOCRQModel(BaseQModel):
             ),
         }
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del batch_size, kwargs
+    def _prepare_calibration_batches(self, conversations):
         calibration_data = []
         for batch in batched(
-            calibration_dataset, 1, process_func=self.preprocess_dataset
+            conversations, 1, process_func=self.preprocess_dataset
         ):
             calibration_data.append(self._prepare_image_sample(batch[0]))
         return calibration_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=self._prepare_calibration_batches,
+        )
 
     def move_input_capture_example(
         self,

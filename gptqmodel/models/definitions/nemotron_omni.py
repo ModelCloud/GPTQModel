@@ -14,6 +14,7 @@ from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .nemotron_h import NEMOTRON_H_LAYER_MODULES, NemotronHQModel
 
 
@@ -135,12 +136,12 @@ class NemotronOmniQModel(NemotronHQModel):
             self.model_local_path, trust_remote_code=self.trust_remote_code
         )
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.__dict__.get("processor") or self.load_processor()
         calib_data = []
         for batch_index, batch in enumerate(
             batched_conversations(
-                calibration_dataset,
+                conversations,
                 batch_size,
                 process_func=self.preprocess_dataset,
             )
@@ -178,8 +179,16 @@ class NemotronOmniQModel(NemotronHQModel):
                     )
             calib_data.append(inputs)
 
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
     def run_input_capture(self, example, use_cache: bool, data_device):
         if self._has_multimodal_inputs(example):
