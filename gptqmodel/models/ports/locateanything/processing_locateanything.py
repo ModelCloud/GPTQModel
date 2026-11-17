@@ -69,14 +69,11 @@ def read_img_from_lmdb_v2(image_data):
 
 
 def parse_lmdb_image_data(image_data):
-    import cv2
-    import lmdb
     lmdb_file = image_data['lmdb_file']
     if not os.path.exists(lmdb_file):
-        if "/home/zhidingy/workspace/libs/eagle/Eagle2/" in lmdb_file:
-            image_data['lmdb_file'] = lmdb_file.replace("/home/zhidingy/workspace/libs/eagle/Eagle2/", "")
-        else:
-            raise ValueError(f"LMDB file {lmdb_file} does not exist")
+        raise ValueError(f"LMDB file {lmdb_file} does not exist")
+    import cv2
+    import lmdb
     # special case for AgiBotWorld
     if 'AgiBotWorld' in image_data['lmdb_file']:
         return read_img_from_lmdb_v2(image_data)
@@ -114,8 +111,9 @@ def fetch_image(ele: dict[str, str | Image.Image]) -> Image.Image:
     elif isinstance(image, dict) and 'lmdb_file' in image:
         image_obj = parse_lmdb_image_data(image)
     elif image.startswith("http://") or image.startswith("https://"):
-        response = requests.get(image, stream=True)
-        image_obj = Image.open(BytesIO(response.content))
+        with requests.get(image, stream=True, timeout=(10, 30)) as response:
+            response.raise_for_status()
+            image_obj = Image.open(BytesIO(response.content))
     elif image.startswith("file://"):
         image_obj = Image.open(image[7:])
     elif image.startswith("data:image"):

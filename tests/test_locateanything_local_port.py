@@ -3,10 +3,13 @@
 """Behavioral qualification for the owned LocateAnything port."""
 
 import json
+import sys
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -286,6 +289,66 @@ def test_processor_patches_video_and_reload(tmp_path):
         reloaded(text=["<image-1>"], images=[])
     torch.testing.assert_close(reloaded(text=[text], images=images, videos=videos, return_tensors="pt")["pixel_values"],
                                batch["pixel_values"])
+
+
+def test_processor_http_image_failure_closes_response_then_retries(tmp_path, monkeypatch):
+    processor = LocateAnythingProcessor(LocateAnythingImageProcessor(patch_size=2), write_tokenizer(tmp_path))
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), (23, 74, 131)).save(buffer, format="PNG")
+    calls, responses = [], []
+
+    class Response:
+        content = buffer.getvalue()
+
+        def __init__(self, failed):
+            self.failed, self.closed = failed, False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.closed = True
+
+        def raise_for_status(self):
+            if self.failed:
+                raise requests.HTTPError("image unavailable")
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        response = Response(failed=len(calls) == 1)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(requests, "get", get)
+    url = "https://example.com/image.png"
+    messages = [{"role": "user", "content": [{"type": "image", "image": url}]}]
+    with pytest.raises(requests.HTTPError, match="image unavailable"):
+        processor.process_vision_info(messages)
+    assert responses[0].closed
+    images, videos = processor.process_vision_info(messages)
+    assert videos is None
+    assert images[0].getpixel((0, 0)) == (23, 74, 131)
+    assert responses[1].closed
+    assert calls == [(url, {"stream": True, "timeout": (10, 30)})] * 2
+
+
+def test_processor_missing_lmdb_preserves_path_and_can_retry_with_pil(tmp_path, monkeypatch):
+    processor = LocateAnythingProcessor(LocateAnythingImageProcessor(patch_size=2), write_tokenizer(tmp_path))
+
+    def unexpected_open(*args, **kwargs):
+        raise AssertionError("a missing LMDB path was rewritten and opened")
+
+    monkeypatch.setitem(sys.modules, "cv2", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "lmdb", SimpleNamespace(open=unexpected_open))
+    path = "/home/zhidingy/workspace/libs/eagle/Eagle2/missing.lmdb"
+    record = {"lmdb_file": path, "lmdb_key": "image"}
+    messages = [{"role": "user", "content": [{"type": "image", "image": record}]}]
+    with pytest.raises(ValueError, match="LMDB file .* does not exist"):
+        processor.process_vision_info(messages)
+    assert record == {"lmdb_file": path, "lmdb_key": "image"}
+    image = Image.new("RGB", (4, 4), (23, 74, 131))
+    images, _ = processor.process_vision_info([{"role": "user", "content": [{"type": "image", "image": image}]}])
+    assert images[0].getpixel((0, 0)) == (23, 74, 131)
 
 
 def test_localization_sampler_patterns_and_weighted_coordinate_selection():
