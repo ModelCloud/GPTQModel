@@ -6,10 +6,19 @@
 Issue #4038: `prepare_calibration_dataset` emitted only `input_ids` for those
 models, so a padded tail block from `calibration_dataset_concat_size` (and any
 user row that already carried padding) entered the Hessian as real tokens.
+
+Issue #4861: a left-padded capture batch passed no `position_ids`, so models
+with learned absolute position embeddings (GPT-2, GPT-Neo) embedded every real
+token at `pad_len + i` and captured hidden states the model never produces at
+inference. `run_input_capture` now derives them from the attention mask, which
+is what `generate()` does.
 """
 
 from types import SimpleNamespace
 
+import torch
+
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.utils.calibration import prepare_calibration_dataset
 
 
@@ -68,3 +77,108 @@ def test_batched_path_attention_mask_is_unchanged():
     )
 
     assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1]]
+
+
+class _RecordingModel:
+    """Causal-LM stand-in that records the kwargs its forward receives."""
+
+    def __init__(self, *, accept_position_ids: bool):
+        self.calls = []
+        if accept_position_ids:
+
+            def forward(input_ids, attention_mask=None, position_ids=None, use_cache=None):
+                self.calls.append(
+                    {
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        "position_ids": position_ids,
+                    }
+                )
+                return input_ids
+
+        else:
+
+            def forward(input_ids, attention_mask=None, use_cache=None):
+                self.calls.append(
+                    {"input_ids": input_ids, "attention_mask": attention_mask}
+                )
+                return input_ids
+
+        self.forward = forward
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+def _capture_qmodel(model):
+    qmodel = BaseQModel.__new__(BaseQModel)
+    qmodel.model = model
+    qmodel.INPUT_EMBEDDING_EXTRA_ARGS = {}
+    qmodel.ATTENTION_MASKS_DTYPE = torch.long
+    return qmodel
+
+
+def _capture(model, input_ids, attention_mask):
+    qmodel = _capture_qmodel(model)
+    qmodel.run_input_capture(
+        {"input_ids": torch.tensor(input_ids), "attention_mask": torch.tensor(attention_mask)},
+        use_cache=False,
+        data_device=torch.device("cpu"),
+    )
+    return model.calls[-1]
+
+
+def test_left_padded_capture_derives_position_ids_from_the_mask():
+    """The left-padded row must count positions from its first real token."""
+
+    call = _capture(
+        _RecordingModel(accept_position_ids=True),
+        input_ids=[[0, 0, 5, 6, 7], [8, 9, 10, 0, 0]],
+        attention_mask=[[0, 0, 1, 1, 1], [1, 1, 1, 0, 0]],
+    )
+
+    # Real tokens run 0, 1, 2 from the first non-pad slot on both rows; pad
+    # slots take 1, which attention masks out. Same as `generate()`.
+    assert call["position_ids"].tolist() == [[1, 1, 0, 1, 2], [0, 1, 2, 1, 1]]
+
+
+def test_unpadded_capture_position_ids_are_arange():
+    """An unpadded batch derives the same ids the model would default to."""
+
+    call = _capture(
+        _RecordingModel(accept_position_ids=True),
+        input_ids=[[5, 6, 7], [8, 9, 10]],
+        attention_mask=[[1, 1, 1], [1, 1, 1]],
+    )
+
+    assert call["position_ids"].tolist() == [[0, 1, 2], [0, 1, 2]]
+
+
+def test_capture_keeps_explicit_position_ids():
+    model = _RecordingModel(accept_position_ids=True)
+    qmodel = _capture_qmodel(model)
+    explicit = torch.tensor([[7, 7, 7]])
+
+    qmodel.run_input_capture(
+        {
+            "input_ids": torch.tensor([[0, 5, 6]]),
+            "attention_mask": torch.tensor([[0, 1, 1]]),
+            "position_ids": explicit,
+        },
+        use_cache=False,
+        data_device=torch.device("cpu"),
+    )
+
+    assert model.calls[-1]["position_ids"] is explicit
+
+
+def test_capture_skips_position_ids_when_the_model_does_not_accept_them():
+    """A forward without `position_ids` must not receive the keyword."""
+
+    call = _capture(
+        _RecordingModel(accept_position_ids=False),
+        input_ids=[[0, 5, 6]],
+        attention_mask=[[0, 1, 1]],
+    )
+
+    assert "position_ids" not in call
