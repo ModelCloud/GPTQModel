@@ -105,8 +105,6 @@ _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
-_INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
-_FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
 
 _QWEN_DRIVE_MODEL_TYPE = "qwen_drive"
 _QWEN_DRIVE_INSTALL_HINT = (
@@ -699,11 +697,15 @@ def _transformers_has_native_prism_gguf_support() -> bool:
     return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
 
 
-def _internal_gguf_torch_loader_enabled() -> bool:
-    raw = os.getenv(_INTERNAL_GGUF_TORCH_LOADER_ENV)
-    if raw is not None:
-        return str(raw).strip().lower() not in _FALSEY_ENV_VALUES
-    return bool(os.getenv("GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE", "").strip())
+def _internal_gguf_torch_loader_enabled(policy=None) -> bool:
+    """Read the load policy, never the process environment.
+
+    ``None`` resolves the policy this load installed; a direct caller may pass
+    the explicit ``KernelConfig`` it wants the dense import to honour.
+    """
+    from . import internal_gguf
+
+    return internal_gguf.torch_dequant_loader_enabled(policy)
 
 
 def _load_gguf_checkpoint_torch_direct(
@@ -714,10 +716,11 @@ def _load_gguf_checkpoint_torch_direct(
     return_tensors: bool = False,
     model_to_load=None,
     torch_dtype=None,
+    policy=None,
 ):
     from ..utils import internal_gguf
 
-    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
+    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled(policy):
         return original_load_gguf_checkpoint(
             gguf_checkpoint_path,
             return_tensors=return_tensors,
@@ -752,7 +755,7 @@ def _load_gguf_checkpoint_torch_direct(
 
     processor = processor_cls(config=config)
     tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
-    target_device = internal_gguf._resolve_torch_dequant_device()
+    target_device = internal_gguf._resolve_torch_dequant_device(policy)
     dequantize_kwargs = {"device": target_device}
     if torch_dtype is not None:
         dequantize_kwargs["dtype"] = torch_dtype
@@ -799,7 +802,7 @@ def _load_gguf_checkpoint_torch_direct(
 
 def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
     with _MONKEY_PATCH_LOCK:
-        if getattr(gguf_utils, "_GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED", False):
+        if getattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", False):
             return
 
         original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
@@ -829,7 +832,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
         gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
         gguf_utils.load_gguf_checkpoint = _wrapped_load_gguf_checkpoint
-        gguf_utils._GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED = True
+        gguf_utils._GPTQMODEL_GGUF_TORCH_LOADER_PATCHED = True
 
 
 def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
@@ -1020,15 +1023,20 @@ def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kw
     Preserve revision/subfolder/auth kwargs for both the data probe and final
     load. A model port opts in through its definition's LocalModelLoader.
     """
-    from ..models.local import local_model_loader
+    from ..models.local import local_model_loader_for_config
 
     ensure_qwen_drive_registered(model_id_or_path)
     payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
-    loader = local_model_loader(payload.get("model_type"))
+    loader = local_model_loader_for_config(payload)
     if loader is not None:
         return loader.load_config(model_id_or_path, **kwargs)
+    config_selection_kwargs = get_config_selection_kwargs(kwargs)
+    # GGUF metadata is the selected config. The trust preflight must inspect
+    # the same file, including when an unrelated config.json is also present.
+    if kwargs.get("gguf_file") is not None:
+        config_selection_kwargs["gguf_file"] = kwargs["gguf_file"]
     trust_remote_code = resolve_trust_remote_code(
-        model_id_or_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs)
+        model_id_or_path, trust_remote_code=trust_remote_code, **config_selection_kwargs
     )
     return AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
@@ -1038,7 +1046,7 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
     # main loader's AutoConfig call.  The probe runs very early in every public
     # GPTQModel entry point when callers explicitly pass trust_remote_code.
     ensure_qwen_drive_registered(model_id_or_path)
-    from ..models.local import local_model_loader
+    from ..models.local import local_model_loader_for_config
 
     if model_id_or_path:
         try:
@@ -1049,7 +1057,7 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
             if not trust_remote_code:
                 return False
             raise
-        if local_model_loader(payload.get("model_type")) is not None:
+        if local_model_loader_for_config(payload) is not None:
             return False
         # A native model_type can still advertise a remote-only layout. Never
         # silently load the incompatible native architecture when trust is off.
@@ -1665,161 +1673,8 @@ def _patch_transformers_remote_code_compat() -> None:
             PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
 
 
-def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
-    if not isinstance(model_id_or_path, str) or not os.path.isdir(model_id_or_path):
-        return False
-
-    config_path = os.path.join(model_id_or_path, "config.json")
-    if not os.path.exists(config_path):
-        return False
-
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            config = json.load(f)
-    except Exception:
-        # A broken local config.json is not "this is some other model"; record it
-        # so a failed DeepSeek-VL2 pre-config patch is diagnosable.
-        log.debug("DeepSeek-VL2 probe could not read %s", config_path, exc_info=True)
-        return False
-
-    return str(config.get("model_type", "")).lower() == "deepseek_vl_v2"
-
-
 def patch_remote_code_before_config_load(model_id_or_path: Optional[str]) -> None:
-    # Must run before AutoConfig.from_pretrained(..., trust_remote_code=True):
-    # DeepSeek-VL2 imports the remote modeling modules while loading config, so
-    # applying this patch after config load is already too late.
-    if not _is_deepseek_vl_v2_model_path(model_id_or_path):
-        return
-
-    try:
-        import transformers.modeling_utils as modeling_utils
-        from transformers.utils import is_flash_attn_2_available
-    except Exception:
-        log.debug("DeepSeek-VL2 pre-config patch skipped: transformers modeling utils unavailable", exc_info=True)
-        return
-
-    try:
-        import transformers.models.llama.modeling_llama as modeling_llama
-    except Exception:
-        modeling_llama = None
-
-    with _MONKEY_PATCH_LOCK:
-        if not hasattr(modeling_utils, "is_flash_attn_2_available"):
-            # DeepSeek-VL2's SigLIP remote code imports this helper from the
-            # transformers 4.x location.
-            modeling_utils.is_flash_attn_2_available = is_flash_attn_2_available
-
-        if modeling_llama is None or not hasattr(modeling_llama, "LlamaAttention"):
-            return
-
-        original_llama_attention = modeling_llama.LlamaAttention
-
-        if getattr(original_llama_attention, "_gptqmodel_deepseek_vl2_compat", False):
-            modeling_llama.LlamaFlashAttention2 = original_llama_attention
-            return
-
-        class DeepSeekVLV2CompatLlamaAttention(original_llama_attention):
-            _gptqmodel_deepseek_vl2_compat = True
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.rotary_emb = modeling_llama.LlamaRotaryEmbedding(self.config)
-
-            def forward(
-                self,
-                hidden_states,
-                position_embeddings=None,
-                attention_mask=None,
-                past_key_values=None,
-                **kwargs,
-            ):
-                old_style = any(
-                    key in kwargs
-                    for key in ("position_ids", "past_key_value", "output_attentions", "use_cache")
-                )
-                if not old_style:
-                    return super().forward(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        attention_mask=attention_mask,
-                        past_key_values=past_key_values,
-                        **kwargs,
-                    )
-
-                position_ids = kwargs.pop("position_ids", None)
-                past_key_value = kwargs.pop("past_key_value", None)
-                output_attentions = kwargs.pop("output_attentions", False)
-                use_cache = kwargs.pop("use_cache", False)
-                if past_key_values is None:
-                    past_key_values = past_key_value
-
-                input_shape = hidden_states.shape[:-1]
-                hidden_shape = (*input_shape, -1, self.head_dim)
-                query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-                if position_embeddings is None:
-                    if position_ids is None:
-                        position_ids = torch.arange(
-                            hidden_states.shape[1],
-                            device=hidden_states.device,
-                        ).unsqueeze(0)
-                    position_embeddings = self.rotary_emb(value_states, position_ids)
-                cos, sin = position_embeddings
-                query_states, key_states = modeling_llama.apply_rotary_pos_emb(
-                    query_states,
-                    key_states,
-                    cos,
-                    sin,
-                )
-
-                if past_key_values is not None:
-                    if hasattr(past_key_values, "update"):
-                        key_states, value_states = past_key_values.update(
-                            key_states,
-                            value_states,
-                            self.layer_idx,
-                        )
-                        present_key_value = past_key_values
-                    else:
-                        key_states = torch.cat([past_key_values[0], key_states], dim=2)
-                        value_states = torch.cat([past_key_values[1], value_states], dim=2)
-                        present_key_value = (key_states, value_states)
-                else:
-                    present_key_value = (key_states, value_states) if use_cache else None
-
-                key_states = modeling_llama.repeat_kv(key_states, self.num_key_value_groups)
-                value_states = modeling_llama.repeat_kv(value_states, self.num_key_value_groups)
-
-                if output_attentions:
-                    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
-                    if attention_mask is not None:
-                        attn_weights = attn_weights + attention_mask
-                    attn_weights = torch.nn.functional.softmax(
-                        attn_weights,
-                        dim=-1,
-                        dtype=torch.float32,
-                    ).to(query_states.dtype)
-                    attn_output = torch.matmul(attn_weights, value_states)
-                else:
-                    attn_weights = None
-                    attn_output = torch.nn.functional.scaled_dot_product_attention(
-                        query_states,
-                        key_states,
-                        value_states,
-                        attn_mask=attention_mask,
-                        dropout_p=0.0 if not self.training else self.attention_dropout,
-                        is_causal=attention_mask is None and query_states.shape[2] > 1,
-                    )
-
-                attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
-                attn_output = self.o_proj(attn_output)
-                return attn_output, attn_weights, present_key_value
-
-        modeling_llama.LlamaAttention = DeepSeekVLV2CompatLlamaAttention
-        modeling_llama.LlamaFlashAttention2 = DeepSeekVLV2CompatLlamaAttention
+    """Legacy hook; definition-owned ports no longer modify Transformers globally."""
 
 
 def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
@@ -2126,23 +1981,6 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
             from transformers.utils import is_flash_attn_2_available
             config.attn_implementation_new = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
 
-    if model_type_lower == "dream" or model_type == "brumby":
-        import transformers.modeling_rope_utils as rope_utils
-        # dream remote models expect "default"
-        if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
-            rope_utils.ROPE_INIT_FUNCTIONS["default"] = rope_utils.ROPE_INIT_FUNCTIONS["linear"]
-
-        # transformers 5.x expects rope_parameters["factor"] for linear RoPE
-        if getattr(config, "rope_parameters", None):
-            config.rope_parameters.setdefault("factor", 1.0)
-
-    # BrumbyConfig remote config may not define pad_token_id.
-    # Ensure the attribute exists to avoid AttributeError in transformers 5.x.
-    if model_type == "brumby":
-        rope_scaling = getattr(config, "rope_scaling", None)
-
-        config.pad_token_id = getattr(config, "pad_token_id", None)
-
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
     rope_scaling = getattr(config, "rope_scaling", None)
@@ -2213,6 +2051,12 @@ def deci_init_compat(config):
 
 
 def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) -> None:
+    from ..models.local import local_model_loader
+
+    # Definition-owned configs carry their own compatibility contract. A raw
+    # caller trust flag cannot opt them into checkpoint-code field rewrites.
+    trust_remote_code = bool(trust_remote_code) and local_model_loader(getattr(config, "model_type", None)) is None
+
     # Some transformers 5.x model classes now read `config.rope_parameters`
     # directly during `from_config()`, but older local configs may only carry
     # legacy RoPE fields or nothing but a default `rope_theta`.
@@ -2960,11 +2804,36 @@ def load_hf_tokenizer(
         *,
         model_config: Any = None,
         trust_remote_code: bool = False,
+        return_tokenicer: bool = False,
         **kwargs,
 ):
     from tokenicer import Tokenicer
 
+    from ..models.local import local_model_loader
+
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
+    loader = local_model_loader(getattr(model_config, "model_type", None))
+    tokenicer_option_names = {"normalize_sentencepiece"}
+    if loader is not None:
+        for key, value in loader.tokenicer_options:
+            kwargs.setdefault(key, value)
+            tokenicer_option_names.add(key)
+    if isinstance(tokenizer_or_path, (str, os.PathLike)):
+        tokenizer_or_path = os.fspath(tokenizer_or_path)
+        if loader is not None:
+            # A package-owned model never delegates tokenizer Python to its
+            # checkpoint, including when it uses an ordinary native tokenizer.
+            trust_remote_code = False
+        if loader is not None and loader.tokenizer_class is not None:
+            # Class selection belongs to the definition, including when two
+            # checkpoints declare the same tokenizer class name. Tokenicer
+            # receives the owned instance and remains the normalization owner.
+            tokenizer_kwargs = {
+                key: value for key, value in kwargs.items()
+                if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
+                and key not in tokenicer_option_names
+            }
+            tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
     if isinstance(model_config, PreTrainedConfig):
         # Tokenicer's model_config controls normalization; AutoTokenizer uses
         # the separate `config` argument for class selection. Reuse the config
@@ -2977,11 +2846,9 @@ def load_hf_tokenizer(
         trust_remote_code=trust_remote_code,
         **kwargs,
     )
-    # BaseQModel applies GPTQModel's runtime Tokenicer wrapper once the model is
-    # constructed. Keep this loader's native-tokenizer return contract while
-    # delegating tokenizer construction and compatibility normalization to
-    # Tokenicer.
-    return tokenicer.tokenizer
+    # Internal model loads retain the normalized wrapper through construction.
+    # Direct callers keep the native-tokenizer return contract by default.
+    return tokenicer if return_tokenicer else tokenicer.tokenizer
 
 
 
