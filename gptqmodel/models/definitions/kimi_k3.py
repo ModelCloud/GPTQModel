@@ -1,9 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """Kimi K3 routed-expert geometry for bounded EXL3 calibration."""
+
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 _ROUTED_MODULES = {
+    "input_layernorm": ("input_layernorm:!",),
+    "post_attention_layernorm": ("post_attention_layernorm:!",),
+    "self_attention_res_norm": ("self_attention_res_norm:!",),
+    "self_attention_res_proj": ("self_attention_res_proj:!",),
+    "mlp_res_norm": ("mlp_res_norm:!",),
+    "mlp_res_proj": ("mlp_res_proj:!",),
+    "self_attn:!": (
+        "q_proj:!",
+        "k_proj:!",
+        "v_proj:!",
+        "b_proj:!",
+        "q_a_proj:!",
+        "q_a_layernorm:!",
+        "q_b_proj:!",
+        "kv_a_proj_with_mqa:!",
+        "kv_a_layernorm:!",
+        "kv_b_proj:!",
+        "o_proj:!",
+        "g_proj:!",
+        "f_a_proj:!",
+        "f_b_proj:!",
+        "g_a_proj:!",
+        "g_b_proj:!",
+        "q_conv1d:!",
+        "k_conv1d:!",
+        "v_conv1d:!",
+        "o_norm:!",
+    ),
+    "mlp": ("gate_proj:!", "up_proj:!", "down_proj:!"),
     "block_sparse_moe:moe": {
         "gate": ("gate:!",),
         "routed_expert_down_proj": ("routed_expert_down_proj:!",),
@@ -23,11 +54,21 @@ class KimiLinearQModel(BaseQModel):
     Quantization therefore uses utils.kimi_k3.KimiK3Source and the explicit
     prepare_moe/finish_moe boundary instead of BaseQModel.quantize().
     """
-    require_trust_remote_code = True
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.kimi_k3.configuration_kimi_k3.KimiConfigFactory",
+        model_class="gptqmodel.models.ports.kimi_k3.modeling_kimi_linear.KimiModelFactory",
+        tokenizer_class="gptqmodel.models.ports.kimi_k3.tokenization_kimi.KimiTokenizerFactory",
+    )
     layer_modules_strict = False  # first decoder layer is dense
     dynamic_expert_index = "num_experts"
     pre_lm_head_norm_module = "model.norm"
     module_tree = ["model", "layers", "#", _ROUTED_MODULES]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        raise NotImplementedError(
+            "Kimi K3 AWQ is unqualified: AttnRes prefix_sum and block_residual require the bounded runner."
+        )
 
     def quantize(self, *args, **kwargs):
         raise NotImplementedError(
@@ -48,6 +89,14 @@ class KimiLinearQModel(BaseQModel):
 
 class KimiK3QModel(KimiLinearQModel):
     """Bundled multimodal checkpoint; only routed text experts are quantized."""
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.kimi_k3.configuration_kimi_k3.KimiConfigFactory",
+        model_class="gptqmodel.models.ports.kimi_k3.modeling_kimi_linear.KimiModelFactory",
+        processor_class="gptqmodel.models.ports.kimi_k3.kimi_k3_processor.KimiK3Processor",
+        tokenizer_class="gptqmodel.models.ports.kimi_k3.tokenization_kimi.TikTokenTokenizer",
+    )
+    require_load_processor = True
     module_tree = ["language_model", "model", "layers", "#", _ROUTED_MODULES]
     pre_lm_head_norm_module = "language_model.model.norm"
     out_of_model_tensors = {"prefixes": ["vision_tower.", "mm_projector."]}
