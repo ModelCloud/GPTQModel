@@ -39,7 +39,12 @@ class InternLMTokenizer(PreTrainedTokenizer):
         self.add_eos_token = add_eos_token
         self.decode_with_prefix_space = decode_with_prefix_space
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
-        self.sp_model.Load(self.vocab_file)
+        with open(self.vocab_file, "rb") as file:
+            self._vocab_bytes = file.read()
+        try:
+            self.sp_model.LoadFromSerializedProto(self._vocab_bytes)
+        except RuntimeError as error:
+            raise RuntimeError(f"{type(self).__name__} could not parse vocabulary: {self.vocab_file}") from error
         super().__init__(
             bos_token=bos_token, eos_token=eos_token, unk_token=unk_token, pad_token=pad_token,
             sp_model_kwargs=self.sp_model_kwargs, add_bos_token=add_bos_token,
@@ -102,7 +107,8 @@ class InternLMTokenizer(PreTrainedTokenizer):
                 copyfile(self.vocab_file, out_vocab_file)
         else:
             with open(out_vocab_file, "wb") as file:
-                file.write(self.sp_model.serialized_model_proto())
+                # Newer SentencePiece mutates legacy NUL piece metadata on load.
+                file.write(self._vocab_bytes)
         return (out_vocab_file,)
 
     def _save_pretrained(self, save_directory, file_names, legacy_format=None, filename_prefix=None):

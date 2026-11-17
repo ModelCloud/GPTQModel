@@ -219,11 +219,19 @@ def test_missing_and_corrupt_asset_repairs_same_path(tmp_path, family):
     (tmp_path / "tokenizer.model").write_bytes(data)
     tokenizer = tokenizer_class.from_pretrained(tmp_path, local_files_only=True)
     assert tokenizer.encode("Hello world!") == [1, 9843, 2028, 346]
+    texts = ["Hello world!", "\x00", "a\x00b", "  中文🙂\n", "<s>hi</s>"]
+    expected = [tokenizer.encode(text) for text in texts]
+    decoded = [tokenizer.decode(ids) for ids in expected]
     (tmp_path / "tokenizer.model").unlink()
     rescued = tmp_path / "rescued"
     tokenizer.save_pretrained(rescued)
     assert (rescued / "tokenizer.model").read_bytes() == data
-    assert tokenizer_class.from_pretrained(rescued, local_files_only=True).encode("Hello world!") == [1, 9843, 2028, 346]
+    restored = tokenizer_class.from_pretrained(rescued, local_files_only=True)
+    assert [restored.encode(text) for text in texts] == expected
+    assert [restored.decode(ids) for ids in expected] == decoded
+    saved_again = tmp_path / "rescued_again"
+    restored.save_pretrained(saved_again)
+    assert (saved_again / "tokenizer.model").read_bytes() == data
 
 
 @pytest.mark.parametrize("family", CLASSES)
