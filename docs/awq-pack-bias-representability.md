@@ -156,3 +156,11 @@ before the copy. This is the same path `restore_packed_module` uses.
 `tests/test_awq_gemv_bias_pack.py` pins the packed-bias dtype, and
 `tests/test_awq_pack_scale_representability.py` keeps the adjacent scale
 contract unchanged.
+
+## Not in scope
+
+`AwqMarlinLinear` is a load-time repack target, not a packer, and its native
+kernel reads `b_bias` as `at::Half`/`at::BFloat16` (it also narrows the buffer
+in `forward`). A wide checkpoint bias therefore still has to be narrowed before
+the Marlin launch, which the Python epilogue cannot undo. That is a separate
+kernel-ABI change and is not part of this pack-time fix.
