@@ -132,6 +132,11 @@ class LinearEXL3:
             torch_mode = params.get("reconstruct", bsz > 32)
 
         out_shape = x.shape[:-1] + (self.out_features,)
+        if bsz == 0:
+            # A zero-row batch has no Hadamard/HGEMM work. The native
+            # had_r_128 would otherwise launch a zero-row grid, which the
+            # CUDA/HIP runtime rejects.
+            return torch.empty(out_shape, dtype = out_dtype or self.out_dtype or torch.half, device = x.device)
         # The native hadamard/hgemm/bc kernels treat the operand as densely
         # packed rows and take `data_ptr()` directly. `view` succeeds on some
         # strided inputs (column slices, `hidden_states[:, -1:, :]`), which

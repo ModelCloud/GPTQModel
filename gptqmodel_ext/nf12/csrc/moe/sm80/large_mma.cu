@@ -143,9 +143,9 @@ class MoeProblem {
     w.base_x4 = 0;
     if (p_.exp_base != nullptr) w.base_x4 = exp_base_x4(__ldg(p_.exp_base + e));
     if (p_.escapes != nullptr) {
-      const int64_t e0 = __ldg(p_.escape_offsets + e);
-      w.escapes = p_.escapes + e0;
-      w.num_escapes = static_cast<uint32_t>(__ldg(p_.escape_offsets + e + 1) - e0);
+      const MoeExpertCodec slice = moe_escape_slice(p_.escapes, p_.escape_offsets, e);
+      w.escapes = slice.escapes;
+      w.num_escapes = slice.num_escapes;
     }
     for (int r = threadIdx.x; r < C::BM; r += C::kThreads) {
       RowMap m;
