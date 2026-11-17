@@ -14,7 +14,7 @@ def test_nemotron_h_puzzle_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="nemotron_h_puzzle")
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition("/tmp/nemotron_h_puzzle") is NemotronHPuzzleQModel
 
