@@ -1,0 +1,12 @@
+Intern-S1 package-owned port for GPT-QModel
+
+Tokenization code: Copyright 2025 The Intern team and Shanghai AI Lab team.
+Configuration, model and processor code: Copyright 2025 HuggingFace Inc. team.
+Adaptations: Copyright 2026 ModelCloud.ai.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Source: https://huggingface.co/internlm/Intern-S1-mini/tree/0f25c8f60f4190a18dd6620c94bdccedbebc208d
+Tokenizer source SHA256: 0695012185b0e257b9352b333121d95e4e2336fc9331c56ec6d06dea54e60af5
+The checkpoint's source headers are retained in the derived files.
+No remote Python imports or dynamic downloads of implementation code are used.
+Native Qwen3/Qwen3-MoE text components are from the installed Transformers package.
