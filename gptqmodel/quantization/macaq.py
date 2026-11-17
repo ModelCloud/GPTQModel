@@ -170,33 +170,28 @@ def balance_pre_scale(
 # ---------------------------------------------------------------------------
 # OCP MXFP4 round-to-nearest (E2M1 + E8M0)
 # ---------------------------------------------------------------------------
+_E2M1_CODE_THRESHOLDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
 def _e2m1_code_from_scaled(abs_scaled: torch.Tensor, *, tie_high: bool = False) -> torch.Tensor:
     """Nearest E2M1 magnitude code (0..7) for values already divided by the scale.
 
     ``tie_high=False`` uses strict ``>`` comparisons, matching the MACaQ weight
     quantizer.  The MACaQ activation kernels compare with ``>=``; pass
     ``tie_high=True`` to reproduce that tie behavior bit-for-bit.
+
+    The codes fit in four bits, so they accumulate in ``uint8``.  A nested
+    ``torch.where`` tree ending in ``.long()`` materialized an int64 plane per
+    weight; on an 8B ``down_proj`` that was 448 MiB per plane, and the exponent
+    screen builds three (#4820).  ``uint8`` is only ever used as data here, not
+    as an index.
     """
 
-    def above(value: float) -> torch.Tensor:
-        return abs_scaled >= value if tie_high else abs_scaled > value
-
-    return torch.where(
-        above(5.0), 7,
-        torch.where(
-            above(3.5), 6,
-            torch.where(
-                above(2.5), 5,
-                torch.where(
-                    above(1.75), 4,
-                    torch.where(
-                        above(1.25), 3,
-                        torch.where(above(0.75), 2, torch.where(above(0.25), 1, 0)),
-                    ),
-                ),
-            ),
-        ),
-    ).long()
+    code = torch.zeros(abs_scaled.shape, dtype=torch.uint8, device=abs_scaled.device)
+    for threshold in _E2M1_CODE_THRESHOLDS:
+        above = abs_scaled >= threshold if tie_high else abs_scaled > threshold
+        code += above.to(torch.uint8)
+    return code
 
 
 @torch.no_grad()
@@ -231,11 +226,16 @@ def mxfp4_rtn_signed_index(
     abs_scaled = (grouped / scale).abs()
     code = _e2m1_code_from_scaled(abs_scaled, tie_high=tie_high)
     negative = grouped < 0
-    signed_index = torch.where(
+    # Build the signed grid in uint8 (values 0..14) and widen once.  int32 is
+    # the narrowest dtype PyTorch accepts as a gather index; int64 doubled
+    # every plane for no benefit, and the exponent screen holds one per offset
+    # (#4820).
+    signed = torch.where(
         code == 0,
         torch.full_like(code, 7),
         torch.where(negative, 7 - code, 7 + code),
-    ).view(out_features, in_features)
+    )
+    signed_index = signed.to(torch.int32).view(out_features, in_features)
     scale_element = scale.expand(out_features, groups, block_size).reshape(out_features, in_features).contiguous()
     return signed_index, log2_scale.squeeze(-1), scale_element
 
