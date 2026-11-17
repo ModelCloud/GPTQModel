@@ -90,6 +90,9 @@ def _torch_foem_oracle(
         zeros.append(zero[:, None])
         if end < columns:
             remaining = remaining[:, group_size:] - errors @ factor[start:end, end:]
+            # #4046: the first column of every block after the first gets the
+            # same beta correction the Torch loop applies at the boundary.
+            remaining[:, 0] -= beta * (remaining[:, 0] - raw[:, end])
     result = tuple(
         torch.cat(values, dim=1).numpy() for values in (quantized, scales, zeros)
     )
