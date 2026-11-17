@@ -299,6 +299,26 @@ def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
     return len(positional) >= 2
 
 
+def _kernel_shape_supported(kernel, in_features: int, out_features: int) -> bool:
+    """Return whether ``kernel`` declares it can pack this module shape.
+
+    Uses the kernel's own static shape contract
+    (``SUPPORTS_{IN,OUT}_FEATURES_DIVISIBLE_BY`` through
+    ``_validate_shape_constraints``) rather than the full ``validate``: the full
+    check also probes runtime availability, and a shape decision must not depend
+    on whether a JIT extension happens to be built.
+    """
+
+    check = getattr(kernel, "_validate_shape_constraints", None)
+    if not callable(check):
+        return True
+    try:
+        ok, _ = check(in_features=in_features, out_features=out_features)
+    except Exception:
+        return False
+    return bool(ok)
+
+
 def _resolve_module_sym(qcfg, module_name: Optional[str], resolved_cfg=None) -> bool:
     """Resolve one module's symmetry mode from its dynamic rule.
 
@@ -567,8 +587,22 @@ class AWQProcessor(LoopProcessor):
         #     return AwqMarlinLinear
         raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
 
-    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, resolved_cfg=None):
-        """Resolves the AWQ kernel after applying any dynamic format override."""
+    def _resolve_qlinear_kernel(
+        self,
+        module_name: Optional[str] = None,
+        *,
+        resolved_cfg=None,
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+    ):
+        """Resolves the AWQ kernel after applying any dynamic format override.
+
+        ``in_features``/``out_features`` are optional because a few callers only
+        know the module name. When they are given, the candidate is checked
+        against the kernel's own packing contract and a kernel that cannot pack
+        the shape falls back to the portable torch kernel of the same checkpoint
+        format (issue #4567).
+        """
 
         target_format = self._module_format(module_name, resolved_cfg=resolved_cfg)
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
@@ -584,8 +618,59 @@ class AWQProcessor(LoopProcessor):
         if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
-                return model_kernel
+                return self._portable_kernel_for_shape(
+                    model_kernel,
+                    module_name,
+                    in_features=in_features,
+                    out_features=out_features,
+                    resolved_cfg=resolved_cfg,
+                )
         return self._select_qlinear_kernel_for_format(target_format)
+
+    def _portable_kernel_for_shape(
+        self,
+        kernel,
+        module_name: Optional[str],
+        *,
+        in_features: Optional[int],
+        out_features: Optional[int],
+        resolved_cfg=None,
+    ):
+        """Fall back to ``AwqTorchLinear`` when ``kernel`` rejects the shape.
+
+        A model-wide kernel is selected once, before any module shape is known,
+        but the CUDA GEMM/GEMV kernels only pack some output widths
+        (``AwqGEMMLinear`` needs ``out_features % 64 == 0``). Without this check
+        a shape the format itself supports (FalconMamba/Mamba ``x_proj``
+        8192->288) fails inside ``create_quant_module`` after the whole
+        calibration has run. ``AwqTorchLinear`` packs the same ``FORMAT.GEMM``
+        checkpoint layout for every shape the format admits, and AUTO already
+        selects a compatible kernel per layer at load, so the saved checkpoint
+        stays loadable.
+
+        Only the portable kernel is used as a fallback: when it also rejects the
+        shape the original kernel is returned so the real, module-specific
+        error still surfaces.
+        """
+
+        if kernel is AwqTorchLinear or in_features is None or out_features is None:
+            return kernel
+        if _kernel_shape_supported(kernel, in_features, out_features):
+            return kernel
+        if not _kernel_shape_supported(AwqTorchLinear, in_features, out_features):
+            # Neither kernel packs the shape: keep the requested one so the
+            # module-specific error still names it.
+            return kernel
+        log.warning(
+            "AWQ: `%s` cannot pack `%s` (%d->%d); using the portable `%s` kernel "
+            "for this module instead of failing at pack time.",
+            getattr(kernel, "__name__", kernel),
+            module_name or "<model-wide>",
+            in_features,
+            out_features,
+            AwqTorchLinear.__name__,
+        )
+        return AwqTorchLinear
 
     def _module_bits(self, module_name: Optional[str], *, resolved_cfg=None) -> int:
         """Resolve the AWQ width this module is staged and packed at.
@@ -664,11 +749,23 @@ class AWQProcessor(LoopProcessor):
             self._full_module_name(layer_module, module)
         )
 
-    def _resolve_module_kernel(self, module_name: Optional[str], resolved_cfg=None):
+    def _resolve_module_kernel(
+        self,
+        module_name: Optional[str],
+        resolved_cfg=None,
+        *,
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+    ):
         """Resolve the packing kernel for one module, falling back to the default."""
 
         try:
-            return self._resolve_qlinear_kernel(module_name, resolved_cfg=resolved_cfg)
+            return self._resolve_qlinear_kernel(
+                module_name,
+                resolved_cfg=resolved_cfg,
+                in_features=in_features,
+                out_features=out_features,
+            )
         except Exception:
             return self.qlinear_kernel
 
@@ -736,7 +833,12 @@ class AWQProcessor(LoopProcessor):
         example a non-quantized MoE router).
         """
 
-        kernel = self._resolve_module_kernel(module_name, resolved_cfg=resolved_cfg)
+        kernel = self._resolve_module_kernel(
+            module_name,
+            resolved_cfg=resolved_cfg,
+            in_features=in_features,
+            out_features=out_features,
+        )
         supported = {
             int(size)
             for size in getattr(kernel, "SUPPORTS_GROUP_SIZE", ()) or ()
@@ -808,7 +910,12 @@ class AWQProcessor(LoopProcessor):
                 continue
             weight = getattr(module, "weight", None)
             dtype = weight.dtype if isinstance(weight, torch.Tensor) else None
-            kernel = self._resolve_module_kernel(name, resolved_cfg=resolved_cfg)
+            kernel = self._resolve_module_kernel(
+                name,
+                resolved_cfg=resolved_cfg,
+                in_features=in_features,
+                out_features=out_features,
+            )
             if self._kernel_group_size_supported(
                 kernel,
                 name,
@@ -4512,8 +4619,17 @@ class AWQProcessor(LoopProcessor):
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
         resolved_cfg = get_resolved_module_config(module)
-        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: self.gptq_model.model.get_submodule(module.full_name)}
+        packed_source = layers[module.full_name]
+        # Resolve against the real module geometry so a kernel that cannot pack
+        # this width falls back here instead of raising inside
+        # `create_quant_module` after every layer was calibrated (#4567).
+        quant_linear_cls = self._resolve_qlinear_kernel(
+            module.full_name,
+            resolved_cfg=resolved_cfg,
+            in_features=int(getattr(packed_source, "in_features", 0) or 0) or None,
+            out_features=int(getattr(packed_source, "out_features", 0) or 0) or None,
+        )
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         # replace module with quantized module
