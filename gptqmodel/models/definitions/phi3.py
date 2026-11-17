@@ -6,6 +6,7 @@ from torch import nn
 
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Phi3QModel(BaseQModel):
@@ -81,6 +82,12 @@ class PhiMoEGPTQForCausalLM(BaseQModel):
 
     dynamic_expert_index = "num_local_experts"
     pre_lm_head_norm_module = "model.norm"
+
+    # PhiMoE stores experts as fused 3-D tensors; Defuser expands them into
+    # per-expert ``gate_proj``/``up_proj``/``down_proj`` linears before the
+    # module tree is resolved. Without these hooks ``ExpertsRoutingBypass``
+    # fell back to native top-2 routing with only a per-forward warning.
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "model",

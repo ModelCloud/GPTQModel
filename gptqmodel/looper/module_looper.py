@@ -166,6 +166,28 @@ def _resolve_strategy_device_pool(
     return resolved
 
 
+def validate_moe_routing_support(gptq_model) -> None:
+    """Reject ``ExpertsRoutingBypass`` when the definition cannot feed all experts.
+
+    A model without ``moe_lifecycle_hooks`` cannot replay the whole calibration
+    batch through every expert. Warning per forward and continuing to calibrate
+    only the natively routed tokens while the saved config still claimed bypass
+    routing made the option a silent no-op.
+    """
+
+    if not gptq_model.quantize_config.moe_routing_bypass():
+        return
+    if getattr(gptq_model, "moe_lifecycle_hooks", None) is not None:
+        return
+    raise ValueError(
+        f"ModuleLooper: MoEConfig(routing=ExpertsRoutingBypass()) was requested but "
+        f"{type(gptq_model).__name__} does not declare `moe_lifecycle_hooks`. "
+        "The all-experts calibration path cannot run, and continuing would silently "
+        "fall back to native routed calibration. Declare `moe_lifecycle_hooks` on the "
+        "model definition, or use `ExpertsRoutingOverride` instead."
+    )
+
+
 class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
 
@@ -406,6 +428,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        validate_moe_routing_support(self.gptq_model)
         self._emit_moe_parallel_quant_runtime()
 
         for processor in self.processors:
@@ -1021,15 +1044,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if not flag_enabled:
             return False
 
-        # Check if model has lifecycle hooks
+        # Check if model has lifecycle hooks. __init__ already rejects a bypass
+        # request for a model without hooks; keep this guard so a config mutated
+        # after construction cannot silently re-enable native routing.
         hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
-            log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
-                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
-                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
+            raise ValueError(
+                f"ModuleLooper: ExpertsRoutingBypass was requested but "
+                f"{self.gptq_model.__class__.__name__} does not declare `moe_lifecycle_hooks`. "
+                "The all-experts calibration path cannot run."
             )
-            return False
 
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block_for_subset(
