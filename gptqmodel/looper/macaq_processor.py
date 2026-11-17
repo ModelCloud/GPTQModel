@@ -28,12 +28,12 @@ from ..looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -59,7 +59,7 @@ from ..utils.torch import CPU
 log = setup_logger()
 
 
-class MacaqProcessor(LoopProcessor):
+class MacaqProcessor(SharedInputCaptureProcessor):
     """Captures Hessians and quantizes Linear modules with the MACaQ recipe."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -88,6 +88,7 @@ class MacaqProcessor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
         if backend not in (BACKEND.MACAQ_TORCH, BACKEND.MACAQ_TRITON):
@@ -124,6 +125,13 @@ class MacaqProcessor(LoopProcessor):
         return self.tasks.get(module.name, False) == False  # noqa: E712
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        if self.shared_input_leader(name) is not None:
+            def skip(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                del inp, out
+            return skip
+
         def hook(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             self.tasks[name].add_batch(inp[0].data, out.data)
 

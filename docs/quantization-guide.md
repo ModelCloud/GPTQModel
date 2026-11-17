@@ -171,15 +171,18 @@ Tokenizers that prepend a BOS token make that position an attention sink: its
 activation norm can exceed the rest of the sequence by hundreds of times, so a
 single calibration row dominates the input Hessian and GPTQ stops optimizing
 for text tokens (issue #4393). Set `exclude_attention_sinks=True` to drop the
-first token of every calibration sequence before the Hessian is accumulated:
+leading BOS token before the Hessian is accumulated:
 
 ```python
 qcfg = GPTQConfig(bits=4, group_size=128, exclude_attention_sinks=True)
 ```
 
-The default is `False`, which keeps the historical Hessian. Enable it only when
-calibration rows start with a special/BOS token; a flattened routed-expert batch
-has no sequence axis and is never masked. On Llama-3.2-1B this option lowered
+The token is dropped only when the calibration `input_ids` show the tokenizer's
+BOS id at the first unpadded position. BOS-less tokenizers such as Qwen2.5/Qwen3
+keep their first real text token (issue #4459), and when the decision cannot be
+made the position is left in the Hessian with a one-time warning. The default is
+`False`, which keeps the historical Hessian. A flattened routed-expert batch has
+no sequence axis and is never masked. On Llama-3.2-1B this option lowered
 wikitext-2 perplexity from 23.21 to 19.51 at the same 4-bit/group-128 GPTQ
 settings.
 

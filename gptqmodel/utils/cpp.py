@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 import traceback
@@ -395,6 +396,26 @@ def _path_is_within(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _replace_staged_tree(source_root: Path, target_root: Path) -> None:
+    """Replace *target_root* with an exact copy of *source_root*.
+
+    A merge copy (``dirs_exist_ok=True``) refreshes files that still exist but
+    never removes files deleted from the authoritative tree. A deleted header
+    therefore stayed visible to the staged compiler and its obsolete contents
+    stayed in the cache fingerprint. Build the copy aside and swap it in so the
+    staged generation is exactly the current source tree.
+    """
+
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    temp_root = Path(tempfile.mkdtemp(prefix=f".{target_root.name}.tmp-", dir=target_root.parent))
+    try:
+        shutil.copytree(source_root, temp_root, dirs_exist_ok=True)
+        shutil.rmtree(target_root, ignore_errors=True)
+        os.replace(temp_root, target_root)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
 
 def _torch_ops_file_lock_timeout_seconds() -> float:
@@ -1229,7 +1250,12 @@ class TorchOpsJitExtension:
         return cuda_include_paths_with_fallback(include_paths)
 
     def _staging_root(self) -> Path:
-        """Writable directory that receives a copy of the HIP kernel sources."""
+        """Writable directory that receives a copy of the HIP kernel sources.
+
+        The path is shared by every fingerprint of this extension, so it is
+        written only while holding the cross-process build lock (see
+        ``_stage_hip_sources``).
+        """
 
         return self.base_build_root() / "_src"
 
@@ -1255,6 +1281,12 @@ class TorchOpsJitExtension:
         checkout but outside the staged source root (for example Machete's
         ``gptqmodel_ext`` headers) are staged too, because hipify rewrites
         every header under its include roots.
+
+        The staged tree is replaced with an exact copy of the authoritative
+        tree, never merged into it, so a deleted header disappears from the
+        staged generation. Callers must run this only while holding the
+        cross-process build lock: another process sharing the cache must not
+        overwrite ``_src`` while a build is compiling it.
         """
 
         resolved_sources = [str(source) for source in sources]
@@ -1300,8 +1332,7 @@ class TorchOpsJitExtension:
                     f"{self.display_name}: the JIT build root `{staging_root}` is inside the "
                     f"source tree `{source_root}`; choose a build root outside the checkout."
                 )
-            staging_root.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source_root, staging_root, dirs_exist_ok=True)
+            _replace_staged_tree(source_root, staging_root)
 
         def staged(path: Path) -> Path | None:
             try:
@@ -1324,22 +1355,31 @@ class TorchOpsJitExtension:
             if resolved.exists() and _path_is_within(resolved, checkout):
                 # An include root inside the checkout outside the staged source
                 # root is still hipified in place; stage it under the cache.
-                # Refresh on every call: the cache fingerprint hashes the
-                # *staged* copy, so a stale stage would hide a header edit and
-                # reuse a binary built against the old header.
+                # The cache fingerprint hashes the authoritative tree, so this
+                # exact replacement keeps the staged headers (including
+                # deletions) aligned with the key that selected this build.
                 external = staging_root / "_checkout" / resolved.relative_to(checkout)
-                external.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(resolved, external, dirs_exist_ok=True)
+                _replace_staged_tree(resolved, external)
                 staged_includes.append(str(external))
                 continue
             staged_includes.append(include)
         return staged_sources, _dedupe_path_strings(staged_includes)
 
-    def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
-        """Resolve sources and includes, staging HIP sources when requested."""
+    def _resolved_source_inputs(self) -> tuple[list[str], list[str]]:
+        """Resolve sources and includes without writing a staged copy."""
 
         sources = self._resolve_sequence(self.sources)
         include_paths = self._resolved_extra_include_paths()
+        return sources, include_paths
+
+    def _resolved_sources_and_include_paths(self) -> tuple[list[str], list[str]]:
+        """Resolve sources and includes, staging HIP sources when requested.
+
+        This writes the shared staging directory and must therefore run while
+        holding the cross-process build lock.
+        """
+
+        sources, include_paths = self._resolved_source_inputs()
         return self._stage_hip_sources(sources, include_paths)
 
     def _with_stable_abi_target(self, flags: Sequence[str]) -> list[str]:
@@ -1601,10 +1641,16 @@ class TorchOpsJitExtension:
         )
 
     def _cache_fingerprint(self) -> str:
-        """Hash the effective op surface and source metadata to avoid stale cache reuse."""
+        """Hash the effective op surface and authoritative source graph.
+
+        This is read-only: it never stages sources. Hashing the authoritative
+        tree (rather than a mutable staged copy) means a deleted include changes
+        the key, and computing a fingerprint cannot overwrite another process's
+        in-flight staged build.
+        """
 
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
-        sources, include_paths = self._resolved_sources_and_include_paths()
+        sources, include_paths = self._resolved_source_inputs()
         extra_cflags = self._resolved_extra_cflags()
         extra_cuda_cflags = self._resolved_extra_cuda_cflags()
         python_abi_dependent, torch_stable_abi = self._resolved_abi_flags(sources, include_paths)
@@ -1993,7 +2039,6 @@ class TorchOpsJitExtension:
                 return True
             if self._load_attempted and not force_rebuild:
                 return self._load_result
-            build_root = self.build_root()
             base_build_root = self.base_build_root()
 
             lock_timeout_seconds = self._build_lock_timeout_seconds()
@@ -2011,6 +2056,11 @@ class TorchOpsJitExtension:
                     log.warning("%s", self._last_error)
                     setup_logger().info(f"{self.display_name}: JIT build lock wait timed out; using fallback path.")
                     return False
+
+                # Compute the fingerprint only after the lock is held so the
+                # build directory and the staged sources compiled below name
+                # the same source snapshot.
+                build_root = self.build_root()
 
                 if force_rebuild and base_build_root.exists():
                     setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")

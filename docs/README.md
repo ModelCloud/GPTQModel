@@ -178,6 +178,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Input capture cleanup lifecycle](input-capture-cleanup-lifecycle.md)
 - [Kernel and thread selection (KernelConfig)](kernel-config.md)
 - [Kernel validation and cache lifecycle](kernel-validation-and-cache-lifecycle.md)
+- [HIP JIT source staging](hip-jit-source-staging.md)
 - [Multi-GPU quantization](multi_gpu_quantization.md)
 - [Multi-GPU memory retention](multi-gpu-memory.md)
 - [Quantization lifecycle contracts](quantization-lifecycle-contracts.md)

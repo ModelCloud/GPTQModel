@@ -36,30 +36,50 @@ def _qqq_gpu_quantizer():
 
 # ``qqq_gemm`` uses its ``C`` argument only as the per-call INT32 global
 # reduce scratch.  A buffer per module made a Llama-3-8B QQQ model retain
-# ~5.25 GiB of zeroed scratch (issue #4387), so all modules on a device share
-# one lazily grown flat buffer instead.  The flat layout lets each caller take
+# ~5.25 GiB of zeroed scratch (issue #4387), so modules on a device share a
+# lazily grown flat buffer instead.  The flat layout lets each caller take
 # a *contiguous* ``(max_par * 64, out_features)`` view even when the shared
 # allocation was grown for a wider layer; slicing columns of a 2-D buffer would
 # hand the kernel a stride it does not understand.
+#
+# The kernel writes ``C`` while it runs, so the allocation lock is not a
+# scratch-use lease (issue #4488).  The cache is keyed by the device *and* the
+# current stream: work on one stream is ordered by that stream and may reuse
+# its buffer, while distinct concurrent streams get independent allocations.
 _REDUCE_SCRATCH_LOCK = threading.Lock()
-_REDUCE_SCRATCH: dict[torch.device, torch.Tensor] = {}
+_REDUCE_SCRATCH: dict[tuple[torch.device, object], torch.Tensor] = {}
 
 
 def _shared_reduce_scratch(
-    device: torch.device, out_features: int, max_par: int = 16
+    device: torch.device,
+    out_features: int,
+    max_par: int = 16,
+    *,
+    stream: object = None,
 ) -> torch.Tensor:
-    """Return one per-device INT32 reduce scratch, grown to ``max_par * 64 x N``."""
+    """Return the INT32 reduce scratch owned by ``device``'s current stream.
+
+    The result is grown to ``max_par * 64 x out_features`` and is exclusive to
+    the stream that will run the kernel.  ``stream`` overrides the current
+    stream lookup; tests use it to exercise the key without a CUDA device.
+    """
 
     device = torch.device(device)
+    if stream is None and device.type == "cuda":
+        stream = torch.cuda.current_stream(device)
+    # Key by the stream handle, not the Stream wrapper: the process-wide cache
+    # must not keep a user-created stream alive after the caller drops it.
+    handle = getattr(stream, "cuda_stream", None)
+    key = (device, handle if handle is not None else stream)
     rows = max_par * 64
     required = rows * out_features
     with _REDUCE_SCRATCH_LOCK:
-        scratch = _REDUCE_SCRATCH.get(device)
+        scratch = _REDUCE_SCRATCH.get(key)
         if scratch is None or scratch.numel() < required:
             # The kernel writes before it reads this scratch, but zeroing keeps
             # the shared buffer indistinguishable from the old per-module one.
             scratch = torch.zeros(required, dtype=torch.int32, device=device)
-            _REDUCE_SCRATCH[device] = scratch
+            _REDUCE_SCRATCH[key] = scratch
     return scratch[:required].view(rows, out_features)
 
 
@@ -419,10 +439,12 @@ class QQQLinear(GroupedQuantLinear):
         return buf
 
     def _reduce_scratch(self, device: Optional[torch.device] = None) -> torch.Tensor:
-        """Return the shared per-device INT32 reduce scratch for this layer.
+        """Return the INT32 reduce scratch owned by this call's stream.
 
-        The native kernel consumes ``C`` only for the duration of one call, so
-        every ``QQQLinear`` on a device uses the same allocation.  Inside
+        The native kernel consumes ``C`` for the duration of one call, so every
+        ``QQQLinear`` call on the same device *and* stream may reuse one
+        allocation.  Different streams must not: their work can overlap, and
+        an allocation lock does not order the kernels.  Inside
         ``torch.compile`` a process-wide mutable cache would be captured as a
         graph constant, so the compiled path gets a per-call allocation.
         """
