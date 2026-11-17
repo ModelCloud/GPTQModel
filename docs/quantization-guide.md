@@ -167,24 +167,24 @@ asymmetric weights where the chosen kernel supports them. `desc_act=True`
 enables GPTQ activation ordering and disables the default group-aware ordering;
 do not explicitly enable both `desc_act` and `act_group_aware`.
 
-Tokenizers that prepend a BOS token make that position an attention sink: its
-activation norm can exceed the rest of the sequence by hundreds of times, so a
-single calibration row dominates the input Hessian and GPTQ stops optimizing
-for text tokens (issue #4393). Set `exclude_attention_sinks=True` to drop the
-leading BOS token before the Hessian is accumulated:
+Tokenizers that prepend a BOS token make it an attention sink: its activation
+norm can exceed the text tokens by hundreds of times, so a few rows dominate the
+input Hessian and the quantizer stops optimizing for text tokens (issue #4393).
+`calibration_exclude_attention_sinks=True` drops every attended BOS token (the
+leading one and each document-boundary BOS of concatenated calibration) from
+every calibration method's statistics (GPTQ, GPTAQ, FOEM, QQQ, MACaQ, EXL3, AWQ,
+calibrated FP8 GSQ) while still running it through the forward:
 
 ```python
-qcfg = GPTQConfig(bits=4, group_size=128, exclude_attention_sinks=True)
+model.quantize(calibration, calibration_exclude_attention_sinks=True)
 ```
 
-The token is dropped only when the calibration `input_ids` show the tokenizer's
-BOS id at the first unpadded position. BOS-less tokenizers such as Qwen2.5/Qwen3
-keep their first real text token (issue #4459), and when the decision cannot be
-made the position is left in the Hessian with a one-time warning. The default is
-`False`, which keeps the historical Hessian. A flattened routed-expert batch has
-no sequence axis and is never masked. On Llama-3.2-1B this option lowered
-wikitext-2 perplexity from 23.21 to 19.51 at the same 4-bit/group-128 GPTQ
-settings.
+The default is `False`, which keeps the historical statistics bit for bit. A
+tokenizer without a BOS token (Qwen2.5/Qwen3) has no sink to drop, so the option
+changes nothing for it (issue #4459). VPTQ, ParoQuant and staged GSQ reject the
+option. The effect is model-dependent, so validate it per model. See
+[calibration attention-sink exclusion](calibration-attention-sinks.md) for the
+exact token rule, the flow, and measurements.
 
 ### AWQ W4A16
 

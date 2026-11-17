@@ -52,7 +52,7 @@ from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
 from ..quantization.config import FORMAT, METHOD, MSEConfig, QuantizeConfig, resolve_quant_format
-from ..utils.attn_mask import normalize_seq_mask
+from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -1132,8 +1132,13 @@ class AWQProcessor(LoopProcessor):
     def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, ...]]:
         """Identity of one captured source tensor, or ``None`` when it cannot be shared.
 
-        Masked captures build a fresh masked tensor per sibling, so they never
-        share. Calibration runs under ``inference_mode``, so the captured tensor
+        A masked capture is shared too: the cached host copy is the masked
+        result, and the key carries the identity of the active keep-mask, which
+        the looper binds once per calibration batch. Before
+        ``CalibrationConfig.exclude_attention_sinks`` only padded batches had a
+        mask; with it every batch does, and refusing to share would copy each
+        q/k/v and gate/up activation once per sibling. Calibration runs under
+        ``inference_mode``, so the captured tensor
         is usually an inference tensor and ``_version`` raises. Keying on the
         version alone therefore disabled sharing for every real calibration
         capture. Use the storage pointer plus shape/stride/dtype instead; the
@@ -1142,8 +1147,7 @@ class AWQProcessor(LoopProcessor):
         when one exists so an in-place mutation still invalidates the host copy.
         """
 
-        if getattr(getattr(self, "_mask_tls", None), "value", None) is not None:
-            return None
+        keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
         if not torch.is_tensor(feature):
             return None
         try:
@@ -1163,6 +1167,7 @@ class AWQProcessor(LoopProcessor):
             tuple(feature.stride()),
             feature.dtype,
             version,
+            None if keep_mask is None else id(keep_mask),
         )
 
     def _materialize_host_feature(self, feature: torch.Tensor) -> torch.Tensor:
@@ -1678,7 +1683,9 @@ class AWQProcessor(LoopProcessor):
     def _token_row_source_structure(
         mask: Optional[torch.Tensor],
         row_count: int,
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]]:
+        sink_positions: Optional[torch.Tensor] = None,
+        exclude_sinks: bool = False,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]]:
         """Map one capture batch's kept rows back onto its document grid.
 
         ``row_count`` is the number of kept rows the capture hook stored for
@@ -1688,9 +1695,30 @@ class AWQProcessor(LoopProcessor):
         ``[row_count, row_count]`` attention relation among those rows (True =
         attended), and ``form`` is the captured mask's form. ``None`` means the
         cached mask does not describe exactly these rows.
+
+        ``sink_positions`` turns on ``CalibrationConfig.exclude_attention_sinks``
+        handling: it is the batch's ``[B, S]`` BOS positions, and the kept set
+        loses the same sink positions the capture hook dropped. Without a
+        captured mask the batch is an unpadded ``[B, S]`` grid; it is rebuilt
+        from that shape so retained rows keep their true positions, and
+        ``form`` is ``None`` because there was no captured mask form to keep.
         """
 
-        if mask is None or row_count <= 0 or not torch.is_tensor(mask):
+        if row_count <= 0:
+            return None
+        if mask is None and exclude_sinks:
+            if not torch.is_tensor(sink_positions) or sink_positions.dim() != 2:
+                return None
+            batch, seq_len = int(sink_positions.shape[0]), int(sink_positions.shape[1])
+            keep = exclude_attention_sinks(None, sink_positions, batch=batch, seq_len=seq_len, device="cpu")
+            if keep is None or int(keep.sum().item()) != row_count:
+                return None
+            flat_index = torch.nonzero(keep.reshape(-1), as_tuple=False).reshape(-1)
+            documents = torch.div(flat_index, seq_len, rounding_mode="floor")
+            positions = flat_index % seq_len
+            allowed = positions.unsqueeze(1) >= positions.unsqueeze(0)
+            return documents, positions, allowed, None
+        if mask is None or not torch.is_tensor(mask):
             return None
 
         form = AWQProcessor._captured_mask_form(mask)
@@ -1728,6 +1756,8 @@ class AWQProcessor(LoopProcessor):
 
         if keep is None or keep.dim() != 2:
             return None
+        if exclude_sinks:
+            keep = exclude_attention_sinks(keep, sink_positions)
 
         seq_len = int(keep.shape[-1])
         if seq_len <= 0:
@@ -1869,7 +1899,14 @@ class AWQProcessor(LoopProcessor):
 
             packed_indices = torch.tensor([item[0] for item in entries], dtype=torch.long)
             local_rows = torch.tensor([item[1] for item in entries], dtype=torch.long)
-            structure = self._token_row_source_structure(mask, row_count)
+            structure = self._token_row_source_structure(
+                mask,
+                row_count,
+                self.attention_sink_positions_for_batch(batch_index),
+                exclude_sinks=bool(
+                    getattr(getattr(self, "calibration", None), "exclude_attention_sinks", False)
+                ),
+            )
             if structure is None:
                 documents = torch.zeros_like(local_rows)
                 source_positions = local_rows.clone()

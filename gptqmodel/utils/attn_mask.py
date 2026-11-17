@@ -86,3 +86,114 @@ def apply_keep_mask_bt(x: torch.Tensor, keep_mask_bs: torch.Tensor | None) -> to
     if len(kept_rows) == 0:
         return x.new_zeros((0,) + x.shape[2:], dtype=x.dtype, device=x.device)
     return torch.cat(kept_rows, dim=0).contiguous()
+
+
+def calibration_row_keep(input_ids, attention_mask=None) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Return ``(ids, keep)`` as ``[B, S]`` tensors for one prepared calibration row.
+
+    ``keep`` marks attended positions (``True`` when no mask is given). ``None``
+    means the row carries no usable ``input_ids`` (for example embeddings-only
+    rows).
+    """
+
+    if input_ids is None:
+        return None
+    try:
+        ids = torch.as_tensor(input_ids)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    if ids.dim() == 1:
+        ids = ids.unsqueeze(0)
+    if ids.dim() != 2 or ids.shape[-1] == 0:
+        return None
+    if ids.dtype == torch.bool or ids.is_floating_point() or ids.is_complex():
+        return None
+
+    keep = None
+    if attention_mask is not None:
+        try:
+            mask = torch.as_tensor(attention_mask)
+        except (TypeError, ValueError, RuntimeError):
+            mask = None
+        if mask is not None:
+            if mask.dim() == 1:
+                mask = mask.unsqueeze(0)
+            if mask.dim() > 2:
+                mask = normalize_seq_mask(mask, seq_len=ids.shape[-1])
+            elif mask.dtype != torch.bool:
+                mask = mask > 0
+            if mask is not None and tuple(mask.shape) == tuple(ids.shape):
+                keep = mask.to(device=ids.device, dtype=torch.bool)
+    if keep is None:
+        keep = torch.ones(ids.shape, dtype=torch.bool, device=ids.device)
+    return ids, keep
+
+
+def bos_token_positions(
+    input_ids,
+    attention_mask=None,
+    bos_token_id: int | None = None,
+) -> torch.Tensor | None:
+    """Return the ``[B, S]`` attended positions that hold the BOS token.
+
+    A BOS token is a massive-activation attention sink wherever it appears: at
+    the start of a row and at every document boundary of a concatenated
+    calibration window. ``None`` means there is none to exclude (the tokenizer
+    has no BOS token, or no attended position holds it).
+    """
+
+    if bos_token_id is None:
+        return None
+    row = calibration_row_keep(input_ids, attention_mask)
+    if row is None:
+        return None
+    ids, keep = row
+    positions = (ids == int(bos_token_id)) & keep
+    if not bool(positions.any()):
+        return None
+    return positions.cpu()
+
+
+def exclude_attention_sinks(
+    keep_mask: torch.Tensor | None,
+    bos_positions: torch.Tensor | None = None,
+    *,
+    batch: int | None = None,
+    seq_len: int | None = None,
+    device=None,
+) -> torch.Tensor | None:
+    """Remove the attended BOS positions from a ``[B, S]`` calibration keep-mask.
+
+    A BOS token is a massive-activation attention sink wherever it appears: at
+    the start of a row and at every document boundary of a concatenated
+    calibration window (issue #4393). Nothing else is removed: a tokenizer
+    without a BOS token (Qwen2/2.5/3) has no sink to drop, and dropping its
+    first text token instead hurts quality (issue #4459).
+
+    ``bos_positions`` has the same ``[B, S]`` shape as the calibration batch.
+    ``keep_mask`` is the padding keep-mask derived from ``attention_mask``;
+    ``None`` means every position is attended, and ``batch``/``seq_len`` then
+    give the replayed grid. ``keep_mask`` is returned unchanged (same object)
+    when there is no BOS position to remove, or when ``bos_positions`` does not
+    match the replayed grid (for example a VLM whose forward expands image
+    placeholders), so such batches keep their exact statistics. Otherwise the
+    result is a new tensor; the input is never mutated.
+    """
+
+    if not torch.is_tensor(bos_positions) or bos_positions.ndim != 2:
+        return keep_mask
+    if not bool(bos_positions.any()):
+        return keep_mask
+    if keep_mask is not None:
+        if not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return keep_mask
+        if tuple(bos_positions.shape) != tuple(keep_mask.shape):
+            return keep_mask
+        result = keep_mask.to(dtype=torch.bool)
+    else:
+        if batch is None or seq_len is None:
+            return keep_mask
+        if (int(batch), int(seq_len)) != tuple(bos_positions.shape):
+            return keep_mask
+        result = torch.ones((int(batch), int(seq_len)), dtype=torch.bool, device=device)
+    return result & ~bos_positions.to(device=result.device, dtype=torch.bool)

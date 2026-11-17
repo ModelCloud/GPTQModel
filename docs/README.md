@@ -31,6 +31,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [AWQ scale folding into normalization modules](awq-scale-folding.md)
 - [AWQ scaling groups](awq-scaling-groups.md)
 - [Calibration Hessian materialization](calibration-hessian-materialization.md)
+- [Calibration attention-sink exclusion](calibration-attention-sinks.md)
 - [Calibration layer replay](calibration-replay.md)
 - [Calibration row trimming](calibration-row-trimming.md)
 - [Changelog archive](changelog/archive.md)

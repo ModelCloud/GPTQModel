@@ -110,6 +110,10 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
+# Provenance of `quantize(calibration_exclude_attention_sinks=True)`. Written
+# only when the option was on, so a default run's config stays byte-identical.
+META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS = "calibration_exclude_attention_sinks"
+
 META_FIELD_GPTAQ_ENABLED = "gptaq"
 
 META_FIELD_FOEM_ENABLED = "foem"
@@ -3912,20 +3916,6 @@ def apply_scalar_module_overrides(config: "BaseQuantizeConfig", resolved_cfg: Re
     act_group_aware = resolved_cfg.get("act_group_aware", None)
     if act_group_aware is not None:
         config.act_group_aware = act_group_aware
-    exclude_attention_sinks = resolved_cfg.get("exclude_attention_sinks", None)
-    if exclude_attention_sinks is not None:
-        if not isinstance(exclude_attention_sinks, bool):
-            raise TypeError(
-                "QuantizeConfig: `dynamic"
-                f"['{resolved_cfg.source_pattern}'].exclude_attention_sinks` must be a bool, "
-                f"got {type(exclude_attention_sinks).__name__} ({exclude_attention_sinks!r})."
-            )
-        if exclude_attention_sinks and not getattr(config, "attention_sink_mask_supported", False):
-            raise ValueError(
-                f"{type(config).__name__}: `exclude_attention_sinks` is only implemented for the "
-                "plain GPTQ Hessian path; leave it False for this method."
-            )
-        config.exclude_attention_sinks = exclude_attention_sinks
     config._resolve_activation_ordering(desc_act, act_group_aware)
 
 
@@ -4193,39 +4183,22 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
             ) from exc
 
 
-def _validate_dynamic_boolean_overrides(
-    layer_name: str,
-    layer_dict: Mapping,
-    *,
-    supports_attention_sinks: bool = False,
-) -> None:
-    """Reject non-boolean `sym`/`desc_act`/sink values in one per-module rule.
+def _validate_dynamic_boolean_overrides(layer_name: str, layer_dict: Mapping) -> None:
+    """Reject non-boolean `sym`/`desc_act` values in one per-module rule.
 
     The top-level fields are type-checked, but `dynamic` values were coerced
     with `bool(...)` when the module was packed, so `{"sym": "False"}` silently
     became `sym=True` and produced a checkpoint labelled with the opposite
     layout. `None` keeps meaning "inherit the global value".
-
-    A truthy `exclude_attention_sinks` is only meaningful for the plain GPTQ
-    Hessian path. Every other config would accept the key and ignore it, so
-    reject it here instead of serializing a checkpoint that claims sinks were
-    excluded when they were not (#4447).
     """
 
-    for key in ("sym", "desc_act", "exclude_attention_sinks"):
+    for key in ("sym", "desc_act"):
         value = layer_dict.get(key)
         if value is not None and not isinstance(value, bool):
             raise TypeError(
                 f"QuantizeConfig: `dynamic['{layer_name}'].{key}` must be a bool, "
                 f"got {type(value).__name__} ({value!r})."
             )
-
-    if not supports_attention_sinks and layer_dict.get("exclude_attention_sinks"):
-        raise ValueError(
-            "QuantizeConfig: `dynamic"
-            f"['{layer_name}'].exclude_attention_sinks` is only implemented for the "
-            "plain GPTQ Hessian path; leave it False for this method."
-        )
 
 
 def _default_damp_percent(method: METHOD) -> float:
@@ -4582,7 +4555,6 @@ _SERIALIZED_META_FIELD_NAMES = (
     "mse",
     "mock_quantization",
     "act_group_aware",
-    "exclude_attention_sinks",
     "true_sequential",
     "static_groups",
     "damp_percent",
@@ -4673,103 +4645,7 @@ def _validate_quantize_config_factory_kwargs(target_cls, payload: Dict[str, Any]
         )
 
 
-def _reject_unsupported_attention_sink_flag(target_cls, payload: Dict[str, Any]) -> None:
-    """Reject a truthy `exclude_attention_sinks` the target method cannot honor.
-
-    The factory filters the payload to the target class's fields, so an
-    unsupported flag used to disappear without an error and the checkpoint
-    metadata then claimed sinks were excluded (#4447). `GPTQConfig` implements
-    the mask; `QQQConfig`/`VPTQConfig` are subclasses that reject it with their
-    own method-specific message in `__post_init__`.
-    """
-
-    if "exclude_attention_sinks" not in payload:
-        return
-    value = payload.get("exclude_attention_sinks")
-    if value is None or value is False:
-        return
-    if not isinstance(value, bool):
-        raise TypeError(
-            f"{target_cls.__name__}: `exclude_attention_sinks` must be a bool, "
-            f"got {type(value).__name__} ({value!r})."
-        )
-    if issubclass(target_cls, GPTQConfig):
-        return
-    raise ValueError(
-        f"{target_cls.__name__}: `exclude_attention_sinks` is only implemented for the "
-        "plain GPTQ Hessian path; leave it False for this method."
-    )
-
-
-def _sanitize_loaded_attention_sink_flags(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Coerce legacy `exclude_attention_sinks` metadata to what actually ran.
-
-    ``from_quant_config`` is the checkpoint-loading path. Before #4447 was
-    fixed the flag could be persisted for methods and per-module rules that
-    never applied the mask, so rejecting it here would make those checkpoints
-    unloadable. The mask demonstrably did not run for them, so repair the flag
-    to False (the behavior the checkpoint was calibrated with) and warn.
-    Explicit construction still raises; only loading is lenient.
-    """
-
-    supports = bool(getattr(target_cls, "attention_sink_mask_supported", False))
-    dynamic = payload.get("dynamic")
-    dynamic_items = dynamic.items() if isinstance(dynamic, Mapping) else ()
-    base_gptaq = payload.get("gptaq") not in (None, False)
-    base_foem = payload.get("foem") not in (None, False)
-    base_sinks = bool(payload.get("exclude_attention_sinks"))
-
-    repaired = False
-    sanitized = dict(payload)
-    if base_sinks and (not supports or base_gptaq or base_foem):
-        sanitized["exclude_attention_sinks"] = False
-        repaired = True
-
-    if dynamic_items:
-        new_dynamic = None
-        for layer, override in dynamic_items:
-            if not isinstance(override, Mapping):
-                continue
-            layer_sinks_value = override.get("exclude_attention_sinks")
-            effective_sinks = base_sinks if layer_sinks_value is None else bool(layer_sinks_value)
-            if not effective_sinks:
-                continue
-            layer_gptaq = override.get("gptaq")
-            layer_foem = override.get("foem")
-            rule_gptaq = base_gptaq if layer_gptaq is None else layer_gptaq not in (None, False)
-            rule_foem = base_foem if layer_foem is None else layer_foem not in (None, False)
-            if supports and not (rule_gptaq or rule_foem):
-                # Plain GPTQ really did mask this rule; keep the recorded truth.
-                continue
-            if new_dynamic is None:
-                new_dynamic = {
-                    key: (dict(value) if isinstance(value, Mapping) else value)
-                    for key, value in dynamic_items
-                }
-            new_dynamic[layer]["exclude_attention_sinks"] = False
-            repaired = True
-        if new_dynamic is not None:
-            sanitized["dynamic"] = new_dynamic
-
-    if not repaired:
-        return payload
-
-    meta = sanitized.get(META_FIELD)
-    if isinstance(meta, Mapping) and "exclude_attention_sinks" in meta:
-        meta_copy = dict(meta)
-        meta_copy["exclude_attention_sinks"] = False
-        sanitized[META_FIELD] = meta_copy
-
-    log.warn(
-        f"{target_cls.__name__}: checkpoint metadata sets `exclude_attention_sinks=True`, "
-        "but that method or per-module rule never applied the mask (#4447). "
-        "Loading with the flag disabled to match the calibration that actually ran."
-    )
-    return sanitized
-
-
 def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _reject_unsupported_attention_sink_flag(target_cls, payload)
     _validate_quantize_config_factory_kwargs(target_cls, payload)
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
     if target_cls is RTNConfig:
@@ -4931,11 +4807,6 @@ def validate_rotation_format(
 
 @dataclass
 class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
-    # Whether this method's quantizer actually drops attention-sink rows from
-    # its calibration Hessian. Methods that only inherit the flag must reject
-    # it rather than serialize metadata claiming the mask ran (#4447).
-    attention_sink_mask_supported: ClassVar[bool] = False
-
     bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 7, 8]})
 
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
@@ -5230,11 +5101,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(
-            layer_name,
-            layer_dict,
-            supports_attention_sinks=self.attention_sink_mask_supported,
-        )
+        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -5826,7 +5693,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
-        normalized = _sanitize_loaded_attention_sink_flags(target_cls, normalized)
         if target_cls is RTNConfig:
             normalized = _normalize_rtn_kwargs(normalized)
         elif target_cls is GGUFConfig:
@@ -6127,32 +5993,9 @@ def normalize_gsq_config(value) -> Optional[GSQConfig]:
 
 @dataclass
 class GPTQConfig(PreProcessorConfig):
-    attention_sink_mask_supported: ClassVar[bool] = True
-
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
     act_group_aware: Optional[bool] = field(default=None)
-    # Calibration-only: drop the leading BOS token of each calibration sequence
-    # before accumulating the input Hessian. Tokenizers that prepend a BOS
-    # token turn that position into an attention sink whose activation norm can
-    # exceed the rest of the sequence by orders of magnitude; a single such row
-    # then dominates ``X^T X`` and GPTQ stops optimizing for the text tokens
-    # (issue #4393). The position is only dropped when the calibration
-    # ``input_ids`` show the tokenizer's BOS id there: BOS-less tokenizers
-    # (Qwen2.5/Qwen3) keep their first real token, and a run that cannot prove
-    # the decision leaves the Hessian untouched (issue #4459). Off by default:
-    # the historical Hessian is unchanged.
-    exclude_attention_sinks: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Skip the leading BOS token of each calibration sequence when accumulating "
-                "the GPTQ Hessian. Only positions whose token id is the tokenizer's BOS are "
-                "skipped; BOS-less tokenizers (Qwen2.5/Qwen3) keep position 0. "
-                "Default: False (unchanged behavior)."
-            )
-        },
-    )
     static_groups: bool = field(default=False)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
@@ -6186,23 +6029,10 @@ class GPTQConfig(PreProcessorConfig):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
-        if not isinstance(self.exclude_attention_sinks, bool):
-            raise TypeError(
-                "QuantizeConfig:: `exclude_attention_sinks` must be a bool, "
-                f"got {type(self.exclude_attention_sinks).__name__} "
-                f"({self.exclude_attention_sinks!r})."
-            )
-        if self.exclude_attention_sinks and (self.gptaq is not None or self.foem is not None):
-            raise ValueError(
-                "QuantizeConfig:: `exclude_attention_sinks` is only implemented for the "
-                "plain GPTQ Hessian path; GPTAQ/FOEM accumulate their own Hessian and "
-                "ignore it. Leave it False for those methods."
-            )
 
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
-        self._validate_dynamic_attention_sink_conflicts()
         self.gsq = normalize_gsq_config(self.gsq)
         if isinstance(self.gsq_training, dict):
             self.gsq_training = GSQTrainingConfig(**self.gsq_training)
@@ -6218,35 +6048,6 @@ class GPTQConfig(PreProcessorConfig):
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
-
-    def _validate_dynamic_attention_sink_conflicts(self) -> None:
-        """Reject a per-module rule that would run GPTAQ/FOEM with the sink mask.
-
-        The top-level combination is rejected above, but `dynamic` can enable
-        GPTAQ/FOEM (or the mask) for one module. GPTAQ/FOEM override
-        `process_batch` and never consult `exclude_attention_sinks`, so the
-        combination must fail at config-validation time instead of silently
-        producing a checkpoint whose metadata says the sinks were dropped
-        (#4447).
-        """
-
-        for layer, override in (self.dynamic or {}).items():
-            if not isinstance(override, Mapping):
-                continue
-            layer_sinks = override.get("exclude_attention_sinks", None)
-            sinks = self.exclude_attention_sinks if layer_sinks is None else layer_sinks
-            if not sinks:
-                continue
-            layer_gptaq = override.get("gptaq", None)
-            layer_foem = override.get("foem", None)
-            gptaq = self.gptaq is not None if layer_gptaq is None else layer_gptaq not in (None, False)
-            foem = self.foem is not None if layer_foem is None else layer_foem not in (None, False)
-            if gptaq or foem:
-                raise ValueError(
-                    "QuantizeConfig:: `exclude_attention_sinks` is only implemented for the "
-                    f"plain GPTQ Hessian path; `dynamic['{layer}']` enables GPTAQ/FOEM, which "
-                    "accumulate their own Hessian and ignore it. Leave it False for that rule."
-                )
 
     def validate_gsq(self) -> None:
         if self.method == METHOD.QQQ:
@@ -6335,7 +6136,6 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["mse"] = self.mse.norm
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
-        meta_payload["exclude_attention_sinks"] = self.exclude_attention_sinks
         # Calibration controls do not take part in inference, so they live in
         # `meta` (the writer already records them there). `to_dict()` must
         # write the same values or a factory reload silently restores the
@@ -6734,9 +6534,6 @@ class ParoConfig(PreProcessorConfig):
 
 @dataclass
 class QQQConfig(GPTQConfig):
-    # QQQ has no GPTQ Hessian mask; it rejects the flag in `__post_init__`.
-    attention_sink_mask_supported: ClassVar[bool] = False
-
     method: METHOD = field(default=METHOD.QQQ)
     format: FORMAT = field(default=FORMAT.QQQ)
 
@@ -6765,11 +6562,6 @@ class QQQConfig(GPTQConfig):
             raise ValueError(
                 "QQQConfig: `desc_act=True` is not supported by the QQQ runtime; "
                 "use `desc_act=False`."
-            )
-        if self.exclude_attention_sinks:
-            raise ValueError(
-                "QQQConfig: `exclude_attention_sinks` is only implemented for the "
-                "GPTQ Hessian path; leave it False for QQQ."
             )
 
         for layer, override in (self.dynamic or {}).items():
@@ -6826,10 +6618,6 @@ class VPTQConfig(GPTQConfig):
     storage parameter. Configure `vector_lens`, `num_centroids`, and
     `num_res_centroids` instead of setting `bits` directly.
     """
-
-    # VPTQ flattens calibration input before accumulating its Hessian and has
-    # no sink mask; it rejects the flag in `__post_init__`.
-    attention_sink_mask_supported: ClassVar[bool] = False
 
     method: METHOD = field(default=METHOD.VPTQ)
     format: FORMAT = field(default=FORMAT.VPTQ)
@@ -7023,13 +6811,6 @@ class VPTQConfig(GPTQConfig):
                     )
 
         super().__post_init__()
-
-        if self.exclude_attention_sinks:
-            raise ValueError(
-                "VPTQConfig: `exclude_attention_sinks` is only implemented for the "
-                "plain GPTQ Hessian path; VPTQ flattens its calibration input before "
-                "accumulating the Hessian. Leave it False for VPTQ."
-            )
 
 
 @dataclass
@@ -7787,11 +7568,6 @@ class EXL3Config(PreProcessorConfig):
                 )
             elif key == "group_size" and value not in (-1, None):
                 raise ValueError("EXL3Config: `group_size` is not used; keep it at `-1`.")
-            elif key == "exclude_attention_sinks" and value:
-                raise ValueError(
-                    "EXL3Config: `exclude_attention_sinks` is only implemented for the "
-                    "plain GPTQ Hessian path; leave it False for EXL3."
-                )
 
     def __post_init__(self):
         self._normalize_preprocessor_state()
