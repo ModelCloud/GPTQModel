@@ -3263,8 +3263,9 @@ class BaseQModel(nn.Module):
         so CUDA-graph capture never covers a layer and each decode step pays
         for the fragments and guard checks: the static cache then runs 2-4x
         slower than eager (#4669). Kernels declare the answer with
-        ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False until a
-        capture is measured.
+        ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False and
+        requires both a ``fullgraph=True`` trace with no graph breaks and a
+        measured win on the hardware it claims (#4739).
 
         A model with no quantized linear (dense) has nothing that breaks the
         graph, so it keeps whatever compile policy the caller chose.

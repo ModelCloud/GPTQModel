@@ -30,13 +30,14 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
-    # Measured, not assumed: the reporter of #4669 saw a static-cache
-    # `generate()` improve from 1.36 s to 0.76 s on Llama-3.2-1B (4090), and
-    # this host's tiny Llama fixture measured parity (0.167 s dynamic vs
-    # 0.155 s static steady state). The forward still breaks the graph on its
-    # scale/bias cache keys, but the eager dequantize path is slow enough that
-    # compiling it is not a pessimization, unlike the custom-op kernels.
-    SUPPORTS_COMPILE = True
+    # Not trace-clean: ``forward`` calls ``tensor_cache_key`` (``_runtime_cache``),
+    # whose ``tensor.is_inference()`` is a hard dynamo graph break, and the
+    # per-projection shape/scale guards recompile. ``torch.compile(fullgraph=True)``
+    # fails outright. Full-model static-cache decode measured 0.214-0.262 s
+    # against 0.173 s eager on a tiny Llama (sm_121), and the reporter of #4739
+    # measured 20-30% slower on sm_120, so compiling it is a pessimization
+    # (#4739). The #4669 4090 number (1.36 s -> 0.76 s) did not reproduce here.
+    SUPPORTS_COMPILE = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]

@@ -931,6 +931,10 @@ class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.float16]
     REQUIRES_FORMAT_V2 = False
+    # The Torch FP8 declaration covers the CUDA dequant/``_scaled_mm`` forward.
+    # This holder dispatches to native Metal MXFP8 kernels on MPS, which were
+    # never traced or timed, so it keeps the conservative default (#4739).
+    SUPPORTS_COMPILE = False
 
     SOURCE_LINEAR = TorchFP8Linear
 
