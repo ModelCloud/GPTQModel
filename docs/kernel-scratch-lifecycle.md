@@ -307,6 +307,78 @@ after.  The CUDA QQQ extension itself was unavailable in the validation
 container (`CUDA_HOME` unset), so the native `QQQLinear` kernel path was
 exercised only through mocked `qqq_gemm` dispatch.
 
+## EXL3 quantization stream and tile scratch
+
+EXL3 quantizes each projection as a serial chain of small tile launches, and it
+runs that chain on a stream of its own so it can be ordered against the caller
+without leaving a wait event on the device-shared default stream. That stream
+used to be thread-local: every worker in the device pool got its own, and the
+tile scratch was keyed by stream.
+
+A stream is an allocator pool. A block freed on worker A's stream is never
+handed to an allocation on worker B's stream, so the per-worker design stranded
+one free-block cache per worker. The tile scratch pair
+(`_allocate_temp_buffers`, 512 MiB at `K=4`, 2 GiB at `K=2`, with the default
+tile batch) was copied once per worker as well. The device quantize lock
+already serialized the kernels, so those extra streams bought no overlap.
+
+```mermaid
+flowchart LR
+    subgraph OLD["Old: stream per worker thread"]
+        T1["DPWorker-cuda:0#0<br/>stream s1"] --> S1["scratch 512 MiB<br/>allocator pool s1"]
+        T2["DPWorker-cuda:0#1<br/>stream s2"] --> S2["scratch 512 MiB<br/>allocator pool s2"]
+        T3["DPWorker-cuda:0#2<br/>stream s3"] --> S3["scratch 512 MiB<br/>allocator pool s3"]
+        T4["DPWorker-cuda:0#3<br/>stream s4"] --> S4["scratch 512 MiB<br/>allocator pool s4"]
+        L["per-device quantize lock"] -.->|"serializes the kernels<br/>so no overlap is gained"| T1
+        L -.-> T2
+        L -.-> T3
+        L -.-> T4
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph NEW["New: one stream per device"]
+        W1["DPWorker-cuda:0#0"] --> S["get_quant_stream(cuda:0)<br/>one stream, one allocator pool"]
+        W2["DPWorker-cuda:0#1"] --> S
+        W3["DPWorker-cuda:0#2"] --> S
+        W4["DPWorker-cuda:0#3"] --> S
+        S --> C["_stream_temp_buffers(device, K, stream)<br/>one scratch pair per device"]
+        S --> A["allocator free blocks<br/>reused across workers"]
+    end
+```
+
+`get_quant_stream` keeps one stream per `torch.device` behind a lock; the light
+read path takes no lock. Work enqueued to one stream from several host threads
+is still ordered by the device, and every launch that reads the scratch runs on
+that stream, so two callers cannot observe each other's scratch. The device
+quantize lock stays where it was; it is no longer needed to protect the scratch,
+but it still keeps the kernels serialized per device.
+
+| Before | After |
+| --- | --- |
+| Cache key `(device, K, stream, batch)` with one stream per thread | Same key shape, one stream per device |
+| Scratch: 512 MiB x worker count per device at `K=4` | Scratch: 512 MiB per device at `K=4` |
+| Allocator pool per worker thread | Allocator pool per device |
+| `_quant_stream_tls = threading.local()` | `_quant_streams` dict plus `_quant_streams_lock` |
+
+Measured on Qwen2.5-0.5B-Instruct, `EXL3Config(bits=4)`, with the default device
+pool. `streams` and `scratch sets` count what one quantization run allocated:
+
+| Streams | Scope | Peak allocated | Peak reserved | Reserved after run | Scratch sets | Wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| per worker (4 per device) | first 4 layers | 2.95 GiB | 4.23 GiB | 4.23 GiB | 8 | 31.6 s |
+| one per device | first 4 layers | 1.44 GiB | 1.77 GiB | 1.77 GiB | 2 | 29.3 s |
+| per worker (4 per device) | all 24 layers | 2.95 GiB | 5.74 GiB | 2.38 GiB | 8 | 125.2 s |
+| one per device | all 24 layers | 1.44 GiB | 1.77 GiB | 0.85 GiB | 2 | 122.0 s |
+
+Reserved grows layer over layer on the old code until every worker stream has
+reached its own peak; the new code plateaus at the first layer's high-water
+mark. The quantized `state_dict()` is bit-identical between the two full runs
+(795 tensors, same SHA-256). `tests/test_exl3_workspace.py` pins the
+one-stream/one-scratch allocation count and the concurrent packed-result
+parity.
+
 ## Contracts
 
 - Scratch is never a weight cache.  It is released or reused, never used to
@@ -320,4 +392,6 @@ exercised only through mocked `qqq_gemm` dispatch.
 - A GGUF CUDA layer has one device copy of its packed weight.  Once uploaded
   from a same-device `qweight`, the ggml buffer is `qweight`'s storage and is
   freed only when no kernel, plan, or Torch tensor references it.
+- An EXL3 quantization stream is process-wide per device. The tile scratch is
+  keyed by that stream, so one device never holds more than one scratch pair.
 - FP8 checkpoint-load peak (item 3 of #4387) is not addressed by this change.

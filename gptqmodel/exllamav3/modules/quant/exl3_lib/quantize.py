@@ -131,11 +131,11 @@ def _tile_batch_size() -> int:
     """Tile slots per quantization launch.
 
     The scratch buffer below is ``batch x 256 x (65536 >> K)`` int16, i.e. 2 GiB
-    at the default batch of 256. That is allocated once per CUDA stream, and the
-    quantization pool runs one stream per worker thread, so a wide run can hold
-    several GiB of pure scratch per device. ``KernelConfig.exl3_tile_batch`` lowers
-    the slot count for memory-constrained hosts; tiles are quantized
-    independently, so a smaller batch only means more launches.
+    at the default batch of 256, allocated once per quantization stream. There
+    is one quantization stream per device, so a run holds one scratch pair per
+    device. ``KernelConfig.exl3_tile_batch`` lowers the slot count for
+    memory-constrained hosts; tiles are quantized independently, so a smaller
+    batch only means more launches.
     """
 
     from .....utils.kernel import get_kernel_config
@@ -170,8 +170,8 @@ def clear_tile_workspace() -> None:
     ``_workspace_buffers`` keeps one scratch pair per device/K/stream so tile
     launches on the same stream can reuse it. Nothing else owns those tensors,
     so without this call a completed run leaves them allocated for the life of
-    the process (512 MiB per stream at K=4, 2 GiB at K=2). Call it once the
-    run's worker streams have drained.
+    the process (512 MiB per device at K=4, 2 GiB at K=2). Call it once the
+    run's quantization streams have drained.
     """
 
     with _workspace_registry_lock:
@@ -182,11 +182,12 @@ def _stream_temp_buffers(device, K: int, stream):
     """Return the writable tile scratch owned by *stream*.
 
     A launch indexes the scratch by tile slot, so launches that may run at the
-    same time must never share it. The lifecycle quantizes several modules
-    concurrently (one per device-pool worker thread) and each thread drives its
-    own serial chain of tile launches; keying the scratch by stream keeps those
-    chains independent so they can overlap on the device. Launches on a single
-    stream stay ordered by the stream itself, so no event handshake is needed.
+    same time must never share it. Every caller runs on the device's shared
+    quantization stream (``get_quant_stream``), so the launch that fills the
+    scratch and the one that reads it back are ordered by the stream itself, and
+    two modules can never alias the buffers even though they run on different
+    host threads. Keying by stream rather than by thread also keeps a single
+    scratch pair alive per device, which is what bounds the allocator cache.
     """
 
     batch = _tile_batch_size()
@@ -239,27 +240,40 @@ def quantize_tiles(tiles, quant_args: dict):
     return quantized_tiles, quantized_idx
 
 
-_quant_stream_tls = threading.local()
+_quant_streams = {}
+_quant_streams_lock = threading.Lock()
 
 
 def get_quant_stream(device):
-    """Return this thread's quantization stream for *device*.
+    """Return the process-wide quantization stream for *device*.
 
-    Modules are quantized by a pool of worker threads, and every module runs its
-    own serial chain of small tile launches (a 56-tile grid fills less than a
-    quarter of the machine). One stream per thread lets independent chains
-    co-schedule on the device; a single shared stream serializes them instead.
+    The EXL3 body runs on this stream instead of the caller's stream so its
+    chain of tile launches is ordered against the caller without leaving a wait
+    event on a device-shared stream that would convoy other workers.
+
+    One stream per device, not per worker thread. The caching allocator pools
+    every block it hands out per stream, and a block freed on worker A's stream
+    is never handed to an allocation on worker B's stream. The tile scratch is
+    keyed by stream as well, so a stream per worker multiplied both the scratch
+    (512 MiB at K=4) and the stranded allocator cache by the worker count while
+    the device lock serialized those kernels anyway (issue #4586).
+
+    Sharing the stream is safe: the device orders work enqueued to one stream
+    from several host threads, and every launch that reads the stream's tile
+    scratch runs on that stream, so two callers cannot observe each other's
+    scratch.
     """
 
     device = torch.device(device)
-    streams = getattr(_quant_stream_tls, "streams", None)
-    if streams is None:
-        streams = _quant_stream_tls.streams = {}
-    stream = streams.get(device)
-    if stream is None:
-        stream = torch.cuda.Stream(device = device)
-        streams[device] = stream
-    return stream
+    stream = _quant_streams.get(device)
+    if stream is not None:
+        return stream
+    with _quant_streams_lock:
+        stream = _quant_streams.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device = device)
+            _quant_streams[device] = stream
+        return stream
 
 
 pinned_tiles: torch.Tensor | None = None
@@ -540,9 +554,9 @@ def ldlq(
 
     devices = quant_args["devices"]
     main_stream = get_quant_stream(devices[0])
-    # Hand the caller's stream ordering over to the per-thread quant stream
-    # instead of draining the whole device: other modules are quantized
-    # concurrently on their own streams and a device sync would convoy them.
+    # Hand the caller's stream ordering over to the device's quant stream
+    # instead of draining the whole device: other modules are ordered against
+    # this stream, and a device sync would convoy them.
     outer_stream = torch.cuda.current_stream(devices[0])
     main_stream.wait_stream(outer_stream)
     with torch.cuda.stream(main_stream):
@@ -1353,18 +1367,18 @@ def quantize_exl3(
 ):
     """Quantize one weight matrix against a captured Hessian.
 
-    The whole body runs on this worker thread's quantization stream instead of
-    the ambient (device-shared) stream. ``ldlq``, ``fallback_quant`` and
-    ``g_scale_gss`` each bracket their work with
-    ``stream.wait_stream(current)`` / ``current.wait_stream(stream)`` pairs, and
-    when ``current`` is the shared default stream those brackets chain every
-    worker's tile launches behind every other worker's through the wait events
-    they leave on it. That serialized the tile chains (one launch in flight at a
-    time, measured 1.19x overlap across four workers) even though the kernel is
-    latency-bound and a single 56-block launch fills under a quarter of the
-    device. Hoisting the bracket to this boundary keeps the same ordering
-    guarantees against the caller, while the nested pairs become waits on their
-    own stream, i.e. no-ops.
+    The whole body runs on this device's quantization stream
+    (``get_quant_stream``) instead of the ambient (device-shared) stream.
+    ``ldlq``, ``fallback_quant`` and ``g_scale_gss`` each bracket their work
+    with ``stream.wait_stream(current)`` / ``current.wait_stream(stream)``
+    pairs, and when ``current`` is the shared default stream those brackets
+    chain every worker's tile launches behind every other worker's through the
+    wait events they leave on it. That serialized the tile chains (one launch
+    in flight at a time, measured 1.19x overlap across four workers) even though
+    the kernel is latency-bound and a single 56-block launch fills under a
+    quarter of the device. Hoisting the bracket to this boundary keeps the same
+    ordering guarantees against the caller, while the nested pairs become waits
+    on their own stream, i.e. no-ops.
 
     :param weight:
         Input tensor, row major shape (in_features, out_features)
