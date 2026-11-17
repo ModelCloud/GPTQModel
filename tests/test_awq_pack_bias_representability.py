@@ -19,6 +19,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.gemv_awq import (
     AwqGEMVLinear,
     AwqGEMVTorchLinear,
@@ -317,6 +318,51 @@ def test_native_forward_cancels_wide_bias(cls):
         expected=input_value * IN_FEATURES + bias_value,
         dtype=torch.float16,
     )
+
+
+def _assert_triton_gemm_cancellation():
+    if not torch.cuda.is_available():
+        pytest.skip("accelerator required")
+
+    # The Triton GEMM reader has no packer of its own: it reads the buffer
+    # layout `AwqGEMMLinear.pack` produces, so pack there and copy the state.
+    # `AwqGEMMLinear` refuses to construct on ROCm (the native kernel is
+    # CUDA-only) while the Triton reader serves the same packed layout there,
+    # so build the packing-only instance directly.
+    packed = _bare_module(AwqGEMMLinear)
+    packed.pack(_linear(-100000.0), *_affine())
+    bias = packed.bias.detach().clone()
+
+    module = AwqGEMMTritonLinear(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=True,
+        register_buffers=True,
+    )
+    # Allocate the bias at the packed width: `load_state_dict` copies into the
+    # existing buffer, so an FP16 placeholder would narrow the value first.
+    # This is the same width `restore_packed_module` rebuilds from the
+    # checkpoint's recorded `bias_dtype`.
+    module.bias = module.bias.to(dtype=packed.bias.dtype)
+    module.load_state_dict(packed.state_dict(), strict=False)
+    module = module.cuda()
+
+    _assert_cancellation(
+        module, bias,
+        rows=1, input_value=1000.0,
+        expected=1000.0 * IN_FEATURES - 100000.0,
+        dtype=torch.float16,
+    )
+
+
+def test_triton_gemm_forward_cancels_wide_bias():
+    """The Triton GEMM reader is the AWQ GEMM path on ROCm."""
+
+    _assert_triton_gemm_cancellation()
 
 
 def test_triton_gemv_forward_cancels_wide_bias():

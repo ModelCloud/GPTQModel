@@ -125,12 +125,17 @@ pack method runs on CPU.
 | `AwqGEMVFastLinear.pack` | 128/128 values `-inf` | 128/128 values `-100000`, dtype FP32 |
 
 Forward cancellation, `x = 1000`, `sum(x * w) = 128000`, bias `-100000`:
-`AwqTorchLinear` and `AwqGEMVTorchLinear` return `28000` in FP16, matching an
-FP64 oracle. `AwqGEMMLinear` returns the same value on its native CUDA kernel.
-The native GEMV kernels round their own partial result to FP16 before the
-Python epilogue, so their cancellation test keeps the product inside the FP16
-range (`x = 100`, bias `-10000`, result `2800`). `AwqGEMVTritonLinear` passes
-the same shape on CUDA and on ROCm.
+`AwqTorchLinear`, `AwqGEMVTorchLinear`, the Triton GEMM reader and the native
+CUDA `AwqGEMMLinear` all return `28000` in FP16, matching an FP64 oracle. The
+native GEMV kernels round their own partial result to FP16 before the Python
+epilogue, so their cancellation test keeps the product inside the FP16 range
+(`x = 100`, bias `-10000`, result `2800`). The Triton GEMV reader passes that
+shape on CUDA and on ROCm.
+
+`AwqGEMMTritonLinear` allocates its bias placeholder at the kernel's default
+FP16 width because it has no packer of its own; a checkpoint rebuild records
+the real value through `bias_dtype` and recreates the buffer at that width
+before the copy. This is the same path `restore_packed_module` uses.
 
 ## Validation
 
