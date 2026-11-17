@@ -50,3 +50,20 @@ def test_real_checkpoint_owners_quantization_consumers_and_plain_awq(architectur
     else:
         assert not plan.moe_roots()
     assert re.fullmatch(r"language_model.model.layers", qmodel.extract_layers_node()[0])
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_prequant_hooks_preserve_embedding_and_rotary_owners(architecture, monkeypatch):
+    model = InternVLChatModel(tiny_config(architecture)).eval()
+    qmodel = InternVLChatQModel(model, quantized=False, quantize_config=QuantizeConfig(bits=4, group_size=16, offload_to_disk=False))
+    visited = []
+    def prequant(module):
+        visited.append(module)
+        return module
+    monkeypatch.setattr(qmodel, "pre_quantize", prequant)
+    qmodel.pre_quantize_generate_hook_start()
+    qmodel.pre_quantize_generate_hook_end()
+    assert model.get_input_embeddings() is visited[0]
+    rotary_paths = qmodel._decoder_rotary_paths()
+    assert len(rotary_paths) == (2 if architecture == "InternLM2ForCausalLM" else 1)
+    assert all(model.get_submodule(path) in visited for path in rotary_paths)

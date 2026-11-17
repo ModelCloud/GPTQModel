@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
+from transformers import DynamicCache, StaticCache
 
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.local import LocalModelLoader
@@ -15,7 +16,7 @@ from gptqmodel.models.ports.internvl_chat.configuration_internvl_chat import Int
 from gptqmodel.models.ports.internvl_chat.modeling_internvl_chat import InternVLChatModel, decoder_model_class
 
 
-ARCHITECTURES = ["LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "Phi3ForCausalLM"]
+ARCHITECTURES = ["LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "Phi3ForCausalLM", "InternLM2ForCausalLM"]
 
 
 def tiny_config(architecture="Qwen3ForCausalLM", **kwargs):
@@ -29,6 +30,102 @@ def tiny_config(architecture="Qwen3ForCausalLM", **kwargs):
     vision.update(kwargs.pop("vision", {}))
     llm.update(kwargs.pop("llm", {}))
     return InternVLChatConfig(vision_config=vision, llm_config=llm, ps_version=kwargs.pop("ps_version", "v2"), **kwargs)
+
+
+def save_tiny_checkpoint(path, architecture="Qwen3ForCausalLM", **kwargs):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    model = InternVLChatModel(tiny_config(architecture, **kwargs)).eval()
+    model.save_pretrained(path, safe_serialization=True)
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "hello": 3, "[UNK]": 4}, unk_token="[UNK]")),
+        pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]",
+    )
+    tokenizer.add_special_tokens({"additional_special_tokens": ["<img>", "</img>", "<IMG_CONTEXT>", "<|im_end|>", "<|im_start|>"]})
+    tokenizer.save_pretrained(path)
+    return model
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_public_gptq_load_uses_local_config_and_model_with_hostile_automap(tmp_path, monkeypatch, trust, bypass):
+    from gptqmodel import GPTQModel
+
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1" if bypass else "0")
+    original = save_tiny_checkpoint(tmp_path)
+    config_path = tmp_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config["auto_map"] = {"AutoConfig": "malicious.Config", "AutoModel": "malicious.Model", "AutoModelForCausalLM": "malicious.Model"}
+    config["llm_config"]["auto_map"] = config["auto_map"]
+    config_path.write_text(json.dumps(config))
+    (tmp_path / "malicious.py").write_text("raise AssertionError('checkpoint Python executed')\n")
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    assert type(loaded) is InternVLChatQModel
+    assert type(loaded.model) is InternVLChatModel and type(loaded.model.config) is InternVLChatConfig
+    ids = torch.tensor([[7, 8, 9]])
+    with torch.no_grad():
+        torch.testing.assert_close(loaded.model(input_ids=ids).logits, original(input_ids=ids).logits, atol=0, rtol=0)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_public_plain_awq_packs_and_reloads_actual_decoder_weights(tmp_path, architecture):
+    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+
+    original = save_tiny_checkpoint(tmp_path, architecture, llm={"hidden_size": 32, "intermediate_size": 64,
+                                    "head_dim": 16, "moe_intermediate_size": 64})
+    vision_before = {name: value.clone() for name, value in original.vision_model.state_dict().items()}
+    wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None,
+                            offload_to_disk=False), backend=BACKEND.TORCH, dtype=torch.float16)
+    calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
+                    "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
+    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    expected_count = {"InternLM2ForCausalLM": 10, "Phi3ForCausalLM": 10, "Qwen3MoeForCausalLM": 20}.get(architecture, 14)
+    packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
+    assert len(packed) == expected_count
+    assert all(name.startswith("language_model.model.layers.") for name in packed)
+    assert all(module.qweight.dtype == torch.int32 for module in packed.values())
+    for name, tensor in wrapper.model.vision_model.state_dict().items():
+        torch.testing.assert_close(tensor, vision_before[name].to(tensor.dtype), atol=0, rtol=0)
+    with torch.inference_mode():
+        expected = wrapper.model(**calibration[0], use_cache=False).logits
+    assert torch.isfinite(expected).all()
+    saved = tmp_path / "quantized"
+    wrapper.save_quantized(str(saved))
+    assert list(saved.glob("*.safetensors")) and not list(saved.glob("*.bin"))
+    reloaded = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    assert type(reloaded.model) is InternVLChatModel
+    assert sum(isinstance(module, AwqTorchLinear) for module in reloaded.model.modules()) == expected_count
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(**calibration[0], use_cache=False).logits, expected, atol=2e-4, rtol=2e-3)
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_real_pil_conversation_preparation_and_image_capture(tmp_path, architecture):
+    from PIL import Image
+
+    from gptqmodel import GPTQModel
+
+    save_tiny_checkpoint(tmp_path, architecture, max_dynamic_patch=2, use_thumbnail=True)
+    wrapper = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32)
+    conversation = [{"role": "user", "content": [Image.new("RGB", (16, 8), color=(35, 71, 143)),
+                                                 {"type": "text", "text": "What is in this image?"}]}]
+    batch = wrapper.prepare_inputs_for_conversation(conversation)
+    assert batch["pixel_values"].shape == (3, 3, 8, 8)  # two tiles and the thumbnail
+    assert torch.isfinite(batch["pixel_values"]).all()
+    assert int((batch["input_ids"] == batch["img_context_token_id"]).sum()) == 12
+    moved = wrapper.move_input_capture_example(batch, torch.device("cpu"))
+    with torch.inference_mode():
+        actual = wrapper.run_input_capture(moved, use_cache=False, data_device=torch.device("cpu"))
+        expected = wrapper.model.generate(pixel_values=moved["pixel_values"], input_ids=moved["input_ids"],
+                    attention_mask=moved["attention_mask"], max_new_tokens=1, do_sample=False,
+                    eos_token_id=batch["eos_token_id"], pad_token_id=0)
+    assert actual.shape == (1, 1)
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
@@ -57,6 +154,20 @@ def test_real_decoder_multimodal_oracle_cache_generation_and_reload(architecture
         direct = model.language_model.generate(inputs_embeds=expected_embeds, max_new_tokens=2, do_sample=False, eos_token_id=None)
         assert torch.equal(generated, direct)
         assert generated.shape == (1, 2)
+        for cache_class in (DynamicCache, StaticCache):
+            cache = cache_class(config=model.config.llm_config, **({"max_cache_len": 12} if cache_class is StaticCache else {}))
+            model(pixel_values=pixels, input_ids=ids, past_key_values=cache, use_cache=True)
+            continuation = model(input_ids=torch.tensor([[9]]), attention_mask=torch.ones(1, 7),
+                                 past_key_values=cache, use_cache=True).logits
+            torch.testing.assert_close(continuation[:, -1], full[:, -1], atol=1e-6, rtol=1e-5)
+            cache.reset()
+            short_ids = torch.tensor([[7, 8]])
+            retried = model(input_ids=short_ids, past_key_values=cache, use_cache=True).logits
+            torch.testing.assert_close(retried, model(input_ids=short_ids, use_cache=False).logits, atol=1e-6, rtol=1e-5)
+        beam = model.generate(pixel_values=pixels, input_ids=ids, max_new_tokens=2, num_beams=2, do_sample=False, eos_token_id=None)
+        direct_beam = model.language_model.generate(inputs_embeds=expected_embeds, max_new_tokens=2, num_beams=2,
+                                                   do_sample=False, eos_token_id=None)
+        assert torch.equal(beam, direct_beam)
         assert model(input_ids=torch.tensor([[7, 8]]), labels=torch.tensor([[7, 8]])).loss.isfinite()
         assert isinstance(model(input_ids=ids, return_dict=False), tuple)
     model.save_pretrained(tmp_path, safe_serialization=True)
@@ -76,6 +187,19 @@ def test_real_decoder_multimodal_oracle_cache_generation_and_reload(architecture
     restored.eval().img_context_token_id = 3
     with torch.no_grad():
         torch.testing.assert_close(restored(pixel_values=pixels, input_ids=ids).logits, oracle, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_tied_embedding_checkpoint_aliases_reload_without_renaming(architecture, tmp_path):
+    model = InternVLChatModel(tiny_config(architecture, llm={"tie_word_embeddings": True})).eval()
+    assert model.get_input_embeddings().weight is model.get_output_embeddings().weight
+    ids = torch.tensor([[7, 8, 9]])
+    expected = model(input_ids=ids).logits
+    model.save_pretrained(tmp_path, safe_serialization=True)
+    restored, info = InternVLChatQModel.loader.from_pretrained(tmp_path, output_loading_info=True, dtype=torch.float32)
+    assert not info["missing_keys"] and not info["unexpected_keys"]
+    assert restored.get_input_embeddings().weight is restored.get_output_embeddings().weight
+    torch.testing.assert_close(restored(input_ids=ids).logits, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("trust", [False, True])
