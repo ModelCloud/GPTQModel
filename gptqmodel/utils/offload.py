@@ -31,7 +31,7 @@ from .device import get_device
 from .logger import setup_logger
 from .module_locks import parent_module_lock
 from .tensor import tensor_buffer
-from .tied_weights import retie_tied_weights, word_embeddings_tied
+from .tied_weights import retie_tied_weights, tied_weights_keys, word_embeddings_tied
 from .torch import CPU, META
 
 
@@ -444,18 +444,27 @@ def _retie_shared_embeddings(model: nn.Module) -> bool:
     was on meta cannot be loaded from it (issue #4597). The lazy shell also
     replaces parameters as it materializes, which breaks the tie the config
     declares. Re-tie before judging whether a module is still meta.
+
+    The load-time snapshot is authoritative: it already resolved tying from the
+    wrapper flag and the checkpoint, so a wrapper whose decoder text config
+    defaults to ``False`` still ties here (#4973), while a distinct checkpoint
+    head stays untied (#4799).
     """
 
     tie = getattr(model, "tie_weights", None)
     if not callable(tie):
         return False
+    snapshot = tied_weights_keys(model)
+    if snapshot is not None:
+        # An empty snapshot means the checkpoint really leaves the head untied.
+        if not snapshot:
+            return False
+        return retie_tied_weights(model)
+    # No snapshot (a model loaded outside the lazy path): keep the config gate.
     config = getattr(model, "config", None)
-    # A stamped snapshot already resolved this from the decoder config and the
-    # checkpoint, so a composite default cannot re-tie a distinct head (#4799).
     if not word_embeddings_tied(config):
         return False
-    retie_tied_weights(model)
-    return True
+    return retie_tied_weights(model)
 
 
 def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:

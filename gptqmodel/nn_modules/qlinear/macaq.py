@@ -68,6 +68,11 @@ class MacaqLinear(WeightOnlyQuantLinear):
     # `E2M1_MAGNITUDES` table to the device on each call.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = False
+    # The policy flag is about dynamo, not the eager capture: a static-cache
+    # `generate()` traces this forward to one graph with zero breaks and the
+    # compiled decode is up to 9x faster than the eager torch path (0.73 s vs
+    # 6.67 s, #4984), so the auto-compile must stay on for `MACAQ_TORCH`.
+    SUPPORTS_COMPILE = True
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TORCH]
     SUPPORTS_METHODS = [METHOD.MACAQ]
@@ -408,6 +413,10 @@ class MacaqTritonLinear(MacaqLinear):
     # `torch.cuda.device_count()` (non-Tensor return): EAGER only.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = True
+    # The torch path's #4984 opt-in covers `MacaqLinear`'s straight-line
+    # MXFP4 dequant; this Triton decode breaks the dynamo graph on
+    # `torch.cuda.device_count()`, so it must not inherit the opt-in.
+    SUPPORTS_COMPILE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MACAQ_TRITON]
     SUPPORTS_METHODS = [METHOD.MACAQ]

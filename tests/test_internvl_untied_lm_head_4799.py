@@ -253,12 +253,15 @@ def test_resolve_tied_weights_keys_trusts_a_distinct_checkpoint_head():
 
     model = _Model()
 
-    # The decoder's own config says untied: nothing to tie.
+    # The wrapper flag and its declared mapping decide which pairs may be tied.
+    # A decoder text flag is inert for the wrapper's head (#4973).
     model.config.get_text_config = lambda: type("Text", (), {"tie_word_embeddings": False})()
-    assert resolve_tied_weights_keys(model) == {}
-
-    model.config.get_text_config = lambda: model.config
     assert resolve_tied_weights_keys(model) == {"lm_head.weight": "model.embed_tokens.weight"}
+
+    # A wrapper that says False ties nothing (#4369).
+    model.config.tie_word_embeddings = False
+    assert resolve_tied_weights_keys(model) == {}
+    model.config.tie_word_embeddings = True
 
     # The checkpoint stores both sides with different values: a real head.
     distinct = {
@@ -279,3 +282,7 @@ def test_resolve_tied_weights_keys_trusts_a_distinct_checkpoint_head():
     assert resolve_tied_weights_keys(model, checkpoint_has_tensor=absent.get) == {
         "lm_head.weight": "model.embed_tokens.weight"
     }
+
+    # The checkpoint has no source tensor: nothing to tie to.
+    missing_source = {"lm_head.weight": True, "model.embed_tokens.weight": False}
+    assert resolve_tied_weights_keys(model, checkpoint_has_tensor=missing_source.get) == {}

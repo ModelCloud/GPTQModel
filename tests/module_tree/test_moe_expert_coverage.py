@@ -13,12 +13,11 @@ expansion, and checks that every quantizable spec emitted by
 ``simple_layer_modules`` actually resolves on at least one decoder layer.
 
 The focused six-model check always runs. The exhaustive ``MODEL_MAP`` sweep is
-opt-in because it builds every model in the registry:
+opt-in because it builds every model in the registry; select it by marker:
 
-    GPTQMODEL_META_COVERAGE=1 pytest tests/module_tree/test_moe_expert_coverage.py
+    pytest tests/module_tree/test_moe_expert_coverage.py -m meta_coverage
 """
 
-import os
 import re
 from importlib import metadata
 from types import SimpleNamespace
@@ -29,7 +28,7 @@ import transformers
 from packaging.version import InvalidVersion, Version
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from gptqmodel.models.auto import MODEL_MAP
+from gptqmodel.models.auto import MODEL_MAP, select_model_definition
 from gptqmodel.utils.model import find_modules, get_layers_with_prefixes
 
 
@@ -156,23 +155,41 @@ def _quantizable_specs(definition, model_config):
 
 
 def _build_defused_model(model_type):
-    """Return ``(config, definition, layers)`` for a meta-device model."""
+    """Return ``(config, definition, layers, fused)`` for a meta-device model.
+
+    ``fused`` lists the 3-D expert projections the installed Defuser could not
+    split into per-expert linears; the sweep skips those models because the
+    loader itself refuses to quantize below its own Defuser minimum.
+    """
     config = transformers.AutoConfig.for_model(model_type)
     override = CONFIG_OVERRIDES.get(model_type)
     if override is not None:
         override(config)
 
-    definition = MODEL_MAP[model_type]
+    definition = select_model_definition(model_type, config)
     with torch.device("meta"):
         model = definition.loader.from_config(config)
 
+    # Run the loader's own conversion path, not bare ``defuser.convert_model``:
+    # Defuser gates on its model registry, so definitions that set
+    # ``defuser_generic_experts`` (native ``kimi_linear``, ``mimo_v2_flash``)
+    # need Defuser's generic replacement pass to split the fused 3-D experts.
     # Imported lazily so the fast test does not pay for Defuser at collection.
-    from defuser import convert_model
+    from gptqmodel.models.loader import _convert_model_with_defuser
 
-    convert_model(model, cleanup_original=False)
+    _convert_model_with_defuser(definition, model, cleanup_original=False)
 
     layers, _ = get_layers_with_prefixes(model, definition.extract_layers_node())
-    return config, definition, layers
+    return config, definition, layers, _fused_expert_parameters(model)
+
+
+def _fused_expert_parameters(model):
+    """3-D expert projections Defuser did not split into per-expert linears."""
+    return [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.dim() == 3 and ".experts." in f".{name}."
+    ]
 
 
 def _resolved_module_names(layers):
@@ -234,7 +251,7 @@ def test_fixed_moe_definitions_expand_every_expert_placeholder(model_type):
     it is recorded as a silent miss and the experts stay in the source dtype.
     """
     _requires_defuser(model_type)
-    config, definition, _ = _build_defused_model(model_type)
+    config, definition, _, _ = _build_defused_model(model_type)
 
     specs = _quantizable_specs(definition, config)
     assert not [spec for spec in specs if "{expert_index}" in spec]
@@ -250,7 +267,7 @@ def test_fixed_moe_definitions_expand_every_expert_placeholder(model_type):
 @pytest.mark.parametrize("model_type", FIXED_MODELS)
 def test_fixed_moe_definitions_resolve_every_quantizable_spec(model_type):
     _requires_defuser(model_type)
-    config, definition, layers = _build_defused_model(model_type)
+    config, definition, layers, _ = _build_defused_model(model_type)
 
     assert layers, f"{model_type}: no decoder layers resolved"
     specs = _quantizable_specs(definition, config)
@@ -266,7 +283,7 @@ def test_fixed_moe_definitions_resolve_every_quantizable_spec(model_type):
 @pytest.mark.parametrize("model_type", FIXED_MODELS)
 def test_fixed_moe_definitions_resolve_routed_experts(model_type):
     _requires_defuser(model_type)
-    config, definition, layers = _build_defused_model(model_type)
+    config, definition, layers, _ = _build_defused_model(model_type)
 
     specs = _quantizable_specs(definition, config)
     expert_specs = [spec for spec in specs if ".experts." in spec]
@@ -281,17 +298,14 @@ def test_fixed_moe_definitions_resolve_routed_experts(model_type):
     )
 
 
-@pytest.mark.skipif(
-    os.environ.get("GPTQMODEL_META_COVERAGE") != "1",
-    reason="set GPTQMODEL_META_COVERAGE=1 to build every MODEL_MAP entry",
-)
+@pytest.mark.meta_coverage
 @pytest.mark.parametrize(
     "model_type", sorted(set(MODEL_MAP) & set(CONFIG_MAPPING))
 )
 def test_every_defined_model_type_resolves_routed_experts(model_type):
     _requires_defuser(model_type)
     try:
-        config, definition, layers = _build_defused_model(model_type)
+        config, definition, layers, fused = _build_defused_model(model_type)
     except Exception as exc:  # noqa: BLE001 - unsupported configs are skipped
         pytest.skip(
             f"{model_type}: cannot build meta model "
@@ -310,6 +324,15 @@ def test_every_defined_model_type_resolves_routed_experts(model_type):
         pytest.xfail(
             f"{model_type}: installed Defuser leaves routed experts fused as 3-D "
             "parameters"
+        )
+
+    if fused:
+        from gptqmodel.models.loader import DEFUSER_MIN_VERSION
+
+        pytest.skip(
+            f"{model_type}: installed defuser {_defuser_version() or 'unknown'} leaves "
+            f"{len(fused)} fused 3-D expert projection(s) unsplit; the loader requires "
+            f"defuser>={DEFUSER_MIN_VERSION}"
         )
 
     missing = _missing_specs(

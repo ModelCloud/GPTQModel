@@ -10,6 +10,10 @@ The declarations live in the kernel modules (`SUPPORTS_COMPILE_LEVEL` and
   host-sync / host-transfer / device-address construct in that kernel's own
   `forward`;
 * a `SUPPORTS_COMPILE=True` policy claim implies at least `DYNAMO`;
+* a kernel that reaches `INDUCTOR` (the documented bar for a compiled decode
+  win) either opts into the #4669 policy or records the measured loss in
+  `SUPPORTS_COMPILE_EAGER_REASON`, so the two declarations cannot drift apart
+  (#4984);
 * `docs/kernel-compile-matrix.md` lists exactly the registered kernels and
   matches their declarations.
 
@@ -25,9 +29,13 @@ import torch
 
 from gptqmodel.nn_modules.qlinear._compile_support import (
     COMPILE_LEVEL,
+    COMPILE_POLICY_FLOOR,
     compile_level,
+    compile_policy_is_justified,
+    compile_policy_reason,
     describe_kernel,
     graph_capture_safe,
+    supports_compiled_generation,
 )
 from tests.kernels.compile_probe import graph_unsafe_constructs, protocol_kernels
 
@@ -99,6 +107,36 @@ def test_compiled_generation_claim_is_traceable(cls):
     )
 
 
+@pytest.mark.parametrize("cls", _kernels(), ids=lambda cls: cls.__name__)
+def test_compile_capable_kernels_pair_the_policy_with_a_reason(cls):
+    """A traceable kernel cannot opt out of compiled generation for free (#4984).
+
+    ``SUPPORTS_COMPILE_LEVEL >= INDUCTOR`` is the documented bar for "a
+    compiled decode can pay off". Keeping the #4669 policy off from there is
+    allowed (eager really can be faster), but the measured loss has to be
+    recorded next to the declaration, otherwise the two answers drift apart and
+    a trace-clean kernel stays 2-9x slower by default.
+    """
+
+    if compile_level(cls) < COMPILE_POLICY_FLOOR:
+        pytest.skip("kernel does not reach the compiled-generation policy floor")
+
+    reason = compile_policy_reason(cls)
+    if supports_compiled_generation(cls):
+        assert reason is None, (
+            f"{cls.__name__} opts into compiled generation but still carries "
+            f"SUPPORTS_COMPILE_EAGER_REASON={reason!r}; drop the stale reason."
+        )
+    else:
+        assert reason, (
+            f"{cls.__name__} declares {compile_level(cls).name} (>= "
+            f"{COMPILE_POLICY_FLOOR.name}) but keeps SUPPORTS_COMPILE=False. "
+            "Record the measured loss in SUPPORTS_COMPILE_EAGER_REASON, or opt "
+            "the kernel in when a compiled static-cache decode is faster."
+        )
+    assert compile_policy_is_justified(cls)
+
+
 def _matrix_rows():
     rows = {}
     for line in MATRIX.read_text(encoding="utf-8").splitlines():
@@ -110,6 +148,7 @@ def _matrix_rows():
             "level": cells[2].strip("`"),
             "graph_capture": cells[3].lower() == "yes",
             "compiled_generation": cells[4].lower() == "yes",
+            "compiled_generation_reason": None if cells[5] == "-" else cells[5],
         }
     return rows
 
@@ -134,6 +173,9 @@ def test_docs_matrix_matches_the_declarations():
         )
         assert row["compiled_generation"] is want["compiled_generation"], (
             f"{name}: docs compiled-generation policy is stale"
+        )
+        assert row["compiled_generation_reason"] == want["compiled_generation_reason"], (
+            f"{name}: docs policy reason is stale"
         )
 
 

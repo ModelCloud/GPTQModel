@@ -37,6 +37,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear._compile_support import supports_compiled_generation
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
@@ -820,6 +821,18 @@ def _thaw_module_tree(value):
 def _module_tree_for_class(cls):
     active = _ACTIVE_MODULE_TREE.get()
     return active[1] if active is not None and active[0] is cls else cls.module_tree
+
+
+def _module_owns_direct_meta_tensors(module: nn.Module) -> bool:
+    """Whether ``module`` itself (not a child) owns a tensor still on ``meta``."""
+
+    for tensor in list(module.parameters(recurse=False)) + list(module.buffers(recurse=False)):
+        if getattr(tensor, "is_meta", False):
+            return True
+        device = getattr(tensor, "device", None)
+        if device is not None and getattr(device, "type", None) == "meta":
+            return True
+    return False
 
 
 # Replay metadata key: the per-layer-type `attention_mask` / `position_embeddings`
@@ -3607,7 +3620,12 @@ class BaseQModel(nn.Module):
         slower than eager (#4669). Kernels declare the answer with
         ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False and
         requires both a ``fullgraph=True`` trace with no graph breaks and a
-        measured win on the hardware it claims (#4739).
+        measured win on the hardware it claims (#4739). A kernel that declares
+        a compile-capable ``SUPPORTS_COMPILE_LEVEL`` (``>= INDUCTOR``) yet
+        keeps the policy off has to record the measured loss in
+        ``SUPPORTS_COMPILE_EAGER_REASON``; otherwise the two declarations drift
+        apart and a trace-clean kernel stays 2-9x slower than it could be
+        (#4984).
 
         A model with no quantized linear (dense) has nothing that breaks the
         graph, so it keeps whatever compile policy the caller chose.
@@ -3631,7 +3649,7 @@ class BaseQModel(nn.Module):
         )
         if not modules:
             return True
-        return all(getattr(module, "SUPPORTS_COMPILE", False) for module in modules.values())
+        return all(supports_compiled_generation(module) for module in modules.values())
 
     def _generation_compile_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """Return the generation kwargs to pass, with the compile policy applied.
@@ -5830,6 +5848,17 @@ class BaseQModel(nn.Module):
                     return stripped
             return strip_non_quantize_flags(names[0]) if names else None
 
+        def _feature_numel(name):
+            """Number of captured activation elements for ``name`` (0 if absent).
+
+            A declared MoE root is seeded as a capture task even on a layer that
+            never runs an expert (ERNIE-4.5-MoE's dense prefix), so the key
+            exists with an empty tensor. Treat "key present" and "captured
+            something" as different questions (#4903).
+            """
+            feature = input_feat.get(name) if name else None
+            return int(feature.numel()) if feature is not None else 0
+
         def _try_update_last_module(candidate_name: str) -> bool:
             nonlocal last_module, last_module_name, last_module_root
 
@@ -6250,9 +6279,15 @@ class BaseQModel(nn.Module):
                     moe_gate_up_root = (
                         _block_moe_root(block) if has_gate_up_roles and is_moe_family else None
                     )
-                    if moe_gate_up_root is not None and moe_gate_up_root in input_feat:
+                    # A seeded-but-uncaptured root is not a usable search input:
+                    # the dense prefix of a hybrid MoE (`mlp:moe` with a dense
+                    # `mlp` block) seeds `mlp` but never runs the root hook, and
+                    # preferring that empty tensor dropped the dense layer's
+                    # norm -> gate/up group (#4903). Fall through to the block's
+                    # own captured feature in that case; a routed-expert block
+                    # keeps the fail-closed path below.
+                    if moe_gate_up_root is not None and _feature_numel(moe_gate_up_root) > 0:
                         feature_name = moe_gate_up_root
-                        inp = input_feat[moe_gate_up_root]
                     # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
                     elif is_moe_gate_up_block and module2inspect is not None:
                         if last_module_root not in input_feat:
@@ -6262,10 +6297,9 @@ class BaseQModel(nn.Module):
                                 len(block),
                             )
                         feature_name = last_module_root if last_module_root in input_feat else _select_feature_name(block)
-                        inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
                     else:
                         feature_name = _select_feature_name(block)
-                        inp = input_feat.get(feature_name)
+                    inp = input_feat.get(feature_name)
 
                     if inp is None:
                         pending_nonquant.clear()
@@ -6276,13 +6310,24 @@ class BaseQModel(nn.Module):
                         # never ran. A zero-width "source" also makes every
                         # consumer look width-foreign below, which used to drop
                         # the routed-expert gate/up group without a trace
-                        # (#4697). Warn before skipping it.
+                        # (#4697). Warn before skipping it, and warn for a
+                        # non-expert gate/up block too: the dense prefix of a
+                        # hybrid MoE used to lose its own group the same silent
+                        # way (#4903).
                         if is_moe_gate_up_block:
                             log.warning(
                                 "awq_get_modules_for_scaling: declared MoE root `%s` captured no "
                                 "activations; skipping the routed-expert gate/up scaling group "
                                 "and leaving those projections on plain quantization",
                                 last_module_root,
+                            )
+                        elif has_gate_up_roles:
+                            log.warning(
+                                "awq_get_modules_for_scaling: feature `%s` captured no activations; "
+                                "skipping the gate/up scaling group for `%s` and leaving those "
+                                "projections on plain quantization",
+                                feature_name,
+                                block[0] if block else "<empty block>",
                             )
                         pending_nonquant.clear()
                         skip_block = True
@@ -7014,16 +7059,55 @@ class BaseQModel(nn.Module):
         return blocks
 
     @classmethod
+    def _module_tree_prefix_paths(cls) -> List[tuple[str, ...]]:
+        """Return every module-tree prefix path before the layer container."""
+
+        all_prefix_paths: List[tuple[str, ...]] = []
+        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
+            try:
+                sharp_idx = tree.index("#")
+            except ValueError:
+                raise ValueError("module_tree must contain '#' to separate hierarchy")
+
+            assert sharp_idx > 0, "failed to get_base_modules"
+            for path in cls._expand_module_tree_prefixes(tree):
+                prefix = tuple(path.split("."))
+                if prefix not in all_prefix_paths:
+                    all_prefix_paths.append(prefix)
+        return all_prefix_paths
+
+    @classmethod
     def get_modules_with_direct_meta_tensors(cls, model: nn.Module):
         """
         Return module paths whose direct params/buffers are materialized outside
         normal layer/base-module traversal.
         """
         out = []
+        seen = set()
         module_names = cls.modules_with_direct_meta_tensors or cls.direct_meta_modules or []
         for module_name in module_names:
             module = get_module(model, module_name)
-            if isinstance(module, nn.Module):
+            if isinstance(module, nn.Module) and module_name not in seen:
+                seen.add(module_name)
+                out.append(module_name)
+
+        # A decoder root (or another module-tree prefix node) can own a bare
+        # parameter/buffer that is not a child module, e.g. Hymba's
+        # `model.memory_tokens`. Nothing in the base-module or layer traversal
+        # materializes it, so a lazy shell leaves it on `meta` and the capture
+        # forward fails. Detect those owners generically instead of requiring
+        # every affected definition to declare them (#4888).
+        for parts in cls._module_tree_prefix_paths():
+            for depth in range(1, len(parts) + 1):
+                module_name = ".".join(parts[:depth])
+                if module_name in seen:
+                    continue
+                module = get_module(model, module_name)
+                if not isinstance(module, nn.Module):
+                    continue
+                if not _module_owns_direct_meta_tensors(module):
+                    continue
+                seen.add(module_name)
                 out.append(module_name)
         return out
 
@@ -7036,19 +7120,7 @@ class BaseQModel(nn.Module):
         """
         Return list of base modules directly under the root path but not the layer container.
         """
-        all_prefix_paths = []
-        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
-            try:
-                sharp_idx = tree.index("#")
-            except ValueError:
-                raise ValueError("module_tree must contain '#' to separate hierarchy")
-
-            assert sharp_idx > 0, "failed to get_base_modules"
-            for path in cls._expand_module_tree_prefixes(tree):
-                prefix = tuple(path.split("."))
-                if prefix not in all_prefix_paths:
-                    all_prefix_paths.append(prefix)
-
+        all_prefix_paths = cls._module_tree_prefix_paths()
         if not all_prefix_paths:
             return []
 

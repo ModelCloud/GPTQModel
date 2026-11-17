@@ -60,8 +60,10 @@ CONTRACT_REFS = (
     ("docs/fp8-scale-semantics.md", "gptqmodel/models/base.py",
      "_decoder_fp8_scale_semantics", SYMBOL_CITATION),
     ("docs/fusion-planner.md", "gptqmodel/models/fusion.py", "_share_operands", 444),
+    # `awq_processor.py` keeps growing (the #4880 replay packing added ~70
+    # lines above this symbol), so cite it by name.
     ("docs/layer-type-replay-masks.md", "gptqmodel/looper/awq_processor.py",
-     "_rotary_layer_type_kwargs", 4471),
+     "_rotary_layer_type_kwargs", SYMBOL_CITATION),
     ("docs/layer-type-replay-masks.md", "gptqmodel/models/definitions/olmo3.py",
      "Olmo3QModel", 53),
     ("docs/multi_gpu_quantization.md", "gptqmodel/utils/torch.py", "torch_sync", 611),
@@ -78,6 +80,15 @@ CONTRACT_REFS = (
      "compute_hessian_xtx", 1207),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
      "hessian_inverse", 2108),
+    # `calibration.py` grew a 70-line payload normalizer above
+    # `prepare_calibration_dataset` (#4934); these three citations are symbol
+    # anchored so an unrelated edit cannot drift them again.
+    ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
+     "_CALIBRATION_COLUMNS", SYMBOL_CITATION),
+    ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
+     "prepare_calibration_dataset", SYMBOL_CITATION),
+    ("docs/decision-transformer-calibration.md", "gptqmodel/utils/calibration.py",
+     "_is_tensor_kwargs_row", SYMBOL_CITATION),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)
