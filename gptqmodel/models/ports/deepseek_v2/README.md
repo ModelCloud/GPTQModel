@@ -13,7 +13,7 @@ them with checkpoint Python. No global Transformers registrations are changed.
   [`52b080b6416a7897e2af90febeb4dfad22b84d19`](https://github.com/huggingface/transformers/tree/52b080b6416a7897e2af90febeb4dfad22b84d19/src/transformers/models/deepseek_v2):
   the config, decoder/model constructors and model API are subclassed/adapted;
   MLA, rotary math, compressed cache layers, expert execution and generation stay
-  native, with package-owned cache publication and derived-buffer lifecycle.
+  native, with package-owned cache failure rollback and derived-buffer lifecycle.
   The installed `modeling_deepseek_v2.py` matched this revision byte for
   byte (SHA256 `8c807b695c6d3835b5035703d6def4a45dfa6296a2b35583064be5f937ee32ec`).
 - DeepSeek-Coder-V2-Lite-Instruct at
@@ -82,22 +82,36 @@ native `DeepseekV2TopkRouter.forward` versus this package's override;
 native `DeepseekV2DecoderLayer.__init__` versus the periodic/dense selection here.
 Shared security-loader and central flow documentation remain integrator-owned.
 
-## Cache publication and derived RoPE state
+## Native cache identity, failure rollback and derived RoPE state
 
-`DeepseekV2Model.forward` forks a caller's ordinary native `DynamicCache` before
-running the native decoder. The fork copies the cache and layer metadata; native
-`DynamicLayer.update` concatenates into new tensors, so the prefix tensors need
-no extra clone. Continue with **`outputs.past_key_values`**, including the cache
-in tuple outputs. The caller's input remains unchanged on success and on decoder,
-head or loss failure. A failed suffix can be retried against the same prefix.
+Successful forwards preserve Hugging Face's mutable-cache contract:
+**`outputs.past_key_values is past_key_values`**, and the caller's cache advances
+in place. Reusing the same external cache for successive 1-, 4- and 1-token calls
+produces lengths 1, 5 and 6 without assigning the returned cache back to it. Tuple
+outputs expose that same original object. Calls without an external cache retain
+native cache creation behavior.
+
+`_cache_transaction` validates the cache and records its pre-call layer lengths,
+layer objects and complete layer metadata. Native `DynamicLayer.update` uses
+`torch.cat` to replace tensor references, so retaining the original references
+allows exact rollback without cloning prefix tensors or truncating them after an
+error. `DeepseekV2ForCausalLM.forward` restores the original state on decoder,
+head, loss or native tuple-conversion exceptions, then reraises. Direct
+`DeepseekV2Model.forward` callers have the same decoder-failure protection. Layers
+appended to an empty lazy cache are removed on failure; configured/reset caches
+recover their original initialization, dtype/device metadata and tensor objects.
+A failed suffix can be retried with the same caller cache and prefix.
 Native DDP cache conversion, crop, batch selection/repetition, reorder, reset and
-replay remain native cache operations.
+replay remain native cache operations. Snapshots live only for the current call;
+concurrent writes to the same mutable cache are not qualified.
 
 Only non-offloaded native `DynamicCache` with ordinary `DynamicLayer` entries is
 qualified. Static, sliding, quantized, offloaded and arbitrary subclass caches
 raise `TypeError` before decoder execution. Incomplete or unequal-length decoder
 prefixes raise `ValueError`; an empty lazy native cache is accepted. This port
 does not claim compiled static-cache or accelerator/offloaded-cache support.
+Both package-owned model classes set `_can_compile_fullgraph=False` rather than
+inheriting native fullgraph compilation advertisement for this eager rollback.
 
 `DeepseekV2RotaryEmbedding._apply` and the model initialization hook regenerate
 `inv_freq` and `original_inv_freq` in FP32 from the pinned native RoPE recipes.
@@ -106,27 +120,27 @@ retains its grown sequence length and native short-position reset behavior; YaRN
 retains native scaling. The derived tables remain nonpersistent. Learned tensors
 retain normal PyTorch casting and checkpoint behavior without repair or rewrite.
 
-| Before (at `da3ecd85c`) | Shipped replacement |
+| Before | Shipped replacement |
 | --- | --- |
 | `modeling_deepseek_v2.py:45-52`: native selected scores scaled before dividing and normalizing; extreme finite factors produced NaNs | `DeepseekV2TopkRouter.forward`: FP32 logits/softmax, native group mask/top-k index selection, then selected-probability normalization without scaling; other branches stay native |
-| `modeling_deepseek_v2.py:102-132`: inherited model/CausalLM forward mutated caller cache before head/loss completed | `DeepseekV2Model.forward` and `_fork_cache`: validate and fork metadata, publish continuation only through public outputs; failures leave caller prefix reusable |
+| `da3ecd85c`, `modeling_deepseek_v2.py:102-132`: inherited model/CausalLM forward left the caller cache partly advanced after decoder/head/loss failure | `_cache_transaction` around both model and complete CausalLM forward: append in place on success, restore exact layer state and reraise on failure |
+| `1882d6b57`, `modeling_deepseek_v2.py:105-133,190-200`: `_fork_cache` left the caller cache unchanged even on success, breaking native manual cache reuse | Return and advance the original cache/list/layer objects; preserve failure atomicity with rollback instead of a fork |
 | `modeling_deepseek_v2.py:114`: native rotary buffers followed parameter casts and lost FP32 frequency precision | `DeepseekV2RotaryEmbedding._refresh_frequencies`, `_apply`, `_NativeCheckpointLayout._init_weights`: regenerate nonpersistent FP32 tables on the destination device from native config |
 
 ```mermaid
 flowchart TD
-    A[DeepseekV2Model.forward: past_key_values] --> B{_fork_cache: supported native cache?}
+    A["DeepseekV2ForCausalLM.forward / DeepseekV2Model.forward"] --> B{"_cache_transaction: supported native cache?"}
     B -->|unsupported type or offloading| X[TypeError before decoder]
     B -->|incomplete or nonuniform prefix| Y[ValueError before decoder]
-    B -->|supported| C[Copy cache and layer metadata; retain prefix tensors]
-    B -->|None| D[Native forward: optional new DynamicCache]
-    C --> D
-    D --> E[Native DynamicLayer.update: new concatenated tensors]
-    E --> F[Decoder output; native CausalLM head and loss]
-    E -->|decoder fails| G[Propagate error; caller prefix unchanged]
-    F -->|head or loss fails| G
-    F -->|success| H[Public output carries continuation cache]
-    H --> I[Caller continues with outputs.past_key_values]
-    G --> J[Retry suffix with original caller prefix]
+    B -->|supported| C[Retain original layer objects and metadata]
+    B -->|None| N[Native cache creation and return behavior]
+    C --> D["Native DynamicLayer.update: append to caller cache"]
+    D --> E[Native CausalLM head, loss and tuple conversion]
+    D -->|decoder fails| G[Restore layer states; remove appended layers; reraise]
+    E -->|head, loss or conversion fails| G
+    E -->|success| H[Return same caller cache; lengths advanced]
+    H --> I[Caller reuses same cache for next suffix]
+    G --> J[Retry suffix with original restored cache]
     classDef failure fill:#fee,stroke:#b00
     class X,Y,G failure
 ```
@@ -171,42 +185,52 @@ quantization. Without the proposed shared updates, four assertions still expect
 the previous DeepSeek plan/folding policy. No shared fixture or AWQ test changes
 are part of this port's commit.
 
-The router/cache/RoPE follow-up adds **46 cases** (99 owned cases total). In an
-isolated checkout of `da3ecd85ce644778197bca9ec9f8f3968486a143`, the unchanged
-new tests produced **32 failed, 14 passed, 43 deselected** in 5.93 seconds:
+The current cache-identity follow-up passes **300 owned cases** in 13.12 seconds
+on parent `0fdfd2396`, using the command above. The new regressions include:
 
-- Four extreme-scale normalized router cases returned nonfinite weights; the
-  two scale-1.0 controls passed. The independent oracle pins both routing modes.
-- Sixteen cache cases detected decoder/head/loss partial mutation, input-cache
-  mutation on success, or failure to reject unqualified caches. Retry checks
-  compare logits and every cache layer against a fresh five-token forward.
-- Twelve post-construction RoPE cast cases failed public generation or numerical
-  assertions. For default BF16 Lite, identical saved tensors generated suffix
-  `[10, 8]` before reload and `[17, 7]` after reload. Twelve direct low-dtype
-  construction controls passed. The fixture uses `initializer_range=0.2` so
-  attention differences survive low-precision output rounding.
+- 36 external-cache 1+4+1 loops, comparing logits and every compressed cache
+  tensor bitwise with a genuine native sibling, then with safetensors reload.
+  Full/Lite, dense/mixed/periodic layouts, FP32/FP16/BF16 and dict/tuple outputs
+  are covered. CPU native eager expert execution is selected explicitly; tiny
+  12-wide expert fixtures do not meet grouped-MM alignment requirements.
+- 144 prefilled-cache failure/retry cases across those layouts and dtypes.
+  Failure is injected after decoder layer 0/1, the head, or at loss computation.
+  Tests observe partial in-place progress, then require original tensor object
+  identity, bitwise prefix contents and metadata after rollback. Retry logits
+  and every cache tensor match a fresh full forward with dtype-specific limits.
+- 24 empty/configured/reset-cache failure cases, including direct decoder
+  callers; native tuple-conversion failure; DDP conversion and cache methods;
+  unsupported-cache and malformed-prefix rejection before mutation.
 
-Exact regression selector (run against the old modeling file for red, and the
-shipped modeling file for green):
+On an isolated unchanged `0fdfd2396` runtime, the identical final cache selector
+produces **209 failed, 7 passed** in 108.02 seconds. The fork breaks
+identity and visible in-place progress; the seven rejection controls pass.
+As a separate negative control, replacing only `_cache_transaction` with
+`lambda *_: contextlib.nullcontext()` retains real native cache writes but
+disables rollback: all **169** decoder/head/loss/tuple failure regressions fail
+on the unrestored state (120 deselected, 58.05 seconds). Both controls ran
+with another CPU test process on this VM; no native tensor operation was mocked.
+The separate compilation-advertisement regression fails before removing the
+inherited flag (1 failed in 2.56 seconds) and passes with the owned override.
+
+Final cache selector:
 
 ```sh
-PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest tests/test_deepseek_v2_local_port.py -k 'normalized_routing_ignores or public_cache_failure or native_cache_conversion_fork or empty_native_cache or unsupported_cache_fails or rope_precision_cast' -q --tb=short
+PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest tests/test_deepseek_v2_local_port.py -k 'external_cache_manual_1_4_1 or public_cache_failure or empty_cache_failure or tuple_conversion_failure or native_cache_conversion_methods or empty_native_cache or invalid_cache_prefix or unsupported_cache_fails' -q --tb=short
 ```
 
-The affected suite also passed on parent
-`569c693de` with just the owned follow-up applied: **744 passed, 11 skipped** in
-22.77 seconds using:
+The router extreme-scale oracle, RoPE cast/reload/generation and previous port
+regressions remain green. The affected suite on `0fdfd2396` with just this owned
+follow-up applied passes **970 tests, 7 skipped** in 31.46 seconds using:
 
 ```sh
 PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest tests/test_deepseek_v2_local_port.py tests/module_tree/test_deepseek_v2_local_port.py tests/module_tree/test_registered_module_plans.py tests/test_awq_scaling_groups.py tests/test_awq_mla_scaling.py tests/test_awq_moe_router_scaling.py tests/test_local_model_loading.py tests/test_local_model_paths.py tests/test_checkpoint_local_model.py -q --tb=short
 ```
 
-All owned cases pass. Skips are nine unrelated AWQ fixtures and two local Llama
-recovery cases; none qualify DeepSeek. A separate broad leaf-ownership audit on
-parent `023d0406b` found two unrelated `lfm3` / `lfm3_vl` ownership failures
-(`conv.conv`, `self_attn.g_proj`), both reproduced on that clean parent. No
-shared files are changed by this follow-up. Central documentation remains the
-integrator's responsibility.
+All owned cases pass. Skips are five unrelated AWQ fixtures and two local Llama
+recovery cases; none qualify DeepSeek. No shared files are changed by this
+follow-up. Central documentation remains the integrator's responsibility and
+must describe native in-place success with failure rollback.
 
 No trained multi-GB checkpoint, accuracy/perplexity run, GPU, FlashAttention,
 distributed experts, or complete packed quantized checkpoint export/inference
