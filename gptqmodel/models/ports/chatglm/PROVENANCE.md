@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 ModelCloud.ai -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# ChatGLM modeling provenance
+# ChatGLM model and tokenizer provenance
 
 GPT-QModel owns the causal-language-model implementation for the existing
 `chatglm` definition. Transformers 5.23.0 has no `chatglm` config or causal-LM
@@ -50,9 +50,11 @@ labml.ai git `db59a04a8a2c6af922f1656f8c0fd113dd9a51b8`.
 - Removed upstream global Torch JIT changes, obsolete Transformers-version
   checks, remote quantizer imports and checkpoint-code generation hooks.
   HF meta/no-init contexts replace `skip_init`. Generation uses a real cache.
-- Standard `generate()` is supported. Upstream tokenizer-specific `chat()`,
-  `stream_chat()`, response parsing and classification heads are outside this
-  causal-LM definition. No tokenizer correction or chat template is embedded.
+- Standard `generate()` is supported. Upstream model `chat()`, `stream_chat()`,
+  response parsing and classification heads are outside this causal-LM
+  definition. Package-owned tokenizers preserve source prompt construction;
+  released chat-template JSON remains a data asset, with normalization owned
+  by Tokenicer.
 - Original ChatGLM1's `transformer.layers`/2D-position architecture is rejected
   by config markers before weights load. Upstream CUDA `quantization_bit`
   checkpoints are also rejected; use GPT-QModel quantization.
@@ -77,3 +79,67 @@ labml.ai git `db59a04a8a2c6af922f1656f8c0fd113dd9a51b8`.
   Real CPU AWQ quantize/save/reload tests cover both layouts and MQA modes.
 
 See [coverage and loading flow](COVERAGE.md) for runnable validation.
+
+## Released tokenizer ownership
+
+The same immutable release revisions above supply `tokenization_chatglm.py`.
+The derived `tokenization_glm2.py`, `tokenization_glm3.py` and
+`tokenization_glm4.py` retain the source SentencePiece / role-token / TikToken
+algorithms. Their code uses the corresponding retained Apache licenses and
+attribution in `NOTICE`; no remote Python is imported by the shipped loader.
+
+| Release | Source SHA-256 | Tokenizer asset SHA-256 |
+| --- | --- | --- |
+| GLM2 | `a223e318392c2a065b96ddfd371e780873cc12365719ceec86d4a610fa476f3c` | `e7dc4c393423b76e4373e5157ddc34803a0189ba96b21ddbb40269d31468a6f2` |
+| GLM3 | `aa92d89aaa950bb3339ffe515ce6e8da7631fffb11319574f42093457baef660` | `e7dc4c393423b76e4373e5157ddc34803a0189ba96b21ddbb40269d31468a6f2` |
+| GLM4 | `90a9a1b739f834cdf7a2f40959f9eeff2a705b80acefb2cea9c19ff3958a9279` | `5a493598071550244b2ee7f26118f3edec2150b9dfa967929a99052ac83fe716` |
+
+`tokenizer_contracts.json` additionally records exact tokenizer-config hashes,
+GLM3's special-token-map hash, source-derived IDs for five text cases per
+release, padded batches, pair construction, GLM2 round prompts, GLM3 tool/history
+construction and literal role commands, and GLM3/4 rendered chats. Tests download
+only those data files at the specified immutable revisions and verify SHA-256.
+They never fetch checkpoint Python. GLM2/4 publish no special-token-map file at
+these revisions; GLM3's is included in the pinned inventory.
+
+The independent oracle ran the inspected source under Transformers 4.44.2 on
+Python 3.12.16, SentencePiece 0.2.1, TikToken 0.12.0 and Jinja2 3.1.6. Only
+GLM2's unused Torch import and GLM3's final tensor-container conversion were
+removed in that isolated no-Torch oracle; integer tokenization and templates
+were unchanged. Runtime qualification uses Transformers 5.23.0,
+SentencePiece 0.2.3 and TikToken 0.12.0. GLM4 source pair input raises
+`KeyError('<eos>')`; pair input is not qualified for GLM4, and its source behavior
+is recorded rather than advertised as supported.
+
+### Transformers 5 tokenizer adaptations
+
+- One package-owned `ChatGLMTokenizer.from_pretrained` dispatcher reads only
+  tokenizer JSON metadata. Released GLM2/3 share the class name
+  `ChatGLMTokenizer`; GLM3's role-token metadata/chat template selects its source
+  class, while GLM2's metadata selects its source class. GLM4's explicit
+  `ChatGLM4Tokenizer` selects TikToken. Saved package classes use distinct
+  `ChatGLM2Tokenizer`/`ChatGLM3Tokenizer`/`ChatGLM4Tokenizer` names. Unknown class
+  names fail closed, even with trust and bypass. `auto_map` is never a dispatch
+  authority, and all imports are package-relative.
+- TF5 passes `padding_side` into `_pad`; the GLM2 signature accepts it while
+  retaining source left-padding semantics. GLM3 replaces removed
+  `batch_encode_plus` with `prepare_for_model` for already encoded chat IDs.
+  Its source-specific `encode_special_tokens` constructor flag is passed to
+  the base initializer so save/reload preserves literal role-command encoding.
+- Source SP display conversion hides BOS/EOS/UNK as empty strings. Enumerating
+  that display conversion as a vocabulary made TF5 register EOS/UNK over
+  GLM3's fixed assistant/observation IDs 64796/64797. Both SP ports enumerate
+  actual SentencePiece pieces plus fixed commands in `get_vocab`; encoding,
+  decoding and prompt IDs retain source semantics. This corrects vocabulary
+  ownership in the source port, without adding a generic normalization shim.
+- The loader constructs the selected tokenizer before the shared outer
+  Tokenicer normalization. Reusable metadata/special-token normalization is
+  owned by [Tokenicer](https://github.com/ModelCloud/Tokenicer/pull/65), not this
+  dispatcher. Parent owns the shared once-only wrapper adapter and dependency
+  pins. The released source asset matrix works with released Tokenicer 0.0.17
+  and the unreleased 0.0.19 preload candidate at
+  `c14e1c8c062c7b7cc9a981054366f98bde015fa1`.
+
+No trained-weight generation-quality, evaluation-score, arbitrary tokenizer
+revision, original ChatGLM1 tokenizer, multi-threaded tokenizer, or GPU claim
+is made. Model cache/dtype/AWQ limits above still apply.

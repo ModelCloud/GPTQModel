@@ -8,6 +8,117 @@ Neither caller trust nor the existing security bypass can return a local-owned
 ChatGLM checkpoint to checkpoint-Python discovery. Decoder parameter ownership
 still follows `transformer.encoder.layers`.
 
+## Released tokenizer selection
+
+`ChatGLMQModel.loader.tokenizer_class` owns GLM2/3/4 tokenization as well as
+model selection. JSON and vocabulary files remain checkpoint data; neither
+checkpoint Python nor a generic tokenizer-json substitution defines behavior.
+This closes the released-asset failure that synthetic WordLevel fixtures did
+not exercise.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load"] --> B["load_hf_tokenizer: definition tokenizer_class"]
+    B --> C["ChatGLMTokenizer.from_pretrained: tokenizer JSON only"]
+    C --> D{"Supported source metadata?"}
+    D -->|"ChatGLMTokenizer, no roles/template"| E["ChatGLM2Tokenizer: SentencePiece"]
+    D -->|"ChatGLMTokenizer, role metadata/template"| F["ChatGLM3Tokenizer: SentencePiece plus role IDs"]
+    D -->|"ChatGLM4Tokenizer"| G["ChatGLM4Tokenizer: TikToken"]
+    D -->|"Saved ChatGLM2Tokenizer or ChatGLM3Tokenizer"| H["Matching packaged concrete class"]
+    D -->|"Unknown or absent class"| X["ValueError; no checkpoint Python fallback"]
+    E --> I["Tokenizer asset constructor"]
+    F --> I
+    G --> I
+    H --> I
+    I -->|"Valid asset"| J["Shared Tokenicer.load normalization"]
+    I -->|"Invalid or missing asset"| Y["Raise; repair asset and retry from disk"]
+    J --> K["Public exact IDs, prompts, generation and AWQ consumer"]
+    style X fill:#fdd,stroke:#900
+    style Y fill:#fdd,stroke:#900
+```
+
+| Before tokenizer follow-up at `0fdfd2396` | After |
+| --- | --- |
+| `definitions/chatglm.py:14-17`: config/model only | Declared package tokenizer dispatcher in the same `LocalModelLoader` |
+| `utils/hf.py:2819-2835`: no declared ChatGLM tokenizer, Tokenicer class discovery | Metadata selects one of three inspected package classes, no class discovery |
+| TF5 lacks `ChatGLMTokenizer`/`ChatGLM4Tokenizer` | Original released tokenizer configs/assets load with trust disabled |
+| Upstream SP `get_vocab` enumerated display strings and dropped control entries | Actual SP pieces plus command IDs preserve assistant/observation ownership |
+| Synthetic WordLevel tests missed released behavior | SHA-checked real assets with source-derived token, chat and special-token contracts |
+
+The public tokenizer regression
+`test_chatglm_released_tokenizer_public_load` covers three releases across
+trust `None`/`False`/`True` and the existing bypass absent/present: **18 cases**.
+Every case loads a real tiny decoder with the released vocabulary width and
+real tokenizer config/model assets, checks five source-derived text cases,
+padded batches, specials and prompts, then compares dense forward logits and
+generates two tokens. GLM3 additionally checks tool/history construction and
+fixed assistant/observation IDs; a separate real-asset test checks literal
+system/observation commands with `encode_special_tokens=True`. Model and
+tokenizer checkpoint Python contain execution sentinels which remain absent.
+
+`test_chatglm_released_tokenizer_roundtrip_retry` corrupts each release's
+tokenizer asset, verifies failure without executing Python, restores the exact
+asset, and retries. It then saves/loads/re-saves/reloads the tiny safetensors
+model and owned tokenizer through `GPTQModel.load`, with exact asset hashes,
+token/chat parity, logits and one shared outer Tokenicer normalization per
+successful public load. `test_chatglm_released_tokenizer_plain_awq_roundtrips`
+uses real source text IDs for calibration, packs all eight decoder linears
+with `fallback=None`, and checks two quantized safetensors cycles, exact packed
+and excluded dense state, source token/chat parity and once-only normalization.
+The existing tiny-vocabulary resizing/dtype tests use real SP assets with
+explicit integer inputs; those do not claim release-specific text semantics.
+
+Tokenizer red evidence before binding: **18 failures** in 9.84s, all the intended
+unavailable `ChatGLMTokenizer`/`ChatGLM4Tokenizer` error. Initial public-load green:
+**18 passed** in 9.15s. A stronger source chat oracle caught the TF5 vocabulary
+collision; restoring only old SP `get_vocab` in memory makes all six GLM3
+public matrix cases fail exact chat IDs (**6 failed**, 2.16s). Package files are
+not rewritten by that control. The literal-command save/reload regression
+also failed before retaining `encode_special_tokens` in constructor metadata:
+the reloaded system command became ordinary text IDs (**1 failed**, 3.40s).
+Unknown tokenizer classes fail closed in three
+additional cases. Full model/module sibling rerun, excluding the three shared
+once-only normalization checks while the parent adapter is pending:
+**261 passed, 3 deselected** in 23.15s.
+
+Parent prerequisite `0fdfd2396` called Tokenicer twice on public loading. The
+new three dense and three quantized roundtrip tests require one call and exposed
+that shared adapter defect. The parent-authorized shared prerequisite preserves
+the helper's default native return contract, carries its existing wrapper
+internally with `return_tokenicer=True`, and lets `BaseQModel` reuse it. The six
+tests now pass (**6 passed**, 11.60s), including both dense safetensors cycles,
+both AWQ packed-state cycles and repaired-asset retries. No model-local marker
+or normalization shim is used. Shared adapter integration remains parent-owned.
+
+Final combined run with released Tokenicer **0.0.17**: **780 passed, no skips
+or deselections**, 31.46s. This includes the complete owned ChatGLM/model-plan
+suite, registry-plan contract, local model/processor loaders, trust isolation
+and local-path security tests:
+
+```bash
+# From tests/:
+PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -m pytest -q \
+  test_chatglm_local_port.py module_tree/test_chatglm_local_port.py \
+  module_tree/test_registered_module_plans.py test_local_model_loading.py \
+  test_local_processor_loading.py test_trust_remote_code_isolation.py \
+  test_local_model_paths.py
+```
+
+`format/check.sh` passed the complete repository gate with Ruff **0.14.2**.
+Compileall, package discovery and `git diff --check` also passed.
+The identical complete command with source-qualified Tokenicer **0.0.19** at
+`c14e1c8c062c7b7cc9a981054366f98bde015fa1` also passed: **780 passed, no skips
+or deselections**, 31.36s. This candidate is unreleased; it supplies the shared
+`prepare_load_kwargs` API for parent integration. No ChatGLM normalization shim
+is needed with either tested Tokenicer version.
+
+Source/assets and runtime versions are recorded in
+[tokenizer provenance](PROVENANCE.md#released-tokenizer-ownership). The
+tokenizer contracts and tests require SentencePiece and TikToken; parent owns
+their central dependency and package-data declarations.
+
+## Model and cache selection
+
 ```mermaid
 flowchart TD
     A["GPTQModel.load / from_pretrained / from_quantized"] --> B["load_model_config: ChatGLMQModel.loader"]
