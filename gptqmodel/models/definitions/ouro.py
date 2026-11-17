@@ -11,6 +11,7 @@ class OuroQModel(LoopedLayerCaptureMixin, BaseQModel):
     """GPTQ definition for ByteDance's looped Ouro decoder."""
 
     require_trust_remote_code = True
+    before_model_load_requires_remote_code = True
 
     pre_lm_head_norm_module = "model.norm"
     rotary_embedding = "model.rotary_emb"

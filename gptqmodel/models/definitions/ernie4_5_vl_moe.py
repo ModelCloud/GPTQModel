@@ -29,6 +29,7 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
 
     require_load_processor = True
     require_trust_remote_code = False
+    before_model_load_requires_remote_code = True
     # Deliberately non-strict: one tree serves both dense and sparse layers, so
     # each decoder layer legitimately misses the other branch's specs. A dense
     # layer has `mlp.gate_proj`/`up_proj`/`down_proj` but no experts; a sparse

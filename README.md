@@ -233,11 +233,12 @@ print(model.tokenizer.decode(tokens))
 ```
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
-covers backend selection, generation, and adapters. Only enable
-`trust_remote_code=True` for checkpoint code you trust. For model types the
-installed Transformers implements natively, the native class is used unless the
-checkpoint declares a remote-only layout; see
-[`docs/trust-remote-code-isolation.md`](docs/trust-remote-code-isolation.md#native-override-of-explicit-trust).
+covers backend selection, generation, and adapters. GPT-QModel targets
+Transformers 5. Model definitions use native Transformers implementations or
+local modeling code shipped with GPT-QModel; local ports always ignore
+checkpoint `auto_map`. Executing unsupported checkpoint Python requires both
+`trust_remote_code=True` and the existing `GPTQ_BYPASS_SAFETY_CHECKS=1` security
+bypass. See [model loading policy](docs/trust-remote-code-isolation.md).
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

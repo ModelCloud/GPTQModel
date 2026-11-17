@@ -10,6 +10,7 @@ class Spark2_5QModel(BaseQModel):
     """GPTQ definition for Spark-X2.5's hybrid-attention decoder."""
 
     require_trust_remote_code = True
+    before_model_load_requires_remote_code = True
 
     # Verified by the tiny real-forward case for XHToken/Spark-X2.5-4B.
     shared_input_verified_model_types = frozenset({"spark2_5"})
@@ -99,4 +100,3 @@ class Spark2_5QModel(BaseQModel):
 
 
 __all__ = ["Spark2_5QModel"]
-

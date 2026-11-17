@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""The loading policy applies before config Python, including retries/reloads."""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+import torch
+from transformers import AutoConfig
+
+from gptqmodel import GPTQModel
+from gptqmodel.models.auto import MODEL_MAP_CASEFOLD, check_and_get_model_definition
+from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.utils.hf import load_model_config, prepare_remote_model_init_compat, resolve_trust_remote_code
+from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
+
+
+@pytest.fixture(autouse=True)
+def security_default(monkeypatch):
+    monkeypatch.delenv(BYPASS_ENV, raising=False)
+
+
+def checkpoint(path, model_type="unported_fixture"):
+    path.mkdir()
+    marker = path / "EXECUTED"
+    (path / "remote_config.py").write_text(
+        "from pathlib import Path\nfrom transformers import PreTrainedConfig\n"
+        f"Path({str(marker)!r}).write_text('config')\n"
+        "class RemoteConfig(PreTrainedConfig):\n    model_type = 'unported_fixture'\n"
+    )
+    (path / "remote_model.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('model')\n"
+        "from transformers import LlamaForCausalLM\n"
+        "class RemoteModel(LlamaForCausalLM):\n    pass\n"
+    )
+    payload = {
+        "model_type": model_type,
+        "auto_map": {"AutoConfig": "remote_config.RemoteConfig", "AutoModelForCausalLM": "remote_model.RemoteModel"},
+        "vocab_size": 32, "hidden_size": 16, "intermediate_size": 32,
+        "num_attention_heads": 2, "num_key_value_heads": 1, "num_hidden_layers": 1,
+    }
+    (path / "config.json").write_text(json.dumps(payload))
+    return marker
+
+
+@pytest.mark.parametrize("entry", [GPTQModel.load, GPTQModel.from_pretrained, GPTQModel.from_quantized])
+def test_public_load_requires_security_bypass_before_config_code(tmp_path, entry):
+    path = tmp_path / "remote"
+    marker = checkpoint(path)
+    with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
+        entry(str(path), trust_remote_code=True)
+    assert not marker.exists()
+
+
+def test_bypass_requires_explicit_trust_and_is_rechecked_on_retry(tmp_path, monkeypatch):
+    path = tmp_path / "remote"
+    marker = checkpoint(path)
+    monkeypatch.setenv(BYPASS_ENV, "1")  # The existing security flag is the API under test.
+    with pytest.raises(ValueError):
+        load_model_config(path, trust_remote_code=False)
+    assert not marker.exists()
+    assert load_model_config(path, trust_remote_code=True).model_type == "unported_fixture"
+    assert marker.read_text() == "config"
+    marker.unlink()
+    monkeypatch.delenv(BYPASS_ENV)
+    with pytest.raises(RemoteCodeSecurityError):
+        load_model_config(path, trust_remote_code=True)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("bypass", [False, True])
+def test_native_model_ignores_checkpoint_model_code(tmp_path, monkeypatch, bypass):
+    path = tmp_path / "native"
+    marker = checkpoint(path, "llama")
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
+    config = load_model_config(path, trust_remote_code=True)
+    assert type(config).__module__.startswith("transformers.models.llama")
+    prepare_remote_model_init_compat(path, config, trust_remote_code=True)
+    assert not marker.exists()
+
+
+def test_local_config_and_loader_win_over_auto_map_even_with_bypass(tmp_path, monkeypatch):
+    path = tmp_path / "local"
+    marker = checkpoint(path, "minimax")
+    loader = LocalModelLoader(
+        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
+        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+    )
+    definition = SimpleNamespace(loader=loader)
+    monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", definition)
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    assert check_and_get_model_definition(str(path), trust_remote_code=True) is definition
+    assert resolve_trust_remote_code(path, trust_remote_code=True) is False
+    config = load_model_config(path, trust_remote_code=True, use_mtp=False, num_mtp_modules=0,
+                               num_local_experts=2, num_experts_per_tok=1, head_dim=8, rotary_dim=8)
+    assert type(config).__module__.startswith("gptqmodel.")
+    prepare_remote_model_init_compat(path, config, trust_remote_code=True)
+    with torch.device("meta"):
+        model = loader.from_config(config, trust_remote_code=True)
+    assert type(model).__module__.startswith("gptqmodel.")
+    assert next(model.parameters()).device.type == "meta"
+    assert not marker.exists()
+    del model
+
+
+def test_config_selection_uses_subfolder_for_policy_and_dispatch(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    marker = checkpoint(root / "nested", "llama")
+    assert load_model_config(root, subfolder="nested", trust_remote_code=True).model_type == "llama"
+    assert check_and_get_model_definition(str(root), trust_remote_code=True, subfolder="nested").__name__ == "LlamaQModel"
+    assert not marker.exists()
+
+
+def test_unported_layout_fails_instead_of_loading_incompatible_native_model(tmp_path):
+    path = tmp_path / "ling"
+    marker = checkpoint(path, "bailing_hybrid")
+    payload = json.loads((path / "config.json").read_text())
+    payload["q_lora_rank"] = 16
+    (path / "config.json").write_text(json.dumps(payload))
+    for trust in (False, True):
+        with pytest.raises(RemoteCodeSecurityError):
+            load_model_config(path, trust_remote_code=trust)
+    assert not marker.exists()
+
+
+def test_local_loader_rejects_checkpoint_import_paths():
+    with pytest.raises(ValueError, match="must belong to gptqmodel"):
+        LocalModelLoader("transformers_modules.repo.Config", "gptqmodel.models.Model")
+
+
+def test_native_config_is_not_changed_by_local_definition_selection(tmp_path, monkeypatch):
+    path = tmp_path / "native"
+    checkpoint(path, "minimax")
+    original = type(AutoConfig.from_pretrained(path, trust_remote_code=False))
+    monkeypatch.setitem(MODEL_MAP_CASEFOLD, "minimax", SimpleNamespace(loader=LocalModelLoader(
+        "gptqmodel.hf_minimax_m2.configuration_minimax_m2.MiniMaxM2Config",
+        "gptqmodel.hf_minimax_m2.modeling_minimax_m2.MiniMaxM2ForCausalLM",
+    )))
+    assert type(load_model_config(path)) is not original
+    assert type(AutoConfig.from_pretrained(path, trust_remote_code=False)) is original

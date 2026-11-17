@@ -32,6 +32,11 @@ runtime coverage.
 Runtime behaviour is selected by the config object or an explicit API argument.
 Never by an environment variable.
 
+The existing `GPTQ_BYPASS_SAFETY_CHECKS` security escape hatch is the explicit
+exception: checkpoint Python requires both this bypass and
+`trust_remote_code=True`. Never add another switch or let this bypass replace
+a definition-owned `LocalModelLoader` with checkpoint modeling code.
+
 - Do not add `GPTQMODEL_*` switches that change which code path runs, how many
   threads are used, or which backend is picked. Extend `BaseQuantizeConfig` /
   `QuantizeConfig`, or add a keyword argument on the call that owns the choice.

@@ -74,6 +74,7 @@ except ImportError:
     from transformers import PretrainedConfig as PreTrainedConfig
 
 from ..utils.logger import setup_logger
+from ..utils.security import RemoteCodeSecurityError, require_remote_code_permission, safety_checks_bypassed
 
 
 __all__ = [
@@ -94,6 +95,7 @@ __all__ = [
     "resolve_trust_remote_code",
     "set_hf_config_dtype",
     "load_hf_tokenizer",
+    "load_model_config",
     "load_tokenizer",
 ]
 
@@ -902,11 +904,14 @@ def normalize_model_id_or_path_for_hf_gguf(
 
 
 @lru_cache(maxsize=None)
-def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple[bool, Optional[str], Optional[str]]:
+def _detect_native_transformers_causallm_support(model_id_or_path: str, **config_selection_kwargs) -> tuple[bool, Optional[str], Optional[str]]:
     # Qwen-Drive's top-level config is registered by the optional official
     # package, so it must be imported before Transformers first sees config.json.
     ensure_qwen_drive_registered(model_id_or_path)
-    config_load_kwargs: dict[str, Any] = {}
+    config_load_kwargs: dict[str, Any] = dict(config_selection_kwargs)
+    gguf_file = config_load_kwargs.pop("gguf_file", None)
+    if gguf_file is not None:
+        config_load_kwargs[INTERNAL_HF_GGUF_FILE_KWARG] = gguf_file
     normalized_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
         model_id_or_path,
         config_load_kwargs,
@@ -916,6 +921,7 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
         config = AutoConfig.from_pretrained(
             normalized_model_id_or_path,
             trust_remote_code=False,
+            **get_config_selection_kwargs(config_selection_kwargs),
             **get_hf_gguf_load_kwargs(config_load_kwargs),
         )
     except Exception as exc:
@@ -1008,31 +1014,65 @@ def _checkpoint_remote_layout_marker(model_id_or_path: str) -> tuple[Optional[st
     return None, remote_class_name
 
 
-def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
+def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kwargs):
+    """Read config data first, then select package-owned or native config code.
+
+    Preserve revision/subfolder/auth kwargs for both the data probe and final
+    load. A model port opts in through its definition's LocalModelLoader.
+    """
+    from ..models.local import local_model_loader
+
+    ensure_qwen_drive_registered(model_id_or_path)
+    payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
+    loader = local_model_loader(payload.get("model_type"))
+    if loader is not None:
+        return loader.load_config(model_id_or_path, **kwargs)
+    trust_remote_code = resolve_trust_remote_code(
+        model_id_or_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs)
+    )
+    return AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code, **kwargs)
+
+
+def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool, **config_load_kwargs) -> bool:
     # Keep registration ahead of the trust-remote-code probe as well as the
     # main loader's AutoConfig call.  The probe runs very early in every public
     # GPTQModel entry point when callers explicitly pass trust_remote_code.
     ensure_qwen_drive_registered(model_id_or_path)
+    from ..models.local import local_model_loader
+
+    if model_id_or_path:
+        payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **config_load_kwargs)
+        if local_model_loader(payload.get("model_type")) is not None:
+            return False
+        # A native model_type can still advertise a remote-only layout. Never
+        # silently load the incompatible native architecture when trust is off.
+        markers = _REMOTE_ONLY_LAYOUT_CONFIG_MARKERS.get(str(payload.get("model_type", "")).lower(), ())
+        if any(payload.get(marker) for marker in markers):
+            if not trust_remote_code:
+                raise RemoteCodeSecurityError(
+                    "This checkpoint layout requires a GPT-QModel local model port; "
+                    "the native Transformers implementation cannot represent it."
+                )
+            return require_remote_code_permission(trust_remote_code)
     if not trust_remote_code or not model_id_or_path:
-        return trust_remote_code
+        return require_remote_code_permission(trust_remote_code)
 
-    native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
+    native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path), **config_load_kwargs)
     if not native_supported:
-        return True
+        # Multimodal definitions use auto classes other than causal LM. Inspect
+        # their declared loader before considering any checkpoint Python.
+        from ..models.auto import MODEL_MAP_CASEFOLD
 
-    remote_layout_marker, remote_model_cls_name = _checkpoint_remote_layout_marker(str(model_id_or_path))
-    if remote_layout_marker is not None:
-        log_key = (str(model_id_or_path), remote_model_cls_name or "unknown", model_cls_name or "unknown")
-        if log_key not in _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED:
-            log.info(
-                "HF: keeping trust_remote_code=True for `%s` because config field `%s` selects a layout of remote model code `%s` that native `%s` cannot load.",
-                model_id_or_path,
-                remote_layout_marker,
-                remote_model_cls_name or "unknown",
-                model_cls_name or "unknown",
-            )
-            _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED.add(log_key)
-        return True
+        definition = MODEL_MAP_CASEFOLD.get(str(payload.get("model_type", "")).lower())
+        mapping = getattr(getattr(definition, "loader", None), "_model_mapping", None)
+        if mapping is not None:
+            # Unknown remote configs do not belong to a native auto mapping.
+            if str(payload.get("model_type", "")) not in transformers.models.auto.configuration_auto.CONFIG_MAPPING:
+                return require_remote_code_permission(trust_remote_code)
+            config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False, **config_load_kwargs)
+            if type(config) in mapping:
+                return False
+        return require_remote_code_permission(trust_remote_code)
 
     warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
     if warning_key not in _TRUST_REMOTE_CODE_OVERRIDE_WARNED:
@@ -2462,7 +2502,9 @@ def prepare_remote_model_init_compat(
     # caller's explicit `trust_remote_code`; `auto_map` alone is checkpoint data
     # and must never enable it. This also covers transformers' cross-repo
     # `repo--module.Class` form, which resolves to another repository's code.
-    if not trust_remote_code or not model_id_or_path:
+    if not resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code):
+        return
+    if not model_id_or_path:
         return
 
     deci_init_compat(config)
@@ -2905,6 +2947,7 @@ def load_hf_tokenizer(
 ):
     from tokenicer import Tokenicer
 
+    trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
     tokenicer = Tokenicer.load(
         tokenizer_or_path,
         model_config=model_config,
@@ -3114,7 +3157,7 @@ def sanitize_generation_config_file(path: str) -> bool:
 def build_shell_model(
     loader,
     config: Any,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
     **model_init_kwargs,
 ):
     """
@@ -3126,6 +3169,12 @@ def build_shell_model(
         trust_remote_code: Allow loading custom model classes.
     """
     init_kwargs = model_init_kwargs.copy()
+    from ..models.local import LocalModelLoader
+
+    if isinstance(loader, LocalModelLoader):
+        trust_remote_code = False
+    else:
+        require_remote_code_permission(trust_remote_code)
 
     del init_kwargs["device_map"]
     del init_kwargs["_fast_init"]

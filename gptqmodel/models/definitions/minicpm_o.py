@@ -213,6 +213,7 @@ class MiniCPMOQModel(BaseQModel):
     pre_lm_head_norm_module = "llm.model.norm"
 
     require_trust_remote_code = True
+    before_model_load_requires_remote_code = True
 
     module_tree = [
         "llm",

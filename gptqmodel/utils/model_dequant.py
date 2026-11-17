@@ -337,13 +337,14 @@ def _discover_compressed_tensors_module_schemes(
     deps: dict,
     trust_remote_code: bool = False,
 ) -> Dict[str, "QuantizationScheme"]:
-    AutoConfig = deps["AutoConfig"]
     init_empty_weights = deps["init_empty_weights"]
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
-    from .hf import normalize_hf_config_compat
+    from .hf import load_model_config, normalize_hf_config_compat, resolve_trust_remote_code
+    from ..models.local import local_model_loader
 
-    config = AutoConfig.from_pretrained(
+    trust_remote_code = resolve_trust_remote_code(model_path, trust_remote_code=trust_remote_code)
+    config = load_model_config(
         model_path, trust_remote_code=trust_remote_code
     )
     normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
@@ -352,7 +353,8 @@ def _discover_compressed_tensors_module_schemes(
     # init hooks); serialize it against loads/saves with the shared lock.
     from ..models.loader import model_load_lock
 
-    loader_candidates = (
+    local_loader = local_model_loader(config.model_type)
+    loader_candidates = (local_loader,) if local_loader is not None else (
         deps["AutoModelForCausalLM"],
         deps["AutoModelForSeq2SeqLM"],
         deps["AutoModel"],

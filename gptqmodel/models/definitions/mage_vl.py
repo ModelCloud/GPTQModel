@@ -31,7 +31,7 @@ class MageVLQModel(BaseQwen3VLGPTQ):
     def load_processor(self):
         return AutoProcessor.from_pretrained(
             self.model_local_path,
-            trust_remote_code=self.require_trust_remote_code,
+            trust_remote_code=self.trust_remote_code,
         )
 
 

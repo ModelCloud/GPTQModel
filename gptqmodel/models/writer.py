@@ -19,7 +19,7 @@ import pcre
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
@@ -61,9 +61,11 @@ from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
     ensure_qwen_drive_registered,
     get_hf_config_dtype,
+    load_model_config,
     normalize_hf_config_compat,
     sanitize_generation_config_file,
     sanitize_model_config,
+    resolve_trust_remote_code,
     suspend_hf_weight_init,
 )
 from ..utils.logger import setup_logger
@@ -2584,16 +2586,19 @@ def ModelWriter(cls):
         from .loader import model_load_lock
 
         ensure_qwen_drive_registered(model_id_or_path)
-        config = AutoConfig.from_pretrained(
-            model_id_or_path,
-            trust_remote_code=self.trust_remote_code,
+        trust_remote_code = resolve_trust_remote_code(
+            model_id_or_path, trust_remote_code=self.trust_remote_code
         )
-        normalize_hf_config_compat(config, trust_remote_code=self.trust_remote_code)
+        config = load_model_config(
+            model_id_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         model_dtype = get_hf_config_dtype(config)
 
         with model_load_lock(), suspend_hf_weight_init():
             model = self.loader.from_config(
-                config, dtype=model_dtype
+                config, dtype=model_dtype, trust_remote_code=trust_remote_code
             )
 
             # Re-saving a loaded quantized MoE must rebuild the same per-expert

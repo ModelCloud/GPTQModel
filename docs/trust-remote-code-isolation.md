@@ -1,165 +1,99 @@
-# Trusted remote-code boundary
+# Model implementation selection and checkpoint code
 
-`trust_remote_code` is the caller's consent to execute Python files bundled in
-a checkpoint. A checkpoint's `auto_map`, its `quant_method`, and its tensor keys
-are attacker-controlled data, so none of them may turn that consent on. This
-page documents the boundary enforced by load, save and dequantize after issue
-#3968.
+GPT-QModel targets Transformers 5. Model definitions use native Transformers
+implementations or modeling code shipped inside `gptqmodel`. Checkpoint
+`auto_map` entries are untrusted data and cannot override a local port.
 
-The boundary has one rule: a snapshot module is imported only when the caller
-passed `trust_remote_code=True` to the public API that is reading the snapshot.
-Native `model_type` values and `auto_map` entries can coexist; the presence of
-`auto_map` alone never selects the remote path.
+## Selection policy
 
-## Load
-
-`GPTQModel.load()` / `GPTQModel.from_quantized()` resolve the caller's flag once
-with `resolve_trust_remote_code()` and pass the same value to every stage. A
-config with a built-in `model_type` plus `auto_map` still loads as the built-in
-class, but `prepare_remote_model_init_compat()` returns before
-`get_class_from_dynamic_module()`.
+`load_model_config` reads configuration data with
+`PreTrainedConfig.get_config_dict`, preserving revision, authentication and
+subfolder options. A definition with a `LocalModelLoader` owns both its config
+and model class. It imports those classes lazily, calls the config class
+directly and constructs the model with `_from_config` or `from_pretrained`.
+It never registers checkpoint classes globally with Transformers.
 
 ```mermaid
 flowchart TD
-    A["GPTQModel.load / from_quantized"] --> B["resolve_trust_remote_code(model_local_path)"]
-    B --> C["AutoConfig.from_pretrained(trust_remote_code=trust_remote_code)"]
-    C --> D["normalize_hf_config_compat(config, trust_remote_code)"]
-    D --> E{"prepare_remote_model_init_compat:<br/>trust_remote_code?"}
-    E -- "False" --> F["return before auto_map import"]
-    E -- "True" --> G["get_class_from_dynamic_module(class_ref, model_path)"]
-    G --> H["remote model init compat patches"]
-    F --> I["native QModel / built-in config"]
-    H --> I
-    E -. "fail-closed path<br/>auto_map is data only" .-> F
-    style E fill:#ffe0b2,stroke:#e65100
-    style F fill:#ffcdd2,stroke:#b71c1c
+    A["GPTQModel.load / from_pretrained / from_quantized"] --> B["load_model_config: read config data"]
+    B --> C{"Definition loader is LocalModelLoader?"}
+    C -- yes --> D["LocalModelLoader.load_config: package config class"]
+    D --> E["LocalModelLoader.from_config / from_pretrained: package model class"]
+    C -- no --> F["resolve_trust_remote_code"]
+    F --> G{"Declared remote-only layout?"}
+    G -- no --> H{"Native Transformers loader mapping?"}
+    H -- yes --> I["trust_remote_code=False: native config and model"]
+    H -- no --> J{"Explicit trust AND safety bypass?"}
+    G -- yes --> J
+    J -- yes --> K["Checkpoint Python allowed"]
+    J -- no --> L["RemoteCodeSecurityError or unsupported native config"]
+    style L fill:#ffcdd2,stroke:#b71c1c
 ```
 
-Both loader entry points pass the caller's value: `from_quantized` at
-`gptqmodel/models/loader.py:1313` and `from_pretrained` at
-`gptqmodel/models/loader.py:1803`. `normalize_hf_config_compat()`
-(`gptqmodel/utils/hf.py:1723`) now returns after the RoPE backfill when trust is
-off, instead of enabling remote-code shims because `auto_map` exists.
+The existing security bypass is `GPTQ_BYPASS_SAFETY_CHECKS=1`. It is additional
+consent: it does not turn trust on. For a remote-only implementation, both that
+flag and the explicit API argument `trust_remote_code=True` are necessary.
+Local ports ignore both for model/config selection. Native implementations
+continue to override remote trust. A known remote-only checkpoint layout
+(currently Bailing Hybrid MLA, selected by `q_lora_rank`) cannot silently fall
+back to an incompatible native model.
 
-## Native override of explicit trust
+Tokenizers receive remote trust only when both explicit trust and the safety
+bypass are present. This gate does not change Tokenicer normalization.
+Processor loads use the resolved model trust. Definition pre-load hooks that
+import checkpoint modules declare `before_model_load_requires_remote_code` and
+run only when remote trust has been resolved and the bypass is enabled.
 
-Explicit `trust_remote_code=True` is still overridden to `False` when the
-installed Transformers implements the checkpoint's `model_type`: the GPT-QModel
-definitions are written for the native module tree, and stale remote modeling
-files often fail to import. `resolve_trust_remote_code()`
-(`gptqmodel/utils/hf.py:1011`) keeps the caller's trust only when the
-checkpoint config sets a declared remote-only layout marker.
-`_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS` (`gptqmodel/utils/hf.py:971`) holds those
-markers per `model_type`; `_checkpoint_remote_layout_marker()`
-(`gptqmodel/utils/hf.py:980`) reads the raw `config.json` without importing
-snapshot code and requires `auto_map.AutoModelForCausalLM`.
+## Local model ports
 
-```mermaid
-flowchart TD
-    A["resolve_trust_remote_code(path, trust_remote_code)"] --> B{"trust_remote_code?"}
-    B -- "False" --> F["False"]
-    B -- "True" --> C{"_detect_native_transformers_causallm_support:<br/>native AutoModelForCausalLM class?"}
-    C -- "no" --> T["True: remote code"]
-    C -- "yes" --> D{"_checkpoint_remote_layout_marker:<br/>auto_map.AutoModelForCausalLM present?"}
-    D -- "no / config unreadable" --> N["False: native class<br/>(warn once)"]
-    D -- "yes" --> E{"config sets a field in<br/>_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS[model_type]?"}
-    E -- "no" --> N
-    E -- "yes (bailing_hybrid q_lora_rank)" --> T
-    style N fill:#d1e7dd,stroke:#146c43
-    style T fill:#ffe0b2,stroke:#e65100
+Each model port belongs in its own pull request after the shared loader contract
+lands. Put the config and model implementation under a model-specific package
+inside `gptqmodel`, preserving upstream license/attribution and recording the
+source revision. Set the definition's loader explicitly:
+
+```python
+from ..local import LocalModelLoader
+
+loader = LocalModelLoader(
+    config_class="gptqmodel.models.model_name.configuration_model_name.ModelConfig",
+    model_class="gptqmodel.models.model_name.modeling_model_name.ModelForCausalLM",
+)
 ```
 
-The failure/ambiguity path is the native branch: a checkpoint whose remote code
-owns a layout that no declared marker describes loads natively, and its module
-tree must then be declared in the model definition or added to the marker
-table with a regression test.
+These strings are trusted source metadata; never construct them from checkpoint
+fields. Both must name classes in `gptqmodel`. The model class must implement
+the Transformers 5 `PreTrainedModel` construction contract. Construction keeps
+the existing shared model-load lock; the frozen loader metadata does not cache
+mutable model instances or modify Transformers' global registries.
 
-| Mechanism | Before (#4373 fix, `d01e8fd`) | After (#4453) |
+Remove obsolete Transformers 4 pins, remote import hooks and remote-trust
+requirements in that model's PR. Port composite config/model construction as
+well: nested `auto_map` must not cause checkpoint code execution. Qualify
+checkpoint key/conversion mappings, generation/cache behavior, save/reload,
+real-model module-plan ownership, and the model's explicit AWQ policy. Native
+support must be verified against the checkpoint layout, not inferred from
+similar model names. Do not replace an architecture with a lookalike.
+
+## Load, save, export and retry boundaries
+
+The public dispatchers, ordinary and quantized loaders, quantized re-save shell,
+and compressed-tensors dequantizer use `load_model_config`. The dequantizer
+also selects the definition's local model loader for shell construction.
+`prepare_remote_model_init_compat` resolves the policy before any dynamic import.
+The Kimi K3/K3.1 reference loaders require the same security bypass in addition
+to explicit trust. The bypass is checked on each attempt; a previous successful
+remote load is not permission for the next load.
+
+| Mechanism | Previous behavior (base revision `bb36e7fb2`) | Current behavior |
 | --- | --- | --- |
-| Layout signal | Any `auto_map` class-name difference from the native class (`gptqmodel/utils/hf.py:995` at `d01e8fd`) | A declared config marker per `model_type` (`gptqmodel/utils/hf.py:971`, `1004`) |
-| `PhiMoEForCausalLM` vs `PhimoeForCausalLM`, `MPTForCausalLM` vs `MptForCausalLM`, `MiniMaxM2ForCausalLM` vs `MiniMaxForCausalLM` | Remote code (import/rope failures) | Native class |
-| Ling-2.6-flash (`bailing_hybrid`, `q_lora_rank=1536`) | Remote code | Remote code |
-| `bailing_hybrid` remote class without `q_lora_rank` | Remote code | Native class (its conversion mapping renames `attention.*` to `self_attn.*`) |
+| Remote-only implementation | Explicit trust alone allowed checkpoint Python (`gptqmodel/utils/hf.py:1011-1052`) | Explicit trust and the existing security bypass are both required |
+| Native model with a remote-only layout marker | Kept remote trust (`gptqmodel/utils/hf.py:1024-1038`) | Local port, explicit bypass, or a clear failure; no incompatible native fallback |
+| Config selection | `AutoConfig.from_pretrained` selected checkpoint config classes (`gptqmodel/models/auto.py:643`, `gptqmodel/models/loader.py:1887,2440`) | Definition-owned config class first, then gated AutoConfig |
+| Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
+| Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 
-Measured over every local checkpoint with an `auto_map` (226 `config.json`
-files under the model store), the decision for `trust_remote_code=True` differs
-from the pre-#4373 resolver (`def6e61`) only for Ling-2.6-flash.
-
-## Save
-
-Re-saving a loaded quantized checkpoint rebuilds the shell model with
-`get_model_with_quantize()`. It now reads the config with the model's own
-`self.trust_remote_code` (`gptqmodel/models/writer.py:2140-2147`); the old
-`AutoConfig.from_pretrained(..., trust_remote_code=True)` is gone.
-
-```mermaid
-flowchart TD
-    A["save() / save_quantized()"] --> B{"self.load_quantized_model?"}
-    B -- "yes" --> C["get_model_with_quantize(qcfg, model_local_path)"]
-    C --> D["AutoConfig.from_pretrained(trust_remote_code=self.trust_remote_code)"]
-    D --> E{"trust_remote_code?"}
-    E -- "False" --> F["built-in config; auto_map AutoConfig not imported"]
-    E -- "True" --> G["auto_map AutoConfig imported"]
-    B -- "no" --> H["write saved config and shards"]
-    F --> H
-    G --> H
-    style E fill:#ffe0b2,stroke:#e65100
-    style F fill:#ffcdd2,stroke:#b71c1c
-```
-
-## Dequantize
-
-`dequantize_model()` gained `trust_remote_code: bool = False` and threads it
-through `_prepare_compressed_tensors_context()` into
-`_discover_compressed_tensors_module_schemes()`. The compressed-tensors format
-is selected from checkpoint data, so it cannot imply consent.
-
-```mermaid
-flowchart TD
-    A["dequantize_model(..., trust_remote_code=False)"] --> B["detect_format(model_path, config)"]
-    B --> C{"format == compressed-pack?"}
-    C -- "no" --> D["shard converters"]
-    C -- "yes" --> E["_prepare_compressed_tensors_context(trust_remote_code)"]
-    E --> F["_discover_compressed_tensors_module_schemes(trust_remote_code)"]
-    F --> G["AutoConfig.from_pretrained(trust_remote_code)"]
-    G --> H{"trust_remote_code?"}
-    H -- "False" --> I["built-in config; auto_map not imported"]
-    H -- "True" --> J["auto_map AutoConfig imported"]
-    I --> K["loader.from_config(trust_remote_code=False)"]
-    J --> L["loader.from_config(trust_remote_code=True)"]
-    style H fill:#ffe0b2,stroke:#e65100
-    style I fill:#ffcdd2,stroke:#b71c1c
-```
-
-`scripts/dequantize_model.py` exposes the same decision as
-`--trust-remote-code`.
-
-## Processors and Kimi K3
-
-`BaseQModel.__init__()` loads processors with `self.trust_remote_code`
-(`gptqmodel/models/base.py:746`), and every `load_processor()` override does the
-same. `load_calibration_reference()` (`gptqmodel/utils/kimi_k3.py:24`) raises
-unless `trust_remote_code=True`, because it `exec`s
-`configuration_kimi_k3.py` and `modeling_kimi_linear.py` from the snapshot.
-
-## Before / after
-
-| Mechanism | Before | After |
-| --- | --- | --- |
-| `auto_map` import at load | `prepare_remote_model_init_compat()` called `get_class_from_dynamic_module()` with no trust argument (`gptqmodel/utils/hf.py:1900-1923`) | Returns before the import unless `trust_remote_code=True` (`gptqmodel/utils/hf.py:1902`) |
-| Load call sites | `loader.py:1789` / `1801` and `1307` / `1313` did not pass the flag | Both pass `trust_remote_code=trust_remote_code` (`gptqmodel/models/loader.py:1313`, `1803`) |
-| `auto_map` compat patches | Enabled whenever `auto_map` existed (`gptqmodel/utils/hf.py:1729-1735`) | Enabled only for `trust_remote_code=True` (`gptqmodel/utils/hf.py:1723`) |
-| Re-save config | `AutoConfig.from_pretrained(..., trust_remote_code=True)` (`gptqmodel/models/writer.py:2140-2147`) | `trust_remote_code=self.trust_remote_code` (`gptqmodel/models/writer.py:2145`) |
-| Dequantize config/model | Hard-coded `True` (`gptqmodel/utils/model_dequant.py:335`, `354`) | `trust_remote_code` parameter threaded from `dequantize_model()` (`gptqmodel/utils/model_dequant.py:1766`) |
-| Processor load | `self.require_trust_remote_code` (`gptqmodel/models/base.py:746`) | `self.trust_remote_code` (`gptqmodel/models/base.py:746`) |
-| K3 reference exec | `load_calibration_reference(snapshot)` with no opt-in (`gptqmodel/utils/kimi_k3.py:24-57`) | Requires `trust_remote_code=True` (`gptqmodel/utils/kimi_k3.py:24`) |
-
-## Failure contract
-
-| Situation | Before | After |
-| --- | --- | --- |
-| Native `model_type` + `auto_map`, trust off | Snapshot module imported | Built-in config; no import |
-| `auto_map` cross-repo `repo--module.Class`, trust off | Module imported from the other repo | Built-in config; no import |
-| `compressed-tensors` checkpoint, trust off | Snapshot config/model imported | Built-in config; no import |
-| Trust on | Remote classes imported | Unchanged |
-| `KimiK3Source` without opt-in | Snapshot files executed | `ValueError` before file access |
+Tests in `tests/test_local_model_loading.py` exercise public load rejection,
+actual checkpoint config import under explicit bypass, permission revocation,
+native/local precedence, lazy local meta construction and subfolder selection.
+They establish dispatch and security behavior, not numerical qualification of
+the separate model ports.

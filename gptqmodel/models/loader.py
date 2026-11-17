@@ -74,6 +74,7 @@ from ..utils.hf import (
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
     load_hf_tokenizer,
+    load_model_config,
     normalize_hf_config_compat,
     normalize_model_id_or_path_for_hf_gguf,
     normalize_torch_dtype_kwarg,
@@ -914,7 +915,7 @@ def _should_print_module_tree() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
 
 
-def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool) -> None:
+def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model: bool, trust_remote_code: bool = False) -> None:
     """Run a definition's pre-load hook for every load path.
 
     `before_model_load` is a plain method on the definition class, not an
@@ -926,6 +927,12 @@ def _call_before_model_load(cls, *, model_local_path: str, load_quantized_model:
     `generate()`/`forward()` on an unquantized model.
     """
 
+    if getattr(cls, "before_model_load_requires_remote_code", False):
+        if not trust_remote_code:
+            return
+        from ..utils.security import require_remote_code_permission
+
+        require_remote_code_permission(trust_remote_code)
     cls.before_model_load(
         cls,
         model_local_path=model_local_path,
@@ -1880,11 +1887,11 @@ def ModelLoader(cls):
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
+        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs)
 
         model_init_kwargs_without_internal["trust_remote_code"] = trust_remote_code
 
-        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
+        config = load_model_config(model_local_path, **model_init_kwargs_without_internal, **hf_gguf_load_kwargs)
 
         defuser.replace_fused_blocks(config.model_type)
 
@@ -2018,6 +2025,7 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             _call_before_model_load(
                 cls,
+                trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
                 load_quantized_model=False,
             )
@@ -2075,7 +2083,9 @@ def ModelLoader(cls):
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
         native_support = has_native_transformers_causallm_support(model_local_path)
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
+        from .local import LocalModelLoader
+
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support and not isinstance(cls.loader, LocalModelLoader):
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -2113,6 +2123,7 @@ def ModelLoader(cls):
 
             _call_before_model_load(
                 cls,
+                trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
                 load_quantized_model=False,
             )
@@ -2364,11 +2375,13 @@ def ModelLoader(cls):
             device = auto_select_device(normalize_device_device_map(None, requested_device_map), backend)
 
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
-        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
+        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs)
         native_support = has_native_transformers_causallm_support(model_local_path)
 
         """load quantized model from local disk"""
-        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
+        from .local import LocalModelLoader
+
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support and not isinstance(cls.loader, LocalModelLoader):
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -2437,7 +2450,7 @@ def ModelLoader(cls):
         }
 
         # == step1: prepare configs and file names == #
-        config: PretrainedConfig = AutoConfig.from_pretrained(
+        config: PretrainedConfig = load_model_config(
             model_local_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
@@ -2733,6 +2746,7 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             _call_before_model_load(
                 cls,
+                trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
                 load_quantized_model=True,
             )

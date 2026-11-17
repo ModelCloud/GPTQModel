@@ -8,6 +8,7 @@ from ..base import BaseQModel
 
 class BrumbyQModel(BaseQModel):
     require_trust_remote_code = True
+    before_model_load_requires_remote_code = True
     require_pkgs = ["retention>=1.0.7"]
 
     pre_lm_head_norm_module = "model.norm"
