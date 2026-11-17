@@ -2508,7 +2508,7 @@
     },
     "internlm": {
       "definition": "InternLMQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned InternLM 1 port; fusion executor has not been qualified."
     },
     "internlm2": {
       "definition": "InternLM2QModel",
