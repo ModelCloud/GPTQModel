@@ -587,6 +587,9 @@ class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, logits_to_keep=0, return_dict=True, **kwargs):
         output = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True, **kwargs)
+        cache = output.past_key_values
+        if cache is not None:
+            cache.incomplete = True
         selection = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         def compute_logits(hidden):
             if self.config.norm_head:
@@ -611,4 +614,7 @@ class BailingForCausalLM(BailingPreTrainedModel, GenerationMixin):
             hidden_states=output.hidden_states, attentions=output.attentions, router_logits=output.router_logits,
             mtp_logits=mtp_logits or None, mtp_loss=tuple(mtp_loss) or None,
         )
-        return result if return_dict else result.to_tuple()
+        result = result if return_dict else result.to_tuple()
+        if cache is not None:
+            cache.incomplete = False
+        return result

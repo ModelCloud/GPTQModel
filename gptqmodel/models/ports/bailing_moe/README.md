@@ -50,8 +50,12 @@ flowchart TD
   F --> I[LinearAttention: recurrent state]
   E --> J[BailingCache: KV and recurrent ownership]
   J --> K{All decoder layers complete?}
-  K -->|Yes| L[Advance sequence length; reusable cache]
+  K -->|Yes| L[Advance sequence length; BailingModel output]
   K -->|Exception| M[incomplete=True: reject reuse; reset and replay]
+  L --> Q[BailingForCausalLM.forward: incomplete=True]
+  Q --> R{LM/MTP heads, losses and output encoding complete?}
+  R -->|Yes| S[incomplete=False: reusable cache]
+  R -->|Exception| M
   A --> N[BailingMoeQModel.prepare_layer_replay_kwargs]
   N --> O[Rebuild layer mask/RoPE; shifted MTP embeddings and target norm]
   E --> P[AWQ empty scaling groups: plain quantization, no folds]
@@ -66,6 +70,7 @@ flowchart TD
 | Native hybrid name could be mistaken for Ling's MLA layout | Explicit configuration/architecture layout decision; native variants stay native |
 | First decoder replay context reused for every layer | Local replay rebuilds causal/padding masks and rotary context, including MTP |
 | HF fast initialization leaves nonpersistent frequencies uninitialized | `_init_weights` regenerates RoPE frequencies and linear slopes |
+| Decoder success previously committed cache before public LM/MTP heads and losses | `BailingForCausalLM.forward` keeps cache incomplete until all output processing succeeds |
 
 Parent-owned central docs/README and shared test updates are enumerated in
 [INTEGRATION.md](INTEGRATION.md); they are intentionally not modified here.
@@ -90,7 +95,10 @@ The network-free regression reconstructs those index-owned key templates with
 the published layer/expert counts and tiny widths.
 
 Each `BailingCache` is caller-owned, not shared between concurrent requests.
-Partial-forward failures poison it until `reset()`. A recurrent cache cannot be
+Partial-forward failures poison it until `reset()`, including failures in the
+public LM/MTP heads, losses and tuple encoding after the decoder has advanced
+its KV/recurrent state. Successful direct `BailingModel` calls still commit at
+their own decoder-output boundary. A recurrent cache cannot be
 cropped because past states cannot be reconstructed; callers must replay the
 prefix. Static caches and KV-only `DynamicCache` are rejected. Cache sequence
 length counts input tokens, not recurrent matrix dimensions. Generation with
@@ -156,7 +164,14 @@ Run from the repository root with
 
 These were runtime assertion failures, not collection errors or skipped tests.
 
-Final focused validation: **105 passed** (runtime, module-tree and
+* `test_public_forward_failure_invalidates_advanced_cache_until_reset` covers
+  five public-output failure boundaries across six layout/alias cases. Before
+  the public-forward guard, all 30 cases reach the injected exception after
+  advancing an already populated cache but fail because it remains reusable.
+  With the guard, all pass: stale reuse is rejected; reset and full-prefix
+  replay match fresh logits, MTP logits and loss exactly; continuation succeeds.
+
+Final focused validation: **135 passed** (runtime, module-tree and
 `tests/test_awq_empty_groups.py`) on Python 3.14t / Transformers 5.23.0 /
 Torch 2.15.0+cpu. Ruff, `git diff --check` and `compileall` also passed. The
 affected shared suite has 470 passes and exactly the ten parametrized stale

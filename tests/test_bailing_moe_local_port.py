@@ -164,6 +164,82 @@ def test_failure_invalidates_partial_cache_then_reset_replays_exactly(layout):
         torch.testing.assert_close(replay, fresh, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("layout", ["dense", "mla", "mla_dense_q", "hybrid", "legacy_gqa", "mla_alias"])
+@pytest.mark.parametrize("boundary", ["lm_head", "loss", "mtp_head", "mtp_loss", "return_tuple"])
+def test_public_forward_failure_invalidates_advanced_cache_until_reset(layout, boundary, monkeypatch):
+    from torch.nn import functional as functional
+
+    from gptqmodel.models.ports.bailing_moe.modeling_bailing import BailingCausalLMOutput
+
+    torch.manual_seed(93)
+    model = BailingForCausalLM(tiny_config(layout, num_nextn_predict_layers=1)).eval()
+    ids = torch.tensor([[0, 3, 7, 5, 9, 11]])
+    mask = (ids != 0).long()
+    calls = 0
+    fired = False
+    original_linear, original_loss = functional.linear, model.loss_function
+
+    def fail():
+        nonlocal fired
+        fired = True
+        raise RuntimeError(f"injected public {boundary} failure")
+
+    def linear(x, weight, bias=None):
+        nonlocal calls
+        if weight.shape == model.lm_head.weight.shape:
+            calls += 1
+            if calls == (2 if boundary == "mtp_head" else 1):
+                fail()
+        return original_linear(x, weight, bias)
+
+    def loss(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == (2 if boundary == "mtp_loss" else 1):
+            fail()
+        return original_loss(*args, **kwargs)
+
+    with torch.no_grad():
+        cache = model(ids[:, :3], attention_mask=mask[:, :3]).past_key_values
+        assert not cache.incomplete and cache.get_seq_length() == 3
+        previous_recurrent = {idx: state.clone() for idx, state in cache.recurrent_states.items()}
+        with monkeypatch.context() as patch:
+            if boundary in ("lm_head", "mtp_head"):
+                patch.setattr(functional, "linear", linear)
+            elif boundary in ("loss", "mtp_loss"):
+                patch.setattr(model, "loss_function", loss)
+            else:
+                patch.setattr(BailingCausalLMOutput, "to_tuple", lambda *args: fail())
+            with pytest.raises(RuntimeError, match=f"injected public {boundary}"):
+                model(
+                    ids[:, 3:], attention_mask=mask, labels=ids[:, 3:], past_key_values=cache,
+                    return_dict=boundary != "return_tuple",
+                )
+            assert fired
+            assert cache.get_seq_length() == ids.shape[1]
+            if previous_recurrent:
+                assert any(not torch.equal(state, cache.recurrent_states[idx]) for idx, state in previous_recurrent.items())
+            else:
+                assert cache.layers[0].get_seq_length() == ids.shape[1]
+            assert cache.incomplete
+            with pytest.raises(ValueError, match="failed partial forward"):
+                model(ids[:, 3:], attention_mask=mask, past_key_values=cache)
+        cache.reset()
+        assert not cache.incomplete and cache.get_seq_length() == 0 and not cache.recurrent_states
+        fresh = model(ids, attention_mask=mask, labels=ids, use_cache=False)
+        replay = model(ids, attention_mask=mask, labels=ids, past_key_values=cache)
+        torch.testing.assert_close(replay.logits, fresh.logits, rtol=0, atol=0)
+        torch.testing.assert_close(replay.loss, fresh.loss, rtol=0, atol=0)
+        for actual, expected in zip(replay.mtp_logits, fresh.mtp_logits, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert not cache.incomplete and cache.get_seq_length() == ids.shape[1]
+        extended = torch.cat((ids, torch.tensor([[13]])), dim=-1)
+        continued = model(extended[:, -1:], attention_mask=(extended != 0).long(), past_key_values=cache)
+        reference = model(extended, attention_mask=(extended != 0).long(), use_cache=False)
+        torch.testing.assert_close(continued.logits, reference.logits[:, -1:], rtol=1e-5, atol=1e-6)
+        assert not cache.incomplete
+
+
 def test_recurrent_cache_reorder_repeat_select_and_crop_rejection():
     model = BailingForCausalLM(tiny_config("hybrid")).eval()
     ids = torch.tensor([[3, 7, 9], [8, 4, 5]])
