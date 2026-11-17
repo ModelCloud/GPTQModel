@@ -133,7 +133,7 @@ flowchart LR
 | Mechanism | Before | After |
 | --- | --- | --- |
 | AWQ `-:` exclusions in the payload | absent (`config.py:5200` on the parent commit), so HF built uninitialized AWQ layers | written to `modules_to_not_convert` (`config.py:5299`) |
-| quantized `lm_head` | silent | save-time warning from `hf_compat_warnings` (`writer.py:292`) |
+| quantized `lm_head` | silent | save-time warning from `hf_compat_warnings` (`writer.py:319`) |
 | 8-bit AWQ | silent | save-time warning from `hf_compat_warnings` |
 
 `modules_to_not_convert` is a compatibility mirror, not a second source of
