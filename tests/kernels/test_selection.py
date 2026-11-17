@@ -2048,3 +2048,96 @@ def test_auto_bf16_prefers_a_native_kernel_over_exllamav2_dense_fallback():
 
     # FP16 keeps the native ExLlamaV2 kernel first.
     assert _candidates(torch.float16)[0] is ExllamaV2Linear
+
+
+def test_cuda_auto_select_prioritizes_vptq_cuda_over_torch(monkeypatch, nvidia_runtime):
+    """AUTO must load a VPTQ checkpoint on the fused kernel, not the reference.
+
+    Both VPTQ kernels declare ``FORMAT.VPTQ``; the selector's stable sort keeps
+    the registry order for equal ranks, which lists the portable kernel first.
+    On an NVIDIA host with the extension available the native kernel must win,
+    and on ROCm the native kernel's ``validate_once`` must send AUTO back to the
+    portable one (issue #4591).
+    """
+
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
+    from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+
+    assert VPTQCudaLinear.auto_select_priority(FORMAT.VPTQ) > VPTQLinear.auto_select_priority(FORMAT.VPTQ)
+    _force_auto_candidates_valid(monkeypatch, METHOD.VPTQ, FORMAT.VPTQ)
+
+    selected = select_quant_linear(
+        bits=2,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.VPTQ,
+        quant_method=METHOD.VPTQ,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+    assert selected is VPTQCudaLinear
+
+    monkeypatch.setattr(VPTQCudaLinear, "validate_device", classmethod(lambda cls, _device: None))
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(
+        VPTQCudaLinear,
+        "cached_validate_once",
+        classmethod(lambda cls: (False, NotImplementedError("VPTQ_CUDA is not available on ROCm"))),
+    )
+    clear_validation_cache()
+    try:
+        selected = select_quant_linear(
+            bits=2,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.ROCM,
+            backend=BACKEND.AUTO,
+            format=FORMAT.VPTQ,
+            quant_method=METHOD.VPTQ,
+            pack_dtype=torch.int32,
+            dtype=torch.float16,
+        )
+    finally:
+        clear_validation_cache()
+
+    assert selected is VPTQLinear
+
+
+def test_cuda_auto_select_keeps_vptq_torch_when_the_native_probe_fails(monkeypatch, nvidia_runtime):
+    """A failed native build must fall back instead of failing the load."""
+
+    from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
+    from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+
+    monkeypatch.setattr(vptq_cuda_module, "vptq_cuda_runtime_available", lambda: False)
+    monkeypatch.setattr(
+        vptq_cuda_module,
+        "vptq_cuda_runtime_error",
+        lambda: "VPTQ CUDA requires an NVIDIA CUDA device: its torch.ops extension is built from CUDA sources.",
+    )
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    clear_validation_cache()
+    try:
+        selected = select_quant_linear(
+            bits=2,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CUDA,
+            backend=BACKEND.AUTO,
+            format=FORMAT.VPTQ,
+            quant_method=METHOD.VPTQ,
+            pack_dtype=torch.int32,
+            dtype=torch.float16,
+        )
+    finally:
+        VPTQCudaLinear.cached_validate_once.cache_clear()
+        clear_validation_cache()
+
+    assert selected is VPTQLinear
