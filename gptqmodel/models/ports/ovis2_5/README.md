@@ -52,6 +52,10 @@ restriction against mixing image and video content is preserved. Generation
 precomputes visual embeddings and delegates the complete cache/beam loop to native
 Qwen3. It returns newly generated tokens, as the source does. The source's optional
 two-stage thinking-budget continuation is retained for one prompt and tensor output.
+The wrapper forwards its saved or explicit generation policy to Qwen3, including
+the release's sampling/EOS fields and `multimodal_max_length=8192`. Both pinned
+`generation_config.json` assets have SHA-256
+`f12d4b54c91ffda6a118067044ef4beffae0a500c20a25b5542ea676b0bcfffa`.
 
 ## Selection and tensor lifecycle
 
@@ -63,6 +67,7 @@ two-stage thinking-budget continuation is retained for one prompt and tensor out
 | Q/K norms absent from the declared decoder plan; incorrect final norm path | Explicit excluded `q_norm`/`k_norm`; final norm is `llm.model.norm` |
 | Source nonpersistent root index buffer could remain on a lazy meta shell | Read final four VTE rows directly; vision RoPE initializes from its defining equation |
 | Generic AWQ grouping had no qualified multimodal objective | Explicit empty scaling groups; actual decoder plain quantization |
+| Delegation could ignore the root saved generation policy | Forward the selected policy to native Qwen3, including explicit overrides |
 
 ```mermaid
 flowchart TD
@@ -91,6 +96,7 @@ sequenceDiagram
     P->>M: Text IDs, visual placeholders, patches and grids
     M->>M: NaViT, soft vocabulary, VTE and indicator merge
     M->>D: Expanded embeddings and native attention context
+    M->>D: Saved or explicit generation policy for native decode loop
     D->>Q: Real first-decoder activations
     Q->>Q: Pack seven projections per decoder layer
     Q->>W: Packed decoder and unchanged dense vision/norms
@@ -109,10 +115,10 @@ Environment: Python 3.14.6t with `PYTHON_GIL=0`, Transformers 5.23.0,
 Torch 2.15.0+cpu, released Tokenicer 0.0.17, Ruff 0.14.2. Execution is serial CPU;
 this does not establish concurrent PyTorch safety.
 
-Final owned result: **56 passed, no skips, 11.76s**. Final combined loader,
+Final owned result: **58 passed, no skips, 4 warnings, 32.14s**. Final combined loader,
 processor, security, HF config, InternLM sibling, required AWQ baseline,
 module-plan and fusion admission run:
-**1066 passed, 477 skipped, 2 deselected, 15 warnings, 46.41s**.
+**1068 passed, 477 skipped, 2 deselected, 19 warnings, 52.23s**.
 The explicit exclusions and skip reasons are recorded below. The full
 `format/check.sh` gate, compileall, package discovery and diff checks pass.
 
@@ -130,9 +136,12 @@ and bias weight owners; independent float64 vision/merge equations at head width
 8 and 64, multiple windows, padded partial tiles and rounded merged-window geometry;
 image/video patch order; ragged images and left-padded beam generation;
 FP32/FP16/BF16 eager/SDPA forward/cache/greedy/beam and two dense safetensors cycles;
-public malicious model/config/tokenizer/processor maps under trust False/True
+public malicious model/config/tokenizer/processor maps and checkpoint
+`custom_generate/generate.py` sentinels under trust False/True
 crossed with bypass absent/0/1; corrupted payload repair/retry; assign False/True;
-and standalone processor roundtrips. New saved tensor payloads are safetensors.
+and standalone processor roundtrips. Saved/overridden sampling, EOS, output scores
+and policy immutability match independent native Qwen3 generation for text/image
+inputs through two dense reloads. New saved tensor payloads are safetensors.
 
 Six **actual public image-calibrated** plain-AWQ cases cover MHA/GQA/MQA, optional
 bias, `fallback=None`, offload False/True, all 14 decoder linears, independent
@@ -177,6 +186,9 @@ Red/green evidence:
 - A standalone processor reload now needs only its saved directory, without
   manually writing an extra model config. Quantized reload tests guard the
   existing writer-owned config against replacement.
+- Restoring the original delegation that omitted the root generation policy
+  fails both text/image policy regressions; forwarding the selected policy
+  preserves native output/scores and saved metadata through two reloads.
 
 The exact central registry/fusion changes are in `central_fixture_proposals.json`.
 They are integration proposals; the shared fixtures remain untouched here. The
@@ -192,6 +204,10 @@ No GPU, FlashAttention, optimized vision kernels, multi-GPU, threading, compile,
 training, speculative decoding, long-context accuracy, foreign/static/offloaded/
 quantized cache, or AWQ fold/search/fusion qualification is claimed. Image inputs
 and PIL video frames were tested; arbitrary encoded video containers were not.
+The source's `inputs_embeds` generation boundary is retained. Native Transformers
+warns that repetition penalties at this boundary cover newly generated tokens,
+rather than the embedded prompt; the native-reference policy cases preserve
+that behavior. This is not a trained-output quality claim.
 
 Two unchanged non-Ovis folding assertions fail on this qualification base in
 `test_awq_fold_safety_4175.py`:

@@ -5,6 +5,7 @@
       "configuration_ovis2_5.py": "04dd4870b6a5e0347651582d53e4d13e2ef18f516e4113259578408c790e0b72",
       "modeling_ovis2_5.py": "51b23951898b6a7fd40012d2c9f94e53c6a3c865b7957feae3e075372ab41c48",
       "config.json": "dfa83f6cc4e9a2bc434676d7310472746ce5e51926b6b312866e5a203e81efd6",
+      "generation_config.json": "f12d4b54c91ffda6a118067044ef4beffae0a500c20a25b5542ea676b0bcfffa",
       "preprocessor_config.json": "63ff380d3e424f93e6fbca5cc8e74eeed882e96fd6be2b7728aed308f3ad1513",
       "LICENSE": "89d5fe4d86445afd34248a35e65fa01821b92f49072e570aaf74adb07ebca510",
       "NOTICE": "c56e4e3994e34eadaa2bc83e9bab9168dac960400ae1209a0ef91bf2d2cc09ed",
@@ -21,6 +22,7 @@
       "configuration_ovis2_5.py": "04dd4870b6a5e0347651582d53e4d13e2ef18f516e4113259578408c790e0b72",
       "modeling_ovis2_5.py": "c97d70152fb1bb1cc337aa82c567a3a50869a7965da11f07de4c444a1d146161",
       "config.json": "d495d8004929648201106241b43dd67b96243762d22fbf90f2f43366992e033e",
+      "generation_config.json": "f12d4b54c91ffda6a118067044ef4beffae0a500c20a25b5542ea676b0bcfffa",
       "LICENSE": "89d5fe4d86445afd34248a35e65fa01821b92f49072e570aaf74adb07ebca510",
       "NOTICE": "42b1217af3e4412d38c03288d1d51dfb82d3a7bbd15dd7d058c3fe11ebe7689f",
       "model.safetensors.index.json": "903804a01207da3e59457254403faaa6e9afcd79ef0a885b2929ac0f30cbf2ba"
