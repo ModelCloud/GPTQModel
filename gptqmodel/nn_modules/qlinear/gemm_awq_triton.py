@@ -131,7 +131,12 @@ class AwqGemmTritonFn(torch.autograd.Function):
             if bias is not None:
                 out = (out + bias.float()).to(x.dtype)
 
-        out = out.reshape(out_shape)
+        # Never hand autograd a reshape view of this Function's own output: an
+        # in-place update on such a view is forbidden (#4974). The 2-D result
+        # is already an owned allocation, so only a batched result needs the
+        # leading dimensions back, and that view has to be materialized.
+        if out.shape != out_shape:
+            out = out.reshape(out_shape).clone()
         if not capturing:
             mark_awq_triton_plan_warmed(
                 plan, M=rows, N=N, K=K, group_size=actual_group_size,

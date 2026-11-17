@@ -386,6 +386,20 @@ class BaseQuantLinear(nn.Module):
     # measurement, no opt-in.
     SUPPORTS_COMPILE: bool = False
 
+    # Why a kernel that declares ``SUPPORTS_COMPILE_LEVEL >= INDUCTOR`` still
+    # keeps ``SUPPORTS_COMPILE = False``: the measured loss that makes the
+    # static-cache auto-compile a pessimization for this kernel (#4984). A
+    # compile-capable level and an opted-out policy are two declarations that
+    # drift apart silently otherwise, so an opt-out from a level at or above
+    # ``INDUCTOR`` must record its reason here.
+    # `tests/kernels/test_kernel_compile_protocol.py` enforces the pairing and
+    # `docs/kernel-compile-matrix.md` publishes it. The empty string means "no
+    # reason recorded" and is the right value for a kernel that opts in
+    # (`SUPPORTS_COMPILE = True`) or declares a level below `INDUCTOR`; it is
+    # not `None` because `verify_supports_params()` treats a `None` default as
+    # a declaration every concrete kernel has to repeat.
+    SUPPORTS_COMPILE_EAGER_REASON: str = ""
+
     # Highest `torch.compile` level this kernel's `forward` reaches, measured
     # with the probes in `_compile_support.LEVEL_PROBES`. Every concrete kernel
     # must declare it explicitly (no silent inheritance), because the answer
