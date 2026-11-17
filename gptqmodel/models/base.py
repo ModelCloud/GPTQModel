@@ -58,6 +58,7 @@ from ..quantization.config import (
     normalize_norm_types,
     resolve_model_rotation,
     resolve_quant_format,
+    validate_rotation_format,
 )
 from ..quantization.dtype import (
     available_float8_dtypes,
@@ -2383,8 +2384,11 @@ class BaseQModel(nn.Module):
                     quant_method=export_quant_method,
                 )
 
-        # rotate model
+        # Validate rotation before any weight is touched. The old order fused
+        # norms and rotated the weights first and only then rejected the
+        # backend, so a refused run left an unusable in-session model (#4666).
         if resolve_model_rotation(self.quantize_config):
+            validate_rotation_format(self.quantize_config, format_code=format_code)
             validate_rotation_model_support(self)
 
             # Validate every width rotation will transform before
@@ -2396,6 +2400,22 @@ class BaseQModel(nn.Module):
                 self.model.config, resolve_model_rotation(self.quantize_config)
             )
 
+            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
+            if backend == BACKEND.AUTO:
+                backend = BACKEND.GPTQ_TORCH
+            if backend not in (
+                BACKEND.GPTQ_TORCH,
+                BACKEND.GPTQ_TRITON,
+                BACKEND.GPTQ_W4AFP8,
+                BACKEND.GPTQ_W4A_NVFP4,
+            ):
+                raise NotImplementedError(
+                    "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
+                )
+
+        # rotate model
+        if resolve_model_rotation(self.quantize_config):
             if self.model.config.tie_word_embeddings:
                 log.info("Rotation requires word embeddings to be untied. Untying.")
                 self.model.config.tie_word_embeddings = False
@@ -2423,21 +2443,6 @@ class BaseQModel(nn.Module):
                                             device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
-
-        if resolve_model_rotation(self.quantize_config):
-            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
-            if backend == BACKEND.AUTO:
-                backend = BACKEND.GPTQ_TORCH
-            if backend not in (
-                BACKEND.GPTQ_TORCH,
-                BACKEND.GPTQ_TRITON,
-                BACKEND.GPTQ_W4AFP8,
-                BACKEND.GPTQ_W4A_NVFP4,
-            ):
-                raise NotImplementedError(
-                    "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
-                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
-                )
 
         from ..adapter.adapter import Lora
 

@@ -4888,6 +4888,47 @@ def resolve_model_rotation(qcfg: Any) -> Optional[str]:
     return getattr(qcfg, "rotation", None)
 
 
+#: Formats whose kernels apply the online Hadamard a rotated checkpoint needs.
+#: ``rotation`` fuses an orthogonal transform into the weights, and only the
+#: GPTQ layouts have a kernel that applies the matching transform to the
+#: activations. Every other format accepted the option, quantized the rotated
+#: model with kernels that ignore it (FP8 nll 21.05 -> 30.20, AWQ 21.59 ->
+#: 30.68), and saved a checkpoint the loader then refuses (issue #4666).
+ROTATION_SUPPORTED_FORMATS = frozenset({FORMAT.GPTQ, FORMAT.GPTQ_V2})
+
+
+def validate_rotation_format(
+    qcfg: Any, *, format_code: Optional[FORMAT] = None
+) -> None:
+    """Reject model-wide rotation on a format whose kernels cannot apply it.
+
+    The load path only accepts a rotated checkpoint whose format is GPTQ or
+    GPTQ_V2, and only the GPTQ kernels apply the online Hadamard. Accepting
+    ``rotation`` on any other config silently produced a broken in-session
+    model plus an unloadable checkpoint (issue #4666).
+    """
+
+    rotation = resolve_model_rotation(qcfg)
+    if not rotation:
+        return
+    resolved = (
+        format_code
+        if format_code is not None
+        else resolve_quant_format(
+            getattr(qcfg, "format", None), getattr(qcfg, "method", None)
+        )
+    )
+    if resolved in ROTATION_SUPPORTED_FORMATS:
+        return
+    supported = ", ".join(sorted(f"FORMAT.{fmt.name}" for fmt in ROTATION_SUPPORTED_FORMATS))
+    raise ValueError(
+        f"{type(qcfg).__name__}: `rotation={rotation!r}` is only supported for the GPTQ "
+        f"checkpoint layouts ({supported}); the configured format resolves to "
+        f"`{resolved}`, whose kernels ignore the online Hadamard. Quantize without "
+        "`rotation`, or use a GPTQ config."
+    )
+
+
 @dataclass
 class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     # Whether this method's quantizer actually drops attention-sink rows from
@@ -5399,6 +5440,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
+
+        # A rotated model is only loadable and only correct on the GPTQ
+        # layouts; reject the option before any run starts (issue #4666).
+        validate_rotation_format(self)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -7840,6 +7885,10 @@ class EXL3Config(PreProcessorConfig):
             self.meta = {}
 
         self.adapter = normalize_adapter(self.adapter)
+
+        # A rotated model is only loadable and only correct on the GPTQ
+        # layouts; reject the option before any run starts (issue #4666).
+        validate_rotation_format(self)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.

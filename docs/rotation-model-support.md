@@ -39,17 +39,38 @@ own opt-in.
 flowchart TD
     A["quantize(rotation=...)"] --> B{"resolve_model_rotation(qcfg)"}
     B -->|"None"| Z["no rotation"]
-    B -->|"hadamard / random"| C["validate_rotation_model_support(self)"]
-    C --> D{"rotation_supported(self)"}
+    B -->|"hadamard / random"| C["validate_rotation_format(qcfg)"]
+    C -->|"non-GPTQ format"| E0["ValueError: config, format,<br/>supported layouts<br/>no weights modified"]
+    C -->|"GPTQ / GPTQ_V2"| D0["validate_rotation_model_support(self)"]
+    D0 --> D{"rotation_supported(self)"}
     D -->|"no"| E["ValueError: model class, model_type,<br/>supported model types<br/>no weights modified"]
     D -->|"yes"| F["validate_rotation_dimensions"]
     F -->|"unsupported width"| G["ValueError: names the dimension<br/>no weights modified"]
-    F -->|"ok"| H["fuse_layer_norms"]
-    H --> I["rotate_model"]
-    I --> J["rotation backend check"]
+    F -->|"ok"| H["rotation backend check"]
+    H --> I["fuse_layer_norms"]
+    I --> J["rotate_model"]
     style E fill:#fde2e1,stroke:#dc2626
+    style E0 fill:#fde2e1,stroke:#dc2626
     style G fill:#fde2e1,stroke:#dc2626
 ```
+
+## Checkpoint-format gate
+
+`rotation` is a base-class field, so every config accepted it, but only the
+GPTQ layouts have a kernel that applies the online Hadamard the rotated weights
+need. `from_quantized` already refused a rotated checkpoint whose format is not
+GPTQ/GPTQ_V2, so a non-GPTQ run quantized a rotated model with kernels that
+ignored the transform (FP8 nll 21.05 -> 30.20, AWQ 21.59 -> 30.68) and saved a
+checkpoint that could not be loaded.
+
+`validate_rotation_format` now rejects the option in
+`BaseQuantizeConfig.__post_init__` (and in `EXL3Config.__post_init__`, which
+does not call the base hook), naming the config, the resolved format and the two
+supported layouts. `quantize()` runs the same check again before
+`fuse_layer_norms`/`rotate_model`, and the backend check moved up with it, so a
+refused run leaves the model exactly as loaded (#4666). MACaQ keeps its own
+per-layer `rotation`: `MacaqConfig.model_rotation` is `None`, so the model-wide
+gate does not apply.
 
 The opt-in decision itself:
 
