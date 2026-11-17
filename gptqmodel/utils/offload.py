@@ -218,6 +218,23 @@ def restore_offloaded_modules(
     """
     unresolved: List[str] = []
     for name, module, device in entries:
+        # A base module can be replaced during quantization (the quantizer
+        # swaps the recorded dense module for its packed kernel and writes the
+        # packed bundle into the same offload directory). Restoring the stale
+        # dense module would read the replacement's index and tensors, so skip
+        # it: the live module owns its own bundle and is restored below by
+        # `restore_disk_offloaded_modules` (issue #4758).
+        try:
+            live_module = get_submodule(model, name) if name else model
+        except AttributeError:
+            live_module = None
+        if live_module is not module:
+            log.debug(
+                "Offload: `%s` was replaced during quantization; skipping the "
+                "stale base-module restore.",
+                name,
+            )
+            continue
         try:
             undo_offload_to_disk(module, device=device)
         except Exception as exc:  # pragma: no cover - defensive

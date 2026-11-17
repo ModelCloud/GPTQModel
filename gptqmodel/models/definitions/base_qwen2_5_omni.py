@@ -16,6 +16,7 @@ from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, thinker_multimodal_model, thinker_text_model, thinker_text_prefix
 from ...utils.offload import offload_to_disk
+from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
 from ._vlm_calibration import (
@@ -112,6 +113,28 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
             operations=[],
         ),
     )
+
+    @classmethod
+    def checkpoint_key_for_save(cls, name: str) -> str:
+        """Write checkpoint keys in the source HF layout (issue #4758).
+
+        Transformers 5.22 keeps the thinker towers under ``thinker.model.*``
+        and the decoder under ``thinker.model.language_model.*`` in memory, but
+        a Qwen2.5-Omni checkpoint stores ``thinker.audio_tower.*``,
+        ``thinker.visual.*`` and ``thinker.model.embed_tokens.*``. Saving the
+        in-memory names wrote a checkpoint the loader could not map back, so
+        the towers and embeddings reloaded as ``torch.empty`` garbage.
+        """
+        return LazyTurtle.convert_hf_checkpoint_key(name, cls.HF_CONVERSION_MAP_REVERSED)
+
+    @classmethod
+    def checkpoint_key_for_load(cls, name: str) -> str:
+        """Map a source-layout checkpoint key back onto the runtime module."""
+        return LazyTurtle.convert_hf_checkpoint_key(
+            name,
+            cls.HF_CONVERSION_MAP_REVERSED,
+            to_runtime=True,
+        )
 
     loader = AutoModelForTextToWaveform
 
