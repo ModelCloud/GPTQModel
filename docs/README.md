@@ -193,6 +193,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Multi-GPU quantization](multi_gpu_quantization.md)
 - [Multi-GPU memory retention](multi-gpu-memory.md)
 - [Quantization lifecycle contracts](quantization-lifecycle-contracts.md)
+- [Cancelled and failed run model state](cancelled-run-contract.md)
 - [Quantization memory and tensor lifetimes](quantization-memory.md)
 - [ROCm default process environment](rocm-default-environment.md)
 - [ROCm JIT toolkit path resolution](rocm-jit-toolkit-paths.md)

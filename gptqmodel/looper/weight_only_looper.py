@@ -997,6 +997,20 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 # A weight-only kernel can be accelerator-only too (GGUF
                 # Triton); leave the finished layers runnable (#4947).
                 rehome_failed_run_kernels(self.gptq_model)
+                # A cancelled run must return the same ordinary tensors a
+                # completed one does: the norms, biases and buffers
+                # `pre_quantize` materialized under inference mode otherwise
+                # stay inference tensors, and a plain grad-mode forward raises
+                # "Inference tensors cannot be saved for backward" (#5012).
+                # Best-effort so it can never mask the run failure.
+                try:
+                    ensure_version_counters(self.gptq_model.model)
+                except Exception:
+                    log.warning(
+                        "failed to repair tensor version counters while failing "
+                        "the weight-only run",
+                        exc_info=True,
+                    )
                 # ``finalize()`` is the only other place the processor closes
                 # its Device-SMI handles, and a failed run never reaches it
                 # (#4813). The release is idempotent and must not mask the run
