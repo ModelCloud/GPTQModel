@@ -149,8 +149,18 @@ class _FakePlan:
 
 
 class _FakeWeight:
-    def __init__(self) -> None:
+    """Stands in for the ggml buffer: a separate device copy of ``qweight``."""
+
+    def __init__(self, qweight: torch.Tensor) -> None:
+        self.storage = qweight.detach().clone()
+        self.device = qweight.device
         self.closed = False
+
+    def as_tensor(self) -> torch.Tensor:
+        return self.storage
+
+    def backs(self, tensor) -> bool:
+        return tensor.data_ptr() == self.storage.data_ptr()
 
     def close(self) -> None:
         self.closed = True
@@ -175,7 +185,7 @@ class _FakeBridge:
         return 0
 
     def build_cuda_weight(self, **kwargs):
-        weight = _FakeWeight()
+        weight = _FakeWeight(kwargs["qweight"])
         self.weight_builds.append(kwargs)
         return weight
 
@@ -220,8 +230,17 @@ def test_kernel_builds_the_weight_once_for_many_batch_sizes(monkeypatch):
     # Evicted plans release their own activation/output buffers.
     assert sum(plan.closed for plan in fake.plans) == 10 - gguf_cpp._MAX_GGML_CUDA_PLANS
 
+    # The upload became the storage of `qweight` (#4387): clearing caches
+    # closes the plans but keeps the weight, and needs no second upload.
     weight = module._ggml_cuda_weight
+    assert weight.backs(module.qweight)
     module.clear_weight_cache()
     assert not module._ggml_cuda_plans
+    assert module._ggml_cuda_weight is weight
+    module(torch.randn(3, 64, device="cuda", dtype=torch.float16))
+    assert len(fake.weight_builds) == 1
+
+    # Moving `qweight` off the device drops the upload.
+    module.cpu()
+    assert not module._ggml_cuda_plans
     assert module._ggml_cuda_weight is None
-    assert weight.closed

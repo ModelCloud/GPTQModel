@@ -221,6 +221,13 @@ class _FakeWeight:
     def close(self) -> None:
         pass
 
+    # The layer's qweight stays on the CPU while the input claims CUDA, so the
+    # kernel keeps this weight as a cache and never adopts it as storage.
+    device = torch.device("cuda:0")
+
+    def backs(self, tensor) -> bool:
+        return False
+
 
 class _CudaTensor:
     """A CPU tensor that advertises a CUDA device to ``GGUFCudaKernel``."""
