@@ -6,9 +6,15 @@
 import torch
 
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class BaiChuanQModel(BaseQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.baichuan.configuration_baichuan.BaichuanConfig",
+        model_class="gptqmodel.models.ports.baichuan.modeling_baichuan.BaichuanForCausalLM",
+    )
+    fusable = None  # Fused QKV; no qualified fusion executor.
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
@@ -17,11 +23,16 @@ class BaiChuanQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("W_pack:0", "o_proj:1"),
+            "self_attn": ("W_pack:0:q:k:v", "o_proj:1", "rotary_emb:!"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Plain quantization only. Fused QKV plus RoPE/ALiBi replay has not
+        # passed the model-specific AWQ fold/search qualification gate.
+        return []
 
     @staticmethod
     def _set_non_persistent_buffer(module, name, tensor):
@@ -53,6 +64,13 @@ class BaiChuanQModel(BaseQModel):
 
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
+
+        from ..ports.baichuan.modeling_baichuan import BaichuanForCausalLM
+
+        if isinstance(model, BaichuanForCausalLM):
+            # Local RoPE is derived per call; Baichuan 1's inv_freq remains
+            # checkpoint-owned and must not be demoted to a runtime buffer.
+            return model
 
         layers = getattr(getattr(model, "model", None), "layers", None)
         if layers is None:
