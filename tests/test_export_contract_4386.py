@@ -93,6 +93,53 @@ def test_export_mlx_forwards_trust_remote_code(tmp_path, monkeypatch):
     assert captured["kwargs"].get("trust_remote_code") is True
 
 
+@pytest.mark.parametrize(
+    ("quant_method", "expected_backend"),
+    [
+        ("gptq", "GPTQ_TORCH"),
+        ("awq", "AWQ_TORCH"),
+        ("paro", "PARO_CUDA"),
+        ("gguf", "GGUF_TORCH"),
+    ],
+)
+def test_export_mlx_loads_the_checkpoint_on_cpu(
+    tmp_path, monkeypatch, quant_method, expected_backend
+):
+    """``export(..., "mlx")`` only reads packed tensors on the host (#4809).
+
+    Leaving the device implicit made the loader pick the accelerator whenever
+    one was visible. The AWQ GEMV/GEMV_FAST Torch readers are CPU-only, so a
+    GPU host failed with ``does not support device: cuda:0`` before any
+    conversion, even though the converter supports those formats.
+    """
+
+    from gptqmodel.utils.backend import BACKEND
+
+    captured = {}
+    monkeypatch.setattr(auto_module, "resolve_trust_remote_code", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        auto_module.AutoConfig,
+        "from_pretrained",
+        classmethod(
+            lambda cls, *args, **kwargs: SimpleNamespace(
+                quantization_config={"quant_method": quant_method}
+            )
+        ),
+    )
+
+    def fake_load(model_id_or_path, **kwargs):
+        captured["kwargs"] = kwargs
+        raise RuntimeError("stop after load")
+
+    monkeypatch.setattr(GPTQModel, "load", staticmethod(fake_load))
+
+    with pytest.raises(RuntimeError, match="stop after load"):
+        GPTQModel.export("checkpoint", str(tmp_path / "out"), "mlx")
+
+    assert captured["kwargs"].get("device") == "cpu"
+    assert captured["kwargs"].get("backend") is getattr(BACKEND, expected_backend)
+
+
 def test_export_hf_drops_quantization_metadata(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

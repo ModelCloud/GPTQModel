@@ -1305,10 +1305,16 @@ class GPTQModel:
         else:
             backend = BACKEND.GPTQ_TORCH
 
-        # load gptq model
+        # Load on the host. The MLX converter reads the packed tensors from the
+        # checkpoint and never runs a quantized forward, so the accelerator is
+        # not needed. Leaving the device implicit picked the accelerator
+        # whenever one was visible, and the AWQ GEMV/GEMV_FAST Torch readers are
+        # CPU-only, so `export(..., "mlx")` of those formats always failed with
+        # `does not support device: cuda:0` (#4809).
         gptq_model = GPTQModel.load(
             model_id_or_path,
             backend=backend,
+            device="cpu",
             trust_remote_code=trust_remote_code,
         )
 
