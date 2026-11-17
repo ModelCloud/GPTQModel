@@ -38,6 +38,77 @@ The five release-run skips are three unavailable Pangu checkpoints and the
 non-buildable `opt350` and `muse_glimmer` CausalLM fixtures.
 The central-plan batch additionally skips 460 NVIDIA-only Marlin cases.
 
+## Optional vision dependencies
+
+Core requirements keep timm and torchvision optional. Install
+`pip install 'gptqmodel[vision]'` for the timm-backed DeepSeek-VL2, LLaVA-Qwen2,
+legacy MiniCPM-V, OpenVLA and ZDTaichu5 components, or InternS1's training-only
+stochastic depth. The extra declares `timm>=1.0.22` and `einops>=0.8.1`;
+select a torchvision build compatible with the installed PyTorch build.
+Native text loading and lazy port imports work without these backends.
+Using a dependent component without its backend raises an `ImportError` with
+the extra installation command, preserving the original exception as its cause.
+
+| Trigger | Previous mechanism | Current mechanism |
+| --- | --- | --- |
+| Core installation | `requirements.txt:16` installed timm, which pulled torchvision into text-only installs | `pyproject.toml` declares a `vision` extra; core requirements omit timm |
+| DeepSeek-VL2 processor import | `processing_deepseek_vl_v2.py:25` imported torchvision immediately | `ImageTransform.__init__` imports it only when needed |
+| Optional vision construction | Missing backend surfaced as an unqualified import failure | Affected constructors/modules raise contextual installation guidance |
+
+```mermaid
+flowchart TD
+    A[Core GPT-QModel installation] --> B[Lazy LocalModelLoader selection]
+    B --> C{Selected component uses optional vision backend?}
+    C -->|No| D[Native or package-owned text execution]
+    C -->|Yes| E{timm or torchvision available?}
+    E -->|Yes| F[Construct the selected vision component]
+    E -->|No| G[ImportError: install gptqmodel vision extra]
+    style G fill:#fee,stroke:#c00
+```
+
+The optional-dependency regression includes a real CPU InternLM forward,
+lazy imports, each guarded vision boundary, and the training/evaluation
+stochastic-depth distinction. A separate clean editable `.[test]` installation
+was qualified with timm, torchvision and einops physically absent, including
+real InternLM plain-AWQ packing and safetensors reload.
+
+Parent qualification at `b7f8cac10` uses published Tokenicer 0.0.19,
+Transformers 5.23.0, Torch 2.15.0 CPU and Python 3.14.6t with `PYTHON_GIL=0`.
+These overlapping runs are not additive:
+
+| Parent validation | Result |
+| --- | --- |
+| Optional dependency boundaries and affected DeepSeek-VL2, OpenVLA, ZDTaichu5, MiniCPM-V, InternS1 and LLaVA-Qwen2 ports | 457 passed, no skips, 96 warnings; 140.73s |
+| Shared model/path/processor/tokenizer/security/config, registered plans, fusion admission and AWQ fold safety | 707 passed, 461 skipped, 17 warnings; 11.13s |
+| DeepSeek-V2 native-first eager-expert fixtures, native Unlimited-OCR, migrated OCR/ZDTaichu support tests and Ricursive | 588 passed, no skips, two warnings; 80.83s |
+| Media failure/retry, DeepSeek-VL2 and Puzzle ownership after maintenance-script relocation | 186 passed, no skips, 72 warnings; 16.15s |
+
+Both built wheel and sdist were checked byte-for-byte against all 883 port
+runtime/provenance/license assets, including 149 compressed JSON fixtures.
+Metadata retains Python `>=3.11`, Transformers `>=5.23.0`, Tokenicer `>=0.0.19`,
+TikToken `>=0.12.0` and SentencePiece `>=0.2.1`; timm and einops are restricted
+to the vision extra. The moved Puzzle network inventory reader is excluded
+from both runtime artifacts. Licensing-held MiniCPM-o and Pangu implementations
+are also excluded.
+
+XVERSE's real legacy Metaspace tokenizer remains incompatible with released
+Tokenicer 0.0.19. Its candidate-only qualification uses unreleased commit
+`63abe8cfba72bb02d62b9df1d069d53d915883c5` in
+[Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+This migration is not fully compatible with the latest released dependencies
+until that upstream correction is released and consumed. No downstream
+tokenizer normalization shim is included.
+
+An independent audit of the integrated `0a9a08ea3` port tree plus the optional
+vision patch (`f0245b360`) ran all 145 local-port/module-plan files in 19 bounded
+processes: **7,901 passed, 23 failed, 13 skipped**, with no collection errors or
+incomplete batches. Every failure was an XVERSE legacy Metaspace case on
+published Tokenicer 0.0.19: 12 hostile public loads, two warm-corruption retries,
+two tokenizer reload cases, four public plain-AWQ cases and three source-chat
+cases. The XVERSE-Ent tokenizer cases passed. The parent runs above separately
+verify the subsequent DeepSeek fixture and media-hygiene changes. Neither this
+audit nor the green CI result establishes complete released-Tokenicer support.
+
 | Integrated batch on the final Tokenicer runtime candidate | Result |
 | --- | --- |
 | Registry, fusion admission, ordering, AWQ plain/fold policy, loader/security/processor/config, norm lifecycle/teacher, Ouro support and native Nemotron-H | 999 passed, 466 skipped, 19 warnings; 73.68s |

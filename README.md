@@ -237,6 +237,12 @@ pip install gptqmodel
 # Or: uv pip install gptqmodel
 ```
 
+For ports that use timm or torchvision, install `pip install 'gptqmodel[vision]'`
+with a torchvision build compatible with your PyTorch installation. These
+optional dependencies are loaded when the affected vision component is used;
+core text installations do not install them. See the
+[vision dependency boundary](docs/transformers5-model-ports.md#optional-vision-dependencies).
+
 PyTorch **2.13.x or >= 2.15.0** is required; known-vulnerable versions are
 blocked by the [runtime safety check](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md).
 Compiled package backends build and cache extensions on first use (JIT),
