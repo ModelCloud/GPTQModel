@@ -3,6 +3,7 @@
 
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -253,3 +254,69 @@ def test_plan_rejects_cast_rope_buffers(model):
     model.model.to(torch.bfloat16)
     plan = model.plan(config=target(Matcher.attention()))
     assert not plan and any("nonpersistent" in error for error in plan.errors)
+
+
+def test_attention_sink_config_reaches_hessian_without_changing_forward_context(model, monkeypatch):
+    import gptqmodel.quantization.solver_format as runner
+
+    rows = [{"input_ids": torch.tensor([[1, 3, 1, 4, 1, 0]]),
+             "attention_mask": torch.tensor([[1, 1, 1, 1, 0, 0]])},
+            {"input_ids": torch.tensor([[5, 1, 7, 8, 9, 1]]), "attention_mask": torch.ones(1, 6, dtype=torch.long)}]
+    before = copy.deepcopy(rows)
+    inputs = []
+    module = model.model.model.layers[0].self_attn.q_proj
+    handle = module.register_forward_pre_hook(lambda module, args: inputs.append(args[0].detach().double().clone()))
+    with torch.inference_mode():
+        for row in rows:
+            model.model(**row, use_cache=False)
+    handle.remove()
+    selected = torch.cat([value[(row["input_ids"] != 1) & row["attention_mask"].bool()]
+                          for value, row in zip(inputs, rows)])
+    expected = selected.T @ selected / 6
+    original = runner.solve_gptq_hessian
+    calls = []
+
+    def check_hessian(weight, hessian, solver):
+        torch.testing.assert_close(hessian, expected, rtol=1e-14, atol=1e-14)
+        calls.append(hessian.clone())
+        return original(weight, hessian, solver)
+
+    monkeypatch.setattr(runner, "solve_gptq_hessian", check_hessian)
+    records = model.quantize(rows, config=target(Matcher.glob("model.layers.0.self_attn.q_proj")),
+                             tokenizer=SimpleNamespace(bos_token_id=1), calibration_exclude_attention_sinks=True)
+    assert len(calls) == 1
+    assert records[0]["tokens"] == 6 and records[0]["excluded_attention_sink_tokens"] == 4
+    for row, old in zip(rows, before):
+        assert all(torch.equal(row[name], value) for name, value in old.items())
+
+
+def test_attention_sink_option_without_tokenizer_bos_is_bitwise_noop(model):
+    other = Qwen2QModel(copy.deepcopy(model.model), quantized=False, quantize_config=None)
+    rows = calibration()
+    rows[0]["input_ids"][0, 0] = 1
+    model.model.config.bos_token_id = other.model.config.bos_token_id = 1
+    cfg = target(Matcher.attention())
+    baseline = model.quantize(rows, config=cfg, calibration_exclude_attention_sinks=False)
+    filtered = other.quantize(rows, config=cfg, tokenizer=SimpleNamespace(bos_token_id=None),
+                              calibration_exclude_attention_sinks=True)
+    assert baseline == filtered
+    assert all(row["tokens"] == 48 and row["excluded_attention_sink_tokens"] == 0 for row in filtered)
+    assert all(torch.equal(value, other.model.state_dict()[name]) for name, value in model.model.state_dict().items())
+
+
+def test_all_sink_tokens_fail_before_replay_or_weight_changes(model):
+    before = {name: tensor.clone() for name, tensor in model.model.state_dict().items()}
+    with pytest.raises(ValueError, match="No calibration tokens"):
+        model.quantize([[1, 1, 1]], config=target(Matcher.attention()),
+                       tokenizer=SimpleNamespace(bos_token_id=1), calibration_exclude_attention_sinks=True)
+    assert all(torch.equal(value, model.model.state_dict()[name]) for name, value in before.items())
+    assert all(not module._forward_pre_hooks for module in model.model.modules())
+
+
+def test_attention_sink_flag_requires_boolean_before_reading_calibration(model):
+    def unreadable():
+        raise AssertionError("calibration was consumed")
+        yield
+
+    with pytest.raises(TypeError, match="exclude_attention_sinks"):
+        model.quantize(unreadable(), config=target(Matcher.attention()), calibration_exclude_attention_sinks=1)

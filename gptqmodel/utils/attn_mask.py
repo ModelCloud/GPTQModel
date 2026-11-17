@@ -129,6 +129,14 @@ def calibration_row_keep(input_ids, attention_mask=None) -> tuple[torch.Tensor, 
     return ids, keep
 
 
+def tokenizer_bos_token_id(tokenizer) -> int | None:
+    for candidate in (tokenizer, getattr(tokenizer, "tokenizer", None)):
+        bos = getattr(candidate, "bos_token_id", None)
+        if isinstance(bos, int) and not isinstance(bos, bool):
+            return bos
+    return None
+
+
 def bos_token_positions(
     input_ids,
     attention_mask=None,
@@ -136,10 +144,9 @@ def bos_token_positions(
 ) -> torch.Tensor | None:
     """Return the ``[B, S]`` attended positions that hold the BOS token.
 
-    A BOS token is a massive-activation attention sink wherever it appears: at
-    the start of a row and at every document boundary of a concatenated
-    calibration window. ``None`` means there is none to exclude (the tokenizer
-    has no BOS token, or no attended position holds it).
+    This identifies the existing BOS-based exclusion policy, not all possible
+    attention/activation-derived sinks. It covers leading and interior document
+    boundaries. ``None`` means the tokenizer has no BOS or the row contains none.
     """
 
     if bos_token_id is None:
@@ -164,11 +171,10 @@ def exclude_attention_sinks(
 ) -> torch.Tensor | None:
     """Remove the attended BOS positions from a ``[B, S]`` calibration keep-mask.
 
-    A BOS token is a massive-activation attention sink wherever it appears: at
-    the start of a row and at every document boundary of a concatenated
-    calibration window (issue #4393). Nothing else is removed: a tokenizer
-    without a BOS token (Qwen2/2.5/3) has no sink to drop, and dropping its
-    first text token instead hurts quality (issue #4459).
+    All attended BOS tokens are excluded, including interior document boundaries
+    (issue #4393). Nothing else is removed: for BOS-less tokenizers (Qwen2/2.5/3),
+    this policy deliberately does not infer a sink from the first text position
+    (issue #4459). Such models can still have non-BOS positional sinks.
 
     ``bos_positions`` has the same ``[B, S]`` shape as the calibration batch.
     ``keep_mask`` is the padding keep-mask derived from ``attention_mask``;

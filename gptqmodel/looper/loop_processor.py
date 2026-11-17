@@ -32,7 +32,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import QuantizeConfig
-from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks
+from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks, tokenizer_bos_token_id
 from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
@@ -342,8 +342,8 @@ class CalibrationConfig:
     batch_size: int = 1
     # Drop attention-sink tokens (every attended BOS token: the leading one
     # and each document-boundary BOS of concatenated calibration) from every
-    # calibration statistic (issue #4393). Tokenizers without a BOS token have
-    # no sink to drop, so nothing changes for them (issue #4459). The tokens
+    # calibration statistic (issue #4393). Without a tokenizer BOS, this policy
+    # is a no-op; it does not infer positional sinks (issue #4459). The tokens
     # still run through the forward, so later tokens keep attending to them;
     # only the per-token rows each processor accumulates (Hessians, AWQ
     # features, sample counts) skip them. Applied once, by
@@ -686,7 +686,7 @@ class LoopProcessor:
             if bos_token_id is None:
                 log.warn(
                     "Calibration: `calibration_exclude_attention_sinks` is enabled but the "
-                    "tokenizer has no BOS token, so there is no attention sink to exclude; "
+                    "tokenizer has no BOS token, so there are no BOS sink rows to exclude; "
                     "calibration statistics are unchanged."
                 )
             else:
@@ -711,14 +711,7 @@ class LoopProcessor:
     def _attention_sink_bos_token_id(self) -> Optional[int]:
         """Return the tokenizer's BOS id, or ``None`` when it defines none."""
 
-        tokenizer = self.tokenizer
-        for candidate in (tokenizer, getattr(tokenizer, "tokenizer", None)):
-            if candidate is None:
-                continue
-            bos_token_id = getattr(candidate, "bos_token_id", None)
-            if isinstance(bos_token_id, int) and not isinstance(bos_token_id, bool):
-                return bos_token_id
-        return None
+        return tokenizer_bos_token_id(self.tokenizer)
 
     def _compute_attention_sink_positions(
         self, calibration_dataset, bos_token_id: int

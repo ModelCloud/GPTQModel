@@ -2130,13 +2130,16 @@ class BaseQModel(nn.Module):
                 raise ValueError("Unsupported quantization plan: " + "; ".join(plan.errors))
             if (adapter is not None or adapter_calibration_dataset is not None or checkpoint is not None
                     or embed_quant_config is not None or embed_quant_mode is not None or fuse
-                    or calibration_exclude_attention_sinks or calibration_concat_size is not None
+                    or calibration_concat_size is not None
                     or calibration_concat_separator is not None or backend not in (None, BACKEND.AUTO)
                     or calibration_sort not in (None, "desc") or calibration_data_min_length != 10):
                 raise ValueError("Solver/format quantization does not support these legacy quantize options")
+            from ..looper.loop_processor import CalibrationConfig
             from ..quantization.solver_format import quantize_model
 
-            return quantize_model(self, calibration, plan, tokenizer=tokenizer, batch_size=batch_size)
+            calibration_config = CalibrationConfig(dataset=calibration, batch_size=batch_size,
+                                                   exclude_attention_sinks=calibration_exclude_attention_sinks)
+            return quantize_model(self, calibration_config, plan, tokenizer=tokenizer)
         run_started = time.perf_counter()
         if type(calibration_exclude_attention_sinks) is not bool:
             raise TypeError("`calibration_exclude_attention_sinks` must be a bool")

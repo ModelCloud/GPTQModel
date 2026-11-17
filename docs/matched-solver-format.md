@@ -38,7 +38,7 @@ plan = model.plan(config=config)
 assert plan.success  # bool(plan) has the same meaning
 
 # quantize() ALWAYS builds/prints a fresh plan before consuming calibration.
-model.quantize(calibration, config=config)
+model.quantize(calibration, config=config, calibration_exclude_attention_sinks=True)
 model.save("qwen-mxfp4")
 restored = GPTQModel.load("qwen-mxfp4", device="cpu")
 ```
@@ -48,6 +48,14 @@ or mappings containing `input_ids` and optional `attention_mask`. This initial
 runner accepts one sequence per row (`batch_size=1`), preserves caller order,
 and excludes padding from Hessian statistics. It does not use the legacy
 sort/minimum-length/concatenation machinery. Supply at least two tokens per row.
+`calibration_exclude_attention_sinks=True` uses the existing
+`CalibrationConfig.exclude_attention_sinks` policy: every attended tokenizer
+BOS token is excluded from statistics, including interior document boundaries.
+The forward attention mask and tokens stay unchanged. The runner reports the
+excluded count and retained sample counts. With a BOS-less tokenizer such as
+Qwen2.5, the policy deliberately removes nothing; it does **not** detect or
+exclude non-BOS positional sinks. All-statistics-excluded input fails before
+replay or weight mutation.
 
 A scalar, unmatched config targets **all declared eligible linears**:
 
@@ -102,7 +110,7 @@ flowchart TD
     D -->|no| X[Print errors; fail before calibration]
     D -->|yes| E[Print all assignments; validate call options]
     E --> F[quantize_model: capture first decoder inputs]
-    F --> G[Replay stage group; Hessian.capture excludes padding]
+    F --> G[Replay stage group; Hessian.capture excludes padding and configured BOS rows]
     G --> H[solve_gptq_hessian: legal E2M1 on stored E8M0 scales]
     H --> I[MXFP4Linear: packed bytes and scale bytes only]
     I --> J[Replay updated layer; propagate hidden states]
@@ -153,7 +161,7 @@ The matcher is recipe metadata, not part of the encoded weight format.
 
 ```bash
 python -m pytest tests/test_matched_quantize_config.py tests/test_mxfp4_solver_kernel.py -q
-python -m scripts.validate_matched_mxfp4 --output /path/to/new-validation-directory
+python -m scripts.validate_matched_mxfp4 --output /path/to/new-validation-directory --exclude-attention-sinks
 ```
 
 The model script uses Qwen2.5-0.5B-Instruct in FP32 on CPU, all 168 decoder
@@ -189,3 +197,49 @@ population claim was inaccurate, so fluent output is not treated as quality proo
 This bounded evaluation is a lifecycle/quality smoke test, not full WikiText
 perplexity, lm-eval qualification, native GPU performance, arbitrary model/MoE
 support, activation quantization, or free-threaded PyTorch qualification.
+
+### Quality diagnosis and attention sinks
+
+Controls use the same FP32 source, target projections, 2,048 calibration tokens,
+and 1,016 held-out next-token predictions as above. These are small, contiguous
+WikiText windows, not representative calibration or a full-corpus benchmark.
+
+| Control | Held-out perplexity |
+| --- | ---: |
+| Dense source | 30.10793 |
+| RTN, existing conservative E8M0 scales | 37.93984 |
+| GPTQ, existing scales | 37.80622 |
+| GPTQ, existing BOS-sink exclusion enabled | 37.80622 |
+| GPTQ, diagnostic first-position statistics exclusion | 38.03082 |
+| RTN, per-block weight-MSE scale search | 36.37713 |
+
+The independent normal-equation tests validate the GPTQ update on a fixed
+nonuniform grid; this experiment does **not** establish a useful LLM-quality
+advantage over RTN. The current solver fixes the scales before error feedback.
+The scale-search control tries E8M0 exponent offsets `-2, -1, 0, +1` around
+the existing scale and chooses each block's lowest squared weight error. It
+changes 3,099,369 of 11,182,080 scale blocks and reduces total squared weight
+error from 2,079.09 to 1,856.30. This is a diagnostic RTN control, not a newly
+qualified public solver configuration. Better scales help in this sample;
+their integration into solver-owned optimization remains future work.
+
+Qwen2.5's tokenizer has no BOS. Its model-config BOS ID also occurs zero times
+in these calibration rows. Enabling the existing calibration option therefore
+excludes **zero** rows and reproduces the original quantized logits exactly,
+including save/load/re-save. It must not be described as successful removal of
+all attention sinks.
+
+Native attention and activation inspection of four calibration windows finds
+strong **non-BOS positional** sinks: the first token contributes approximately
+99.74% and 99.30% of input squared energy in decoder layers 2 and 3's
+`mlp.down_proj` (zero-based layers; mean of the four per-window fractions).
+However, the separate diagnostic run excluding the first statistic row of
+every window, while retaining all tokens in forward attention, keeps 2,032
+rows and slightly **worsens** perplexity. Strong activation energy alone does
+not justify changing the BOS-only policy to drop every first text token.
+
+Thus the observed increase is not evidence that GPTQ cannot solve MXFP4.
+MXFP4 representation error, a conservative fixed-scale recipe, and limited
+calibration are distinct concerns. This experiment isolates a scale recipe
+limitation and finds no improvement from blanket positional exclusion; it does
+not prove an optimal recipe or universal attention-sink policy.

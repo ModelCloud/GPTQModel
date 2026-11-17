@@ -10,6 +10,7 @@ from collections.abc import Mapping
 import torch
 
 from ..nn_modules.qlinear.mxfp4 import MXFP4Linear
+from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks, tokenizer_bos_token_id
 from .format_reference import decode_elements, encode_elements, fit_grid
 
 
@@ -132,8 +133,21 @@ def _next_inputs(args, kwargs, output):
 
 
 @torch.no_grad()
-def quantize_model(wrapper, calibration, plan, *, tokenizer=None, batch_size=1):
-    batches = _calibration_batches(calibration, tokenizer or wrapper.tokenizer, batch_size)
+def quantize_model(wrapper, calibration, plan, *, tokenizer=None):
+    tokenizer = tokenizer if tokenizer is not None else wrapper.tokenizer
+    batches = _calibration_batches(calibration.dataset, tokenizer, calibration.batch_size)
+    masks = [batch["attention_mask"] for batch in batches]
+    excluded = 0
+    if calibration.exclude_attention_sinks:
+        bos = tokenizer_bos_token_id(tokenizer)
+        if bos is None:
+            print("Calibration: tokenizer has no BOS token; attention-sink exclusion leaves statistics unchanged")
+        masks = [exclude_attention_sinks(mask, bos_token_positions(batch["input_ids"], mask, bos))
+                 for batch, mask in zip(batches, masks)]
+        excluded = sum(int(batch["attention_mask"].sum() - mask.sum()) for batch, mask in zip(batches, masks))
+        print(f"Calibration: exclude_attention_sinks drops {excluded} attended BOS tokens")
+    if not any(mask.any() for mask in masks):
+        raise ValueError("No calibration tokens remain after attention-sink exclusion")
     layers = wrapper.model.get_submodule(plan.layer_prefix)
     captured, solutions, records = [], {}, []
     training = wrapper.model.training
@@ -171,9 +185,9 @@ def quantize_model(wrapper, calibration, plan, *, tokenizer=None, batch_size=1):
                         accumulator = Hessian(module.in_features)
                         accumulators[entry.name] = accumulator
                         hooks.append(module.register_forward_pre_hook(accumulator.capture))
-                    for (args, kwargs), batch in zip(captured, batches):
+                    for (args, kwargs), mask in zip(captured, masks):
                         for accumulator in accumulators.values():
-                            accumulator.mask = batch["attention_mask"]
+                            accumulator.mask = mask
                         layer(*args, **kwargs)
                 finally:
                     for handle in hooks:
@@ -190,6 +204,7 @@ def quantize_model(wrapper, calibration, plan, *, tokenizer=None, batch_size=1):
                     solutions[entry.name] = {**entry.config.to_dict(), "in_features": module.in_features,
                                             "out_features": module.out_features, "bias": module.bias is not None}
                     records.append({"module": entry.name, "tokens": accumulator.tokens,
+                                    "excluded_attention_sink_tokens": excluded,
                                     "storage_bits": solution.storage_bits})
                     del module, solution, accumulator
             captured = [_next_inputs(args, kwargs, layer(*args, **kwargs)) for args, kwargs in captured]

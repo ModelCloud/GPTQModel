@@ -62,6 +62,7 @@ def main():
     parser.add_argument("--evaluation-samples", type=int, default=8)
     parser.add_argument("--sequence-length", type=int, default=128)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--exclude-attention-sinks", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(args.threads)
@@ -75,7 +76,7 @@ def main():
                                     solver=solvers.GPTQ(), format=formats.MXFP4())]
     dense_bytes = sum(t.numel() * t.element_size() for t in model.model.parameters())
     started = time.perf_counter()
-    records = model.quantize(calibration, config=targets)
+    records = model.quantize(calibration, config=targets, calibration_exclude_attention_sinks=args.exclude_attention_sinks)
     elapsed = time.perf_counter() - started
     quantized, predictions = evaluate(model, heldout)
     expected_payloads = payload_hashes(model)
@@ -110,6 +111,8 @@ def main():
         "model": args.model, "torch": torch.__version__, "device": "cpu", "threads": args.threads,
         "calibration_dataset": "Salesforce/wikitext/wikitext-2-raw-v1/train",
         "calibration_tokens": args.calibration_samples * args.sequence_length,
+        "calibration_exclude_attention_sinks": args.exclude_attention_sinks,
+        "excluded_attention_sink_tokens": records[0]["excluded_attention_sink_tokens"],
         "evaluation_dataset": "Salesforce/wikitext/wikitext-2-raw-v1/test",
         "dense": baseline, "gptq_mxfp4": quantized,
         "argmax_agreement": float((predictions == reference_predictions).float().mean()),
