@@ -208,6 +208,68 @@ def calibration_input_row_count(dataset: Any) -> Optional[int]:
         return None
 
 
+def attention_sink_bos_flags(
+    input_ids: Any,
+    attention_mask: Any = None,
+    bos_token_id: Optional[int] = None,
+) -> Optional[torch.Tensor]:
+    """Per-sample flags: the first non-padding token of the sample is BOS.
+
+    ``exclude_attention_sinks`` may only drop a token that is really an
+    attention sink. Qwen2.5/Qwen3 tokenizers add no BOS, so the historical
+    unconditional ``keep[:, 0] = False`` removed the first *text* token of
+    every row and could make GPTQ worse than RTN (issue #4459). This helper
+    turns the calibration ``input_ids`` into one flag per sample, which lets
+    the Hessian skip exactly the rows whose first retained token is the
+    tokenizer's BOS id.
+
+    Padding is resolved from ``attention_mask`` (left padding included): the
+    flag describes the first position that survives the mask, which is also
+    the first row GPTQ sees after the batch keep-mask is applied.
+
+    Returns ``None`` when the decision cannot be made from the supplied
+    metadata (no ids, no BOS id, unusable shape). Callers must then skip
+    position-0 masking instead of guessing. A tensor of all ``False`` is a
+    positive decision that nothing in this batch is a BOS sink.
+    """
+
+    if input_ids is None or bos_token_id is None:
+        return None
+
+    try:
+        ids = torch.as_tensor(input_ids)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    if ids.dim() == 1:
+        ids = ids.unsqueeze(0)
+    if ids.dim() != 2 or ids.shape[0] == 0:
+        return None
+    if ids.dtype == torch.bool or ids.is_floating_point() or ids.is_complex():
+        return None
+    ids = ids.to(dtype=torch.long)
+
+    if attention_mask is None:
+        keep = torch.ones_like(ids, dtype=torch.bool)
+    else:
+        try:
+            keep = torch.as_tensor(attention_mask)
+        except (TypeError, ValueError, RuntimeError):
+            return None
+        if keep.dim() == 1:
+            keep = keep.unsqueeze(0)
+        if keep.dim() != 2:
+            return None
+        if keep.shape != ids.shape:
+            return None
+        keep = keep.to(dtype=torch.bool)
+
+    has_token = keep.any(dim=1)
+    # ``argmax`` on an all-False row yields 0, which ``has_token`` masks out.
+    first_position = keep.to(dtype=torch.int8).argmax(dim=1)
+    first_ids = ids.gather(1, first_position.unsqueeze(1)).squeeze(1)
+    return has_token & (first_ids == int(bos_token_id))
+
+
 def _is_dataset_split_mapping(mapping: Mapping) -> bool:
     """Return True for a ``DatasetDict``-style mapping of splits to datasets."""
 
