@@ -1689,6 +1689,58 @@ class LoopProcessor:
         pass
 
 
+def rehome_failed_run_kernels(gptq_model) -> None:
+    """Best-effort switch of a failed run's packed layers to a runnable kernel.
+
+    The loop packs every finished layer with the calibration-time kernel, which
+    may be accelerator-only (AWQ GEMM, QQQ, GGUF Triton). The success path
+    rehomes them after the loop; a cancelled or failed run must do the same or
+    the next in-session forward raises ``Could not run ... with arguments from
+    the 'CPU' backend`` (#4947). Finished layers of a disk-offloaded run are
+    meta shells, so resolve the device from the rest of the model instead of
+    from their own tensors. Cleanup never masks the cancellation: a rehome
+    failure (for example the save-and-reload guidance) is logged and ignored.
+    """
+
+    from ..models.base import rehome_quantized_kernel
+
+    model = getattr(gptq_model, "model", None)
+    if model is None:
+        return
+
+    device = None
+    for module in model.modules():
+        runtime_device = getattr(module, "runtime_device", None)
+        if not callable(runtime_device):
+            continue
+        try:
+            candidate = runtime_device()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if candidate is not None and candidate.type != "meta":
+            device = candidate
+            break
+
+    if device is None:
+        for tensor in model.parameters():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+    if device is None:
+        for tensor in model.buffers():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+
+    try:
+        rehome_quantized_kernel(gptq_model, device=device)
+    except Exception:
+        log.warn(
+            "failed to rehome the quantized kernels of a cancelled/failed run",
+            exc_info=True,
+        )
+
+
 def release_failed_run_processors(processors) -> None:
     """Release every processor a failed run built, best effort (#4862).
 

@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+import types
 from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
@@ -619,6 +620,12 @@ def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
     """
 
     module.__class__ = target_cls
+    # An accelerate offload hook captures the previous class's bound ``forward``
+    # in ``_old_forward`` and calls it from its wrapper, so a class swap alone
+    # would keep executing the accelerator-only kernel (#4947). Rebind the
+    # captured forward to the target class.
+    if getattr(module, "_hf_hook", None) is not None and hasattr(module, "_old_forward"):
+        module._old_forward = types.MethodType(target_cls.forward, module)
     # ``__class__`` assignment never runs the target kernel's ``__init__``, so a
     # kernel that keeps runtime state on the instance has to install it here
     # (#4940; this path previously broke on #4451 and #4856).
@@ -643,7 +650,7 @@ def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
         post_init()
 
 
-def rehome_quantized_kernel(model) -> None:
+def rehome_quantized_kernel(model, device=None) -> None:
     """Make the in-session quantized layers runnable on their final device.
 
     The quantize loop deliberately leaves packed layers on CPU. For AWQ, QQQ
@@ -651,6 +658,11 @@ def rehome_quantized_kernel(model) -> None:
     in-session forward would fail. Switch those modules to the portable Torch
     kernel for the final device, or raise the reload-the-checkpoint guidance
     when no layout-compatible kernel exists.
+
+    ``device`` overrides the probe of the packed modules' runtime device. A
+    cancelled/failed run keeps its finished layers disk-offloaded as meta
+    shells, so the caller passes the device the rest of the model occupies
+    (#4947).
     """
 
     qcfg = getattr(model, "quantize_config", None)
@@ -665,15 +677,16 @@ def rehome_quantized_kernel(model) -> None:
     if not modules:
         return
 
-    device = next(
-        (
-            runtime_device
-            for module in modules
-            if (runtime_device := module.runtime_device()) is not None
-            and runtime_device.type != "meta"
-        ),
-        None,
-    )
+    if device is None:
+        device = next(
+            (
+                runtime_device
+                for module in modules
+                if (runtime_device := module.runtime_device()) is not None
+                and runtime_device.type != "meta"
+            ),
+            None,
+        )
     if device is None:
         return
 
