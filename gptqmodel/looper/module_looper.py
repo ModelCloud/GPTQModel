@@ -27,6 +27,7 @@ from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
+from ..looper.inflight_layer import InflightLayerTracker
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import (
     LoopProcessor,
@@ -216,7 +217,7 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
+class ModuleLooper(InflightLayerTracker, LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
     The looper executes work on the shared global :class:`DeviceThreadPool`
@@ -1904,80 +1905,6 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         """
 
         release_failed_run_processors(getattr(self, "processors", ()))
-
-    def _track_inflight_layer(
-        self,
-        module: torch.nn.Module,
-        home_device: Optional[torch.device] = None,
-    ) -> None:
-        """Remember the layer being staged and its pre-run home device."""
-
-        if not isinstance(module, torch.nn.Module):
-            return
-        if home_device is None:
-            try:
-                home_device = get_device(module)
-            except Exception:
-                home_device = CPU
-        # A lazy shell has no usable runtime placement to return to, so the
-        # model's ordinary CPU home is the only safe destination.
-        if getattr(home_device, "type", None) == "meta":
-            home_device = CPU
-        self._inflight_layer = (module, home_device)
-
-    def _clear_inflight_layer(self) -> None:
-        """Mark the current layer as complete so failure cleanup ignores it."""
-
-        self._inflight_layer = None
-
-    def _restore_inflight_layer(self) -> None:
-        """Return a cancelled/failed in-flight layer to its pre-run device.
-
-        The stage moves the whole layer to the compute device before a subset
-        forward. The success path relies on ``post_quantize`` to move it back,
-        but a ``StopMainLoop``/exception unwinds before that step, leaving every
-        parameter and buffer of the layer on the accelerator (issue #4546).
-
-        A cancelled subset can also unwind while its capture hooks are still
-        installed, and the failure path never reached the stage's release. The
-        inline ``forward_hook``/``forward_hook_last`` pair would then make every
-        later forward raise ``StopForward`` (issue #5009), so clear it here as a
-        safety net for the windows the stage guard cannot see.
-        """
-
-        inflight = self._inflight_layer
-        self._inflight_layer = None
-        if inflight is None:
-            return
-        module, home_device = inflight
-        self._clear_layer_capture_hooks(module)
-        try:
-            rehome_module_to_device(
-                module,
-                home_device,
-                move_parameters=True,
-                move_buffers=True,
-                root_module=getattr(self.gptq_model, "model", None),
-            )
-        except Exception:
-            # Cleanup must never mask the cancellation/failure that got us
-            # here; ``rehome_module_to_device`` already reports per-tensor
-            # failures, so this only guards unexpected structural errors.
-            log.warning(
-                "failed to restore in-flight quantization layer to %s",
-                home_device,
-                exc_info=True,
-            )
-
-    @staticmethod
-    def _clear_layer_capture_hooks(module: torch.nn.Module) -> None:
-        """Drop capture hooks a cancelled subset stage did not release (#5009)."""
-
-        for submodule in module.modules():
-            if getattr(submodule, "forward_hook", None) is not None:
-                submodule.forward_hook = None
-            if getattr(submodule, "forward_hook_last", False):
-                submodule.forward_hook_last = False
 
     def _fence_run_work(self) -> None:
         """Wait for work this run already submitted before tearing its state down.
