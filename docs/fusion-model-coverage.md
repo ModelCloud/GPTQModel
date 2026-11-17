@@ -211,8 +211,8 @@ layout alone does not authorize it.
 | `apertus1p5_text` | `Apertus1p5TextQModel` | Package-owned Apertus 1.5 text implementation; fusion executor remains unqualified. |
 | `axk2` | `AXK2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `baichuan` | `BaiChuanQModel` | Package-owned fused-QKV Baichuan implementation; fusion executor remains unqualified. |
-| `bailing_hybrid` | `BailingMoeQModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
-| `bailing_moe` | `BailingMoeQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `bailing_hybrid` | `BailingMoeQModel` | Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor. |
+| `bailing_moe` | `BailingMoeQModel` | Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor. |
 | `bloom` | `BloomQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `brumby` | `BrumbyQModel` | Package-owned power-retention implementation; fusion executor and retention replay remain unqualified. |
 | `chatglm` | `ChatGLMQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

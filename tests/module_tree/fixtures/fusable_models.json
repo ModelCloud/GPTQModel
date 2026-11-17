@@ -105,11 +105,11 @@
     },
     "bailing_hybrid": {
       "definition": "BailingMoeQModel",
-      "reason": "No compatible native projection forward: projections already combined, conditional, or preprocessed."
+      "reason": "Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor."
     },
     "bailing_moe": {
       "definition": "BailingMoeQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned dense/MLA/recurrent/MoE layouts; no qualified fused executor."
     },
     "bloom": {
       "definition": "BloomQModel",

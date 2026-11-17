@@ -264,15 +264,22 @@ def test_external_engine_helpers_require_security_bypass(monkeypatch, backend):
         load("unported-model", trust_remote_code=True)
 
 
-def test_unported_layout_fails_instead_of_loading_incompatible_native_model(tmp_path):
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_local_mla_layout_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
+    from gptqmodel.models.ports.bailing_moe.configuration_bailing import BailingConfig
+
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
     path = tmp_path / "ling"
     marker = checkpoint(path, "bailing_hybrid")
     payload = json.loads((path / "config.json").read_text())
     payload["q_lora_rank"] = 16
     (path / "config.json").write_text(json.dumps(payload))
-    for trust in (False, True):
-        with pytest.raises(RemoteCodeSecurityError):
-            load_model_config(path, trust_remote_code=trust)
+    config = load_model_config(path, trust_remote_code=trust)
+    assert isinstance(config, BailingConfig)
+    assert config.q_lora_rank == 16
+    assert resolve_trust_remote_code(path, trust_remote_code=trust) is False
     assert not marker.exists()
 
 

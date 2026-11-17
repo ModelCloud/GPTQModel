@@ -240,6 +240,8 @@ checkpoint `auto_map`. Executing unsupported checkpoint Python requires both
 `trust_remote_code=True` and the existing `GPTQ_BYPASS_SAFETY_CHECKS=1` security
 bypass. See [model loading policy](docs/trust-remote-code-isolation.md) and
 [local Transformers 5 ports and validation](docs/transformers5-model-ports.md).
+[Bailing/Ling layout and MTP replay](docs/transformers5-model-ports.md#bailing--ling-selection-and-replay)
+cover the package-owned GQA/MLA/recurrent variants and their qualification limits.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

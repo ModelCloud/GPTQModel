@@ -21,6 +21,36 @@ definition ownership corrections alongside the package-owned ports.
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
 
+### Bailing / Ling selection and replay
+
+`BailingMoeQModel` owns both aliases through `LocalModelLoader`. Its
+[pinned source and validation reference](../gptqmodel/models/ports/bailing_moe/README.md)
+records original Ling softmax GQA and normalized heads, V2 dense GQA, both MLA
+query projections, hybrid recurrence, MTP ownership and two-layer replay.
+Full meta inventories match the three pinned checkpoint indexes. The CPU port
+uses plain AWQ, with real quantization/packing/inference tests; no GPU, trained
+evaluation, fused FLA or full public quantize/save/load qualification is claimed.
+
+Previously the definition required checkpoint Python and omitted MTP envelope
+owners (`gptqmodel/models/definitions/bailing_moe.py:12-13,26-29` at `22bea1201`).
+The local config/model now select the layout and own the MTP projection and
+norms; the existing native layout delegates to Transformers 5.
+
+```mermaid
+flowchart TD
+    A[LocalModelLoader: BailingConfig.from_dict] --> B{is_native_hybrid}
+    B -->|native dense-query metadata| C[Transformers BailingHybridConfig and model]
+    B -->|legacy GQA or MLA| D[Package BailingConfig and BailingForCausalLM]
+    D --> E[Decoder attention and MoE with request-owned BailingCache]
+    E --> F{MTP layer replay}
+    F -->|yes| G[Captured input_ids, shifted embeddings and envelope norm]
+    F -->|no| H[Native rotary positions and causal or recurrent mask]
+    G --> I[Plain AWQ: no scale folding]
+    H --> I
+    A -. checkpoint auto_map and trust toggles .-> J[Ignored: never import checkpoint Python]
+    E -->|failed or unsupported cache| K[Reject reuse; reset and replay prefix]
+```
+
 Run the InternLM checks from the repository root:
 
 ```shell

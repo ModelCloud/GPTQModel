@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Issue #4373: `bailing_hybrid` remote-code layout must not be force-nativized.
+"""Issue #4373: Ling MLA layout must select its package-owned implementation.
 
 Ling-2.6-flash declares ``model_type=bailing_hybrid`` but ships its own
 ``auto_map`` model class and the remote MLA attention layout. The installed
-transformers ``BailingHybridForCausalLM`` is a different layout, so forcing
-``trust_remote_code=False`` from ``model_type`` alone crashes in
-``_init_weights``. These fixtures use local ``config.json`` files only; no
+transformers ``BailingHybridForCausalLM`` is a different layout. The definition
+now owns native delegation and the local MLA implementation, with remote code
+disabled even under the explicit bypass. These use local configs only; no
 checkpoint or remote module is downloaded or imported.
 """
 
@@ -16,11 +16,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils.hf import resolve_trust_remote_code
-from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
+from gptqmodel.utils.security import BYPASS_ENV
 
 
 def _write_config(directory: Path, payload: dict) -> Path:
@@ -105,7 +103,7 @@ def test_auto_map_config_only_does_not_select_remote_model_code(tmp_path):
     assert resolve_trust_remote_code(str(checkpoint), trust_remote_code=True) is False
 
 
-def test_bailing_hybrid_remote_code_layout_respects_explicit_trust(tmp_path, monkeypatch):
+def test_bailing_hybrid_local_layout_ignores_explicit_trust(tmp_path, monkeypatch):
     monkeypatch.setenv(BYPASS_ENV, "1")
     _clear_layout_caches()
     checkpoint = _write_config(
@@ -128,7 +126,7 @@ def test_bailing_hybrid_remote_code_layout_respects_explicit_trust(tmp_path, mon
         },
     )
 
-    assert resolve_trust_remote_code(str(checkpoint), trust_remote_code=True) is True
+    assert resolve_trust_remote_code(str(checkpoint), trust_remote_code=True) is False
 
 
 def test_bailing_hybrid_remote_code_layout_stays_off_without_trust(tmp_path):
@@ -147,13 +145,12 @@ def test_bailing_hybrid_remote_code_layout_stays_off_without_trust(tmp_path):
         },
     )
 
-    with pytest.raises(RemoteCodeSecurityError, match="local model port"):
-        resolve_trust_remote_code(str(checkpoint), trust_remote_code=False)
+    assert resolve_trust_remote_code(str(checkpoint), trust_remote_code=False) is False
 
 
 def test_bailing_hybrid_mla_marker_with_same_named_remote_class(tmp_path, monkeypatch):
-    monkeypatch.setenv(BYPASS_ENV, "1")
     """A same-named remote class still declares the MLA layout via config."""
+    monkeypatch.setenv(BYPASS_ENV, "1")
 
     _clear_layout_caches()
     checkpoint = _write_config(
@@ -172,4 +169,4 @@ def test_bailing_hybrid_mla_marker_with_same_named_remote_class(tmp_path, monkey
         },
     )
 
-    assert resolve_trust_remote_code(str(checkpoint), trust_remote_code=True) is True
+    assert resolve_trust_remote_code(str(checkpoint), trust_remote_code=True) is False
