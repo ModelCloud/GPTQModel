@@ -3169,6 +3169,18 @@ class AWQProcessor(LoopProcessor):
             if any(_ in name for _ in avoid_clipping):
                 continue
 
+            features = input_feat[name]
+            if features.numel() == 0:
+                # No calibration sample reached this projection (a subset
+                # early-stop used to starve a sibling, #4679). Clip search needs
+                # at least one token row; leave the module unclipped instead of
+                # reshaping an empty tensor.
+                log.warn(
+                    "AWQ: module `%s` received no calibration samples; skipping clip search.",
+                    name,
+                )
+                continue
+
             linear = named_linears[name]
             original_device = get_device(linear)
             target_device = _resolve_module_exec_device(linear)
@@ -3176,7 +3188,7 @@ class AWQProcessor(LoopProcessor):
 
             max_val = self._compute_best_clip(
                 linear.weight,
-                input_feat[name],
+                features,
                 bits=self._bits_for(layer, linear),
                 group_size=self._group_size_for(layer, linear),
                 format=self._format_for(layer, linear),
@@ -3210,6 +3222,11 @@ class AWQProcessor(LoopProcessor):
             raise ValueError(
                 "AWQ clipping expects a 2-D weight tensor, "
                 f"got shape {tuple(w.shape)}"
+            )
+        if input_feat.numel() == 0:
+            raise ValueError(
+                "AWQ clipping needs at least one calibration token row; "
+                "this module received no calibration samples."
             )
         org_w_shape = w.shape
         # w           [co, ci]      -> [co, 1, n_group, group size]
