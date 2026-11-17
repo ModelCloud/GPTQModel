@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 import torch
+import transformers
 from torch import nn
 from torch.nn import Module
 
@@ -50,6 +51,7 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
+from ..quantization.awq.utils.packing_utils import source_weight_out_in
 from ..quantization.config import FORMAT, METHOD, CalibrationConfig, MSEConfig, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
@@ -4687,14 +4689,20 @@ class AWQProcessor(LoopProcessor):
                 named_module.full_name, resolved_cfg=resolved_cfg,
             )
 
+            # transformers.Conv1D (GPT-2 and friends) stores [in, out]. AWQ
+            # pads and groups along the input-channel axis, so pseudo-quantize
+            # in the Linear [out, in] layout, exactly like the GPTQ packer
+            # (#4887).
+            is_conv1d = isinstance(linear_layer, transformers.pytorch_utils.Conv1D)
+            weight_for_quant = source_weight_out_in(linear_layer)
+
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
-            original_cols = linear_layer.weight.data.shape[1]
+            original_cols = weight_for_quant.shape[1]
             if isinstance(tp_info, dict):
                 pad_cols = int(tp_info.get("pad_cols", 0) or 0)
                 original_cols = int(tp_info.get("original_columns", original_cols))
 
-            weight_for_quant = linear_layer.weight.data
             if pad_cols:
                 pad = weight_for_quant.new_zeros(weight_for_quant.shape[0], pad_cols)
                 weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
@@ -4746,6 +4754,12 @@ class AWQProcessor(LoopProcessor):
                     scales = scales[:, :original_cols]
                     if zeros is not None:
                         zeros = zeros[:, :original_cols]
+
+            if is_conv1d:
+                # Restore the Conv1D [in, out] storage layout for the in-place
+                # weight swap below and for the AWQ packers, which transpose
+                # it back into the Linear layout.
+                wq = wq.t().contiguous()
 
             named_module.stream_state_payload_to_cpu(
                 {
