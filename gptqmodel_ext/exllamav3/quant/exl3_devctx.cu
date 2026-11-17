@@ -7,14 +7,6 @@ namespace cg = cooperative_groups;
 #include "../util.h"
 #include "../util.cuh"
 
-//DevCtx::DevCtc()
-//{
-//    int num_sms[MAX_DEVICES] = {};
-//    int cc[MAX_DEVICES] = {};
-//    void* locks[MAX_DEVICES] = {};
-//    std::mutex mtx;
-//}
-
 DevCtx& DevCtx::instance()
 {
     static DevCtx ctx;
@@ -49,33 +41,6 @@ int DevCtx::get_cc(int device)
     return cc[device];
 }
 
-void* DevCtx::get_ws(int device)
-{
-    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
-                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
-    std::lock_guard<std::mutex> lock(mtx);
-    if (!ws[device])
-    {
-        cudaSetDevice(device);
-        cudaMalloc(&ws[device], WORKSPACE_SIZE);
-    }
-    return ws[device];
-}
-
-int* DevCtx::get_locks(int device)
-{
-    TORCH_CHECK(device >= 0 && device < MAX_DEVICES,
-                "EXL3 device ordinal ", device, " exceeds MAX_DEVICES=", MAX_DEVICES);
-    std::lock_guard<std::mutex> lock(mtx);
-    if (!locks[device])
-    {
-        cudaSetDevice(device);
-        cudaMalloc(&locks[device], MAX_TILES_C * sizeof(int));
-        cudaMemset(locks[device], 0, MAX_TILES_C * sizeof(int));
-    }
-    return (int*) locks[device];
-}
-
 int g_get_cc(int device)
 {
     return DevCtx::instance().get_cc(device);
@@ -90,5 +55,4 @@ void prepare_ctx(int device)
 {
     DevCtx::instance().get_num_sms(device);
     DevCtx::instance().get_cc(device);
-    DevCtx::instance().get_locks(device);
 }

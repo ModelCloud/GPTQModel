@@ -87,13 +87,12 @@ void bc_linear_exl3_run_wrapper(
     std::optional<torch::Tensor> bias_opt,
     bool mcg,
     bool mul1,
-    torch::Tensor& xh,
     torch::Tensor x,
     torch::Tensor& y
 )
 {
     const c10::optional<at::Tensor> bias = bias_opt.has_value() ? c10::optional<at::Tensor>(bias_opt.value()) : c10::nullopt;
-    bc_linear_exl3_run(trellis, suh, svh, K, bias, mcg, mul1, xh, x, y);
+    bc_linear_exl3_run(trellis, suh, svh, K, bias, mcg, mul1, x, y);
 }
 
 }  // namespace
@@ -109,7 +108,7 @@ TORCH_LIBRARY(gptqmodel_exllamav3, m)
     m.def("reconstruct(Tensor(a!) unpacked, Tensor packed, int K, bool mcg, bool mul1) -> ()");
     m.def("had_r_128(Tensor input, Tensor(a!) output, Tensor? pre_scale, Tensor? post_scale, float scale) -> ()");
     m.def("hgemm(Tensor a, Tensor b, Tensor(a!) c) -> ()");
-    m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor(a!) xh, Tensor x, Tensor(b!) y) -> ()");
+    m.def("bc_linear_exl3_run(Tensor trellis, Tensor suh, Tensor svh, int K, Tensor? bias, bool mcg, bool mul1, Tensor x, Tensor(b!) y) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav3, CPU, m)
