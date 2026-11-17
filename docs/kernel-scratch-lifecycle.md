@@ -362,9 +362,8 @@ but it still keeps the kernels serialized per device.
 | Allocator pool per worker thread | Allocator pool per device |
 | `_quant_stream_tls = threading.local()` | `_quant_streams` dict plus `_quant_streams_lock` |
 
-Measured on Qwen2.5-0.5B-Instruct, `EXL3Config(bits=4)`, default device pool
-(four workers per device, two devices, 128-aligned projections). `streams` and
-`scratch sets` count what one quantization run allocated:
+Measured on Qwen2.5-0.5B-Instruct, `EXL3Config(bits=4)`, with the default device
+pool. `streams` and `scratch sets` count what one quantization run allocated:
 
 | Streams | Scope | Peak allocated | Peak reserved | Reserved after run | Scratch sets | Wall |
 | --- | --- | --- | --- | --- | --- | --- |
