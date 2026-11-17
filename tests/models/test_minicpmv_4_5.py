@@ -11,12 +11,11 @@ from PIL import Image
 
 class TestMiniCPMV4_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/MiniCPM-V-4_5"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 1
 
     def test_minicpmv_4_5(self):
-        # Evalution does not support minicpmv, and will throw an error during execution:
-        # E TypeError: MiniCPMV.forward() missing 1 required positional argument: 'data
+        # Exercise the package-owned media/chat path on the trained checkpoint.
         with self.model_compat_test_context():
             model, tokenizer, processor = self.quantModel(
                 self.NATIVE_MODEL_ID,

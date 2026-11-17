@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import Dict
 
 from PIL import Image
-from transformers import AutoModel, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
@@ -15,6 +15,7 @@ from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ._vlm_calibration import (
     finalize_conversation_batches,
     pop_conversation_calibration_options,
@@ -22,18 +23,13 @@ from ._vlm_calibration import (
 )
 
 
-def _allow_minicpmv_remote_tokenizer() -> None:
-    try:
-        from transformers.models.auto import tokenization_auto
-    except Exception:
-        return
-
-    incompatible = getattr(tokenization_auto, "MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS", None)
-    if isinstance(incompatible, set):
-        incompatible.discard("minicpmv")
-
 class MiniCPMVQModel(BaseQModel):
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.minicpmv.configuration_minicpm.MiniCPMVConfig",
+        model_class="gptqmodel.models.ports.minicpmv.modeling_minicpmv.MiniCPMV",
+        processor_class="gptqmodel.models.ports.minicpmv.processing_minicpmv.MiniCPMVProcessor",
+        tokenizer_class="gptqmodel.models.ports.minicpmv.tokenization_minicpmv.MiniCPMVTokenizer",
+    )
 
     pre_lm_head_norm_module = "llm.model.norm"
 
@@ -53,6 +49,8 @@ class MiniCPMVQModel(BaseQModel):
                 "k_proj:0:in=x",
                 "v_proj:0:in=x",
                 "o_proj:1",
+                "q_norm:!",
+                "k_norm:!",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
@@ -61,10 +59,12 @@ class MiniCPMVQModel(BaseQModel):
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
-    require_trust_remote_code = True
+    require_trust_remote_code = False
 
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        _allow_minicpmv_remote_tokenizer()
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # The wrapper spans legacy muP, Llama, Qwen2 and normalized-QK Qwen3.
+        # Fold/search/replay across these variants has not been qualified.
+        return []
 
     def pre_quantize_generate_hook_start(self):
         self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
@@ -105,7 +105,10 @@ class MiniCPMVQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return type(self).loader.load_processor(
+            self.model_local_path, config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     @staticmethod
     def _normalize_conversation(

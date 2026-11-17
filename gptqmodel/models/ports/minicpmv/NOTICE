@@ -1,0 +1,16 @@
+MiniCPM-V legacy Transformers 5 port
+Copyright 2024 OpenBMB and upstream MiniCPM-V contributors.
+Copyright 2026 ModelCloud.ai.
+
+Derived from the OpenBMB MiniCPM-V repositories listed with exact revisions
+and SHA-256 source hashes in PROVENANCE.json. Apache License, Version 2.0;
+the complete upstream LICENSE is retained alongside this notice.
+
+The timm original vision tower and Transformers Llama/Qwen2/Qwen3 primitives
+remain dependencies with their original licenses and are not vendored here.
+MiniCPM-V 4.6 is a separate native Transformers architecture and is unchanged.
+
+Modifications: package-owned dispatch/config/processor, current native decoder
+and cache interfaces, source MiniCPM residual/embedding/logit scaling, eager
+and SDPA vision, source spatial/temporal resamplers with invocation-local
+positions, safe serialization, native tokenizer binding, and CPU regressions.
