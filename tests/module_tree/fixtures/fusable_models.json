@@ -363,7 +363,7 @@
     },
     "dbrx_converted": {
       "definition": "DbrxConvertedQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned converted DBRX eager attention; fused projection execution has not been qualified."
     },
     "deci": {
       "definition": "DeciLMQModel",

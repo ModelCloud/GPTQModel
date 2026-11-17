@@ -218,7 +218,7 @@ layout alone does not authorize it.
 | `chatglm` | `ChatGLMQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `codegen` | `CodeGenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `dbrx` | `DbrxQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `dbrx_converted` | `DbrxConvertedQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `dbrx_converted` | `DbrxConvertedQModel` | Package-owned converted DBRX eager attention; fused projection execution has not been qualified. |
 | `deci` | `DeciLMQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `deepseek_v2` | `DeepSeekV2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `deepseek_v3` | `DeepSeekV3QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

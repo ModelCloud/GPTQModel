@@ -102,17 +102,19 @@ def test_real_loader_ignores_auto_map_and_roundtrips_safetensors(tmp_path, monke
 
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
-def test_public_gptqmodel_load_uses_local_architecture(tmp_path, monkeypatch, trust, bypass):
+@pytest.mark.parametrize("for_quantization", [False, True])
+def test_public_gptqmodel_load_uses_local_architecture(tmp_path, monkeypatch, trust, bypass, for_quantization):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import PreTrainedTokenizerFast
 
     from gptqmodel import GPTQModel
+    from gptqmodel.quantization import QuantizeConfig
 
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     if bypass:
         monkeypatch.setenv(BYPASS_ENV, "1")
-    model = make_model()
+    model = make_model(max_seq_len=8192)
     model.save_pretrained(tmp_path, safe_serialization=True)
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel({str(i): i for i in range(41)}, unk_token="0")),
@@ -120,9 +122,16 @@ def test_public_gptqmodel_load_uses_local_architecture(tmp_path, monkeypatch, tr
     )
     tokenizer.save_pretrained(tmp_path)
     marker = poison_checkpoint(tmp_path, json.loads((tmp_path / "config.json").read_text()))
-    wrapped = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    quantize_config = QuantizeConfig(bits=4, group_size=16, offload_to_disk=False) if for_quantization else None
+    wrapped = GPTQModel.load(
+        str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust,
+        quantize_config=quantize_config,
+    )
     assert isinstance(wrapped, DbrxConvertedQModel)
     assert type(wrapped.model) is type(model)
+    assert wrapped.model.config.max_seq_len == 8192
+    if for_quantization:
+        assert wrapped.model.seqlen == 8192
     assert wrapped.module_plan().find("ffn.experts.mlp.2.w2").quantize
     ids = torch.tensor([[1, 3, 7, 11]])
     with torch.inference_mode():

@@ -11,6 +11,10 @@ definition ownership corrections alongside the package-owned ports.
 
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `ChatGLMQModel` / `chatglm` | [GLM2/3/4 pinned sources and licenses](../gptqmodel/models/ports/chatglm/PROVENANCE.md), [selection/cache coverage](../gptqmodel/models/ports/chatglm/COVERAGE.md) | Published 200/200/284-key meta schemas; independent FP32/FP16/BF16 MQA/MHA equations, prefix tuning, generation, cache retry/reorder, repeated safetensors reload and public hostile metadata matrix | Eight actual CPU plain-AWQ quantize/save/reload variants; no scale groups | No trained-checkpoint quality, GPU or long-context qualification; GLM2 rotary uses GLM3-style FP32 frequencies; static/sliding caches and tokenizer-specific chat helpers unsupported; ChatGLM1 rejected |
+| `CodeGenQModel` / `codegen` | [CodeGen/CodeGen2 partition and checkpoint provenance](../gptqmodel/models/ports/codegen/PROVENANCE.md); native four partitions, package-owned eight partitions | Independent per-head equations, exact native four-partition parity, legacy metadata/mask validation, cache/generation, FP32/FP16/BF16 safetensors reload, public hostile metadata matrix and full-size meta ownership | Actual plain quantization of all four decoder linears; no scale groups | No trained multi-GB/GPU accuracy, packed quantized reload or multi-GPU concurrency qualification; ambiguous legacy metadata requires explicit `qkv_layout` |
+| `DbrxConvertedQModel` / `dbrx_converted` | [Converted DBRX sources, Databricks license and notice](../gptqmodel/models/ports/dbrx_converted/PROVENANCE.md) | Both pinned 2203-key indexes match full meta state; independent FP32/FP16/BF16 MHA/GQA/MQA and MoE equations, dynamic/static cache, beam generation, public hostile metadata matrix and safetensors reload | Public CPU plain-AWQ quantize/pack/save/reload of all 26 tiny linears; routers and norms stay dense | Eager only; no GPU, trained 132B quality, compilation, SDPA/FlashAttention, training, fusion or AWQ scale-fold/search qualification |
+| `BailingMoeQModel` / `bailing_moe`, `bailing_hybrid` | [Ling dense/MLA/hybrid/MTP provenance](../gptqmodel/models/ports/bailing_moe/README.md) | Three full meta indexes; dense GQA, normalized heads, low-rank/dense-query MLA, recurrence, MTP replay, generation, safetensors reload and head/loss failure-reset coverage | Actual CPU plain quantization/packing/inference; no scale groups | No GPU, trained evaluation, fused FLA or full public quantize/save/load qualification |
 | `ApertusQModel`, `Apertus1p5TextQModel`, `Apertus1p5QModel` / `apertus`, `apertus1p5_text`, `apertus1p5` | [Native Apertus and package-owned 1.5 text/multimodal qualification](../gptqmodel/models/ports/apertus/README.md); pinned Apache-2.0 Swiss AI fork | Native text oracle; full/pruned output vocabularies, bias/activation variants, live CPU/meta ownership, eager/decoder-SDPA cache/generation and safetensors reload, actual image/audio processor and embedding splice, public hostile metadata matrix | Actual CPU plain quantization of every decoder projection across layouts, including failure/retry; no scale folding/search | Official gated checkpoint returned HTTP 401: no trained weights, official tokenizer/chat template or checkpoint key audit; no GPU/FlashAttention/CUDA xIELU, packed GPTQ/AWQ roundtrip or fusion qualification; vision attention remains the source's fixed implementation |
 | `AgnesQModel` / `agnes` | [Agnes 3.0 Flash multimodal port and pinned Apache-2.0 provenance](../gptqmodel/models/ports/agnes/README.md) | Full 1506-key checkpoint schema; independent FP64 delta recurrence and image/video patch oracles; mixed/homogeneous attention and parallel FFN layouts, media/cache/beam/failure-reset behavior, real local processor save/reload, public malicious model/processor metadata matrix | Actual plain AWQ quantization for both FFN layouts; delta state/norm/convolution tensors stay dense; no scale groups | No GPU/FP16, trained-checkpoint load/quality, video file decoder or fused FLA/CUDA qualification; recurrent crop/assisted rollback explicitly unsupported |
 | `BaiChuanQModel` / `baichuan` | [Baichuan 1/2 source and layout provenance](../gptqmodel/models/ports/baichuan/PROVENANCE.md); pinned Apache-2.0 sources for 7B/13B variants | Independent FP32/FP16/BF16 oracles for all four variants; fused QKV, RoPE/ALiBi and normalized heads, cache/generation, malicious metadata matrix, safetensors round trips and live CPU/meta ownership; both 13B index schemas audited | Actual plain AWQ processor quantizes all five decoder linears; norms and Baichuan 1 persistent rotary buffer stay dense; retry idempotence | No GPU, trained-checkpoint or monolithic 7B payload audit; static/tuple/offloaded caches, AWQ scale search/replay, upstream chat/quantizer helpers and fusion unqualified |
@@ -48,8 +52,51 @@ flowchart TD
     G --> I[Plain AWQ: no scale folding]
     H --> I
     A -. checkpoint auto_map and trust toggles .-> J[Ignored: never import checkpoint Python]
-    E -->|failed or unsupported cache| K[Reject reuse; reset and replay prefix]
+    E --> L[LM and MTP heads, losses and output encoding]
+    L -->|success| M[Mark BailingCache complete and return]
+    L -->|exception| K[Reject reuse; reset and replay prefix]
+    E -->|failed or unsupported cache| K
 ```
+
+### CodeGen layout and ChatGLM / converted DBRX loading
+
+Before these ports, `definitions/chatglm.py:13-14,33-85` and
+`definitions/dbrx_converted.py:10-11` at `22bea1201` required checkpoint code;
+ChatGLM additionally patched its generation hooks. CodeGen had no owned loader
+(`definitions/codegen.py:9`), allowing native attention's four partitions to
+reinterpret CodeGen2 eight-partition weights. The shipped definitions select
+their package classes explicitly; layout metadata never grants checkpoint code
+execution. [CodeGen evidence](../gptqmodel/models/ports/codegen/PROVENANCE.md),
+[ChatGLM evidence](../gptqmodel/models/ports/chatglm/COVERAGE.md) and
+[DBRX evidence](../gptqmodel/models/ports/dbrx_converted/PROVENANCE.md) include
+pinned sources, before/after references and regression commands.
+
+```mermaid
+flowchart TD
+    A[Definition-owned LocalModelLoader] --> B{Model definition}
+    B -->|CodeGenQModel| C[CodeGenConfig.validate_layout]
+    C -->|qvk_4| D[NativeCodeGenModel]
+    C -->|qvk_8| E[CodeGen2Model and CodeGen2Attention]
+    C -->|ambiguous or conflicting metadata| X[ValueError before weight loading]
+    B -->|ChatGLMQModel| F[ChatGLMConfig]
+    F -->|rope_ratio absent| G[GLM2/3 sequence-first core]
+    F -->|rope_ratio present| H[GLM4 batch-first core]
+    F -->|ChatGLM1 or unsupported quantization_bit| X
+    G --> I[Private layer results then fresh DynamicCache]
+    H --> I
+    I -->|decoder failure| J[Raise with input cache unchanged]
+    B -->|DbrxConvertedQModel| K[DbrxConfig validates dimensions and expert top-k]
+    K -->|valid| L[DbrxForCausalLM split QKV and experts]
+    K -->|invalid| X
+    L --> M[Plain AWQ of declared projections then packed safetensors reload]
+    N[Checkpoint auto_map and trust toggles] -. cannot replace owned classes .-> A
+```
+
+The DBRX loader reads `max_seq_len` alongside other context-length keys, including
+on quantized reload; it no longer substitutes 4096 for a published context size.
+ChatGLM preserves caller cache ownership by assembling a fresh output cache only
+after all layers succeed. Both CodeGen layouts and ChatGLM use plain AWQ, too;
+none of these ports claims qualified source folding or scale search.
 
 Run the InternLM checks from the repository root:
 

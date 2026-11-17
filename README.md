@@ -264,6 +264,8 @@ bypass. See [model loading policy](docs/trust-remote-code-isolation.md) and
 [local Transformers 5 ports and validation](docs/transformers5-model-ports.md).
 [Bailing/Ling layout and MTP replay](docs/transformers5-model-ports.md#bailing--ling-selection-and-replay)
 cover the package-owned GQA/MLA/recurrent variants and their qualification limits.
+[CodeGen, ChatGLM and converted DBRX loading](docs/transformers5-model-ports.md#codegen-layout-and-chatglm--converted-dbrx-loading)
+documents partition selection, cache ownership and plain AWQ qualification.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
