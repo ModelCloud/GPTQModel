@@ -5515,15 +5515,19 @@ class BaseQModel(nn.Module):
 
             ``refuse_last_module_fallback`` is set when the block immediately
             before this one declared only modules that this layer does not own
-            (for example the MLA `q_b_proj`/`kv_b_proj` pair on a Ling 2.0
-            layer). `last_module` then still points at the run before that
-            absent block, which is not this block's producer: falling back to it
-            folded `attention.dense` into `input_layernorm` (#4677).
+            **and** that absent declaration is a data-flow predecessor of this
+            block (for example the MLA `q_b_proj`/`kv_b_proj` pair before
+            `attention.dense` on a Ling 2.0 layer). `last_module` then still
+            points at the run before that absent block, which is not this
+            block's producer: falling back to it folded `attention.dense` into
+            `input_layernorm` (#4677).
 
-            The caller clears the flag when this block declares the same
-            `:in=<tag>` shared input as the absent block: the two are siblings
-            reading one tensor, so the norm before them is still this block's
-            producer (#4732).
+            An absent *sibling branch* never clears the source: `mamba` vs
+            `self_attn`, `conv` vs `self_attn`, or `self_attn` vs `attention`
+            are alternative mixers of one layer, so the norm before them still
+            feeds this block (#4759). The caller also clears the flag when this
+            block declares the same `:in=<tag>` shared input as the absent
+            block: the two are siblings reading one tensor (#4732).
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -5687,6 +5691,13 @@ class BaseQModel(nn.Module):
         # module still declares which tensor it would have read, so a following
         # block with the same tag is its sibling rather than its consumer.
         prev_absent_block_tags: set[str] = set()
+        # Branch (plan parent) of each block in that run of absent declarations.
+        prev_absent_block_parents: set[str] = set()
+        # Branch of every quantized block emitted since the last declared
+        # non-quantized block. A run of absent declarations that follows a
+        # present block of the same branch is a data-flow predecessor of the
+        # consumer: it sits downstream of a projection this layer owns.
+        present_block_parents: set[str] = set()
         for block in full_layer_modules:
             block_absent = False
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
@@ -5712,6 +5723,8 @@ class BaseQModel(nn.Module):
                 # A declared norm block is a real producer for the next run.
                 prev_block_absent = False
                 prev_absent_block_tags = set()
+                prev_absent_block_parents = set()
+                present_block_parents = set()
                 continue
 
             prev_not_quantized = False
@@ -5735,11 +5748,13 @@ class BaseQModel(nn.Module):
             is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
             is_moe_gate_up_block = is_moe_block and has_gate_up_roles
             block_input_tags = set()
+            block_parents = set()
             for name in block:
                 if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
                     spec = plan.find(self._parse_module_flags(name)[0])
                     if spec is not None:
                         block_input_tags.update(flag[3:] for flag in spec.flags if flag.startswith("in="))
+                        block_parents.add(spec.parent)
             shared_tag = next(iter(block_input_tags)) if len(block_input_tags) == 1 else None
             # Qwen3.5-style hybrid trees declare `self_attn` and `linear_attn`
             # against one `:in=` tag, and a linear-attention layer owns no
@@ -5751,6 +5766,17 @@ class BaseQModel(nn.Module):
             sibling_of_absent_block = (
                 shared_tag is not None and shared_tag in prev_absent_block_tags
             )
+            # An absent declaration may only take the fold source away when it
+            # is a data-flow predecessor of this block, never when it is a
+            # sibling branch the layer does not own. Sibling branches are
+            # declared under a different plan parent (`mamba` vs `self_attn`,
+            # `conv` vs `self_attn`, `self_attn` vs `attention`). The remaining
+            # case is the same branch (`attention.q_b/kv_b` before
+            # `attention.dense`), which only interrupts the flow when a
+            # quantized block of that branch was already emitted (#4677).
+            absent_in_same_branch = bool(block_parents & prev_absent_block_parents)
+            branch_already_quantized = bool(block_parents & present_block_parents)
+            absent_is_predecessor = absent_in_same_branch and branch_already_quantized
             skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 pending_nonquant.clear()
@@ -5809,6 +5835,10 @@ class BaseQModel(nn.Module):
                         subset_names.append(name)
 
                 block_absent = not subset and not skip
+                if subset:
+                    # This block really owns modules, so a later absent
+                    # declaration in the same branch is downstream of it.
+                    present_block_parents = present_block_parents | block_parents
                 if skip or not subset:
                     pending_nonquant.clear()
                     skip_block = True
@@ -5870,7 +5900,9 @@ class BaseQModel(nn.Module):
                         allow_block_norm=allow_block_norm,
                         shared_source=shared_source,
                         refuse_last_module_fallback=(
-                            prev_block_absent and not sibling_of_absent_block
+                            prev_block_absent
+                            and absent_is_predecessor
+                            and not sibling_of_absent_block
                         ),
                     )
                     moe_consumers = (
@@ -5964,6 +5996,12 @@ class BaseQModel(nn.Module):
             # visible to the block that follows the run (#4732).
             prev_absent_block_tags = (
                 (prev_absent_block_tags | set(block_input_tags)) if block_absent else set()
+            )
+            # Same union for the declared branch of the run, so the block that
+            # follows a whole run of absent declarations still knows whether
+            # they were its siblings or its predecessors.
+            prev_absent_block_parents = (
+                (prev_absent_block_parents | block_parents) if block_absent else set()
             )
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
