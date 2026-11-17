@@ -26,6 +26,9 @@ pytest.importorskip("mlx.core")
 def test_qqq_processor_uses_portable_checkpoint_holder_on_macos():
     processor = object.__new__(QQQProcessor)
     processor.qcfg = QQQConfig(offload_to_disk=False)
+    # `__init__` records the user's backend request; AUTO keeps macOS on the
+    # portable Torch holder instead of the FP16-only CUDA QQQ kernel.
+    processor.requested_backend = BACKEND.AUTO
     assert processor._quant_linear_kernel() == (
         QQQTorchLinear,
         BACKEND.QQQ_TORCH,
