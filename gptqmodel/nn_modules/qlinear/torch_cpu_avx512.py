@@ -15,6 +15,7 @@ from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
+from ._fused_train_state import finalize_fused_train_state
 from .torch_aten_kernel import TorchAtenLinear
 
 
@@ -122,9 +123,10 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
     # be restored before a checkpoint load or save.
     _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
-    # The AVX512 extension packs a different layout with no verified inverse;
-    # keep the full checkpoint snapshot.
-    _FUSED_TRAIN_STATE_REBUILD = None
+    # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4``, so the
+    # checkpoint ``qweight`` is rebuilt on save instead of kept resident. The
+    # remaining snapshot entries are per-column metadata, not the packed weight.
+    _FUSED_TRAIN_STATE_REBUILD = "avx512_gptq"
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
@@ -220,6 +222,11 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         # ``g_idx`` still aliases the checkpoint mapping and would pin the whole
         # shard even though ``qweight``/``qzeros`` are now private (#4785).
         self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
+        # ``unpack_hf_int4`` inverts ``pack_hf_int4``, so the checkpoint
+        # ``qweight`` can be rebuilt on save. Drop the resident clone once that
+        # inverse reproduces the bytes captured before the transform; a layout
+        # this build cannot invert keeps it (#4783).
+        finalize_fused_train_state(self)
 
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:
