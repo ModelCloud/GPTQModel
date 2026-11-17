@@ -1,0 +1,2157 @@
+{
+  "model.embed_tokens.weight": [
+    32001,
+    1600
+  ],
+  "model.final_layernorm.weight": [
+    1600
+  ],
+  "model.layers.0.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.0.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.0.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.0.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.0.mamba.D.0": [
+    3200
+  ],
+  "model.layers.0.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.0.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.0.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.0.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.0.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.0.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.0.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.0.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.0.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.0.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.0.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.0.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.0.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.0.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.1.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.1.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.1.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.1.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.1.mamba.D.0": [
+    3200
+  ],
+  "model.layers.1.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.1.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.1.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.1.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.1.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.1.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.1.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.1.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.1.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.1.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.1.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.1.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.1.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.1.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.10.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.10.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.10.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.10.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.10.mamba.D.0": [
+    3200
+  ],
+  "model.layers.10.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.10.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.10.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.10.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.10.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.10.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.10.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.10.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.10.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.10.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.10.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.10.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.10.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.10.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.11.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.11.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.11.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.11.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.11.mamba.D.0": [
+    3200
+  ],
+  "model.layers.11.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.11.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.11.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.11.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.11.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.11.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.11.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.11.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.11.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.11.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.11.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.11.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.11.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.11.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.12.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.12.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.12.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.12.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.12.mamba.D.0": [
+    3200
+  ],
+  "model.layers.12.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.12.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.12.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.12.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.12.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.12.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.12.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.12.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.12.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.12.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.12.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.12.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.12.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.12.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.13.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.13.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.13.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.13.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.13.mamba.D.0": [
+    3200
+  ],
+  "model.layers.13.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.13.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.13.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.13.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.13.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.13.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.13.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.13.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.13.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.13.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.13.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.13.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.13.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.13.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.14.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.14.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.14.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.14.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.14.mamba.D.0": [
+    3200
+  ],
+  "model.layers.14.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.14.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.14.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.14.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.14.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.14.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.14.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.14.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.14.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.14.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.14.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.14.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.14.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.14.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.15.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.15.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.15.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.15.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.15.mamba.D.0": [
+    3200
+  ],
+  "model.layers.15.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.15.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.15.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.15.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.15.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.15.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.15.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.15.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.15.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.15.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.15.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.15.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.15.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.15.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.16.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.16.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.16.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.16.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.16.mamba.D.0": [
+    3200
+  ],
+  "model.layers.16.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.16.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.16.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.16.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.16.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.16.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.16.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.16.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.16.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.16.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.16.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.16.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.16.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.16.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.17.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.17.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.17.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.17.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.17.mamba.D.0": [
+    3200
+  ],
+  "model.layers.17.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.17.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.17.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.17.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.17.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.17.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.17.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.17.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.17.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.17.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.17.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.17.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.17.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.17.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.18.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.18.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.18.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.18.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.18.mamba.D.0": [
+    3200
+  ],
+  "model.layers.18.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.18.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.18.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.18.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.18.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.18.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.18.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.18.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.18.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.18.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.18.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.18.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.18.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.18.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.19.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.19.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.19.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.19.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.19.mamba.D.0": [
+    3200
+  ],
+  "model.layers.19.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.19.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.19.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.19.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.19.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.19.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.19.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.19.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.19.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.19.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.19.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.19.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.19.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.19.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.2.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.2.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.2.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.2.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.2.mamba.D.0": [
+    3200
+  ],
+  "model.layers.2.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.2.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.2.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.2.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.2.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.2.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.2.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.2.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.2.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.2.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.2.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.2.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.2.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.2.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.20.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.20.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.20.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.20.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.20.mamba.D.0": [
+    3200
+  ],
+  "model.layers.20.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.20.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.20.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.20.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.20.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.20.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.20.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.20.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.20.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.20.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.20.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.20.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.20.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.20.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.21.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.21.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.21.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.21.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.21.mamba.D.0": [
+    3200
+  ],
+  "model.layers.21.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.21.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.21.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.21.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.21.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.21.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.21.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.21.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.21.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.21.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.21.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.21.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.21.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.21.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.22.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.22.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.22.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.22.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.22.mamba.D.0": [
+    3200
+  ],
+  "model.layers.22.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.22.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.22.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.22.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.22.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.22.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.22.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.22.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.22.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.22.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.22.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.22.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.22.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.22.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.23.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.23.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.23.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.23.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.23.mamba.D.0": [
+    3200
+  ],
+  "model.layers.23.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.23.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.23.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.23.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.23.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.23.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.23.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.23.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.23.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.23.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.23.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.23.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.23.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.23.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.24.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.24.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.24.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.24.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.24.mamba.D.0": [
+    3200
+  ],
+  "model.layers.24.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.24.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.24.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.24.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.24.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.24.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.24.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.24.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.24.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.24.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.24.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.24.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.24.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.24.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.25.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.25.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.25.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.25.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.25.mamba.D.0": [
+    3200
+  ],
+  "model.layers.25.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.25.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.25.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.25.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.25.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.25.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.25.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.25.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.25.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.25.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.25.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.25.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.25.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.25.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.26.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.26.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.26.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.26.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.26.mamba.D.0": [
+    3200
+  ],
+  "model.layers.26.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.26.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.26.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.26.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.26.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.26.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.26.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.26.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.26.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.26.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.26.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.26.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.26.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.26.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.27.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.27.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.27.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.27.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.27.mamba.D.0": [
+    3200
+  ],
+  "model.layers.27.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.27.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.27.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.27.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.27.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.27.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.27.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.27.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.27.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.27.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.27.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.27.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.27.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.27.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.28.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.28.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.28.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.28.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.28.mamba.D.0": [
+    3200
+  ],
+  "model.layers.28.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.28.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.28.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.28.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.28.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.28.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.28.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.28.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.28.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.28.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.28.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.28.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.28.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.28.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.29.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.29.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.29.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.29.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.29.mamba.D.0": [
+    3200
+  ],
+  "model.layers.29.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.29.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.29.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.29.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.29.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.29.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.29.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.29.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.29.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.29.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.29.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.29.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.29.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.29.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.3.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.3.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.3.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.3.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.3.mamba.D.0": [
+    3200
+  ],
+  "model.layers.3.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.3.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.3.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.3.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.3.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.3.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.3.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.3.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.3.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.3.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.3.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.3.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.3.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.3.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.30.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.30.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.30.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.30.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.30.mamba.D.0": [
+    3200
+  ],
+  "model.layers.30.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.30.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.30.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.30.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.30.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.30.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.30.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.30.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.30.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.30.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.30.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.30.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.30.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.30.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.31.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.31.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.31.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.31.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.31.mamba.D.0": [
+    3200
+  ],
+  "model.layers.31.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.31.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.31.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.31.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.31.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.31.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.31.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.31.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.31.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.31.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.31.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.31.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.31.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.31.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.4.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.4.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.4.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.4.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.4.mamba.D.0": [
+    3200
+  ],
+  "model.layers.4.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.4.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.4.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.4.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.4.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.4.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.4.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.4.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.4.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.4.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.4.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.4.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.4.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.4.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.5.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.5.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.5.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.5.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.5.mamba.D.0": [
+    3200
+  ],
+  "model.layers.5.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.5.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.5.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.5.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.5.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.5.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.5.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.5.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.5.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.5.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.5.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.5.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.5.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.5.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.6.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.6.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.6.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.6.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.6.mamba.D.0": [
+    3200
+  ],
+  "model.layers.6.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.6.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.6.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.6.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.6.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.6.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.6.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.6.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.6.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.6.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.6.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.6.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.6.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.6.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.7.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.7.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.7.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.7.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.7.mamba.D.0": [
+    3200
+  ],
+  "model.layers.7.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.7.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.7.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.7.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.7.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.7.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.7.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.7.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.7.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.7.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.7.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.7.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.7.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.7.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.8.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.8.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.8.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.8.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.8.mamba.D.0": [
+    3200
+  ],
+  "model.layers.8.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.8.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.8.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.8.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.8.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.8.mamba.in_proj.weight": [
+    8000,
+    1600
+  ],
+  "model.layers.8.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.8.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.8.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.8.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.8.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.8.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.8.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.8.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.layers.9.input_layernorm.weight": [
+    1600
+  ],
+  "model.layers.9.mamba.A_log.0": [
+    3200,
+    16
+  ],
+  "model.layers.9.mamba.B_layernorm.weight": [
+    16
+  ],
+  "model.layers.9.mamba.C_layernorm.weight": [
+    16
+  ],
+  "model.layers.9.mamba.D.0": [
+    3200
+  ],
+  "model.layers.9.mamba.conv1d.bias": [
+    3200
+  ],
+  "model.layers.9.mamba.conv1d.weight": [
+    3200,
+    1,
+    4
+  ],
+  "model.layers.9.mamba.dt_layernorm.weight": [
+    100
+  ],
+  "model.layers.9.mamba.dt_proj.0.bias": [
+    3200
+  ],
+  "model.layers.9.mamba.dt_proj.0.weight": [
+    3200,
+    100
+  ],
+  "model.layers.9.mamba.in_proj.weight": [
+    8960,
+    1600
+  ],
+  "model.layers.9.mamba.out_proj.weight": [
+    1600,
+    3200
+  ],
+  "model.layers.9.mamba.pre_avg_layernorm1.weight": [
+    3200
+  ],
+  "model.layers.9.mamba.pre_avg_layernorm2.weight": [
+    3200
+  ],
+  "model.layers.9.mamba.x_proj.0.weight": [
+    132,
+    3200
+  ],
+  "model.layers.9.moe.experts.0.down_proj.weight": [
+    1600,
+    5504
+  ],
+  "model.layers.9.moe.experts.0.gate_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.9.moe.experts.0.up_proj.weight": [
+    5504,
+    1600
+  ],
+  "model.layers.9.pre_moe_layernorm.weight": [
+    1600
+  ],
+  "model.memory_tokens": [
+    128,
+    1600
+  ]
+}
