@@ -1344,19 +1344,27 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        if self._is_runtime_layout():
-            from ...utils.checkpoint_state import is_checkpoint_serialization
+        # The first forward rewrites `_buffers` (register_buffer for the fused
+        # snapshot, rebinding `qweight`/`qzeros`, and popping the clone in
+        # `finalize_fused_train_state`). Serialize with that transform: without
+        # the lock `nn.Module._save_to_state_dict` iterates a dict that is being
+        # resized ("dictionary changed size during iteration"), and under
+        # free-threading it can also emit the runtime int4pack words under the
+        # checkpoint `qweight` key or drop tensors (issue #4788).
+        with self._cpu_transform_lock:
+            if self._is_runtime_layout():
+                from ...utils.checkpoint_state import is_checkpoint_serialization
 
-            if is_checkpoint_serialization():
-                raise RuntimeError(
-                    f"{self.__class__.__name__} rewrites packed tensors into a "
-                    "kernel-private runtime layout; the original checkpoint tensors "
-                    "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
-                    "for a loadable checkpoint, or reload the original checkpoint."
-                )
-        super()._save_to_state_dict(destination, prefix, keep_vars)
-        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
-        self._write_state_dict_layout_marker(destination, prefix, keep_vars)
+                if is_checkpoint_serialization():
+                    raise RuntimeError(
+                        f"{self.__class__.__name__} rewrites packed tensors into a "
+                        "kernel-private runtime layout; the original checkpoint tensors "
+                        "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
+                        "for a loadable checkpoint, or reload the original checkpoint."
+                    )
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
+            self._write_state_dict_layout_marker(destination, prefix, keep_vars)
 
     def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the layout code as a tensor so in-process transports keep it.
@@ -1395,6 +1403,14 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     def _load_from_state_dict(self, *args, **kwargs):
+        # `restore_fused_train_state` rebinds `qweight`/`qzeros` and the fused
+        # snapshot buffers, so a concurrent first forward must not interleave
+        # with it (issue #4788). The lock is re-entrant, so a nested call from a
+        # save path or from `load_state_dict` is safe.
+        with self._cpu_transform_lock:
+            return self._load_from_state_dict_locked(*args, **kwargs)
+
+    def _load_from_state_dict_locked(self, *args, **kwargs):
         state_dict = args[0] if args else kwargs.get("state_dict")
         prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
         missing_keys = args[4] if len(args) > 4 else kwargs.get("missing_keys")
