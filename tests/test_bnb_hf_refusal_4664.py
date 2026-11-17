@@ -79,6 +79,64 @@ def test_refusal_names_a_loader_that_reads_the_layout():
     assert "vLLM" not in message
 
 
+def test_hf_bitsandbytes_config_is_not_refused():
+    """transformers' own bnb config shares the plain name and must keep loading.
+
+    #4706 refused every ``quant_method == "bitsandbytes"``, which is also what
+    ``transformers.BitsAndBytesConfig`` reports, so importing GPT-QModel broke
+    every HF bnb load (QLoRA, any Hub bnb checkpoint) in that process (#4731).
+    """
+
+    from transformers import BitsAndBytesConfig
+    from transformers.quantizers.auto import AutoHfQuantizer
+
+    four_bit = AutoHfQuantizer.from_config(BitsAndBytesConfig(load_in_4bit=True))
+    assert type(four_bit).__name__ == "Bnb4BitHfQuantizer"
+
+    eight_bit = AutoHfQuantizer.from_config(BitsAndBytesConfig(load_in_8bit=True))
+    assert type(eight_bit).__name__ == "Bnb8BitHfQuantizer"
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_hf_saved_bitsandbytes_config_dict_is_not_refused(bits):
+    """The dict an HF bnb ``save_pretrained`` writes must resolve to HF's config.
+
+    It carries ``quant_method: "bitsandbytes"`` plus the matching ``load_in_*``
+    flag, which ``AutoQuantizationConfig.from_dict`` turns into a real
+    ``BitsAndBytesConfig`` before ``from_config`` appends ``_4bit``/``_8bit``.
+    """
+
+    from transformers import BitsAndBytesConfig
+    from transformers.quantizers.auto import AutoHfQuantizer, AutoQuantizationConfig
+
+    saved = {
+        "quant_method": "bitsandbytes",
+        "load_in_4bit": bits == 4,
+        "load_in_8bit": bits == 8,
+    }
+    assert isinstance(AutoQuantizationConfig.from_dict(saved), BitsAndBytesConfig)
+
+    quantizer = AutoHfQuantizer.from_config(saved)
+    assert type(quantizer).__name__ == f"Bnb{bits}BitHfQuantizer"
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_gptqmodel_bitsandbytes_layout_is_still_refused(bits):
+    """Both GPT-QModel bnb layouts (``bits: 4`` and ``bits: 8``) still fail closed."""
+
+    from transformers.quantizers.auto import AutoHfQuantizer
+
+    from gptqmodel.quantization import BitsAndBytesConfig as GPTQModelBnB
+
+    config = GPTQModelBnB(bits=bits)
+    assert "load_in_4bit" not in config.to_dict() and "load_in_8bit" not in config.to_dict()
+
+    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
+        AutoHfQuantizer.from_config(config)
+    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
+        AutoHfQuantizer.from_config(config.to_dict())
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 def test_from_pretrained_refuses_a_bitsandbytes_checkpoint(tmp_path, bits):
     from transformers import AutoModelForCausalLM
