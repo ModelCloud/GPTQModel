@@ -4085,11 +4085,26 @@ class AWQProcessor(LoopProcessor):
                     module_kwargs["position_ids"] = pos_for_rotary
 
             x_for_rotary = x if rotary_device is None else x.to(rotary_device)
-            module_kwargs["position_embeddings"] = rotary(
+            rotary_kwargs = self._rotary_layer_type_kwargs(rotary, module)
+            built_embeddings = self._build_position_embeddings(
+                rotary,
                 x_for_rotary,
                 pos_for_rotary,
-                **self._rotary_layer_type_kwargs(rotary, module),
+                rotary_kwargs,
+                module_kwargs.get("position_embeddings"),
             )
+            if built_embeddings is None:
+                # This rotary keys its buffers by a label the attention does not
+                # expose (DeepSeek V4 decouples architecture layer types from its
+                # `main`/`compress` rope types). Keep captured embeddings only
+                # when they describe this sample; never call the rotary with a
+                # label it cannot resolve.
+                if not self._position_embeddings_match(
+                    module_kwargs.get("position_embeddings"), seq_len
+                ):
+                    module_kwargs.pop("position_embeddings", None)
+            else:
+                module_kwargs["position_embeddings"] = built_embeddings
         elif supports_position_ids and seq_len is not None and stale_position_ids:
             # Rebuild whenever the captured ids describe a different sample.
             # The old code only filled a *missing* key, so kwargs captured from
@@ -4124,14 +4139,25 @@ class AWQProcessor(LoopProcessor):
 
         if position_embeddings is None or seq_len is None:
             return True
-        values = (
-            position_embeddings
-            if isinstance(position_embeddings, (tuple, list))
-            else (position_embeddings,)
-        )
+        if isinstance(position_embeddings, Mapping):
+            values = tuple(position_embeddings.values())
+        elif isinstance(position_embeddings, (tuple, list)):
+            values = tuple(position_embeddings)
+        else:
+            values = (position_embeddings,)
+        # Some families (DeepSeek V4) keep one cos/sin pair per rope type in a
+        # mapping of tuples; flatten one level so the sample length is checked.
+        flattened = []
+        for value in values:
+            if isinstance(value, Mapping):
+                flattened.extend(value.values())
+            elif isinstance(value, (tuple, list)):
+                flattened.extend(value)
+            else:
+                flattened.append(value)
         lengths = {
             int(value.shape[-2])
-            for value in values
+            for value in flattened
             if torch.is_tensor(value) and value.dim() >= 2
         }
         if len(lengths) != 1:
@@ -4140,9 +4166,75 @@ class AWQProcessor(LoopProcessor):
         return lengths.pop() == seq_len
 
     @staticmethod
+    def _rotary_layer_type_parameter(rotary: nn.Module) -> Optional[str]:
+        """Name of the per-layer-type selector ``rotary.forward`` accepts."""
+
+        try:
+            parameters = inspect.signature(rotary.forward).parameters
+        except (TypeError, ValueError):
+            return None
+        for name in ("layer_type", "attention_type"):
+            if name in parameters:
+                return name
+        return None
+
+    @staticmethod
+    def _rotary_layer_types(rotary: nn.Module) -> Tuple[str, ...]:
+        """Layer-type labels a typed rotary owns, when it declares them."""
+
+        layer_types = getattr(rotary, "layer_types", None)
+        if isinstance(layer_types, (list, tuple, set, frozenset)):
+            labels = tuple(value for value in layer_types if isinstance(value, str))
+            if labels:
+                return labels
+        rope_type = getattr(rotary, "rope_type", None)
+        if isinstance(rope_type, Mapping):
+            return tuple(key for key in rope_type if isinstance(key, str))
+        return ()
+
+    @classmethod
+    def _build_position_embeddings(
+            cls,
+            rotary: nn.Module,
+            x: torch.Tensor,
+            position_ids: torch.Tensor,
+            selector_kwargs: Optional[Dict[str, Any]],
+            captured,
+    ):
+        """Rebuild the cos/sin scaffolding without changing its container.
+
+        Typed rotaries take a layer-type label; a mapping-shaped
+        ``position_embeddings`` (DeepSeek V4's ``{"main": ..., "compress": ...}``)
+        must stay a mapping so the attention can index its own rope type. When
+        the selector cannot be resolved and the container is not a mapping,
+        return ``None`` and let the caller keep or drop the captured value.
+        """
+
+        parameter_name = cls._rotary_layer_type_parameter(rotary)
+        if isinstance(captured, Mapping):
+            keys = [key for key in captured if isinstance(key, str)]
+            if keys:
+                if parameter_name is not None:
+                    valid_types = set(cls._rotary_layer_types(rotary))
+                    if valid_types and not all(key in valid_types for key in keys):
+                        # Captured keys are not labels this rotary can resolve;
+                        # keep the captured mapping instead of guessing one.
+                        return None
+                built = {}
+                for key in keys:
+                    kwargs = dict(selector_kwargs or {})
+                    if parameter_name is not None:
+                        kwargs[parameter_name] = key
+                    built[key] = rotary(x, position_ids, **kwargs)
+                return built
+        if selector_kwargs is None:
+            return None
+        return rotary(x, position_ids, **selector_kwargs)
+
+    @classmethod
     def _rotary_layer_type_kwargs(
-            rotary: nn.Module, module: torch.nn.Module
-    ) -> Dict[str, Any]:
+            cls, rotary: nn.Module, module: torch.nn.Module
+    ) -> Optional[Dict[str, Any]]:
         """Return the per-layer-type selector a typed rotary needs.
 
         Gemma 3/4 and OLMo 3 rotary embeddings take a required ``layer_type``
@@ -4150,12 +4242,18 @@ class AWQProcessor(LoopProcessor):
         own cos/sin pair. AWQ scales one decoder layer at a time, so the
         selector comes from the attention module being inspected. Rotaries
         without that parameter get an empty mapping and are called as before.
+
+        DeepSeek V4 decouples its architecture layer types
+        (``sliding_attention``/``compressed_sparse_attention``) from the rope
+        labels it indexes (``main``/``compress``). Prefer the attention's own
+        ``rope_layer_type`` selector and only pass a value the rotary declares.
+        Returns ``None`` when no valid selector can be resolved.
         """
 
-        try:
-            parameters = inspect.signature(rotary.forward).parameters
-        except (TypeError, ValueError):
+        parameter_name = cls._rotary_layer_type_parameter(rotary)
+        if parameter_name is None:
             return {}
+        valid_types = set(cls._rotary_layer_types(rotary))
         # `module` is normally the attention block, but a later AWQ group whose
         # root was already consumed (for example `o_proj`) falls back to the
         # decoder layer. Look through both shapes.
@@ -4164,22 +4262,19 @@ class AWQProcessor(LoopProcessor):
             getattr(module, "self_attn", None),
             getattr(module, "attention", None),
         )
-        for name in ("layer_type", "attention_type"):
-            if name not in parameters:
-                continue
+        # `rope_layer_type` is the decoupled rope label (DeepSeek V4); the
+        # architecture selectors remain the fallback for Gemma 3/4 and OLMo 3.
+        for attribute in ("rope_layer_type", "layer_type", "attention_type"):
             for candidate in candidates:
                 if candidate is None:
                     continue
-                value = getattr(candidate, name, None)
-                if value is None:
-                    value = getattr(
-                        candidate,
-                        "attention_type" if name == "layer_type" else "layer_type",
-                        None,
-                    )
-                if isinstance(value, str):
-                    return {name: value}
-        return {}
+                value = getattr(candidate, attribute, None)
+                if not isinstance(value, str):
+                    continue
+                if valid_types and value not in valid_types:
+                    continue
+                return {parameter_name: value}
+        return None
 
     def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
         """Rows per scale-search replay forward.
@@ -4258,6 +4353,11 @@ class AWQProcessor(LoopProcessor):
                 if val.ndim > 0 and val.shape[0] == full_batch_size:
                     return val[start:start + length]
                 return val
+            if isinstance(val, Mapping):
+                return {
+                    key: _slice_value(item, start, length)
+                    for key, item in val.items()
+                }
             if isinstance(val, (list, tuple)):
                 sliced = [_slice_value(item, start, length) for item in val]
                 return type(val)(sliced)
