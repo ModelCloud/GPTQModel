@@ -1,0 +1,134 @@
+{
+  "Qwen-1_8B": {
+    "tokenizer_config.json": {
+      "model_max_length": 8192,
+      "tokenizer_class": "QWenTokenizer",
+      "auto_map": {
+        "AutoTokenizer": [
+          "tokenization_qwen.QWenTokenizer",
+          null
+        ]
+      }
+    },
+    "generation_config.json": {
+      "chat_format": "raw",
+      "eos_token_id": 151643,
+      "pad_token_id": 151643,
+      "stop_words_ids": [
+        [
+          151643
+        ]
+      ],
+      "max_new_tokens": 512,
+      "do_sample": true,
+      "top_k": 0,
+      "top_p": 0.8,
+      "transformers_version": "4.31.0"
+    }
+  },
+  "Qwen-7B": {
+    "tokenizer_config.json": {
+      "model_max_length": 32768,
+      "tokenizer_class": "QWenTokenizer",
+      "auto_map": {
+        "AutoTokenizer": [
+          "tokenization_qwen.QWenTokenizer",
+          null
+        ]
+      }
+    },
+    "generation_config.json": {
+      "chat_format": "raw",
+      "eos_token_id": 151643,
+      "pad_token_id": 151643,
+      "stop_words_ids": [
+        [
+          151643
+        ]
+      ],
+      "max_new_tokens": 512,
+      "do_sample": true,
+      "top_k": 0,
+      "top_p": 0.8,
+      "transformers_version": "4.31.0"
+    }
+  },
+  "Qwen-14B": {
+    "tokenizer_config.json": {
+      "model_max_length": 8192,
+      "tokenizer_class": "QWenTokenizer",
+      "auto_map": {
+        "AutoTokenizer": [
+          "tokenization_qwen.QWenTokenizer",
+          null
+        ]
+      }
+    },
+    "generation_config.json": {
+      "chat_format": "raw",
+      "eos_token_id": 151643,
+      "pad_token_id": 151643,
+      "stop_words_ids": [
+        [
+          151643
+        ]
+      ],
+      "max_new_tokens": 512,
+      "do_sample": true,
+      "top_k": 0,
+      "top_p": 0.8,
+      "transformers_version": "4.31.0"
+    }
+  },
+  "Qwen-72B": {
+    "tokenizer_config.json": {
+      "model_max_length": 32768,
+      "tokenizer_class": "QWenTokenizer",
+      "auto_map": {
+        "AutoTokenizer": [
+          "tokenization_qwen.QWenTokenizer",
+          null
+        ]
+      }
+    },
+    "generation_config.json": {
+      "chat_format": "raw",
+      "eos_token_id": 151643,
+      "pad_token_id": 151643,
+      "stop_words_ids": [
+        [
+          151643
+        ]
+      ],
+      "max_new_tokens": 512,
+      "do_sample": true,
+      "top_k": 0,
+      "top_p": 0.8,
+      "transformers_version": "4.31.0"
+    }
+  },
+  "Qwen-7B-Chat": {
+    "tokenizer_config.json": {
+      "model_max_length": 32768,
+      "tokenizer_class": "QWenTokenizer",
+      "auto_map": {
+        "AutoTokenizer": [
+          "tokenization_qwen.QWenTokenizer",
+          null
+        ]
+      }
+    },
+    "generation_config.json": {
+      "chat_format": "chatml",
+      "eos_token_id": 151643,
+      "pad_token_id": 151643,
+      "max_window_size": 24000,
+      "max_new_tokens": 512,
+      "do_sample": true,
+      "top_k": 0,
+      "top_p": 0.8,
+      "repetition_penalty": 1.1,
+      "transformers_version": "4.31.0"
+    }
+  }
+}

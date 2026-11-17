@@ -1,0 +1,2 @@
+# Preserve the pinned upstream notice byte-for-byte, including its original whitespace.
+NOTICE-UPSTREAM -text -whitespace
