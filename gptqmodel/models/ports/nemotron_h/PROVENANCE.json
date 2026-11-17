@@ -1,0 +1,140 @@
+{
+  "8b": {
+    "repo": "nvidia/Nemotron-H-8B-Base-8K",
+    "revision": "94ea861e008c2dfced3e8e1302094024077aa04e",
+    "files": {
+      "config.json": "81e822f85d6471312bcc0ccd34cc62789075376ecedca7fde0e451584943368b",
+      "model.safetensors.index.json": "2a6b20ccb9b00a4034d79714ef24ae1817eaf4dc3541198542aa25c7cf140f51",
+      "configuration_nemotron_h.py": "07fa66e5b3da7e6a71c1a263e3dd68da11c8afa9178b47c49510ba628746fcff",
+      "modeling_nemotron_h.py": "d2576e4ac61039ab74f480e50d5e25f54423b661f19c02a14f20c79dfc9fa35a",
+      "README.md": "d27a85ef8d3212388879973835cfbcb8c6a797c33691f7a8062fc6852b947e05"
+    },
+    "safetensors_headers": {
+      "model-00001-of-00004.safetensors": "83a207da125dc72ab603c93f04b37096fff57496416c686a3849f03846592e9c",
+      "model-00002-of-00004.safetensors": "70ecee5f925b6d60c43d5e9236b4767116de1d5bf3e5f896808c8c5e427773c6",
+      "model-00003-of-00004.safetensors": "428dd875989b67826364ae7b34aed1f2c5910078ab85ac0142a5770b6006d842",
+      "model-00004-of-00004.safetensors": "a1988b2efef83405a482686248cf2dbaa5496a31f9c59d4ca7fbe30fa19111f1"
+    },
+    "tensor_count": 311,
+    "README.md": "d27a85ef8d3212388879973835cfbcb8c6a797c33691f7a8062fc6852b947e05",
+    "tokenizer_assets_sha256": {
+      "tokenizer.json": "3277c00fe5fb3963b3cb7c07b7f183722d2af4d775a4aea7cfb3684d7cccbc2f",
+      "tokenizer_config.json": "282733babeb4f94dd3cbf4a680b7498f971d36e1cbb335339cc161c052f0448a",
+      "special_tokens_map.json": "6fa06efa2785e450051989a6f8fb4416b10149ded485ddd3f127a40734f5cfd0"
+    }
+  },
+  "nano": {
+    "repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "revision": "bf77c3174f68ad409e1c2aa60daeb46e32d1c606",
+    "files": {
+      "config.json": "dd9fa380ac107b0477db5a26108db9febe6378e7bb3966a107944853ec4f76f8",
+      "model.safetensors.index.json": "e4f8729dca1df07816a914b620c6c32976c89b74061740507e43d5a0279ff0ad",
+      "configuration_nemotron_h.py": "09a3179517667d302068c2f8c96c9f059297418a829bf3cb96273040563b955c",
+      "modeling_nemotron_h.py": "4d353ce6e8f495d043f2d8c5acd13496a84ba2b2d45da8279797a55f680309d9",
+      "README.md": "faec6eef185d9993d92a0f03c6ad872381bf252b21699bf5b3ecb52fdeac112b"
+    },
+    "safetensors_headers": {
+      "model-00001-of-00013.safetensors": "77a5f9ac2281aacc2209e622c4dbabb1d1cb78d76796055a765729e868165579",
+      "model-00002-of-00013.safetensors": "4e92047ab276e1137add544bc0efe154750bc92ed9d11755f6edc66968b3e9ab",
+      "model-00003-of-00013.safetensors": "674bb569b412d1dd030eca99fdf53f6d1d778d583617231aa81a14daa6b639a7",
+      "model-00004-of-00013.safetensors": "3dd7b425d03f6647e28930f3e5b39f86170bd9f59ba927b40d25ae848c0ac18f",
+      "model-00005-of-00013.safetensors": "12905f720bf9834c01a9b3b441c57b34808519ff75f53efdfc269d7345832420",
+      "model-00006-of-00013.safetensors": "6dfc38dd10f4b2f50e64e5dd2155106da47802ab8554a44654b7f0e9ebe06fb4",
+      "model-00007-of-00013.safetensors": "061c59038b395f37065e78c4d63f95473338df5f29f9c084976c609a3885c6ea",
+      "model-00008-of-00013.safetensors": "d43fbe69cee1c08d9c06345c4b5b7e932dd302a9b1a7a762728a4f91e27d63ff",
+      "model-00009-of-00013.safetensors": "205403112bbd92ba8a93d26e7da962ab26683dec79417621d4ef9be7d8bc1985",
+      "model-00010-of-00013.safetensors": "9d3b755ee1c5794b1f6174bccf6ceb518d8c9cd0ce1b22f234f04b4924210dc2",
+      "model-00011-of-00013.safetensors": "d8b083bee13b9858c27c9fa64799910662bc2e16f47a720990da5d96b636995a",
+      "model-00012-of-00013.safetensors": "527bbd67148c1718d028ea1806fa243b7c088ecf80a95f1f1c510b9fc6062eb5",
+      "model-00013-of-00013.safetensors": "7988f2178a57aa7339d78df0d416aae032a34ff4cbd019c94353866443d598a5"
+    },
+    "tensor_count": 6243,
+    "README.md": "faec6eef185d9993d92a0f03c6ad872381bf252b21699bf5b3ecb52fdeac112b",
+    "tokenizer_assets_sha256": {
+      "tokenizer.json": "c6021eb6847e682f89aa52d5eb6e8c7d902a23acfc8137e25211cf84828f1592",
+      "tokenizer_config.json": "3d568e506d0905285ae90a3fdd1482be7b6d0bf0b8ca9514d75dad4257b0827a",
+      "special_tokens_map.json": "e3a4f63da745f02317a45e00e6476c17fc66ac41faf14bb1b0be1f3211b0ca53",
+      "chat_template.jinja": "ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862"
+    }
+  },
+  "super": {
+    "repo": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "revision": "2dc98e2afe4face0e4ce40972a915c45368bd34a",
+    "files": {
+      "config.json": "699f34f0fc645d29ebffa5767fb59e6ae6ec98e3a4605485eb9913256d0df7e6",
+      "model.safetensors.index.json": "42ddaa271a5e40d3614760750f8bcd4d982b34361d6f3c519d3e840e17d038b0",
+      "configuration_nemotron_h.py": "0fc818c10506c91bd02df5a605f49cb0704b5498954f46dbde2d63999ae36c3d",
+      "modeling_nemotron_h.py": "e1cb5fc02e887983f0a445bf4c1a2604453b2cb2db4624c7004dcf663bbb1b6e",
+      "README.md": "cade76c064eda90d4f53e12614f45816ae6cfe43dacc8a9410abcc2fc7a17e59"
+    },
+    "safetensors_headers": {
+      "model-00001-of-00050.safetensors": "cdd91d1c4716eef35d080aa5cf1ea3f3eea789a1ff379a66ba78013d032d0d98",
+      "model-00002-of-00050.safetensors": "a096e2dbde2b027345ad504db5f2ca8c113b06f07957d615d1ac7d7a1945fb1f",
+      "model-00003-of-00050.safetensors": "048160dab909e379cbf9fffb5ab7341718c9fa411f4bb9e456110b0cb9029087",
+      "model-00004-of-00050.safetensors": "40428f549891a7753eb45c002cfc94b412d15186998f6bb608ce9a834f8e06f0",
+      "model-00005-of-00050.safetensors": "aec4b2fbceb9392e335a37827c6616abdc797a243922d8a094dd0317bd5d9afd",
+      "model-00006-of-00050.safetensors": "cca743217c39ea6ca09eba26ed4184907194a6faf9dce0915aa42c238f902e3c",
+      "model-00007-of-00050.safetensors": "0adb924213557b1c0f01ec7984624f471e161c95378bab38aa88603395bb8d86",
+      "model-00008-of-00050.safetensors": "271189eb2e9feb2de2954895e1ad62e1aec10e7d799ccf0f0f5fa2fe9d2682fc",
+      "model-00009-of-00050.safetensors": "25770d560794b91a3c342aa23e07533f7b60716ffa4d81a9a9751b30a2c45758",
+      "model-00010-of-00050.safetensors": "4f924de2837211b001066542fef686a2a65df436db87767e75f19f5d5d917a7a",
+      "model-00011-of-00050.safetensors": "ea739fde9fc7dd90e79f3d80e2d948aad800fa11006697b3120a0c2e03040f21",
+      "model-00012-of-00050.safetensors": "dad816e1bdd00ae45062401c7b11d87aec6b030c3c12b55efa0de330ec3b546b",
+      "model-00013-of-00050.safetensors": "d0317bd4bebfc9bbc418178bf53e72a0f412175b0031c514a2eaf199952ddafa",
+      "model-00014-of-00050.safetensors": "596444692a48bc770f64ad206fae319d9fc9978700a5c43332d2c0078fe07399",
+      "model-00015-of-00050.safetensors": "3df936c5b30a0a878bfa99ee1f890f372af799b370c5eaccbc5f7e30c525878c",
+      "model-00016-of-00050.safetensors": "17a081716d08334b8a2458cc1f7c1753cef8fc9aff472579cbc09549f2fe7e04",
+      "model-00017-of-00050.safetensors": "94f02f01b2120b912648331ced9541b904aea1ca38fe8b5411c45b6df36dc1fb",
+      "model-00018-of-00050.safetensors": "89333d98c373a75bb89063680b901b1043cbd6e578983c7d2963e0ecbe927d46",
+      "model-00019-of-00050.safetensors": "bfd2ca340b15000cd7ae869907b725f806ef30da11be5d89249c1da4a20fe93c",
+      "model-00020-of-00050.safetensors": "4d795486f2f1efc6530bb9d61ebd85a22f5f8862b8ac7cefc89d4cfb53f3170d",
+      "model-00021-of-00050.safetensors": "0577bcfc2c3e42d59b9dbcffa7d260f13b8b0b9a147c02a87149f969eeb03765",
+      "model-00022-of-00050.safetensors": "e4e9096c93e16218bd843b1ebddd40e7dcbdb271bd92985a7561bbd4d377a53b",
+      "model-00023-of-00050.safetensors": "e7d5412bcff5339904204bcf041d8c6b454b4c853c9e395d43b246b098f34f05",
+      "model-00024-of-00050.safetensors": "7ca7fa7609b6f4db13814e0e4576635a78a210c5eff4365c3b1f1c37a7b007e8",
+      "model-00025-of-00050.safetensors": "c1bf4ce656224ea50f32cac424134d223239a4164398997dc3f8217b977235d8",
+      "model-00026-of-00050.safetensors": "e2c6cf5dae95db77ba2aa973ec9f28a3a58f0ce5ce9d0acf7f19d389c0d3f135",
+      "model-00027-of-00050.safetensors": "57d00d63cf650baee1bf5d0cfe7215fbbe37f0c04ee1ace452f30aed4b21d38f",
+      "model-00028-of-00050.safetensors": "e0f84f34bd753a60a0877422c4376061b587b1a90e10bd533cda95fd2bbaf10d",
+      "model-00029-of-00050.safetensors": "dc2481ab8fa60dabec1e3f850f7855ebb8a420f985d7c61c56e3ef703f392282",
+      "model-00030-of-00050.safetensors": "f17d6f00bef141ecc4ed1bb7227998375b86cb4d182af3fa6de22498cc7c58d6",
+      "model-00031-of-00050.safetensors": "c989d990a0ed341c2f5329b1789d1a14f4d4612585439c8ccf4b5f690d804fea",
+      "model-00032-of-00050.safetensors": "6b3a6f0fa916c2c6ca68604064a397dcd3bc474bcd1cd68034ee8cd30bcf223f",
+      "model-00033-of-00050.safetensors": "55e277b3cd19c296b649bcff2599bdd000c3ca615a75064cb6ae6393976ef8b9",
+      "model-00034-of-00050.safetensors": "26d3ca8a839973e0c84e8a5212277d8e6ef571f1924fcdcb88320cedb8428233",
+      "model-00035-of-00050.safetensors": "ba7c44857e391f224412a8312ca43e48d2764035e68feca76661b4463a5f4e08",
+      "model-00036-of-00050.safetensors": "e9d528997603dd717253f34af7653c096a35059199b6be44134248409799de5d",
+      "model-00037-of-00050.safetensors": "52522ed025433952cc4191d37694d66624b486163f62f66d6c384e30c6c00db3",
+      "model-00038-of-00050.safetensors": "66d5f2f4053b2c10471576306318eade9d067cacdfbeaddc48c2e2a1d79d9bdc",
+      "model-00039-of-00050.safetensors": "8fb541a736b62fa27522efc8b23acaf3f01cd7c3c5ff2bbf54b3c4c8c8d0640a",
+      "model-00040-of-00050.safetensors": "ac22240fe002fccfe8b751716fe21cc0b452f9d93de0c52f60dc6fb3dbe150d1",
+      "model-00041-of-00050.safetensors": "861530a3adc8d76797e7b3661b0ca5985f3d3c2a84f173306617681c37889dd1",
+      "model-00042-of-00050.safetensors": "713ad5a5eadafa2e521619cfa64a8d295a5764a8f6f454b4eea19446cea19dd8",
+      "model-00043-of-00050.safetensors": "7aab2b1b7ff3d5e2606e5eb95bf6a3114d531644d44793c5a08e3b9b77ddbb83",
+      "model-00044-of-00050.safetensors": "34d1f1c07229deef357813a059c383d1f502e7ef327b50e049b6714d10e836f1",
+      "model-00045-of-00050.safetensors": "19f576c23ae567da9d5b0ac1aa873b1fcce184c25205ed0e3343eaf9641df7fa",
+      "model-00046-of-00050.safetensors": "05857bb11da7bdf1e8556cdd51caaf166e663075601f0998fe9fb42bab49a292",
+      "model-00047-of-00050.safetensors": "c5cae8ba2b67a4844247413eb4b9ad620e81e8930e0aae2e852cd17f96a086ab",
+      "model-00048-of-00050.safetensors": "704f26870cbcae3c2c81d517a38db86f77a4481360e550effe6f8dcabcf3ec04",
+      "model-00049-of-00050.safetensors": "e3bb22fbf7610612232d7e0be087be906062bbc6ca916665cfe147eaa316ced5",
+      "model-00050-of-00050.safetensors": "b78be3fb486c9961c9f2fd0d274d7bb082d534ee3e80e632a1d24b6a9ae2fb1f"
+    },
+    "tensor_count": 42683,
+    "README.md": "cade76c064eda90d4f53e12614f45816ae6cfe43dacc8a9410abcc2fc7a17e59",
+    "tokenizer_assets_sha256": {
+      "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+      "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc",
+      "special_tokens_map.json": "e9435fefd6d838fd9fcbbc44b97a8e3ff322be7f6dfb7e4fd2468586574bb52b",
+      "chat_template.jinja": "575fb74f54ed264df9047d0ecce3c98938aae953fb4f50356675706264cbb68a"
+    }
+  },
+  "fixture_sha256": "163369f57e02a651edb4c25f4e37e68db68486b04d36965b4d3e03664ace1126",
+  "native_transformers_5.23.0": {
+    "configuration_nemotron_h.py": "cc18d1332d8df52f50f6877b9ad3b6ded2493c49ee2578610e0bc69ec05c1ec6",
+    "modeling_nemotron_h.py": "d13b26d1adb49f54dd952b9ee11b3b008b79e55792c9e8d1cce9f46c213f6397",
+    "upstream_configuration_nemotron_h.py": "cc18d1332d8df52f50f6877b9ad3b6ded2493c49ee2578610e0bc69ec05c1ec6",
+    "upstream_modeling_nemotron_h.py": "d13b26d1adb49f54dd952b9ee11b3b008b79e55792c9e8d1cce9f46c213f6397",
+    "revision": "52b080b6416a7897e2af90febeb4dfad22b84d19",
+    "license": "Apache-2.0"
+  }
+}
