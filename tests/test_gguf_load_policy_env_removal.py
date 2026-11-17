@@ -324,6 +324,8 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
         loader_requires_dtype = False
         require_fast_init = False
         require_trust_remote_code = False
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         require_pkgs = []
         supports_desc_act = [True, False]
         support_offload_to_disk = False
