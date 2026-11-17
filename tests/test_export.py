@@ -19,7 +19,7 @@ from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM
 
 from gptqmodel import GPTQModel
-from gptqmodel.utils.model_dequant import pack_cols
+from gptqmodel.utils.model_dequant import dequantize_model, detect_format, pack_cols
 
 
 _LOCAL_AWQ = "/monster/data/model/AWQ-Llama-3.2-1B-g128-gemm"
@@ -217,3 +217,51 @@ def test_export_hf_awq_checkpoint_reloads(tmp_path):
     logits = model(torch.tensor([[1, 2, 3]])).logits
     assert logits.shape[-1] == model.config.vocab_size
     assert torch.isfinite(logits).all()
+
+
+@pytest.mark.parametrize(
+    ("method", "format_name"),
+    [
+        ("paro", "paro"),
+        ("macaq", "mxfp4_macaq"),
+        # A rotation-free MACaQ checkpoint stores `format: "mxfp4"` next to
+        # `method: "macaq"`, so the format string alone reads as MXFP4.
+        ("macaq", "mxfp4"),
+        ("gguf", "q4_k_m"),
+        ("qqq", "qqq"),
+        ("nf12", "nf12"),
+        ("vptq", "vptq"),
+        ("exl3", "exl3"),
+    ],
+)
+def test_export_hf_refuses_a_method_without_a_dense_decoder(tmp_path, method, format_name):
+    """Tensor-name sniffing decoded these with a different layout (#4786).
+
+    Paro carries ``.qweight`` without ``.g_idx`` and was decoded as AWQ;
+    MACaQ's ``format: "mxfp4_macaq"`` matched the ``mxfp4`` substring. Both
+    dropped their rotation, reported success, and wrote a dense checkpoint
+    whose weights ran but were garbage (nll 1.5 -> 13).
+    """
+
+    model_dir = tmp_path / "quantized"
+    model_dir.mkdir()
+    save_file(
+        {
+            "model.layers.0.mlp.up_proj.qweight": torch.zeros((8, 8), dtype=torch.int32),
+        },
+        str(model_dir / "model.safetensors"),
+    )
+    payload = {
+        "quantization_config": {"method": method, "format": format_name, "bits": 4}
+    }
+    (model_dir / "config.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    output_dir = tmp_path / "dense"
+    with pytest.raises(NotImplementedError, match=method):
+        dequantize_model(model_dir, output_dir)
+    # The refusal happens before the output directory is created, so a failed
+    # export leaves nothing behind for the next run to mistake for a result.
+    assert not output_dir.exists()
+
+    # The declared method decides; its `format` is only a sub-format of it.
+    assert detect_format(model_dir, payload) == method

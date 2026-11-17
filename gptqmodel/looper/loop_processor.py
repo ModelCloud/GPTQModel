@@ -1592,6 +1592,23 @@ class LoopProcessor:
 
         pass
 
+    def release_failed_run(self) -> None:
+        """Release run resources that ``finalize()`` would otherwise close.
+
+        ``finalize()`` runs only after a successful loop, so a cancelled or
+        failed run used to keep its Device-SMI handles -- and their 5 Hz sampler
+        threads -- alive for the life of the process (#4813). Closing here is
+        idempotent: ``finalize()`` may still run later and finds no handles
+        left, and a repeated release never raises.
+        """
+
+        self._close_device_smi_handles()
+        # ``finalize`` also drops the process-wide Hessian workspace; a failed
+        # run must not keep it pinned until the next successful one.
+        from ..quantization.gptq import release_workspace_cache
+
+        release_workspace_cache()
+
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
     def finalize(self, model: BaseQModel, **kwargs):
