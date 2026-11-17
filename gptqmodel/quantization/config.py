@@ -1769,12 +1769,38 @@ class HessianConfig:
                     "other group members instead of accumulating it separately for each module"
         },
     )
+    # ``desc_act=True`` switches ``act_group_aware`` off, and with it the
+    # per-group scale protection that keeps a handful of massive-activation
+    # ("attention sink") rows from dominating ``X^T X``. Without protection the
+    # sink channels are ordered first, get a tiny ``Hinv[i, i]``, and their
+    # quantization error is amplified into the columns correlated with them
+    # (issue #4742). Capping each row's norm before the outer product keeps the
+    # sink row's direction but bounds its weight in the Hessian.
+    sink_row_cap_median_multiple: Optional[float] = field(
+        default=4.0,
+        metadata={
+            "help": "Cap each calibration row's norm at `min(p99.9, N x median)` before `X^T X` when "
+                    "`desc_act=True` disables `act_group_aware`; 0 or None disables the cap"
+        },
+    )
 
     def __post_init__(self):
         """Validate Hessian chunking and staging dtype settings."""
 
         if not isinstance(self.dedup_shared_inputs, bool):
             raise ValueError("HessianConfig: `dedup_shared_inputs` must be a bool.")
+
+        multiple = self.sink_row_cap_median_multiple
+        if multiple is not None:
+            if isinstance(multiple, bool) or not isinstance(multiple, (int, float)):
+                raise ValueError(
+                    "HessianConfig: `sink_row_cap_median_multiple` must be a number or None."
+                )
+            if multiple < 0:
+                raise ValueError(
+                    "HessianConfig: `sink_row_cap_median_multiple` must be non-negative."
+                )
+            self.sink_row_cap_median_multiple = float(multiple)
 
         if self.chunk_size is not None:
             if not isinstance(self.chunk_size, int):
@@ -6229,8 +6255,14 @@ class GPTQConfig(PreProcessorConfig):
 
         if desc_act_enabled_by_user and act_group_aware_user_value is None and self.act_group_aware:
             log.warn(
-                "QuantizeConfig: `desc_act=True` automatically disables `act_group_aware`. "
-                "Set `act_group_aware=False` explicitly to silence this warning."
+                "QuantizeConfig: `desc_act=True` automatically disables `act_group_aware`, which is the "
+                "per-group scale protection that keeps massive-activation (attention-sink) rows from "
+                "dominating the Hessian. On Llama-3 models this makes sink damage much worse: the sink "
+                "channels are ordered first and their quantization error saturates the columns correlated "
+                "with them (issue #4742). A row-norm cap on the Hessian is applied by default for this "
+                "case (`HessianConfig.sink_row_cap_median_multiple`); consider "
+                "`CalibrationConfig(exclude_attention_sinks=True)` as well, and validate the checkpoint "
+                "before shipping it. Set `act_group_aware=False` explicitly to silence this warning."
             )
             self.act_group_aware = False
 
@@ -6286,6 +6318,9 @@ class GPTQConfig(PreProcessorConfig):
             "chunk_bytes": self.hessian.chunk_bytes,
             "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
             "dedup_shared_inputs": self.hessian.dedup_shared_inputs,
+            # The row-norm cap changes the accumulated Hessian, so a reload
+            # must not silently restore the default (issue #4742).
+            "sink_row_cap_median_multiple": self.hessian.sink_row_cap_median_multiple,
         }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
