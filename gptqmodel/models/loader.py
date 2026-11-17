@@ -27,6 +27,11 @@ from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    retie_tied_weights,
+    word_embeddings_tied,
+)
 
 
 if ensure_modelscope_available():
@@ -1854,7 +1859,7 @@ def _load_quantized_gguf_checkpoint_into_model(
             + ", ".join(sorted(missing_qweights))
         )
 
-    model.tie_weights()
+    retie_tied_weights(model)
 
 
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
@@ -3245,7 +3250,10 @@ def ModelLoader(cls):
                         break
 
             if head is not None:
-                tie_cfg = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+                resolved_tie = lm_head_is_tied(model)
+                if resolved_tie is None:
+                    resolved_tie = word_embeddings_tied(getattr(model, "config", None))
+                tie_cfg = bool(resolved_tie)
                 if in_emb is not None and tie_cfg:
                     # A tied head is the same tensor as the input embedding, so
                     # it follows that placement instead of consuming budget.

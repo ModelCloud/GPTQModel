@@ -14,7 +14,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
-from . import AWQuantLinear
+from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import capture_fused_train_state
 from ._numerics import matmul_fp32_reduce
@@ -151,15 +151,26 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         # Keep the checkpoint scales in FP32. The shared AVX512 kernel uses
         # BF16 activations and weights with FP32 accumulation; rounding scales
         # to BF16 first would consume most of the inference error budget.
-        self.scales = self.scales.to(torch.float32).contiguous()
+        # ``to`` returns the same tensor when the dtype already matches, which
+        # would leave the operand as a view of the checkpoint mapping (#4785).
+        scales = self.scales.to(torch.float32)
+        if scales.data_ptr() == self.scales.data_ptr():
+            scales = detach_cpu_operand(scales)
+        self.scales = scales.contiguous()
         if self.bias is not None:
-            self.bias = self.bias.to(torch.float32).contiguous()
+            bias = self.bias.to(torch.float32)
+            if bias.data_ptr() == self.bias.data_ptr():
+                bias = detach_cpu_operand(bias)
+            self.bias = bias.contiguous()
         self.qweight, self.qzeros = self.pack_awq_int4_kernel(
             self.qweight,
             self.qzeros,
             self.out_features,
             self.in_features,
         )
+        # ``g_idx`` still aliases the checkpoint mapping and would pin the whole
+        # shard even though ``qweight``/``qzeros`` are now private (#4785).
+        self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
         self._cpu_transformed = True
 
     def _apply(self, fn, recurse: bool = True):

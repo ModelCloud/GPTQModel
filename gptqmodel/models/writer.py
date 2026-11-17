@@ -86,6 +86,11 @@ from ..utils.model import (
     streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    retie_tied_weights,
+    word_embeddings_tied,
+)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
@@ -129,7 +134,22 @@ _QUANTIZED_TENSOR_SUFFIXES = (
 )
 
 
-def _validate_export_shell_quantized_slots(model, checkpoint):
+def _export_shell_key_converter(qmodel, model):
+    """Return the checkpoint-to-runtime key converter for the export shell.
+
+    The shell is built from config, so it carries the runtime (Transformers)
+    module names while the checkpoint may use a legacy layout (for example the
+    Transformers 4.x ``language_model.model.layers.*`` keys of a Gemma-3 VL
+    checkpoint). Accelerate matches tensor names verbatim, so the fill has to
+    convert them the same way the native loader does (issue #4802).
+    """
+
+    from .loader import _checkpoint_key_converter
+
+    return _checkpoint_key_converter(type(qmodel), model, to_runtime=True)
+
+
+def _validate_export_shell_quantized_slots(model, checkpoint, key_converter=None):
     """Fail closed when the export shell has no slot for checkpoint quant tensors.
 
     The shell is rebuilt from config and filled from the checkpoint. A
@@ -137,11 +157,18 @@ def _validate_export_shell_quantized_slots(model, checkpoint):
     shell's module tree does not match the checkpoint (the fused-expert MoE
     case before #4589). Accelerate would ignore it and ``save()`` would
     publish a checkpoint missing that payload, so raise instead of writing.
+
+    ``key_converter`` maps checkpoint names to the shell's runtime names. It is
+    required for legacy layouts: a Gemma-3 VL checkpoint stores
+    ``language_model.model.layers.*`` while the shell exposes
+    ``model.language_model.layers.*`` (issue #4802).
     """
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
     if checkpoint_keys is None:
         return
+    if callable(key_converter):
+        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
 
     shell_keys = set(model.state_dict().keys())
     dropped = sorted(
@@ -762,8 +789,13 @@ def _save_module_replacement_safetensors(
         raise ValueError("Module replacement save requires at least one module prefix.")
 
     config = getattr(model, "config", None)
-    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
-    if not tie_word_embeddings:
+    # The loaded model's snapshot already resolved tying from the decoder config
+    # and the checkpoint (#4799); the config.json flag is only a fallback.
+    resolved_tie = lm_head_is_tied(model)
+    tie_word_embeddings = word_embeddings_tied(config)
+    if resolved_tie is not None:
+        tie_word_embeddings = resolved_tie
+    elif not tie_word_embeddings:
         source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
         if os.path.exists(source_config_path):
             try:
@@ -1013,7 +1045,7 @@ def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activa
         if result.unexpected_keys:
             raise ValueError(f"Unrecognized native W4A tensors: {result.unexpected_keys}")
         seen.update(values)
-    model.tie_weights()
+    retie_tied_weights(model)
     # A tied tensor can legitimately be omitted from safetensors. Every other
     # parameter/buffer must have been loaded, including the calibration bits.
     state = model.state_dict()
@@ -2743,8 +2775,12 @@ def ModelWriter(cls):
                         module.qzero_format(
                             format=1 if source_format == FORMAT.GPTQ else 2
                         )
+            shell_key_converter = _export_shell_key_converter(self, model)
             load_checkpoint_in_model_then_tie_weights(
                 model,
+                # The checkpoint may use a legacy layout; fill the shell under
+                # its runtime names (issue #4802).
+                key_converter=shell_key_converter,
                 # Do not cast the export shell. Each quantized module
                 # allocates its buffers in the checkpoint's storage dtype
                 # (packed FP8 weight, FP16 GPTQ scales, FP32 QQQ
@@ -2771,7 +2807,7 @@ def ModelWriter(cls):
                 # offload_buffers=True,
             )
             _validate_export_shell_quantized_slots(
-                model, self.checkpoint_file_name,
+                model, self.checkpoint_file_name, key_converter=shell_key_converter,
             )
             resave_conversion = resolve_resave_format_conversion(qcfg)
             if resave_conversion is not None:

@@ -124,6 +124,8 @@ def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     assert first_weight.numel() == module.in_features * module.out_features // 2
     assert first_weight.untyped_storage().nbytes() == first_weight.numel()
 
+    # The packed cache replaced the checkpoint buffers (#4805).
+    assert module._materialize_dropped_checkpoint()
     module.s_channel.add_(1.0)
     second_weight, _, second_channel = module._packed_weight_for_cpu()
     assert second_weight is not first_weight

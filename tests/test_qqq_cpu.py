@@ -76,7 +76,9 @@ def test_packed_qqq_oracle(packed_kernel, monkeypatch, dtype, group_size, tokens
     packed, scales, _ = module._packed_weight_for_cpu()
     restored = unpack_hf_int4(packed, module.out_features, module.in_features).t()
     torch.testing.assert_close(restored, codes ^ 8 if group_size == -1 else codes, rtol=0, atol=0)
-    actual_accum = packed_kernel(quantized, packed, scales, module.group_size)
+    # The cache keeps the checkpoint scale dtype; the kernel needs FP32.
+    assert scales.dtype == dtype
+    actual_accum = packed_kernel(quantized, packed, scales.to(torch.float32), module.group_size)
     torch.testing.assert_close(actual_accum, expected_accum, rtol=0, atol=0)
     with torch.inference_mode():
         output = module(activation)
@@ -125,6 +127,9 @@ def test_packed_qqq_mutation(packed_kernel, buffer):
     activation = torch.randn(7, module.in_features, dtype=torch.float16)
     module(activation)
     first = module._torch_packed_cache
+    # The packed cache replaced the checkpoint buffers (#4805); an in-place
+    # mutation therefore has to materialize them first.
+    assert module._materialize_dropped_checkpoint()
     getattr(module, buffer).add_(1)
     actual = module(activation)
     assert module._torch_packed_cache is not first

@@ -23,7 +23,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -84,6 +84,7 @@ from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_corre
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .tensor import tensor_buffer
+from .tied_weights import tied_weights_keys
 from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
 
 
@@ -1685,6 +1686,41 @@ def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Uni
     return result
 
 
+def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Optional[torch.device]:
+    """Return the map's one device when every tensor is already resident there.
+
+    ``add_hook_to_module`` rebinds ``module.forward`` to ``partial(new_forward, module)``
+    and keeps the previous bound method on ``module._old_forward``.  Both point back
+    at the module, so a hooked model is a reference cycle: a GPU model keeps its VRAM
+    allocated after the last user reference is dropped, until a full ``gc.collect()``
+    (#4847).  A layer-wise map whose entries all name the same device does not need
+    the hooks at all -- accelerate's own ``dispatch_model`` only attaches them when
+    the map spans more than one device or offloads to disk -- so skip them whenever
+    nothing is left to materialise or offload.
+    """
+
+    devices = {d for d in device_map.values() if d is not None}
+    if len(devices) != 1:
+        return None
+    raw_device = next(iter(devices))
+    if isinstance(raw_device, str) and raw_device in ("cpu", "mps", "disk"):
+        return None
+    try:
+        device = torch.device(raw_device)
+    except (TypeError, RuntimeError):
+        return None
+    for parameter in model.parameters():
+        if parameter.device.type != device.type:
+            return None
+        if device.index is not None and parameter.device.index != device.index:
+            return None
+    # Buffers may legitimately stay on the CPU (a scalar format flag, a rotary
+    # ``inv_freq`` cache), but a meta buffer still has to be materialised.
+    if any(buffer.device.type == "meta" for buffer in model.buffers()):
+        return None
+    return device
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
@@ -1697,6 +1733,13 @@ def simple_dispatch_model(model, device_map):
     if single_root or all_single_cpu_or_mps:
         d = next(iter(device_map.values()))
         model = model.to(torch.device(d))
+        model.hf_device_map = device_map
+        return model
+
+    # One device and nothing to materialise: the per-entry hooks would only pin the
+    # model in a reference cycle, so place nothing and keep the tensors where the
+    # checkpoint loader already put them.
+    if _single_resident_device(model, device_map) is not None:
         model.hf_device_map = device_map
         return model
 
@@ -2820,12 +2863,28 @@ def get_state_dict_for_save(
             key = ("other", id(source))
         ptrs[key].append(name)
 
+    # Only a pair the checkpoint really ties may be collapsed to one tensor.
+    # `_tied_weights_keys` is derived from the model config alone, and a
+    # composite wrapper can leave its top-level `tie_word_embeddings` at the
+    # default `True` while the checkpoint stores a distinct `lm_head` (#4799).
+    # The stamped snapshot records what the checkpoint really ties.
+    snapshot = tied_weights_keys(model)
+    tied_targets = set(snapshot) if snapshot is not None else None
+
     shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
     warn_names = set()
+    separated_names = set()
     for names in shared_ptrs.values():
         # Removing the keys which are declared as known duplicates on
         # load. This allows to make sure the name which is kept is consistent.
-        if model._tied_weights_keys is not None:
+        if tied_targets is not None:
+            found = 0
+            for name in sorted(names):
+                if name in tied_targets and name in state_dict:
+                    found += 1
+                    if found < len(names):
+                        del state_dict[name]
+        elif model._tied_weights_keys is not None:
             found = 0
             for name in sorted(names):
                 matches_pattern = any(pcre.compile(pat).search(name) for pat in model._tied_weights_keys)
@@ -2844,11 +2903,29 @@ def get_state_dict_for_save(
             if name in state_dict:
                 found += 1
                 if found > 1:
+                    entry = state_dict[name]
+                    if (
+                        tied_targets is not None
+                        and name not in tied_targets
+                        and isinstance(entry.source, torch.Tensor)
+                    ):
+                        # The checkpoint does not tie this tensor, so it must
+                        # not be dropped: give it its own storage and keep it.
+                        state_dict[name] = replace(
+                            entry, source=entry.source.clone()
+                        )
+                        separated_names.add(name)
+                        continue
                     del state_dict[name]
                     warn_names.add(name)
     if len(warn_names) > 0:
         log.warn.once(
             f"Removed shared tensor {warn_names} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading",
+        )
+    if len(separated_names) > 0:
+        log.warn.once(
+            f"Separated shared storage for {separated_names} while saving: the checkpoint does "
+            "not tie these tensors, so both are written.",
         )
     return state_dict
 

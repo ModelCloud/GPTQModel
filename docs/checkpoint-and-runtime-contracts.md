@@ -16,8 +16,8 @@ A saved checkpoint describes tensors, not the machine that produced them.
 | Mechanism | Before | After |
 | --- | --- | --- |
 | `offload_to_disk_path` in `meta` | published the quantizer's local `/tmp/gptqmodel_*` directory (`config.py:5396` before the change) | omitted; a loader chooses its own scratch directory |
-| index `metadata.total_size` | summed on-disk safetensors file sizes, including headers and padding | sums `TensorSource.num_bytes` (`utils/model.py:3567`) |
-| `max_shard_size` units | every `KB`/`MB`/`GB` suffix meant 1024^n | `KB`/`MB`/`GB` are decimal, `KiB`/`MiB`/`GiB` are binary, bare `K`/`M`/`G` keep the historical binary meaning (`models/writer.py:142`) |
+| index `metadata.total_size` | summed on-disk safetensors file sizes, including headers and padding | sums `TensorSource.num_bytes` (`utils/model.py:4077`) |
+| `max_shard_size` units | every `KB`/`MB`/`GB` suffix meant 1024^n | `KB`/`MB`/`GB` are decimal, `KiB`/`MiB`/`GiB` are binary, bare `K`/`M`/`G` keep the historical binary meaning (`models/writer.py:226`) |
 
 ```mermaid
 flowchart TD
