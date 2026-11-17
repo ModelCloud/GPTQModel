@@ -294,25 +294,49 @@ def _patch_transformers_refusing_quantizers():
         # suffix. That branch runs before the mapping lookup, so the refusing
         # quantizer registered above is never constructed and GPT-QModel's
         # layout raises a generic TypeError instead of the actionable error
-        # (#4664). Intercept the plain name only: `bitsandbytes_4bit` /
-        # `bitsandbytes_8bit` are genuine transformers names and must keep
-        # loading real HF bnb checkpoints.
+        # (#4664). Refuse only GPT-QModel's layout: transformers' own
+        # `BitsAndBytesConfig` carries the same plain `quant_method`, so
+        # refusing every occurrence broke all genuine HF bnb loads (QLoRA, any
+        # Hub bnb checkpoint) in a process that imported GPT-QModel (#4731).
         original_from_config = hf_quant_auto.AutoHfQuantizer.__dict__["from_config"]
         if not getattr(original_from_config, "_gptqmodel_refusal_guard", False):
 
             @classmethod
             def _refusing_from_config(cls, quantization_config, **kwargs):
-                method = (
-                    quantization_config.get("quant_method")
-                    if isinstance(quantization_config, dict)
-                    else getattr(quantization_config, "quant_method", None)
-                )
-                if method == "bitsandbytes":
-                    raise ValueError(refusal_message(method))
+                if _is_gptqmodel_bitsandbytes_layout(quantization_config):
+                    raise ValueError(refusal_message("bitsandbytes"))
                 return original_from_config.__func__(cls, quantization_config, **kwargs)
 
             _refusing_from_config._gptqmodel_refusal_guard = True
             hf_quant_auto.AutoHfQuantizer.from_config = _refusing_from_config
+
+
+def _is_gptqmodel_bitsandbytes_layout(quantization_config) -> bool:
+    """Whether a ``bitsandbytes`` config is GPT-QModel's layout, not HF's own.
+
+    transformers' ``BitsAndBytesConfig`` and GPT-QModel's checkpoint layout
+    share ``quant_method == "bitsandbytes"``. Only the GPT-QModel layout must
+    be refused: HF's config is loadable and must keep working (#4731).
+
+    A dict is GPT-QModel's layout only when it carries neither ``load_in_4bit``
+    nor ``load_in_8bit``; ``AutoQuantizationConfig.from_dict`` maps a dict with
+    either flag to a real ``BitsAndBytesConfig`` through the
+    ``bitsandbytes_4bit``/``bitsandbytes_8bit`` names. An already-built object
+    is GPT-QModel's layout when it is not a real ``BitsAndBytesConfig``.
+    """
+
+    if isinstance(quantization_config, dict):
+        if quantization_config.get("quant_method") != "bitsandbytes":
+            return False
+        return not (
+            quantization_config.get("load_in_4bit", False)
+            or quantization_config.get("load_in_8bit", False)
+        )
+    if getattr(quantization_config, "quant_method", None) != "bitsandbytes":
+        return False
+    from transformers import BitsAndBytesConfig
+
+    return not isinstance(quantization_config, BitsAndBytesConfig)
 
 
 def _patch_transformers_save_pretrained_runtime_layout_guard():
