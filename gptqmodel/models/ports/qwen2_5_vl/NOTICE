@@ -1,0 +1,16 @@
+GPT-QModel Qwen2.5-VL text-task binding
+Copyright 2026 ModelCloud.ai
+
+The causal-LM head follows the Transformers Qwen2.5-VL head and calls the
+unchanged native Qwen2_5_VLTextModel. The native composite is used directly.
+Transformers v5.23.0, revision 52b080b6416a7897e2af90febeb4dfad22b84d19:
+Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team.
+Apache License 2.0: see LICENSE. No native decoder or vision code is vendored.
+
+The small config and tensor-shape fixtures were obtained from
+Qwen/Qwen2.5-VL-3B-Instruct at revision
+66285546d2b821cf421d4f5eb2576359d3770cd3.
+That checkpoint's separate Qwen Research License is preserved in
+LICENSE.Qwen3B. It is not an Apache-only checkpoint license; this package
+does not grant rights to the trained weights or redistribute tensor payloads.
+See provenance.json for source URLs, revisions and SHA-256 digests.
