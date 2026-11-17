@@ -32,14 +32,15 @@ def _kernel() -> GGUFCppKernel:
     )
 
 
-def test_cpu_path_choice_is_capability_based_not_timed(monkeypatch):
+def test_cpu_path_choice_is_capability_based_not_timed():
     module = _kernel()
     x = torch.zeros(2, 32)
 
-    def _timing_forbidden(*args, **kwargs):
-        raise AssertionError("the ggml/torch path choice must not time the two paths")
-
-    monkeypatch.setattr(module, "_benchmark_forward_runner", _timing_forbidden)
+    # #4627 removed the timing selector: the path comes from the weight layout
+    # and the module's kernel policy, never from benchmarking. A reintroduced
+    # timing hook fails this check instead of silently making the numerics
+    # machine-dependent again.
+    assert not hasattr(module, "_benchmark_forward_runner")
     assert module._use_ggml_cpu_matmul(x) is True
     assert module._use_ggml_cpu_matmul(x) is True
 

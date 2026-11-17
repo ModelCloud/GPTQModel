@@ -285,7 +285,11 @@ def test_native_path_is_not_chosen_by_timing(monkeypatch):
 
     from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
-    monkeypatch.setattr(cpp, "_benchmark_forward_runner", timing_forbidden)
+    # #4627 removed the timing selector entirely. Assert the timing hook is
+    # gone rather than patching a method that no longer exists: a reintroduced
+    # benchmark would fail this check before it could make the choice depend
+    # on the machine.
+    assert not hasattr(cpp, "_benchmark_forward_runner")
     monkeypatch.setattr(cpp, "_autotune", timing_forbidden)
     configure_kernel(KernelConfig(gguf_cpp_native_matmul=None))
     x = torch.zeros(2, IN_FEATURES)

@@ -68,10 +68,26 @@ def gemm_arguments(layer, x, *, fp32=True):
     atomic = False
     if type(layer).__name__ == "AwqMarlinLinear":
         atomic = should_use_atomic_add_reduce(a.shape[0], n, k, a.device, a.dtype)
-    return dict(a=a, c=None, b_q_weight=layer.qweight, b_bias=layer.bias,
-                b_scales=layer.scales, global_scale=None, b_zeros=layer.qzeros,
-                g_idx=layer.g_idx, perm=layer.g_idx_sort_indices,
-                workspace=layer.workspace, b_q_type=layer.weight_type,
-                size_m=a.shape[0], size_n=n, size_k=k,
-                is_k_full=getattr(layer, "is_k_full", True),
-                use_atomic_add=atomic, use_fp32_reduce=fp32, is_zp_float=False)
+    # ``layer.bias`` keeps the checkpoint width/order; the raw kernel reads a
+    # padded, tile-permuted FP32 operand (#4657), so derive it per call exactly
+    # as the module's forward does instead of passing the checkpoint layout.
+    return {
+        "a": a,
+        "c": None,
+        "b_q_weight": layer.qweight,
+        "b_bias": layer._kernel_bias(a),
+        "b_scales": layer.scales,
+        "global_scale": None,
+        "b_zeros": layer.qzeros,
+        "g_idx": layer.g_idx,
+        "perm": layer.g_idx_sort_indices,
+        "workspace": layer.workspace,
+        "b_q_type": layer.weight_type,
+        "size_m": a.shape[0],
+        "size_n": n,
+        "size_k": k,
+        "is_k_full": getattr(layer, "is_k_full", True),
+        "use_atomic_add": atomic,
+        "use_fp32_reduce": fp32,
+        "is_zp_float": False,
+    }

@@ -131,7 +131,14 @@ def test_fp8_cpu_bias_cancels_before_output_rounding(
     (torch.float16, 70.0),
     (torch.bfloat16, 68.5),
 ])
-def test_fp8_gpu_dequant_fallback_keeps_bias_wide(dtype, input_value):
+def test_fp8_gpu_native_gemm_keeps_bias_wide(dtype, input_value):
+    """#3737: a bias wider than the activation dtype must reach the epilogue.
+
+    #4716 keeps this layer on the native GEMM: the decoded weight is narrowed
+    to the activation dtype and the 70000 bias is added in the FP32 epilogue.
+    The old assertion compared against an un-narrowed FP32 dequant, i.e. the
+    fallback path that #4716 deliberately removed for this layer.
+    """
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("BF16 arithmetic unavailable on this device")
     linear = torch.nn.Linear(1, 1, bias=True, dtype=torch.float32)
@@ -147,13 +154,21 @@ def test_fp8_gpu_dequant_fallback_keeps_bias_wide(dtype, input_value):
     module = module.to("cuda")
     x = torch.full((2, 1), input_value, device="cuda", dtype=dtype)
     decoded = module.weight.float() / module.weight_scale_inv.float()[:, None]
-    oracle = (x.float() @ decoded.T + module.bias.float()).to(dtype)
+    # The native path narrows the decoded weight to the activation dtype.
+    oracle = (x.float() @ decoded.to(dtype).float().T + module.bias.float()).to(dtype)
 
     with torch.inference_mode():
         actual = module(x)
 
     assert actual.dtype == dtype
-    torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+    # Rounding the decoded weight to the activation dtype moves |x.w| by at
+    # most one ulp (finfo.eps) of that dtype: 2^-10 for fp16, 2^-7 for bf16.
+    # A bias narrowed to fp16 overflows to inf; a dropped bias leaves
+    # ~|x.w| = 68500-70000, far outside this bound.
+    bound = float(torch.finfo(dtype).eps) * abs(float(input_value) * -1000.0)
+    assert module.bias.dtype == torch.float32
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=bound)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm runtime required")
