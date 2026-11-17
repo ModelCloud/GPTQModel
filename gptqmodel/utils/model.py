@@ -3113,6 +3113,7 @@ def _matches_ignore_pattern(name: str, pattern) -> bool:
 
 def _unmaterialized_checkpoint_parameters(
     model: nn.Module, checkpoint: str | os.PathLike | None,
+    key_converter=None,
 ) -> List[str]:
     """Non-quantized parameters that no checkpoint tensor was loaded into.
 
@@ -3131,6 +3132,8 @@ def _unmaterialized_checkpoint_parameters(
         # Pickle checkpoints cannot be inspected without loading them; leave
         # that path to Accelerate's own reporting.
         return []
+    if callable(key_converter):
+        checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
 
     loaded_parameter_ids = {
         id(parameter)
@@ -3165,10 +3168,13 @@ def _unmaterialized_checkpoint_parameters(
 
 def _raise_on_unmaterialized_checkpoint_parameters(
     model: nn.Module, checkpoint: str | os.PathLike | None,
+    key_converter=None,
 ) -> None:
     """Raise when a load leaves non-quantized parameters uninitialized."""
 
-    missing = _unmaterialized_checkpoint_parameters(model, checkpoint)
+    missing = _unmaterialized_checkpoint_parameters(
+        model, checkpoint, key_converter=key_converter,
+    )
     if not missing:
         return
     preview = ", ".join(missing[:8]) + (", ..." if len(missing) > 8 else "")
@@ -3189,6 +3195,7 @@ def _tie_weights_after_checkpoint_load(
     checkpoint: str | os.PathLike | None,
     *,
     extra_keys: set[str] | frozenset[str] | None = None,
+    key_converter=None,
 ) -> None:
     # Match transformers.from_pretrained(): when both sides of a tied-weight
     # pair are present in the checkpoint, tie_weights(missing_keys=...) checks
@@ -3199,6 +3206,8 @@ def _tie_weights_after_checkpoint_load(
     if checkpoint is not None:
         checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
         if checkpoint_keys is not None:
+            if callable(key_converter):
+                checkpoint_keys = {key_converter(key) for key in checkpoint_keys}
             if extra_keys:
                 # Accelerate may have received a temporary checkpoint without
                 # some tensors the loader restored itself; they were present
@@ -3567,7 +3576,7 @@ def _checkpoint_tensor_dtypes(checkpoint) -> Dict[str, torch.dtype]:
     return dtypes
 
 
-def _prepare_variable_quant_buffers(model, checkpoint) -> None:
+def _prepare_variable_quant_buffers(model, checkpoint, key_converter=None) -> None:
     """Resize data-dependent quant buffers to the checkpoint's stored shapes."""
 
     shapes = _checkpoint_tensor_shapes(checkpoint)
@@ -3589,7 +3598,8 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
             expected_quant_type = "nf12"
         if suffix is None:
             continue
-        module_name = key[: -len(suffix)]
+        runtime_key = key_converter(key) if callable(key_converter) else key
+        module_name = runtime_key[: -len(suffix)]
         try:
             module = model.get_submodule(module_name)
         except AttributeError:
@@ -3820,6 +3830,186 @@ def _int_ordinal_device_map(device_map):
     return converted
 
 
+def _safetensors_shard_files(checkpoint) -> Optional[List[str]]:
+    """Return the safetensors shards of ``checkpoint``, or ``None``.
+
+    The resolution mirrors Accelerate's ``load_checkpoint_in_model``: a pickle
+    checkpoint or an ambiguous index is left to the copy path. The returned
+    paths are the source shards, whose headers still use the checkpoint's
+    (possibly legacy) key layout.
+    """
+
+    path = os.fspath(checkpoint)
+    if os.path.isdir(path):
+        if os.path.isfile(os.path.join(path, "pytorch_model.bin")):
+            return None
+        single = os.path.join(path, "model.safetensors")
+        if os.path.isfile(single):
+            return [single]
+        indexes = [name for name in os.listdir(path) if name.endswith(".index.json")]
+        if len(indexes) != 1:
+            return None
+        path = os.path.join(path, indexes[0])
+    if path.endswith(".index.json"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map")
+        except (OSError, ValueError):
+            return None
+        if not isinstance(weight_map, dict) or not weight_map:
+            return None
+        base = os.path.dirname(path)
+        files = sorted({os.path.join(base, name) for name in weight_map.values()})
+        if not all(
+            os.path.isfile(file) and file.endswith(".safetensors")
+            for file in files
+        ):
+            return None
+        return files
+    if path.endswith(".safetensors") and os.path.isfile(path):
+        return [path]
+    return None
+
+
+def _load_key_converted_safetensors(
+    model,
+    checkpoint,
+    key_converter,
+    *,
+    device_map,
+    dtype,
+    offload_state_dict: bool,
+    keep_in_fp32_modules,
+    strict: bool,
+) -> bool:
+    """Load a safetensors checkpoint under runtime names without copying it.
+
+    A legacy-layout checkpoint only differs in its header keys. Instead of
+    rewriting every shard into a temporary file (a full checkpoint copy), read
+    each tensor with ``safe_open`` and place it with Accelerate's
+    ``set_module_tensor_to_device``, so device placement and dtype casting stay
+    the same. The caller ties weights afterwards, as it does for the copy path.
+
+    Returns ``False`` when the checkpoint needs the copy path (pickle, disk
+    offload, bitsandbytes SCB metadata, a shape/name mismatch, ...). The caller
+    then falls back to ``_remap_safetensors_checkpoint_keys``. The function
+    only returns ``False`` before it mutates the model.
+    """
+
+    if not callable(key_converter):
+        return False
+    if not isinstance(device_map, dict) or not device_map:
+        # Accelerate's no-device-map branch has different semantics
+        # (`set_model_state_dict` / `model.load_state_dict`); keep the copy.
+        return False
+    if offload_state_dict:
+        return False
+    if any(str(device) in ("disk", "meta") for device in device_map.values()):
+        return False
+    shards = _safetensors_shard_files(checkpoint)
+    if not shards:
+        return False
+    if isinstance(dtype, str):
+        resolved_dtype = getattr(torch, dtype.replace("torch.", ""), None)
+        if resolved_dtype is None:
+            return False
+        dtype = resolved_dtype
+
+    model_state = model.state_dict()
+    model_keys = set(model_state.keys())
+    seen: set[str] = set()
+    plan: List[Tuple[str, str, str]] = []
+    unexpected: List[str] = []
+    changed = False
+    for shard in shards:
+        try:
+            with safe_open(shard, framework="pt", device="cpu") as handle:
+                metadata = handle.metadata()
+                if metadata is not None and metadata.get("format") not in (None, "pt"):
+                    return False
+                keys = list(handle.keys())
+                # BitsAndBytes stores `weight`/`SCB` pairs; Accelerate has a
+                # dedicated fp16-statistics path for them.
+                if any("SCB" in key for key in keys):
+                    return False
+                for source_name in keys:
+                    runtime_name = key_converter(source_name)
+                    changed |= runtime_name != source_name
+                    if runtime_name in seen:
+                        raise ValueError(
+                            "Checkpoint key conversion produced duplicate tensor name: "
+                            f"{runtime_name}"
+                        )
+                    seen.add(runtime_name)
+                    if runtime_name not in model_keys:
+                        unexpected.append(runtime_name)
+                        if strict:
+                            return False
+                        continue
+                    shape = tuple(handle.get_slice(source_name).get_shape())
+                    if tuple(model_state[runtime_name].shape) != shape:
+                        return False
+                    plan.append((shard, source_name, runtime_name))
+        except (OSError, ValueError):
+            return False
+    if not changed or not plan:
+        # No header key changes: let Accelerate load the source checkpoint
+        # exactly as before.
+        return False
+
+    def _param_device(name: str):
+        module_name = name
+        while module_name and module_name not in device_map:
+            module_name = ".".join(module_name.split(".")[:-1])
+        if module_name == "" and "" not in device_map:
+            return None
+        return device_map[module_name]
+
+    placed: List[Tuple[str, str, str, object]] = []
+    for shard, source_name, runtime_name in plan:
+        param_device = _param_device(runtime_name)
+        if param_device is None:
+            return False
+        placed.append((shard, source_name, runtime_name, param_device))
+
+    # Accelerate's loader does not retie: `_tie_weights_after_checkpoint_load`
+    # runs right after this call and ties with `missing_keys`, which keeps a
+    # checkpoint that stores a deliberately distinct `lm_head` untied.
+    from accelerate.utils.modeling import set_module_tensor_to_device
+
+    by_shard: Dict[str, List[Tuple[str, str, object]]] = {}
+    for shard, source_name, runtime_name, param_device in placed:
+        by_shard.setdefault(shard, []).append(
+            (source_name, runtime_name, param_device)
+        )
+    for shard, entries in by_shard.items():
+        with safe_open(shard, framework="pt", device="cpu") as handle:
+            for source_name, runtime_name, param_device in entries:
+                value = handle.get_tensor(source_name)
+                new_dtype = dtype
+                if dtype is not None and torch.is_floating_point(value):
+                    if keep_in_fp32_modules is not None and dtype == torch.float16:
+                        for key in keep_in_fp32_modules:
+                            if ((key in runtime_name and key + "." in runtime_name)
+                                    or key == runtime_name):
+                                new_dtype = torch.float32
+                                break
+                set_module_tensor_to_device(
+                    model,
+                    runtime_name,
+                    param_device,
+                    value=value,
+                    dtype=new_dtype,
+                )
+    if unexpected:
+        log.warn(
+            "Loader: %d checkpoint tensor(s) were not used by the model: %s",
+            len(unexpected),
+            unexpected[:8],
+        )
+    return True
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
@@ -3855,32 +4045,67 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     converted_checkpoint = None
     restore_checkpoint = checkpoint
     restore_name_map = None
+    lazy_loaded = False
     if checkpoint is not None and (callable(key_converter) or fp8_weight_names):
-        converted_checkpoint = _remap_safetensors_checkpoint_keys(
-            checkpoint, key_converter, fp8_weight_names,
-        )
-        if converted_checkpoint is not None:
-            kwargs["checkpoint"] = converted_checkpoint
-            if fp8_weight_names:
-                # Packed FP8 weights are absent from the temporary checkpoint:
-                # Accelerate would cast them to the model dtype (and stage the
-                # whole shard on the target device) before the loader restored
-                # the packed bytes. Read them from the source checkpoint
-                # instead, and use the same source for every other restored
-                # buffer so key conversion is applied only once.
-                restore_checkpoint = checkpoint
-                if callable(key_converter):
-                    restore_name_map = _checkpoint_runtime_to_source_keys(
-                        checkpoint, key_converter,
-                    )
-            else:
-                restore_checkpoint = converted_checkpoint
+        if (
+            callable(key_converter)
+            and not fp8_weight_names
+            and len(args) <= 1
+            and not kwargs.get("broadcast_from_rank0", False)
+        ):
+            # Rename the header keys lazily instead of copying every shard
+            # (issue #4959). A legacy-layout VL checkpoint can be many GiB,
+            # and the copy was ~80% of its load time.
+            lazy_loaded = _load_key_converted_safetensors(
+                model,
+                checkpoint,
+                key_converter,
+                device_map=kwargs.get("device_map"),
+                dtype=kwargs.get("dtype"),
+                offload_state_dict=bool(kwargs.get("offload_state_dict", False)),
+                keep_in_fp32_modules=kwargs.get("keep_in_fp32_modules"),
+                strict=bool(kwargs.get("strict", False)),
+            )
+        if lazy_loaded:
+            # The source checkpoint keeps the legacy names, so the dtype and
+            # buffer restore passes read it through this runtime -> source map.
+            restore_checkpoint = checkpoint
+            restore_name_map = _checkpoint_runtime_to_source_keys(
+                checkpoint, key_converter,
+            )
+        else:
+            converted_checkpoint = _remap_safetensors_checkpoint_keys(
+                checkpoint, key_converter, fp8_weight_names,
+            )
+            if converted_checkpoint is not None:
+                kwargs["checkpoint"] = converted_checkpoint
+                if fp8_weight_names:
+                    # Packed FP8 weights are absent from the temporary checkpoint:
+                    # Accelerate would cast them to the model dtype (and stage the
+                    # whole shard on the target device) before the loader restored
+                    # the packed bytes. Read them from the source checkpoint
+                    # instead, and use the same source for every other restored
+                    # buffer so key conversion is applied only once.
+                    restore_checkpoint = checkpoint
+                    if callable(key_converter):
+                        restore_name_map = _checkpoint_runtime_to_source_keys(
+                            checkpoint, key_converter,
+                        )
+                else:
+                    restore_checkpoint = converted_checkpoint
     try:
-        _prepare_variable_quant_buffers(
-            model,
-            kwargs.get("checkpoint", checkpoint),
-        )
-        accelerate.load_checkpoint_in_model(model, *args, **kwargs)
+        if lazy_loaded:
+            # The source shards still use the legacy names, so the buffers are
+            # looked up through the same converter as the tensor placement.
+            _prepare_variable_quant_buffers(
+                model, checkpoint, key_converter=key_converter,
+            )
+        else:
+            _prepare_variable_quant_buffers(
+                model, kwargs.get("checkpoint", checkpoint),
+            )
+        if not lazy_loaded:
+            accelerate.load_checkpoint_in_model(model, *args, **kwargs)
         restore_dtypes = dict(packed_fp8_buffer_dtypes)
         if str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
@@ -3893,6 +4118,12 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         # shell (`restore_checkpoint_buffer_dtypes`) republishes every
         # floating buffer at exactly its stored dtype instead (#4379).
         checkpoint_dtypes = _checkpoint_tensor_dtypes(kwargs.get("checkpoint", checkpoint))
+        if lazy_loaded and restore_name_map:
+            checkpoint_dtypes = {
+                runtime: checkpoint_dtypes[source]
+                for runtime, source in restore_name_map.items()
+                if source in checkpoint_dtypes
+            }
         for name, module in model.named_modules():
             model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
             if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
@@ -3971,9 +4202,12 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             model,
             kwargs.get("checkpoint", checkpoint),
             extra_keys=fp8_weight_names if converted_checkpoint is not None else None,
+            key_converter=key_converter if lazy_loaded else None,
         )
         _raise_on_unmaterialized_checkpoint_parameters(
-            model, kwargs.get("checkpoint", checkpoint)
+            model,
+            kwargs.get("checkpoint", checkpoint),
+            key_converter=key_converter if lazy_loaded else None,
         )
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)
