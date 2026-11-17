@@ -168,7 +168,9 @@ def test_bfloat16_normal_range_cast_is_exact():
 
     assert prepared is not None
     native_input, output_scale = prepared
-    assert output_scale is None
+    # `None` and an all-ones tensor are the same decision, "scale 1" (#4955).
+    if output_scale is not None:
+        assert torch.equal(output_scale, torch.ones_like(output_scale))
     assert native_input.dtype == torch.float16
     assert torch.equal(native_input.float(), x.float())
 

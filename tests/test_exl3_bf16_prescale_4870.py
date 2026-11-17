@@ -61,7 +61,8 @@ def test_in_range_rows_are_passed_through_untouched():
 
     native_input, output_scale = _prepared(_bridge(), x)
 
-    assert output_scale is None
+    # `None` and an all-ones tensor are the same decision, "scale 1" (#4955).
+    assert torch.equal(_scale_rows(output_scale, x.shape[0]), torch.ones(8, 1))
     assert torch.equal(native_input, x.to(torch.float16))
     assert torch.equal(native_input.float(), x.float())
 
