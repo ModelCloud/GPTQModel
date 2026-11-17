@@ -14,6 +14,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from ._compile_support import COMPILE_LEVEL
+from ._mapped_operands import detach_checkpoint_mapping
 from .torch_aten_kernel import TorchAtenLinear
 
 
@@ -207,6 +208,9 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         )
         self._cpu_transform_dtype = torch.bfloat16
         self._cpu_transformed = True
+        # ``g_idx`` (and an FP32 checkpoint ``scales``/``bias`` that ``.to``
+        # returned unchanged) can still be views of the shard mapping.
+        detach_checkpoint_mapping(self)
 
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:

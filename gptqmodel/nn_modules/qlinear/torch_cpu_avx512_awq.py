@@ -17,6 +17,7 @@ from ...utils.logger import setup_logger
 from . import AWQuantLinear
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import capture_fused_train_state
+from ._mapped_operands import detach_checkpoint_mapping
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
 from .torch_cpu_avx512 import unpack_hf_int4
@@ -161,6 +162,9 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             self.in_features,
         )
         self._cpu_transformed = True
+        # ``g_idx`` (and an FP32 checkpoint ``scales``/``bias`` that ``.to``
+        # returned unchanged) can still be views of the shard mapping.
+        detach_checkpoint_mapping(self)
 
     def _apply(self, fn, recurse: bool = True):
         """Keep the FP32 affine operands exact across dtype/device moves.

@@ -30,6 +30,7 @@ from ._fused_train_state import (
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
+from ._mapped_operands import detach_checkpoint_mapping
 from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import build_group_ret_idx, tensor_cache_key
 
@@ -509,6 +510,9 @@ class TorchFusedLinear(PackableQuantLinear):
         # ``qweight`` now holds int4pack words: drop the checkpoint clone if
         # the inverse reproduces exactly the bytes captured before the pack.
         finalize_fused_train_state(self)
+        # ``scales``/``g_idx``/``bias`` survive the transform byte-identically;
+        # copy them out of the checkpoint mapping so no view pins the shard.
+        detach_checkpoint_mapping(self)
 
     def transform(self, dtype, device):
         if device == "xpu":
