@@ -450,7 +450,7 @@ def _round_with_exponents(
         raise ValueError(
             "block-float exponents must lie in "
             f"[{BLOCKFLOAT_EXPONENT_MIN}, {BLOCKFLOAT_EXPONENT_MAX}], got "
-            f"{sorted(set(int(v) for v in exponents.reshape(-1).tolist()))[:8]}"
+            f"{sorted({int(v) for v in exponents.reshape(-1).tolist()})[:8]}"
         )
     w = x.to(torch.float32)
     last = w.shape[-1]
