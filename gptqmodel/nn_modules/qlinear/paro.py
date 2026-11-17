@@ -734,9 +734,14 @@ class ParoLinear(AwqTorchLinear):
         kernel_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
         # The transform rewrites registered buffers, so it must not interleave
         # with `state_dict()`/`load_state_dict()`, which hold the same lock.
+        # Only the transform and the operand capture need that lock: the GEMM
+        # runs on these locals, so a concurrent save may rebind the module
+        # attributes without tearing this product (issue #4885).
         with self._cpu_transform_lock:
             if not self._ensure_cpu_layout("avx512"):
                 return None
+            qweight = self.qweight
+            qzeros = self.qzeros
             # The kernel requires FP32 affine operands. Widen per call so the
             # checkpoint dtype stays resident instead of a second FP32 copy
             # (issue #4814).
@@ -746,14 +751,14 @@ class ParoLinear(AwqTorchLinear):
                 if self.bias is not None
                 else None
             )
-            output = gemm(
-                kernel_input,
-                self.qweight,
-                self.qzeros,
-                scales,
-                self.group_size,
-                bias,
-            )
+        output = gemm(
+            kernel_input,
+            qweight,
+            qzeros,
+            scales,
+            self.group_size,
+            bias,
+        )
         if output.dtype != original_dtype:
             output = output.to(dtype=original_dtype)
         return output
@@ -786,38 +791,46 @@ class ParoLinear(AwqTorchLinear):
 
         # The transform rewrites registered buffers, so it must not interleave
         # with `state_dict()`/`load_state_dict()`, which hold the same lock.
+        # Capture the operands under it, then run the product on those locals:
+        # a concurrent save may rebind the module attributes without tearing
+        # this GEMM (issue #4885).
         with self._cpu_transform_lock:
             if not self._ensure_cpu_layout("aten", x_flat.dtype):
                 return None
-            try:
-                # The layer has no bias: the parent adds it after return. Ask
-                # for the wide product so a finite sum is not rounded to
-                # infinity before the outer bias epilogue (issue #4471).
-                out = _cpu_int4pack_mm(
-                    x_flat,
-                    self.qweight,
-                    self.group_size,
-                    self.scales_and_zeros,
-                    out_dtype=torch.float32 if self.bias is not None else None,
-                )
-            except Exception as exc:
-                # Fail closed to the dense reference instead of returning a
-                # half-transformed module.
+            qweight = self.qweight
+            scales_and_zeros = self.scales_and_zeros
+            bias = self.bias
+        try:
+            # The layer has no bias: the parent adds it after return. Ask
+            # for the wide product so a finite sum is not rounded to
+            # infinity before the outer bias epilogue (issue #4471).
+            out = _cpu_int4pack_mm(
+                x_flat,
+                qweight,
+                self.group_size,
+                scales_and_zeros,
+                out_dtype=torch.float32 if bias is not None else None,
+            )
+        except Exception as exc:
+            # Fail closed to the dense reference instead of returning a
+            # half-transformed module. Restoring rebinds registered buffers,
+            # so it takes the same lock the save path holds.
+            with self._cpu_transform_lock:
                 self._restore_cpu_checkpoint_layout()
-                if not self._cpu_layout_warning_logged:
-                    log.warning(
-                        "Paro ATen CPU int4pack failed for `%s`; using dense fallback: %s",
-                        self.name,
-                        exc,
-                    )
-                    self._cpu_layout_warning_logged = True
-                return None
+            if not self._cpu_layout_warning_logged:
+                log.warning(
+                    "Paro ATen CPU int4pack failed for `%s`; using dense fallback: %s",
+                    self.name,
+                    exc,
+                )
+                self._cpu_layout_warning_logged = True
+            return None
 
-        if self.bias is not None:
+        if bias is not None:
             # Accumulate the bias in FP32 before the visible dtype cast. ATen
             # returns a BF16/FP16 result, and a same-dtype add would round both
             # the bias and the sum again.
-            out = (out.float() + self.bias.float()).to(dtype=x_flat.dtype)
+            out = (out.float() + bias.float()).to(dtype=x_flat.dtype)
         if out.dtype != x_flat.dtype:
             out = out.to(dtype=x_flat.dtype)
         return out

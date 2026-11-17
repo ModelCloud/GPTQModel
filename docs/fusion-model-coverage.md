@@ -6,7 +6,7 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **205 registered model types**: **102 qualified** and **103 not
+accounts for all **208 registered model types**: **102 qualified** and **106 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert
@@ -293,6 +293,7 @@ layout alone does not authorize it.
 | `refinedWeb` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
 | `refinedWebModel` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
 | `ricursive` | `RicursiveQModel` | Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified. |
+| `sensenova_loop` | `SenseNovaLoopQModel` | Custom/remote looped implementation: the mHC decoder layer runs the remote forward, so QKV and gate/up fusion needs its own native-forward qualification. |
 | `solar_open2` | `SolarOpen2QModel` | Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified. |
 | `spark2_5` | `Spark2_5QModel` | Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified. |
 | `stablelm_epoch` | `LlamaQModel` | Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified. |

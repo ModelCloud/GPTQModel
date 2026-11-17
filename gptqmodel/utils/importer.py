@@ -1091,7 +1091,17 @@ def normalize_device_device_map(
     device: Optional[Union[str, int, torch.device, DEVICE]],
     device_map: Optional[Union[str, Dict]],
     default: Optional[SelectorDevice] = None,
+    *,
+    validate_families: bool = True,
 ) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    """Normalize a public ``device``/``device_map`` pair.
+
+    ``validate_families`` enforces the single compute-capability group that the
+    inference kernel selection requires (#4632/#4705/#4734). A quantization load
+    selects no inference kernel for its device pool, so its entry points pass
+    ``False`` and a pool may span generations (#4875).
+    """
+
     normalized_device: Optional[SelectorDevice] = default
     accelerator = torch.accelerator.current_accelerator()
     if device is None:
@@ -1125,7 +1135,8 @@ def normalize_device_device_map(
             ]
             selected_devices = accelerator_devices or normalized_devices
             if selected_devices:
-                _validate_selector_device_families(selected_devices)
+                if validate_families:
+                    _validate_selector_device_families(selected_devices)
                 normalized_device = (
                     selected_devices[0]
                     if len(selected_devices) == 1
@@ -1139,7 +1150,8 @@ def normalize_device_device_map(
         else:
             normalized = _selector_devices(device)
             assert normalized is not None
-            _validate_selector_device_families(normalized)
+            if validate_families:
+                _validate_selector_device_families(normalized)
             normalized_device = normalized[0] if len(normalized) == 1 else normalized
 
     # map fake cuda to actual rocm
