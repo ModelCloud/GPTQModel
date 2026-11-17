@@ -1753,27 +1753,48 @@ def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> 
     cache["ready_event"] = event
 
 
+def _is_current_stream_capturing() -> bool:
+    """True when the active stream is inside a CUDA graph capture."""
+
+    try:
+        return torch.cuda.is_current_stream_capturing()
+    except Exception:
+        return False
+
+
 def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
     """Make the caller's stream wait for the cache builder, when they differ."""
 
     event = cache.get("ready_event")
-    if event is None:
-        return
     try:
         current = torch.cuda.current_stream(device)
     except Exception:
         return
     builder = cache.get("ready_stream")
-    if builder is not None and current == builder:
-        # Same stream: the build is already ordered before this forward, so the
-        # common single-stream path stays free of any bookkeeping.
-        return
-    current.wait_event(event)
-    # The cached tensors outlive every forward, but the allocator still has to
-    # know this stream reads them.
-    for value in cache.values():
-        if isinstance(value, torch.Tensor):
-            value.record_stream(current)
+    same_stream = builder is not None and current == builder
+    if event is not None and not same_stream:
+        # A captured stream may only wait on an event recorded inside the same
+        # capture, so an explicit ``torch.cuda.graph`` can never consume this
+        # one: the driver fails the capture with
+        # ``CUDA_ERROR_STREAM_CAPTURE_ISOLATION`` (#4867). Even ``Event.query()``
+        # is rejected while capturing, and ``torch.cuda.graph`` synchronizes the
+        # device before capture starts, so a cache built on another stream is
+        # already complete here: skip both the wait and the retirement.
+        if _is_current_stream_capturing():
+            return
+        if event.query():
+            # The build finished: nothing is left to order, so retire the event
+            # and every later forward -- captured ones included -- is a plain
+            # kernel launch.
+            cache.pop("ready_event", None)
+        else:
+            current.wait_event(event)
+    if not same_stream:
+        # The cached tensors outlive every forward, but the allocator still has to
+        # know this stream reads them.
+        for value in cache.values():
+            if isinstance(value, torch.Tensor):
+                value.record_stream(current)
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
