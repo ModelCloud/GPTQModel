@@ -1,0 +1,55 @@
+{
+  "model": "nvidia/Nemotron-Labs-Diffusion-3B",
+  "hf_revision": "0d51902da1f8869f83413ce642fab402fa5641e0",
+  "license_repo": "NVlabs/Nemotron-Labs-Diffusion",
+  "license_revision": "2aabcf75ecf70264d4047ff090d842450853f2e4",
+  "license_sha256": "24ab66be50d1aca4fc5e029ef76ce4ceaac6557ea21665caf4b140695a76ffee",
+  "source_files_sha256": {
+    "configuration_nemotron_labs_diffusion.py": "2b18216e1b4e0d89b728c1c871744088a28004564f99009809294b39ec677b57",
+    "modeling_ministral.py": "021afd8a72e23c5bf3a309f9dc5f0a7771db2424c148be5ce2a2737bf4cb7d65",
+    "modeling_nemotron_labs_diffusion.py": "29d73c5709e90e3be3c7e537edb61a84fbb3dc1c286b1eaed42d899a3a4e4760",
+    "config.json": "fc6ec1011e5f4ff858a104e8e04599e931e45dc874c71b9e73182a7f2dbdec44",
+    "README.md": "ac96f71d75eae0bf983c9e5b8f7fea942bdd7e3c24d600f9fef3bfba2036adfc",
+    "tokenizer_config.json": "50d5c40a1e06a86e8d0fc2d4c6a9bf73ed0ffca7bdad3c9b42cedca48baa25dc",
+    "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+    "special_tokens_map.json": "e3a4f63da745f02317a45e00e6476c17fc66ac41faf14bb1b0be1f3211b0ca53",
+    "generation_config.json": "c400f11f0da87584559a2d375c997b79bddfcde336b4085c626c1921ae7dfb6e",
+    "linear_spec_lora_adapter_config.json": "b715a51c044b575e888a644034923ffee04afb7808cf643ab15fd905bf62d1da"
+  },
+  "checkpoint_inventory": {
+    "file": "model.safetensors",
+    "inspected": "range-read header only, no tensor payload",
+    "tensor_count": 237,
+    "captured_parsed_header_sha256": "f1fd72a428d98973aa16feed709383d71027c64e018ff5b0b87d26e05dcb4953",
+    "shapes_fixture_sha256": "d33a532f3a29fa43b2639970aaa5461e8307b1c164a9c414be5d8c64f88faed8"
+  },
+  "manual_tokenizer_oracle": {
+    "Hello world!": [
+      22177,
+      4304,
+      1033
+    ],
+    "Latin + 中文 / 日本語 🧬\n": [
+      106611,
+      1867,
+      30549,
+      11449,
+      1987,
+      30367,
+      15199,
+      119685,
+      1167,
+      1172,
+      1010
+    ],
+    "<s>[INST] Explain diffusion. [/INST]": [
+      1,
+      3,
+      129575,
+      16359,
+      1046,
+      1032,
+      4
+    ]
+  }
+}

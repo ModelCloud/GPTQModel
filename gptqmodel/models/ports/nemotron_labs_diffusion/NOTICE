@@ -1,0 +1,32 @@
+Nemotron Labs Diffusion Transformers 5 adaptation
+
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Configuration also derives from the EleutherAI and HuggingFace teams' 2022
+Apache-2.0 configuration. The Ministral decoder derives from HuggingFace
+Transformers and NVIDIA's diffusion-specific changes.
+Transformers 5 adaptation and tests: Copyright (c) 2026 ModelCloud.ai.
+
+Authoritative model source:
+https://huggingface.co/nvidia/Nemotron-Labs-Diffusion-3B/tree/0d51902da1f8869f83413ce642fab402fa5641e0
+configuration_nemotron_labs_diffusion.py, modeling_ministral.py,
+modeling_nemotron_labs_diffusion.py
+
+Source-code license statement:
+https://github.com/NVlabs/Nemotron-Labs-Diffusion/blob/2aabcf75ecf70264d4047ff090d842450853f2e4/LICENSE
+Source code is Apache-2.0; model weights are separately NVIDIA Open Model
+License. LICENSE preserves that upstream notice byte-for-byte;
+LICENSE-APACHE-2.0.txt supplies the Apache-2.0 text. No trained weights are
+included in this package, and the code license does not relicense weights.
+
+Changes: package-local config/model/generation binding without checkpoint
+Python imports; Transformers 5 cache and strict-FP32 rotary initialization;
+explicit eager/SDPA bidirectional, causal and block-diffusion masks; call-local
+attention-mode selection instead of mutating layer flags; exception-safe
+adapter-flag restoration; negative-count speculative cache cropping; bounded
+speculative unmasking even when the model predicts its mask token. The
+upstream block sampler, loss equations, sampling, confidence threshold,
+thinking-budget and EOS policies are retained. CUDA compilation and optional
+fused implementations are not imported or enabled by this port.
+
+Exact source/asset/header SHA-256 records and tested scope are in
+source_manifest.json and README.md.
