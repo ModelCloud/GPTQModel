@@ -4448,6 +4448,7 @@ class AWQProcessor(LoopProcessor):
                 named_module.state["gsq_diagnostics"] = {
                     "objective": "weight_mse", "before": fitted.before,
                     "after": fitted.after, "learn_scales": gsq.learn_scales,
+                    "skipped": fitted.skipped,
                 }
 
             if pad_cols:
