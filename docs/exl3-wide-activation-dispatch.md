@@ -19,7 +19,7 @@ flowchart TD
     E -->|no| H["_ensure_torch_inner"]
     E -->|yes| F{"amax <= 64?"}
     F -->|yes| G["cast to FP16 (exact)"]
-    F -->|no| P["divide by a power of two, cast to FP16"]
+    F -->|no| P["divide each wide row by its own<br/>power of two, cast to FP16"]
     G --> C
     P --> C
     C --> I["LinearEXL3.forward"]
@@ -40,19 +40,31 @@ BF16's 8-bit significand is a subset of FP16's 11-bit one, so every BF16
 value inside FP16's finite range converts exactly. That covers ordinary activations and is
 bit-exact with the plain FP16 path.
 
-Values above `_FP16_SAFE_AMAX = 64` are divided by a power of two before the
-cast, and the kernel output is multiplied back:
+When the tensor's `amax` exceeds `_FP16_SAFE_AMAX = 64`, each **row** whose own
+`amax` exceeds the threshold is divided by its own power of two before the cast,
+and the kernel output row is multiplied back:
 
-- `math.frexp(amax)` gives `2**exponent > amax`, so the scaled magnitude lies in
-  `(0.5, 1]`. Power-of-two scaling is exact, so relative rounding is unchanged.
+- `torch.frexp(row_amax)` gives `2**exponent > row_amax`, so the scaled
+  magnitude lies in `(0.5, 1]`. Power-of-two scaling is exact, so relative
+  rounding is unchanged.
+- The scale is per row because a per-tensor scale let one massive activation
+  (a BOS outlier at amax ~1e3) divide every other row of the batch by the same
+  factor. Ordinary rows then fell into FP16 subnormals (smallest normal
+  6.1e-5) and lost most of their precision: 9.9e-2 relative error instead of
+  2.7e-3 (#4870). Rows already inside the safe range keep scale 1 and convert
+  bit-exactly.
+- A row that itself mixes a huge outlier with small values still goes subnormal
+  on its own small elements; that is inherent to the FP16 range, and it can no
+  longer drag the other rows down with it.
 - The Hadamard rotation is bounded by `sqrt(128)` times the input maximum and
   the GEMM accumulation stays far below FP16's 65504 limit. This preserves
   #3731's guarantee: wide BF16 activations neither overflow nor produce NaN.
 - The native kernels add the bias to the scaled accumulator. The bridge removes
   the bias, rescales, and restores it in FP32, so the bias is never scaled.
-- The decision needs one `amax` reduction and a host read of that scalar per
-  BF16 forward. It is a single small kernel plus one synchronization, against
-  the hundreds of launches the Torch reconstruction performs.
+- The decision needs one tensor-wide `amax` reduction and a host read of that
+  scalar per BF16 forward, plus a per-row reduction only when it triggers. That
+  is a couple of small kernels and one synchronization, against the hundreds of
+  launches the Torch reconstruction performs.
 
 Non-finite BF16 activations (`inf`/`nan`) keep the FP32 Torch path: there is no
 power of two that would make them finite.
@@ -68,7 +80,7 @@ still reaches the native dtype check.
 | Mechanism | Before #4767 | After #4767 |
 | --- | --- | --- |
 | Dtype dispatch | FP16 native; BF16 and FP32 Torch | FP16 and BF16 native; FP32 Torch |
-| BF16 input conversion | none (Torch, FP32 compute) | exact FP16 cast, power-of-two pre-scale above 64 |
+| BF16 input conversion | none (Torch, FP32 compute) | exact FP16 cast; per-row power-of-two pre-scale for rows above 64 |
 | Wide-input safety | Torch path, FP32 | native FP16 with exact pre-scale; non-finite stays Torch |
 | Native dtype contract | `gptqmodel_ext/exllamav3/quant/exl3_gemm.cu:64` and `hgemm.cu:33` require FP16 | Unchanged; the bridge satisfies it |
 

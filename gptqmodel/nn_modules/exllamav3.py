@@ -372,7 +372,7 @@ class ExllamaV3Linear(nn.Module):
 
     def _native_bf16_input(
         self, x: torch.Tensor
-    ) -> Optional[tuple[torch.Tensor, float]]:
+    ) -> Optional[tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Map a BF16 activation onto the FP16-only native kernel contract.
 
         BF16's 8-bit significand is a subset of FP16's 11-bit one, so every BF16
@@ -382,30 +382,43 @@ class ExllamaV3Linear(nn.Module):
         GEMM accumulation inside FP16's range without changing the relative
         rounding (power-of-two scaling is exact in FP16).
 
-        Returns ``(fp16_input, output_scale)``. The kernel result must have the
-        bias removed, be multiplied by ``output_scale``, and have the bias
+        The scale is per row, not per tensor: a single outlier token (the BOS
+        massive activation on a prefill, for example) would otherwise divide
+        every other row of the batch by the same power of two and push them
+        into FP16 subnormals, which loses most of their precision (#4870).
+        Rows already inside the safe range keep a scale of 1 and stay bit-exact.
+
+        Returns ``(fp16_input, output_scale)``, where ``output_scale`` is
+        ``None`` when nothing was scaled. Otherwise the kernel result must have
+        the bias removed, be multiplied by ``output_scale``, and have the bias
         restored. Returns ``None`` for non-finite activations so they keep the
         FP32 Torch reconstruction path.
         """
         if x.numel() == 0:
             # A zero-row batch has no inf-norm identity; LinearEXL3 already
             # returns an empty output for it, so no scaling is needed.
-            return x.to(torch.float16), 1.0
+            return x.to(torch.float16), None
         # ``vector_norm(inf)`` is the max-abs reduction without materializing
         # an ``abs`` copy, and it is the cheapest form on CUDA.
         amax = float(torch.linalg.vector_norm(x.detach(), ord=float("inf")))
         if not math.isfinite(amax):
             return None
         if amax <= _FP16_SAFE_AMAX:
-            return x.to(torch.float16), 1.0
-        # ``math.frexp`` yields ``amax < 2**exponent``, so the scaled magnitude
-        # lies in (0.5, 1] and every power-of-two step is exact.
-        exponent = math.frexp(amax)[1]
-        output_scale = math.ldexp(1.0, exponent)
-        return (x * (1.0 / output_scale)).to(torch.float16), output_scale
+            return x.to(torch.float16), None
+        # ``frexp`` yields ``amax < 2**exponent``, so the scaled magnitude lies
+        # in (0.5, 1] and every power-of-two step is exact. Rows that do not
+        # need it keep 1.0, so only the wide rows change.
+        row_amax = x.detach().float().abs().amax(dim=-1, keepdim=True)
+        _, exponent = torch.frexp(row_amax)
+        output_scale = torch.where(
+            row_amax > _FP16_SAFE_AMAX,
+            torch.ldexp(torch.ones_like(row_amax), exponent),
+            torch.ones_like(row_amax),
+        )
+        return (x / output_scale).to(torch.float16), output_scale
 
     def _rescale_native_output(
-        self, result: torch.Tensor, output_scale: float
+        self, result: torch.Tensor, output_scale: torch.Tensor
     ) -> torch.Tensor:
         """Undo ``_native_bf16_input``'s pre-scale, keeping the bias unscaled."""
         bias = getattr(self, "bias", None)
@@ -448,7 +461,7 @@ class ExllamaV3Linear(nn.Module):
                     {},
                     out_dtype=torch.float16,
                 )[..., :self.out_features]
-                if output_scale != 1.0:
+                if output_scale is not None:
                     result = self._rescale_native_output(result, output_scale)
                 return result.to(input_dtype)
 
