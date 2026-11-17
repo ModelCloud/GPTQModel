@@ -1070,6 +1070,20 @@ def _run_single_subset_pass(
         forward.replay_after_process or forward.subset_early_stop
     ):
         pending_members = set(subset_names)
+        # The pending set and the stop flag describe one forward pass, not the
+        # whole subset stage. The member that completes the subset keeps
+        # ``forward_hook_last`` set until the stage ends, and the set stays
+        # empty, so from the second calibration batch on the first member to
+        # fire stopped the forward and every sibling lost that batch (#4738).
+        # Refill both at the start of each batch: the layer module is forwarded
+        # once per batch before any of its subset members.
+        def _reset_subset_early_stop(_module, _inputs):
+            pending_members.clear()
+            pending_members.update(subset_names)
+            for member_name in subset_names:
+                subset[member_name].forward_hook_last = False
+
+        handle.append(module.register_forward_pre_hook(_reset_subset_early_stop))
 
     if execute_forward:
         for idx, name in enumerate(subset_names):
