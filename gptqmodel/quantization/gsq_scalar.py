@@ -137,17 +137,55 @@ def affine_codes(weight, scales, zeros, g_idx, bits, *, packing, scale_dtype=tor
     return values.round().clamp(0, 2**bits - 1)
 
 
+_DAMP_START = 1e-6
+_DAMP_STEPS = 4
+_DAMP_GROWTH = 10.0
+
+
 def _metric_factor(hessian: torch.Tensor) -> torch.Tensor:
-    """Factor a positive-semidefinite calibration Gram without extra damping."""
-    h = (hessian.float() + hessian.float().T) * 0.5
+    """Factor a positive-semidefinite calibration Gram.
+
+    Symmetrization materializes one C^2 buffer and scales it in place.  The
+    undamped fp32 Cholesky is tried first, so a well-conditioned Gram produces
+    the same factor as before.  An ill-conditioned or rank-deficient Gram (the
+    undamped factor fails on real ``down_proj`` layers) retries the Cholesky
+    with a diagonal jitter ladder before any eigendecomposition.  The factor
+    only weights a local reconstruction objective, so ``H + eps * I`` is
+    equivalent to ``H`` at the tolerance GSQ needs.  The eigendecomposition is
+    a host-side fp64 fallback: fp64 matrix/vector/syevd workspace on the
+    accelerator used to cost roughly 14x the Hessian.
+    """
+    h = hessian.detach()
+    if h.dtype is not torch.float32:
+        h = h.float()
+    h = h + h.T
+    h.mul_(0.5)
     factor, info = torch.linalg.cholesky_ex(h)
     if int(info) == 0:
         return factor
-    values, vectors = torch.linalg.eigh(h.double())
+    del factor
+    mean_diag = h.diagonal().mean()
+    if not bool(torch.isfinite(mean_diag)) or float(mean_diag) <= 0.0:
+        mean_diag = h.diagonal().abs().max()
+    jitter = float(mean_diag) * _DAMP_START
+    added = 0.0
+    for _ in range(_DAMP_STEPS):
+        h.diagonal().add_(jitter)
+        added += jitter
+        factor, info = torch.linalg.cholesky_ex(h)
+        if int(info) == 0:
+            return factor
+        del factor
+        jitter *= _DAMP_GROWTH
+    # Restore the undamped Gram before the fallback so its PSD check still
+    # rejects genuinely indefinite inputs.
+    h.diagonal().sub_(added)
+    values, vectors = torch.linalg.eigh(h.cpu().double())
     tolerance = torch.finfo(torch.float32).eps * h.shape[0] * values.abs().max()
     if values.min() < -tolerance:
         raise ValueError("GSQ requires a positive-semidefinite calibration Hessian")
-    return (vectors * values.clamp_min(0).sqrt().unsqueeze(0)).float()
+    factor = (vectors * values.clamp_min(0).sqrt().unsqueeze(0)).float()
+    return factor.to(hessian.device)
 
 
 def refine_gptq_scalar(
