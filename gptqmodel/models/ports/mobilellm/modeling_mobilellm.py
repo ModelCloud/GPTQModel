@@ -8,6 +8,7 @@
 # code; see LICENSE-APACHE-2.0 and NOTICE for the preserved attribution.
 
 import math
+from contextlib import contextmanager
 from typing import cast
 
 import torch
@@ -20,6 +21,28 @@ from transformers.generation.utils import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 from .configuration_mobilellm import MobileLLMConfig
+
+
+@contextmanager
+def _restore_forward_state_on_error(cache, decoder_layers):
+    # DynamicLayer.update concatenates into replacement tensors; retain references,
+    # not copies of the full KV storage. Newly appended slots must disappear too.
+    layers = list(cache.layers) if isinstance(cache, DynamicCache) else []
+    cache_states = [vars(layer).copy() for layer in layers]
+    rotary_states = [(layer.self_attn.rotary_emb, layer.self_attn.rotary_emb._base,
+                      layer.self_attn.rotary_emb.inv_freq) for layer in decoder_layers]
+    try:
+        yield
+    except Exception:
+        if isinstance(cache, DynamicCache):
+            cache.layers[:] = layers
+            for layer, state in zip(layers, cache_states):
+                vars(layer).clear()
+                vars(layer).update(state)
+        for rotary, base, frequencies in rotary_states:
+            rotary._base = base
+            rotary.inv_freq = frequencies
+        raise
 
 
 class MobileLLMRMSNorm(nn.Module):
@@ -233,25 +256,26 @@ class MobileLLMModel(MobileLLMPreTrainedModel):
         mask.masked_fill_(~keep, torch.finfo(hidden_states.dtype).min)
         all_hidden, all_attentions = (), ()
         repetitions = 2 if self.config.layer_sharing else 1
-        for index, layer in enumerate(self.layers):
-            for repeat in range(repetitions):
-                if output_hidden_states:
-                    all_hidden += (hidden_states,)
-                hidden_states, weights = layer(
-                    hidden_states, attention_mask=mask, position_ids=position_ids,
-                    past_key_value=past_key_values, output_attentions=output_attentions,
-                    cache_idx=index * repetitions + repeat,
-                )
-                if output_attentions:
-                    all_attentions += (weights,)
-        hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        result = BaseModelOutputWithPast(last_hidden_state=hidden_states,
-                                        past_key_values=past_key_values if use_cache else None,
-                                        hidden_states=all_hidden if output_hidden_states else None,
-                                        attentions=all_attentions if output_attentions else None)
-        return result if return_dict else result.to_tuple()
+        with _restore_forward_state_on_error(past_key_values, self.layers):
+            for index, layer in enumerate(self.layers):
+                for repeat in range(repetitions):
+                    if output_hidden_states:
+                        all_hidden += (hidden_states,)
+                    hidden_states, weights = layer(
+                        hidden_states, attention_mask=mask, position_ids=position_ids,
+                        past_key_value=past_key_values, output_attentions=output_attentions,
+                        cache_idx=index * repetitions + repeat,
+                    )
+                    if output_attentions:
+                        all_attentions += (weights,)
+            hidden_states = self.norm(hidden_states)
+            if output_hidden_states:
+                all_hidden += (hidden_states,)
+            result = BaseModelOutputWithPast(last_hidden_state=hidden_states,
+                                            past_key_values=past_key_values if use_cache else None,
+                                            hidden_states=all_hidden if output_hidden_states else None,
+                                            attentions=all_attentions if output_attentions else None)
+            return result if return_dict else result.to_tuple()
 
 
 class MobileLLMForCausalLM(MobileLLMPreTrainedModel, GenerationMixin):
@@ -289,19 +313,20 @@ class MobileLLMForCausalLM(MobileLLMPreTrainedModel, GenerationMixin):
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
                 inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0,
                 output_attentions=None, output_hidden_states=None, return_dict=True, **kwargs):
-        output = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-                            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-                            output_attentions=output_attentions, output_hidden_states=output_hidden_states)
-        states = output.last_hidden_state
-        states = states[:, -logits_to_keep:, :] if isinstance(logits_to_keep, int) else states[:, logits_to_keep, :]
-        if self.config.pretraining_tp > 1:
-            logits = _column_parallel(states, self.get_output_embeddings(), self.config.pretraining_tp).float()
-        else:
-            logits = (F.linear(states, cast(torch.Tensor, self.model.embed_tokens.weight)) if self.config.share_embedding
-                      else self.lm_head(states)).float()
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-        result = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=output.past_key_values,
-                                       hidden_states=output.hidden_states, attentions=output.attentions)
-        return result if return_dict else result.to_tuple()
+        with _restore_forward_state_on_error(past_key_values, self.model.layers):
+            output = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
+                                past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
+                                output_attentions=output_attentions, output_hidden_states=output_hidden_states)
+            states = output.last_hidden_state
+            states = states[:, -logits_to_keep:, :] if isinstance(logits_to_keep, int) else states[:, logits_to_keep, :]
+            if self.config.pretraining_tp > 1:
+                logits = _column_parallel(states, self.get_output_embeddings(), self.config.pretraining_tp).float()
+            else:
+                logits = (F.linear(states, cast(torch.Tensor, self.model.embed_tokens.weight)) if self.config.share_embedding
+                          else self.lm_head(states)).float()
+            loss = None
+            if labels is not None:
+                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            result = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=output.past_key_values,
+                                           hidden_states=output.hidden_states, attentions=output.attentions)
+            return result if return_dict else result.to_tuple()
