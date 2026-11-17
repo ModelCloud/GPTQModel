@@ -502,6 +502,8 @@ def test_moss_tokenizer_bpe_bos_pair_padding_truncation_and_save(tmp_path, bos, 
     assert tok.eos_token_id == vocab["<eom>"]
     raw = "\nprint(1)\nprint(2)\nSTOP\n"
     assert tok.decode(tok.encode(raw, add_special_tokens=False), truncate_before_pattern=["^STOP"]).endswith("print(1)\n")
+    assert tok.decode(tok.encode(raw, add_special_tokens=False), False, None, ["^STOP"]).endswith("print(1)\n")
+    assert tok.truncate("code\n中文tail\n", [r"^\p{Han}+"]) == "code\n"
     # Roundtrip a serializer and a legacy vocab/merges representation.
     for legacy in (False, True):
         saved = tmp_path / str(legacy)
@@ -519,3 +521,72 @@ def test_moss_tokenizer_bpe_bos_pair_padding_truncation_and_save(tmp_path, bos, 
         for text in texts:
             assert loaded.encode(text) == tok.encode(text)
             assert loaded.decode(loaded.encode(text)) == tok.decode(tok.encode(text))
+
+
+def _write_original_tokenizer_metadata(path, eos_token="<eom>"):
+    """Five-file layout of pinned Moon-003, without rewriting legacy tokens."""
+    from tokenizers.pre_tokenizers import ByteLevel
+
+    vocab = {char: index for index, char in enumerate(sorted(ByteLevel.alphabet()))}
+    added = {"<|endoftext|>": 256, "<eom>": 257, "<pad>": 258, "<eoh>": 259, "    ": 260, "\t\t": 261}
+    (path / "vocab.json").write_text(json.dumps(vocab))
+    (path / "merges.txt").write_text("#version: 0.2\n")
+    (path / "added_tokens.json").write_text(json.dumps(added))
+    tokens = [{"content": token, "lstrip": False, "rstrip": False, "normalized": True,
+               "single_word": False} for token in ("<eom>", "<eoh>")]
+    (path / "special_tokens_map.json").write_text(json.dumps({
+        "bos_token": "<|endoftext|>", "eos_token": eos_token, "unk_token": "<|endoftext|>",
+        "pad_token": "<pad>", "additional_special_tokens": tokens,
+    }))
+    (path / "tokenizer_config.json").write_text(json.dumps({
+        "tokenizer_class": "UntrustedMossTokenizer", "add_bos_token": False,
+        "auto_map": {"AutoTokenizer": ["evil.Tokenizer", None]},
+    }))
+    return vocab, added
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+@pytest.mark.parametrize("eos_token", ["<|endoftext|>", "<eom>"])
+def test_moss_original_legacy_tokens_public_security_save_and_retry(tmp_path, monkeypatch, trust, bypass, eos_token):
+    from gptqmodel import GPTQModel
+    from gptqmodel.utils.hf import load_hf_tokenizer
+
+    model = _model()
+    model.save_pretrained(tmp_path)
+    vocab, added = _write_original_tokenizer_metadata(tmp_path, eos_token=eos_token)
+    original = {file.name: file.read_bytes() for file in tmp_path.glob("*.json")}
+    marker = tmp_path / "EXECUTED"
+    (tmp_path / "evil.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    if bypass is None:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
+    else:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", bypass)
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    texts = ["Hello 中文 123", "def foo():\n    return 123\n\t\tpass", "<|Human|>: 你好<eoh>\n<|MOSS|>: Hi<eom>"]
+    for text in texts:
+        expected = _source_bpe_ids(text, vocab, [], added=added)
+        assert loaded.tokenizer.encode(text) == expected
+        assert loaded.tokenizer.decode(expected) == text
+    assert loaded.tokenizer.decode(loaded.tokenizer.encode(texts[1]), skip_special_tokens=True) == texts[1]
+    assert not marker.exists()
+    assert loaded.trust_remote_code is False
+    assert loaded.tokenizer.eos_token_id == added[eos_token]
+    for name, data in original.items():
+        assert (tmp_path / name).read_bytes() == data, name
+    native = loaded.tokenizer
+    native.save_pretrained(tmp_path / "saved-tokenizer")
+    normalized = load_hf_tokenizer(tmp_path / "saved-tokenizer", model_config=model.config,
+                                    trust_remote_code=trust)
+    for text in texts:
+        assert normalized.encode(text) == native.encode(text)
+        assert normalized.decode(normalized.encode(text)) == text
+    # A failed constructor must not poison source or preload metadata caches.
+    (tmp_path / "vocab.json").write_text("invalid JSON")
+    # Tokenizers' Rust BPE reader exposes this native parse failure as Exception.
+    with pytest.raises(Exception, match="Error while initializing BPE"):
+        load_hf_tokenizer(tmp_path, model_config=model.config, trust_remote_code=trust)
+    (tmp_path / "vocab.json").write_bytes(original["vocab.json"])
+    repaired = load_hf_tokenizer(tmp_path, model_config=model.config, trust_remote_code=trust)
+    for text in texts:
+        assert repaired.encode(text) == native.encode(text)

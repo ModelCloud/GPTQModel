@@ -5,8 +5,7 @@
 Class selection is package-owned; Tokenicer owns corrective normalization.
 """
 
-import re
-
+import regex as re
 from tokenizers.processors import TemplateProcessing
 from transformers import GPT2Tokenizer
 
@@ -27,8 +26,10 @@ class MossTokenizer(GPT2Tokenizer):
             inserted = self.backend_tokenizer.encode("", add_special_tokens=True).ids
             object.__setattr__(self, "_add_bos_token", inserted == [self.bos_token_id])
 
-    def decode(self, token_ids, *args, truncate_before_pattern=None, **kwargs):
-        text = super().decode(token_ids, *args, **kwargs)
+    def decode(self, token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=None,
+               truncate_before_pattern=None, **kwargs):
+        text = super().decode(token_ids, skip_special_tokens=skip_special_tokens,
+                              clean_up_tokenization_spaces=clean_up_tokenization_spaces, **kwargs)
         if truncate_before_pattern:
             text = self.truncate(text, truncate_before_pattern)
         return text
