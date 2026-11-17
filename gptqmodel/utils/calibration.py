@@ -178,6 +178,23 @@ def _column_entries(value: Any) -> Optional[List[Any]]:
     return None
 
 
+def _hf_dataset_rows(dataset: Any) -> Optional[List[Any]]:
+    """Return an HF dataset's rows as python mappings, or ``None`` if not HF.
+
+    A caller often leaves a display format on the dataset for another pipeline
+    step. Iteration then yields one-row ``pandas.DataFrame`` or
+    ``pyarrow.Table`` objects instead of the documented python rows, and every
+    row was rejected purely because of that format (issue #4882). Clearing the
+    format keeps the same rows, so the rejection depends on the content only.
+    """
+
+    hf_dataset_types = _hf_dataset_types()
+    if not hf_dataset_types or not isinstance(dataset, hf_dataset_types):
+        return None
+    reset_format = getattr(dataset, "with_format", None)
+    return list(reset_format(None) if callable(reset_format) else dataset)
+
+
 def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
     """Return a DataFrame-like input as a columnar mapping, else ``None``.
 
@@ -195,25 +212,37 @@ def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
     if getattr(dataset, "columns", None) is None:
         return None
     to_dict = getattr(dataset, "to_dict", None)
-    if not callable(to_dict):
-        return None
-
-    # pandas spells the orientation as a positional argument or ``orient=``;
-    # Polars uses ``as_series=False``. A `to_dict` that understands none of
-    # them is not a row-wise table, so let the iterable handling take it.
-    for args, kwargs in (
-        (("list",), {}),
-        ((), {"orient": "list"}),
-        ((), {"as_series": False}),
-    ):
-        try:
-            mapped = to_dict(*args, **kwargs)
-        except TypeError:
-            continue
-        if isinstance(mapped, Mapping):
-            break
+    if callable(to_dict):
+        # pandas spells the orientation as a positional argument or ``orient=``;
+        # Polars uses ``as_series=False``. A `to_dict` that understands none of
+        # them is not a row-wise table, so let the iterable handling take it.
+        for args, kwargs in (
+            (("list",), {}),
+            ((), {"orient": "list"}),
+            ((), {"as_series": False}),
+        ):
+            try:
+                mapped = to_dict(*args, **kwargs)
+            except TypeError:
+                continue
+            if isinstance(mapped, Mapping):
+                break
+        else:
+            return None
     else:
-        return None
+        # ``pyarrow.Table`` (what ``Dataset.with_format("arrow")[:]`` returns)
+        # has ``columns`` but no ``to_dict``, so it used to fall through to the
+        # iterable handling, where iteration yields one ``ChunkedArray`` per
+        # column and every row is rejected.
+        to_pydict = getattr(dataset, "to_pydict", None)
+        if not callable(to_pydict):
+            return None
+        try:
+            mapped = to_pydict()
+        except Exception:
+            return None
+        if not isinstance(mapped, Mapping):
+            return None
 
     columns: Dict[str, Any] = {}
     for name, value in mapped.items():
@@ -434,7 +463,7 @@ def prepare_calibration_dataset(
                 f"or `messages` columns, got keys={list(calibration_dataset.keys())}."
             )
     elif hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
-        raw_examples = list(calibration_dataset)
+        raw_examples = _hf_dataset_rows(calibration_dataset)
     elif isinstance(calibration_dataset, list):
         raw_examples = calibration_dataset
     elif isinstance(calibration_dataset, Sequence) and not isinstance(calibration_dataset, (bytes, bytearray)):
