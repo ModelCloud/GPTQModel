@@ -209,9 +209,26 @@ def detach_cpu_operand(tensor):
     These operands are per-column metadata, so one copy at repack time is cheap
     next to the shard pages it releases. ``None`` and non-tensors pass through
     unchanged.
+
+    Only a tensor that really aliases the checkpoint is copied. A ``safetensors``
+    (or ``torch.frombuffer``) storage is file-backed and therefore not resizable,
+    while an ordinary allocation is. Copying unconditionally would rebind and
+    duplicate the buffers the module already owns, which is exactly what the
+    int4pack snapshot accounting removed (#4395), so a resizable tensor is
+    returned unchanged and keeps its identity.
     """
 
     if tensor is None or not isinstance(tensor, t.Tensor):
+        return tensor
+    if tensor.device.type != "cpu":
+        return tensor
+    try:
+        resizable = tensor.untyped_storage().resizable()
+    except (NotImplementedError, RuntimeError):
+        # A backend without resizable() cannot tell us, so keep the old
+        # fail-safe behaviour of handing back a private copy.
+        return tensor.clone()
+    if resizable:
         return tensor
     return tensor.clone()
 
