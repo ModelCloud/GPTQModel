@@ -109,6 +109,9 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
     # be restored before a checkpoint load or save.
     _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
+    # The AVX512 extension packs a different layout with no verified inverse;
+    # keep the full checkpoint snapshot.
+    _FUSED_TRAIN_STATE_REBUILD = None
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None

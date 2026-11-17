@@ -20,7 +20,9 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -69,6 +71,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     gemm_int4_forward_kernel = None
+
+    # ``transform_cpu`` keeps ``scales`` in the checkpoint dtype and layout, so
+    # only the rewritten qweight/qzeros need a checkpoint snapshot.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros")
+    # The ATen CPU int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "awq"
 
     def __init__(
         self,
@@ -225,8 +234,12 @@ class TorchAtenAwqLinear(AWQuantLinear):
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
         self.qzeros = _cpu_int4pack_zero_offsets(izeros, compute_scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":

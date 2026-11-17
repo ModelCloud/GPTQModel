@@ -21,7 +21,9 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -116,6 +118,13 @@ class TorchAtenLinear(PackableQuantLinear):
 
     gemm_int4_forward_kernel = None
     _fused_op_handles_bias = False
+
+    # ``transform_cpu`` keeps ``scales`` in the checkpoint dtype and layout, so
+    # only the rewritten qweight/qzeros need a checkpoint snapshot.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros")
+    # The ATen CPU int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "gptq"
 
     @classmethod
     def _validate(
@@ -318,6 +327,11 @@ class TorchAtenLinear(PackableQuantLinear):
         self.scales_and_zeros = pack_scales_and_zeros(
             scales.to(dtype), qzeros.to(dtype)
         )
+        # ``qzeros`` is byte-identical to the packed metadata's zero column.
+        # Keep it as a view instead of a second allocation, then key the cache
+        # on the view that is actually installed.
+        if bind_runtime_qzeros(self):
+            key = (tensor_cache_key(scales), tensor_cache_key(self.qzeros))
         self._fused_state_key = key
 
     def _build_ret_idx(self) -> torch.Tensor:
@@ -417,8 +431,12 @@ class TorchAtenLinear(PackableQuantLinear):
 
         self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, compute_scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":
