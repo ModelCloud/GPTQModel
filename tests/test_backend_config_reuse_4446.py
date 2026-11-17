@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from gptqmodel import GPTQModel
-from gptqmodel.backend import BACKEND, MarlinConfig, RuntimeConfig, TorchConfig
+from gptqmodel.backend import BACKEND, AwqTorchConfig, MarlinConfig, RuntimeConfig, TorchConfig
 from gptqmodel.quantization import AWQConfig, QuantizeConfig
 from gptqmodel.utils.backend_config import resolve_quantize_backend
 from gptqmodel.utils.kernel import KernelConfig, get_kernel_config, reset_kernel_config, resolve_kernel_config
@@ -43,7 +43,12 @@ def fake_load(monkeypatch, tmp_path):
                 kwargs["backend"], kwargs["quantize_config"], kwargs.get("kernel"), kwargs.get("runtime")
             )
             calls.append((selected, policy))
-            return SimpleNamespace(quantize_config=kwargs["quantize_config"])
+            # Current GPTQModel.load logs the KV-cache estimate on the returned
+            # model; this fake stops before a real model exists.
+            return SimpleNamespace(
+                quantize_config=kwargs["quantize_config"],
+                log_kv_cache_estimate=lambda: None,
+            )
 
     monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: _Definition)
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
@@ -169,3 +174,49 @@ def test_quant_linear_kwargs_carry_the_resolved_policy():
         policy = qcfg.quant_linear_init_kwargs()["kernel"]
         assert policy.marlin_fp32 is False
         assert policy.max_packers == 2
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [
+        (TorchConfig(), BACKEND.GPTQ_TORCH),
+        (BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TORCH),
+        (AwqTorchConfig(), BACKEND.AWQ_TORCH),
+        (BACKEND.AWQ_TORCH, BACKEND.AWQ_TORCH),
+    ],
+)
+def test_load_backend_selection_is_inherited_by_quantize(fake_load, selection, expected):
+    """A typed config and its enum spelling must survive into quantize() alike (#4582)."""
+
+    qcfg = AWQConfig(bits=4) if expected is BACKEND.AWQ_TORCH else QuantizeConfig(bits=4)
+
+    fake_load(qcfg, backend=selection)
+    assert fake_load.calls[-1][0] is expected
+
+    selected, _ = resolve_quantize_backend(BACKEND.AUTO, qcfg, inherit=True)
+
+    assert selected is expected
+    assert selected is not BACKEND.AUTO
+
+
+def test_explicit_enum_load_is_inherited_without_a_typed_config(fake_load):
+    """The issue's exact case: enum load, then quantize(backend=AUTO)."""
+
+    qcfg = AWQConfig(bits=4, group_size=128)
+    fake_load(qcfg, backend=BACKEND.AWQ_TORCH)
+
+    selected, policy = resolve_quantize_backend(BACKEND.AUTO, qcfg, inherit=True)
+
+    assert selected is BACKEND.AWQ_TORCH
+    assert policy is None
+
+
+@pytest.mark.parametrize("invalid", ["not-a-backend", 123, object()])
+def test_unknown_load_backend_raises_instead_of_falling_back_to_auto(fake_load, invalid):
+    qcfg = QuantizeConfig(bits=4)
+
+    with pytest.raises((TypeError, ValueError)):
+        fake_load(qcfg, backend=invalid)
+
+    assert getattr(qcfg, "_load_backend", None) is None
+    assert resolve_quantize_backend(BACKEND.AUTO, qcfg, inherit=True) == (BACKEND.AUTO, None)

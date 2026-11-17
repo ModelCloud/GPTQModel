@@ -138,6 +138,28 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         finally:
             os.unlink(path)
 
+    class _CudaArrayExporter:
+        def __init__(self, owner: torch.Tensor) -> None:
+            self.owner = owner
+            self.__cuda_array_interface__ = {
+                "shape": tuple(owner.shape),
+                "typestr": "|u1",
+                "data": (owner.data_ptr(), False),
+                "strides": None,
+                "version": 3,
+            }
+
+    def cuda_array_interface_view() -> bool:
+        """``GGUFCudaKernel`` exposes its ggml weight buffer this way (#4387)."""
+        owner = torch.randint(0, 256, (257, 144), dtype=torch.uint8, device="cuda")
+        exporter = _CudaArrayExporter(owner)
+        with torch.inference_mode(False):
+            view = torch.as_tensor(exporter, device=owner.device)
+        del exporter
+        same = view.data_ptr() == owner.data_ptr() and not view.is_inference()
+        torch.cuda.current_stream().synchronize()
+        return same and torch.equal(view.cpu(), owner.cpu())
+
     def generator_roundtrip() -> bool:
         generator = torch.Generator(device="cuda")
         generator.manual_seed(1234)
@@ -1061,6 +1083,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.eye": lambda: torch.eye(256, device="cuda"),
         "torch.tensor": lambda: torch.tensor([1.0, 2.0, 3.0], device="cuda"),
         "torch.as_tensor": lambda: torch.as_tensor([1.0, 2.0], device="cuda"),
+        "torch.as_tensor (__cuda_array_interface__ view)": cuda_array_interface_view,
         "torch.from_numpy": lambda: torch.from_numpy(__import__("numpy").arange(16)),
         "torch.zeros_like": lambda: torch.zeros_like(t(64)),
         "torch.ones_like": lambda: torch.ones_like(t(64)),

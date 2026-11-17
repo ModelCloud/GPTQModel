@@ -199,6 +199,13 @@ This writes the default AWQ GEMM format. Calibration is still required.
 Other AWQ layouts have different runtime and dtype restrictions; changing only
 the file's format label does not convert the packed tensors.
 
+`FORMAT.GEMV` checkpoints are packed with the native CUDA GEMV kernel on CUDA,
+with `AWQ_GEMV_TRITON` on ROCm, and with the portable Torch reader
+(`BACKEND.AWQ_TORCH`) on a CPU-only host. The CPU reader is also what
+`quantize()` re-homes the in-session model to after the packing loop leaves the
+layers on CPU, so `quantize()` -> `save()` completes on every host and still
+writes the requested GEMV checkpoint (issue #4554).
+
 ### RTN W4A16 without calibration
 
 ```python

@@ -451,7 +451,11 @@ def _install_fake_bitsandbytes(monkeypatch) -> None:
     def int8_vectorwise_quant(x, threshold=0.0):
         del threshold
         assert x.dim() == 2, f"native int8_vectorwise_quant expects rank 2, got {tuple(x.shape)}"
-        x_fp32 = x.to(torch.float32)
+        # The native kernel reads data_ptr() as packed [M, K] rows and ignores
+        # the tensor's strides. as_strided reproduces that read so a row-strided
+        # view yields the same wrong codes the real kernel produces.
+        x_packed = torch.as_strided(x, (x.numel(),), (1,)).reshape(x.shape)
+        x_fp32 = x_packed.to(torch.float32)
         row_absmax = x_fp32.abs().amax(dim=1)
         scale = row_absmax / 127.0
         scale = torch.where(scale == 0, torch.ones_like(scale), scale)
@@ -459,7 +463,8 @@ def _install_fake_bitsandbytes(monkeypatch) -> None:
         return codes, row_absmax, None
 
     def int8_linear_matmul(x_int8, weight):
-        return torch.matmul(x_int8.to(torch.int32), weight.to(torch.int32).t())
+        # Exact for INT8 inputs: the products and their K-sum fit in FP32.
+        return torch.matmul(x_int8.to(torch.float32), weight.to(torch.float32).t())
 
     def int8_mm_dequant(mm_out, row_stats, col_stats):
         return (
@@ -542,6 +547,62 @@ def test_bitsandbytes_int8_forward_preserves_batched_activation_dims(
             (x_codes * x_scale[:, None]) @ kernel.dequantize_weight().float().t()
         ).reshape(batched.shape)
         torch.testing.assert_close(batched, expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="bitsandbytes INT8 vectorwise quant requires CUDA/HIP",
+)
+def test_bitsandbytes_int8_forward_handles_row_strided_activations(monkeypatch):
+    """A row-strided activation must be packed before the native INT8 ops."""
+
+    if not BITSANDBYTES_AVAILABLE:
+        _install_fake_bitsandbytes(monkeypatch)
+
+    torch.manual_seed(4584)
+    linear = nn.Linear(128, 64, bias=False).to(torch.float16).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    kernel.eval()
+    kernel = kernel.to("cuda")
+
+    # ``base[:, -1:, :]`` has row stride 4 * K, so ``reshape`` returns a view
+    # rather than a packed [M, K] buffer.
+    base = torch.randn(3, 4, 128, dtype=torch.float16, device="cuda")
+    x = base[:, -1:, :]
+    x_flat = x.reshape(-1, 128)
+    assert not x_flat.is_contiguous()
+
+    with torch.inference_mode():
+        actual = kernel(x)
+        contiguous = kernel(x_flat.contiguous()).reshape(actual.shape)
+
+    assert actual.shape == (3, 1, 64)
+    assert torch.equal(actual, contiguous)
+
+    # Independent FP64 oracle: quantize the logical rows, multiply by the
+    # dequantized packed weight, and dequantize without calling forward.
+    x64 = x_flat.to(torch.float64)
+    absmax = x64.abs().amax(dim=1)
+    scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float64).tiny)
+    codes = (x64 / scale[:, None]).round().clamp(-127, 127)
+    weight64 = kernel.weight.to(torch.float64) * (
+        kernel.weight_scb.to(torch.float64) / 127.0
+    ).unsqueeze(1)
+    expected = ((codes * scale[:, None]) @ weight64.t()).reshape(actual.shape)
+    torch.testing.assert_close(
+        actual.to(torch.float64), expected, rtol=2e-3, atol=2e-3
+    )
 
 
 @pytest.mark.skipif(

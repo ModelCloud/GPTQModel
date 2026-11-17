@@ -271,19 +271,20 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        if (
-            not self.training
-            and not x_flat.requires_grad
-            and self.linear_mode is None
-            and self._cpu_fused_available()
-            and x_flat.device.type == "cpu"
-            and self._fused_input_dtype(x_flat)
-        ):
-            capture_fused_train_state(self)
-            self.transform("cpu")
-            self.linear_mode = "inference"
-        elif self.linear_mode is None:
-            self.linear_mode = "train"
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x_flat.requires_grad
+                and self.linear_mode is None
+                and self._cpu_fused_available()
+                and x_flat.device.type == "cpu"
+                and self._fused_input_dtype(x_flat)
+            ):
+                capture_fused_train_state(self)
+                self.transform("cpu")
+                self.linear_mode = "inference"
+            elif self.linear_mode is None:
+                self.linear_mode = "train"
 
         if self.linear_mode == "inference":
             if not self._fused_input_dtype(x_flat):

@@ -6,6 +6,7 @@
 import copy
 import math
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, wraps
 from typing import Any, Dict, List, Optional, Tuple
@@ -315,6 +316,13 @@ def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
 
 
 class BaseQuantLinear(nn.Module):
+    # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
+    # on the first forward. Serialize that cold check-and-transform so a
+    # concurrent first forward cannot observe half-converted tensors or repack
+    # already-packed words (issue #4565). One process-wide lock is enough: the
+    # transform runs once per module and avoids per-instance lock pickling.
+    _cpu_transform_lock = threading.RLock()
+
     SUPPORTS_BACKENDS: List[BACKEND] = None
     # False for role-specific modules that are instantiated explicitly and
     # must never participate in general backend discovery.

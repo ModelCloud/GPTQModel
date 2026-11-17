@@ -72,6 +72,13 @@ class _FakeWeight:
     def close(self) -> None:
         self.closed = True
 
+    # The layer's qweight stays on the CPU while the input claims CUDA, so the
+    # kernel keeps this weight as a cache and never adopts it as storage.
+    device = torch.device("cuda:0")
+
+    def backs(self, tensor) -> bool:
+        return False
+
 
 def _make_layer(in_features: int, out_features: int) -> GGUFCudaKernel:
     layer = object.__new__(GGUFCudaKernel)
