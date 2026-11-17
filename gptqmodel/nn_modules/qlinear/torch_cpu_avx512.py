@@ -13,6 +13,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
+from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from .torch_aten_kernel import TorchAtenLinear
 
@@ -184,9 +185,18 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         # Keep scales in FP32. BF16 scale rounding alone consumes most of the
         # 2e-3 inference error budget on small-K layers; the dot product still
         # uses BF16 inputs with FP32 accumulation.
-        self.scales = self.scales.to(torch.float32).contiguous()
+        #
+        # ``to`` returns the same tensor when the dtype already matches, which
+        # would leave scales as a view of the checkpoint mapping (#4785).
+        scales = self.scales.to(torch.float32)
+        if scales.data_ptr() == self.scales.data_ptr():
+            scales = detach_cpu_operand(scales)
+        self.scales = scales.contiguous()
         if self.bias is not None:
-            self.bias = self.bias.to(torch.float32).contiguous()
+            bias = self.bias.to(torch.float32)
+            if bias.data_ptr() == self.bias.data_ptr():
+                bias = detach_cpu_operand(bias)
+            self.bias = bias.contiguous()
 
         if self.pack_gptq_int4_kernel is None:
             ok, err = type(self).cached_validate_once()
@@ -207,6 +217,9 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         )
         self._cpu_transform_dtype = torch.bfloat16
         self._cpu_transformed = True
+        # ``g_idx`` still aliases the checkpoint mapping and would pin the whole
+        # shard even though ``qweight``/``qzeros`` are now private (#4785).
+        self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
 
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:

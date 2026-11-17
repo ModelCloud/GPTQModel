@@ -195,6 +195,27 @@ def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
     )
 
 
+def detach_cpu_operand(tensor):
+    """Return ``tensor`` as a private allocation instead of a checkpoint view.
+
+    A CPU load keeps quantized tensors as zero-copy views of the shard's
+    ``safetensors`` mapping. The CPU int4 repack replaces ``qweight`` and
+    ``qzeros`` with private tensors, but keeps small per-column metadata
+    (``g_idx``, and ``scales`` on the ATen path) as views of that mapping. A
+    single surviving view pins the whole shard: every page the loader touched
+    stays resident even though the packed weights were replaced, so the model
+    counts its quantized weights twice (#4785).
+
+    These operands are per-column metadata, so one copy at repack time is cheap
+    next to the shard pages it releases. ``None`` and non-tensors pass through
+    unchanged.
+    """
+
+    if tensor is None or not isinstance(tensor, t.Tensor):
+        return tensor
+    return tensor.clone()
+
+
 # Packed quantized weights are unpacked through shift operations in several
 # kernels. Keep those shifts behind helpers so Ascend 910B/CANN 9.1 beta can use
 # arithmetic equivalents for operators that torch-npu does not expose as native
