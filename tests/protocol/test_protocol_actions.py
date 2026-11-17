@@ -497,6 +497,67 @@ def test_activation_statistics_ignore_padded_positions():
     assert not torch.equal(masked_b.x_max["proj"], unmasked_b.x_max["proj"])
 
 
+def test_activation_statistics_use_each_batch_attention_mask():
+    """Batch 2..N must be masked by their own padding, not batch 1's (#4559)."""
+
+    torch.manual_seed(1)
+    model = _MaskedModel().eval()
+    _randomize_layer_norm_bias(model)
+    first = torch.randn(2, 4, 16)
+    second = torch.randn(2, 4, 16)
+    # Positions padded by one batch and real in the other, so a stale mask
+    # provably over- or under-counts the channel maximum.
+    second[0, 1:] = 1e3
+    second[1, 1:] = -1e3
+    mask_a = torch.tensor([[1, 1, 1, 1], [1, 0, 0, 0]])
+    mask_b = torch.tensor([[1, 0, 0, 0], [1, 1, 1, 1]])
+
+    def single(x, mask):
+        return protocol_module._capture_smoothquant_statistics(
+            model, lambda: model(x, attention_mask=mask)
+        ).x_max["proj"]
+
+    expected = torch.maximum(single(first, mask_a), single(second, mask_b))
+
+    forward = protocol_module._capture_smoothquant_statistics(
+        model,
+        lambda: (model(first, attention_mask=mask_a), model(second, attention_mask=mask_b)),
+    ).x_max["proj"]
+    reverse = protocol_module._capture_smoothquant_statistics(
+        model,
+        lambda: (model(second, attention_mask=mask_b), model(first, attention_mask=mask_a)),
+    ).x_max["proj"]
+
+    torch.testing.assert_close(forward, expected)
+    torch.testing.assert_close(reverse, expected)
+
+
+def test_activation_statistics_clear_a_mask_from_a_different_batch_shape():
+    """A later batch with another sequence length must not fall back to unmasked."""
+
+    torch.manual_seed(2)
+    model = _MaskedModel().eval()
+    _randomize_layer_norm_bias(model)
+    first = torch.randn(2, 4, 16)
+    second = torch.randn(2, 6, 16)
+    second[0, 2:] = 1e3
+    mask_a = torch.tensor([[1, 1, 1, 1], [1, 0, 0, 0]])
+    mask_b = torch.tensor([[1, 1, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1]])
+
+    def single(x, mask):
+        return protocol_module._capture_smoothquant_statistics(
+            model, lambda: model(x, attention_mask=mask)
+        ).x_max["proj"]
+
+    expected = torch.maximum(single(first, mask_a), single(second, mask_b))
+    combined = protocol_module._capture_smoothquant_statistics(
+        model,
+        lambda: (model(first, attention_mask=mask_a), model(second, attention_mask=mask_b)),
+    ).x_max["proj"]
+
+    torch.testing.assert_close(combined, expected)
+
+
 def test_non_finite_activation_statistics_are_rejected_before_any_mutation():
     model, input_ids = _tiny_model()
     block = model.layers[0]

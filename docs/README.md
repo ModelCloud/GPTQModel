@@ -35,6 +35,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Calibration row trimming](calibration-row-trimming.md)
 - [Changelog archive](changelog/archive.md)
 - [Convolution capture padding](conv-capture-padding.md)
+- [CPU block packing](cpu-block-packing.md)
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)
 - [Packed payloads and save-time source materialization](fp8-save-offload.md)
 - [FP8 checkpoint scale semantics](fp8-scale-semantics.md)
