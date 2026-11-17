@@ -93,11 +93,12 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # Not buildable here: the ExLlamaV2 torch.ops JIT extension fails without
-    # CUDA_HOME/nvcc. Its custom gemm has no fake/meta impl, so dynamo breaks:
-    # conservative EAGER, no capture measured.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output; the q-handle
+    # is built in ``post_init``, so ``forward`` only dispatches. Dynamo stops at
+    # EAGER on the q-handle cache's data-pointer comparison.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def auto_select_priority(cls, fmt, dtype=None):

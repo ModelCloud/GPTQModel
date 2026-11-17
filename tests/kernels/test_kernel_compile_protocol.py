@@ -21,6 +21,7 @@ consistency.
 from pathlib import Path
 
 import pytest
+import torch
 
 from gptqmodel.nn_modules.qlinear._compile_support import (
     COMPILE_LEVEL,
@@ -134,3 +135,31 @@ def test_docs_matrix_matches_the_declarations():
         assert row["compiled_generation"] is want["compiled_generation"], (
             f"{name}: docs compiled-generation policy is stale"
         )
+
+
+class _CommentOnlyKernel(torch.nn.Module):
+    def forward(self, x):
+        # The native quantizer reads data_ptr() and may call .item() for a log;
+        # a comment must not be mistaken for an executed host transfer.
+        return x + 1
+
+
+class _StringLiteralKernel(torch.nn.Module):
+    def forward(self, x):
+        raise RuntimeError("this branch would call .cpu() or data_ptr()")
+        return x + 1
+
+
+class _HostSyncKernel(torch.nn.Module):
+    def forward(self, x):
+        return x + x.item()
+
+
+def test_static_scan_ignores_comments_and_strings():
+    assert graph_unsafe_constructs(_CommentOnlyKernel) == []
+    assert graph_unsafe_constructs(_StringLiteralKernel) == []
+
+
+def test_static_scan_still_finds_executed_host_sync():
+    found = graph_unsafe_constructs(_HostSyncKernel)
+    assert any(".item()" in item for item in found), found

@@ -93,11 +93,13 @@ class AllSparkAwqLinear(AWQuantLinear):
 
     QUANT_TYPE = "allspark"
 
-    # Unavailable here: AllSpark needs compute capability 80-120, this GB10 is
-    # sm_121. Forward calls `packed_ready()` -> `tensor_cache_key` (data_ptr)
-    # and a custom op, so dynamo breaks and capture is unsafe.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The packed
+    # layout is derived in ``post_init``, so a capture does not cross the
+    # ``packed_ready()`` data-pointer check; dynamo stops at EAGER on
+    # ``tensor.is_inference()``.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_device(cls, device):

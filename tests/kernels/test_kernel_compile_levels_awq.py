@@ -3,7 +3,8 @@
 """Measured ``torch.compile`` / CUDA-graph levels for the AWQ kernels.
 
 Each case builds a real packed AWQ module, then measures it with
-``tests/kernels/compile_probe.py`` on the GB10 (sm_121, torch 2.11.0+cu130).
+``tests/kernels/compile_probe.py`` on the GB10 (sm_121, torch 2.11.0+cu130) and
+on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130).
 Kernels whose runtime cannot build on this host are skipped with the reason
 their declaration records, instead of faking a level.
 """
@@ -128,6 +129,99 @@ def _checkpoint(cls, *, device: str, cuda_graph: bool):
     return module, x, cuda_graph
 
 
+def _build_awq_marlin():
+    from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
+
+    torch.manual_seed(5)
+    codes = torch.randint(0, 1 << BITS, (IN_FEATURES, OUT_FEATURES))
+    zeros = torch.full((IN_FEATURES // GROUP_SIZE, OUT_FEATURES), 1 << (BITS - 1),
+                       dtype=torch.int32)
+    scales = torch.full(zeros.shape, 1 / 512, dtype=torch.float16)
+    module = AwqMarlinLinear(
+        bits=BITS,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        register_buffers=True,
+        dtype=torch.float16,
+    ).cuda()
+    qweight, qzeros = pack_awq(codes, zeros, BITS)
+    module.qweight.data.copy_(qweight.cuda())
+    module.qzeros.data.copy_(qzeros.cuda())
+    module.scales.data.copy_(scales.cuda())
+    module.post_init()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.float16, device="cuda")
+    return module.eval(), x, True
+
+
+def _build_awq_exllamav2():
+    from gptqmodel.utils.exllamav2 import ScratchSpace
+
+    torch.manual_seed(6)
+    groups = IN_FEATURES // GROUP_SIZE
+    codes = torch.randint(0, 1 << BITS, (IN_FEATURES, OUT_FEATURES), dtype=torch.int32)
+    zeros = torch.full((groups, OUT_FEATURES), 1 << (BITS - 1), dtype=torch.int32)
+    qweight = pack_awq_columns(codes, BITS, order=AWQ_ORDER)
+    qzeros = pack_awq_columns(zeros, BITS, order=AWQ_ORDER)
+    scales = (torch.rand(groups, OUT_FEATURES, dtype=torch.float32) * 0.02 + 0.001).to(
+        torch.float16
+    )
+    module = AwqExllamaV2Linear(
+        bits=BITS,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        register_buffers=True,
+    ).cuda()
+    module.qweight.data.copy_(qweight)
+    module.qzeros.data.copy_(qzeros)
+    module.scales.data.copy_(scales)
+    module.post_init(ScratchSpace(module.scratch_space_fixed(), 0))
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.float16, device="cuda")
+    return module.eval(), x, True
+
+
+def _build_allspark_awq():
+    from gptqmodel.utils.allspark import prewarm_allspark_extension
+
+    if not prewarm_allspark_extension():
+        raise RuntimeError("AllSpark JIT extension failed to build on this host")
+
+    torch.manual_seed(0)
+    dense = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False, dtype=torch.float16)
+    module = AllSparkAwqLinear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        register_buffers=True,
+    )
+    scales = torch.rand(OUT_FEATURES, 1, dtype=torch.float16) * 0.02 + 0.001
+    zeros = torch.full((OUT_FEATURES, 1), 128, dtype=torch.int32)
+    module.pack(dense, scales, zeros)
+    module = module.cuda().eval()
+    module.post_init()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.float16, device="cuda")
+    return module, x, True
+
+
+def _build_cpu_avx512_awq():
+    """BF16 activations drive the fused AVX512-BF16 AWQ path on first call."""
+
+    module, _, _ = _checkpoint(TorchCpuAvx512AwqLinear, device="cpu", cuda_graph=False)
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.bfloat16)
+    return module, x, False
+
+
 def _validate_unavailable(cls) -> Optional[str]:
     try:
         ok, error = cls.validate_once()
@@ -223,7 +317,7 @@ CASES = [
     ),
     Case(
         TorchCpuAvx512AwqLinear,
-        None,
+        _build_cpu_avx512_awq,
         lambda: _validate_unavailable(TorchCpuAvx512AwqLinear),
     ),
     Case(
@@ -231,17 +325,33 @@ CASES = [
         None,
         lambda: "retired backend: __init__ raises NotImplementedError",
     ),
-    Case(AwqGEMVLinear, None, _awq_unavailable),
-    Case(AwqGEMVFastLinear, None, _awq_unavailable),
-    Case(LLMAwqLinear, None, _awq_unavailable),
-    Case(AwqGEMMLinear, None, _awq_unavailable),
-    Case(AwqMarlinLinear, None, _marlin_unavailable),
+    Case(
+        AwqGEMVLinear,
+        lambda: _packed(AwqGEMVLinear, device="cuda", cuda_graph=True),
+        _awq_unavailable,
+    ),
+    Case(
+        AwqGEMVFastLinear,
+        lambda: _packed(AwqGEMVFastLinear, device="cuda", cuda_graph=True),
+        _awq_unavailable,
+    ),
+    Case(
+        LLMAwqLinear,
+        lambda: _packed(LLMAwqLinear, device="cuda", cuda_graph=True),
+        _awq_unavailable,
+    ),
+    Case(
+        AwqGEMMLinear,
+        lambda: _packed(AwqGEMMLinear, device="cuda", cuda_graph=True),
+        _awq_unavailable,
+    ),
+    Case(AwqMarlinLinear, _build_awq_marlin, _marlin_unavailable),
     Case(AwqMacheteLinear, None, _machete_unavailable),
     Case(SwordfishLinear, None, _swordfish_unavailable),
     Case(AwqSwordfishLinear, None, _swordfish_unavailable),
-    Case(AwqExllamaV2Linear, None, _exllamav2_unavailable),
+    Case(AwqExllamaV2Linear, _build_awq_exllamav2, _exllamav2_unavailable),
     Case(AWQBitBlasKernel, None, _bitblas_unavailable),
-    Case(AllSparkAwqLinear, None, lambda: _validate_unavailable(AllSparkAwqLinear)),
+    Case(AllSparkAwqLinear, _build_allspark_awq, lambda: _validate_unavailable(AllSparkAwqLinear)),
 ]
 
 

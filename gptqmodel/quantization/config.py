@@ -4229,8 +4229,13 @@ _TYPE_HINTS_CACHE: Dict[type, Dict[str, Any]] = {}
 #: Keys a ``dynamic`` per-module rule may carry beyond the config field names.
 #: ``fmt`` is the documented legacy alias for ``format``; ``nested`` is an opaque
 #: passthrough whose contents the dynamic fingerprint and defensive-copy paths
-#: preserve verbatim, so it is accepted as-is rather than inspected.
-_DYNAMIC_LEGACY_KEYS = frozenset({"fmt", "nested"})
+#: preserve verbatim, so it is accepted as-is rather than inspected. The
+#: ``bnb_*`` names are the legacy synonyms ``QUANT_CONFIG_ARG_SYNONYMS`` maps at
+#: the top level; the BnB per-module normalizer still translates them, so the
+#: key check must let them through (#4728).
+_DYNAMIC_LEGACY_KEYS = frozenset(
+    {"fmt", "nested", "bnb_quant_type", "bnb_block_size", "bnb_compress_statistics"}
+)
 
 
 def _resolved_type_hints(cls) -> Dict[str, Any]:
@@ -4250,6 +4255,29 @@ def _is_optional_bool(hint) -> bool:
     """True for an ``Optional[bool]`` / ``bool | None`` annotation."""
 
     return hint is not bool and set(get_args(hint)) == {bool, type(None)}
+
+
+def _bool_annotated_fields(cls) -> List[Tuple[str, bool]]:
+    """Return ``(name, optional)`` for every ``bool``/``Optional[bool]`` field."""
+
+    hints = _resolved_type_hints(cls)
+    out = []
+    for field_info in fields(cls):
+        hint = hints.get(field_info.name)
+        optional = _is_optional_bool(hint)
+        if hint is bool or optional:
+            out.append((field_info.name, optional))
+    return out
+
+
+def _require_bool_value(owner_name: str, field_label: str, value: Any) -> None:
+    """Raise ``TypeError`` unless ``value`` is a real ``bool`` (#4668)."""
+
+    if not isinstance(value, bool):
+        raise TypeError(
+            f"{owner_name}: `{field_label}` must be a bool, "
+            f"got {type(value).__name__} ({value!r})."
+        )
 
 
 def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) -> None:
@@ -4296,22 +4324,28 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
             ) from exc
 
 
-def _validate_dynamic_boolean_overrides(layer_name: str, layer_dict: Mapping) -> None:
-    """Reject non-boolean `sym`/`desc_act` values in one per-module rule.
+def _validate_dynamic_boolean_overrides(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Reject non-boolean values for every bool field in one per-module rule.
 
-    The top-level fields are type-checked, but `dynamic` values were coerced
-    with `bool(...)` when the module was packed, so `{"sym": "False"}` silently
-    became `sym=True` and produced a checkpoint labelled with the opposite
-    layout. `None` keeps meaning "inherit the global value".
+    The top-level fields are type-checked by ``_validate_bool_fields``, but
+    ``dynamic`` values used to be copied verbatim or coerced with ``bool(...)``
+    when the module was packed. The string ``"False"`` is truthy, so
+    ``{"static_groups": "False"}`` silently turned static groups on. Derive the
+    set from the owning config's annotations, exactly like the top-level path,
+    and include the legacy synonyms those keys map to (``#4728``). ``None``
+    keeps meaning "inherit the global value".
     """
 
-    for key in ("sym", "desc_act"):
-        value = layer_dict.get(key)
-        if value is not None and not isinstance(value, bool):
-            raise TypeError(
-                f"QuantizeConfig: `dynamic['{layer_name}'].{key}` must be a bool, "
-                f"got {type(value).__name__} ({value!r})."
-            )
+    bool_fields = {name for name, _ in _bool_annotated_fields(type(owner))}
+    for key, value in layer_dict.items():
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+        if canonical not in bool_fields or value is None:
+            continue
+        _require_bool_value(
+            owner.__class__.__name__,
+            f"dynamic['{layer_name}'].{key}",
+            value,
+        )
 
 
 def _default_damp_percent(method: METHOD) -> float:
@@ -5214,7 +5248,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -5293,20 +5327,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         default" value.
         """
 
-        hints = _resolved_type_hints(type(self))
-        for field_info in fields(self):
-            hint = hints.get(field_info.name)
-            optional = _is_optional_bool(hint)
-            if hint is not bool and not optional:
-                continue
-            value = getattr(self, field_info.name, None)
+        for field_name, optional in _bool_annotated_fields(type(self)):
+            value = getattr(self, field_name, None)
             if value is None and optional:
                 continue
-            if not isinstance(value, bool):
-                raise TypeError(
-                    f"{self.__class__.__name__}: `{field_info.name}` must be a bool, "
-                    f"got {type(value).__name__} ({value!r})."
-                )
+            _require_bool_value(self.__class__.__name__, field_name, value)
 
     def __post_init__(self):
         self._normalize_serialization_fields()
@@ -7229,7 +7254,7 @@ class FP8Config(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -7531,7 +7556,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -7568,14 +7593,17 @@ class BitsAndBytesConfig(PreProcessorConfig):
                 effective_format = _normalize_bitsandbytes_format(None, bits=effective_bits)
             if effective_format != self.format:
                 layer_dict[FORMAT_FIELD_CODE] = effective_format
+        layer_dict.pop("bnb_quant_type", None)
         if "block_size" in layer_dict or "bnb_block_size" in layer_dict:
             layer_dict["block_size"] = _normalize_bitsandbytes_block_size(
                 layer_dict.get("block_size", layer_dict.get("bnb_block_size"))
             )
         layer_dict.pop("bnb_block_size", None)
         if "compress_statistics" in layer_dict or "bnb_compress_statistics" in layer_dict:
-            layer_dict["compress_statistics"] = bool(
-                layer_dict.get("compress_statistics", layer_dict.get("bnb_compress_statistics"))
+            # `_validate_dynamic_boolean_overrides` already rejected a string
+            # like `"False"`; keep the real bool instead of re-coercing it.
+            layer_dict["compress_statistics"] = layer_dict.get(
+                "compress_statistics", layer_dict.get("bnb_compress_statistics")
             )
         layer_dict.pop("bnb_compress_statistics", None)
 
@@ -7959,7 +7987,7 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
 
