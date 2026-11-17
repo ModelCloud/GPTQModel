@@ -68,6 +68,7 @@ from ..utils.hf import (  # noqa: E402
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
+from ..utils.importer import auto_select_device  # noqa: E402
 from ..utils.linalg_warmup import (  # noqa: E402
     kick_torch_linear_prewarm,
     kick_torch_quantize_prewarm,
@@ -78,6 +79,7 @@ from ..utils.backend_config import Backend, RuntimeConfig, resolve_backend_confi
 from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import normalize_device  # noqa: E402
+from ..utils.looper_helpers import normalize_device_like, select_forward_devices  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .loader import _explicit_requested_devices, native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
@@ -695,7 +697,71 @@ def _config_prewarm_dtype(model_cfg, target: torch.device) -> Optional[torch.dty
         return None
 
 
-def _resolve_prewarm_device(device, device_map) -> Optional[torch.device]:
+def _quantize_warmup_devices(quantize_config, device) -> Optional[List[torch.device]]:
+    """Concrete accelerators this load may warm, or ``None`` for the old pool.
+
+    The loopers narrow the quantization/forward pool with
+    ``quantize_config.compute_device_filter``, but the eager linalg warmup and
+    the quantize/linear prewarms were resolved from the ``device=``/``device_map=``
+    load kwargs alone. A caller who excluded a GPU through the documented filter
+    therefore still warmed that GPU, which created a full context there and
+    reserved hundreds of MiB (issue #4653).
+
+    Return the same filtered pool the loopers use. ``None`` keeps the historical
+    family-wide warmup whenever this load has no restriction to honor (no filter
+    and no explicit device sequence), or when the filter rejects everything --
+    the loopers keep the full pool in that case, so the warmup must match.
+
+    ``device_map`` is not consulted on purpose: a quantization load runs the
+    dense model on CPU and places layers through ``quantize_config``, so a map
+    describes inference placement rather than the quantization pool.
+    """
+
+    explicit_devices = _explicit_requested_devices(device)
+    compute_device_filter = getattr(quantize_config, "compute_device_filter", None)
+    if explicit_devices is None and compute_device_filter is None:
+        return None
+
+    base_device = None
+    configured = getattr(quantize_config, "device", None)
+    if configured is not None:
+        base_device = normalize_device_like(configured)
+    elif explicit_devices:
+        base_device = explicit_devices[0]
+    elif device is not None:
+        base_device = normalize_device_like(device)
+    else:
+        base_device = normalize_device_like(
+            auto_select_device(None, None)
+        )
+
+    candidates = select_forward_devices(base_device)
+    if compute_device_filter is not None:
+        filtered = compute_device_filter(candidates)
+        # The loopers keep the full pool when the filter rejects everything.
+        if not filtered:
+            return None
+        candidates = list(filtered)
+    elif explicit_devices is not None:
+        wanted = {str(target) for target in explicit_devices}
+        subsets = [target for target in candidates if str(target) in wanted]
+        if not subsets:
+            return None
+        candidates = subsets
+
+    devices: List[torch.device] = []
+    for candidate in candidates:
+        target = normalize_device_like(candidate)
+        if target is not None and target not in devices:
+            devices.append(target)
+    return devices or None
+
+
+def _resolve_prewarm_device(device, device_map, quantize_config=None) -> Optional[torch.device]:
+    warmup_pool = _quantize_warmup_devices(quantize_config, device)
+    if warmup_pool:
+        return warmup_pool[0]
+
     candidates = []
     if device is not None:
         candidates.append(device)
@@ -718,7 +784,7 @@ def _resolve_prewarm_device(device, device_map) -> Optional[torch.device]:
     return None
 
 
-def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
+def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None, quantize_config=None) -> None:
     """
     Hide the one-time accelerator library and kernel inits behind the model load.
 
@@ -733,7 +799,7 @@ def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
     decides the default dtype has not been read yet, and guessing a dtype would
     spend the init on a warmup the first forward cannot use.
     """
-    target = _resolve_prewarm_device(device, device_map)
+    target = _resolve_prewarm_device(device, device_map, quantize_config)
     if target is None:
         return
     dtype = _explicit_prewarm_dtype(kwargs)
@@ -745,7 +811,7 @@ def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
     kick_torch_quantize_prewarm(target, dtype)
 
 
-def _prebuild_device_thread_pool(device=None) -> None:
+def _prebuild_device_thread_pool(device=None, quantize_config=None) -> None:
     """
     Build the device thread pool before the quantization loop starts.
 
@@ -761,16 +827,22 @@ def _prebuild_device_thread_pool(device=None) -> None:
     """
     from .. import resize_device_thread_pool
 
-    explicit_devices = _explicit_requested_devices(device)
+    warmup_devices = _quantize_warmup_devices(quantize_config, device)
     if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
         # Do not build eagerly, but still retune a pool an earlier load created.
-        resize_device_thread_pool(warmup_devices=explicit_devices, create=False)
+        resize_device_thread_pool(warmup_devices=warmup_devices, create=False)
         return
 
     # Resize the singleton to the policy installed for *this* run. A later load
     # that asks for a different ``cpu_workers`` must not inherit the first
     # load's worker count (issue #4396).
-    resize_device_thread_pool(warmup_devices=explicit_devices)
+    pool = resize_device_thread_pool(warmup_devices=warmup_devices)
+    # A retained pool keeps the worker threads (and their already-installed
+    # policy) but must still honor this load's warmup allow-list: the eager
+    # warmup is submitted once, when the pool is built.
+    setter = getattr(pool, "set_warmup_devices", None)
+    if callable(setter):
+        setter(warmup_devices)
 
 
 def _install_kernel_policy(kernel) -> None:
@@ -832,8 +904,8 @@ class GPTQModel:
         backend, kernel = resolve_quantize_backend(backend, quantize_config, kernel, runtime)
         _install_kernel_policy(kernel)
         if quantize_config is not None:
-            _kick_quantize_prewarms(device, device_map, kwargs)
-            _prebuild_device_thread_pool(device)
+            _kick_quantize_prewarms(device, device_map, kwargs, quantize_config=quantize_config)
+            _prebuild_device_thread_pool(device, quantize_config=quantize_config)
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
@@ -996,8 +1068,11 @@ class GPTQModel:
                 model_init_kwargs.get("device"),
                 model_init_kwargs.get("device_map"),
                 model_init_kwargs,
+                quantize_config=quantize_config,
             )
-            _prebuild_device_thread_pool(model_init_kwargs.get("device"))
+            _prebuild_device_thread_pool(
+                model_init_kwargs.get("device"), quantize_config=quantize_config
+            )
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
@@ -1070,6 +1145,7 @@ class GPTQModel:
                 model_init_kwargs.get("device_map"),
                 model_init_kwargs,
                 config,
+                quantize_config,
             )
 
         if quantize_config and quantize_config.dynamic:
