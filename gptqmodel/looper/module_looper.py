@@ -72,6 +72,7 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     ensure_version_counters,
+    has_disk_offloaded_modules,
     materialize_remaining_meta_modules,
     offload_to_disk,
     release_private_offload_root,
@@ -2082,9 +2083,27 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                         try:
                             self._restore_offloaded_base_modules(strict=False)
                         finally:
-                            # A failed run cannot be saved, so its per-run offload
-                            # bundles are no longer reachable (issue #4368).
-                            release_private_offload_root(self.gptq_model)
+                            # Layers that finished before the cancel stay as
+                            # disk-offloaded meta shells pointing into this run's
+                            # private offload root. Deleting that root now would
+                            # make them unrecoverable and break the next forward
+                            # with FileNotFoundError (#4807). A cancelled run must
+                            # also stay cheap: materializing every finished layer
+                            # would defeat the memory bound the default
+                            # ``offload_to_disk=True`` exists for. Keep the root
+                            # instead; ``bind_private_offload_root`` already
+                            # registered a model-lifetime finalizer that removes
+                            # it, and the next run on this model releases it
+                            # (#4368). Only release it eagerly when no module
+                            # still reads from it.
+                            model = getattr(self.gptq_model, "model", None)
+                            if model is not None and has_disk_offloaded_modules(model):
+                                log.debug(
+                                    "Offload: keeping the per-run directory for the "
+                                    "disk-offloaded layers of a cancelled/failed run."
+                                )
+                            else:
+                                release_private_offload_root(self.gptq_model)
                 raise
             finally:
                 # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
