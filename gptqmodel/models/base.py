@@ -234,6 +234,34 @@ def validate_rotation_model_support(model_def) -> None:
     )
 
 
+#: Backends whose kernels apply the online Hadamard a rotated model needs.
+ROTATION_BACKENDS = (
+    BACKEND.GPTQ_TORCH,
+    BACKEND.GPTQ_TRITON,
+    BACKEND.GPTQ_W4AFP8,
+    BACKEND.GPTQ_W4A_NVFP4,
+)
+
+
+def resolve_rotation_backend(qcfg, backend):
+    """Return the backend a rotated model will run on, or refuse it.
+
+    Every other kernel ignores `online_full_had`, so accepting one here would
+    quantize a rotated model whose inference path never undoes the rotation.
+    """
+
+    resolved = normalize_backend(backend, quant_method=qcfg.method)
+    if resolved == BACKEND.AUTO:
+        resolved = BACKEND.GPTQ_TORCH
+    if resolved not in ROTATION_BACKENDS:
+        raise NotImplementedError(
+            "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+            f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{resolved}`. "
+            "No weights were modified."
+        )
+    return resolved
+
+
 def _torch_cuda_device(value: object) -> Optional[torch.device]:
     """Resolve one pool entry to a concrete CUDA device, or None."""
 
@@ -2133,6 +2161,16 @@ class BaseQModel(nn.Module):
         # while an explicit quantize backend may replace that choice.
         backend, _ = resolve_quantize_backend(backend, self.quantize_config, inherit=True)
 
+        # Refuse a rotation backend that ignores the online Hadamard before
+        # anything is fused or rotated: this gate used to run after
+        # `fuse_layer_norms`/`rotate_model`, so a refusal left the caller's
+        # model rotated and unusable (#4666).
+        rotation_backend = (
+            resolve_rotation_backend(self.quantize_config, backend)
+            if resolve_model_rotation(self.quantize_config)
+            else None
+        )
+
         dynamic_cache_stats_before = (
             dynamic_override_cache_stats(self.quantize_config.dynamic) if self.quantize_config.dynamic else None
         )
@@ -2383,6 +2421,9 @@ class BaseQModel(nn.Module):
                     quant_method=export_quant_method,
                 )
 
+        if rotation_backend is not None:
+            backend = rotation_backend
+
         # rotate model
         if resolve_model_rotation(self.quantize_config):
             validate_rotation_model_support(self)
@@ -2423,21 +2464,6 @@ class BaseQModel(nn.Module):
                                             device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
-
-        if resolve_model_rotation(self.quantize_config):
-            backend = normalize_backend(backend, quant_method=self.quantize_config.method)
-            if backend == BACKEND.AUTO:
-                backend = BACKEND.GPTQ_TORCH
-            if backend not in (
-                BACKEND.GPTQ_TORCH,
-                BACKEND.GPTQ_TRITON,
-                BACKEND.GPTQ_W4AFP8,
-                BACKEND.GPTQ_W4A_NVFP4,
-            ):
-                raise NotImplementedError(
-                    "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
-                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
-                )
 
         from ..adapter.adapter import Lora
 

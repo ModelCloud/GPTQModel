@@ -5330,6 +5330,21 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
             self.offload_to_disk = False
 
+        # Only the GPTQ-layout kernels apply the online Hadamard at inference
+        # (`_apply_rotation_to_input`), and the loader accepts a rotated
+        # checkpoint only for GPTQ/GPTQ_V2. Accepting the field on another
+        # method fused a rotation nothing undoes: the in-session model was
+        # silently wrong and the saved checkpoint could not be loaded (#4666).
+        # `model_rotation` is `None` for methods that reuse `rotation` for
+        # their own per-layer transform, so MACaQ stays unaffected.
+        rotation_format = self._resolve_checkpoint_format()
+        if self.model_rotation and rotation_format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            raise ValueError(
+                f"{self.__class__.__name__}: `rotation` requires a GPTQ or GPTQ_V2 "
+                f"checkpoint format; got `{rotation_format}`. "
+                "No weights were modified."
+            )
+
         self._ensure_offload_temp_dir()
 
         self.dense_vram_strategy = _normalize_dense_vram_strategy(self.dense_vram_strategy)
@@ -7687,6 +7702,16 @@ class EXL3Config(PreProcessorConfig):
             raise ValueError("EXL3Config: `method` must be `exl3`.")
         if self.format != FORMAT.EXL3:
             raise ValueError("EXL3Config: `format` must be `exl3`.")
+
+        # This config does not delegate to `BaseQuantizeConfig.__post_init__`,
+        # so the shared rotation gate has to run here too: EXL3 kernels never
+        # apply the online Hadamard and a rotated EXL3 checkpoint cannot be
+        # loaded (#4666).
+        if self.model_rotation:
+            raise ValueError(
+                "EXL3Config: `rotation` requires a GPTQ or GPTQ_V2 checkpoint "
+                f"format; got `{self.format}`. No weights were modified."
+            )
 
         self.group_size = -1
         self.desc_act = False
