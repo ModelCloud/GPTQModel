@@ -5801,6 +5801,21 @@ class BaseQModel(nn.Module):
                         pending_nonquant.clear()
                         log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
                         skip_block = True
+                    elif inp.numel() == 0:
+                        # An empty feature means the declared MoE-root capture
+                        # never ran. A zero-width "source" also makes every
+                        # consumer look width-foreign below, which used to drop
+                        # the routed-expert gate/up group without a trace
+                        # (#4697). Warn before skipping it.
+                        if is_moe_gate_up_block:
+                            log.warning(
+                                "awq_get_modules_for_scaling: declared MoE root `%s` captured no "
+                                "activations; skipping the routed-expert gate/up scaling group "
+                                "and leaving those projections on plain quantization",
+                                last_module_root,
+                            )
+                        pending_nonquant.clear()
+                        skip_block = True
 
                 input_width = None
                 scale_consumers = []
