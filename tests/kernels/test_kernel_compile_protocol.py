@@ -28,8 +28,7 @@ from gptqmodel.nn_modules.qlinear._compile_support import (
     describe_kernel,
     graph_capture_safe,
 )
-from gptqmodel.utils import importer
-from tests.kernels.compile_probe import graph_unsafe_constructs
+from tests.kernels.compile_probe import graph_unsafe_constructs, protocol_kernels
 
 
 MATRIX = Path(__file__).resolve().parents[2] / "docs" / "kernel-compile-matrix.md"
@@ -38,7 +37,7 @@ pytestmark = [pytest.mark.cpu]
 
 
 def _kernels():
-    return sorted(importer._registry_kernel_classes(), key=lambda cls: cls.__name__)
+    return protocol_kernels()
 
 
 def test_every_registered_kernel_declares_both_attributes():

@@ -1138,6 +1138,12 @@ class TorchQuantEmbeddings(TorchLinear):
     # not be discovered as a general backend: their forward contract accepts
     # integer token IDs, not hidden states.
     SUPPORTS_BACKEND_SELECTION = False
+    # The forward branches on host values (`input_ids.numel()` against the
+    # row-decode limit, dtype/device checks) before choosing a dense decode or
+    # `F.embedding`, so dynamo breaks and a CUDA-graph capture cannot cross the
+    # branch. Not probed: the branches are unconditional on every call.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
     SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]

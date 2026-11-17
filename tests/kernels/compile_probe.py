@@ -222,6 +222,23 @@ def _probe_cuda_graph(fn: Callable, args: Sequence[Any], reference: Any):
         return False, f"{type(error).__name__}: {str(error)[:400]}"
 
 
+def protocol_kernels():
+    """Every quantized kernel that must declare the protocol.
+
+    Registered kernels plus the role-selected modules that skip backend
+    discovery (`SUPPORTS_BACKEND_SELECTION = False`), which are still user-facing
+    quantized layers.
+    """
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchQuantEmbeddings
+    from gptqmodel.utils import importer
+
+    return sorted(
+        set(importer._registry_kernel_classes()) | {TorchQuantEmbeddings},
+        key=lambda cls: cls.__name__,
+    )
+
+
 def graph_unsafe_constructs(kernel_cls: type) -> List[str]:
     """Static scan of the kernel's own ``forward`` for capture-unsafe calls."""
 

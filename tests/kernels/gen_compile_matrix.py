@@ -5,7 +5,7 @@
 from pathlib import Path
 
 from gptqmodel.nn_modules.qlinear._compile_support import describe_kernel
-from gptqmodel.utils import importer
+from tests.kernels.compile_probe import protocol_kernels
 
 
 HEADER = """<!-- SPDX-FileCopyrightText: 2026 ModelCloud.ai -->
@@ -66,7 +66,7 @@ python -m tests.kernels.gen_compile_matrix
 
 def render() -> str:
     rows = []
-    for cls in sorted(importer._registry_kernel_classes(), key=lambda cls: cls.__name__):
+    for cls in protocol_kernels():
         row = describe_kernel(cls)
         module = row["module"].replace("gptqmodel.nn_modules.qlinear.", "")
         rows.append(

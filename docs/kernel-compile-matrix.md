@@ -112,6 +112,7 @@ python -m tests.kernels.gen_compile_matrix
 | `TorchInt8AwqLinear` | `torch_int8_awq` | `EAGER` | no | no |
 | `TorchInt8Linear` | `torch_int8` | `EAGER` | no | no |
 | `TorchLinear` | `torch` | `EAGER` | yes | no |
+| `TorchQuantEmbeddings` | `torch` | `EAGER` | no | no |
 | `TritonV2Linear` | `tritonv2` | `EAGER` | yes | no |
 | `VPTQCudaLinear` | `vptq_cuda` | `EAGER` | no | no |
 | `VPTQLinear` | `vptq_torch` | `CUDAGRAPH` | yes | no |
