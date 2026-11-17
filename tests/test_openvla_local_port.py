@@ -565,7 +565,7 @@ def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, mon
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     source = tmp_path / "source"
     source.mkdir()
@@ -606,7 +606,7 @@ def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, mon
 
     monkeypatch.setattr(StageInputsCapture, "cache_inputs", observe_capture)
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.language_model.model.layers[0], {}, {}) == []
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert len(captures) == 2
     for actual, expected in zip(captures, expected_capture):
         assert actual.shape == (1, len(TOKEN_IDS) + 4, 32)

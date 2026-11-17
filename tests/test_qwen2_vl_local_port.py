@@ -509,7 +509,7 @@ def test_real_pinned_tokenizer_and_media_processor(tmp_path, text):
 def test_public_plain_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     source = tmp_path / "source"
     reference = save_fixture(source, text, legacy=legacy).half()
@@ -559,7 +559,9 @@ def test_public_plain_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
                 handle.remove()
 
         wrapper.run_input_capture = capture
-    wrapper.quantize(quantization_dataset, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=quantization_dataset, batch_size=1, min_length=1), backend=BACKEND.TORCH
+    )
     if not text:
         assert actual_capture
         for actual in actual_capture:

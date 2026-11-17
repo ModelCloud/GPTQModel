@@ -22,7 +22,7 @@ from gptqmodel.models.definitions.qwen_drive import QwenDriveQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.qwen_drive import QwenDriveConfig, QwenDriveForConditionalGeneration
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
@@ -304,7 +304,7 @@ def test_public_image_plain_awq_all_linears_and_two_exact_reloads(tmp_path, monk
         return cache
 
     monkeypatch.setattr(StageInputsCapture, "cache_inputs", check_capture)
-    loaded.quantize([inputs], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(CalibrationConfig(dataset=[inputs], batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert len(captured) == 1
     expected = {
         f"vlm.model.language_model.layers.{index}.{projection}"

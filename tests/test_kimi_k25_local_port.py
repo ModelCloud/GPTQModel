@@ -309,7 +309,7 @@ def test_shared_tokenizer_survives_failed_processor_and_two_live_consumers(tmp_p
 def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp_path, q_lora_rank):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     _, marker = write_checkpoint(
         tmp_path, routing_bias=(.01, -.02, .03, -.04), q_lora_rank=q_lora_rank,
@@ -335,7 +335,7 @@ def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp
     with torch.inference_mode():
         dense_logits = wrapper.model(**calibration[0], use_cache=False).logits
         assert torch.isfinite(dense_logits).all() and dense_logits.std() > .01
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed_count = 26 if q_lora_rank is None else 28
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == packed_count
     with torch.inference_mode():

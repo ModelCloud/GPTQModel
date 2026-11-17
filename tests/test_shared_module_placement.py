@@ -9,7 +9,7 @@ from tokenizers.models import WordLevel
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import GPTQModel
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import co_locate_shared_module_aliases
 
@@ -123,9 +123,13 @@ def test_real_tied_embedding_alias_public_awq_default_and_explicit_reload(tmp_pa
     )
     ids = torch.tensor([[1, 5, 7, 6, 8, 9], [1, 4, 6, 8, 3, 7]])
     wrapped.quantize(
-        [{"input_ids": row.unsqueeze(0), "attention_mask": torch.ones(1, 6, dtype=torch.long)} for row in ids],
-        batch_size=1,
-        calibration_data_min_length=1,
+        CalibrationConfig(
+            dataset=[
+                {"input_ids": row.unsqueeze(0), "attention_mask": torch.ones(1, 6, dtype=torch.long)} for row in ids
+            ],
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
     )
     with torch.inference_mode():

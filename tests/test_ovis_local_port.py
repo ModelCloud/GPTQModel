@@ -442,7 +442,7 @@ def test_native_attention_backend_capability_and_numerical_parity(tmp_path, layo
 @pytest.mark.parametrize("offload", [False, True])
 def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycles(tmp_path, layout, offload):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
     source = tiny_model(layout).half()
     write_checkpoint(tmp_path, source)
     config = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=offload)
@@ -481,7 +481,7 @@ def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycle
     for layer in wrapper.model.llm.model.layers:
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     try:
-        wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     finally:
         handle.remove()
     assert captures

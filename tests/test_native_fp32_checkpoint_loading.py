@@ -205,7 +205,7 @@ def test_public_awq_reload_preserves_nonzero_native_router_bias_after_failure(tm
     from test_ernie4_5_moe_local_port import checkpoint
 
     from gptqmodel import BACKEND, GPTQModel
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     source = tmp_path / "source"
     reference, _ = checkpoint(source, num_hidden_layers=2, intermediate_size=32, moe_intermediate_size=16)
@@ -218,8 +218,12 @@ def test_public_awq_reload_preserves_nonzero_native_router_bias_after_failure(tm
         backend=BACKEND.TORCH, dtype=dtype, attn_implementation="eager",
     )
     ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]])
-    model.quantize([{"input_ids": ids, "attention_mask": torch.ones_like(ids)}],
-                   batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": ids, "attention_mask": torch.ones_like(ids)}], batch_size=1, min_length=1
+        ),
+        backend=BACKEND.TORCH,
+    )
     torch.testing.assert_close(model.model.state_dict()[bias_name], bias, rtol=0, atol=0)
     expected = {name: value.clone() for name, value in model.model.state_dict().items()}
     with torch.inference_mode():

@@ -442,7 +442,7 @@ def test_codec_real_encode_decode_stream_legacy_safetensors_and_processor_reload
 @pytest.mark.parametrize("bias", [False, True])
 def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_heads, bias):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     source = tiny_model(kv_heads=kv_heads, bias=bias).half()
     write_checkpoint(tmp_path, source)
@@ -455,7 +455,7 @@ def test_public_plain_awq_quantizes_only_text_linears_and_reloads(tmp_path, kv_h
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 19
     assert all(name.startswith("model.language_model.layers.") for name in packed)

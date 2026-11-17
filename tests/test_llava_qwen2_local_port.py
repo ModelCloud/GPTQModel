@@ -470,7 +470,7 @@ def test_owned_processor_image_chat_ids_pixels_and_save_reload(tmp_path, aspect)
 def test_public_plain_awq_image_calibration_pack_infer_and_safetensors_reload(tmp_path, tower, merge):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
     size = 128 if tower == "mobileclip" else 16
     model = _model(tower, mm_patch_merge_type=merge,
                    image_aspect_ratio="square" if merge == "flat" else "anyres",
@@ -490,7 +490,9 @@ def test_public_plain_awq_image_calibration_pack_infer_and_safetensors_reload(tm
         lambda module, args, kwargs: lengths.append((kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]).shape[1]),
         with_kwargs=True)
     try:
-        wrapper.quantize([conversation, conversation], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(
+            CalibrationConfig(dataset=[conversation, conversation], batch_size=1, min_length=1), backend=BACKEND.TORCH
+        )
     finally:
         handle.remove()
     expected_length = batch.input_ids.shape[1] - 1 + (4 if merge == "flat" else 10)

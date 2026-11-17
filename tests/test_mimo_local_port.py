@@ -19,7 +19,7 @@ from gptqmodel.models.definitions.mimo import MimoQModel
 from gptqmodel.models.ports.mimo.configuration_mimo import MiMoConfig
 from gptqmodel.models.ports.mimo.modeling_mimo import MiMoForCausalLM
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.hf import load_model_config
 
 
@@ -316,7 +316,7 @@ def test_public_plain_awq_packs_every_decoder_and_preserves_dense_mtp(tmp_path, 
         {"input_ids": torch.tensor([[7, 5, 4, 6, 7, 6, 4, 5]]),
          "attention_mask": torch.ones(1, 8, dtype=torch.long)},
     ]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == {f"model.layers.{i}.{name}" for i in range(2) for name in [
         "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",

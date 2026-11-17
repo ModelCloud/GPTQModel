@@ -485,7 +485,7 @@ def test_public_load_cannot_execute_hostile_maps(tmp_path, monkeypatch, model_ty
 def test_public_plain_awq_quantizes_every_linear_save_reload(tmp_path, model_type, kv_heads):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     source, output = tmp_path / "source", tmp_path / "packed"
     model = local_model(
@@ -512,7 +512,7 @@ def test_public_plain_awq_quantizes_every_linear_save_reload(tmp_path, model_typ
         {"input_ids": torch.tensor([[4, 5, 6, 7, 5, 4, 7, 6]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
         for _ in range(2)
     ]
-    wrapper.quantize(samples, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=samples, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name: module for name, module in layer.named_modules() if isinstance(module, AwqTorchLinear)}
     assert set(packed) == {
         "self_attn.q_proj",

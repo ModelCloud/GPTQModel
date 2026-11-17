@@ -18,7 +18,7 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.models.definitions.minicpm import MiniCPMGPTQ
 from gptqmodel.models.ports.minicpm import MiniCPMConfig, MiniCPMForCausalLM
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig, ExpertsRoutingOverride, MoEConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig, ExpertsRoutingOverride, MoEConfig
 from gptqmodel.utils.hf import load_hf_tokenizer, load_model_config
 
 
@@ -468,7 +468,7 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, moe, fallb
     ids = torch.tensor([[4, 5, 6, 7, 4, 7, 6, 5]])
     calibration = [{"input_ids": ids, "attention_mask": torch.ones_like(ids)} for _ in range(2)]
     dense = {name: value.to(torch.float16).clone() for name, value in source.state_dict().items()}
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     expected_linears = 4 + (9 if moe else 3)
     assert sum(isinstance(m, AwqTorchLinear) for m in model.model.modules()) == expected_linears
     state = {name: value.clone() for name, value in model.model.state_dict().items()}

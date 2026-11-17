@@ -546,7 +546,7 @@ def test_media_generation_cache_and_two_safetensors_cycles(tmp_path, mode, dtype
 def test_public_plain_awq_pack_infer_two_reloads_preserve_loras_and_media(tmp_path, offload, mode):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     vision = {
         "hidden_size": 8,
@@ -632,7 +632,9 @@ def test_public_plain_awq_pack_infer_two_reloads_preserve_loras_and_media(tmp_pa
         source(**inputs, logits_to_keep=1)
     handle.remove()
     handle = model.model.model.layers[0].register_forward_pre_hook(record(captured), with_kwargs=True)
-    model.quantize([dict(inputs), dict(inputs)], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=[dict(inputs), dict(inputs)], batch_size=1, min_length=1), backend=BACKEND.TORCH
+    )
     handle.remove()
     assert captured, "Actual first-decoder calibration input must be captured"
     torch.testing.assert_close(captured[0], expected_inputs[0], atol=0, rtol=0)

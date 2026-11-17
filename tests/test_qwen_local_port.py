@@ -27,7 +27,7 @@ from gptqmodel.models.ports.qwen.modeling_qwen import (
 )
 from gptqmodel.models.ports.qwen.tokenization_qwen import PAT_STR, SPECIAL_TOKENS, QWenTokenizer, make_context
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.backend import BACKEND
 
 
@@ -348,7 +348,7 @@ def test_public_plain_awq_all_linears_dense_exclusions_two_reloads(tmp_path, no_
         {"input_ids": torch.tensor([[2, 3, 5, 8, 7, 4, 6, 9]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)},
         {"input_ids": torch.tensor([[8, 3, 2, 4, 5, 7, 9, 6]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)},
     ]
-    model.quantize(rows, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=rows, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)} == linears
     for name in linears:
         assert model.model.get_submodule(name).qweight.dtype == torch.int32

@@ -93,7 +93,7 @@ def test_live_decoder_plan_covers_all_checkpoint_owners(kv_heads, tied, device):
 def test_plain_awq_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, rope):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
     model = tiny_model(tie_word_embeddings=tied, rope_scaling=ROPE[rope])
     norms = {}
     for name, value in model.named_parameters():
@@ -108,7 +108,7 @@ def test_plain_awq_quantizes_packs_every_linear_and_round_trips(tmp_path, tied, 
     assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     for index in range(2):
         decoder = wrapper.model.transformer.h[index]

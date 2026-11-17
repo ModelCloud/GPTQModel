@@ -464,7 +464,7 @@ def test_sampler_repeated_box_prefix_exercises_real_multiround_cache(architectur
 def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architecture):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     model = tiny_model(architecture=architecture)
     model.save_pretrained(tmp_path)
@@ -480,7 +480,7 @@ def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architect
     calibration = [[{"role": "user", "content": [{"type": "image", "image": image},
                      {"type": "text", "text": "Locate object"}]},
                     {"role": "assistant", "content": "<box>1 2 3 4</box>"}]] * 2
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     for key, value in dense.items():
         torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)

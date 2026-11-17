@@ -525,7 +525,7 @@ def test_invalid_architecture_fails_then_corrected_checkpoint_loads(tmp_path):
 def test_awq_plain_policy_quantizes_and_packs_every_linear(tmp_path, alias, fallback):
     from gptqmodel import GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
     from gptqmodel.utils.backend import BACKEND
 
     model = tiny(alias, hidden_size=64, intermediate_size=128)
@@ -538,7 +538,7 @@ def test_awq_plain_policy_quantizes_and_packs_every_linear(tmp_path, alias, fall
     calibration = [{"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 3]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     norms = {name: tensor.half().clone() for name, tensor in model.state_dict().items() if "layernorm" in name}
-    loaded.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(module, AwqTorchLinear) for module in loaded.model.modules()) == expected
     for name, tensor in norms.items():
         torch.testing.assert_close(tensor, loaded.model.state_dict()[name], rtol=0, atol=0)

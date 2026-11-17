@@ -525,7 +525,7 @@ def test_corrupt_safetensors_public_failure_repair_retry(tmp_path):
 def test_public_plain_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path, layout, moe):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     media = moe == [0, 1]
     source = make_model(dtype=torch.float16, attention_projection_layout=layout, moe_layer_freq=moe,
@@ -554,7 +554,7 @@ def test_public_plain_awq_packs_every_decoder_linear_and_two_roundtrips(tmp_path
                         "video_pixel_values": torch.linspace(2, -1, 384, dtype=torch.float16).reshape(16, 24),
                         "video_grid_thw": torch.tensor([[1, 4, 4]]),
                         "audio_codes": torch.tensor([[1, 2], [3, 4], [5, 6]])} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == expected_names
     for name, value in before.items():

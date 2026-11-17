@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from gptqmodel.models.definitions.llada2 import LLaDA2MoeQModel
 from gptqmodel.models.ports.llada2.configuration_llada2_moe import LLaDA2MoeConfig
 from gptqmodel.models.ports.llada2.modeling_llada2_moe import LLaDA2MoeModelLM
+from gptqmodel.quantization.config import CalibrationConfig
 from gptqmodel.utils.hf import load_model_config
 
 
@@ -618,7 +619,7 @@ def test_public_plain_awq_all_owners_pack_infer_and_two_reloads(tmp_path, versio
         }
         for start in [0, 8, 16, 24]
     ]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     actual_names = {name for name, mod in wrapper.model.named_modules() if isinstance(mod, AwqTorchLinear)}
     assert actual_names == expected_names
     assert len(actual_names) == 4 + dense * 3 + (2 - dense) * 15
@@ -784,5 +785,5 @@ def test_default_lazy_offload_preserves_strict_fp32_nonzero_bias(tmp_path, dtype
         }
         for start in [0, 8, 16, 24]
     ]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     torch.testing.assert_close(wrapper.model.state_dict()[bias_name], bias, rtol=0, atol=0)

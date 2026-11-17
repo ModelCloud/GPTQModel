@@ -314,7 +314,7 @@ def test_public_missing_scientific_asset_fails_without_serialized_fallback_then_
 def test_public_plain_awq_quantized_safetensors_roundtrip(tmp_path):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     torch.manual_seed(53)
     save_tiny_owned_checkpoint(tmp_path)
@@ -325,7 +325,7 @@ def test_public_plain_awq_quantized_safetensors_roundtrip(tmp_path):
                     "attention_mask": torch.ones(1,16,dtype=torch.long)},
                    {"input_ids": torch.arange(16,0,-1).reshape(1,-1),
                     "attention_mask": torch.ones(1,16,dtype=torch.long)}]
-    wrapped.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapped.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     counts = [sum(isinstance(mod, AwqTorchLinear) for mod in layer.modules())
               for layer in wrapped.model.model.language_model.layers]
     assert counts == [15,16]

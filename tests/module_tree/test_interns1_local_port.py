@@ -458,7 +458,7 @@ def test_public_awq_plain_quantization_pack_media_and_safetensors_reload(tokeniz
     wrapper = GPTQModel.load(str(tokenizer_assets), quantize_config=qcfg, backend=BACKEND.TORCH,
                             dtype=torch.float16)
     samples = ["A scientific test about atoms and molecules.", "Proteins contain many different amino acids."]
-    wrapper.quantize(samples, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=samples, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     expected_count = {False: 14, True: 26, "hybrid": 20, "moe_dense_only": 14}[moe]
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == expected_count
     assert wrapper.processor.tokenizer is wrapper.tokenizer.tokenizer

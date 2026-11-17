@@ -18,7 +18,7 @@ from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.definitions.ernie4_5_moe import Ernie4_5_MoeQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 from gptqmodel.utils.security import BYPASS_ENV
 
@@ -208,8 +208,12 @@ def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_p
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH,
                           dtype=dtype, attn_implementation="eager")
     ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]])
-    model.quantize([{"input_ids": ids, "attention_mask": torch.ones_like(ids)}],
-                   batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": ids, "attention_mask": torch.ones_like(ids)}], batch_size=1, min_length=1
+        ),
+        backend=BACKEND.TORCH,
+    )
     packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected_names = {
         f"model.layers.{layer}.self_attn.{projection}_proj" for layer in range(2) for projection in "qkvo"

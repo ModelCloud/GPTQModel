@@ -352,7 +352,7 @@ def test_no_exact_native_grinmoe_or_global_registration():
 @pytest.mark.parametrize("fallback", [None, "quantize"])
 def test_plain_awq_quantizes_and_packs_every_projection_without_norm_folds(tmp_path, fallback):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
     from gptqmodel.utils.backend import BACKEND
 
     poisoned_checkpoint(tmp_path, hidden_size=32, intermediate_size=64, num_hidden_layers=1)
@@ -367,7 +367,7 @@ def test_plain_awq_quantizes_and_packs_every_projection_without_norm_folds(tmp_p
         {"input_ids": torch.tensor([[1, 8, 6, 4, 3, 7, 9, 5]]),
          "attention_mask": torch.ones(1, 8, dtype=torch.long)},
     ]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     expected = {"self_attn." + name + "_proj" for name in ("q", "k", "v", "o")}
     expected |= {f"block_sparse_moe.experts.{i}.{name}" for i in range(3) for name in ("w1", "w2", "w3")}
     layer = wrapper.model.model.layers[0]

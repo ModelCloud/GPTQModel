@@ -14,6 +14,7 @@ from gptqmodel.models.ports.internlm.configuration_internlm import InternLMConfi
 from gptqmodel.models.ports.internlm.modeling_internlm import InternLMForCausalLM
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
+from gptqmodel.quantization.config import CalibrationConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
@@ -55,7 +56,7 @@ def packed_student(tmp_path_factory):
     model = GPTQModel.load(str(source), quantize_config=QuantizeConfig(bits=4, group_size=16, desc_act=False,
                           device="cpu", format=FORMAT.GPTQ_V2, offload_to_disk=False, pack_impl="original"),
                           backend=BACKEND.TORCH, dtype=torch.float16)
-    model.quantize(CALIBRATION, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=CALIBRATION, min_length=1), backend=BACKEND.TORCH)
     model.save(str(packed))
     return packed
 
@@ -90,8 +91,10 @@ def dense_teacher(path, family):
 
 
 def tune(model, teacher):
-    return model.requantize(CALIBRATION, norm=NormConfig(teacher=teacher, steps=2, lr=0.02, reg=0.0),
-                            calibration_data_min_length=1)["norm"]
+    return model.requantize(
+        CalibrationConfig(dataset=CALIBRATION, min_length=1),
+        norm=NormConfig(teacher=teacher, steps=2, lr=0.02, reg=0.0),
+    )["norm"]
 
 
 def state(model):

@@ -367,7 +367,7 @@ def test_public_plain_awq_native_pack_save_reload(tmp_path, variant):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.models.ports.k2_horizon import K2HorizonForCausalLM
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     model = K2HorizonForCausalLM(variant_config(variant, intermediate_size=32, moe_intermediate_size=16)).half().eval()
     model.save_pretrained(tmp_path)
@@ -379,7 +379,7 @@ def test_public_plain_awq_native_pack_save_reload(tmp_path, variant):
                              backend=BACKEND.TORCH, dtype=torch.float16)
     calibration = [{"input_ids": torch.tensor([[1, 5, 8, 13, 20, 9, 25, 6]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     quantized_names = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(quantized_names) == (14 if variant == "dense" else 28)
     if variant == "mova":

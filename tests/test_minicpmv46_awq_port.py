@@ -476,7 +476,7 @@ def test_public_tiny_awq_quantizes_packs_and_roundtrips_all_linears(tmp_path, he
                 and not name.endswith(("in_proj_a", "in_proj_b"))}
     rows = [{"input_ids": torch.tensor([[4, 5, 4, 5, 4, 5, 4, 5]]),
              "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    loaded.quantize(rows, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(CalibrationConfig(dataset=rows, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name for name, m in loaded.model.named_modules() if isinstance(m, AwqTorchLinear)}
     assert packed == expected
     assert len(packed) == 13

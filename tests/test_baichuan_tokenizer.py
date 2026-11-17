@@ -312,7 +312,7 @@ def test_public_real_save_reload_resave(real_assets, tmp_path, monkeypatch):
 def test_real_tokenizer_public_awq_pack_save_reload(real_assets, tmp_path, monkeypatch):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     assets, case = real_assets
     source = tmp_path / 'source'
@@ -331,8 +331,10 @@ def test_real_tokenizer_public_awq_pack_save_reload(real_assets, tmp_path, monke
              if key.removesuffix('.weight') not in expected}
     assert model.awq_get_modules_for_scaling(model.model.model.layers[0], {}, {}) == []
     # Public string calibration must pass through the real owned tokenizer.
-    model.quantize([sample['text'] for sample in case['samples'][:2]], batch_size=1,
-                   backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=[sample["text"] for sample in case["samples"][:2]], batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)} == expected
     for key, value in dense.items():
         torch.testing.assert_close(model.model.state_dict()[key], value, rtol=0, atol=0)

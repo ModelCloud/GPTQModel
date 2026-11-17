@@ -460,7 +460,7 @@ def test_streammind_missing_dependency_is_lazy_and_transactional(tmp_path, monke
 def test_plain_awq_all_decoder_linears_pack_and_two_safetensors_roundtrips(tmp_path, kv, bias):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     model = _model(text={"num_key_value_heads": kv, "attention_bias": bias})
     model.save_pretrained(tmp_path)
@@ -487,7 +487,7 @@ def test_plain_awq_all_decoder_linears_pack_and_two_safetensors_roundtrips(tmp_p
 
     handle = wrapper.model.model.language_model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
     try:
-        wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     finally:
         handle.remove()
     assert len(captured) >= 2

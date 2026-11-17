@@ -457,7 +457,7 @@ def test_generation_eos_sampling_and_thinking_budget():
 @pytest.mark.parametrize("kv", [1, 2, 4])
 def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, offload, kv):
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     path = tmp_path / "native"
     model = tiny_model(vocab_size=128, hidden_size=32, intermediate_size=64, head_dim=16,
@@ -470,7 +470,7 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, 
                            dtype=torch.float16, attn_implementation="eager")
     rows = [{"input_ids": torch.tensor([[1, 4, 7, 9, 10, 12, 15, 2]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)},
             {"input_ids": torch.tensor([[1, 3, 6, 8, 11, 13, 16, 2]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}]
-    loaded.quantize(rows, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(CalibrationConfig(dataset=rows, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert loaded.quantize_config.fallback is None
     packed = {name: module for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected = {f"encoder.layers.{i}.{projection}" for i in range(2) for projection in (

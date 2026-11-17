@@ -299,7 +299,7 @@ def test_twenty_b_head_group_ratio_and_explicit_positions():
 def test_public_plain_awq_quantizes_packs_and_reloads(tmp_path, heads, bias):
     from gptqmodel import BACKEND
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     original = InternLM2ForCausalLM(tiny_config(num_key_value_heads=heads, bias=bias)).eval()
     original.save_pretrained(tmp_path)
@@ -309,7 +309,7 @@ def test_public_plain_awq_quantizes_packs_and_reloads(tmp_path, heads, bias):
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 10
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits

@@ -13,6 +13,7 @@ from transformers.cache_utils import DynamicCache, StaticCache
 
 from gptqmodel.models.definitions.mobilellm import MobileLLMQModel
 from gptqmodel.models.local import LocalModelLoader
+from gptqmodel.quantization.config import CalibrationConfig
 
 
 def test_definition_owns_model_without_checkpoint_python():
@@ -403,8 +404,10 @@ def test_public_pretraining_tp_quantization_rejects_dense_slice_path_before_pack
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None),
                              backend=BACKEND.TORCH, dtype=torch.float16)
     with pytest.raises(ValueError, match="dense weight slices"):
-        wrapper.quantize([{"input_ids": torch.tensor([[1, 4, 9, 13, 7, 8, 4, 5]])}],
-                         backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(
+            CalibrationConfig(dataset=[{"input_ids": torch.tensor([[1, 4, 9, 13, 7, 8, 4, 5]])}], min_length=1),
+            backend=BACKEND.TORCH,
+        )
     assert all(isinstance(layer.mlp.down_proj, torch.nn.Linear) for layer in wrapper.model.model.layers)
 
 
@@ -461,7 +464,7 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tiny_config, tmp_pat
              "attention_mask": torch.ones(1, 8, dtype=torch.long)},
             {"input_ids": torch.tensor([[1, 17, 7, 6, 11, 22, 8, 4]]),
              "attention_mask": torch.ones(1, 8, dtype=torch.long)}]
-    wrapper.quantize(rows, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=rows, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 14
     expected_linears = {f"model.layers.{index}.{name}" for index in range(2) for name in

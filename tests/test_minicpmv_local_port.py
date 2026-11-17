@@ -426,7 +426,7 @@ def test_independent_original_minicpm_mup_decoder(version, kv):
 def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     config = tiny_config(version, intermediate_size=128)
     source = MiniCPMVQModel.loader.from_config(config, dtype=torch.float16).eval()
@@ -445,7 +445,7 @@ def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version
     dense = {name: tensor.clone() for name, tensor in source.state_dict().items()
              if not name.startswith("llm.model.layers.0.") or not name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight",
                                                                                "o_proj.weight", "gate_proj.weight", "up_proj.weight", "down_proj.weight"))}
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 7
     assert all(name.startswith("llm.model.layers.0.") for name in packed)

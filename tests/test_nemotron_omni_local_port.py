@@ -18,7 +18,7 @@ from gptqmodel.models.ports.nemotron_omni.configuration import NemotronOmniConfi
 from gptqmodel.models.ports.nemotron_omni.modeling import NemotronH_Omni_Reasoning_V3
 from gptqmodel.models.ports.nemotron_omni.processing import NemotronOmniProcessor
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.hf import load_model_config
 
 
@@ -373,7 +373,7 @@ def test_public_plain_awq_image_calibration_all_owners_and_two_reloads(tmp_path,
         {"type": "image", "image": Image.new("RGB", (8, 8), color=(110, 40, 190))},
         {"type": "text", "text": "t3 t4 t5"},
     ]}] for _ in range(2)]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == modules
     assert all(not hasattr(model.model.get_submodule(name), "weight") for name in packed)

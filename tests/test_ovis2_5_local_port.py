@@ -393,7 +393,7 @@ def test_saved_generation_policy_reaches_native_decoder_and_two_reloads(tmp_path
 def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path, kv, bias, offload):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     model = _model(text={"num_key_value_heads": kv, "attention_bias": bias}).half()
     model.save_pretrained(tmp_path)
@@ -422,7 +422,7 @@ def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path,
 
     handle = wrapper.model.llm.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
     try:
-        wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     finally:
         handle.remove()
     assert len(captured) >= 2

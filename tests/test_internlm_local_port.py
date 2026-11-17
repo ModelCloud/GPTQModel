@@ -264,7 +264,7 @@ def test_internlm_public_dispatch_uses_definition_owned_model(tmp_path, monkeypa
 def test_internlm_plain_awq_quantizes_every_linear_and_reloads(tmp_path, bias):
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
     model = _model(bias=bias)
     model.save_pretrained(tmp_path)
     _write_release_tokenizer(tmp_path)
@@ -273,7 +273,7 @@ def test_internlm_plain_awq_quantizes_every_linear_and_reloads(tmp_path, bias):
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     with torch.inference_mode():
         expected = wrapper.model(**calibration[0], use_cache=False).logits

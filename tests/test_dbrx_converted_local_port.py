@@ -530,7 +530,7 @@ def test_plain_awq_public_quantization_and_packed_reload(tmp_path):
 
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization.config import AWQConfig
+    from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
     model = make_model(ffn_config={"ffn_hidden_size": 48, "moe_num_experts": 3, "moe_top_k": 3})
     model.save_pretrained(tmp_path, safe_serialization=True)
@@ -542,7 +542,7 @@ def test_plain_awq_public_quantization_and_packed_reload(tmp_path):
     wrapped = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
     calibration = [{"input_ids": torch.tensor([[1, 3, 7, 11, 19, 23, 29, 37]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapped.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapped.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name: module for name, module in wrapped.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 26
     assert all(module.qweight.dtype == torch.int32 for module in packed.values())

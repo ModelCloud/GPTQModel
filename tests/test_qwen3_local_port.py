@@ -24,7 +24,7 @@ from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.models.definitions.qwen3_5_text import Qwen3_5TextQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.hf import load_model_config
 
 
@@ -288,7 +288,7 @@ def test_public_plain_awq_pack_infer_two_exact_reloads(tmp_path, family, offload
         loaded.tokenizer(text, return_tensors="pt")
         for text in ["Marin and Qwen models learn café 你好.", "A different sequence: 42, seven, moon!"]
     ]
-    loaded.quantize(rows, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(CalibrationConfig(dataset=rows, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert sum(isinstance(m, AwqTorchLinear) for m in loaded.model.modules()) == 14
     for key, value in dense.items():
         torch.testing.assert_close(loaded.model.state_dict()[key], value, rtol=0, atol=0)

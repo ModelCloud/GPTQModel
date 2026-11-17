@@ -26,7 +26,7 @@ from transformers import (
 from gptqmodel import GPTQModel
 from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
@@ -280,7 +280,7 @@ def test_public_awq_plain_quantization_packs_all_decoder_linears(tmp_path, kv_he
         {"type": "text", "text": "t5 t6 t7 t8 t9 t10 t11 t12"},
         {"type": "image", "image": Image.new("RGB", (4, 4), (100, 40, 20))},
     ]}] for _ in range(2)]
-    wrapper.quantize(samples, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(CalibrationConfig(dataset=samples, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert set(packed) == expected_names
     assert len(packed) == 19

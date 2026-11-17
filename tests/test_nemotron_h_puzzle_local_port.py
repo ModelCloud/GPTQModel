@@ -16,6 +16,7 @@ from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
 from gptqmodel.models.ports.nemotron_h_puzzle import NemotronHPuzzleConfig, NemotronHPuzzleForCausalLM
 from gptqmodel.models.ports.nemotron_h_puzzle.modeling_nemotron_h_puzzle import NemotronHPuzzleCache
 from gptqmodel.quantization import AWQConfig
+from gptqmodel.quantization.config import CalibrationConfig
 from gptqmodel.utils.hf import load_model_config
 
 
@@ -396,7 +397,7 @@ def test_public_plain_awq_pack_infer_and_two_reload_cycles(tmp_path, kv_heads, l
     wrapped = GPTQModel.load(str(native), quantize_config=qcfg, dtype=torch.float16)
     calibration = [dict(tokenizer(text, return_tensors="pt")) for text in
                    ["the quick brown fox jumps over lazy dog", "the fox jumps over the dog"]]
-    wrapped.quantize(calibration, batch_size=1, calibration_data_min_length=1, backend=BACKEND.TORCH)
+    wrapped.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     from gptqmodel.nn_modules.qlinear import BaseQuantLinear
     packed = {name for name, module in wrapped.model.named_modules() if isinstance(module, BaseQuantLinear)}
     expected_linears = {name for name, module in source.named_modules() if isinstance(module, torch.nn.Linear)
