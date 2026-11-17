@@ -122,6 +122,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   after the reduction, so packing keeps its source precision instead of casting
   it to FP16; see
   [AWQ pack-time bias storage](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-bias-representability.md).
+- **Keep the Marlin bias in the checkpoint.** The native Marlin kernel adds the
+  bias to its FP32 accumulator, so the buffer keeps its checkpoint width and
+  order and the padded, permuted operand is derived per launch; see
+  [Marlin bias epilogue and storage](https://github.com/ModelCloud/GPTQModel/blob/main/docs/marlin-bias-epilogue.md).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.

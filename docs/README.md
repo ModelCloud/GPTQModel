@@ -111,6 +111,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [CPU and offload kernel dispatch](kernel-dispatch-cpu.md)
 - [Kernel input contiguity and launch contracts](kernel-input-contiguity.md)
 - [Low-precision bias epilogues](low-precision-bias-epilogue.md)
+- [Marlin bias epilogue and storage](marlin-bias-epilogue.md)
 - [MLX runtime generation and export flow](mlx-runtime.md)
 - [NF12 fallback epilogue](nf12-bias-epilogue.md)
 - [NF12 CUDA dispatch and weight readiness](nf12-cuda-dispatch.md)
