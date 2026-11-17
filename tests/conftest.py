@@ -82,14 +82,20 @@ for path in (_REPO_ROOT, _TESTS_DIR, _MODELS_TESTS_DIR):
         sys.path.insert(0, path_str)
 
 
-_OPT_IN_MARKERS = ("gptq_cuda_e2e", "gptq_cuda_eval_only", "checkpoint_recovery")
+_OPT_IN_MARKERS = (
+    "gptq_cuda_e2e",
+    "gptq_cuda_eval_only",
+    "checkpoint_recovery",
+    "meta_coverage",
+)
 
 
 def pytest_collection_modifyitems(config, items):
     """Apply opt-in test selection, then order native-TTNN hardware tests.
 
-    Opt-in checks quantize and evaluate a real model, or run the multi-minute
-    subprocess checkpoint-recovery matrix, so they are selected by marker
+    Opt-in checks quantize and evaluate a real model, run the multi-minute
+    subprocess checkpoint-recovery matrix, or build every registered model on
+    ``meta`` to check routed-expert coverage, so they are selected by marker
     rather than by an environment variable. Any other ``-m`` expression still
     leaves them skipped; only naming the marker runs them.
 

@@ -121,7 +121,7 @@ flowchart TD
 | Before (baseline `c9efdbacf`) | Now |
 | --- | --- |
 | Candidate search multiplies non-quantized consumer weights (`awq_processor.py:3099-3119`). | Search leaves them unchanged; final folding still compensates them. |
-| Shared-source merge retains the first inspection module for cross-root groups (`models/base.py:5540-5546`). | Group construction remains unchanged, but search rejects boundaries missing any member rather than scoring only one branch. |
+| Shared-source merge retains the first inspection module for cross-root groups (`models/base.py:5540-5546`). | Group construction remains unchanged, but search rejects boundaries missing any *scored* member rather than scoring only one branch. A group the tree declares across sibling branches of one norm (`_awq_allow_outside_fold`) folds the out-of-boundary members **and scale consumers** instead of scoring them: they read the same tensor, so the same scale is exact, and `apply_scale` compensates every declared consumer. Only members the search scores must be replayed (#4741, #4898). |
 | A contained target need not execute during replay (`awq_processor.py:2551-2572`). | Reference-forward observation rejects unexecuted targets before candidate mutation; observation hooks are always removed. |
 | Replay always routes with the model's native top-k, even when calibration captured features under `ExpertsRoutingOverride` (`awq_processor.py:2358-2661`). | Reference and candidate replays re-enter the capture-time override; a target that still cannot execute rejects the group. |
 | Weight restoration occurs only after successful grid evaluation (`awq_processor.py:3267-3278`). | Restoration is in `finally`, covering quantizer, replay, and loss exceptions. |
