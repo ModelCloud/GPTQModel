@@ -13,14 +13,23 @@ settle, re-read all comments, and keep the claim only when it is the oldest
 live claim (lowest comment id). Every agent applies the same rule to the same
 comments, so exactly one agent wins and the others withdraw.
 
+A claim is a commitment to start now, not a reservation. ``claim`` therefore
+requires a note on the work being started and refuses once the session holds
+``--capacity`` workloads (default 1): set it to the number of workloads the
+agent will run concurrently right now, bounded by both the sub-agents it will
+spawn and the free GPUs/hardware it has to test on. Correlated issues that one
+change resolves are claimed together, all-or-nothing, as a single workload.
+
 Only the Python standard library and an authenticated ``gh`` CLI are required.
 
     issue_claim.py whoami
     issue_claim.py scan [--limit 30]
-    issue_claim.py claim <issue>
-    issue_claim.py verify <issue>        # exit 0 only while this agent holds the claim
-    issue_claim.py heartbeat <issue> [--note TEXT]
-    issue_claim.py release <issue> [--pr URL] [--note TEXT]
+    issue_claim.py held                  # this session's live workloads
+    issue_claim.py claim <issue> --note TEXT [--capacity N]
+    issue_claim.py claim <issue> <issue>... --related TEXT --note TEXT
+    issue_claim.py verify <issue>...     # exit 0 only while this agent holds every claim
+    issue_claim.py heartbeat <issue>... [--note TEXT]
+    issue_claim.py release <issue>... [--pr URL] [--note TEXT]
 """
 
 from __future__ import annotations
@@ -299,13 +308,13 @@ query($owner: String!, $name: String!, $first: Int!) {
 # --------------------------------------------------------------------------- comment bodies
 
 
-def render_body(meta: dict, note: str | None = None) -> str:
+def render_body(meta: dict) -> str:
     agent = meta["agent"]
     state = meta["state"]
     if state == "active":
-        headline = f"**Agent claim:** `{agent}` is working on this issue."
+        headline = f"**Agent claim:** `{agent}` is working on this issue now."
         detail = (
-            f"Claimed {meta['claimed_at']}. The claim expires {meta['ttl_hours']}h after this comment was last "
+            f"Started {meta['claimed_at']}. The claim expires {meta['ttl_hours']}h after this comment was last "
             "edited (heartbeat). Other agents: do not start this issue while the claim is live."
         )
     elif state == "done":
@@ -315,8 +324,12 @@ def render_body(meta: dict, note: str | None = None) -> str:
         headline = f"**Agent claim released:** `{agent}` is no longer working on this issue."
         detail = "The issue is free to claim."
     lines = [headline, "", detail]
-    if note:
-        lines += ["", note]
+    issues = meta.get("workload_issues") or []
+    if len(issues) > 1:
+        lines += ["", "One workload with " + ", ".join(f"#{n}" for n in issues)
+                  + (f": {meta['related']}" if meta.get("related") else "")]
+    if meta.get("note"):
+        lines += ["", str(meta["note"])]
     lines += ["", f"<!-- {MARKER} {json.dumps(meta, sort_keys=True)} -->"]
     return "\n".join(lines)
 
@@ -402,54 +415,168 @@ def _blockers(issue: IssueState, me: str, now: datetime, args) -> list[str]:
     return reasons
 
 
+def workload_of(claim: Claim) -> str:
+    # Claims posted before workloads existed are single-issue workloads.
+    return str(claim.meta.get("workload") or f"c{claim.comment_id}")
+
+
+def _ledger_path(repo: str, me: str) -> Path:
+    return Path.home() / ".cache" / "gptqmodel" / "issue-claims" / f"{repo.replace('/', '__')}__{me}.json"
+
+
+def _ledger_load(repo: str, me: str) -> set[int]:
+    try:
+        return {int(n) for n in json.loads(_ledger_path(repo, me).read_text()).get("issues", [])}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+
+def _ledger_save(repo: str, me: str, issues: set[int]) -> None:
+    path = _ledger_path(repo, me)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"issues": sorted(issues)}) + "\n")
+    except OSError as exc:
+        print(f"warning: could not write claim ledger {path}: {exc}", file=sys.stderr)
+
+
+def search_claimed_issues(repo: str, me: str) -> set[int]:
+    """Best-effort discovery of this agent's claims made from another worktree or after a lost ledger."""
+    try:
+        out = gh("search", "issues", me, "--repo", repo, "--state", "open", "--match", "comments",
+                 "--limit", "100", "--json", "number", "--jq", ".[].number")
+    except ClaimError:
+        return set()
+    return {int(n) for n in out.split()}
+
+
+def held_workloads(repo: str, me: str) -> dict[str, list[int]]:
+    """Live workloads of this session, verified against the issues themselves."""
+    candidates = _ledger_load(repo, me) | search_claimed_issues(repo, me)
+    now = utcnow()
+    held: dict[str, list[int]] = {}
+    for number in sorted(candidates):
+        holder = fetch_issue(repo, number).holder(now)
+        if holder and holder.agent == me:
+            held.setdefault(workload_of(holder), []).append(number)
+    _ledger_save(repo, me, {n for issues in held.values() for n in issues})
+    return held
+
+
+def cmd_held(args) -> int:
+    held = held_workloads(args.repo, agent_id())
+    for workload, issues in held.items():
+        print(f"{workload}: " + ", ".join(f"#{n}" for n in issues))
+    print(f"{len(held)} live workload(s)")
+    return 0
+
+
 def cmd_claim(args) -> int:
     me = agent_id()
+    numbers = sorted(set(args.issue))
+    if len(numbers) > 1 and not (args.related or "").strip():
+        print("NOT CLAIMED: claiming several issues requires --related naming the shared root cause or change. "
+              "Claim unrelated issues as separate workloads only when capacity allows.")
+        return 2
     now = utcnow()
-    issue = fetch_issue(args.repo, args.issue)
-    holder = issue.holder(now)
-    if holder and holder.agent == me:
-        # The body must change for GitHub to bump updated_at, which is the heartbeat.
-        holder.meta["heartbeat_at"] = fmt_ts(now)
-        edit_comment(args.repo, holder.comment_id, render_body(holder.meta))
-        print(f"ALREADY HELD: #{args.issue} by {me} (comment {holder.comment_id}); heartbeat refreshed")
+    issues = {n: fetch_issue(args.repo, n) for n in numbers}
+    holders = {n: issue.holder(now) for n, issue in issues.items()}
+    mine = {n: h for n, h in holders.items() if h and h.agent == me}
+
+    if len(mine) == len(numbers):
+        for n, holder in mine.items():
+            # The body must change for GitHub to bump updated_at, which is the heartbeat.
+            holder.meta["heartbeat_at"] = fmt_ts(now)
+            edit_comment(args.repo, holder.comment_id, render_body(holder.meta))
+        print("ALREADY HELD: " + ", ".join(f"#{n}" for n in numbers) + f" by {me}; heartbeat refreshed")
         return 0
-    blockers = _blockers(issue, me, now, args)
+
+    blockers = [f"#{n}: {r}" for n in numbers if n not in mine for r in _blockers(issues[n], me, now, args)]
     if blockers:
-        print(f"NOT CLAIMED: #{args.issue}: " + "; ".join(blockers))
+        print("NOT CLAIMED: " + "; ".join(blockers))
         return 2
 
-    stale = [c.comment_id for c in issue.claims if c.state == "active" and not c.superseded and not c.live(now)]
-    meta = {
-        "v": 1,
-        "agent": me,
-        "nonce": uuid.uuid4().hex[:12],
-        "state": "active",
-        "claimed_at": fmt_ts(now),
-        "ttl_hours": args.ttl_hours,
-        "supersedes": stale,
-    }
-    posted = gh_json("api", "-X", "POST", f"repos/{args.repo}/issues/{args.issue}/comments",
-                     input_obj={"body": render_body(meta, args.note)})
-    my_id = int(posted["id"])
+    joined = {workload_of(h) for h in mine.values()}
+    if len(joined) > 1:
+        print("NOT CLAIMED: the issues already belong to different workloads of this session; release one first.")
+        return 2
+    if joined:
+        # A correlated issue found mid-work joins the running workload and uses no extra capacity.
+        workload = joined.pop()
+    else:
+        held = held_workloads(args.repo, me)
+        if len(held) >= args.capacity:
+            print(f"AT CAPACITY: this session already runs {len(held)} workload(s) "
+                  f"({', '.join(held)}) with --capacity {args.capacity}. Finish or release one first; "
+                  "never claim issues to queue them.")
+            return 5
+        workload = uuid.uuid4().hex[:12]
 
-    # Let concurrent claimers' comments become visible before deciding the winner.
-    time.sleep(args.settle_seconds)
-    issue = fetch_issue(args.repo, args.issue)
-    now = utcnow()
-    holder = issue.holder(now)
-    if holder is not None and holder.comment_id == my_id:
-        print(f"CLAIMED: #{args.issue} by {me} (comment {my_id}). Heartbeat at least every "
-              f"{args.ttl_hours / 2:g}h and run `verify` before pushing or opening a PR.")
-        return 0
-
-    winner = describe(holder, now) if holder else "no live claim (own comment not visible)"
+    all_issues = sorted(set(numbers) | {n for n, h in mine.items()})
+    posted: dict[int, tuple[int, dict]] = {}
     try:
-        delete_comment(args.repo, my_id)
+        for n in numbers:
+            if n in mine:
+                continue
+            stale = [c.comment_id for c in issues[n].claims
+                     if c.state == "active" and not c.superseded and not c.live(now)]
+            meta = {
+                "v": 1,
+                "agent": me,
+                "nonce": uuid.uuid4().hex[:12],
+                "state": "active",
+                "claimed_at": fmt_ts(now),
+                "ttl_hours": args.ttl_hours,
+                "supersedes": stale,
+                "workload": workload,
+                "workload_issues": all_issues,
+                "note": args.note,
+            }
+            if args.related:
+                meta["related"] = args.related
+            reply = gh_json("api", "-X", "POST", f"repos/{args.repo}/issues/{n}/comments",
+                            input_obj={"body": render_body(meta)})
+            posted[n] = (int(reply["id"]), meta)
+
+        # Let concurrent claimers' comments become visible before deciding the winners.
+        time.sleep(args.settle_seconds)
+        now = utcnow()
+        lost = {}
+        for n, (my_id, _) in posted.items():
+            holder = fetch_issue(args.repo, n).holder(now)
+            if holder is None or holder.comment_id != my_id:
+                lost[n] = describe(holder, now) if holder else "no live claim (own comment not visible)"
     except ClaimError:
-        meta["state"] = "released"
-        edit_comment(args.repo, my_id, render_body(meta, "Withdrawn: another agent claimed this issue first."))
-    print(f"LOST RACE: #{args.issue}: winner is {winner}. Own claim withdrawn; pick another issue.")
-    return 3
+        _withdraw(args.repo, posted)
+        raise
+
+    if lost:
+        # All-or-nothing: a partial win would split one workload between agents.
+        _withdraw(args.repo, posted)
+        print("LOST RACE: " + "; ".join(f"#{n} won by {w}" for n, w in lost.items())
+              + ". All new claims in this workload withdrawn; pick other work.")
+        return 3
+
+    for holder in mine.values():
+        holder.meta["workload_issues"] = all_issues
+        if args.related:
+            holder.meta["related"] = args.related
+        holder.meta["heartbeat_at"] = fmt_ts(now)
+        edit_comment(args.repo, holder.comment_id, render_body(holder.meta))
+    _ledger_save(args.repo, me, _ledger_load(args.repo, me) | set(all_issues))
+    print("CLAIMED: " + ", ".join(f"#{n}" for n in all_issues) + f" as workload {workload} by {me}. "
+          f"Start now; heartbeat at least every {args.ttl_hours / 2:g}h and run `verify` before pushing.")
+    return 0
+
+
+def _withdraw(repo: str, posted: dict[int, tuple[int, dict]]) -> None:
+    for n, (comment_id, meta) in posted.items():
+        try:
+            delete_comment(repo, comment_id)
+        except ClaimError:
+            meta["state"] = "released"
+            meta["note"] = "Withdrawn: another agent claimed part of this workload first."
+            edit_comment(repo, comment_id, render_body(meta))
 
 
 def _own_live_claim(repo: str, number: int) -> tuple[Claim | None, IssueState]:
@@ -459,43 +586,58 @@ def _own_live_claim(repo: str, number: int) -> tuple[Claim | None, IssueState]:
     return (holder if holder and holder.agent == me else None), issue
 
 
-def cmd_verify(args) -> int:
-    mine, issue = _own_live_claim(args.repo, args.issue)
-    if mine:
-        print(f"HELD: #{args.issue} by {mine.agent}, expires {fmt_ts(mine.expires_at)}")
-        return 0
+def _not_held(n: int, issue: IssueState, hint: str) -> str:
     holder = issue.holder(utcnow())
-    print(f"NOT HELD: #{args.issue}; holder is {describe(holder, utcnow()) if holder else 'nobody'}. Stop work.")
-    return 4
+    return f"NOT HELD: #{n}; holder is {describe(holder, utcnow()) if holder else 'nobody'}. {hint}"
+
+
+def cmd_verify(args) -> int:
+    rc = 0
+    for n in args.issue:
+        mine, issue = _own_live_claim(args.repo, n)
+        if mine:
+            print(f"HELD: #{n} by {mine.agent}, expires {fmt_ts(mine.expires_at)}")
+        else:
+            print(_not_held(n, issue, "Stop work."))
+            rc = 4
+    return rc
 
 
 def cmd_heartbeat(args) -> int:
-    mine, issue = _own_live_claim(args.repo, args.issue)
-    if not mine:
-        holder = issue.holder(utcnow())
-        print(f"NOT HELD: #{args.issue}; holder is {describe(holder, utcnow()) if holder else 'nobody'}. "
-              "Do not revive an expired claim; run `claim` again instead.")
-        return 4
-    mine.meta["heartbeat_at"] = fmt_ts(utcnow())
-    edit_comment(args.repo, mine.comment_id, render_body(mine.meta, args.note))
-    print(f"HEARTBEAT: #{args.issue} comment {mine.comment_id}")
-    return 0
+    rc = 0
+    for n in args.issue:
+        mine, issue = _own_live_claim(args.repo, n)
+        if not mine:
+            print(_not_held(n, issue, "Do not revive an expired claim; run `claim` again instead."))
+            rc = 4
+            continue
+        mine.meta["heartbeat_at"] = fmt_ts(utcnow())
+        if args.note:
+            mine.meta["note"] = args.note
+        edit_comment(args.repo, mine.comment_id, render_body(mine.meta))
+        print(f"HEARTBEAT: #{n} comment {mine.comment_id}")
+    return rc
 
 
 def cmd_release(args) -> int:
     me = agent_id()
-    issue = fetch_issue(args.repo, args.issue)
-    mine = [c for c in issue.claims if c.agent == me and c.state == "active"]
-    if not mine:
-        print(f"NOTHING TO RELEASE: no active claim by {me} on #{args.issue}")
-        return 0
-    for c in mine:
-        c.meta["state"] = "done" if args.pr else "released"
-        c.meta["released_at"] = fmt_ts(utcnow())
-        if args.pr:
-            c.meta["pr"] = args.pr
-        edit_comment(args.repo, c.comment_id, render_body(c.meta, args.note))
-        print(f"RELEASED: #{args.issue} comment {c.comment_id} ({c.meta['state']})")
+    released = set()
+    for n in args.issue:
+        issue = fetch_issue(args.repo, n)
+        mine = [c for c in issue.claims if c.agent == me and c.state == "active"]
+        if not mine:
+            print(f"NOTHING TO RELEASE: no active claim by {me} on #{n}")
+        for c in mine:
+            c.meta["state"] = "done" if args.pr else "released"
+            c.meta["released_at"] = fmt_ts(utcnow())
+            if args.pr:
+                c.meta["pr"] = args.pr
+            if args.note:
+                c.meta["note"] = args.note
+            edit_comment(args.repo, c.comment_id, render_body(c.meta))
+            print(f"RELEASED: #{n} comment {c.comment_id} ({c.meta['state']})")
+        released.add(n)
+    _ledger_save(args.repo, me, _ledger_load(args.repo, me) - released)
     return 0
 
 
@@ -512,9 +654,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_scan)
 
+    sub.add_parser("held", help="list this session's live workloads").set_defaults(func=cmd_held)
+
     p = sub.add_parser("claim")
-    p.add_argument("issue", type=int)
-    p.add_argument("--note", help="one line on the planned approach, shown in the claim comment")
+    p.add_argument("issue", type=int, nargs="+", help="one issue, or several correlated issues as one workload")
+    p.add_argument("--note", required=True, help="the work being started now, shown in the claim comment")
+    p.add_argument("--related", help="required for several issues: the shared root cause or change")
+    p.add_argument("--capacity", type=int, default=1,
+                   help="workloads this session can run right now: min(sub-agents it will spawn, free test hardware)")
     p.add_argument("--ttl-hours", type=float, default=DEFAULT_TTL_HOURS)
     p.add_argument("--settle-seconds", type=float, default=DEFAULT_SETTLE_SECONDS)
     p.add_argument("--allow-assigned", action="store_true", help="the user explicitly directed work on an assigned issue")
@@ -523,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for name, func in (("verify", cmd_verify), ("heartbeat", cmd_heartbeat), ("release", cmd_release)):
         p = sub.add_parser(name)
-        p.add_argument("issue", type=int)
+        p.add_argument("issue", type=int, nargs="+")
         if name in ("heartbeat", "release"):
             p.add_argument("--note")
         if name == "release":
@@ -531,6 +678,8 @@ def main(argv: list[str] | None = None) -> int:
         p.set_defaults(func=func)
 
     args = parser.parse_args(argv)
+    if getattr(args, "capacity", 1) < 1:
+        parser.error("--capacity must be at least 1")
     if getattr(args, "ttl_hours", DEFAULT_TTL_HOURS) > MAX_TTL_HOURS:
         parser.error(f"--ttl-hours may not exceed {MAX_TTL_HOURS:g}")
     try:

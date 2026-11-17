@@ -21,6 +21,14 @@ GitHub issue, read and follow `$gptqmodel-issue-claims` in
   GitHub login alone never proves ownership, because other agents share it.
 - If the helper reports `NOT CLAIMED` or `LOST RACE`, choose a different issue.
   Never work an issue that another agent session holds.
+- Claim only immediately before you start working an issue; never claim to
+  queue or reserve work. Hold no more workloads than you can run right now:
+  pass `--capacity` as the smaller of the workers (you plus sub-agents you will
+  spawn now) and the free test hardware (for example GPUs) those workloads
+  need. Stop at `AT CAPACITY`.
+- Several issues may be claimed together only when they are actually
+  correlated (same root cause or one change fixes them). Claim them in one call
+  with `--related`; they form one workload.
 - Heartbeat during long work, run `verify` before pushing or opening a pull
   request, and `release` the claim (with the PR link) when finished or
   abandoned.
