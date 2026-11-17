@@ -50,6 +50,15 @@ class VPTQLinear(WeightOnlyQuantLinear):
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = True
+    # No measured static-cache win yet: AUTO selects the VPTQ CUDA kernel, and
+    # the issue's sweep found the forced compile there slower than eager
+    # (#4984). The portable torch path has not been timed under `generate()`,
+    # so it keeps the conservative policy until someone measures it.
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "no measured static-cache generate win for the portable torch path; "
+        "re-measure before opting in (#4984)"
+    )
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]

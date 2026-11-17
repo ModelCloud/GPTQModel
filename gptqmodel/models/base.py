@@ -37,6 +37,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear._compile_support import supports_compiled_generation
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
@@ -3607,7 +3608,12 @@ class BaseQModel(nn.Module):
         slower than eager (#4669). Kernels declare the answer with
         ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False and
         requires both a ``fullgraph=True`` trace with no graph breaks and a
-        measured win on the hardware it claims (#4739).
+        measured win on the hardware it claims (#4739). A kernel that declares
+        a compile-capable ``SUPPORTS_COMPILE_LEVEL`` (``>= INDUCTOR``) yet
+        keeps the policy off has to record the measured loss in
+        ``SUPPORTS_COMPILE_EAGER_REASON``; otherwise the two declarations drift
+        apart and a trace-clean kernel stays 2-9x slower than it could be
+        (#4984).
 
         A model with no quantized linear (dense) has nothing that breaks the
         graph, so it keeps whatever compile policy the caller chose.
@@ -3631,7 +3637,7 @@ class BaseQModel(nn.Module):
         )
         if not modules:
             return True
-        return all(getattr(module, "SUPPORTS_COMPILE", False) for module in modules.values())
+        return all(supports_compiled_generation(module) for module in modules.values())
 
     def _generation_compile_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """Return the generation kwargs to pass, with the compile policy applied.
