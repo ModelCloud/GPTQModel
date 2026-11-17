@@ -108,9 +108,7 @@ struct MoeProblem {
     const MoeExpertCodec c = moe_expert_codec<kSrc>(p.exp_base, p.escapes, p.escape_offsets, e);
     t.base_x4 = c.base_x4;
     t.escapes = c.escapes;
-    t.num_escapes =
-        c.escapes != nullptr ? static_cast<uint32_t>(__ldg(p.escape_offsets + e + 1) - __ldg(p.escape_offsets + e))
-                             : 0u;
+    t.num_escapes = c.num_escapes;
     return t;
   }
   __device__ static bool x_gathered(const MoeTcParams& p) { return p.gather != nullptr; }

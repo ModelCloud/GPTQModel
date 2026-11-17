@@ -49,16 +49,29 @@ struct MoeExpertCodec {
   uint32_t num_escapes;
 };
 
+// One expert's escape slice from the absolute offset pair. The base is clamped
+// to the table start so a corrupt negative offset cannot point before the
+// allocation, and a decreasing pair yields an empty slice. The local index
+// bound (lo0 < num_escapes) stays in the decode helpers, matching the HIP
+// kernels; the loader owns the remaining upper-bound validation.
+__device__ __forceinline__ MoeExpertCodec moe_escape_slice(const uint4* __restrict__ escapes,
+                                                          const int64_t* __restrict__ escape_offsets, int e) {
+  if (escapes == nullptr) return {0u, nullptr, 0u};
+  const int64_t lo = __ldg(escape_offsets + e);
+  const int64_t hi = __ldg(escape_offsets + e + 1);
+  const int64_t base = lo > 0 ? lo : 0;
+  return {0u, escapes + base, static_cast<uint32_t>(hi > base ? hi - base : 0)};
+}
+
 template <WeightSource S>
 __device__ __forceinline__ MoeExpertCodec moe_expert_codec(const uint8_t* __restrict__ exp_base,
                                                            const uint4* escapes,
                                                            const int64_t* __restrict__ escape_offsets, int e) {
   if constexpr (S == WeightSource::kNF12) {
     // A null table means no expert has escapes.
-    if (escapes == nullptr) return {exp_base_x4(__ldg(exp_base + e)), nullptr, 0u};
-    const int64_t lo = __ldg(escape_offsets + e);
-    const int64_t hi = __ldg(escape_offsets + e + 1);
-    return {exp_base_x4(__ldg(exp_base + e)), escapes + lo, static_cast<uint32_t>(hi > lo ? hi - lo : 0)};
+    MoeExpertCodec slice = moe_escape_slice(escapes, escape_offsets, e);
+    slice.base_x4 = exp_base_x4(__ldg(exp_base + e));
+    return slice;
   } else {
     return {0u, nullptr, 0u};
   }
