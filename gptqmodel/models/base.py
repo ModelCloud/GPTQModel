@@ -122,6 +122,7 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
+from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
@@ -839,6 +840,19 @@ class BaseQModel(nn.Module):
 
     # some models require Processor? For example, Qwen2VLImageProcessor.
     require_load_processor = False
+
+    # Some checkpoints ship no tokenizer at all (Decision Transformer offline-RL
+    # models). A definition that sets this to False is loaded without one; the
+    # text models keep the default so a missing tokenizer still fails loudly.
+    require_load_tokenizer: bool = True
+
+    # How prepared calibration rows reach the model forward:
+    #   "token_ids"     - normalise every row to `input_ids`/`attention_mask`
+    #                     and collate by token length (default, text models).
+    #   "tensor_kwargs" - pass a row whose values are all tensors straight
+    #                     through as keyword arguments (Decision Transformer's
+    #                     `states`/`actions`/`returns_to_go`/`timesteps`).
+    calibration_inputs: str = "token_ids"
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
@@ -6771,7 +6785,13 @@ class BaseQModel(nn.Module):
         return node
 
     def tied_word_embedding(self) -> bool:
-        return getattr(self.model.config, "tie_word_embeddings", False)
+        # The load-time snapshot resolves tying from the decoder config and the
+        # checkpoint, so a composite wrapper's default flag cannot claim a tie
+        # the checkpoint does not have (#4799).
+        resolved = lm_head_is_tied(self.model, self.lm_head)
+        if resolved is not None:
+            return resolved
+        return word_embeddings_tied(getattr(self.model, "config", None))
 
     # Direct children that carry the token embedding or the language head. The
     # structural `nn.Module` check is the real guard; these names only break

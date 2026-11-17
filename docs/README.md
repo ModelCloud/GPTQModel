@@ -36,6 +36,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [Calibration row trimming](calibration-row-trimming.md)
 - [Changelog archive](changelog/archive.md)
 - [Convolution capture padding](conv-capture-padding.md)
+- [Decision Transformer tensor calibration](decision-transformer-calibration.md)
 - [CPU block packing](cpu-block-packing.md)
 - [FP4 effective-weight range in the decode path](fp4-effective-weight-range.md)
 - [FP8 dequantization scaling and AWQ GEMM dispatch](fp8-dequant-scaling.md)

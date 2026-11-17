@@ -50,6 +50,11 @@ from torch import nn
 from ..utils.logger import setup_logger
 from .checkpoint_paths import validate_relative_checkpoint_path
 from .p2p import safe_move_to
+from .tied_weights import (
+    retie_tied_weights,
+    snapshot_tied_weights_keys,
+    tensors_equal_in_chunks,
+)
 from .torch import as_torch_device
 
 
@@ -1192,6 +1197,16 @@ class LazyTurtle:
         alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
+        # Resolve tying once from the decoder config and the checkpoint itself.
+        # `materialize_submodule` re-applies this snapshot instead of calling
+        # `tie_weights()`, which would recompute from the wrapper config and
+        # replace a checkpoint's distinct `lm_head` with the embedding (#4799).
+        if target_model is not None:
+            self.tied_weights_keys = snapshot_tied_weights_keys(
+                target_model,
+                checkpoint_has_tensor=self._checkpoint_has_parameter,
+                checkpoint_tensors_equal=self._checkpoint_parameters_equal,
+            )
         # Keep the same placement exclusions declared by the Transformers model.
         no_placement_params = getattr(target_model, "_no_placement_params", ())
         self._no_placement_params = tuple(
@@ -1527,7 +1542,10 @@ class LazyTurtle:
                 skip_module_types=skip_module_types,
             )
         if tie_weights and loaded_entries > 0 and hasattr(target_model, "tie_weights"):
-            target_model.tie_weights()
+            # Re-apply the pairs this checkpoint really ties. Calling
+            # `tie_weights()` here recomputes the mapping from the wrapper
+            # config and ties an untied `lm_head` to the embedding (#4799).
+            retie_tied_weights(target_model)
         return target_submodule
 
     def _convert_checkpoint_source_to_safetensors(
@@ -1643,6 +1661,81 @@ class LazyTurtle:
             )
             weight_map = self._load_weight_map(tempdir)
             return tempdir, weight_map
+
+    def _checkpoint_has_parameter(self, parameter_name: str) -> Optional[bool]:
+        """Return whether the checkpoint stores one runtime parameter name."""
+
+        if "." not in parameter_name:
+            return None
+        module_path, rel_name = parameter_name.rsplit(".", 1)
+        try:
+            source_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(
+                module_path, rel_name
+            )
+        except Exception:  # pragma: no cover - defensive: exotic alias tables
+            return None
+        if expert_index is not None or split_index is not None or split_dim is not None:
+            # A fused/sliced source is not a plain parameter of this module.
+            return None
+        return source_name is not None
+
+    def _checkpoint_parameters_equal(
+        self,
+        target_name: str,
+        source_name: str,
+    ) -> Optional[bool]:
+        """Compare two runtime parameter names in the checkpoint, if both exist.
+
+        A checkpoint that stores a separate `lm_head.weight` with values
+        different from the embedding carries a real head; tying it would replace
+        that head. Values are compared in row chunks so a large vocabulary does
+        not have to be materialized twice.
+        """
+
+        if "." not in target_name or "." not in source_name:
+            return None
+        target_module, target_rel = target_name.rsplit(".", 1)
+        source_module, source_rel = source_name.rsplit(".", 1)
+        try:
+            target_checkpoint, target_expert, target_split, target_dim = self._resolve_checkpoint_tensor_source(
+                target_module, target_rel
+            )
+            source_checkpoint, source_expert, source_split, source_dim = self._resolve_checkpoint_tensor_source(
+                source_module, source_rel
+            )
+        except Exception:  # pragma: no cover - defensive: exotic alias tables
+            return None
+        if (
+            target_checkpoint is None
+            or source_checkpoint is None
+            or target_expert is not None
+            or source_expert is not None
+            or target_split is not None
+            or source_split is not None
+            or target_dim is not None
+            or source_dim is not None
+        ):
+            return None
+        target_shard = self._weight_map.get(target_checkpoint)
+        source_shard = self._weight_map.get(source_checkpoint)
+        if target_shard is None or source_shard is None:
+            return None
+        try:
+            with safe_open(
+                self._checkpoint_shard_path(target_shard, module_path=target_module),
+                framework="pt",
+                device="cpu",
+            ) as target_handle, safe_open(
+                self._checkpoint_shard_path(source_shard, module_path=source_module),
+                framework="pt",
+                device="cpu",
+            ) as source_handle:
+                return tensors_equal_in_chunks(
+                    target_handle.get_slice(target_checkpoint),
+                    source_handle.get_slice(source_checkpoint),
+                )
+        except Exception:  # pragma: no cover - defensive: unreadable shard
+            return None
 
     def has_checkpoint_tensor(
         self,
@@ -1844,9 +1937,12 @@ class LazyTurtle:
         finally:
             progress.close()
 
-        if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
+        if tie_after and hasattr(shell_model, "tie_weights"):
             try:
-                shell_model.tie_weights()
+                # Re-apply only the pairs the checkpoint really ties; a
+                # composite wrapper's default flag must not replace a distinct
+                # `lm_head` (#4799).
+                retie_tied_weights(shell_model)
                 log.info("Module: Re-tied embedding weights on shell model after lazy sync")
             except Exception as exc:
                 log.info(f"Module: tie_weights failed: {exc}")

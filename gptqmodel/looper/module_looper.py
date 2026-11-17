@@ -86,6 +86,7 @@ from ..utils.p2p import (
     safe_move_to,
 )
 from ..utils.python import has_gil_control, has_gil_disabled
+from ..utils.tied_weights import lm_head_is_tied
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .execution_state import DeviceAssignmentState
@@ -1456,9 +1457,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             return True
 
         # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
-        # even though the head is tied). Only the *root* config flag is trusted
-        # here; a nested text_config flag does not describe the loaded model's
-        # actual storage (issue #4369).
+        # even though the head is tied). The load-time snapshot resolved this
+        # from the decoder config and the checkpoint, so prefer it over the
+        # wrapper's config flag (#4799, #4369).
+        snapshot = lm_head_is_tied(model, lm_head_name)
+        if snapshot is not None:
+            return snapshot
+
         config = getattr(model, "config", None)
         if not bool(getattr(config, "tie_word_embeddings", False)):
             return False
@@ -1939,6 +1944,27 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         materialize_remaining_meta_modules(self.gptq_model, device=CPU)
 
+    def _materialize_unreached_meta_modules(self) -> None:
+        """Best-effort fill of the layers a cancelled/failed run never reached.
+
+        With the default ``offload_to_disk=True`` the model is a lazy meta
+        shell: the loop materializes each layer on demand, so every layer after
+        the cancel point still owns meta tensors and has no offload hook. The
+        success path fills those modules in ``_materialize_remaining_meta_
+        modules``; the failure path must do the same or the next forward fails
+        on the first unreached layer (#4860). Cleanup must never mask the
+        cancellation that got us here, so a materialization failure is logged
+        and ignored.
+        """
+
+        try:
+            self._materialize_remaining_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the layers the cancelled/failed run never reached",
+                exc_info=True,
+            )
+
     def _release_run_workspace(self) -> None:
         """Release processor-owned scratch shared across the whole run."""
 
@@ -2083,6 +2109,10 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                         try:
                             self._restore_offloaded_base_modules(strict=False)
                         finally:
+                            # The loop never materialized the layers past the
+                            # cancel point; fill them before the next forward
+                            # (#4860).
+                            self._materialize_unreached_meta_modules()
                             # Layers that finished before the cancel stay as
                             # disk-offloaded meta shells pointing into this run's
                             # private offload root. Deleting that root now would

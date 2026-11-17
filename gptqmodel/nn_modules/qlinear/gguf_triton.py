@@ -1753,27 +1753,48 @@ def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> 
     cache["ready_event"] = event
 
 
+def _is_current_stream_capturing() -> bool:
+    """True when the active stream is inside a CUDA graph capture."""
+
+    try:
+        return torch.cuda.is_current_stream_capturing()
+    except Exception:
+        return False
+
+
 def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
     """Make the caller's stream wait for the cache builder, when they differ."""
 
     event = cache.get("ready_event")
-    if event is None:
-        return
     try:
         current = torch.cuda.current_stream(device)
     except Exception:
         return
     builder = cache.get("ready_stream")
-    if builder is not None and current == builder:
-        # Same stream: the build is already ordered before this forward, so the
-        # common single-stream path stays free of any bookkeeping.
-        return
-    current.wait_event(event)
-    # The cached tensors outlive every forward, but the allocator still has to
-    # know this stream reads them.
-    for value in cache.values():
-        if isinstance(value, torch.Tensor):
-            value.record_stream(current)
+    same_stream = builder is not None and current == builder
+    if event is not None and not same_stream:
+        # A captured stream may only wait on an event recorded inside the same
+        # capture, so an explicit ``torch.cuda.graph`` can never consume this
+        # one: the driver fails the capture with
+        # ``CUDA_ERROR_STREAM_CAPTURE_ISOLATION`` (#4867). Even ``Event.query()``
+        # is rejected while capturing, and ``torch.cuda.graph`` synchronizes the
+        # device before capture starts, so a cache built on another stream is
+        # already complete here: skip both the wait and the retirement.
+        if _is_current_stream_capturing():
+            return
+        if event.query():
+            # The build finished: nothing is left to order, so retire the event
+            # and every later forward -- captured ones included -- is a plain
+            # kernel launch.
+            cache.pop("ready_event", None)
+        else:
+            current.wait_event(event)
+    if not same_stream:
+        # The cached tensors outlive every forward, but the allocator still has to
+        # know this stream reads them.
+        for value in cache.values():
+            if isinstance(value, torch.Tensor):
+                value.record_stream(current)
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
@@ -1880,10 +1901,104 @@ class GGUFTritonKernel(GGUFTorchLinear):
         self._gguf_triton_cache.clear()
         return super().clear_weight_cache()
 
+    def _packed_weight_is_permuted(self) -> bool:
+        """True when ``qweight`` holds the transposed runtime storage (#4811)."""
+        qweight = self.qweight
+        return (
+            qweight.numel() > 0
+            and qweight.stride(0) == 1
+            and qweight.stride(1) == qweight.shape[0]
+        )
+
+    def _permute_packed_weight(self) -> None:
+        """Re-lay out ``qweight`` once so the fused kernels read it coalesced.
+
+        ``qweight`` is stored output-feature-major, so the permuted
+        ``(k_blocks, bytes, out_features)`` code arrays the fused kernels want
+        are strided views whose ``offs_n`` axis moves by a whole packed row.
+        Materializing them keeps a second full copy of the weights resident
+        (#4748); reading the views uncoalesced costs up to +66% prefill
+        (#4811).  Transpose the storage once instead and expose the same
+        logical ``qweight`` as a transposed view, so there is still exactly one
+        resident copy and the code views become row-contiguous.  The extra
+        buffer is one module, not the whole model, and is released as soon as
+        the copy completes.
+        """
+        qweight = self.qweight
+        if qweight.numel() == 0 or self._packed_weight_is_permuted():
+            return
+        # The first cache build runs under the caller's ``inference_mode``.
+        # ``qweight`` is a public buffer that callers may still mutate in place,
+        # so keep its storage a normal (non-inference) tensor.
+        with torch.inference_mode(False):
+            storage = torch.empty(
+                (qweight.shape[1], qweight.shape[0]),
+                dtype=qweight.dtype,
+                device=qweight.device,
+            )
+        storage.copy_(qweight.t())
+        self.qweight = storage.t()
+
+    def _reshape_blocks(
+        self,
+        *,
+        device: torch.device | str | None = None,
+    ) -> tuple[torch.Tensor, int, int]:
+        target_device = self.qweight.device if device is None else torch.device(device)
+        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
+        rows = qweight.shape[0]
+        num_blocks = qweight.shape[1] // self.gguf_type_size
+        if self._packed_weight_is_permuted():
+            # Permuted storage (#4811): the canonical block view is a strided
+            # view of the same bytes, so no copy is needed.
+            blocks = qweight.as_strided(
+                (rows, num_blocks, self.gguf_type_size),
+                (1, self.gguf_type_size * rows, rows),
+            )
+        else:
+            blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+        return blocks, rows, num_blocks
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars) -> None:
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        key = prefix + "qweight"
+        if key in destination and not destination[key].is_contiguous():
+            # The permuted storage (#4811) is an internal runtime layout; saved
+            # checkpoints must stay in the canonical GGUF order.
+            destination[key] = destination[key].contiguous()
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        key = prefix + "qweight"
+        if key in state_dict and self._packed_weight_is_permuted():
+            # Checkpoints are stored in canonical order, but the live buffer may
+            # still hold the permuted runtime layout (#4811).  The default
+            # implementation copies element-wise in logical order, so restore a
+            # canonical buffer first; the next cache build re-permutes it.
+            self.qweight = self.qweight.contiguous()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     def _triton_cache_key(self, device: torch.device, wide_dot: bool = False) -> tuple[int, str, bool]:
         return (device.index if device.index is not None else -1, self.gguf_tensor_qtype, wide_dot)
 
     def _build_triton_cache(self, device: torch.device, wide_dot: bool = False) -> dict[str, Any]:
+        self._permute_packed_weight()
         blocks, _, _ = self._reshape_blocks(device=device)
 
         if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
@@ -1998,7 +2113,9 @@ class GGUFTritonKernel(GGUFTorchLinear):
             return cached
 
         cached = self._build_triton_cache(device, wide_dot)
-        cached["qweight_key"] = qweight_key
+        # The first build re-lays out ``qweight`` (#4811), so key the cache by
+        # the tensor that is actually resident now or every forward rebuilds it.
+        cached["qweight_key"] = tensor_cache_key(self.qweight)
         _publish_triton_cache_ready(cached, device)
         self._gguf_triton_cache[key] = cached
         return cached

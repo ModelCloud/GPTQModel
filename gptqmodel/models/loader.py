@@ -27,6 +27,11 @@ from ..utils.modelscope import ensure_modelscope_available
 from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    retie_tied_weights,
+    word_embeddings_tied,
+)
 
 
 if ensure_modelscope_available():
@@ -1846,7 +1851,7 @@ def _load_quantized_gguf_checkpoint_into_model(
             + ", ".join(sorted(missing_qweights))
         )
 
-    model.tie_weights()
+    retie_tied_weights(model)
 
 
 def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
@@ -2045,12 +2050,18 @@ def ModelLoader(cls):
                 model_dtype=dtype,
             )
 
-        tokenizer = load_hf_tokenizer(
-            model_local_path,
-            model_config=config,
-            trust_remote_code=tokenizer_trust_remote_code,
-            **_get_tokenizer_load_kwargs(model_init_kwargs),
-        )
+        # Definitions that declare no tokenizer (Decision Transformer) skip the
+        # whole text path: these checkpoints never ship one and calibration
+        # samples are named tensors, so the loader must not require it.
+        if cls.require_load_tokenizer:
+            tokenizer = load_hf_tokenizer(
+                model_local_path,
+                model_config=config,
+                trust_remote_code=tokenizer_trust_remote_code,
+                **_get_tokenizer_load_kwargs(model_init_kwargs),
+            )
+        else:
+            tokenizer = None
 
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
@@ -2677,28 +2688,31 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        tokenizer = load_hf_tokenizer(
-            model_local_path,
-            model_config=config,
-            trust_remote_code=tokenizer_trust_remote_code,
-            # The tokenizer must come from the same directory and revision as
-            # the config and weights. A nested checkpoint keeps all of them in
-            # the requested subfolder, so resolving only the weights there would
-            # load the root tokenizer (or fail on a repo that has none).
-            **_get_tokenizer_load_kwargs(
-                {
-                    "cache_dir": cache_dir,
-                    "force_download": force_download,
-                    "resume_download": resume_download,
-                    "proxies": proxies,
-                    "local_files_only": local_files_only,
-                    "use_auth_token": use_auth_token,
-                    "revision": revision,
-                    "subfolder": subfolder,
-                }
-            ),
-            **hf_gguf_load_kwargs,
-        )
+        if cls.require_load_tokenizer:
+            tokenizer = load_hf_tokenizer(
+                model_local_path,
+                model_config=config,
+                trust_remote_code=tokenizer_trust_remote_code,
+                # The tokenizer must come from the same directory and revision as
+                # the config and weights. A nested checkpoint keeps all of them in
+                # the requested subfolder, so resolving only the weights there would
+                # load the root tokenizer (or fail on a repo that has none).
+                **_get_tokenizer_load_kwargs(
+                    {
+                        "cache_dir": cache_dir,
+                        "force_download": force_download,
+                        "resume_download": resume_download,
+                        "proxies": proxies,
+                        "local_files_only": local_files_only,
+                        "use_auth_token": use_auth_token,
+                        "revision": revision,
+                        "subfolder": subfolder,
+                    }
+                ),
+                **hf_gguf_load_kwargs,
+            )
+        else:
+            tokenizer = None
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             runtime_generate = None
@@ -2949,8 +2963,18 @@ def ModelLoader(cls):
 
                 modules = find_modules(model)
                 ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
-                input_embeddings = model.get_input_embeddings()
-                output_embeddings = model.get_output_embeddings()
+                # Some supported models (Decision Transformer) are not causal
+                # LMs and do not implement the embedding accessors; Transformers
+                # raises NotImplementedError for them. They have no tied
+                # input/output embedding to preserve, so treat them as absent.
+                try:
+                    input_embeddings = model.get_input_embeddings()
+                except NotImplementedError:
+                    input_embeddings = None
+                try:
+                    output_embeddings = model.get_output_embeddings()
+                except NotImplementedError:
+                    output_embeddings = None
                 input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
                 output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
                 input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
@@ -3216,7 +3240,10 @@ def ModelLoader(cls):
                         break
 
             if head is not None:
-                tie_cfg = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+                resolved_tie = lm_head_is_tied(model)
+                if resolved_tie is None:
+                    resolved_tie = word_embeddings_tied(getattr(model, "config", None))
+                tie_cfg = bool(resolved_tie)
                 if in_emb is not None and tie_cfg:
                     # A tied head is the same tensor as the input embedding, so
                     # it follows that placement instead of consuming budget.

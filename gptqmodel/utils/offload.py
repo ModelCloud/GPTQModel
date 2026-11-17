@@ -31,6 +31,7 @@ from .device import get_device
 from .logger import setup_logger
 from .module_locks import parent_module_lock
 from .tensor import tensor_buffer
+from .tied_weights import retie_tied_weights, word_embeddings_tied
 from .torch import CPU, META
 
 
@@ -244,11 +245,14 @@ def restore_offloaded_modules(
         if is_meta_module(module):
             unresolved.append(name)
 
-    config = getattr(model, "config", None)
     tie_weights = getattr(model, "tie_weights", None)
-    if callable(tie_weights) and getattr(config, "tie_word_embeddings", False):
+    if callable(tie_weights):
         try:
-            tie_weights()
+            # Only re-apply the pairs the checkpoint really ties: a composite
+            # wrapper can default `tie_word_embeddings` to True while the
+            # decoder declares False and the checkpoint carries a real head
+            # (#4799).
+            retie_tied_weights(model)
         except Exception as exc:  # pragma: no cover - defensive
             log.warn("Offload: tie_weights() after restore failed: %s", exc)
             unresolved.append("<tie_weights>")
@@ -446,16 +450,11 @@ def _retie_shared_embeddings(model: nn.Module) -> bool:
     if not callable(tie):
         return False
     config = getattr(model, "config", None)
-    tied = bool(getattr(config, "tie_word_embeddings", False))
-    if not tied and hasattr(config, "get_text_config"):
-        try:
-            text_config = config.get_text_config()
-        except Exception:  # pragma: no cover - defensive
-            text_config = None
-        tied = bool(getattr(text_config, "tie_word_embeddings", False))
-    if not tied:
+    # A stamped snapshot already resolved this from the decoder config and the
+    # checkpoint, so a composite default cannot re-tie a distinct head (#4799).
+    if not word_embeddings_tied(config):
         return False
-    tie()
+    retie_tied_weights(model)
     return True
 
 
@@ -1242,9 +1241,11 @@ def _offload_to_disk_impl(
             source_checkpoint=source_checkpoint,
         )
 
-    if hasattr(module, "config") and hasattr(module, "tie_weights") and getattr(module.config,
-                                             "tie_word_embeddings", False):
-        module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
+    if hasattr(module, "config") and hasattr(module, "tie_weights"):
+        # Re-applies only the pairs the checkpoint really ties (see
+        # `gptqmodel.utils.tied_weights`), so an untied `lm_head` keeps its own
+        # storage after offload/restore (#4799).
+        retie_tied_weights(module)
 
     # print("offload_disk: list item tree")
             # print_module_tree(module)
@@ -1679,14 +1680,12 @@ def undo_offload_to_disk(
 
             # 3) Tie embedding if module is model and enabled/tied
             tie_weights = getattr(module, "tie_weights", None)
-            if (
-                callable(tie_weights)
-                and hasattr(module, "config")
-                and getattr(module.config, "tie_word_embeddings", False)
-            ):
+            if callable(tie_weights) and hasattr(module, "config"):
                 # Submodules such as rotary embeddings expose `config` but are
-                # not models; calling tie_weights() on them raises.
-                tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
+                # not models; `retie_tied_weights` is a no-op without a snapshot
+                # when the config declares untied embeddings, and re-applies the
+                # resolved pairs otherwise (#4799).
+                retie_tied_weights(module)  # makes a tied lm_head point to embed_tokens.weight again
 
         # 4) Optionally delete offload folders.
         if delete_offload_folders:

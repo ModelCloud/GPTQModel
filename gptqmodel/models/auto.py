@@ -103,6 +103,7 @@ from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.dots3_note import Dots3NoteQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
+from .definitions.decision_transformer import DecisionTransformerQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v32 import DeepSeekV32QModel  # noqa: E402
@@ -287,6 +288,9 @@ MODEL_MAP = {
     "gpt_neox": GPTNeoXQModel,
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
+    # Decision Transformer wraps a GPT-2 decoder under `encoder` and has no
+    # tokenizer; see definitions/decision_transformer.py.
+    "decision_transformer": DecisionTransformerQModel,
     "llama": LlamaQModel,
     "smollm3": LlamaQModel,  # llama-compatible quantization module tree
     "smolvlm": SmolVLMQModel,
