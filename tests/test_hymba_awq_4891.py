@@ -99,8 +99,10 @@ class _HymbaBlock(nn.Module):
         # The real block reads these out of `**kwargs`; a name-based filter that
         # drops them turns this into a `KeyError`.
         attention_mask = kwargs["attention_mask"]
-        kwargs["kv_last_layer"]
-        kwargs["position_ids"]
+        # Required by the real block as well; bound explicitly so the presence
+        # check is a real read rather than a no-op expression.
+        _kv_last_layer = kwargs["kv_last_layer"]
+        _position_ids = kwargs["position_ids"]
         residual = hidden_states + self.mamba(self.input_layernorm(hidden_states))
         hidden_states = residual + self.moe(self.pre_moe_layernorm(residual))
         if attention_mask is not None:
