@@ -211,9 +211,7 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
     mag = fmaxf(mag, fabsf(block[i]));
   }
   const float safe = fmaxf(mag, FLT_MIN);
-  // ``floor(log2(FLT_MAX))`` is 128: the largest finite power of two is
-  // ``2**127`` and an int8 exponent cannot hold 128.
-  const int base = min(floor_log2_exact(safe), 127);
+  const int base = floor_log2_exact(safe);
 
   // Three candidates: base, base-1, base+1.  Strict `<` keeps the earlier one
   // on ties, matching the reference's sequential torch.where updates.
@@ -230,12 +228,11 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
 #pragma unroll
   for (int i = 0; i < BLOCK; ++i) unit[i] = block[i] / base_scale;
 
-  // Candidate 0 is taken unconditionally: near FLT_MAX every candidate's
-  // squared error overflows to inf, so a strict comparison against the initial
-  // inf would leave ``best_code`` uninitialised.  A neighbour outside the
-  // storable exponent range has no representable scale (``2**128`` is inf, and
-  // ``0 * inf`` is NaN), so it is rejected before its error is compared -- a
-  // NaN error must never decide the winner.
+  // Candidate 0 is taken unconditionally, which initialises ``best_code`` and
+  // fixes the tie order; the neighbours must beat it strictly. A neighbour
+  // outside the storable exponent range has no representable scale
+  // (``2**128`` is inf, and ``0 * inf`` is NaN), so it is rejected before its
+  // error is compared.
   int best_exp = base;
   float best_err = 0.0f;
   int best_code[BLOCK];
@@ -260,7 +257,7 @@ __global__ void quantize_kernel(const float* __restrict__ x, int64_t rows, int64
       const float d = u - unit[i];
       err += d * d;
     }
-    if (usable && (t == 0 || (isfinite(err) && err < best_err))) {
+    if (usable && (t == 0 || err < best_err)) {
       best_err = err;
       best_exp = ex;
 #pragma unroll
@@ -309,7 +306,7 @@ __global__ void decompose_kernel(const float* __restrict__ x, int64_t rows, int6
   float mag = 0.0f;
 #pragma unroll
   for (int i = 0; i < BLOCK; ++i) mag = fmaxf(mag, fabsf(p[i]));
-  const int base = min(floor_log2_exact(fmaxf(mag, FLT_MIN)), 127);
+  const int base = floor_log2_exact(fmaxf(mag, FLT_MIN));
 
   // Same candidate order as decompose_blockfloat.  A shift past the representable
   // exponent range has no storable scale, so skip it rather than search it.

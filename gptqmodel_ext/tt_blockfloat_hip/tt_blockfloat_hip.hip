@@ -359,12 +359,9 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
             error = error + diff * diff;
         }
         // The base candidate is taken unconditionally, matching the reference
-        // (``best = _round_with(base_exponent)`` then compare the neighbours).
-        // A strict comparison against INFINITY would leave ``best_code``
-        // uninitialised whenever every candidate's error overflows -- which
-        // happens for inputs near FLT_MAX, where the squared error is inf.  A
-        // NaN/inf neighbour error must never replace the winner.
-        if (usable && (candidate == 0 || (isfinite(error) && error < best_error))) {
+        // (``best_unit = _round_unit(0.0)``). That initialises ``best_code``
+        // and fixes the tie order; the neighbours must beat it strictly.
+        if (usable && (candidate == 0 || error < best_error)) {
             best_error = error;
             best_exponent = exponent;
 #pragma unroll
