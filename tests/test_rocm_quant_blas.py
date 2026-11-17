@@ -452,3 +452,43 @@ def test_awq_plus_eora_plan_pins_rocblas_for_the_adapter_gram(monkeypatch):
             needs_lora=False,
         )
     )
+
+
+def test_eora_gram_runs_on_the_pinned_backend(monkeypatch):
+    """The EoRA Gram matmul must execute while the run-level pin is active.
+
+    Recording the backend from inside the real ``eora_process_input`` call
+    proves the pin reaches the actual ``X^T X`` GEMM, not just the run-plan
+    predicate. Two calls with the same input must also be bitwise identical
+    within one process.
+    """
+
+    from types import SimpleNamespace
+
+    from gptqmodel.eora import eora as eora_mod
+    from gptqmodel.models.base import _needs_deterministic_hessian
+    from gptqmodel.models.quantization_run_plan import ProcessorStep
+
+    fake = _FakeTorchBlas(current="Cublaslt")
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    configure_kernel(KernelConfig())
+
+    observed = []
+    real_matmul = torch.matmul
+
+    def recording_matmul(left, right, *args, **kwargs):
+        observed.append(fake.current.name)
+        return real_matmul(left, right, *args, **kwargs)
+
+    monkeypatch.setattr(eora_mod.torch, "matmul", recording_matmul)
+
+    run_plan = SimpleNamespace(processors=(ProcessorStep.AWQ, ProcessorStep.EORA))
+    inputs = (torch.randn(1, 8, 16, dtype=torch.float32),)
+
+    with rocm.quant_blas_backend(deterministic=_needs_deterministic_hessian(run_plan)):
+        _, first, _ = eora_mod.eora_process_input(inputs, "layer.0.q_proj", 1, torch.device("cpu"))
+        _, second, _ = eora_mod.eora_process_input(inputs, "layer.0.q_proj", 1, torch.device("cpu"))
+
+    assert observed == ["Cublas", "Cublas"], "the Gram matmul must run on rocBLAS"
+    assert torch.equal(first, second)

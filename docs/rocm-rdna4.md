@@ -98,12 +98,16 @@ identical GPTQ runs then save different checkpoints — measured on Qwen2.5-0.5B
 therefore exports `ROCBLAS_USE_HIPBLASLT=0` at import unless the caller already
 set it, so rocBLAS runs its own deterministic kernels.
 
-That pin is scoped to methods that build a Hessian. #4079 forced rocBLAS for
-every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16 kernels, so AWQ
-and RTN paid 8-14x on their GEMMs with no determinism gain. A run plan that
-contains a Hessian builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3 or calibrated FP8 GSQ
-(`_needs_deterministic_hessian` in `gptqmodel/models/base.py`) - now pins
-rocBLAS, and every other method pins hipBLASLt for its whole run. #4105 gated
+That pin is scoped to methods that build a Hessian or input Gram. #4079 forced
+rocBLAS for every calibrated run; on gfx1201 rocBLAS has no fast fp16/bf16
+kernels, so AWQ and RTN paid 8-14x on their GEMMs with no determinism gain. A
+run plan that contains a Hessian/Gram builder - GPTQ, QQQ, VPTQ, MACaQ, EXL3,
+calibrated FP8 GSQ or an EoRA adapter (`_needs_deterministic_hessian` in
+`gptqmodel/models/base.py`) - now pins rocBLAS, and every other method pins
+hipBLASLt for its whole run. An AWQ plan with an EoRA adapter therefore pins
+rocBLAS for the whole run as well: EoRA's fp32 input Gram accumulates from the
+same calibration forwards, and the guard cannot switch backends for a nested
+secondary phase. #4105 gated
 this on `ProcessorStep.GPTQ` alone and therefore dropped QQQ, which does build a
 Hessian: four QQQ runs then produced three distinct checkpoints differing in
 490/627 tensors (issue #4123). The Hessian builders keep the pin for the
