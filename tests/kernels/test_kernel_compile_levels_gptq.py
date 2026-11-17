@@ -3,7 +3,8 @@
 """Measured ``torch.compile`` / CUDA-graph levels for the portable-torch kernels.
 
 Each case builds a real packed GPTQ module, then measures it with
-``tests/kernels/compile_probe.py`` on the GB10 (sm_121, torch 2.11.0+cu130).
+``tests/kernels/compile_probe.py`` on the GB10 (sm_121, torch 2.11.0+cu130) and
+on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130).
 Kernels whose runtime cannot build on this host are skipped with the reason
 their declaration records, instead of faking a level.
 """
@@ -105,6 +106,102 @@ def _from_torch_source(cls, *, bits: int, device: str):
     return module, x, False
 
 
+def _checkpoint_source(*, bits: int = 4):
+    """Pack a dense weight into the GPTQ layout with the portable Torch kernel.
+
+    Marlin, ExLlamaV2 and AllSpark load a checkpoint layout instead of packing
+    it, so the builders below copy these buffers into the target module.
+    """
+
+    return _pack_into(TorchLinear, bits=bits, dtype=torch.float16, device="cpu")
+
+
+def _copy_packed(source, module, names=("qweight", "qzeros", "scales", "g_idx", "bias")):
+    for name in names:
+        src = getattr(source, name, None)
+        dst = getattr(module, name, None)
+        if (
+            isinstance(src, torch.Tensor)
+            and isinstance(dst, torch.Tensor)
+            and src.shape == dst.shape
+        ):
+            dst.data.copy_(src.to(device=dst.device))
+
+
+def _build_marlin():
+    source = _checkpoint_source()
+    module = MarlinLinear(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        register_buffers=True,
+        dtype=torch.float16,
+    ).cuda()
+    _copy_packed(source, module)
+    # Marlin's evaluator reads the GPTQ qzeros either as zero-points (format 0)
+    # or as the packed ``(1 << (bits - 1)) - z`` form; the packed buffer above
+    # is the zero-point form.
+    module.qzero_format(format=2)
+    module.post_init()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.float16, device="cuda")
+    return module.eval(), x, True
+
+
+def _build_exllamav2():
+    from gptqmodel.utils.exllamav2 import ScratchSpace
+
+    source = _checkpoint_source()
+    module = ExllamaV2Linear(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        register_buffers=True,
+    ).cuda()
+    _copy_packed(source, module)
+    module.post_init(ScratchSpace(module.scratch_space_fixed(), 0))
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.float16, device="cuda")
+    return module.eval(), x, True
+
+
+def _build_allspark():
+    from gptqmodel.utils.allspark import prewarm_allspark_extension
+
+    if not prewarm_allspark_extension():
+        raise RuntimeError("AllSpark JIT extension failed to build on this host")
+
+    torch.manual_seed(11)
+    weight = (torch.randn(IN_FEATURES, OUT_FEATURES, device="cuda") * 0.02).to(
+        torch.float16
+    )
+    scale = (weight.abs().amax(dim=0) / 127).clamp_min(1e-8)
+    codes = (weight / scale).round().add(128).clamp(0, 255).to(torch.int32)
+    shifts = (torch.arange(4, device="cuda", dtype=torch.int32) * 8).view(1, 4, 1)
+    qweight = (codes.view(IN_FEATURES // 4, 4, OUT_FEATURES) << shifts).sum(dim=1)
+    module = AllSparkLinear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        dtype=torch.float16,
+    ).cuda().to(torch.float16)
+    module.qweight.data.copy_(qweight.to(torch.int32).contiguous())
+    module.scales.data.copy_(scale.view(1, OUT_FEATURES))
+    module.post_init()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.float16, device="cuda")
+    return module.eval(), x, True
+
+
 def _unavailable(cls) -> Optional[str]:
     try:
         ok, err = cls.cached_validate_once()
@@ -166,16 +263,16 @@ CASES = [
         lambda: None,
     ),
     Case(TorchCpuAvx512Linear, None, lambda: _unavailable(TorchCpuAvx512Linear)),
-    Case(MarlinLinear, None, _marlin_unavailable),
+    Case(MarlinLinear, _build_marlin, _marlin_unavailable),
     Case(MacheteLinear, None, _machete_unavailable),
-    Case(ExllamaV2Linear, None, lambda: _unavailable(ExllamaV2Linear)),
+    Case(ExllamaV2Linear, _build_exllamav2, lambda: _unavailable(ExllamaV2Linear)),
     Case(
         TritonV2Linear,
         lambda: _packable(TritonV2Linear, device="cuda", cuda_graph=True),
         lambda: _unavailable(TritonV2Linear),
     ),
     Case(BitblasLinear, None, _bitblas_unavailable),
-    Case(AllSparkLinear, None, lambda: _unavailable(AllSparkLinear)),
+    Case(AllSparkLinear, _build_allspark, lambda: _unavailable(AllSparkLinear)),
 ]
 
 
