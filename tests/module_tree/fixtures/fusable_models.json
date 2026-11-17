@@ -2642,7 +2642,7 @@
     },
     "kimi_k25": {
       "definition": "KimiK25QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Kimi-K2.5 MLA/MoE multimodal binding; fusion executor has not been qualified."
     },
     "klear": {
       "definition": "KlearQModel",
@@ -2874,11 +2874,11 @@
     },
     "lfm3_omni": {
       "definition": "LFM3OmniQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned LFM3 Omni hybrid multimodal wrapper; fusion executor has not been qualified."
     },
     "lfm3_vl": {
       "definition": "LFM3VLQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers LFM3-VL hybrid conv/attention decoder; fusion executor has not been qualified."
     },
     "llada2_moe": {
       "definition": "LLaDA2MoeQModel",

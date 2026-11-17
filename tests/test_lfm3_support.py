@@ -66,7 +66,7 @@ def test_lfm3_module_tree_covers_conv_attention_and_mlp_paths(definition):
     flat_modules = _flat_layer_modules(definition)
 
     assert definition.layer_modules_strict is False
-    assert bool(definition.require_trust_remote_code) is (definition is not LFM3QModel)
+    assert not definition.require_trust_remote_code
     assert definition.rotary_embedding.endswith("rotary_emb")
     # `:!` marks a module that keeps its source dtype, so it is not quantized.
     assert flat_modules == {

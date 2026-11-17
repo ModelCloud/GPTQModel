@@ -288,6 +288,9 @@ or newer.
 documents dense/MoE ownership, distinct tokenizer semantics and the explicit
 AttnRes quantization boundary. Packaged TikToken implementations require
 `tiktoken>=0.12.0`.
+[LFM3 media and Kimi-K2.5 loading](docs/transformers5-model-ports.md#lfm3-media-and-kimi-k25-loading)
+documents native versus package-owned media components, FP16 image calibration,
+ragged video pooling and checkpoint round trips.
 [InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
 documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
 decoder selection, pinned licenses and CPU plain-AWQ validation.

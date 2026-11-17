@@ -55,7 +55,6 @@ class LFM3OmniQModel(LFM3QModel):
                 "k_proj:0",
                 "k_norm:0:!",
                 "v_proj:0",
-                "g_proj:!",
                 "gate_proj:!",
                 "o_proj:1",
             ),

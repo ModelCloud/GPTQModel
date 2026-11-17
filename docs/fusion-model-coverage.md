@@ -252,11 +252,11 @@ layout alone does not authorize it.
 | `internvl_chat` | `InternVLChatQModel` | Package-owned legacy wrapper; decoder-specific fusion execution is unqualified. |
 | `k2_horizon` | `K2HorizonQModel` | Package-owned K2-Horizon dense/MoVA implementation; fusion executor has not been qualified. |
 | `kimi_k2` | `DeepSeekV3QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `kimi_k25` | `KimiK25QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `kimi_k25` | `KimiK25QModel` | Native Kimi-K2.5 MLA/MoE multimodal binding; fusion executor has not been qualified. |
 | `klear` | `KlearQModel` | Package-owned Klear MoE with per-head Q/K norms and learned routed/shared expert mixing; fusion executor has not been qualified. |
 | `lfm3` | `LFM3QModel` | Native Transformers 5 LFM3 hybrid short-convolution/gated-attention; fusion executor has not been qualified. |
-| `lfm3_omni` | `LFM3OmniQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `lfm3_vl` | `LFM3VLQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `lfm3_omni` | `LFM3OmniQModel` | Package-owned LFM3 Omni hybrid multimodal wrapper; fusion executor has not been qualified. |
+| `lfm3_vl` | `LFM3VLQModel` | Native Transformers LFM3-VL hybrid conv/attention decoder; fusion executor has not been qualified. |
 | `llada2_moe` | `LLaDA2MoeQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `llava_qwen2` | `LlavaQwen2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `locateanything` | `LocateAnythingQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |

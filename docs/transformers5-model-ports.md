@@ -42,7 +42,10 @@ definition ownership corrections alongside the package-owned ports.
 | `BrumbyQModel` / `brumby` | [Manifest AI 14B/4B and retention 1.0.7 provenance](../gptqmodel/models/ports/brumby/PROVENANCE.md); Apache-2.0 | Exact full-size meta/index schemas; portable degree-2 retention, GQA, Q/K norms, dynamic/linear/default RoPE, independent CPU recurrence oracle, cache continuation/compression/rollback, padding, generation, repeated safetensors reload and public trust/bypass isolation | Actual CPU plain AWQ quantization and packing of all seven linears; gates and norms stay dense; no scale groups | No publisher CUDA/Triton-kernel parity, GPU packing or trained-checkpoint quality qualification; KV-only/static/offloaded caches and speculative rollback rejected |
 | `AfMoeQModel` / `afmoe` | [Native Afmoe / Trinity qualification](../gptqmodel/models/ports/afmoe/README.md); Transformers 5.23.0 Apache-2.0 implementation; pinned Mini/Nano/Large index schemas and checkpoint license recorded locally | Full meta inventories match all three checkpoint schemas; unequal attention/residual widths; dense/MoE ownership, native conversion and routing oracle, cache/generation, public trust/bypass matrix, safetensors retry/round trips | Tested plain quantization for all declared linears; norms, router and expert bias stay dense | CPU pseudoquantization; no GPU packing/kernel or trained-checkpoint quality qualification; no scaling/folding claim |
 | `InternLMQModel` / `internlm` | [InternLM 1 port](../gptqmodel/models/ports/internlm/README.md); Apache-2.0; upstream revision `96e127d08d851a88cac736a9b091dd953ae1b873` | Independent FP32/FP16/BF16 numerical oracle; biased/unbiased origin/dynamic rotary; eager/SDPA; generation/cache/beam lifecycle; public dense load and safetensors reload; live meta-model weight ownership; all 14 linears in two-layer AWQ quantization/reload | Tested plain quantization, zero scale-fold groups | No GPU or trained 7B numerical/quality qualification; fusion and foreign/static/quantized KV caches unsupported |
-| `LFM3QModel`, `LFM3VLQModel`, `LFM3OmniQModel` | [Native decoder ownership and conservative AWQ](../gptqmodel/models/ports/lfm3/COVERAGE.md) | Real CPU/meta text and VL decoders plus Omni text-prefix coverage; native/legacy gate spelling, explicit depthwise exclusions, actual packing and failure/retry | Plain quantization only, including `fallback=None`; five convolution-layer or seven attention-layer projections remain eligible | No trained-checkpoint, accelerator, VL media or full Omni/audio qualification |
+| `LFM3QModel` / `lfm3` | [Native Transformers 5 text model and checkpoint schema](../gptqmodel/models/ports/lfm3/README.md) | 286-key metadata audit, independent bias/gate/sandwich owners, FP32/FP16/BF16 cache/generation and public hostile metadata | Public plain-AWQ pack/infer/safetensors reload; excluded convolutions and gates preserved | No trained weights, GPU, fused convolution, compiler, concurrent execution or fusion qualification |
+| `LFM3VLQModel` / `lfm3_vl` | [Native model and fixed native media components](../gptqmodel/models/ports/lfm3_vl/README.md) | 424-key metadata audit, image/video/cache/generation, selected tokenizer and FP16 image calibration with integer IDs preserved | Six public MHA/GQA/MQA × bias plain-AWQ pack/infer/safetensors reloads; no scale groups | No trained weights, GPU, FlashAttention, concurrent execution or fusion qualification |
+| `LFM3OmniQModel` / `lfm3_omni` | [Pinned package-owned model, processor and codec](../gptqmodel/models/ports/lfm3_omni/README.md) | 665 model and 203 codec checkpoint inventories; independent text oracles, image/video/audio inputs and text/audio/interleaved generation | Six public plain-AWQ decoder pack/infer/safetensors reloads; all nontext tensors preserved | Dynamic text/codec cache only; beams/multiple returns rejected; no trained weights, GPU, live transcription quality, concurrent execution or fusion qualification |
+| `KimiK25QModel` / `kimi_k25` | [Native multimodal model, distinct TikToken/tool renderer and media adapters](../gptqmodel/models/ports/kimi_k25/README.md) | Exact 208550-key source-index inventory, ragged temporal pooling and spatial splits, real tokenizer IDs/tools, image/video/mixed generation and native-format saving | Four real public plain-AWQ dense/split-Q pack/infer/reload cases, including unsampled experts and `fallback=None` | Extended legacy media budgets/custom timestamps rejected; no trained weights, GPU, concurrent execution, compiler or fusion qualification |
 | `InternVLChatQModel` / `internvl_chat` | [Package-owned legacy wrapper/vision port and pinned licenses](../gptqmodel/models/ports/internvl_chat/README.md); native decoders and package-owned InternLM2 | Six decoder layouts, actual tiled PIL inputs, 657-key checkpoint inventory, cache/generation, safetensors and hostile nested metadata | Public CPU plain-AWQ quantize/pack/infer/save/reload for all six decoder layouts, preserving vision weights | Eager vision only; unmerged LoRA requires adapter merge; no trained weights, GPU/FlashAttention, distributed or fusion qualification |
 | `K2HorizonQModel` / `k2_horizon` | [Pinned IFM dense/MoVA/sparse-MoE sources, Apache license and notice](../gptqmodel/models/ports/k2_horizon/README.md) | Exact 255/16998/34076-key meta inventories, independent eager/SDPA routing/attention oracles, cache/generation, dtype preservation and hostile metadata | Real processor coverage across variants; public dense/MoVA CPU plain-AWQ packing and safetensors reload with `fallback=None` | DynamicCache only; no trained weights, GPU/FlashAttention/FlexAttention, sliding-window, distributed or fusion qualification |
 | `InternS2PreviewQModel` / `intern_s2_preview` | [Pinned hybrid model, processor and distinct scientific tokenizer](../gptqmodel/models/ports/intern_s2_preview/README.md), [Apache-2.0 provenance](../gptqmodel/models/ports/intern_s2_preview/PROVENANCE.md) | Exact 1313-key non-MTP schema, independent DeltaNet oracle, four attention orders/bias variants, cache continuations, image/video generation and FP32/FP16/BF16 time series | Public plain AWQ packs all 31 tiny hybrid decoder linears; exact packed/dense state and time-series save/reload parity | PROT/XNA semantics differ from S1; no trained weights, GPU/fused FLA/FlashAttention, concurrent execution, static/offloaded/arbitrary-beam caches or MTP qualification |
@@ -464,11 +467,12 @@ consistency, not a new TT hardware qualification.
 
 ## LFM3 native decoder ownership
 
-LFM3 retains the Transformers 5.23 decoder. Its native `conv.conv` depthwise
-kernel and `self_attn.g_proj` per-head sigmoid gate now have explicit source-dtype
-exclusions; legacy `gate_proj` remains excluded. The same policy applies to text,
-VL and Omni decoder definitions. [Native-source evidence and regression scope](../gptqmodel/models/ports/lfm3/COVERAGE.md)
-record the gate and convolution relationships.
+LFM3 retains the Transformers 5.23 decoder. All three definitions explicitly
+exclude `conv.conv` from quantization. Text LFM3 excludes native `self_attn.g_proj`
+and the legacy `gate_proj` alias; native VL uses `g_proj`, while the package-owned
+Omni decoder uses `gate_proj`. [Native-source evidence](../gptqmodel/models/ports/lfm3/COVERAGE.md)
+records the convolution/gate relationships. The [media loading reference](#lfm3-media-and-kimi-k25-loading)
+describes the distinct model and processor implementations.
 
 ```mermaid
 flowchart TD
@@ -485,15 +489,16 @@ flowchart TD
 
 | Mechanism | Before | Shipped behavior |
 | --- | --- | --- |
-| Native dense leaves | Base `569c693de`, `definitions/lfm3.py:58-68`: depthwise kernel and native sigmoid gate undeclared | `definitions/lfm3.py:58-71`: nested depthwise owner and both gate spellings explicitly excluded; VL/Omni share the policy |
+| Native dense leaves | Base `569c693de`, `definitions/lfm3.py:58-68`: depthwise kernel and native sigmoid gate undeclared | `definitions/lfm3.py:58-71`: nested depthwise owner and both text gate spellings explicitly excluded; VL/Omni declare their applicable gate |
 | AWQ groups | Generic inference could cross nonlinear convolution/gating boundaries | `definitions/lfm3.py:80-83`: no scale groups; real CPU packing preserves all declared linear targets |
 
 The parent independently reproduced both original registry failures. After the
 fix and explicit registry snapshots, combined native coverage, support tests,
 full leaf inventory, registry and required AWQ baseline passed **759 tests with
 24 skips and 3 expected failures** in 83.56 seconds. Missing checkpoint/GPU
-fixtures and existing expected failures remain unqualified. No trained weights,
-VL media processing, full Omni wrapper/audio or accelerator behavior is claimed.
+fixtures and existing expected failures remain unqualified. This earlier
+decoder-only run did not qualify media or the Omni wrapper/audio. Subsequent
+media qualification is recorded [below](#lfm3-media-and-kimi-k25-loading).
 
 The AWQ unit CI then exposed two old synthetic tests that still required LFM3
 fold groups. Those expectations now assert the plain policy; additional real
@@ -653,4 +658,74 @@ OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
   tests/module_tree/test_registered_module_plans.py tests/module_tree/test_fusable_models.py \
   tests/test_local_tokenizer_loading.py tests/test_native_fp32_checkpoint_loading.py \
   -xq --disable-warnings
+```
+
+## LFM3 media and Kimi-K2.5 loading
+
+LFM3-VL selects native Transformers 5.23 config/model classes and an owned
+processor loader with fixed native Qwen image/video components. LFM3-Omni
+selects the pinned package-owned wrapper, decoder, media processor and codec;
+the exact Omni architecture is absent from Transformers 5.23. Kimi-K2.5 reuses
+native multimodal config, decoder and cache behavior with narrow vision/media
+adapters and its own K2.5 tokenizer. The K2, K2.5 and K3 tokenizers retain
+distinct IDs and chat/tool rendering; Tokenicer owns outer normalization.
+
+```mermaid
+flowchart TD
+    A["LocalModelLoader: definition-owned class paths"] --> B{"Model family"}
+    B -- lfm3_vl --> C["Lfm3VlConfig / native Lfm3VlForConditionalGeneration"]
+    C --> D["Lfm3VlNativeProcessor: selected tokenizer and fixed native media classes"]
+    D --> E["prepare_vlm_calibration_dataset: token rows or conversations"]
+    E --> F["LFM3VLQModel.prepare_dataset: BatchFeature.to model dtype; integer IDs preserved"]
+    B -- lfm3_omni --> G["Package Lfm3OmniConfig / model / processor / codec"]
+    G --> H["Decoder gate_proj and all nontext checkpoint tensors stay dense"]
+    B -- kimi_k25 --> I["Native config / decoder; owned processor and K2.5 TikToken"]
+    I --> J["Kimi_K25VisionModel: native blocks and temporal_patch_merger"]
+    J --> K["Kimi_K25Model.get_image_features: split pooled spatial grids"]
+    K --> L["Native-format safetensors: avoid reverse-QKV conversion collisions"]
+    A -. checkpoint auto_map or trust toggles .-> N["Ignored for package-owned loading"]
+    D -- unsupported component or malformed asset --> X["Raise; repair assets then retry"]
+    I -- unsupported legacy media mode or malformed asset --> X
+    G -- unsupported cache or generation mode --> X
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X failure
+```
+
+| Mechanism | Before at `3695dfd5a` | Shipped behavior and evidence |
+| --- | --- | --- |
+| LFM3-VL processor | `definitions/lfm3_vl.py:128-129`: AutoProcessor discovery | `definitions/lfm3_vl.py:132-137`, `ports/lfm3_vl/native.py:18-49`: selected tokenizer, explicit image/video classes; checkpoint-selected components rejected |
+| FP16 image calibration | `definitions/lfm3_vl.py:149-156`: shared helper returned FP32 media | `definitions/lfm3_vl.py:163-177`: shared preparation retained, floating BatchFeature media cast to model dtype, integer IDs preserved |
+| LFM3-Omni architecture | `definitions/lfm3_omni.py:18`: no owned model/processor selector | `definitions/lfm3_omni.py:30-34`: pinned local config/model/processor; [SHA provenance and licenses](../gptqmodel/models/ports/lfm3_omni/PROVENANCE.json) |
+| Kimi-K2.5 selection | `definitions/kimi_k25.py:14,18,26-33`: remote trust and legacy decoder prefix | `definitions/kimi_k25.py:16-22,33-58`: native-backed owned loader and exact native decoder owners; [source, licenses and native failure probes](../gptqmodel/models/ports/kimi_k25/README.md) |
+| Partial video chunks | Native rectangular temporal gather and repeated temporal split counts | `ports/kimi_k25/native.py:29-72`: native temporal merger followed by spatial-only split; independent full/partial clip oracles |
+
+The combined K2/K2.5/K3, LFM3-VL/Omni, loader/security/tokenizer/processor,
+registry/fusion and AWQ safety run passed **977 tests, with 475 skips**, in
+51.70 seconds. A separate shared VLM calibration run passed **183 tests** in
+2.97 seconds. The skipped cases require unavailable trained checkpoint fixtures
+or NVIDIA fusion hardware. CPU/meta results do not qualify trained-weight
+quality, GPU/FlashAttention/fused kernels, multi-GPU, concurrent execution,
+compilation, training, additional cache modes or fusion.
+
+The parent repeated the FP16 failure probe through the shared calibration
+helper: disabling only `batch.to(dtype=self.model.dtype)` made
+`tests/test_lfm3_vl_local_port.py::test_public_awq_plain_quantization_packs_all_decoder_linears[False-1]`
+fail at the actual native patch embedding with `float != c10::Half`.
+Restoring the cast preserves the shared calibration path and exact integer IDs.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
+  tests/test_kimi_k25_local_port.py tests/module_tree/test_kimi_k25_local_port.py \
+  tests/test_deepseek_v3_local_port.py tests/test_kimi_k3_local_port.py \
+  tests/test_lfm3_vl_local_port.py tests/module_tree/test_lfm3_vl_local_port.py \
+  tests/test_lfm3_omni_local_port.py tests/module_tree/test_lfm3_omni_local_port.py \
+  tests/test_lfm3_support.py tests/test_local_model_loading.py tests/test_local_model_paths.py \
+  tests/test_local_processor_loading.py tests/test_local_tokenizer_loading.py \
+  tests/test_trust_remote_code_isolation.py tests/test_awq_empty_groups.py \
+  tests/test_awq_scale_search_safety.py tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py -x --disable-warnings
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
+  tests/test_vlm_mapping_calibration_4308.py tests/test_vlm_calibration_metadata_columns_4455.py \
+  tests/test_vlm_pretokenized_calibration.py tests/test_vlm_multimodal_calibration_4371.py \
+  -x --disable-warnings
 ```
