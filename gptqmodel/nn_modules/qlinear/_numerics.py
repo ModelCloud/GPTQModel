@@ -99,7 +99,11 @@ class _CudaWideMatmul(torch.autograd.Function):
             output = torch.mm(flat_x, weight, out_dtype=torch.float32) + bias.float()
         else:
             output = torch.addmm(bias.float(), flat_x, weight, out_dtype=torch.float32)
-        return output.to(x.dtype).reshape(x.shape[:-1] + (weight.shape[-1],))
+        # Return the 2-D product, never a view: a `Function` output that is a
+        # view cannot be modified in-place by the caller, which is what PEFT's
+        # AdaLoRA wrapper does (`result += output`). The caller reshapes
+        # outside the Function (#4974).
+        return output.to(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
@@ -115,6 +119,18 @@ class _CudaWideMatmul(torch.autograd.Function):
         if ctx.needs_input_grad[2]:
             grad_bias = grad.float().sum_to_size(ctx.bias_shape).to(ctx.bias_dtype)
         return grad_x, grad_weight, grad_bias
+
+
+def _reshape_reduced(output: torch.Tensor, shape: torch.Size) -> torch.Tensor:
+    """Reshape a reduced product without creating a view when it is unnecessary.
+
+    ``Tensor.reshape`` returns a view even when the requested shape equals the
+    current one. Inside an ``autograd.Function`` that makes the output a view,
+    and autograd then rejects any in-place op on it (#4974). Skipping the
+    no-op reshape keeps the plain eager path allocation-free.
+    """
+
+    return output if output.shape == shape else output.reshape(shape)
 
 
 def matmul_fp32_reduce(
@@ -134,9 +150,11 @@ def matmul_fp32_reduce(
         # round the product before a wide bias cancels it.
         return linear_wide_bias(x, weight.t(), bias)
     if _wants_fp32_reduce(x):
-        if _needs_wide_autograd(x, weight, bias):
-            return _CudaWideMatmul.apply(x, weight, bias)
         shape = x.shape[:-1] + (weight.shape[-1],)
+        if _needs_wide_autograd(x, weight, bias):
+            # The Function returns the 2-D product; reshaping here keeps its
+            # output free of views (#4974).
+            return _reshape_reduced(_CudaWideMatmul.apply(x, weight, bias), shape)
         if autocast_active(x.device.type):
             # Autocast narrows the GEMM operands, so a bias fused into the
             # epilogue is narrowed too (a BF16 bias can overflow as FP16).
@@ -164,12 +182,14 @@ def matmul_fp32_reduce(
             return (output + bias).to(x.dtype)
         else:
             output = torch.mm(flat_x, weight, out_dtype=torch.float32)
-        return output.to(x.dtype).reshape(shape)
+        return _reshape_reduced(output.to(x.dtype), shape)
     if _can_fuse_hip_bias(x, weight, bias):
         # Fuse the bias into the GEMM epilogue instead of rounding first.
         flat_x = x.reshape(-1, x.shape[-1])
         flat_bias = bias if bias.dim() == 1 else bias.reshape(-1, weight.shape[-1])
-        return torch.addmm(flat_bias, flat_x, weight).reshape(x.shape[:-1] + (weight.shape[-1],))
+        return _reshape_reduced(
+            torch.addmm(flat_bias, flat_x, weight), x.shape[:-1] + (weight.shape[-1],)
+        )
     output = torch.matmul(x, weight)
     return output + bias if bias is not None else output
 
@@ -346,13 +366,15 @@ def linear_fp32_reduce(x, weight, bias=None):
         return linear_wide_bias(x, weight, bias)
     bias = promote_bias(x, bias)
     if _wants_fp32_reduce(x):
-        if _needs_wide_autograd(x, weight, bias):
-            return _CudaWideMatmul.apply(x, weight.t(), bias)
         shape = x.shape[:-1] + (weight.shape[0],)
+        if _needs_wide_autograd(x, weight, bias):
+            # The Function returns the 2-D product; reshape outside it so the
+            # output is never a view of a custom Function (#4974).
+            return _reshape_reduced(_CudaWideMatmul.apply(x, weight.t(), bias), shape)
         output = torch.mm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=torch.float32)
         if bias is not None:
             output = output + bias.float()
-        return output.to(x.dtype).reshape(shape)
+        return _reshape_reduced(output.to(x.dtype), shape)
     if _fuse_bias_epilogue(x, weight, bias):
         # CPU/HIP may round or overflow the product before a separate bias
         # addition; keep both in a single epilogue.

@@ -64,6 +64,7 @@ jobs:
                 tests/test_calibration_tools_formats_4934.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
+                tests/test_awq_cohere2_moe_parallel_norm_4898.py \
                 tests/module_tree/test_awq_relationships.py \
                 tests/module_tree/test_granitemoehybrid_model_tree.py \
                 tests/module_tree/test_registered_module_plans.py \
