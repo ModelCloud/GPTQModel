@@ -29,7 +29,11 @@ from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
-from ..looper.loop_processor import LoopProcessor, record_quant_log
+from ..looper.loop_processor import (
+    LoopProcessor,
+    record_quant_log,
+    release_failed_run_processors,
+)
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -1981,14 +1985,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         never mask the failure that got us here.
         """
 
-        for processor in getattr(self, "processors", ()) or ():
-            try:
-                processor.release_failed_run()
-            except Exception:
-                log.warning(
-                    "failed to release processor resources while failing the quantization run",
-                    exc_info=True,
-                )
+        release_failed_run_processors(getattr(self, "processors", ()))
 
     def _track_inflight_layer(
         self,
