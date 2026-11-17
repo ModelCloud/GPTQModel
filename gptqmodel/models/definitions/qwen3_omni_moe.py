@@ -23,6 +23,7 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._omni_thinker_layout import OmniThinkerCheckpointLayoutMixin
 from ._thinker_embeddings import ThinkerEmbeddingsMixin
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .base_qwen3_vl import DeepStackReplayMixin
@@ -41,7 +42,7 @@ _THINKER_LAYER_MODULES = {
 }
 
 
-class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, ThinkerEmbeddingsMixin, BaseQModel):
+class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, OmniThinkerCheckpointLayoutMixin, ThinkerEmbeddingsMixin, BaseQModel):
     fusable = FusableConfig("qwen3_omni_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
@@ -231,7 +232,7 @@ class Qwen3OmniMoeGPTQ(DeepStackReplayMixin, ThinkerEmbeddingsMixin, BaseQModel)
         if text_prefix:
             self.pre_lm_head_norm_module = f"{text_prefix}.norm"
         # need to load processor for save processor_config and chat_template
-        if not load_quantized_model:
+        if not load_quantized_model and self.require_load_processor:
             self.processor = AutoProcessor.from_pretrained(self.model_local_path)
 
         return model
