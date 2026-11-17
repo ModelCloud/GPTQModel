@@ -1,9 +1,22 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-model-plan-tests
-description: Add and validate module-plan unit tests when registering a model type, changing a model definition, or changing module-tree consumption in GPTQModel.
+description: Add and validate module-plan unit tests and fusion eligibility when registering a model type or alias, changing a model definition, or changing module-tree consumption in GPT-QModel.
 ---
 
 # Model support requires module-plan tests
+
+## At a glance
+
+- **What:** every model type and alias has a registry plan case, a model-specific module-plan test, and a fusion-eligibility entry.
+- **Why:** `module_tree` is the oracle for which checkpoint weights exist and how each is quantized. A wrong tree silently skips, misgroups, or drops weights.
+- **When:** adding to `MODEL_MAP`, changing a definition's paths, tags, variants, or method overrides, or changing a module-plan consumer.
+- **Where:** `gptqmodel/models/definitions/`, `gptqmodel/models/module_plan.py`, `tests/module_tree/` (fixtures `registered_module_plans.json`, `fusable_models.json`).
+- **How:** build the real model class tiny on CPU or meta, resolve every checkpoint-owned weight through the plan, and run the always-on registry contract.
+- **Also:** every new model or definition change needs `gptqmodel-awq-model-onboarding`.
+
+## Registry and model-specific tests
 
 Every new `MODEL_MAP` entry, including an alias, must add an explicit case to
 `tests/module_tree/fixtures/registered_module_plans.json` and a model-specific
@@ -11,12 +24,9 @@ module-plan unit test under `tests/module_tree/`. Changes to a definition's
 paths, tags, variants, or method overrides must update its tests in the same PR.
 The always-run registry contract fails for an unlisted model or method case.
 
-Also follow `gptqmodel-awq-model-onboarding` in
-`.agents/skills/gptqmodel-awq-model-onboarding/SKILL.md` for every new model/alias
-and definition or AWQ-consumer change. A correct weight inventory does not prove
-valid scale sources, complete consumers, or a correct search objective. Require
-native fold/search/replay evidence or a tested conservative AWQ policy; do not
-infer AWQ qualification from registry, shape, or generation tests alone.
+A correct weight inventory is necessary but does not qualify AWQ: scale
+sources, consumers, and search objectives are proven separately under
+`gptqmodel-awq-model-onboarding`.
 
 Use `tests/module_tree/test_registered_module_plans.py` for the fast compiler
 and consumer contract. Its inventory pins decoder prefixes and ordered blocks
@@ -30,14 +40,24 @@ plan through `model.module_plan()` when testing a loaded wrapper. Verify:
 
 - Declared quantizable paths resolve on the real decoder layers, including
   dense/MoE and hybrid attention branches used by the model.
-- Checkpoint-owned weight owners resolve through `plan.find()` and carry
-  quantization, exclusion, or capture tags. Include non-quantized weights.
 - Declared roles and routed/shared expert families reach the actual consumers,
   including looper grouping and lifecycle hooks where applicable.
 - Similar prefixes/suffixes and undeclared descendants are rejected.
 
-`state_dict()` is a useful architecture fixture for parameters and persistent
-buffers. For an actual checkpoint audit, use checkpoint keys and declared
+Every checkpoint-owned decoder-layer weight, quantized or not, must satisfy
+all three:
+
+- Its deepest owning module resolves through `ModulePlan.find()`.
+- A quantized owner is declared by `simple_layer_modules()`.
+- A non-quantized owner carries an explicit `:!` (not quantized) or `:?`
+  (capture-only) tag.
+
+The registry contract runs without an opt-in flag and must not skip supported
+definitions.
+
+Use `state_dict()` (parameters and persistent buffers) as the architecture
+fixture, not `named_modules()`, `named_parameters()`, or `named_buffers()`
+alone. For an actual checkpoint audit, use checkpoint keys and declared
 conversion mappings to distinguish checkpoint weights from tensors created
 after loading; runtime-only tensors do not create model-definition obligations.
 Do not substitute a tree-generated fake model for real model validation.

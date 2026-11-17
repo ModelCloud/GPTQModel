@@ -7,6 +7,14 @@ description: Free-threaded (PYTHON_GIL=0) PyTorch safety. Use before writing, re
 
 # PyTorch on a free-threaded interpreter
 
+## At a glance
+
+- **What:** treat every PyTorch API as thread-unsafe under `PYTHON_GIL=0` until the ledger says otherwise.
+- **Why:** multi-GPU quantization and inference run free-threaded, and some PyTorch entry points hang or return torn data when called concurrently.
+- **When:** writing, reviewing, or debugging code that calls PyTorch from more than one thread, or that touches P2P copies, streams, or per-thread device selection.
+- **Where:** `pytorch_gil_0_compat.md` (the ledger), `scripts/gil0_api_probe.py`, `gptqmodel/utils/p2p.py`, `gptqmodel/utils/looper_helpers.py`.
+- **How:** check the ledger, probe unknown APIs on a free-threaded build with two or more GPUs, and record the result in the same change.
+
 `PYTHON_GIL=0` removes the global interpreter lock. It does **not** make a C
 extension thread-safe. PyTorch wheels built for `3.14t` still contain entry
 points that take a global lock, that are unsafe to call concurrently, or that
@@ -30,22 +38,23 @@ If the API you need is not in the ledger, treat it as UNVERIFIED:
    unsafe API, a "Manual findings" entry).
 
 Do not merge a multi-threaded code path that calls an API the ledger does not
-cover, and never upgrade a row to SAFE based on a single-threaded run.
+cover, and never upgrade a row to SAFE based on a single-threaded run. Keep the
+ledger current in the same change that introduces or removes a threaded PyTorch
+call; a concurrency finding from review belongs in the ledger, not only in the
+pull request.
 
 ## Rules
 
 - Thread counts and "run threaded or not" decisions come from an explicit
-  argument or the config object, never from an environment variable. An env
-  switch makes the shipped default untested and lets a production run silently
-  take a path no test covers. See *No environment-variable behaviour switches*
-  in `AGENTS.md`; the retired `GPTQMODEL_PACK_PY_THREADS` /
-  `GPTQMODEL_PACK_THREADS` pair is the cautionary example.
+  argument or the config object, never an environment variable (see
+  `AGENTS.md`). Configure P2P through `BaseQuantizeConfig.p2p` (`P2PConfig`)
+  or `GPTQModel.load(..., p2p=...)`.
 - Never call `torch.cuda.comm.*` from worker threads. Use
   `gptqmodel.utils.p2p.peer_copy_batch`, which drives
   `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync` through `ctypes` (the GIL is
   released for the call).
 - `torch.nn.parallel.replicate` internally calls `broadcast_coalesced`. It is
-  serialized by `_THREAD_SAFE_PARALLEL` in `looper_helpers.py`, but that only
+  serialized by `_THREAD_SAFE_PARALLEL` in `gptqmodel/utils/looper_helpers.py`, but that only
   prevents concurrent entry; it does not make the entry point safe.
   `clone_module_for_devices` skips it when the GIL is disabled and uses the
   deepcopy + `move_module_to_device` path. `use_torch_replicate` is off by
