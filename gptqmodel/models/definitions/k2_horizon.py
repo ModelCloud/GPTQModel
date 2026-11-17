@@ -9,6 +9,7 @@ from ...nn_modules.hooked_linear import StopForward
 from ...utils.device import get_device
 from ...utils.model import move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks, _get_module_by_relative_path
 
 
@@ -120,7 +121,10 @@ class K2HorizonMoELifecycleHooks(GateUpDownMoELifecycleHooks):
 class K2HorizonQModel(BaseQModel):
     """GPT-QModel definition for K2 Horizon dense and MoVA checkpoints."""
 
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.k2_horizon.configuration_k2_horizon.K2HorizonConfig",
+        model_class="gptqmodel.models.ports.k2_horizon.modeling_k2_horizon.K2HorizonForCausalLM",
+    )
     layer_modules_strict = False
     dynamic_expert_index = "num_experts"
     dynamic_expert_indices = {
@@ -131,6 +135,11 @@ class K2HorizonQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
     moe_lifecycle_hooks = K2HorizonMoELifecycleHooks()
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Grouped norms, selection-only router biases and SiLU value experts
+        # have not been qualified for scale search and neutral folding.
+        return []
+
     module_tree = [
         "model",
         "layers",
@@ -140,14 +149,9 @@ class K2HorizonQModel(BaseQModel):
             "self_attn": {
                 "q_norm": ("q_norm:!",),
                 "k_norm": ("k_norm:!",),
-                # One flat group: q/k/v/gate/o all read the same attention
-                # input. Declaring each projection as its own node made AWQ
-                # fold `input_layernorm` into `q_proj` alone and then chain
-                # `q_proj -> k_proj -> ...` (PPL 1100 vs RTN 21.03). Dense
-                # layers expose v_proj; MoVA layers expose routed value experts
-                # instead. Strict=False makes this one tree valid for both.
-                # `gate_proj` is the attention gate: `o_proj` reads
-                # `attn * sigmoid(gate)`, which is not positively homogeneous.
+                # Dense layers own v_proj; MoVA layers own routed value experts.
+                # Strict=False allows both branches. The SiLU/softplus attention
+                # gate is not a valid linear source for scale folding.
                 "": (
                     "q_proj:0",
                     "k_proj:0",
