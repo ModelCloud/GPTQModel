@@ -155,8 +155,13 @@ the responsibility of those engines.
 | Config selection | `AutoConfig.from_pretrained` selected checkpoint config classes (`gptqmodel/models/auto.py:643`, `gptqmodel/models/loader.py:1887,2440`) | Definition-owned config class first, then gated AutoConfig |
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
+<<<<<<< HEAD
 | Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
 | Processor selection | Always entered `AutoProcessor.from_pretrained` (`464cfb05f:gptqmodel/models/base.py:1071`) | Optional definition-owned processor class receives selected config/tokenizer directly |
+||||||| parent of 5423ad629 (Port InternLM 1 to package-owned Transformers 5 modeling)
+=======
+| Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
+>>>>>>> 5423ad629 (Port InternLM 1 to package-owned Transformers 5 modeling)
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
 actual checkpoint config and model imports under explicit bypass, permission
