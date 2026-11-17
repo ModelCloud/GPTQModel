@@ -90,7 +90,7 @@ from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
-from ..utils.kv_cache import estimate_kv_cache
+from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.model import (
@@ -376,27 +376,27 @@ def _log_quantize_summary(
     )
 
 
-def _log_kv_cache_estimate(model: object) -> None:
-    """State what context costs, since weight quantization does not change it.
 
-    The dtype comes from the weights that were just quantized, not from the
-    config: ``torch_dtype`` is often unset and a cache is only as small as the
-    activations that fill it.
-    """
 
-    inner = getattr(model, "model", None)
-    config = getattr(inner, "config", None)
-    dtype = None
+def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+    """KV-cache estimate for a decoder module, dtype taken from its weights."""
+
+    return estimate_kv_cache(
+        getattr(inner, "config", None),
+        dtype=dtype or _module_weight_dtype(inner),
+    )
+
+
+def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
+    """dtype of the first floating parameter of a module, or None."""
+
     try:
-        for parameter in inner.parameters():
+        for parameter in module.parameters():
             if parameter.is_floating_point():
-                dtype = parameter.dtype
-                break
+                return parameter.dtype
     except Exception:  # pragma: no cover - exotic module trees
-        dtype = None
-    estimate = estimate_kv_cache(config, dtype=dtype)
-    if estimate is not None:
-        log.info(estimate.format())
+        return None
+    return None
 
 
 class _QuantizedCheckpointSource:
@@ -2062,6 +2062,25 @@ class BaseQModel(nn.Module):
 
         warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
 
+    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+        """Per-token KV-cache cost of this model, or None when the config hides it.
+
+        Weight quantization does not change the cache, so this is the number a
+        user needs after loading to decide how much context fits next to the
+        weights. The dtype defaults to the dtype of the model's own weights: a
+        cache is as large as the activations that fill it, and
+        ``config.torch_dtype`` is usually unset.
+        """
+
+        return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
+
+    def log_kv_cache_estimate(self) -> None:
+        """Log the KV-cache cost once, when the config supports the estimate."""
+
+        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
+        if estimate is not None:
+            log.info(estimate.format())
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -2533,7 +2552,7 @@ class BaseQModel(nn.Module):
         # copies are gone once the loop returns, but PyTorch keeps the pinned
         # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
         release_pinned_host_cache()
-        _log_kv_cache_estimate(self)
+        self.log_kv_cache_estimate()
         return result
 
     @staticmethod
