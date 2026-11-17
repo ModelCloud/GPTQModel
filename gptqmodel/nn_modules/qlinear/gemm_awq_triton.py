@@ -197,6 +197,10 @@ class AwqGEMMTritonLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The biased paths add the checkpoint bias to an FP32 product, so the
+    # buffer keeps its stored width at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     QUANT_TYPE = "awq_gemm_triton"
 
     @classmethod
