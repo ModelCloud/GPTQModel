@@ -7,9 +7,11 @@ Quantized inference kernels may keep their packed weights, scales, zero points,
 and indexing metadata.  They may **not** keep dense or expanded weight copies,
 and they should not keep per-layer scratch that is only needed for the duration
 of one kernel call.  This page documents the scratch ownership introduced for
-[issue #4387](https://github.com/ModelCloud/GPTQModel/issues/4387) and the
+[issue #4387](https://github.com/ModelCloud/GPTQModel/issues/4387), the
 per-call QQQ reduce scratch that replaced its stream-keyed cache in
-[issue #4621](https://github.com/ModelCloud/GPTQModel/issues/4621).
+[issue #4621](https://github.com/ModelCloud/GPTQModel/issues/4621), and the
+per-call EXL3 kernel scratch introduced for
+[issue #4619](https://github.com/ModelCloud/GPTQModel/issues/4619).
 
 ## QQQ reduce scratch
 
@@ -85,6 +87,88 @@ that `C`'s initial contents do not change the output (0, -1 and `INT32_MAX`
 fills give bitwise-equal results), that no module-level cache symbol remains,
 that two calls never share storage, and that eight streams retain less than
 2 MiB after their forwards return.
+
+## EXL3 kernel scratch
+
+`LinearEXL3.forward` reaches three writable buffers, and all three are consumed
+by exactly one call: the split-K lock array of the tensor-core GEMM (`bc.run` ->
+`exl3_gemm`, taken when `M <= 32`), the cuBLAS workspace of `hgemm` (taken when
+`M > 32`), and the Hadamard-rotated input (`A_had`/`xh`) of the `bsz == 1`
+decode path.  All three used to be process-wide state, so two streams could run
+two kernels into the same memory.
+
+```mermaid
+flowchart LR
+    subgraph OLD["Old: writable scratch shared per device or per shape"]
+        L1["LinearEXL3 on stream s1"] -->|"bc.run"| K1["exl3_gemm"]
+        L2["LinearEXL3 on stream s2"] -->|"bc.run"| K1
+        K1 --> LK["DevCtx::get_locks(device)<br/>int[MAX_TILES_C], 4 MiB<br/>one array per device"]
+        H1["hgemm on s1"] --> WS["DevCtx::get_ws(device)<br/>4 MiB, one buffer per device"]
+        H2["hgemm on s2"] --> WS
+        X1["bsz == 1 module A"] --> XH["g_tensor_cache<br/>device, shape (1, in_features), dtype"]
+        X2["bsz == 1 module B"] --> XH
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph NEW["New: one allocation per kernel call"]
+        L1["LinearEXL3 on stream s1"] -->|"bc.run"| A1["at::zeros<br/>tiles_m x (size_n / 16) int32"]
+        L2["LinearEXL3 on stream s2"] -->|"bc.run"| A2["independent at::zeros"]
+        A1 --> K1["exl3_gemm on s1"]
+        A2 --> K2["exl3_gemm on s2"]
+        H1["hgemm on s1"] --> W1["at::empty 4 MiB<br/>cublasSetWorkspace"]
+        H2["hgemm on s2"] --> W2["independent at::empty"]
+        B1["bc_linear_exl3_run"] --> X1["at::empty_like(x)"]
+        K1 -->|"launch enqueued"| FREE1["block returned to the<br/>caching allocator"]
+        W1 -->|"launch enqueued"| FREE1
+    end
+```
+
+| Scratch | Before | After |
+| --- | --- | --- |
+| Split-K lock array | `DevCtx::get_locks(device)` returned one `cudaMalloc`ed `MAX_TILES_C` array per device (`exl3_devctx.cu:65`), shared by every stream | `exl3_gemm` allocates zeroed `tiles_m * (size_n / 16)` INT32 for the call (`exl3_gemm.cu`) |
+| hgemm workspace | `DevCtx::get_ws(device)` returned one 4 MiB `cudaMalloc` per device and `hgemm` installed it on the caller's handle (`hgemm.cu:56`, `exl3_devctx.cu:52`) | `hgemm` allocates 4 MiB per call, installs it on the per-thread cuBLAS handle, and restores the handle's default workspace before the allocation is released (`hgemm.cu`) |
+| bsz == 1 Hadamard input | `g_tensor_cache.get(device, (1, in_features), dtype)` shared one buffer by every module of that width (`exl3.py:80`, `linear.cpp:30`) | `bc_linear_exl3_run` allocates `at::empty_like(x)` for every batch size (`linear.cpp`) |
+
+The split-K lock array is a barrier, not a cache: the kernel increments and
+resets those counters while it runs and leaves them zeroed, and
+`barrier_acquire`/`barrier_release` spin on the values.  Two co-resident
+launches that share the array therefore either read a stage they never reached
+(wrong output) or wait for a release that already happened (deadlock).  A
+zeroed per-call allocation gives each launch its own counters, and the kernel's
+own reset is no longer load-bearing.
+
+The hgemm workspace is state on the cuBLAS handle while the GEMM runs on the
+caller's stream.  ATen's cuBLAS handle is per thread, so a per-call workspace
+is not observed by another thread, and setting the handle back to its default
+before the tensor is released keeps a later Torch BLAS call on that thread from
+inheriting a freed pointer.  `at::empty` is enough: cuBLAS does not read the
+workspace's previous contents.
+
+Every buffer is allocated and released on the stream that runs the kernel, so
+the caching allocator only reuses a freed block for ordered work on that
+stream.  Nothing is retained per device, per stream, or per module, so no
+cleanup step is needed; `LinearEXL3.unload()` no longer has a shared buffer to
+drop.
+
+Measured on RTX 4090 (SM89) with torch 2.16.0.dev+cu130, two to four threads
+each forwarding on its own stream, 2000 calls per thread, compared bitwise with
+the serial output:
+
+| Case (M, N, K) | Before | After |
+| --- | --- | --- |
+| 8, 512, 2048 (locks) | GPU deadlock, process killed; another run of the same case gave 0 mismatches | 0 mismatches, max rel err 0.000 |
+| 4, 512, 2048 (locks) | 329-881 mismatches of 2000, max rel err 0.549; another run gave 0 | 0 mismatches, max rel err 0.000 |
+| 1, 8192, 2048 (bsz-1 `xh`) | 1-25 mismatches of 2000, max rel err 1.204 | 0 mismatches, max rel err 0.000 |
+| 256, 512, 2048 (hgemm) | 387-788 mismatches of 2000, max rel err 1.683 | 0 mismatches, max rel err 0.000 |
+
+The lock-array failure is nondeterministic: whether two launches overlap
+depends on whether the first one has already filled the SMs, so the same case
+can deadlock, corrupt a few outputs, or pass.
+
+Single-stream runs were bitwise identical to the serial reference in both
+builds.
 
 ## GGUF CUDA plan scratch
 

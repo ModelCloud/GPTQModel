@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
     fcntl = None
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -1180,6 +1180,7 @@ class TorchOpsJitExtension:
         verbose_env: Optional[str] = None,
         requires_cuda: bool = False,
         merge_visible_cuda_arch_override: bool = True,
+        build_env_scope: Optional[Callable[[], AbstractContextManager]] = None,
         binary_names: Optional[Sequence[str]] = None,
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
@@ -1201,6 +1202,10 @@ class TorchOpsJitExtension:
         self.verbose_env = verbose_env
         self.requires_cuda = bool(requires_cuda)
         self.merge_visible_cuda_arch_override = bool(merge_visible_cuda_arch_override)
+        # Optional process-environment scope installed only around the
+        # torch cpp_extension.load() call, so an extension can pass build
+        # overrides without leaking them to other JIT extensions.
+        self.build_env_scope = build_env_scope
         self.binary_names = tuple(binary_names or (name,))
         self.python_abi_dependent = python_abi_dependent
         self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
@@ -2121,7 +2126,9 @@ class TorchOpsJitExtension:
                         # expansion; never mutate TORCH_CUDA_ARCH_LIST for the
                         # duration of a multi-minute JIT build.
                         kwargs["extra_cuda_cflags"] = [*extra_cuda_cflags, *arch_flags]
-                    load(**kwargs)
+                    build_env_scope = self.build_env_scope
+                    with build_env_scope() if build_env_scope is not None else nullcontext():
+                        load(**kwargs)
                     build_invocation_succeeded = True
                 except Exception as exc:  # pragma: no cover - build depends on host toolchain
                     elapsed = time.perf_counter() - started
