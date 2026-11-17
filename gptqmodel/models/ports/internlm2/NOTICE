@@ -1,0 +1,13 @@
+InternLM2 / InternLM2.5 modeling port
+
+Copyright (c) The InternLM team and The HuggingFace Inc. team. All rights reserved.
+Adaptations for Transformers 5: Copyright 2026 ModelCloud.ai.
+
+Derived from configuration_internlm2.py and modeling_internlm2.py in
+https://huggingface.co/internlm/internlm2_5-1_8b-chat
+revision 57dcbc5455bf050d27a80f0ebd7808387caa714d.
+These files are Apache-2.0 licensed, derived in turn from Hugging Face Llama.
+See LICENSE and README.md for license terms, pinned sources and adaptations.
+
+Only modeling/configuration code is distributed here, not upstream weights.
+The upstream model-weight license is separate and is not superseded by this port.
