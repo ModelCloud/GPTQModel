@@ -6,6 +6,7 @@
 
 import math
 import warnings
+import weakref
 from collections.abc import Iterable
 from typing import Optional
 
@@ -62,6 +63,35 @@ except Exception:  # pragma: no cover - optional dependency
     _ROCM_GEMM_SMALL_M_MAX = 0
     _ROCM_GEMM_MAX_IN_FEATURES = 0
     _ROCM_GEMM_GATE_LIMITS = None
+
+
+
+
+class _CompiledDequantizeWeight:
+    """Run a compiled *unbound* ``dequantize_weight`` without pinning the module.
+
+    ``torch.compile(self.dequantize_weight)`` stores the bound method inside the
+    compiled wrapper, so the module ends up referencing itself through the
+    instance attribute.  A GPU model then keeps its VRAM allocated after the last
+    user reference is dropped, until a full cyclic ``gc.collect()`` (#4847).
+    Compiling the class function and resolving the instance through a weak
+    reference keeps the compiled fast path cycle-free.
+    """
+
+    __slots__ = ("_compiled", "_module_ref")
+
+    def __init__(self, compiled, module):
+        self._compiled = compiled
+        self._module_ref = weakref.ref(module)
+
+    def __call__(self, *args, **kwargs):
+        module = self._module_ref()
+        if module is None:
+            raise RuntimeError("compiled `dequantize_weight` called after its module was released")
+        return self._compiled(module, *args, **kwargs)
+
+    def __repr__(self):
+        return f"<compiled dequantize_weight {self._compiled!r}>"
 
 
 log = setup_logger()
@@ -124,8 +154,18 @@ class _LinearWeightMetadata:
     """Tensor-like metadata shim for integrations that only inspect `weight` attrs."""
 
     def __init__(self, module: "TorchLinear", transposed: bool = False):
-        self._module = module
+        # A strong back-reference here closes a module -> metadata -> module
+        # cycle, so every quantized linear pins its buffers (and, on a GPU, its
+        # VRAM) until a full cyclic GC (#4847).
+        self._module_ref = weakref.ref(module)
         self._transposed = transposed
+
+    @property
+    def _module(self) -> "TorchLinear":
+        module = self._module_ref()
+        if module is None:
+            raise RuntimeError("weight metadata accessed after its module was released")
+        return module
 
     def _shape(self) -> torch.Size:
         shape = (self._module.out_features, self._module.in_features)
@@ -353,7 +393,11 @@ class TorchLinear(PackableQuantLinear):
 
     @property
     def weight(self):
-        return self._weight_metadata
+        metadata = getattr(self, "_weight_metadata", None)
+        if metadata is None:
+            # Rebuilt after unpickling: the weak back-reference is not serializable.
+            metadata = self._weight_metadata = _LinearWeightMetadata(self)
+        return metadata
 
     def dequantize_weight(self, num_itr: int = 1):
         # Triton dequant currently handles the common single-iteration layout.
@@ -400,8 +444,10 @@ class TorchLinear(PackableQuantLinear):
             # MPS doesn't support inductor.
             backend = "inductor" if device_type != "mps" else "aot_eager"
 
-        # compile dequantize
-        self.dequantize_weight = torch_compile(self.dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+        # Compile the unbound function: compiling the bound method would store a
+        # strong reference to this module inside the compiled wrapper (#4847).
+        compiled = torch_compile(type(self).dequantize_weight, backend=backend, mode=mode, fullgraph=fullgraph)
+        self.dequantize_weight = _CompiledDequantizeWeight(compiled, self)
 
         if self.adapter:
             self.adapter.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
@@ -419,6 +465,7 @@ class TorchLinear(PackableQuantLinear):
 
         state = super().__getstate__()
         state.pop("dequantize_weight", None)
+        state.pop("_weight_metadata", None)
         return state
 
     def train(self, mode: bool = True):
