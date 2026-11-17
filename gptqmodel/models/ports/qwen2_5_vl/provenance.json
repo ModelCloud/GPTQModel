@@ -1,0 +1,66 @@
+{
+  "transformers_revision": "52b080b6416a7897e2af90febeb4dfad22b84d19",
+  "transformers_version": "5.23.0",
+  "checkpoint": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "checkpoint_revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+  "headers": {
+    "model-00001-of-00002.safetensors": {
+      "header_sha256": "7e3af32632f54ccd57a123aad2a639ed25337217531aeabd59f49198c7bd9d79",
+      "header_bytes": 61328
+    },
+    "model-00002-of-00002.safetensors": {
+      "header_sha256": "2de57d6bba37e9481c215c29f033aedcb5928c1ac220b23645cc78407ffe9f19",
+      "header_bytes": 30696
+    }
+  },
+  "files": {
+    "transformers/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py": "ce977667ae554a89ed931b375fdd53dad73d293ab705f644258b8fcdf937f832",
+    "transformers/src/transformers/models/qwen2_5_vl/configuration_qwen2_5_vl.py": "848cd7184a2d56170535062e023ab117a70370872cb8411114e046ca224f95f4",
+    "transformers/LICENSE": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049",
+    "checkpoint/config.json": "7ed3eed5be6924cc800e8a5e53fc405c1aab1aaf36bad65c33403b36c56827f5",
+    "checkpoint/model.safetensors.index.json": "c7dd78a4c6bea60b51332f1baf37b8f8124ecab2c35395a29a29825bf2619768",
+    "checkpoint/LICENSE": "b5c0e5cf74cf51af1ecbc4af597cfcd13fd9925611838884a681070838a14a50",
+    "transformers/src/transformers/models/auto/modeling_auto.py": "13b58377b09a0945c6d155653233421ccd7b54311acd6149a733c3017361adcd"
+  },
+  "source_urls": {
+    "transformers": "https://github.com/huggingface/transformers/tree/52b080b6416a7897e2af90febeb4dfad22b84d19/src/transformers/models/qwen2_5_vl",
+    "checkpoint": "https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/tree/66285546d2b821cf421d4f5eb2576359d3770cd3"
+  },
+  "released_tokenizer_assets_sha256": {
+    "config.json": "7ed3eed5be6924cc800e8a5e53fc405c1aab1aaf36bad65c33403b36c56827f5",
+    "tokenizer.json": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    "tokenizer_config.json": "4abd3520120e266da84c0864fee064d1fb10806f02225911a47253dd38dc5f56",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+  },
+  "packaged_assets_sha256": {
+    "NOTICE": "d1959283a53f98a07b7a7f01ebb0d1e46e49e7b75880effda9807d45cbee4131",
+    "LICENSE.Qwen3B": "b5c0e5cf74cf51af1ecbc4af597cfcd13fd9925611838884a681070838a14a50",
+    "LICENSE": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049",
+    "fixtures/published_headless_shapes.json.gz": "48ba89c028baedbeb71d004382e11be3f25d87967cd5b488c7aad8232cb8c0e6",
+    "fixtures/published_headless_reference.json": "1d01a78be7d5dd328f63594dd075ffe6efb831ce3e8821af2789570aa25b3f16",
+    "fixtures/qwen3b_shapes.json.gz": "92fc623f544c998c08b2e23f131f5d1a2fa6ee9d43b1a46d5d78ac25611a1d48",
+    "fixtures/standalone_publication_audit.json": "7c0e06e2a9239ce825a7aa63ff0c95b68fbb8ef486f40afbfb267c3cffeab230",
+    "fixtures/published_headless_config.json": "4523f083f266a18c29397cbebe331a0e564c7f6947f88e04505a2073a1c78610",
+    "fixtures/qwen3b_tokenizer_reference.json": "397eb8f6a79d8128a63c1fb839115a7ee448351f9b456de00970b11e6d7be5c4",
+    "fixtures/qwen3b_config.json": "7ed3eed5be6924cc800e8a5e53fc405c1aab1aaf36bad65c33403b36c56827f5"
+  },
+  "standalone_headless_publication": {
+    "repository": "hf-tiny-v2/tiny-random-Qwen2_5_VLTextModel",
+    "revision": "3d88ac2485f48cc590e717ba208662768db347e9",
+    "sha256": {
+      "chat_template.jinja": "a0bc6f6fc7a29a80017a433e8f03a1cc1236e838a944a2d034295a60c4f2fddb",
+      "config.json": "4523f083f266a18c29397cbebe331a0e564c7f6947f88e04505a2073a1c78610",
+      "model.safetensors": "374de0fbb2e77646fbeaff32fd35fb95d3510cbffaa57032c70a3f14b47f42b6",
+      "tokenizer.json": "ff8cce547abc110590d19c6b5b6e0c6a7b4c8d1012d78b9c42131bae7f494a02",
+      "tokenizer_config.json": "df594eab0be6bd5da9e2cef6ec1f26c6dc3ce12d0c24bb062c67e358aa49f10c"
+    },
+    "tensor_count": 26,
+    "contract": "Native Qwen2_5_VLTextModel; root embed_tokens/layers/norm; no causal head or generation",
+    "publication_kind": "Independently published tiny-random checkpoint, not trained model quality evidence",
+    "qualified": "Exact public/native dense hidden states and TWO native dense saves with public reload; explicit generation rejection",
+    "awq_limitation": "Published tiny intermediate_size37 cannot pack in Torch AWQ: out_features must be divisible by8. Six independent aligned native fixtures qualify all14 projections separately."
+  },
+  "qualified_tokenicer": "0.0.19",
+  "parent_shared_prerequisite": "Canonical parent b444efaac models/local.py and utils/hf.py inherited unchanged; no prerequisite copy included in replacement"
+}
