@@ -203,6 +203,48 @@ def test_device_thread_pool_explicit_worker_intraop_override():
     assert "RESULT 1" in result.stdout.splitlines()
 
 
+def test_device_thread_pool_worker_budget_does_not_leak_to_new_threads():
+    """A thread created after a pool task must see the process budget again.
+
+    ``torch.set_num_threads`` also writes libtorch's process-global value, which
+    every later-created thread reads when its intra-op pool initializes. The
+    worker budget must therefore be scoped to the task, including when the task
+    raises (issue #4601).
+    """
+
+    code = (
+        "import threading, torch\n"
+        "from gptqmodel.utils.threadx import DeviceThreadPool\n"
+        "torch.set_num_threads(8)\n"
+        "def fresh():\n"
+        "    seen = []\n"
+        "    thread = threading.Thread(target=lambda: seen.append(torch.get_num_threads()))\n"
+        "    thread.start(); thread.join()\n"
+        "    return seen[0]\n"
+        "before = fresh()\n"
+        "pool = DeviceThreadPool(\n"
+        "    devices=[torch.device('cpu')], include_cuda=False, include_xpu=False,\n"
+        "    include_npu=False, include_mps=False, workers={'cpu': 4},\n"
+        "    empty_cache_every_n=0,\n"
+        ")\n"
+        "pool.submit(torch.device('cpu'), lambda: None).result(timeout=60)\n"
+        "after_task = fresh()\n"
+        "def fail():\n"
+        "    raise RuntimeError('task failed')\n"
+        "try:\n"
+        "    pool.submit(torch.device('cpu'), fail).result(timeout=60)\n"
+        "except RuntimeError:\n"
+        "    pass\n"
+        "after_error = fresh()\n"
+        "caller = torch.get_num_threads()\n"
+        "pool.shutdown(wait=True)\n"
+        "print(f'RESULT {before} {after_task} {after_error} {caller}')\n"
+    )
+    result = _run_python(code, {})
+
+    assert "RESULT 8 8 8 8" in result.stdout.splitlines()
+
+
 def test_kernel_config_pool_intraop_threads_drives_the_default_pool():
     from gptqmodel import _build_device_thread_pool
     from gptqmodel.utils.kernel import KernelConfig, configure_kernel, reset_kernel_config

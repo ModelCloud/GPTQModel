@@ -414,6 +414,70 @@ def split_intraop_threads(worker_count: int, total: Optional[int] = None) -> int
     return max(1, int(total) // count)
 
 
+_INTRAOP_SCOPE_LOCK = threading.RLock()
+_INTRAOP_SCOPE_DEPTH = 0
+_INTRAOP_SCOPE_ORIGINAL: Optional[int] = None
+
+
+@contextlib.contextmanager
+def _scoped_intraop_threads(target: Optional[int]):
+    """Apply ``target`` to this thread for one task, then restore the process.
+
+    ``torch.set_num_threads`` updates libtorch's process-global ``num_threads``
+    as well as the calling thread's intra-op setting. A thread created later
+    reads that global when its intra-op pool is lazily initialized, so leaving
+    a worker budget installed would cap every later caller thread (#4601).
+    This scope sets the target only while the worker runs its task and restores
+    the previous value on exit, including on exception. The last active scope
+    also restores the process value captured before the first pool task.
+    """
+
+    global _INTRAOP_SCOPE_DEPTH, _INTRAOP_SCOPE_ORIGINAL
+
+    if target is None or int(target) <= 0:
+        yield
+        return
+    target = int(target)
+
+    with _INTRAOP_SCOPE_LOCK:
+        previous = torch.get_num_threads()
+        if _INTRAOP_SCOPE_DEPTH == 0:
+            _INTRAOP_SCOPE_ORIGINAL = previous
+        _INTRAOP_SCOPE_DEPTH += 1
+        try:
+            torch.set_num_threads(target)
+        except Exception as exc:  # pragma: no cover - defensive
+            _INTRAOP_SCOPE_DEPTH -= 1
+            if _INTRAOP_SCOPE_DEPTH == 0:
+                _INTRAOP_SCOPE_ORIGINAL = None
+            log.warn.once(
+                "Could not set intra-op threads to %s for this pool task (%s); "
+                "the worker keeps the inherited pool.",
+                target,
+                exc,
+            )
+            yield
+            return
+
+    try:
+        yield
+    finally:
+        with _INTRAOP_SCOPE_LOCK:
+            try:
+                torch.set_num_threads(previous)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            _INTRAOP_SCOPE_DEPTH -= 1
+            if _INTRAOP_SCOPE_DEPTH == 0:
+                original = _INTRAOP_SCOPE_ORIGINAL
+                _INTRAOP_SCOPE_ORIGINAL = None
+                if original is not None:
+                    try:
+                        torch.set_num_threads(original)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+
 class _DeviceWorker:
     """
     Single worker thread bound to one device.
@@ -491,38 +555,6 @@ class _DeviceWorker:
         if DEBUG_ON: log.debug(f"{self.name}: joining thread")
         self._thread.join()
 
-    def _apply_intraop_threads(self) -> None:
-        """Give this worker thread its own Torch intra-op pool size.
-
-        libgomp creates one OpenMP team per pthread that enters a parallel
-        region, sized from that thread's intra-op count. Without a per-worker
-        value every pool worker duplicates the spawning thread's full team:
-        the default pool on a 320-CPU host held 2622 OS threads (issue #4356).
-
-        ``torch.set_num_threads`` is thread-local for the intra-op pool, so the
-        caller's pool is unchanged (see ``pytorch_gil_0_compat.md``). This runs
-        before the worker's first Torch call, including its warmup, because the
-        team is materialized on that first parallel region.
-        """
-
-        target = self._intraop_threads
-        if target is None or target <= 0:
-            return
-        try:
-            if torch.get_num_threads() == int(target):
-                return
-            torch.set_num_threads(int(target))
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warn.once(
-                "Could not set intra-op threads to %s for %s (%s); the worker keeps the inherited pool.",
-                target,
-                self.name,
-                exc,
-            )
-            return
-        if DEBUG_ON:
-            log.debug(f"{self.name}: intra-op threads set to {target}")
-
     def _apply_cpu_affinity(self) -> None:
         if self._affinity_applied or self._target_cpu_core is None:
             return
@@ -581,7 +613,6 @@ class _DeviceWorker:
         may override via `inference_mode`.
         """
         self._apply_cpu_affinity()
-        self._apply_intraop_threads()
         # Exit on the sentinel, not on `_stop`. `stop()` enqueues its sentinel
         # after every task the pool already accepted, so reaching the sentinel
         # means the queue is drained and every accepted future is resolved.
@@ -597,7 +628,8 @@ class _DeviceWorker:
 
                 try:
                     self._ensure_device_activated()
-                    self._run_warmup()
+                    with _scoped_intraop_threads(self._intraop_threads):
+                        self._run_warmup()
                 except BaseException as exc:
                     # Warmup runs on the worker thread before the task. Report
                     # the failure through the pending future and keep the
@@ -616,13 +648,16 @@ class _DeviceWorker:
                 )
                 use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
-                # Tasks take a **read** lock so janitor's write lock can't interleave
-                with ctx(self.rwlock.reader(), _device_ctx(self.device)):
-                    inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
-                    with inference_ctx:
-                        if event is not None and self.device.type == "cuda":
-                            event.synchronize()
-                        result = fn(*args, **kwargs)
+                # Tasks take a **read** lock so janitor's write lock can't interleave.
+                # The intra-op budget is scoped to the task so libtorch's
+                # process-global value is restored before the worker goes idle.
+                with _scoped_intraop_threads(self._intraop_threads):
+                    with ctx(self.rwlock.reader(), _device_ctx(self.device)):
+                        inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                        with inference_ctx:
+                            if event is not None and self.device.type == "cuda":
+                                event.synchronize()
+                            result = fn(*args, **kwargs)
                 # Counters must be updated before resolving futures to prevent
                 # tests reading stats mid-transition and seeing stale totals.
                 self._on_task_finished(self.key)
