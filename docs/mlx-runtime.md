@@ -280,3 +280,26 @@ writes a checkpoint that depends on them: `GPTQModel.export(...,
 format="mlx")` emits the stock `mlx_lm` layout described above. Checkpoints
 written by earlier versions with `*.linear.*` keys and the
 `_gptqmodel_custom_mlx_runtime` flag still require the GPT-QModel MLX loader.
+
+## RoPE configuration (transformers 5)
+
+transformers 5 stores the rotary setup as `rope_parameters` and omits the
+top-level `rope_theta` / `rope_scaling` pair. Most `mlx_lm` architectures only
+read the flat pair, so a config forwarded unchanged makes the exported or
+in-process MLX model run with `rope_theta=10000` and no scaling, silently
+changing its positional encoding.
+
+`gptqmodel/utils/mlx_rope.py` translates the fields before the MLX model is
+built and before the exported `config.json` is written:
+
+| Source (`rope_parameters`) | Emitted |
+| --- | --- |
+| `rope_theta` | top-level `rope_theta` |
+| `rope_type` other than `default`, plus `factor`, `high_freq_factor`, `low_freq_factor`, `original_max_position_embeddings`, `partial_rotary_factor` | top-level `rope_scaling` |
+| `rope_type: default` | no `rope_scaling` |
+| per-layer-type dicts (`full_attention` / `sliding_attention`) | collapsed when every type agrees; `ValueError` otherwise |
+| `rope_parameters` itself | kept, for architectures such as `qwen3` that read it |
+
+A `rope_parameters` mapping without `rope_theta` logs a warning instead of
+silently accepting mlx-lm's 10000 default. `qwen3` configs are left untouched
+because their `ModelArgs` read the nested form directly.
