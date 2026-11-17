@@ -269,6 +269,9 @@ dropped quantization payloads; see
 [`docs/quantized-moe-resave-defuse.md`](docs/quantized-moe-resave-defuse.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
+QQQ's shared-memory staging of the per-group scales and the reduction-scratch
+ordering are documented in
+[docs/qqq-group-scale-staging.md](docs/qqq-group-scale-staging.md).
 Quantized modules load their scales and other quantization buffers at the dtype
 the checkpoint stores, whatever model dtype you request; see
 [checkpoint buffer dtype](docs/checkpoint-and-runtime-contracts.md#4-checkpoint-buffer-dtype).

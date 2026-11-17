@@ -393,3 +393,138 @@ def test_qqq_cuda_kernel_uses_tensor_device_context():
     # Same kernel, weights and input: only the device context changed.
     torch.testing.assert_close(actual, expected.cpu(), rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(actual, torch_output, rtol=2e-3, atol=2e-3)
+
+
+def _build_large_batch_parity_modules(
+    *,
+    group_size: int,
+    in_features: int = 512,
+    out_features: int = 1024,
+) -> tuple[qqq_module.QQQLinear, qqq_module.QQQTorchLinear]:
+    """Build native and Torch QQQ modules from one packed weight.
+
+    The per-group scales span a wide range so that a tile which consumes
+    another group's scale produces a large error instead of drifting inside
+    the FP16 rounding floor.
+    """
+
+    torch.manual_seed(4662 + group_size)
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
+    linear.weight.data.normal_(0, 0.02)
+    groups = 1 if group_size == -1 else in_features // group_size
+    scales = torch.rand((out_features, groups), dtype=torch.float16) * 0.5 + 0.05
+    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.001 + 0.002
+
+    modules = []
+    for module_cls in (qqq_module.QQQLinear, qqq_module.QQQTorchLinear):
+        module = module_cls(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            register_buffers=True,
+        )
+        module.pack(linear, scales, s_channel)
+        module.post_init()
+        modules.append(module.eval())
+
+    return modules[0].cuda(), modules[1]
+
+
+def _relative_error(output: torch.Tensor, expected: torch.Tensor) -> float:
+    return ((output - expected).norm() / expected.norm()).item()
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("group_size", [128, -1])
+@pytest.mark.parametrize("tokens", [17, 32, 64, 128])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_qqq_large_batch_cuda_matches_torch_on_every_repeat(group_size, tokens):
+    """`prob_m > 16` selects the 64x256 tile; every repeat must be exact.
+
+    That tile is 64 k values wide while a group is 128 wide, so the per-group
+    scale has to stay resident for two consecutive tiles. Reusing its shared
+    memory stage for the next group before the second tile has consumed it
+    corrupted a timing-dependent subset of k tiles, so a single call can look
+    correct while the next one drifts by several percent.
+    """
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    native, oracle = _build_large_batch_parity_modules(group_size=group_size)
+    torch.manual_seed(4662 + tokens)
+    x = torch.randn((tokens, native.in_features), dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        expected = oracle(x.cpu()).float().cuda()
+        # `tokens > 16` takes `large_batch_thread_configs`, whose default tile
+        # is `thread_k=64, thread_n=256`.
+        outputs = [native(x).float() for _ in range(10)]
+
+    assert expected.norm() > 0
+    for repeat, output in enumerate(outputs):
+        relative = _relative_error(output, expected)
+        assert relative < 1e-3, f"repeat {repeat}: relative error {relative:.6f}"
+    assert all(torch.equal(outputs[0], output) for output in outputs[1:])
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_qqq_gemm_64x256_tile_matches_torch_on_every_repeat():
+    """Pin the exact tile that `prob_m > 16` selects.
+
+    `qqq_gemm` is called with the explicit {64, 256} thread tile so the check
+    does not depend on the auto heuristic. Ten back-to-back calls on the same
+    input must all match the Torch oracle and each other.
+    """
+
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("QQQ CUDA requires compute capability >= 8.0")
+    if not qqq_module.qqq_runtime_available():
+        pytest.skip(qqq_module.qqq_runtime_error())
+
+    from gptqmodel.utils.qqq import qqq_gemm
+
+    native, oracle = _build_large_batch_parity_modules(group_size=128)
+    tokens = 64
+    torch.manual_seed(4662 + tokens)
+    x = torch.randn((tokens, native.in_features), dtype=torch.float16, device="cuda")
+
+    with torch.inference_mode():
+        expected = oracle(x.cpu()).float().cuda()
+        quant_a, s1 = native.dynamic_quant(x)
+        outputs = []
+        for _ in range(10):
+            output = torch.empty(
+                tokens, native.out_features, dtype=torch.float16, device="cuda"
+            )
+            reduce = torch.empty(
+                16 * 64, native.out_features, dtype=torch.int32, device="cuda"
+            )
+            qqq_gemm(
+                quant_a,
+                native.B,
+                reduce,
+                output,
+                s1,
+                native.s_channel,
+                native.s_group,
+                native.workspace,
+                64,
+                256,
+                -1,
+                16,
+            )
+            outputs.append(output.float())
+
+    assert expected.norm() > 0
+    for repeat, output in enumerate(outputs):
+        relative = _relative_error(output, expected)
+        assert relative < 1e-3, f"repeat {repeat}: relative error {relative:.6f}"
+    assert all(torch.equal(outputs[0], output) for output in outputs[1:])
