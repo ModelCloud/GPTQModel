@@ -25,8 +25,16 @@ class LocalModelLoader:
     model_class: str
     processor_class: str | None = None
     tokenizer_class: str | None = None
+    # Explicit opt-in for released config.json files that omit model_type.
+    # These are trusted class names supplied by the package, never import paths
+    # or a heuristic derived from a checkpoint directory/model identifier.
+    config_architectures: tuple[str, ...] = ()
 
     def __post_init__(self):
+        if not isinstance(self.config_architectures, tuple) or any(
+            not isinstance(name, str) or not name.isidentifier() for name in self.config_architectures
+        ):
+            raise ValueError("Local config_architectures must be a tuple of class names")
         paths = (self.config_class, self.model_class)
         if self.processor_class is not None:
             paths += (self.processor_class,)
@@ -76,3 +84,36 @@ def local_model_loader(model_type):
     definition = MODEL_MAP_CASEFOLD.get(str(model_type or "").lower())
     loader = getattr(definition, "loader", None)
     return loader if isinstance(loader, LocalModelLoader) else None
+
+
+def local_model_loader_for_config(payload):
+    """Select trusted package metadata without executing checkpoint code.
+
+    A present model_type is authoritative, including invalid explicit values.
+    Legacy inference requires every architecture to name the same unique
+    package-declared loader; partial matches and conflicting declarations fail
+    before either trust handling or a Transformers dynamic-module lookup.
+    """
+    if "model_type" in payload:
+        return local_model_loader(payload["model_type"])
+    architectures = payload.get("architectures")
+    if not isinstance(architectures, (list, tuple)) or not architectures:
+        return None
+    names = {name for name in architectures if isinstance(name, str)}
+
+    from .auto import MODEL_MAP_CASEFOLD
+
+    candidates = []
+    for definition in MODEL_MAP_CASEFOLD.values():
+        loader = getattr(definition, "loader", None)
+        if not isinstance(loader, LocalModelLoader) or not names.intersection(loader.config_architectures):
+            continue
+        if loader not in candidates:
+            candidates.append(loader)
+    if not candidates:
+        # Unknown checkpoint families retain the ordinary explicit trust+bypass
+        # policy. Merely having architectures metadata does not grant local trust.
+        return None
+    if any(not isinstance(name, str) for name in architectures) or len(candidates) != 1 or not names.issubset(candidates[0].config_architectures):
+        raise ValueError("Ambiguous or conflicting package model architectures in checkpoint config")
+    return candidates[0]

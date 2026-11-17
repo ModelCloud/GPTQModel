@@ -16,7 +16,9 @@ It never registers checkpoint classes globally with Transformers.
 ```mermaid
 flowchart TD
     A["GPTQModel.load / from_pretrained / from_quantized"] --> B["load_model_config: read config data"]
-    B --> C{"Definition loader is LocalModelLoader?"}
+    B --> Q["local_model_loader_for_config: explicit type or declared legacy architecture"]
+    Q --> C{"Definition loader is LocalModelLoader?"}
+    Q --> M["Conflicting/ambiguous package architectures: ValueError before checkpoint code"]
     C -- yes --> D["LocalModelLoader.load_config: package config class"]
     D --> E["LocalModelLoader.from_config / from_pretrained: package model class"]
     C -- no --> F["resolve_trust_remote_code"]
@@ -28,7 +30,20 @@ flowchart TD
     J -- yes --> K["Checkpoint Python allowed"]
     J -- no --> L["RemoteCodeSecurityError or unsupported native config"]
     style L fill:#ffcdd2,stroke:#b71c1c
+    style M fill:#ffcdd2,stroke:#b71c1c
 ```
+
+Legacy checkpoints may omit `model_type`. A local definition can explicitly
+declare `LocalModelLoader.config_architectures=("MiniCPMForCausalLM",)` as trusted
+package metadata. Both `load_model_config` and `resolve_trust_remote_code` use
+`local_model_loader_for_config` before any checkpoint import. A present
+`model_type` is authoritative, including an empty, null or unsupported value.
+Only an absent key permits inference; every architecture must match the same
+unique declared loader. Aliases sharing a loader do not create ambiguity.
+Partial matches, malformed entries alongside a known name, and conflicting
+package declarations raise even under explicit trust and the bypass. Unknown
+families retain the ordinary security gate; neither checkpoint paths nor
+`auto_map` determine package class names. Nothing is registered globally.
 
 The existing security bypass is `GPTQ_BYPASS_SAFETY_CHECKS=1`. It is additional
 consent: it does not turn trust on. For a remote-only implementation, both that
@@ -135,6 +150,7 @@ the responsibility of those engines.
 | Remote-only implementation | Explicit trust alone allowed checkpoint Python (`gptqmodel/utils/hf.py:1011-1052`) | Explicit trust and the existing security bypass are both required |
 | Native model with a remote-only layout marker | Kept remote trust (`gptqmodel/utils/hf.py:1024-1038`) | Local port, explicit bypass, or a clear failure; no incompatible native fallback |
 | Config selection | `AutoConfig.from_pretrained` selected checkpoint config classes (`gptqmodel/models/auto.py:643`, `gptqmodel/models/loader.py:1887,2440`) | Definition-owned config class first, then gated AutoConfig |
+| Missing legacy `model_type` | Only `payload.get("model_type")` could select package code (`9ebb28f07:gptqmodel/utils/hf.py:1030,1060`) | Explicit opt-in architecture metadata in the package; unique complete match or clear conflict error |
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 | Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
@@ -146,3 +162,14 @@ revocation, native/local precedence, all three public dispatchers, lazy local
 meta construction, native multimodal mappings and subfolder selection.
 They establish dispatch and security behavior, not numerical qualification of
 the separate model ports.
+
+The missing-type regression uses a real tiny owned InternLM checkpoint under a
+neutral root/subfolder and a temporary trusted architecture declaration; it does
+not assert support by importing the checkpoint. It covers both trust values,
+all three bypass states, actual exact FP32 logits, successful load followed by
+conflicting/malformed metadata and repaired retry, explicit-type precedence,
+and two incompatible package declarations. The new nodes initially report seven
+failures/four passes because package selection is missed; the complete shared
+loader/paths/processor/tokenizer suite passes 114 cases in 4.09 seconds after
+the fix. Dtype and attention implementation are selected explicitly in the
+fixture so the selection test does not compare different compute policies.
