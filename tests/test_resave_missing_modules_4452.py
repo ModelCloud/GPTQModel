@@ -22,7 +22,9 @@ def test_checkpoint_dtype_restore_skips_removed_module(monkeypatch, tmp_path):
         "_checkpoint_tensor_dtypes",
         lambda _checkpoint: {"model.layers.0.self_attn.rotary_emb.inv_freq": torch.float32},
     )
-    monkeypatch.setattr(model_utils, "_tie_weights_after_checkpoint_load", lambda *_args: None)
+    monkeypatch.setattr(
+        model_utils, "_tie_weights_after_checkpoint_load", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(model_utils, "release_pinned_host_cache", lambda: None)
 
     model_utils.load_checkpoint_in_model_then_tie_weights(
