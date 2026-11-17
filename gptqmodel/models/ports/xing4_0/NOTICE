@@ -1,0 +1,28 @@
+GPT-QModel Xing4.0 local port
+
+Configuration, decoder modeling and SentencePiece tokenizer are adapted from
+XingChen-AGI/Xing4.0-29B-A4B, pinned revision
+acbdebfe496d117e6fde3ce152d2450fb0d5fa53:
+https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B/tree/acbdebfe496d117e6fde3ce152d2450fb0d5fa53
+
+Upstream: China Telecom Artificial Intelligence Technology Co., Ltd.
+Upstream release license: Apache License, Version 2.0; its complete original
+LICENSE is distributed byte-for-byte alongside this notice. The inspected
+source files do not contain additional copyright headers. Their Transformers /
+DeepSeek-derived class structure and attribution are acknowledged here.
+Transformers is Copyright the HuggingFace Team and distributed under Apache-2.0.
+
+Modifications, tests and integration: Copyright 2026 ModelCloud.ai, Apache-2.0.
+Changes include package-relative ownership, current Transformers 5 APIs,
+correct hyperconnection initialization attributes, explicit FP32 correction
+buffers, conservative AWQ policy, and source-byte-preserving tokenizer saves.
+
+Bundled release configuration, generation policy, tokenizer metadata,
+SentencePiece vocabulary and chat template retain the same upstream license.
+Compressed safetensors headers, the index and the derived inventory contain
+metadata only, not trained tensor payloads. Source hashes and exact revisions
+are recorded in assets/source_manifest.json and assets/fp8_source_manifest.json.
+
+The FP8 release is metadata-only coverage; no trained FP8 payload or activation
+converter is qualified by this port. No checkpoint Python is executed by the
+runtime loader. See README.md for validation boundaries and source deviations.
