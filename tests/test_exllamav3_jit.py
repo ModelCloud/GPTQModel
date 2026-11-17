@@ -29,7 +29,7 @@ class _FakeExtension:
 def test_exllamav3_bc_linear_wrapper_uses_jit_op(monkeypatch):
     calls = {}
 
-    def fake_run(trellis, suh, svh, K, bias, mcg, mul1, xh, x, y):
+    def fake_run(trellis, suh, svh, K, bias, mcg, mul1, x, y):
         calls["bc_linear_exl3_run"] = {
             "trellis_shape": tuple(trellis.shape),
             "suh_shape": tuple(suh.shape),
@@ -38,7 +38,6 @@ def test_exllamav3_bc_linear_wrapper_uses_jit_op(monkeypatch):
             "bias_is_none": bias is None,
             "mcg": mcg,
             "mul1": mul1,
-            "xh_shape": tuple(xh.shape),
             "x_shape": tuple(x.shape),
             "y_shape": tuple(y.shape),
         }
@@ -57,7 +56,6 @@ def test_exllamav3_bc_linear_wrapper_uses_jit_op(monkeypatch):
         bias=None,
         mcg=True,
         mul1=False,
-        xh=torch.zeros((1, 128), dtype=torch.float16),
     )
 
     wrapper.run(
@@ -73,7 +71,6 @@ def test_exllamav3_bc_linear_wrapper_uses_jit_op(monkeypatch):
         "bias_is_none": True,
         "mcg": True,
         "mul1": False,
-        "xh_shape": (1, 128),
         "x_shape": (3, 128),
         "y_shape": (3, 64),
     }
@@ -149,7 +146,6 @@ def test_exllamav3_bc_linear_wrapper_surfaces_jit_error(monkeypatch):
             bias=None,
             mcg=False,
             mul1=False,
-            xh=torch.zeros((1, 128), dtype=torch.float16),
         )
 
 

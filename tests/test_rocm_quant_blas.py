@@ -409,21 +409,18 @@ def test_paroquant_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
     assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
 
 
-def test_awq_eora_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
-    """AWQ+EoRA must run its fp32 input Gram on rocBLAS (#4614).
+def test_awq_plus_eora_plan_pins_rocblas_for_the_adapter_gram(monkeypatch):
+    """#4614: EoRA's fp32 input Gram must not run on per-process hipBLASLt kernels.
 
-    EoRA is a secondary step that accumulates ``X^T X`` from the calibration
-    forwards, but the run-level gate only looked at the primary AWQ processor.
-    hipBLASLt then chose a different Gram kernel per process and every saved
-    adapter tensor differed across two identical runs. Mock ROCm and assert the
-    real AWQ+EoRA plan maps to a rocBLAS pin.
+    A GPTQ primary is in the deterministic set, so GPTQ+EoRA was already pinned
+    by accident. An AWQ primary is not, so the AWQ + EoRA plan stayed on
+    hipBLASLt and produced a different adapter in every process.
     """
 
     from gptqmodel.adapter.adapter import Lora
     from gptqmodel.models.base import _needs_deterministic_hessian
     from gptqmodel.models.quantization_run_plan import ProcessorStep, QuantizationRunPlan
     from gptqmodel.quantization.config import FORMAT, AWQConfig
-    from gptqmodel.utils.backend import BACKEND
 
     fake = _FakeTorchBlas(current="Cublaslt")
     _install(monkeypatch, fake)
@@ -431,10 +428,10 @@ def test_awq_eora_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
     configure_kernel(KernelConfig())
 
     run_plan = QuantizationRunPlan.build(
-        AWQConfig(bits=4, group_size=128, adapter=Lora(rank=32)),
+        AWQConfig(bits=4, group_size=128, adapter=Lora(rank=8, path="/tmp/lora-4614")),
         format_code=FORMAT.GEMM,
         pack_backend=None,
-        loop_backend=BACKEND.TORCH,
+        loop_backend=None,
         batch_size=1,
         needs_lora=True,
     )
@@ -442,11 +439,19 @@ def test_awq_eora_selects_the_deterministic_pin_on_mocked_rocm(monkeypatch):
     assert _needs_deterministic_hessian(run_plan)
 
     with rocm.quant_blas_backend(deterministic=_needs_deterministic_hessian(run_plan)):
-        assert fake.current.name == "Cublas", "EoRA's input Gram must run on rocBLAS"
+        assert fake.current.name == "Cublas", "AWQ + EoRA must run on rocBLAS"
 
-    assert fake.calls == ["hipblas", "cublaslt"]
-    assert fake.current.name == "Cublaslt"
-    assert rocm._QUANT_BLAS_GUARD_DEPTH == 0
+    # A plain AWQ run still keeps the faster hipBLASLt kernels.
+    assert not _needs_deterministic_hessian(
+        QuantizationRunPlan.build(
+            AWQConfig(bits=4, group_size=128),
+            format_code=FORMAT.GEMM,
+            pack_backend=None,
+            loop_backend=None,
+            batch_size=1,
+            needs_lora=False,
+        )
+    )
 
 
 def test_eora_gram_runs_on_the_pinned_backend(monkeypatch):

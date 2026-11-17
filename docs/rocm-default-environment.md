@@ -62,8 +62,8 @@ determinism gain for methods that never build a Hessian.
 
 The pin is scoped to methods that accumulate a Hessian or input Gram from the
 calibration activations (`_needs_deterministic_hessian` in
-`gptqmodel/models/base.py:183`, keyed off `_DETERMINISTIC_BLAS_PROCESSOR_STEPS`
-at `gptqmodel/models/base.py:171`):
+`gptqmodel/models/base.py:158`, keyed off `_HESSIAN_PROCESSOR_STEPS` at
+`gptqmodel/models/base.py:148`):
 
 | Method | Accumulates | Where |
 |---|---|---|
@@ -73,16 +73,12 @@ at `gptqmodel/models/base.py:171`):
 | MACaQ | `X^T X` | `quantization/macaq.py:668` |
 | EXL3 | reuses GPTQ's capture | `looper/exllamav3_processor.py:192` |
 | FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
-| EoRA adapter (secondary step) | fp32 input Gram | `eora/eora.py:44` |
+| EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
 
-AWQ without an EoRA adapter and weight-only (RTN) accumulate none of these and
-keep hipBLASLt. A plan that includes the EoRA adapter pins rocBLAS for the
-whole run, including the AWQ primary: EoRA accumulates its Gram from the same
-calibration forwards, and the refcounted guard cannot switch backends for a
-nested secondary phase. That is the reproducibility-for-speed trade-off: the
-AWQ base tensors are identical either way, but its fp16/bf16 GEMMs lose the
-hipBLASLt kernels. ParoQuant is included for a different reason (its
-rotation-optimization GEMMs are not reproducible on hipBLASLt, issue #4460).
+AWQ, ParoQuant and weight-only (RTN) accumulate none of these and keep
+hipBLASLt. EoRA is included even though it is a secondary processor: an
+AWQ + EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the
+saved adapter differed in 39/42 LoRA tensors between identical runs (#4614).
 
 #4105 scoped the pin to `ProcessorStep.GPTQ in run_plan.processors`, which was
 too narrow: QQQ also builds a Hessian, so it accumulated on hipBLASLt and lost
@@ -119,7 +115,7 @@ same-target runs share the refcount and different-target runs serialize.
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
     B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, ParoQuant, EoRA" --> C["want rocBLAS"]
-    B -- "no: AWQ, RTN (no EoRA adapter)" --> D["want hipBLASLt"]
+    B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
     E -- "yes" --> F["wait for it to finish"]
@@ -134,14 +130,13 @@ flowchart TD
     class D fast
 ```
 
-| Mechanism | Before (#4079) | After (#4105 + #4123 + #4460 + #4614) |
+| Mechanism | Before (#4079) | After (#4105 + #4123 + #4460) |
 |---|---|---|
-| Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2479`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:183`) |
-| AWQ / RTN without EoRA | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
-| AWQ + EoRA | forced rocBLAS for the whole run | pinned rocBLAS (EoRA's input Gram) |
+| Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:158`) |
+| AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
 | ParoQuant | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
 | QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
-| EoRA adapter | forced rocBLAS | pinned rocBLAS (it builds an input Gram) |
+| EoRA | forced rocBLAS | pinned rocBLAS (fp32 input Gram + `eigh`; #4614) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |
 | Nested scopes | not reference counted | reentrant refcount, restores only after the last worker exits |
