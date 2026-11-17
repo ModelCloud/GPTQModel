@@ -734,21 +734,36 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         bound = self._decoded_weight_absmax_bound()
         return bound is not None and bound <= float(torch.finfo(torch.float16).max)
 
+    def _native_gemm_eligible(
+        self, x_flat: torch.Tensor, device_type: str | None = None
+    ) -> bool:
+        """Whether the decoded weight can stay in the activation dtype.
+
+        A bias stored wider than the activation dtype is deliberately not part
+        of this decision: ``matmul_fp32_reduce`` keeps such a bias in the FP32
+        epilogue, so a biased layer gets the same native GEMM as a bias-free
+        one (#4681). ``device_type`` is overridable for tests; callers pass the
+        real tensor device.
+        """
+
+        device_type = x_flat.device.type if device_type is None else device_type
+        return (
+            x_flat.dtype in (torch.float16, torch.bfloat16)
+            and device_type == "cuda"
+            and not autocast_active(device_type)
+            and self._weights_fit_activation_dtype(x_flat.dtype)
+        )
+
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if x_flat.dtype in (torch.float16, torch.bfloat16) and (
-            x_flat.device.type != "cuda"
-            or autocast_active(x_flat.device.type)
-            or (bias is not None and bias.dtype != x_flat.dtype)
-            or not self._weights_fit_activation_dtype(x_flat.dtype)
-        ):
+        if not self._native_gemm_eligible(x_flat):
             # Decode into temporary FP32 storage only when narrowing is not
             # range-safe: a decoded FP8 weight above the activation dtype's
             # finite range (for example 65536 under FP16) becomes inf and turns
-            # a finite dot product into NaN, and a wide bias can cancel a sum
-            # outside that range. In-range weights take the native GEMM with an
-            # FP32 reduction below, which also keeps a same-dtype bias wide.
+            # a finite dot product into NaN. In-range weights take the native
+            # GEMM with an FP32 reduction below, which also keeps a wide bias
+            # wide.
             with torch.autocast(device_type=x_flat.device.type, enabled=False):
                 weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
                 output = torch.matmul(x_flat.float(), weight)
