@@ -24,11 +24,14 @@ class LocalModelLoader:
     config_class: str
     model_class: str
     processor_class: str | None = None
+    tokenizer_class: str | None = None
 
     def __post_init__(self):
         paths = (self.config_class, self.model_class)
         if self.processor_class is not None:
             paths += (self.processor_class,)
+        if self.tokenizer_class is not None:
+            paths += (self.tokenizer_class,)
         for path in paths:
             module, _, name = path.rpartition(".")
             if not module.startswith("gptqmodel.") or not name.isidentifier():
@@ -57,6 +60,13 @@ class LocalModelLoader:
         kwargs.pop("trust_remote_code", None)
         kwargs.pop("code_revision", None)
         return _local_class(self.processor_class).from_pretrained(model_id_or_path, **kwargs)
+
+    def load_tokenizer(self, model_id_or_path, **kwargs):
+        if self.tokenizer_class is None:
+            raise ValueError("This local model loader does not declare a tokenizer class")
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("code_revision", None)
+        return _local_class(self.tokenizer_class).from_pretrained(model_id_or_path, **kwargs)
 
 
 def local_model_loader(model_type):
