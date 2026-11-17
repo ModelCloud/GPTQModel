@@ -29,6 +29,7 @@ from ...utils.paro import (
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
+from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
@@ -383,6 +384,15 @@ class ParoLinear(AwqTorchLinear):
             self.scales_and_zeros = scales_and_zeros
             bind_runtime_qzeros(self)
         finalize_fused_train_state(self)
+        # The per-column operands keep the checkpoint dtype and stay the
+        # loader's tensors, so they are views of the shard's ``safetensors``
+        # mapping and pin every page the loader touched even after
+        # ``qweight``/``qzeros`` were replaced (#4785/#4873). Detach them once
+        # the runtime layout is built; values, dtype and order are unchanged.
+        for operand in ("scales", "bias", "theta", "pairs", "channel_scales"):
+            value = getattr(self, operand, None)
+            if isinstance(value, torch.Tensor):
+                setattr(self, operand, detach_cpu_operand(value))
         return True
 
     def _pack_cpu_avx512(self) -> Tuple[torch.Tensor, torch.Tensor]:

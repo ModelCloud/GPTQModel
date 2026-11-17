@@ -16,6 +16,7 @@ from ...models._const import DEVICE, PLATFORM, normalize_device
 from ...nn_modules.qlinear import (
     BaseQuantLinear,
     PackableQuantLinear,
+    detach_cpu_operand,
     resolve_dequantize_dtype,
 )
 from ...quantization import FORMAT, METHOD
@@ -509,6 +510,13 @@ class TorchFusedLinear(PackableQuantLinear):
         # ``qweight`` now holds int4pack words: drop the checkpoint clone if
         # the inverse reproduces exactly the bytes captured before the pack.
         finalize_fused_train_state(self)
+        # ``scales`` keeps the checkpoint dtype and ``g_idx`` is still the
+        # loader's tensor, so both stay views of the shard's ``safetensors``
+        # mapping; either one alone pins every page the loader touched (#4785).
+        # Detach them now that the runtime layout is built; values, dtype and
+        # order are unchanged.
+        self.scales = detach_cpu_operand(self.scales)
+        self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
 
     def transform(self, dtype, device):
         if device == "xpu":
