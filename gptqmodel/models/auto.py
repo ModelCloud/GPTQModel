@@ -995,6 +995,11 @@ class GPTQModel:
                             break
 
         if is_gptqmodel_quantized:
+            # A caller-supplied config cannot describe the tensors this
+            # checkpoint already stores. Forward it so the quantized loader can
+            # reject it with a precise message instead of dropping it (#4945).
+            if quantize_config is not None:
+                kwargs["quantize_config"] = quantize_config
             m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,

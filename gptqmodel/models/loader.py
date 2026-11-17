@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 import os
 import shutil
@@ -1680,6 +1681,103 @@ def set_dtype_compat(model_init_kwargs: dict, torch_dtype):
     else:
         model_init_kwargs["torch_dtype"] = torch_dtype
 
+# Options a quantized load can consume. `from_quantized` pops the hub/cache and
+# dtype options itself; the rest are read further down (the checkpoint loader
+# offload switches) or by the hub download for a remote id. Anything outside
+# this set used to be swallowed by `QuantizeConfig.from_pretrained(**kwargs)`,
+# so a typo such as `dtpye=` silently loaded with defaults (#4945).
+_QUANTIZED_LOAD_ACCEPTED_KWARGS = (
+    "adapter",
+    "adapter_revision",
+    "adapter_sha256",
+    "allow_remote_adapter",
+    "allow_patterns",
+    "attn_implementation",
+    "backend",
+    "cache_dir",
+    "device",
+    "device_map",
+    "dtype",
+    "endpoint",
+    "force_download",
+    "format",
+    "fuse",
+    "headers",
+    "ignore_patterns",
+    "kernel",
+    "library_name",
+    "library_version",
+    "local_dir",
+    "local_files_only",
+    "max_memory",
+    "max_workers",
+    "module_tree",
+    "offload_buffers",
+    "offload_folder",
+    "offload_state_dict",
+    "p2p",
+    "proxies",
+    "quantize_config",
+    "repo_type",
+    "resume_download",
+    "revision",
+    "runtime",
+    "subfolder",
+    "token",
+    "tokenizer_trust_remote_code",
+    "torch_dtype",
+    "trust_remote_code",
+    "use_auth_token",
+)
+
+# Keys that survive the pops above but are still consumed later: `format` by the
+# quantize config, the offload switches by the checkpoint loader, and the hub
+# options by `snapshot_download` for a remote id.
+_QUANTIZED_LOAD_LATE_KWARGS = frozenset({
+    "format",
+    "offload_state_dict",
+    "offload_folder",
+    "offload_buffers",
+    "allow_patterns",
+    "endpoint",
+    "headers",
+    "ignore_patterns",
+    "library_name",
+    "library_version",
+    "local_dir",
+    "max_workers",
+    "repo_type",
+    "token",
+})
+
+
+def reject_unconsumed_load_kwargs(kwargs: Dict[str, Any], *, api_name: str = "GPTQModel.load") -> None:
+    """Raise for load keywords this path cannot consume, with a suggestion."""
+
+    if not kwargs:
+        return
+    if "quantize_config" in kwargs:
+        raise TypeError(
+            f"{api_name}: `quantize_config` cannot be applied to an already-quantized "
+            "checkpoint; the quantization config serialized in the checkpoint is used. "
+            "Load a dense source model to quantize it with a different config."
+        )
+    unexpected = sorted(key for key in kwargs if key not in _QUANTIZED_LOAD_LATE_KWARGS)
+    if not unexpected:
+        return
+    details = []
+    for key in unexpected:
+        matches = difflib.get_close_matches(key, _QUANTIZED_LOAD_ACCEPTED_KWARGS, n=1)
+        details.append(f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else ""))
+    raise TypeError(
+        f"{api_name}: unexpected keyword argument(s) for a quantized checkpoint: "
+        + ", ".join(details)
+        + ". A quantized load accepts "
+        + ", ".join(f"`{name}`" for name in _QUANTIZED_LOAD_ACCEPTED_KWARGS)
+        + "."
+    )
+
+
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
     if is_local or os.path.isabs(pretrained_model_id_or_path):
@@ -2582,6 +2680,11 @@ def ModelLoader(cls):
             "attn_implementation": attn_implementation,
         }
 
+        # vLLM and SGLang forward the remaining keywords to their own engines,
+        # which accept options this loader never sees.
+        if backend not in (BACKEND.VLLM, BACKEND.SGLANG):
+            reject_unconsumed_load_kwargs(kwargs_without_internal)
+
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = AutoConfig.from_pretrained(
             model_local_path,
@@ -2630,7 +2733,11 @@ def ModelLoader(cls):
                 lm_head=native_gguf_qspec.lm_head_quantized,
             )
         else:
-            qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+            qcfg = QuantizeConfig.from_pretrained(
+                model_local_path,
+                format=kwargs_without_internal.get("format"),
+                subfolder=subfolder,
+            )
 
         # Runtime policy belongs to this checkpoint's modules, not whichever
         # model most recently installed a process policy. It is a resolved

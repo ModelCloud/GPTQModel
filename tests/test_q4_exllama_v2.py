@@ -167,7 +167,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
         model_q = GPTQModel.load(
             model_id,
-            rivision=revision,
+            revision=revision,
             device="cuda:0",
             backend=BACKEND.EXLLAMA_V2,
         )

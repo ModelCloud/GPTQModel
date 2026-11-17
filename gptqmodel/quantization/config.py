@@ -5891,9 +5891,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return config
 
     @classmethod
-    def from_pretrained(cls, save_dir: str, **kwargs):
-        format = kwargs.pop("format", None)
-        subfolder = kwargs.pop("subfolder", None)
+    def from_pretrained(cls, save_dir: str, *, format=None, subfolder=None):
+        # Only the two options this method reads. It used to take `**kwargs` and
+        # ignore the rest, which silently swallowed unknown load keywords
+        # (#4945).
         # The quantize config may live in a repo subfolder while the caller
         # passes the repository root, so resolve it the same way the config,
         # the weights, and the adapter manifest are resolved.
