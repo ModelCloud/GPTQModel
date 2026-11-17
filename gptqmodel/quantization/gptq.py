@@ -1097,10 +1097,11 @@ class GPTQ:
         GPTQ path) so that configuration stays bit-identical.
         """
 
-        if not self.qcfg.desc_act or self.qcfg.act_group_aware:
+        qcfg = getattr(self, "qcfg", None)
+        if qcfg is None or not qcfg.desc_act or qcfg.act_group_aware:
             return None
 
-        multiple = getattr(self.qcfg.hessian, "sink_row_cap_median_multiple", None)
+        multiple = getattr(qcfg.hessian, "sink_row_cap_median_multiple", None)
         if multiple is None:
             return None
         multiple = float(multiple)
@@ -1108,25 +1109,8 @@ class GPTQ:
             return None
         return multiple
 
-    def resolve_sink_row_cap_scale(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> Optional[torch.Tensor]:
-        """Return a per-row clamp scale that caps sink-row norms, or ``None``.
-
-        The threshold is ``min(p99.9 of the row norms, multiple x median)``.
-        The percentile alone is not enough on a small batch, where it *is* the
-        largest row (two sink rows in a 64-row batch sit above p99.9); the
-        median multiple then supplies the bound. On a large calibration window
-        the percentile is the binding term and the cap only touches the few
-        extreme rows.
-
-        The threshold is derived from the whole batch, not per chunk, so the
-        result does not depend on ``HessianConfig.chunk_size``. Row norms are
-        computed chunk-by-chunk in fp32, so the whole matrix is never staged in
-        fp32 just to take the norms.
-        """
-
-        multiple = self.sink_row_cap_median_multiple()
-        if multiple is None:
-            return None
+    def _sink_row_norms(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
+        """Return per-row fp32 L2 norms, staged chunk-by-chunk (device-only)."""
 
         rows = matrix.shape[0]
         norms = torch.empty(rows, dtype=torch.float32, device=matrix.device)
@@ -1139,24 +1123,86 @@ class GPTQ:
             norms[start:stop] = torch.linalg.vector_norm(
                 matrix[start:stop], ord=2, dim=1, dtype=torch.float32
             )
+        return norms
 
-        if not bool(torch.isfinite(norms).all()):
+    def resolve_sink_row_cap_threshold(
+        self, matrix: torch.Tensor, chunk_size: Optional[int]
+    ) -> Optional[torch.Tensor]:
+        """Return the scalar sink-row norm cap threshold, or ``None``.
+
+        The threshold is ``min(p99.9 of the row norms, multiple x median)``.
+        The percentile alone is not enough on a small batch, where it *is* the
+        largest row (two sink rows in a 64-row batch sit above p99.9); the
+        median multiple then supplies the bound. On a large calibration window
+        the percentile is the binding term and the cap only touches the few
+        extreme rows.
+
+        The threshold is derived from the whole batch, not per chunk, so the
+        result does not depend on ``HessianConfig.chunk_size``. Row norms are
+        computed chunk-by-chunk in fp32, so the whole matrix is never staged in
+        fp32 just to take the norms.
+
+        Everything is a tensor op: ``compute_hessian_xtx`` runs inside the layer
+        forward hooks, so a ``bool()``/``float()`` here would drain the CUDA
+        queue on every ``add_batch`` (issue #4950). A non-finite or non-positive
+        threshold becomes ``+inf`` (which makes every scale 1) instead of an
+        early ``None``, so the decision never reads the host.
+        """
+
+        multiple = self.sink_row_cap_median_multiple()
+        if multiple is None:
             return None
 
-        median = torch.kthvalue(norms, (rows + 1) // 2).values
+        rows = matrix.shape[0]
+        if rows == 0:
+            return None
+
+        norms = self._sink_row_norms(matrix, chunk_size)
+        # One device sort serves both quantiles: two ``kthvalue`` calls cost
+        # ~1.5x more and are the only per-batch work the cap still adds.
+        ordered = torch.sort(norms).values
+        median = ordered[(rows + 1) // 2 - 1]
         rank = max(1, min(rows, math.ceil(SINK_ROW_CAP_PERCENTILE / 100.0 * rows)))
-        percentile = torch.kthvalue(norms, rank).values
+        percentile = ordered[rank - 1]
         threshold = torch.minimum(percentile, median * multiple)
-        if not bool(torch.isfinite(threshold)) or float(threshold) <= 0.0:
-            return None
+        # ``main`` returned ``None`` (no cap) on any non-finite row norm or a
+        # non-positive threshold. Folding that into the tensor keeps the
+        # decision identical without a host read.
+        usable = (
+            torch.isfinite(norms).all()
+            & torch.isfinite(threshold)
+            & (threshold > 0.0)
+        )
+        return torch.where(usable, threshold, torch.full_like(threshold, float("inf")))
 
-        scale = torch.clamp(
+    def _sink_row_cap_scale_from_threshold(
+        self,
+        matrix: torch.Tensor,
+        threshold: torch.Tensor,
+        chunk_size: Optional[int],
+    ) -> torch.Tensor:
+        """Turn a scalar cap threshold into a per-row clamp scale (device-only)."""
+
+        norms = self._sink_row_norms(matrix, chunk_size)
+        usable_rows = torch.isfinite(norms) & (norms > 0.0)
+        ratio = torch.clamp(
             threshold / norms.clamp_min(torch.finfo(torch.float32).tiny),
             max=1.0,
         )
-        if bool((scale >= 1.0).all()):
+        return torch.where(usable_rows, ratio, torch.ones_like(norms))
+
+    def resolve_sink_row_cap_scale(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> Optional[torch.Tensor]:
+        """Return a per-row clamp scale that caps sink-row norms, or ``None``.
+
+        This is a pure function of ``matrix`` (used by the #4742 regression
+        tests). ``compute_hessian_xtx`` resolves the threshold and the scale
+        separately so the threshold never depends on the chunk layout.
+        """
+
+        threshold = self.resolve_sink_row_cap_threshold(matrix, chunk_size)
+        if threshold is None:
             return None
-        return scale
+        return self._sink_row_cap_scale_from_threshold(matrix, threshold, chunk_size)
 
     def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
@@ -1168,10 +1214,28 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = stage_dtype
         self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
-        cap_scale = self.resolve_sink_row_cap_scale(matrix, chunk_size)
+        threshold = self.resolve_sink_row_cap_threshold(matrix, chunk_size)
+        cap_scale = (
+            self._sink_row_cap_scale_from_threshold(matrix, threshold, chunk_size)
+            if threshold is not None
+            else None
+        )
 
-        if chunk_size is None and cap_scale is None:
+        if chunk_size is None:
+            needs_copy = matrix.dtype != torch.float32
             mat32 = matrix.to(dtype=torch.float32)
+            if cap_scale is not None:
+                # Fold the cap into the fp32 GEMM input instead of switching
+                # to the chunk-workspace lease: an all-ones scale is a
+                # bitwise no-op, and a capped batch keeps the single-GEMM
+                # fast path (issue #4950).
+                # ``matrix.to(float32)`` returns the caller's tensor unchanged
+                # when it is already fp32 (and activations may be shared by
+                # several projections), so this must be out of place.
+                if needs_copy:
+                    mat32.mul_(cap_scale.unsqueeze(1))
+                else:
+                    mat32 = mat32 * cap_scale.unsqueeze(1)
             # Determinism across processes comes from this fp32 X^T X GEMM
             # running on rocBLAS (see ``utils/rocm.py``). The quantization run
             # already holds the override for Hessian methods; this per-call
@@ -1181,9 +1245,6 @@ class GPTQ:
                 xtx = torch.matmul(mat32.T, mat32)
             del mat32
             return xtx
-
-        if chunk_size is None:
-            chunk_size = rows
 
         xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 

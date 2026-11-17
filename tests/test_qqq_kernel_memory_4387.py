@@ -287,14 +287,18 @@ def test_qqq_torch_forward_is_bitwise_unchanged(group_size):
     module = _build_torch_module(group_size=group_size)
     x = torch.randn(7, module.in_features, dtype=torch.float16)
 
-    with torch.inference_mode():
-        actual = module(x)
-
-    quant_a, s1 = module.dynamic_quant(x.reshape(-1, module.in_features))
+    # Since #4856 the first CPU forward may replace the checkpoint layout with
+    # the packed cache and drop ``B``/``s_group``/``s_channel``, so snapshot the
+    # oracle tensors before it runs.
     weight = _oracle_int8_weight(module)
     s_channel = module._unpermute_scales(
         module.s_channel, module._scale_perm_single_i
     ).float()
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    quant_a, s1 = module.dynamic_quant(x.reshape(-1, module.in_features))
     accum = quant_a.float() @ weight.float()
     expected = (accum * s1 * s_channel).to(torch.float16).reshape(7, module.out_features)
 

@@ -21,7 +21,7 @@ from transformers import OlmoeConfig, OlmoeForCausalLM
 
 from gptqmodel.models import loader as loader_module
 from gptqmodel.models.definitions.olmoe import OlmoeQModel
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.hf import suspend_hf_weight_init
 
 
@@ -167,7 +167,6 @@ def test_quantized_loader_meta_izes_fused_experts_before_defuser(tmp_path, monke
     with pytest.raises(_StopLoad):
         loader_module.ModelLoader(OlmoeQModel).from_quantized(
             str(checkpoint),
-            quantize_config=QuantizeConfig(bits=4, group_size=32, format=FORMAT.GPTQ),
             device="cpu",
         )
 

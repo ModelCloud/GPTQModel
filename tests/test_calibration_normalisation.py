@@ -77,9 +77,11 @@ def test_3d_causal_attention_mask_keeps_every_real_token():
     assert prepared[0]["attention_mask"].tolist() == [[1] * seq_len]
 
 
-def test_3d_causal_attention_mask_preserves_padding_positions():
+def test_3d_causal_attention_mask_preserves_interior_masked_positions():
     seq_len = 5
-    keep = torch.tensor([True, True, True, False, False])
+    # Interior zeros describe a caller-built mask, not tokenizer padding, so
+    # they survive the pre-padded-row strip from #4889 (edge padding does not).
+    keep = torch.tensor([True, False, True, True, False])
     causal = torch.zeros((1, seq_len, seq_len), dtype=torch.bool)
     for query_idx in range(seq_len):
         causal[0, query_idx] = keep & (torch.arange(seq_len) <= query_idx)
@@ -93,7 +95,7 @@ def test_3d_causal_attention_mask_preserves_padding_positions():
         ]
     )
 
-    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1, 0, 0]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 0, 1, 1, 0]]
 
 
 # ---------------------------------------------------------------------------

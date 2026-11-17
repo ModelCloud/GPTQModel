@@ -996,6 +996,17 @@ class GPTQModel:
                             break
 
         if is_gptqmodel_quantized:
+            if quantize_config is not None:
+                # A quantized checkpoint's bits/group_size/method/format come
+                # from the checkpoint itself. Forwarding a caller config into
+                # `from_quantized` would either be ignored (the old behavior)
+                # or silently disagree with the tensors on disk (#4945).
+                raise ValueError(
+                    "GPTQModel.load: `quantize_config` cannot be applied to a "
+                    "quantized checkpoint; its quantization settings are read "
+                    "from the checkpoint. Load without `quantize_config` to use "
+                    "them, or pass an unquantized model to quantize."
+                )
             m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,

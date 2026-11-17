@@ -10,6 +10,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...quantization.awq.utils.packing_utils import source_weight_out_in
 from ...utils.awq import (
     awq_fast_gemm_forward_prefill,
     awq_fast_gemv_forward_decode,
@@ -280,7 +281,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
         qscales = torch.zeros(
             (
                 scales.shape[0],
-                calculate_zeros_width(linear.in_features, self.group_size) * pack_num,
+                calculate_zeros_width(self.in_features, self.group_size) * pack_num,
             ),
             dtype=torch.float16,
             device=scales.device,
@@ -302,9 +303,10 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.
-        group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
+        weight = source_weight_out_in(linear)
+        group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            (weight.float() + scale_zeros.index_select(1, group_index))
             / qscales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_intweight(

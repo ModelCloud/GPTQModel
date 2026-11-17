@@ -8,6 +8,7 @@ architecture exclusions are explicit skips, never portable-kernel substitutions.
 """
 
 import copy
+import gc
 import weakref
 
 import pytest
@@ -491,6 +492,13 @@ def _check_native_fusion(cls, family, dtype, profile, record_property, *, unifor
     try:
         group.install()
         assert type(group.packed) is cls
+        # Since #4871 the module is a graph input of the compiled
+        # ``dequantize_weight``, so Dynamo leaves transient trace garbage
+        # (``LazyCache -> LazyVariableTracker -> ConstDictVariable`` of the
+        # module's buffers) that keeps the pre-fusion allocation alive until
+        # the cycle collector runs.  The contract is that no *live* owner
+        # remains, not that CPython never saw a temporary reference.
+        gc.collect()
         assert all(ref() is None for ref in refs), "Original native weight allocations were retained"
         with torch.inference_mode():
             for x, baseline in zip(xs, before):

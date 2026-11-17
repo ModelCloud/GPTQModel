@@ -12,7 +12,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import pack_awq_columns
+from ...quantization.awq.utils.packing_utils import pack_awq_columns, source_weight_out_in
 from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
@@ -261,7 +261,7 @@ class AwqGEMVLinear(AWQuantLinear):
         qscales = torch.zeros(
             (
                 scales.shape[0],
-                calculate_zeros_width(linear.in_features, self.group_size) * pack_num,
+                calculate_zeros_width(self.in_features, self.group_size) * pack_num,
             ),
             dtype=torch.float16,
             device=scales.device,
@@ -281,9 +281,10 @@ class AwqGEMVLinear(AWQuantLinear):
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.  The GEMV layout keeps
         # scales as [out_features, groups], so the group index selects columns.
-        group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
+        weight = source_weight_out_in(linear)
+        group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            (weight.float() + scale_zeros.index_select(1, group_index))
             / self.scales.index_select(1, group_index).float()
         ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
@@ -292,7 +293,7 @@ class AwqGEMVLinear(AWQuantLinear):
         # Pad the group axis up to the packed width so the vectorized packer
         # reproduces the loop's out-of-range skips (those codes stay zero).
         padded_zeros = torch.zeros(
-            (zeros.shape[0], calculate_zeros_width(linear.in_features, self.group_size) * pack_num),
+            (zeros.shape[0], calculate_zeros_width(self.in_features, self.group_size) * pack_num),
             dtype=torch.int32,
             device=zeros.device,
         )

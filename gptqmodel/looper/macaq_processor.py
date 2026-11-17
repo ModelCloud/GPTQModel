@@ -353,9 +353,11 @@ class MacaqProcessor(SharedInputCaptureProcessor):
         model.quantize_config.method = METHOD.MACAQ
         model.quantize_config.format = model.quantize_config.checkpoint_format_for_settings()
         super().finalize(model=model, **kwargs)
-        # The compiled flip sweep leaves Dynamo resume frames holding the last
-        # weights' working set; collect so `quantize()` returns with no
-        # quantizer memory resident (#4801, the contract #4747/#4757 set).
+        # Backstop for the #4747/#4757 contract: ``quantize()`` returns with
+        # no quantizer memory resident. The graph-break-free flip sweep (#4854)
+        # no longer leaves the Dynamo frame cycle #4801 chased, so a full gen-2
+        # collection per Linear only cost time (#4900); this single pass is
+        # what actually holds the contract.
         gc.collect()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
