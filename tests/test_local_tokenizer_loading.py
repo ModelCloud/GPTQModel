@@ -144,6 +144,29 @@ def test_public_tokenizer_uses_owned_class_and_normalizes(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
+def test_local_model_without_owned_tokenizer_cannot_import_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
+    reference = InternLMForCausalLM(_config()).eval()
+    reference.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    marker = _hostile_metadata(tmp_path)
+    # Preserve the actual native tokenizer class while adding a hostile map.
+    path = tmp_path / "tokenizer_config.json"
+    metadata = json.loads(path.read_text())
+    metadata["tokenizer_class"] = "TokenizersBackend"
+    path.write_text(json.dumps(metadata))
+    assert InternLMQModel.loader.tokenizer_class is None
+    if bypass:
+        monkeypatch.setenv(BYPASS_ENV, "1")
+    else:
+        monkeypatch.delenv(BYPASS_ENV, raising=False)
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    assert loaded.tokenizer("hello science", add_special_tokens=False).input_ids == [3, 4]
+    assert loaded.tokenizer.decode([3, 4]) == "hello science"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
 def test_public_model_load_uses_owned_tokenizer(tmp_path, monkeypatch, owned, trust, bypass):
     _, tokenizer_class, _ = owned
     reference = InternLMForCausalLM(_config()).eval()
