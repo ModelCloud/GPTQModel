@@ -15,7 +15,7 @@ from gptqmodel.quantization.config import MOE_ALL_EXPERTS, ExpertsRoutingOverrid
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis2.6-30B-A3B"
 
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 1
     MOE_CONFIG = MoEConfig(ExpertsRoutingOverride(num_experts_per_tok=MOE_ALL_EXPERTS))
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"

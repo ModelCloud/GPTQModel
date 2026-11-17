@@ -6,13 +6,19 @@
 import torch
 from torch import nn
 
-from ...quantization import METHOD
 from ...utils.torch import as_torch_device
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 from .ovis2_5 import Ovis2_5QModel
 
 
 class Ovis2_6_MoeQModel(Ovis2_5QModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6.Ovis2_6_Moe_Config",
+        model_class="gptqmodel.models.ports.ovis2_6_moe.modeling_ovis2_6.Ovis2_6_MoeForCausalLM",
+        processor_class="gptqmodel.models.ports.ovis2_6_moe.processing_ovis2_6.Ovis26Processor",
+    )
+    require_trust_remote_code = False
     dynamic_expert_index = "num_experts"
 
     pre_lm_head_norm_module = "llm.model.norm"
@@ -39,7 +45,7 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
-        }
+        },
     ]
 
     @staticmethod
@@ -76,8 +82,26 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
         self._materialize_missing_vision_post_layernorm(as_torch_device(self.quantize_config.device))
         super().pre_quantize_generate_hook_start()
 
+    def awq_get_modules_for_scaling(self, *args, **kwargs):
+        return []
+
+    def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
+        samples = list(calibration_dataset)
+        if samples and all(isinstance(sample, dict) and "input_ids" in sample for sample in samples):
+            return samples
+        return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
+
+    @staticmethod
+    def _sanitize_input_ids_for_embeddings(input_ids, **kwargs):
+        return input_ids
+
 
 class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6.Ovis2_6_Next_Config",
+        model_class="gptqmodel.models.ports.ovis2_6_moe.modeling_ovis2_6.Ovis2_6_NextForCausalLM",
+        processor_class="gptqmodel.models.ports.ovis2_6_moe.processing_ovis2_6.Ovis26Processor",
+    )
     layer_modules_strict = False
 
     module_tree = [
@@ -89,7 +113,7 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
             "input_layernorm": ("input_layernorm:!",),
             # Token mixers
             "self_attn": ("q_norm:!", "k_norm:!", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "linear_attn": ("norm:!", "conv1d:!", "in_proj_qkvz:0", "in_proj_ba:!:0", "out_proj:1"),
+            "linear_attn": ("linear_attn:!", "norm:!", "conv1d:!", "in_proj_qkvz:0", "in_proj_ba:!:0", "out_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # MLP / MoE
             "mlp:moe": {
@@ -98,7 +122,6 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
                 "shared_expert_gate": ("shared_expert_gate:!",),
                 # <-- single (1, N) logic projections should not be quantized
                 "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-
                 # Experts list with dynamic index
                 "experts:0": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
@@ -106,13 +129,3 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
             },
         },
     ]
-
-    module_tree_overrides = {
-        METHOD.AWQ: [
-            {
-                "mlp:moe": {
-                    "gate": ("gate",),
-                }
-            }
-        ]
-    }
