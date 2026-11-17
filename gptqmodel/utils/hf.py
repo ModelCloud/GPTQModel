@@ -434,6 +434,45 @@ def _compile_keep_in_fp32_matcher(model):
     return matches
 
 
+CONSTRUCTION_DTYPES_ATTR = "_gptqmodel_construction_parameter_dtypes"
+
+
+def _record_construction_dtypes(model) -> None:
+    """Remember the dtype each parameter had when the model was constructed.
+
+    ``PreTrainedModel.post_init`` runs after the constructor and before
+    ``from_pretrained`` loads the checkpoint. Recording the dtypes there lets
+    ``assert_loaded_model_state`` distinguish a parameter the model's own code
+    allocated in fp32 (Hymba's ``mamba.A_log``) from one a broken load left in
+    the wrong dtype (issue #4888). Only dtypes are retained, never tensors.
+
+    Parameters matched by ``_keep_in_fp32_modules`` at construction are
+    excluded: the current declaration already governs them, so clearing the
+    declaration must make them reportable again (#4170).
+    """
+
+    named_parameters = getattr(model, "named_parameters", None)
+    if not callable(named_parameters):
+        return
+    try:
+        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
+        dtypes = {
+            name: parameter.dtype
+            for name, parameter in named_parameters()
+            if parameter.is_floating_point()
+            and not (keep_in_fp32 is not None and keep_in_fp32(name))
+        }
+    except Exception:  # pragma: no cover - defensive: exotic parameter proxies
+        return
+    if not dtypes or all(dtype is torch.float32 for dtype in dtypes.values()):
+        # Constructed entirely in fp32: transformers' dtype context was not
+        # active, so the record says nothing about intent and must not be used
+        # to exempt anything. Keeping the strict check here is what stops a
+        # broken cast from being masked.
+        return
+    object.__setattr__(model, CONSTRUCTION_DTYPES_ATTR, dtypes)
+
+
 def assert_loaded_model_state(
     model,
     *,
@@ -466,6 +505,14 @@ def assert_loaded_model_state(
     dtype transformers' ``_get_dtype_plan`` pins them to. A declared module left
     in any other dtype is still reported. Pinned parameters are still checked
     for materialization, and undeclared mixed dtypes still fail (issue #4170).
+
+    A model's own constructor may also allocate a parameter in fp32 from an
+    explicit fp32 tensor (Hymba's ``mamba.A_log``), and transformers loads the
+    half-precision checkpoint value into it without changing its dtype. The
+    dtype each parameter had at construction is recorded by the patched
+    ``post_init``; a parameter that is *still* fp32 after the load is treated
+    as intentional. A parameter the load changed away from its construction
+    dtype is still reported, so a broken cast is never masked (issue #4888).
     """
 
     problems = []
@@ -483,6 +530,7 @@ def assert_loaded_model_state(
         require_materialized or require_uniform_dtype or expected_dtype is not None
     ):
         keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
+        construction_dtypes = getattr(model, CONSTRUCTION_DTYPES_ATTR, None)
         dtypes = Counter()
         meta = []
         for name, parameter in named_parameters():
@@ -496,6 +544,16 @@ def assert_loaded_model_state(
                 and keep_in_fp32 is not None
                 and keep_in_fp32(name)
             ):
+                continue
+            if (
+                parameter.dtype is torch.float32
+                and construction_dtypes is not None
+                and construction_dtypes.get(name) is torch.float32
+            ):
+                # The constructor allocated this parameter in fp32 and the load
+                # did not change it (Hymba's `mamba.A_log`, #4888). A parameter
+                # constructed in a half dtype and then left/cast to fp32 is
+                # still reported below.
                 continue
             dtypes[parameter.dtype] += 1
 
@@ -1617,6 +1675,16 @@ def _patch_transformers_remote_code_compat() -> None:
 
             PreTrainedModel.__getattr__ = __getattr__
             PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
+
+        if not getattr(PreTrainedModel, "_gptqmodel_construction_dtype_patch", False):
+            original_post_init = PreTrainedModel.post_init
+
+            def post_init(self):
+                original_post_init(self)
+                _record_construction_dtypes(self)
+
+            PreTrainedModel.post_init = post_init
+            PreTrainedModel._gptqmodel_construction_dtype_patch = True
 
 
 def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
