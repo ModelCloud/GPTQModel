@@ -33,6 +33,50 @@ flowchart TD
     L --> M
 ```
 
+### Container resolution
+
+Before any row is read, `prepare_calibration_dataset` and
+`split_calibration_dataset` classify the *container* the caller passed. A table
+(pandas `DataFrame`, Polars `DataFrame`, ...) is columnar even though it is not a
+`Mapping`, and `Dataset.with_format("numpy")[:]` stores a ragged token column as
+a 1-D `ndarray(dtype=object)`. Both are now resolved before the row split, so
+they reach the same paths as an equivalent `dict` of columns.
+
+```mermaid
+flowchart TD
+    A["calibration input"] --> B{"isinstance(input, Mapping)"}
+    B -- "yes" --> C["use mapping columns directly"]
+    B -- "no" --> D{"_frame_columns(input)"}
+    D -- "columns + to_dict list" --> E["columns = to_dict list"]
+    D -- "not a table" --> F["keep the iterable"]
+    C --> G["_is_columnar_mapping"]
+    E --> G
+    F --> H["iterate rows<br/>string / list[int] / Mapping"]
+    G -- "columnar" --> I["_columnar_mapping_examples<br/>_column_entries per column"]
+    G -- "single row" --> H
+    I --> J["one mapping per calibration row"]
+    J --> K["_pack_ids<br/>_unwrap_object_array"]
+    H --> K
+    K --> L["prepare_calibration_dataset rows"]
+```
+
+`_column_entries` is the single place that decides how a column yields one
+entry per row: 2-D arrays index by row, 1-D `ndarray`/`Series` unwrap through
+`tolist()`, and a `datasets` `Column` (a `Sequence` without `ndim`) is listed.
+`_unwrap_object_array` then lets `torch.as_tensor` accept an object-dtype array
+whose elements are integer token ids, which is what one NumPy-formatted row is.
+
+A definition that does not use the shared splitter (`base_qwen3_vl.py`) rejects
+a table with the same `ValueError` it already used for mappings, instead of
+iterating the column labels.
+
+| Input | Before | After |
+| --- | --- | --- |
+| `Dataset.with_format("numpy")[:]` | 1-D object column read as one token row, `torch.as_tensor` raised | unpacked into one row per element |
+| `Dataset.with_format("pandas")[:]` / `df.to_pandas()` | column labels iterated, calibrated on `"text"` | unpacked into one row per element |
+| plain `{"input_ids": [7, 8, 9]}` | one token row | unchanged, still one token row |
+| `pandas.DataFrame({"foo": ...})` | no error until the misleading length check | `ValueError` naming the accepted columns |
+
 Two shapes of per-model work remain, and both delegate:
 
 - `prepare_inputs_for_conversations(processor, conversations)` prepares one
@@ -108,6 +152,8 @@ input and is out of scope.
 | `input_ids` row plus `pixel_values` | tensors silently dropped | `ValueError` naming the columns |
 | `calibration_concat_size` with conversations | silently ignored | `ValueError` |
 | `calibration_dataset_sort` / `calibration_data_min_length` | silently ignored | applied |
+| `Dataset.with_format("numpy")[:]` (object columns) | crash in tensor conversion | unpacked into rows |
+| `Dataset.with_format("pandas")[:]` / `DataFrame` | calibrated on the column labels | unpacked into rows, or rejected by definitions that cannot unpack |
 | unequal conversations at `batch_size > 1` | `ValueError` from `apply_chat_template` | `padding=True` on `support_batch_quantize=True` models |
 
 ## Conformance test

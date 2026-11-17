@@ -23,6 +23,7 @@ from transformers import BatchEncoding
 from gptqmodel.models.definitions._vlm_calibration import split_calibration_dataset
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
+from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
 from gptqmodel.models.definitions.internvl import InternVLQModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
@@ -222,3 +223,53 @@ def test_split_calibration_dataset_keeps_single_row_mapping():
 
     assert conversations is None
     assert rows == [row]
+
+
+@pytest.mark.parametrize("cls", MAPPING_DEFINITIONS, ids=lambda cls: cls.__name__)
+def test_numpy_formatted_dataset_columns_are_unpacked(cls, monkeypatch):
+    """`Dataset.with_format("numpy")[:]` must reach the same rows as the dataset.
+
+    The object-dtype column of arrays was read as one token row, so the text
+    path failed on tensor conversion before the VLM split even ran.
+    """
+
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(cls, "load_processor", _fail_load_processor, raising=False)
+    model = _make_model(cls)
+    rows = [list(range(12)), list(range(13))]
+    columns = {
+        "input_ids": np.array([np.arange(len(row)) for row in rows], dtype=object),
+        "attention_mask": np.array([np.ones(len(row), dtype=np.int64) for row in rows], dtype=object),
+    }
+
+    batches = model.prepare_dataset(columns, batch_size=1)
+
+    assert [batch["input_ids"].shape for batch in batches] == [(1, 12), (1, 13)]
+
+
+@pytest.mark.parametrize("cls", MAPPING_DEFINITIONS, ids=lambda cls: cls.__name__)
+def test_dataframe_calibration_input_is_unpacked_into_rows(cls, monkeypatch):
+    pandas = pytest.importorskip("pandas")
+    monkeypatch.setattr(cls, "load_processor", _fail_load_processor, raising=False)
+    model = _make_model(cls)
+    rows = [list(range(12)), list(range(13))]
+
+    batches = model.prepare_dataset(
+        pandas.DataFrame({"input_ids": rows, "attention_mask": [[1] * len(row) for row in rows]}),
+        batch_size=1,
+    )
+
+    assert [batch["input_ids"].tolist() for batch in batches] == [[rows[0]], [rows[1]]]
+
+
+def test_qwen3_vl_rejects_dataframe_calibration_input():
+    """The one definition outside the shared splitter must fail closed."""
+
+    pandas = pytest.importorskip("pandas")
+    model = _make_model(BaseQwen3VLGPTQ)
+
+    with pytest.raises(ValueError, match="not a single string, mapping, or DataFrame"):
+        model.prepare_dataset(
+            pandas.DataFrame({"input_ids": [[1, 2], [3, 4]]}),
+            batch_size=1,
+        )
