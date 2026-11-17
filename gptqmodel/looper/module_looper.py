@@ -100,6 +100,7 @@ log = setup_logger()
 
 _IO_WRITE_SPEED_MB: Optional[float] = None
 _IO_WRITE_SPEED_LOCK = threading.Lock()
+_SAME_MASK = object()
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from logbar.progress import ProgressBar
@@ -881,11 +882,21 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         tls = getattr(processor, "_hooks_paused_tls", None)
         return getattr(tls, "value", False) if tls else False
 
-    def _set_processor_mask(self, processor: LoopProcessor, mask):
-        """Store the active sequence mask for the current worker thread."""
+    def _set_processor_mask(self, processor: LoopProcessor, mask, padding_mask=_SAME_MASK):
+        """Store the active sequence mask for the current worker thread.
 
+        ``mask`` is the calibration row mask every statistic uses (padding and,
+        with ``CalibrationConfig.exclude_attention_sinks``, the attention-sink
+        tokens). ``padding_mask`` is the attention padding alone; it drives the
+        forward-visible MoE padding zeroing and activation ranges, which must
+        never alter a real token. It defaults to ``mask``.
+        """
+
+        if padding_mask is _SAME_MASK:
+            padding_mask = mask
         tls = self._processor_mask_tls(processor)
         tls.value = mask
+        tls.padding_value = padding_mask
         # ``mask`` is [batch, seq] on the execution device. Derive the
         # per-sample emptiness flags once per batch here; every module's
         # forward hook would otherwise synchronize once per sample.
@@ -897,11 +908,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Routed-expert hooks need to know whether this batch contains padding
         # before they scan a `[routed_rows, H]` activation for all-zero rows.
         # Resolve it here, once per batch, instead of synchronizing per expert.
-        tls.mask_has_padding = (
-            not bool(mask.all())
-            if torch.is_tensor(mask) and mask.ndim == 2
-            else None
-        )
+        if torch.is_tensor(padding_mask) and padding_mask.ndim == 2:
+            tls.mask_has_padding = not bool(padding_mask.all())
+        elif padding_mask is None and torch.is_tensor(mask):
+            # Only sink tokens are masked; there is no padding to scan for.
+            tls.mask_has_padding = False
+        else:
+            tls.mask_has_padding = None
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""

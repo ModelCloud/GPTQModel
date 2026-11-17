@@ -35,6 +35,17 @@ class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
         return cls(**config_dict)
 
 
+def refusal_message(method) -> str:
+    """The actionable error for a checkpoint transformers cannot read."""
+
+    label = REFUSED_HF_QUANT_METHODS.get(method, method)
+    return (
+        f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
+        f"load them with {refused_hf_load_remedy(method)}. "
+        f"(quant_method: {method!r})"
+    )
+
+
 class GPTQModelRefusingHfQuantizer(HfQuantizer):
     """Fail closed: transformers cannot read GPT-QModel's packed tensors."""
 
@@ -67,12 +78,7 @@ class GPTQModelRefusingHfQuantizer(HfQuantizer):
                 "`GPTQModel.load` or re-save the checkpoint. "
                 f"(quant_method: {method!r})"
             )
-        label = REFUSED_HF_QUANT_METHODS.get(method, method)
-        raise ValueError(
-            f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
-            f"load them with {refused_hf_load_remedy(method)}. "
-            f"(quant_method: {method!r})"
-        )
+        raise ValueError(refusal_message(method))
 
     @property
     def is_trainable(self) -> bool:

@@ -804,9 +804,19 @@ def forward_batch_worker(
             target_device=module_device,
         )
 
+    from ..looper.loop_processor import resolve_calibration_keep_mask
+
+    calibration_keep_mask = resolve_calibration_keep_mask(
+        processor,
+        keep_mask,
+        batch_index=batch_index,
+        layer_input=inputs,
+    )
+
     mask_tls = getattr(processor, "_mask_tls", None)
     if mask_tls is not None:
-        mask_tls.value = keep_mask
+        mask_tls.value = calibration_keep_mask
+        mask_tls.padding_value = keep_mask
 
     module_output = None
     kv_next = None
@@ -820,6 +830,7 @@ def forward_batch_worker(
     finally:
         if mask_tls is not None:
             mask_tls.value = None
+            mask_tls.padding_value = None
         processor._set_current_batch_index(None)
 
     if (reuse_kv or write_shared_kv_cache) and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:

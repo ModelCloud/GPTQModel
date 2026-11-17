@@ -38,6 +38,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import QuantizeConfig
+from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks
 from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
@@ -345,6 +346,22 @@ class CalibrationConfig:
     sort: Optional[str] = None
     concat_separator: Optional[str] = None
     batch_size: int = 1
+    # Drop attention-sink tokens (every attended BOS token: the leading one
+    # and each document-boundary BOS of concatenated calibration) from every
+    # calibration statistic (issue #4393). Tokenizers without a BOS token have
+    # no sink to drop, so nothing changes for them (issue #4459). The tokens
+    # still run through the forward, so later tokens keep attending to them;
+    # only the per-token rows each processor accumulates (Hessians, AWQ
+    # features, sample counts) skip them. Applied once, by
+    # ``LoopProcessor.calibration_keep_mask``.
+    exclude_attention_sinks: bool = False
+
+    def __post_init__(self):
+        if not isinstance(self.exclude_attention_sinks, bool):
+            raise TypeError(
+                "CalibrationConfig.exclude_attention_sinks must be a bool, "
+                f"got {type(self.exclude_attention_sinks).__name__}."
+            )
 
 
 class CalibrationTypes(str, Enum):
@@ -413,6 +430,35 @@ class ProcessorLifecycleConfig:
     def use(self, forward: ForwardConfig) -> "ProcessorLifecycleConfig":
         """Return a copy using the supplied forward configuration."""
         return replace(self, forward=forward)
+
+
+def active_padding_mask(processor):
+    """Return the padding-only ``[B, S]`` keep-mask bound to this worker thread.
+
+    Forward-visible consumers (MoE padding zeroing, activation ranges, router
+    evidence) must use this mask: the calibration mask in ``_mask_tls.value``
+    can additionally drop attention-sink tokens, real tokens whose activations
+    later positions still depend on.
+    """
+
+    tls = getattr(processor, "_mask_tls", None)
+    if tls is None:
+        return None
+    return getattr(tls, "padding_value", getattr(tls, "value", None))
+
+
+def resolve_calibration_keep_mask(processor, keep_mask, *, batch_index, layer_input):
+    """Return ``processor``'s calibration row mask for one replayed batch.
+
+    Processors without ``calibration_keep_mask`` (test doubles, adapters) keep
+    the padding mask, which is also what every processor gets with
+    ``CalibrationConfig.exclude_attention_sinks`` off.
+    """
+
+    resolver = getattr(processor, "calibration_keep_mask", None)
+    if not callable(resolver):
+        return keep_mask
+    return resolver(keep_mask, batch_index=batch_index, layer_input=layer_input)
 
 
 def bind_resolved_module_config(module, resolved_cfg) -> None:
@@ -645,11 +691,151 @@ class LoopProcessor:
             self.calibration_dataset = []
 
         self.total_calibration_tokens = self._compute_total_tokens(self.calibration_dataset)
+        # Per-batch ``[B, S]`` attended BOS positions (``None`` for a batch
+        # without any). Only populated with ``exclude_attention_sinks`` and a
+        # tokenizer that defines a BOS token.
+        self.attention_sink_positions: Optional[List[Optional[torch.Tensor]]] = None
+        if self.calibration.exclude_attention_sinks and self.calibration_dataset:
+            bos_token_id = self._attention_sink_bos_token_id()
+            if bos_token_id is None:
+                log.warn(
+                    "Calibration: `calibration_exclude_attention_sinks` is enabled but the "
+                    "tokenizer has no BOS token, so there is no attention sink to exclude; "
+                    "calibration statistics are unchanged."
+                )
+            else:
+                self.attention_sink_positions, excluded = self._compute_attention_sink_positions(
+                    self.calibration_dataset, bos_token_id
+                )
+                # Averaging and the Hessian fallback threshold must describe
+                # the same rows the hooks retain.
+                self.total_calibration_tokens = max(self.total_calibration_tokens - excluded, 0)
+                log.info(
+                    "Calibration: exclude_attention_sinks drops %s BOS attention-sink tokens "
+                    "from %s calibration batches.",
+                    excluded,
+                    len(self.calibration_dataset),
+                )
 
         # Track the current calibration batch index on a per-thread basis so
         # processors can retrieve deterministic ordering information (e.g.
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
+
+    def _attention_sink_bos_token_id(self) -> Optional[int]:
+        """Return the tokenizer's BOS id, or ``None`` when it defines none."""
+
+        tokenizer = self.tokenizer
+        for candidate in (tokenizer, getattr(tokenizer, "tokenizer", None)):
+            if candidate is None:
+                continue
+            bos_token_id = getattr(candidate, "bos_token_id", None)
+            if isinstance(bos_token_id, int) and not isinstance(bos_token_id, bool):
+                return bos_token_id
+        return None
+
+    def _compute_attention_sink_positions(
+        self, calibration_dataset, bos_token_id: int
+    ) -> Tuple[List[Optional[torch.Tensor]], int]:
+        """Locate the attended BOS positions of every prepared batch.
+
+        Returns the per-batch ``[B, S]`` BOS positions (``None`` for a batch
+        without BOS or without usable ``input_ids``) and how many tokens
+        ``exclude_attention_sinks`` removes from the whole dataset, so token
+        totals match what the hooks retain.
+        """
+
+        positions: List[Optional[torch.Tensor]] = []
+        excluded = 0
+        for row in calibration_dataset:
+            bos = None
+            if isinstance(row, dict):
+                bos = bos_token_positions(
+                    row.get("input_ids"), row.get("attention_mask"), bos_token_id
+                )
+            positions.append(bos)
+            if bos is not None:
+                excluded += int(bos.sum().item())
+        return positions, excluded
+
+    def attention_sink_positions_for_batch(self, batch_index: Optional[int]) -> Optional[torch.Tensor]:
+        """Return the ``[B, S]`` BOS positions of one calibration batch."""
+
+        positions = getattr(self, "attention_sink_positions", None)
+        if not positions or batch_index is None:
+            return None
+        batch_index = int(batch_index)
+        if not 0 <= batch_index < len(positions):
+            return None
+        return positions[batch_index]
+
+    def calibration_keep_mask(
+        self,
+        keep_mask: Optional[torch.Tensor],
+        *,
+        batch_index: Optional[int],
+        layer_input=None,
+    ) -> Optional[torch.Tensor]:
+        """Return the row mask every calibration statistic of this batch uses.
+
+        This is the single place ``CalibrationConfig.exclude_attention_sinks``
+        is applied: the padding keep-mask derived from ``attention_mask`` loses
+        every attended BOS token (``exclude_attention_sinks`` in
+        ``utils.attn_mask``). With the option off, for a batch without a BOS
+        token, and for a tokenizer without one, ``keep_mask`` is returned
+        unchanged (same object), so those batches keep their exact statistics.
+        """
+
+        calibration = getattr(self, "calibration", None)
+        if calibration is None or not calibration.exclude_attention_sinks:
+            return keep_mask
+        batch = seq_len = None
+        device = None
+        hidden = None
+        if isinstance(layer_input, (list, tuple)) and layer_input:
+            hidden = layer_input[0]
+        elif torch.is_tensor(layer_input):
+            hidden = layer_input
+        if torch.is_tensor(hidden) and hidden.dim() >= 3:
+            batch, seq_len = int(hidden.shape[0]), int(hidden.shape[1])
+            device = hidden.device
+        return exclude_attention_sinks(
+            keep_mask,
+            self.attention_sink_positions_for_batch(batch_index),
+            batch=batch,
+            seq_len=seq_len,
+            device=device,
+        )
+
+    def calibration_rows(self, inp: torch.Tensor) -> torch.Tensor:
+        """Drop the attention-sink rows from a module input the mask wrapper left whole.
+
+        ``ModuleLooper._masked_hook_wrapper`` already applies the calibration
+        mask to ``[B, S, H]`` inputs. QQQ, MACaQ and the EXL3 capture also see
+        inputs it cannot place, such as the flattened ``[B*S, H]`` rows of an
+        all-expert MoE bypass, which they historically consumed whole
+        (padding included). Here they lose exactly the BOS sink rows, so the
+        option changes nothing else. Natively routed expert rows cannot be
+        mapped back to a sequence position and stay unfiltered.
+        """
+
+        if not torch.is_tensor(inp):
+            return inp
+        tls = getattr(self, "_mask_tls", None)
+        keep_mask = getattr(tls, "value", None)
+        padding_mask = getattr(tls, "padding_value", keep_mask)
+        if keep_mask is padding_mask or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            # Option off or no sink in this batch: the calibration mask is the
+            # padding mask itself.
+            return inp
+        rows = keep_mask.to(dtype=torch.bool)
+        if torch.is_tensor(padding_mask) and tuple(padding_mask.shape) == tuple(rows.shape):
+            rows = rows | ~padding_mask.to(device=rows.device, dtype=torch.bool)
+        if inp.dim() >= 3 and tuple(inp.shape[:2]) == tuple(rows.shape):
+            return inp[rows.to(device=inp.device)]
+        if inp.dim() == 2 and inp.shape[0] == rows.numel():
+            return inp[rows.reshape(-1).to(device=inp.device)]
+        return inp
 
     @staticmethod
     def _build_log_file_path(processor_name: str, current_time: str) -> Path:
@@ -1183,6 +1369,7 @@ class LoopProcessor:
                 "log": self.log,
                 "num_batches": self.num_batches,
                 "total_calibration_tokens": self.total_calibration_tokens,
+                "attention_sink_positions": getattr(self, "attention_sink_positions", None),
                 "results": self.results(),
                 "statistics": {
                     key: getattr(self, key)
@@ -1198,6 +1385,8 @@ class LoopProcessor:
             self.log = state["log"]
             self.num_batches = state["num_batches"]
             self.total_calibration_tokens = state["total_calibration_tokens"]
+            if "attention_sink_positions" in state:
+                self.attention_sink_positions = state["attention_sink_positions"]
             with self._results_lock:
                 self._results = dict(state["results"])
             for key in ("durations", "module_names", "gpu_memorys", "cpu_memorys", "log_call_count", "avg_losses"):

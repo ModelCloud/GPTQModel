@@ -581,7 +581,8 @@ def _runtime_layout_shell(cls, flag: str):
 
 
 @pytest.mark.parametrize(
-    "quant_method", ["exl3", "qqq", "paroquant", "macaq", "nf12", "tt-blockfloat"]
+    "quant_method",
+    ["bitsandbytes", "exl3", "qqq", "paroquant", "macaq", "nf12", "tt-blockfloat"],
 )
 def test_hf_from_pretrained_refuses_every_refused_method(tmp_path, quant_method):
     """Plain transformers must raise instead of loading random weights (#4091 item 5)."""
