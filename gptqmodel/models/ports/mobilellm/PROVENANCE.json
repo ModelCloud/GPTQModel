@@ -1,0 +1,70 @@
+{
+  "upstream_repository": "https://github.com/facebookresearch/MobileLLM",
+  "upstream_revision": "6cb80c4064183622a64105c875cdd8a35fc8c56b",
+  "license": "FAIR Noncommercial Research License with incorporated FAIR Acceptable Use Policy; upstream modeling also carries EleutherAI/Hugging Face Apache-2.0 attribution",
+  "source_files": [
+    {
+      "path": "utils/modeling_llama.py",
+      "sha256": "3ed7dcf49cdfa28ee1a33ae0347a167af27ffcfa0bd52d6b7c8d7b496f3c570c"
+    },
+    {
+      "path": "utils/process_args.py",
+      "sha256": "ccf1141f343e36c62d325ac24ebf67df268df7ce294b51cb3d52cc7edf93390a"
+    },
+    {
+      "path": "pretrain.py",
+      "sha256": "5eef80bac81f98b4fd47df7a70e9a0f1bb1b1f5a8457fc278f948f236747e503"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "3240ae7ffbefbe0ab1ac933cda5684dca2e790e85bfd3483fa6737d48e7a85d9"
+    },
+    {
+      "path": "configs/125M/config.json",
+      "sha256": "5c2c023e7f97d877b8d6a9cd5b92879632645328cf7ecdb0e4ea4873b57bf429"
+    },
+    {
+      "path": "configs/350M/config.json",
+      "sha256": "00bcf845dc57ff87c8f809b0fc66746fb361a9bce2f5b517fd7d4b7f70074e97"
+    },
+    {
+      "path": "configs/600M/config.json",
+      "sha256": "3df9721e6abbf3c616068519e1aafd3fe000be97fe6651a2ca682975b419e3e5"
+    },
+    {
+      "path": "configs/1B/config.json",
+      "sha256": "181694429d11a7eb015e13f8487c0f6037d1e3ab4e82293b341ee99a6972910c"
+    },
+    {
+      "path": "configs/1.5B/config.json",
+      "sha256": "1644361fc9c028cc4bcc1e354ae8cfa5fb141a85220f2cfdedac98d87740f608"
+    }
+  ],
+  "checkpoint_inventory_basis": "None: official HF config/source returned HTTP 401. Parameter keys/shapes are source-derived architecture coverage, not a verified released-checkpoint inventory.",
+  "modeling_changes": [
+    "Package-local MobileLLM config/model classes selected directly by LocalModelLoader on the mobilellm definition",
+    "Transformers 5 DynamicCache, current generation APIs, explicit 2D causal mask validation",
+    "Distinct cache slots for repeated physical layer uses; single checkpoint owner per physical layer",
+    "Source default/linear/dynamic RoPE and source retained dynamic NTK frequencies; strict nonpersistent FP32 rotary metadata",
+    "Shared embedding output projection and dense pretraining_tp split/sum arithmetic",
+    "Conservative plain-AWQ-only policy; dense TP-slice quantization rejects before packing"
+  ],
+  "omitted_unqualified_paths": [
+    "FlashAttention",
+    "training/gradient checkpointing",
+    "compilation",
+    "distributed/multi-GPU",
+    "threaded execution",
+    "static/offloaded/quantized/foreign cache implementations",
+    "speculative decoding",
+    "AWQ fold/search optimization",
+    "fusion"
+  ],
+  "tested_runtime": {
+    "python": "3.14.6 free-threaded",
+    "PYTHON_GIL": "0",
+    "torch": "2.15.0+cpu",
+    "transformers": "5.23.0",
+    "tokenicer": ["0.0.14", "0.0.17"]
+  }
+}

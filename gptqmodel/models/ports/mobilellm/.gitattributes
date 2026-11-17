@@ -1,0 +1,2 @@
+# Preserve the upstream license and AUP byte-for-byte, including whitespace.
+LICENSE -whitespace
