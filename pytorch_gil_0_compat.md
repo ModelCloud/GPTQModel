@@ -148,7 +148,7 @@ results below for that build.
 
 | API | Result | Where we use it | Notes / workaround |
 |---|---|---|---|
-| `torch.empty` | SAFE (concurrent) | staging buffers | Allocator is internally locked; contention only, no correctness risk. |
+| `torch.empty` | SAFE (concurrent) | staging buffers; QQQ per-call reduce scratch `gptqmodel/nn_modules/qlinear/qqq.py:53` | Allocator is internally locked; contention only, no correctness risk. QQQ allocates its `qqq_gemm` `C` scratch per call (#4621), so concurrent forwards on their own streams get independent blocks instead of racing a process-wide cache. |
 | `torch.zeros` | SAFE (concurrent) | buffers, masks | Fills on the current stream. |
 | `torch.ones` | SAFE (concurrent) | tests, probes | - |
 | `torch.full` | SAFE (concurrent) | constant buffers | - |

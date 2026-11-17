@@ -5,7 +5,6 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-import threading
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
@@ -34,60 +33,40 @@ def _qqq_gpu_quantizer():
     return dynamic_quant
 
 
-# ``qqq_gemm`` uses its ``C`` argument only as the per-call INT32 global
-# reduce scratch.  A buffer per module made a Llama-3-8B QQQ model retain
-# ~5.25 GiB of zeroed scratch (issue #4387), so modules on a device share a
-# lazily grown flat buffer instead.  The flat layout lets each caller take
-# a *contiguous* ``(max_par * 64, out_features)`` view even when the shared
-# allocation was grown for a wider layer; slicing columns of a 2-D buffer would
-# hand the kernel a stride it does not understand.
+# ``qqq_gemm`` uses its ``C`` argument only as the INT32 global-reduce scratch
+# of one call.  ``global_reduce`` writes each column slice before it reads that
+# slice, so ``C`` carries no state across calls: the kernel produces
+# bitwise-equal output from a zeroed buffer and from one filled with garbage
+# (#4621).
 #
-# The kernel writes ``C`` while it runs, so the allocation lock is not a
-# scratch-use lease (issue #4488).  The cache is keyed by the device *and* the
-# current stream: work on one stream is ordered by that stream and may reuse
-# its buffer, while distinct concurrent streams get independent allocations.
-_REDUCE_SCRATCH_LOCK = threading.Lock()
-_REDUCE_SCRATCH: dict[tuple[torch.device, object], torch.Tensor] = {}
+# ``C`` is therefore allocated per call and returned to the caching allocator
+# when the forward drops it.  Two earlier designs cached it, first per device
+# (#4387) and then per device *and* stream (#4488), and both outlived the
+# model: a thread pool that created its 32 pooled streams pinned 32 x 56 MiB on
+# an 8B QQQ model for the life of the process, and ``del model`` released none
+# of it (#4621).  A per-call allocation is stream-safe by construction: the
+# allocator only reuses a freed block on the stream that freed it, and work on
+# one stream is ordered by that stream.  On the 4096x14336 shapes it measured
+# 0.0-0.3 us slower per call, where one kernel call is 13.9 us.
 
 
-def _shared_reduce_scratch(
+def _allocate_reduce_scratch(
     device: torch.device,
     out_features: int,
     max_par: int = 16,
-    *,
-    stream: object = None,
 ) -> torch.Tensor:
-    """Return the INT32 reduce scratch owned by ``device``'s current stream.
+    """Allocate the INT32 global-reduce scratch for one ``qqq_gemm`` call.
 
-    The result is grown to ``max_par * 64 x out_features`` and is exclusive to
-    the stream that will run the kernel.  ``stream`` overrides the current
-    stream lookup; tests use it to exercise the key without a CUDA device.
+    The contiguous ``(max_par * 64, out_features)`` tensor is the kernel's ``C``
+    argument.  Nothing in it survives the call, so the caller may drop it as
+    soon as the kernel has been enqueued.
     """
 
-    device = torch.device(device)
-    if stream is None and device.type == "cuda":
-        stream = torch.cuda.current_stream(device)
-    # Key by the stream handle, not the Stream wrapper: the process-wide cache
-    # must not keep a user-created stream alive after the caller drops it.
-    handle = getattr(stream, "cuda_stream", None)
-    key = (device, handle if handle is not None else stream)
-    rows = max_par * 64
-    required = rows * out_features
-    with _REDUCE_SCRATCH_LOCK:
-        scratch = _REDUCE_SCRATCH.get(key)
-        if scratch is None or scratch.numel() < required:
-            # The kernel writes before it reads this scratch, but zeroing keeps
-            # the shared buffer indistinguishable from the old per-module one.
-            scratch = torch.zeros(required, dtype=torch.int32, device=device)
-            _REDUCE_SCRATCH[key] = scratch
-    return scratch[:required].view(rows, out_features)
-
-
-def _clear_reduce_scratch() -> None:
-    """Drop the process-wide scratch cache (tests and teardown only)."""
-
-    with _REDUCE_SCRATCH_LOCK:
-        _REDUCE_SCRATCH.clear()
+    return torch.empty(
+        (max_par * 64, out_features),
+        dtype=torch.int32,
+        device=torch.device(device),
+    )
 
 # The Marlin-derived QQQ W4A8 kernel (``gptqmodel_ext/qqq/qqq_gemm.cu``) is
 # written against CUDA inline PTX: ``cp.async``, ``mma.sync``, ``ldmatrix``,
@@ -439,25 +418,18 @@ class QQQLinear(GroupedQuantLinear):
         return buf
 
     def _reduce_scratch(self, device: Optional[torch.device] = None) -> torch.Tensor:
-        """Return the INT32 reduce scratch owned by this call's stream.
+        """Allocate the INT32 reduce scratch for this kernel call.
 
-        The native kernel consumes ``C`` for the duration of one call, so every
-        ``QQQLinear`` call on the same device *and* stream may reuse one
-        allocation.  Different streams must not: their work can overlap, and
-        an allocation lock does not order the kernels.  Inside
-        ``torch.compile`` a process-wide mutable cache would be captured as a
-        graph constant, so the compiled path gets a per-call allocation.
+        The native kernel consumes ``C`` for the duration of one call and does
+        not read its initial contents, so every call allocates its own buffer
+        instead of sharing a process-wide cache that outlives the model
+        (#4621).  One allocation also serves both the eager and the compiled
+        path: nothing here can be captured as a graph constant.
         """
 
         if device is None:
             device = self.B.device if hasattr(self, "B") else torch.device("cpu")
-        if torch.compiler.is_compiling():
-            return torch.zeros(
-                (self.max_par * 64, self.out_features),
-                dtype=torch.int32,
-                device=device,
-            )
-        return _shared_reduce_scratch(device, self.out_features, self.max_par)
+        return _allocate_reduce_scratch(device, self.out_features, self.max_par)
 
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
         """Pack a fake-quantized linear layer into the Marlin representation."""
