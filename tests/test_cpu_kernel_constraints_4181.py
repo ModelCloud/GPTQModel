@@ -171,6 +171,33 @@ def test_auto_group_size_equal_in_features_avoids_aten_and_fused(in_features):
     assert selected not in (TorchAtenLinear, TorchFusedLinear)
 
 
+def test_auto_partial_group_geometry_avoids_int4pack_and_forwards():
+    """SmolLM2's K=576, gs=128 must not select a CPU int4pack kernel.
+
+    ``aten::_weight_int4pack_mm_for_cpu`` requires K divisible by the resolved
+    group size, while GPTQ supports a partial final group. The model-wide
+    candidate pass cannot know K; per-module selection must reject Aten/Fused
+    and fall through to a kernel that supports the geometry.
+    """
+
+    in_features, out_features, group_size = 576, 64, 128
+    module = nn.Sequential(nn.Linear(in_features, out_features, bias=False))
+    _, selected = _select_for_module(module, group_size=group_size)
+
+    assert selected not in (TorchAtenLinear, TorchFusedLinear)
+
+    layer = _make_layer(
+        selected,
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+    )
+    out = layer(torch.randn(2, in_features, dtype=torch.bfloat16))
+
+    assert tuple(out.shape) == (2, out_features)
+    assert torch.isfinite(out).all()
+
+
 @pytest.mark.parametrize(
     ("dequantize", "kernel_cls"),
     [
