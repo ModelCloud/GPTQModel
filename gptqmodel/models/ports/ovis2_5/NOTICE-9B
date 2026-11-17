@@ -1,0 +1,5 @@
+Copyright (C) 2025 AIDC-AI
+Licensed under the Apache 2.0 (the "License").
+The model was trained based on the following models:
+1. Qwen3-8B (https://huggingface.co/Qwen/Qwen3-8B), license: Apache License 2.0 (https://huggingface.co/Qwen/Qwen3-8B/blob/main/LICENSE). 
+2. Siglip2 (https://huggingface.co/google/siglip2-so400m-patch16-512), license: Apache License 2.0 (https://choosealicense.com/licenses/apache-2.0/).
