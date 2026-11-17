@@ -153,9 +153,9 @@ Three findings drove the implementation:
    storage paths as fast as the 32-bit one.
 2. **Vectorize the loops, do not just translate them.** The original packers
    touched one row or column per Python iteration (4096 Torch dispatches for a
-   4096x4096 layer). `_pack_codes_to_words`, `_pack_block_rows_2_4_8`,
-   `_pack_block_rows_3`, `_pack_code_cols_2_4_8` and `_pack_code_cols_3`
-   process whole chunks per step, which is both exact and faster than the NumPy
+   4096x4096 layer). `_pack_codes_to_words`, `_pack_rows_3`,
+   `_pack_code_cols_2_4_8` and `_pack_code_cols_3` process whole chunks per
+   step, which is both exact and faster than the NumPy
    loop for `marlin.pack_cols` and `marlin.unpack_cols`. The `pack_factor == 1`
    case is the identity and skips packing entirely.
 3. **The RCO DP is compiled, not a NumPy fast path.** The inner step is a few

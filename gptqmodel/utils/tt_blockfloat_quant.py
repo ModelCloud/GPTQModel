@@ -1288,18 +1288,28 @@ def save_blockfloat_checkpoint(
                 continue
             key = f"{index}.{name}"
             layer_bits = _layer_bits(bits, key)
-            w = module.weight.detach().to(torch.float32)
+            source_weight = module.weight.detach()
+            bias = getattr(module, "bias", None)
+            # The grid check needs float32 arithmetic, but that cast is only for
+            # the encoder. Anything stored as a dense float keeps the module's
+            # own dtype: narrowing a bf16/fp32 weight or bias to float16 turns
+            # values above 65504 into inf and rounds every other value.
+            w = source_weight.to(torch.float32)
             try:
                 codes, exponents = decompose_blockfloat(w, bits=layer_bits)
             except ValueError:
-                # Not quantized (or not on the grid): keep it as dense float.
-                tensors[f"{key}.weight"] = w.to(torch.float16)
+                # Not quantized (or not on the grid): keep it as a dense float
+                # at the source precision, bias included. The old code both
+                # narrowed this weight and dropped the bias entirely.
+                tensors[f"{key}.weight"] = source_weight.contiguous()
+                if bias is not None:
+                    tensors[f"{key}.bias"] = bias.detach().contiguous()
                 continue
             tensors[f"{key}.blockfloat_codes"] = _pack_codes(codes, layer_bits)
             tensors[f"{key}.blockfloat_code_shape"] = torch.tensor(codes.shape)
             tensors[f"{key}.blockfloat_exponents"] = exponents
-            if getattr(module, "bias", None) is not None:
-                tensors[f"{key}.bias"] = module.bias.detach().float().to(torch.float16)
+            if bias is not None:
+                tensors[f"{key}.bias"] = bias.detach().contiguous()
             packed = tensors[f"{key}.blockfloat_codes"]
             summary[key] = {
                 "shape": list(w.shape),

@@ -100,11 +100,12 @@ def _quantization_dtype(dtype):
     """Operand dtype for the dynamic quantizer.
 
     The Metal quantizer reads each element as FP32, so it does not need an FP16
-    operand.  Narrowing BF16 to FP16 first turns any ``|x| > 65504`` into inf,
-    which then makes the row scale inf and the output NaN.  Keep BF16 wide and
-    preserve the historical FP16 operand for every other input dtype.
+    operand. Narrowing BF16 or FP32 to FP16 first turns any ``|x| > 65504``
+    into inf, which then makes the row scale inf and the output NaN. Keep every
+    supported activation dtype at its own width; only an unknown dtype keeps
+    the historical FP16 fallback.
     """
-    return dtype if dtype == mx.bfloat16 else mx.float16
+    return dtype if dtype in (mx.float16, mx.bfloat16, mx.float32) else mx.float16
 
 
 class MlxQQQLinear(nn.Module):

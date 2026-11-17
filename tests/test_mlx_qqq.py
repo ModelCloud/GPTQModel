@@ -277,3 +277,38 @@ def test_qqq_mlx_wide_epilogue_keeps_finite_range(
     assert actual.dtype == dtype
     assert np.isfinite(visible).all()
     np.testing.assert_allclose(visible, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("rows", [1, 2], ids=["finalizer", "python_epilogue"])
+def test_qqq_mlx_fp32_activation_range_stays_finite(rows):
+    """FP32 |x| > 65504 must not be narrowed to FP16 before the row max."""
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
+
+    out_features = in_features = 64
+    weight = np.full((out_features, in_features // 8), np.uint32(0x99999999), dtype=np.uint32)
+    scales = np.full((out_features, 1), 16.0, dtype=np.float32)
+    biases = np.full((out_features, 1), -128.0, dtype=np.float32)
+    linear = nn.QuantizedLinear(
+        in_features, out_features, bias=False, group_size=64, bits=4,
+    )
+    linear.load_weights([
+        ("weight", mx.array(weight)),
+        ("scales", mx.array(scales)),
+        ("biases", mx.array(biases)),
+    ])
+    layer = MlxQQQLinear(
+        linear, np.full((1, out_features), 0.0625, dtype=np.float32),
+    )
+
+    x_np = np.full((rows, in_features), 100000.0, dtype=np.float32)
+    actual = layer(mx.array(x_np))
+    mx.eval(actual)
+
+    # Signed code 1, scale 16, channel scale 0.0625 -> represented weight 1.
+    exact = x_np.astype(np.float64) @ np.ones((in_features, out_features))
+    expected = torch.from_numpy(exact).float().numpy()
+    visible = np.array(actual.astype(mx.float32))
+
+    assert actual.dtype == mx.float32
+    assert np.isfinite(visible).all()
+    np.testing.assert_allclose(visible, expected, rtol=2e-3, atol=2e-3)

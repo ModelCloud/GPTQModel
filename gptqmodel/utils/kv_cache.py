@@ -15,7 +15,10 @@ per layer:
                  of two. Reading per-head shapes here overstates by ~60x.
 ``linear``       recurrent layers keep a constant-size state. They do not grow
                  with context and are reported separately, never in the slope.
-``sliding``      growth capped at ``min(context, window)``.
+``sliding``      growth capped at ``min(context, window)``; chunked attention
+                 (Llama 4) uses ``attention_chunk_size`` as its window.
+``shared``       Gemma 3n/4 tail layers reuse an earlier layer's K/V and add
+                 nothing; they are reported but never counted.
 
 Stacks that mix those (GLM5, DeepSeek V4.1 Flash, Gemma4 and similar) declare the
 mix either through ``layer_types`` or through a heterogeneous
@@ -24,6 +27,7 @@ resolved layer by layer; anything unclassifiable is named instead of being folde
 into a total that looks authoritative.
 """
 
+from collections.abc import Sequence as _SequenceABC
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Tuple
 
@@ -50,14 +54,14 @@ _FULL_ATTENTION_TYPES = frozenset({
     # A layer that mixes a recurrent branch with an attention branch still keeps
     # standard K/V for the attention half; the recurrent half is constant state.
     "hybrid",
-    # Llama4 masking pattern: global attention with a chunked causal mask, so the
-    # cache covers the whole context like any full-attention layer.
-    "chunked_attention",
 })
 _SLIDING_ATTENTION_TYPES = frozenset({
     "sliding_attention", "sliding_window_attention", "window_attention",
     "hybrid_sliding",
 })
+# Llama4's "chunked attention" is not full attention: transformers builds a
+# sliding-window cache for it with ``sliding_window = attention_chunk_size``.
+_CHUNKED_ATTENTION_TYPES = frozenset({"chunked_attention"})
 _COMPRESSED_ATTENTION_TYPES = frozenset({
     "heavily_compressed_attention", "compressed_sparse_attention", "compressed_attention",
 })
@@ -96,7 +100,7 @@ class LayerCache:
     ``compress_rate`` source tokens, which is the part that grows unbounded.
     """
 
-    kind: str                       # "gqa" | "mla" | "linear" | "unknown"
+    kind: str                       # "gqa" | "mla" | "linear" | "shared" | "block" | "unknown"
     dims: int = 0                   # elements cached per token (0 when not growing)
     window: Optional[int] = None    # cap for sliding layers
     compressed_dims: int = 0        # elements per compressed entry
@@ -138,6 +142,12 @@ class KVCacheEstimate:
     @property
     def block_layers(self) -> int:
         return sum(1 for layer in self.layers if layer.kind == "block")
+
+    @property
+    def shared_layers(self) -> int:
+        """Decoder layers that reuse an earlier layer's K/V and cache nothing."""
+
+        return sum(1 for layer in self.layers if layer.kind == "shared")
 
     @property
     def layer_type(self) -> str:
@@ -200,6 +210,8 @@ class KVCacheEstimate:
             parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
         if self.block_layers:
             parts.append(f"{self.block_layers} non-attention block(s)")
+        if self.shared_layers:
+            parts.append(f"{self.shared_layers} KV-shared layer(s)")
         if self.mtp_layers:
             parts.append(f"incl. {self.mtp_layers} MTP layer(s)")
         if self.unclassified:
@@ -260,12 +272,73 @@ def _declared_layer_types(source: Any, layers: int) -> Optional[list]:
 
 
 def _per_layer_configs(source: Any) -> Optional[list]:
-    """Per-layer configs for heterogeneous stacks, or None."""
+    """Per-layer configs for heterogeneous stacks, or None.
+
+    Transformers exposes this as ``_PerLayerConfigView``, a
+    ``collections.abc.Sequence`` rather than a ``list``; accepting only
+    ``list``/``tuple`` silently discarded Gemma 4's per-layer head shapes.
+    """
 
     per_layer = _safe_get(source, "per_layer_config")
-    if isinstance(per_layer, (list, tuple)) and per_layer:
-        return list(per_layer)
+    if per_layer is None or isinstance(per_layer, (str, bytes)):
+        return None
+    if isinstance(per_layer, (list, tuple)):
+        return list(per_layer) if per_layer else None
+    if isinstance(per_layer, _SequenceABC):
+        try:
+            return [per_layer[index] for index in range(len(per_layer))]
+        except Exception:
+            return None
     return None
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _read_attr(obj: Any, name: str) -> Tuple[Any, bool]:
+    """Read an attribute and report whether heterogeneity made it ambiguous."""
+
+    try:
+        return getattr(obj, name, None), False
+    except Exception as exc:
+        return None, type(exc).__name__ == "AmbiguousGlobalPerLayerAttributeError"
+
+
+def _layer_attr(source: Any, layer_cfg: Any, name: str) -> Tuple[Any, bool]:
+    value, ambiguous = _read_attr(layer_cfg, name)
+    if value is None and layer_cfg is not source:
+        value, ambiguous = _read_attr(source, name)
+    return value, ambiguous
+
+
+def _inferred_layer_type(source: Any, layer_cfg: Any) -> str:
+    """Resolve a layer kind the way ``transformers.cache_utils`` does.
+
+    When ``layer_types`` is absent, a per-layer ``sliding_window`` means the
+    layer is sliding, otherwise a per-layer ``attention_chunk_size`` means it is
+    chunked, otherwise it is full attention. Mistral, Phi-3 and Starcoder2
+    checkpoints rely on this: they set ``sliding_window`` without declaring
+    ``layer_types``.
+    """
+
+    window = _positive_int(_safe_get(layer_cfg, "sliding_window"))
+    if window is None and layer_cfg is not source:
+        window = _positive_int(_safe_get(source, "sliding_window"))
+    if window is not None:
+        return "sliding_attention"
+    chunk = _positive_int(_safe_get(layer_cfg, "attention_chunk_size"))
+    if chunk is None and layer_cfg is not source:
+        chunk = _positive_int(_safe_get(source, "attention_chunk_size"))
+    if chunk is not None:
+        return "chunked_attention"
+    return "full_attention"
 
 
 def _mla_dims(source: Any, layer_cfg: Any) -> Optional[int]:
@@ -280,10 +353,16 @@ def _mla_dims(source: Any, layer_cfg: Any) -> Optional[int]:
 
 
 def _gqa_dims(source: Any, layer_cfg: Any) -> Optional[int]:
-    heads = _safe_get(layer_cfg, "num_attention_heads", _safe_get(source, "num_attention_heads"))
-    hidden = _safe_get(layer_cfg, "hidden_size", _safe_get(source, "hidden_size"))
-    kv_heads = _safe_get(layer_cfg, "num_key_value_heads", _safe_get(source, "num_key_value_heads")) or heads
-    head_dim = _safe_get(layer_cfg, "head_dim", _safe_get(source, "head_dim"))
+    heads, heads_ambiguous = _layer_attr(source, layer_cfg, "num_attention_heads")
+    hidden, hidden_ambiguous = _layer_attr(source, layer_cfg, "hidden_size")
+    kv_heads, kv_ambiguous = _layer_attr(source, layer_cfg, "num_key_value_heads")
+    head_dim, head_dim_ambiguous = _layer_attr(source, layer_cfg, "head_dim")
+    if heads_ambiguous or hidden_ambiguous or kv_ambiguous or head_dim_ambiguous:
+        # The value varies per layer and the caller did not give us the layer
+        # view. Guessing ``hidden_size // heads`` here is what made Gemma 4
+        # report 210 KiB/token, so report unknown instead.
+        return None
+    kv_heads = kv_heads or heads
     if not head_dim and heads and hidden:
         head_dim = hidden // heads
     if not (heads and kv_heads and head_dim):
@@ -357,22 +436,31 @@ def _estimate_for_stack(
     if resolved_dtype is None:
         return None
 
-    global_window = _safe_get(source, "sliding_window")
-    global_window = int(global_window) if isinstance(global_window, int) and global_window > 0 else None
+    global_window = _positive_int(_safe_get(source, "sliding_window"))
 
     declared_types = _declared_layer_types(source, layer_count)
     mtp = int(_safe_get(source, "num_nextn_predict_layers", 0) or 0)
+    shared = _positive_int(_safe_get(source, "num_kv_shared_layers")) or 0
+    shared_from = max(0, layer_count - shared)
 
     resolved: list[LayerCache] = []
     unclassified: list[str] = []
     for index in range(layer_count):
+        # Gemma 3n/4 reuse an earlier layer's K/V for the tail; transformers does
+        # not call ``past_key_values.update`` for them, so they add no bytes.
+        if index >= shared_from:
+            resolved.append(LayerCache(kind="shared"))
+            continue
+
         layer_cfg = per_layer_configs[index] if per_layer_configs and index < len(per_layer_configs) else source
         layer_type = _safe_get(layer_cfg, "layer_type")
+        if layer_type is not None:
+            layer_type = str(layer_type).lower() or None
         if layer_type is None and declared_types and index < len(declared_types):
             layer_type = declared_types[index]
-        layer_type = str(layer_type).lower() if layer_type else None
-        window = _safe_get(layer_cfg, "sliding_window", global_window)
-        window = int(window) if isinstance(window, int) and window > 0 else None
+        if layer_type is None:
+            layer_type = _inferred_layer_type(source, layer_cfg)
+        window = _positive_int(_safe_get(layer_cfg, "sliding_window", global_window))
 
         if layer_type in _LINEAR_ATTENTION_TYPES:
             resolved.append(LayerCache(kind="linear"))
@@ -415,7 +503,19 @@ def _estimate_for_stack(
                 resolved.append(LayerCache(kind="unknown"))
             continue
 
-        known_attention = layer_type is None or layer_type in _FULL_ATTENTION_TYPES
+        if layer_type in _CHUNKED_ATTENTION_TYPES:
+            # Llama4 caps each chunked layer at ``attention_chunk_size`` tokens.
+            chunk = _positive_int(_safe_get(layer_cfg, "attention_chunk_size"))
+            if chunk is None and layer_cfg is not source:
+                chunk = _positive_int(_safe_get(source, "attention_chunk_size"))
+            if chunk is None:
+                unclassified.append(layer_type)
+                resolved.append(LayerCache(kind="unknown"))
+            else:
+                resolved.append(LayerCache(kind=kind, dims=dims, window=chunk))
+            continue
+
+        known_attention = layer_type in _FULL_ATTENTION_TYPES
         if layer_type in _SLIDING_ATTENTION_TYPES:
             resolved.append(LayerCache(kind=kind, dims=dims, window=window or 1024))
         elif known_attention:
