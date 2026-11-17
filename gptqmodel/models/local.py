@@ -29,8 +29,18 @@ class LocalModelLoader:
     # These are trusted class names supplied by the package, never import paths
     # or a heuristic derived from a checkpoint directory/model identifier.
     config_architectures: tuple[str, ...] = ()
+    # Immutable, package-declared normalization defaults, consumed by Tokenicer
+    # after class selection. Explicit caller options take precedence.
+    tokenicer_options: tuple[tuple[str, object], ...] = ()
 
     def __post_init__(self):
+        if not isinstance(self.tokenicer_options, tuple) or any(
+            not isinstance(option, tuple) or len(option) != 2
+            or not isinstance(option[0], str) or not option[0].isidentifier()
+            or option[0] in {"config", "model_config", "trust_remote_code", "code_revision"}
+            for option in self.tokenicer_options
+        ) or len(dict(self.tokenicer_options)) != len(self.tokenicer_options):
+            raise ValueError("Local tokenicer_options must be unique normalization option pairs")
         if not isinstance(self.config_architectures, tuple) or any(
             not isinstance(name, str) or not name.isidentifier() for name in self.config_architectures
         ):
