@@ -8,6 +8,7 @@ The pinned source and adaptation boundaries are recorded in PROVENANCE.md.
 """
 
 import math
+from contextlib import contextmanager
 from functools import partial
 from typing import cast
 
@@ -21,6 +22,24 @@ from transformers.masking_utils import create_causal_mask
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 
 from .configuration_dbrx import DbrxConfig
+
+
+@contextmanager
+def _cache_transaction(cache):
+    if not isinstance(cache, Cache):
+        yield
+        return
+    if getattr(cache, "_dbrx_invalid", False):
+        if any(cache.get_seq_length(index) != 0 for index in range(len(cache.layers))):
+            raise ValueError("Failed converted DBRX forward invalidated this cache; call reset() and prefill the full prompt.")
+        setattr(cache, "_dbrx_invalid", False)
+    version = getattr(cache, "_dbrx_write_version", 0)
+    try:
+        yield
+    except BaseException:
+        if getattr(cache, "_dbrx_write_version", 0) != version:
+            setattr(cache, "_dbrx_invalid", True)
+        raise
 
 
 class DbrxRotaryEmbedding(nn.Module):
@@ -75,6 +94,7 @@ class DbrxAttention(nn.Module):
         cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
         q, k = q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
         if past_key_value is not None:
+            setattr(past_key_value, "_dbrx_write_version", getattr(past_key_value, "_dbrx_write_version", 0) + 1)
             k, v = past_key_value.update(k, v, self.block_idx)
         repeats = self.num_heads // self.num_key_value_heads
         k, v = (t.repeat_interleave(repeats, dim=1) for t in (k, v))
@@ -260,42 +280,43 @@ class DbrxModel(DbrxPreTrainedModel):
         hidden_states = F.dropout(inputs_embeds, p=self.config.emb_pdrop, training=self.training)
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
-        past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
-        if position_ids is None:
-            position_ids = torch.arange(past_length, past_length + hidden_states.shape[1], device=hidden_states.device)[None]
-        if position_ids.shape[-1] != hidden_states.shape[1]:
-            raise ValueError("position_ids must describe the current tokens.")
-        if attention_mask is not None and attention_mask.ndim not in (2, 4):
-            raise ValueError("attention_mask must be a 2D padding mask or 4D additive mask.")
-        if output_router_logits and attention_mask is not None and attention_mask.ndim != 2:
-            raise ValueError("Router auxiliary loss requires a 2D padding mask.")
-        causal_mask = create_causal_mask(
-            config=self.config, inputs_embeds=hidden_states, attention_mask=attention_mask,
-            past_key_values=past_key_values, position_ids=position_ids,
-        )
-        all_hidden, all_attentions, all_router = (), (), ()
-        for block in self.blocks:
+        with _cache_transaction(past_key_values):
+            past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+            if position_ids is None:
+                position_ids = torch.arange(past_length, past_length + hidden_states.shape[1], device=hidden_states.device)[None]
+            if position_ids.shape[-1] != hidden_states.shape[1]:
+                raise ValueError("position_ids must describe the current tokens.")
+            if attention_mask is not None and attention_mask.ndim not in (2, 4):
+                raise ValueError("attention_mask must be a 2D padding mask or 4D additive mask.")
+            if output_router_logits and attention_mask is not None and attention_mask.ndim != 2:
+                raise ValueError("Router auxiliary loss requires a 2D padding mask.")
+            causal_mask = create_causal_mask(
+                config=self.config, inputs_embeds=hidden_states, attention_mask=attention_mask,
+                past_key_values=past_key_values, position_ids=position_ids,
+            )
+            all_hidden, all_attentions, all_router = (), (), ()
+            for block in self.blocks:
+                if output_hidden_states:
+                    all_hidden += (hidden_states,)
+                output = block(
+                    hidden_states, position_ids=position_ids, attention_mask=causal_mask, past_key_value=past_key_values,
+                    output_attentions=output_attentions, output_router_logits=output_router_logits, use_cache=use_cache,
+                )
+                hidden_states = output[0]
+                if output_attentions:
+                    all_attentions += (output[1],)
+                if output_router_logits:
+                    all_router += (output[-1],)
+            hidden_states = self.norm_f(hidden_states)
             if output_hidden_states:
                 all_hidden += (hidden_states,)
-            output = block(
-                hidden_states, position_ids=position_ids, attention_mask=causal_mask, past_key_value=past_key_values,
-                output_attentions=output_attentions, output_router_logits=output_router_logits, use_cache=use_cache,
+            output = MoeModelOutputWithPast(
+                last_hidden_state=hidden_states, past_key_values=past_key_values if use_cache else None,
+                hidden_states=all_hidden if output_hidden_states else None,
+                attentions=all_attentions if output_attentions else None,
+                router_logits=cast(tuple[torch.Tensor], all_router) if output_router_logits else None,
             )
-            hidden_states = output[0]
-            if output_attentions:
-                all_attentions += (output[1],)
-            if output_router_logits:
-                all_router += (output[-1],)
-        hidden_states = self.norm_f(hidden_states)
-        if output_hidden_states:
-            all_hidden += (hidden_states,)
-        output = MoeModelOutputWithPast(
-            last_hidden_state=hidden_states, past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden if output_hidden_states else None,
-            attentions=all_attentions if output_attentions else None,
-            router_logits=cast(tuple[torch.Tensor], all_router) if output_router_logits else None,
-        )
-        return output if return_dict else output.to_tuple()
+            return output if return_dict else output.to_tuple()
 
 
 def load_balancing_loss_func(gate_logits, num_experts, top_k, attention_mask=None):
@@ -344,6 +365,11 @@ class DbrxForCausalLM(DbrxPreTrainedModel, GenerationMixin):
     def set_decoder(self, decoder):
         self.transformer = decoder
 
+    @staticmethod
+    def create_masks_for_generate(*, attention_mask=None, **kwargs):
+        # DbrxModel constructs the causal mask; routing still needs the original padding mask.
+        return attention_mask
+
     def forward(
         self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
         inputs_embeds=None, labels=None, use_cache=None, output_attentions=None, output_hidden_states=None,
@@ -351,29 +377,40 @@ class DbrxForCausalLM(DbrxPreTrainedModel, GenerationMixin):
     ):
         return_dict = self.config.return_dict if return_dict is None else return_dict
         output_router_logits = self.config.output_router_logits if output_router_logits is None else output_router_logits
-        output = self.transformer(
-            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
-            output_attentions=output_attentions, output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits, return_dict=True, **kwargs,
-        )
-        indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(output.last_hidden_state[:, indices]).float()
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-        aux_loss = None
-        if output_router_logits:
-            router_mask = attention_mask
-            if router_mask is not None:
-                router_mask = router_mask[:, -output.last_hidden_state.shape[1]:]
-            aux_loss = load_balancing_loss_func(
-                output.router_logits, self.num_experts, self.num_experts_per_tok, router_mask,
+        if past_key_values is None and (self.config.use_cache if use_cache is None else use_cache):
+            past_key_values = DynamicCache(config=self.config)
+        with _cache_transaction(past_key_values):
+            router_start = 0
+            if output_router_logits and attention_mask is not None and isinstance(past_key_values, Cache):
+                router_start = past_key_values.get_seq_length()
+                if isinstance(router_start, torch.Tensor):
+                    router_start = router_start.clone()
+            output = self.transformer(
+                input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
+                past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
+                output_attentions=output_attentions, output_hidden_states=output_hidden_states,
+                output_router_logits=output_router_logits, return_dict=True, **kwargs,
             )
-            if loss is not None:
-                loss = loss + self.router_aux_loss_coef * aux_loss.to(loss.device)
-        result = MoeCausalLMOutputWithPast(
-            loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=output.past_key_values,
-            hidden_states=output.hidden_states, attentions=output.attentions, router_logits=output.router_logits,
-        )
-        return result if return_dict else result.to_tuple()
+            indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            logits = self.lm_head(output.last_hidden_state[:, indices]).float()
+            loss = None
+            if labels is not None:
+                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            aux_loss = None
+            if output_router_logits:
+                router_mask = attention_mask
+                if router_mask is not None:
+                    positions = torch.arange(output.last_hidden_state.shape[1], device=router_mask.device)
+                    if isinstance(router_start, torch.Tensor):
+                        router_start = router_start.to(router_mask.device)
+                    router_mask = router_mask.index_select(1, positions + router_start)
+                aux_loss = load_balancing_loss_func(
+                    output.router_logits, self.num_experts, self.num_experts_per_tok, router_mask,
+                )
+                if loss is not None:
+                    loss = loss + self.router_aux_loss_coef * aux_loss.to(loss.device)
+            result = MoeCausalLMOutputWithPast(
+                loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=output.past_key_values,
+                hidden_states=output.hidden_states, attentions=output.attentions, router_logits=output.router_logits,
+            )
+            return result if return_dict else result.to_tuple()
