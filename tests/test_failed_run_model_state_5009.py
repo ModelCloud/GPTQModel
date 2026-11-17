@@ -98,10 +98,17 @@ def _load(model_dir: str, method: str, offload: bool) -> GPTQModel:
     return GPTQModel.load(model_dir, quantize_config=quantize_config, dtype=torch.float16)
 
 
-def _run_expecting_failure(model: GPTQModel) -> BaseException | None:
+def _run_expecting_failure(model: GPTQModel) -> Exception | None:
+    """Run the quantization and return the stop signal it raised.
+
+    Both signals under test (``StopMainLoop`` and an ordinary stage error) are
+    ``Exception`` subclasses, so ``KeyboardInterrupt``/``SystemExit`` are left to
+    the caller.
+    """
+
     try:
         model.quantize(CalibrationConfig(dataset=_calibration(), batch_size=2, min_length=1))
-    except BaseException as exc:  # noqa: BLE001 - the stop signal is the point
+    except Exception as exc:  # noqa: BLE001 - the stop signal is the point
         return exc
     return None
 
