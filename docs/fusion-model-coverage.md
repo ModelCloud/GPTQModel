@@ -246,7 +246,7 @@ layout alone does not authorize it.
 | `hymba` | `HymbaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `instella` | `InstellaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `intern_s2_preview` | `InternS2PreviewQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `internlm` | `InternLMQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `internlm` | `InternLMQModel` | Package-owned InternLM 1 port; fusion executor has not been qualified. |
 | `internlm2` | `InternLM2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `interns1` | `InternS1QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `internvl_chat` | `InternVLChatQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
