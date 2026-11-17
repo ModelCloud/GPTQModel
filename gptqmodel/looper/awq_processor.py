@@ -3242,33 +3242,58 @@ class AWQProcessor(LoopProcessor):
             1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
         )
 
+        out_dtype = torch.result_type(input_feat, w_all)
+
+        def alloc_scratch(rows):
+            clamp = torch.empty(
+                (cand_chunk, rows, 1, n_group, group_w), dtype=w_all.dtype, device=device
+            )
+            return (
+                clamp,
+                torch.empty_like(clamp),
+                torch.empty(
+                    (cand_chunk, rows, n_tokens, n_group),
+                    dtype=out_dtype,
+                    device=device,
+                ),
+            )
+
+        # One workspace set serves every full tile. Allocating inside the loop
+        # left the previous tile's buffers alive through the `prod`/`clamp`/
+        # `quant`/`cur_out` views while the next set was created, so the peak
+        # carried two sets and every AWQ run paid +52-62% (#4682).
+        full_scratch_clamp, full_scratch_quant, full_scratch_out = alloc_scratch(oc_batch_size)
+        full_org_out = torch.empty_like(full_scratch_out[0])
+        full_scratch_prod = torch.empty(
+            (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
+            dtype=full_scratch_out.dtype,
+            device=device,
+        )
+
         for i_b in range(0, org_w_shape[0], oc_batch_size):
-            # The final tile may be shorter than `oc_batch_size`. Size the
-            # scratch to this tile's real row count: cropping a padded buffer to
-            # `co` rows leaves a non-contiguous slice whose `reshape` is a copy,
-            # so `_pseudo_quantize_tensor_into` wrote the quantized candidates
+            # The final tile may be shorter than `oc_batch_size`. It gets its
+            # own exact-size set: cropping a full-size buffer to `co` rows
+            # leaves a non-contiguous slice whose `reshape` is a copy, so
+            # `_pseudo_quantize_tensor_into` wrote the quantized candidates
             # into that copy and the error reduction read stale rows (#4540).
-            # Per-tile allocation keeps every slice below a contiguous view and
-            # never materializes padded rows, so the reduction only sees real
-            # tile rows. Each tile allocates once, outside the inner loops.
+            # A full tile takes the shared set, where `[:co]` is the whole
+            # extent and therefore still contiguous.
             w = w_all[i_b: i_b + oc_batch_size]
             co = w.shape[0]
-
-            scratch_clamp = torch.empty(
-                (cand_chunk, co, 1, n_group, group_w), dtype=w_all.dtype, device=device
-            )
-            scratch_quant = torch.empty_like(scratch_clamp)
-            scratch_out = torch.empty(
-                (cand_chunk, co, n_tokens, n_group),
-                dtype=torch.result_type(input_feat, w_all),
-                device=device,
-            )
-            org_out = torch.empty_like(scratch_out[0])
-            scratch_prod = torch.empty(
-                (cand_chunk, co, token_chunk, n_group, group_w),
-                dtype=scratch_out.dtype,
-                device=device,
-            )
+            if co == oc_batch_size:
+                scratch_clamp = full_scratch_clamp
+                scratch_quant = full_scratch_quant
+                scratch_out = full_scratch_out
+                org_out = full_org_out
+                scratch_prod = full_scratch_prod
+            else:
+                scratch_clamp, scratch_quant, scratch_out = alloc_scratch(co)
+                org_out = torch.empty_like(scratch_out[0])
+                scratch_prod = torch.empty(
+                    (cand_chunk, co, token_chunk, n_group, group_w),
+                    dtype=scratch_out.dtype,
+                    device=device,
+                )
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
