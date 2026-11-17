@@ -51,7 +51,8 @@ conversion. Rotary `inv_freq` is nonpersistent, as in the converted source.
 - Use current `PreTrainedConfig`, `GenerationMixin`, masking and `Cache` APIs.
 - Keep post-rotary keys in caller-owned dynamic or static caches.
 - Preserve FP32 LM-head outputs and the source's second auxiliary-loss softmax.
-- Restrict auxiliary-loss padding masks to current tokens during continuation.
+- Index auxiliary-loss padding masks by current physical cache positions.
+- Invalidate caches on post-write failures; require reset and full-prefix refill.
 - Write dense and packed checkpoints as safetensors.
 
 Runtime code imports only package-local config/model classes and installed Torch
@@ -72,7 +73,7 @@ Before/after evidence is relative to the pre-port definition at
 | Class selection | `definitions/dbrx_converted.py:10-11` required checkpoint custom code | `definitions/dbrx_converted.py:11-14` declares the exact local config/model |
 | Model layout | Checkpoint Python owned split projections and experts | Package code owns those exact weights, without converting to original DBRX |
 | AWQ scaling | Inherited generic source inference | `definitions/dbrx_converted.py:22-31` disables unused root capture and all scale groups |
-| Cache continuation with auxiliary loss | Full-history padding mask mismatched current router tokens | The LM head slices the auxiliary mask to current tokens; attention still receives full key history |
+| Cache continuation with auxiliary loss | Full-history padding mask mismatched current router tokens | The LM head selects current physical cache positions; attention still receives full key history |
 
 ```mermaid
 flowchart TD
@@ -104,6 +105,78 @@ empty activation bucket. Module projections still collect their ordinary inputs.
 Tests run the real AWQ consumer and public calibration/packing/save/reload, not a
 mock quantizer. Router/norm weights remain unquantized. Fusion is unqualified.
 
+## Cache failure lifecycle and padding-mask ownership
+
+Both public `DbrxForCausalLM.forward` and decoder-core `DbrxModel.forward` guard
+the caller's cache through output construction and tuple encoding. Each attempted
+attention cache update advances a cache-local write version **before** the write.
+Any escaping exception after a write attempt marks that cache invalid. This
+includes a partial decoder update, complete decoder followed by head/loss/auxiliary
+failure, output-construction failure, and a decoder forward-hook failure inside
+the LM call. Validation failures before any write do not invalidate the prefix.
+
+Invalid caches are **not rolled back or copied**. Both entry points refuse reuse
+until every layer reports zero length: the caller must run `cache.reset()`, then
+prefill the **entire** prompt again. Resetting just the first layer does not
+qualify. This avoids copying a trained-scale KV prefix on every token. The marker
+is cache-local, not stored on the model; concurrent calls require independent
+caches. Failure invalidation covers these forward bodies, not arbitrary user
+hooks running after the outer LM forward has returned.
+
+`DbrxForCausalLM.create_masks_for_generate` leaves the generation padding mask
+unconverted. `DbrxModel` constructs the causal mask exactly once while auxiliary
+loss retains its 2D validity metadata. Transformers may omit an all-valid mask;
+that remains equivalent to no padding. Arbitrary caller 4D additive masks still
+work for attention without router loss, but do **not** qualify as router padding
+metadata. This avoids guessing validity from an internal additive mask.
+
+The LM snapshots the physical cache length before the decoder mutates it. For a
+query of length `q`, auxiliary loss selects padding columns `start + arange(q)`.
+This is neither the last `q` capacity columns nor padding-adjusted RoPE position
+IDs. The scalar StaticCache length is cloned because its counter is updated
+in-place by every decoder block. Full-capacity masks with future zero padding
+therefore yield the same finite auxiliary/labeled loss as minimal-width masks.
+
+Evidence below compares the original local port `b9443ebb47b258527693641468864f590ef2ce39`
+to the corrected runtime; all locations are in this package's `modeling_dbrx.py`.
+
+| Mechanism | Original local port | Corrected runtime |
+| --- | --- | --- |
+| Failed decoder/head/loss/encoding | `:263-298`, `:354-379`: cache remained partially or fully advanced | `:27-42`, `:283-319`, `:380-416`: nested cache guards invalidate and reject reuse until reset |
+| Static generation mask | `:270-271`: valid caller 2D mask rejected after HF 4D conversion | `:368-371`: model-owned generation hook preserves padding metadata; `:293-296` builds causal attention |
+| Auxiliary current tokens | `:367-369`: last query-width columns could be future padding | `:383-387`, `:400-408`: snapshot physical start and index actual current positions |
+
+```mermaid
+flowchart TD
+    A["DbrxForCausalLM.forward / DbrxModel.forward"] --> B{"_cache_transaction: cache invalid?"}
+    B -- yes --> C{"All cache layers reset to zero?"}
+    C -- no --> X["ValueError: reset and full prefill required"]
+    C -- yes --> D["Clear invalid marker; prefill full prompt"]
+    B -- no --> E["Snapshot cache-local write version"]
+    D --> E
+    E --> F["DbrxAttention: advance version before Cache.update"]
+    F --> G["Decoder, LM head, loss, auxiliary loss, output encoding"]
+    G -- success --> H["Return valid caller-owned cache"]
+    F -- exception --> I["Mark cache invalid; re-raise original exception"]
+    G -- exception --> I
+    I --> B
+    classDef failure fill:#fee,stroke:#c00,color:#900;
+    class X,I failure;
+```
+
+```mermaid
+flowchart TD
+    A["GenerationMixin: caller 2D padding mask"] --> B["create_masks_for_generate: keep original mask"]
+    B --> C["DbrxModel: create_causal_mask"]
+    C --> D["DbrxAttention: additive causal attention"]
+    B --> E["LM: snapshot physical cache start before decoder"]
+    E --> F["index_select: start plus current-token positions"]
+    F --> G["load_balancing_loss_func: current-token validity"]
+    H["Arbitrary caller 4D mask with router loss"] --> X["ValueError before cache mutation"]
+    classDef failure fill:#fee,stroke:#c00,color:#900;
+    class X failure;
+```
+
 ## Qualification and limits
 
 The two model-specific suites use real CPU models, an independent dense-expert
@@ -125,6 +198,26 @@ ruff check gptqmodel/models/definitions/dbrx_converted.py gptqmodel/models/ports
 pyright --pythonpath /home/ubuntu/.venvs/gptqmodel-tf5/bin/python gptqmodel/models/ports/dbrx_converted
 git diff --check
 ```
+
+Peer-review regression command:
+
+```sh
+python -s -m pytest tests/test_dbrx_converted_local_port.py -q --tb=short -o log_cli=false -k 'failed_cached_forward or static_generation_preserves or static_capacity_mask or arbitrary_4d'
+```
+
+On the original local-port runtime this gave **30 failed, 1 passed** (5.22s):
+24 missing cache-reuse errors, four static generation 4D-mask rejections, and two
+NaN capacity-mask auxiliary/labeled losses. After repair it gave **31 passed**
+(3.92s). The combined runtime/module-plan/registry command above gave **494 passed**
+(7.62s), with no skips. Tests assert failed-state refusal through **both** LM and core, unchanged
+KV state on refused retries, rejection after only one layer is reset, and numerical
+parity after full reset/prefill for DynamicCache and StaticCache. Failure injection
+covers decoder pre-hooks, final norm, cache update, decoder output construction,
+tuple encoding, decoder forward-hooks inside the LM, LM head, label loss,
+auxiliary loss, and LM output construction/tuple encoding. Static generation
+checks greedy/beam tokens and scores against uncached controls, finite auxiliary
+loss on every step, and preserved padding semantics. Capacity-mask cases include
+left padding with logical RoPE IDs different from physical cache positions.
 
 Red evidence: the four `test_definition_owns_config_before_checkpoint_python`
 cases fail on the pre-port definition (including actual checkpoint Python
