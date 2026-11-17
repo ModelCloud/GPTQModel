@@ -223,7 +223,10 @@ def _offline_qwen_tokenizer():
             return AutoTokenizer.from_pretrained(repo_id, local_files_only=True)
         except Exception:
             continue
-    pytest.skip("a Qwen2.5 tokenizer is not available offline")
+    # Raise the skip exception explicitly: a bare ``pytest.skip(...)`` here
+    # would leave the loop's exit as an implicit fall-through return, mixing
+    # explicit and implicit returns in one function.
+    raise pytest.skip.Exception("a Qwen2.5 tokenizer is not available offline")
 
 
 def test_hub_tool_layouts_render_exactly_like_inference():
