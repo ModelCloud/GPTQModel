@@ -329,7 +329,7 @@ def test_public_resave_keeps_selected_config_and_exact_checkpoint(tmp_path, subf
     import torch
     from test_resave_preserves_checkpoint_dtypes_4379 import CALIBRATION, _shard_tensors, _tiny_source
 
-    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 
     source = tmp_path / "source"
     selected = _selection_checkpoint_dir(source, subfolder)
@@ -338,7 +338,7 @@ def test_public_resave_keeps_selected_config_and_exact_checkpoint(tmp_path, subf
     qcfg = QuantizeConfig(bits=4, group_size=32, desc_act=False, device="cpu", offload_to_disk=False)
     model = GPTQModel.load(str(source), subfolder=subfolder, quantize_config=qcfg, backend=BACKEND.GPTQ_TORCH)
     assert model.model.config.hidden_size == 32
-    model.quantize(CALIBRATION, batch_size=1, backend=BACKEND.GPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=CALIBRATION, batch_size=1, min_length=1), backend=BACKEND.GPTQ_TORCH)
     ids = torch.tensor([[1, 7, 4, 9, 2]])
     with torch.inference_mode():
         expected_logits = model.model(ids).logits.clone()

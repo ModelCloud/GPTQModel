@@ -23,7 +23,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP_CASEFOLD
 from gptqmodel.models.definitions.internlm import InternLMQModel
 from gptqmodel.models.local import LocalModelLoader
@@ -277,7 +277,7 @@ def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch,
     assert len(normalized) == 1 and loaded.tokenizer is normalized[0]
     sample = {"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 2]]),
               "attention_mask": torch.ones(1, 8, dtype=torch.long)}
-    loaded.quantize([sample, sample], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(CalibrationConfig(dataset=[sample, sample], batch_size=1, min_length=1), backend=BACKEND.TORCH)
     # Keep the source's castable rotary buffer at the requested reload dtype.
     loaded.model.half()
     expected_state = {name: value.detach().clone() for name, value in loaded.model.state_dict().items()}

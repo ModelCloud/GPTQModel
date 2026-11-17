@@ -344,6 +344,9 @@ and research restrictions remain separate from the port's Apache code license.
 binds Qwen2/2.5-VL to exact native composite or headless text models and Qwen-Drive
 to its package-owned root VLM wrapper. Headless text artifacts support feature
 extraction and explicitly reject generation; Qwen-Drive support covers the VLM.
+[Checkpoint config selection](docs/checkpoint-config-selection.md)
+preserves the selected subfolder/revision when rebuilding a quantized save shell,
+including subsequent saves after a public reload.
 [Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
 explains generated device maps for tied aliases and native FP32 destinations
 during lazy offload, including the exclusions for packed weights.

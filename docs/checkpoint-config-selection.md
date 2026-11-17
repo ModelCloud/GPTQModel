@@ -113,6 +113,23 @@ python -s -m pytest -q tests/test_checkpoint_subfolder_resolution.py \
   tests/test_gguf_load_policy_env_removal.py
 ```
 
+After preserving main's `CalibrationConfig` API merge, the combined writer,
+loader, tokenizer, processor, security and Qwen-Drive support run passed
+**181 tests, no skips, 15 warnings in 23.39 seconds** on Python 3.14.6t,
+Transformers 5.23.0, Torch 2.15.0+cpu and released Tokenicer 0.0.19. The two
+public resave cases retain the original samples, batch size and minimum length
+through `CalibrationConfig`; no legacy quantize API is restored.
+
+```bash
+PYTHON_GIL=0 OMP_NUM_THREADS=1 python -m pytest -q \
+  tests/test_qwen_drive_support.py tests/test_local_model_loading.py \
+  tests/test_local_processor_loading.py tests/test_local_tokenizer_loading.py \
+  tests/test_local_model_paths.py tests/test_trust_remote_code_isolation.py \
+  tests/test_checkpoint_subfolder_resolution.py \
+  tests/test_gguf_load_policy_env_removal.py --tb=short -ra \
+  -o addopts= -o log_cli=false
+```
+
 Native quantized `.gguf` import uses a dedicated tensor reader in the loader;
 the writer's loaded-model reconstruction still uses the existing checkpoint
 restore path. Retaining a GGUF filename and qualifying its metadata selection
