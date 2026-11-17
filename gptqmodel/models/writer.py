@@ -313,6 +313,23 @@ def hf_compat_warnings(
         )
     if (
         getattr(quantize_config, "method", None) == METHOD.AWQ
+        and bool(getattr(quantize_config, "dynamic", None))
+    ):
+        warnings.append(
+            "This AWQ checkpoint carries `dynamic` per-module overrides "
+            "(`bits`/`group_size`). A loader that does not install GPT-QModel's "
+            "native AWQ bridge builds every module from the global `bits` and "
+            "`group_size`, so the overrides are ignored: on CPU the checkpoint "
+            "loads with silently wrong logits and on CUDA the Marlin pack raises "
+            "a qzeros shape error. Transformers' own AWQ quantizer only reaches "
+            "the bridge after it has already replaced the layers, so an older "
+            "Transformers or a third-party loader still needs `import gptqmodel` "
+            "before loading. Load this checkpoint with `GPTQModel.load` (or a "
+            "Transformers version with the native AWQ bridge) to honor the "
+            "overrides."
+        )
+    if (
+        getattr(quantize_config, "method", None) == METHOD.AWQ
         and getattr(quantize_config, "bits", None) == 8
     ):
         warnings.append(

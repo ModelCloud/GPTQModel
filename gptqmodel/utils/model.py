@@ -700,6 +700,7 @@ def create_quant_module(
     dtype: Optional[torch.dtype] = None,
     bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
+    transfer_from: Optional[nn.Module] = None,
 
 ):
     # An adapter only covers the modules named by its PEFT target list and
@@ -733,8 +734,10 @@ def create_quant_module(
 
     # Transformers builds quantized models on the meta device before assigning
     # checkpoint tensors, so allow either CPU or meta here and keep the
-    # replacement layer on the device the original layer occupied.
-    if ori_layer_device.type not in {CPU.type, "meta"}:
+    # replacement layer on the device the original layer occupied. A rebuild of
+    # an already-loaded layer (`transfer_from`) legitimately sees a live device:
+    # its checkpoint tensors are moved into the replacement below.
+    if transfer_from is None and ori_layer_device.type not in {CPU.type, "meta"}:
         raise AssertionError(
             f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
@@ -847,6 +850,21 @@ def create_quant_module(
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
+    if transfer_from is not None:
+        # The caller already loaded the checkpoint tensors into the module this
+        # one replaces (a load started before the native bridge was installed,
+        # #4795). The replacement was constructed from the same serialized
+        # config, so every persistent tensor keeps the checkpoint's shape and
+        # only has to be copied over before the device move.
+        source_state = transfer_from.state_dict()
+        missing = sorted(set(new_layer.state_dict()) - set(source_state))
+        if missing:
+            sample = ", ".join(missing[:8])
+            raise ValueError(
+                f"Cannot rebuild `{name}` from its loaded tensors: the checkpoint "
+                f"did not assign {sample}. Load this checkpoint with `GPTQModel.load`."
+            )
+        new_layer.load_state_dict(source_state, strict=False)
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
@@ -867,6 +885,7 @@ def create_quant_layer(
         init_kwargs: Optional[Dict[str, Any]] = None,
         dtype: Optional[torch.dtype] = None,
         bias_dtype: Optional[torch.dtype] = None,
+        transfer_from: Optional[Dict[str, nn.Module]] = None,
 
 ) -> Type[BaseQuantLinear]:
     if any(isinstance(module, candidate) for candidate in linear_candidates):
@@ -902,6 +921,9 @@ def create_quant_layer(
                     init_kwargs=init_kwargs,
                     dtype=dtype,
                     bias_dtype=bias_dtype,
+                    transfer_from=(
+                        transfer_from.get(name) if transfer_from is not None else None
+                    ),
                 )
             except NotImplementedError as error:
                 last_error = error
