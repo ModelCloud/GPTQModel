@@ -1,0 +1,95 @@
+{
+  "repo": "fnlp/moss-moon-003-sft",
+  "revision": "3c06a7a241cef41caa9c339b149e9931d6b3deaa",
+  "note": "Independently computed source regex/byte/ranked-BPE IDs. Original metadata constructor requires upstream Tokenicer preload correction; manual caller AddedToken overrides used for diagnosis until shared fix.",
+  "sha256": {
+    "vocab.json": "53a5be5c089e133f66cfa2eb0889d91cfc76ab7ff9a3b0a237e6c550c50e8d40",
+    "merges.txt": "b0686029221952e7145d99331c5d89dbf01ece4d86ddce52687a8dab23bcd048",
+    "added_tokens.json": "1d60be8c005e6fcfb89a9aa675a5f6bb75f06638db35ce66f22ed9ce03127dae",
+    "tokenizer_config.json": "26cb82be993f1738a94fb55643f24972a021553ec8453a84949c4bdad471edaf",
+    "special_tokens_map.json": "e0eb0b3291bcd6004f59653eca3e393f235ab412c01b019efd70e15b62157058"
+  },
+  "cases": [
+    {
+      "text": "Hello, world!",
+      "ids": [
+        15496,
+        11,
+        995,
+        0
+      ]
+    },
+    {
+      "text": "中文测试 Hello 12345",
+      "ids": [
+        54119,
+        52926,
+        18435,
+        17031,
+        2231
+      ]
+    },
+    {
+      "text": "<|Human|>: 你好<eoh>\n<|MOSS|>: Hi<eom>",
+      "ids": [
+        27,
+        91,
+        20490,
+        91,
+        31175,
+        59163,
+        50331,
+        106067,
+        198,
+        27,
+        91,
+        44,
+        18420,
+        91,
+        31175,
+        15902,
+        106068
+      ]
+    },
+    {
+      "text": "def foo():\n    return 123\n\t\tpass",
+      "ids": [
+        4299,
+        22944,
+        33529,
+        198,
+        106056,
+        7783,
+        17031,
+        198,
+        106066,
+        6603
+      ]
+    },
+    {
+      "text": "We're I'M 9 1234567890  ",
+      "ids": [
+        1135,
+        821,
+        314,
+        6,
+        44,
+        860,
+        17031,
+        2231,
+        30924,
+        3829,
+        106058
+      ]
+    },
+    {
+      "text": "🙂 café\r\n",
+      "ids": [
+        8582,
+        25081,
+        40304,
+        64659
+      ]
+    }
+  ]
+}
