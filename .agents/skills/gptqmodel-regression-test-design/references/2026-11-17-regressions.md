@@ -59,3 +59,11 @@ relationship evidence, and target-device qualification. The new gate adds
 cross-stage regression construction and explicit detection evidence; it does
 not weaken those requirements or claim documentation prevents regressions by
 itself.
+
+## Structural follow-up
+
+[Design issue #4615](https://github.com/ModelCloud/GPTQModel/issues/4615) proposes
+explicit persistence, attempt/commit, asynchronous workspace, and resolved-policy
+contracts where test coverage alone leaves responsibility spread across consumers.
+It distinguishes existing fixes from architectural proposals and related open
+reports; this documentation change does not implement those designs.

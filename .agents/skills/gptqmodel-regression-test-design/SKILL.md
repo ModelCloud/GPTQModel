@@ -219,3 +219,24 @@ green command/result, and hardware/dependency skips. State which sibling paths
 remain unverified. Mocks, CPU runs, and skipped GPU tests must never be reported
 as native qualification. Documentation-only updates need link/frontmatter and
 evidence checks, not claims that these new runtime requirements already pass.
+
+## 5. Separate test gaps from structural contract failures
+
+Escalate beyond another isolated test when fixes repeatedly transfer ownership
+between consumers, duplicate representation conversion or retry preparation,
+or depend on undocumented ordering of mutation, publication, and cleanup.
+A missing stride case or boundary fixture alone does not justify a redesign.
+
+Describe the violated invariant, current owner(s), and recurrence evidence.
+Propose one explicit ownership/transition contract, a bounded migration using
+existing extension points, and conformance tests for every affected consumer.
+Distinguish already-landed fixes from proposed architecture and unverified bug
+reports. Preserve storage, compatibility, memory, and concurrency constraints;
+do not substitute a broad rewrite or dense weight cache for a precise contract.
+
+When the user requests an issue for structural findings, publish the proposal
+with evidence links and acceptance criteria, and append `@Qubitium`. Otherwise
+report the recommendation for approval rather than opening an unsolicited issue.
+The [2026-11-17 contract proposal](https://github.com/ModelCloud/GPTQModel/issues/4615)
+illustrates persistence ownership, transactional attempts, asynchronous scratch
+lifetime, and immutable execution policy; it is not implemented behavior.
