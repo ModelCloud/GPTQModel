@@ -2966,6 +2966,10 @@ def load_hf_tokenizer(
 
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
     if isinstance(model_config, PreTrainedConfig):
+        from ..models.local import local_model_loader
+
+        if local_model_loader(model_config.model_type) is not None:
+            trust_remote_code = False
         # Tokenicer's model_config controls normalization; AutoTokenizer uses
         # the separate `config` argument for class selection. Reuse the config
         # already selected by our policy so tokenizer initialization cannot
