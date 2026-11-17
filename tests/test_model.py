@@ -725,5 +725,7 @@ def test_is_supported_quantization_config_rejects_kv_cache_quantization():
         }
     )
 
-    with pytest.raises(ValueError, match="activation quantized models"):
+    # KV-cache quantization is not activation quantization; the message has to
+    # say which one the checkpoint asked for.
+    with pytest.raises(ValueError, match="quantize the KV cache"):
         _is_supported_quantization_config(config)
