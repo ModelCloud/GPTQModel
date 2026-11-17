@@ -115,6 +115,18 @@ def packed_module_config(module, config, *, module_name=None):
         module_config["compute_dtype"] = str(module.quant_config.torch_dtype)
     if constructor.kind == "qqq":
         module_config["group_scales"] = "s_group" in module.state_dict()
+    escapes = getattr(module, "nf12_escapes", None)
+    if isinstance(escapes, torch.Tensor):
+        # NF12's escape table is data-dependent: the kernel allocates an empty
+        # `(0, 8)` table and `pack()` fills as many rows as the weights need,
+        # so the restore template cannot reproduce the shape from the config
+        # alone (#4792).
+        module_config["escape_rows"] = int(escapes.shape[0])
+    if constructor.kind == "macaq":
+        # `BH`/`pre_scale` are allocated at the run's compute dtype, which is
+        # not the source config's dtype; record it so the restore template
+        # matches the bundle instead of tripping the schema comparison (#4792).
+        module_config["compute_dtype"] = str(module.compute_dtype)
     return module_config
 
 
@@ -147,6 +159,7 @@ def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
         checkpoint_format = module_config.pop("format", None)
         has_compute_dtype = "compute_dtype" in module_config
         dtype_name = module_config.pop("compute_dtype", None)
+        escape_rows = module_config.pop("escape_rows", None)
         checkpoint_bias_dtype = module_config.pop("bias_dtype", None)
         quant_state_shape = module_config.pop("quant_state_shape", None)
         if kind == "paro":
@@ -219,6 +232,16 @@ def restore_packed_module(module_config, *, name, config, kernel, lm_head_name):
             module.weight_quant_state = torch.empty(
                 quant_state_shape, dtype=torch.uint8, device="meta"
             )
+        if escape_rows is not None:
+            if type(escape_rows) is not int or escape_rows < 0:
+                raise CheckpointError("invalid packed NF12 escape row count")
+            escapes = getattr(module, "nf12_escapes", None)
+            if isinstance(escapes, torch.Tensor):
+                module.nf12_escapes = torch.empty(
+                    (escape_rows, *escapes.shape[1:]),
+                    dtype=escapes.dtype,
+                    device=escapes.device,
+                )
         if kind == "qqq" and not group_scales:
             # QQQ's pack path omits this optional buffer for per-channel scales.
             del module.s_group

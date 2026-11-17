@@ -94,9 +94,9 @@ always saw `False`.
 
 | Area | Before | After |
 | --- | --- | --- |
-| Factory kwargs | `_filter_quantize_config_payload_for_target_cls` dropped unknown and foreign keys silently | `_validate_quantize_config_factory_kwargs` raises for unknown keys and warns for foreign known fields (`config.py:4012`) |
+| Factory kwargs | `_filter_quantize_config_payload_for_target_cls` dropped unknown and foreign keys silently | `_validate_quantize_config_factory_kwargs` raises for unknown keys and warns for foreign known fields (`config.py:4760`) |
 | EXL3 fields | `EXL3Config.__post_init__` bypassed base normalisation (`config.py:6303` before this change) | calls `_normalize_serialization_fields` (`config.py:6401`) |
-| Serialization helper | duplicated in `BaseQuantizeConfig.__post_init__` | shared `_normalize_serialization_fields` (`config.py:4429`) |
+| Serialization helper | duplicated in `BaseQuantizeConfig.__post_init__` | shared `_normalize_serialization_fields` (`config.py:5288`) |
 | Bool fields | `bool()` accepted the string `"False"` as `True` (`config.py:4450` before this change) | `_validate_bool_fields` raises `TypeError` (`config.py:4452`); `desc_act` likewise |
 | Calibration examples | `isinstance(example, dict)` rejected `BatchEncoding` (`calibration.py:352` before this change) | `isinstance(example, Mapping)` (`calibration.py:356`) |
 | Device placement | explicit `device` replaced by `device_map` without a check (`loader.py:1735` before this change) | `_normalize_requested_device_map` (`loader.py:569`) validates agreement and maps HF device strings |

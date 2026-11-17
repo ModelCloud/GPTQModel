@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -79,6 +80,12 @@ class ExllamaV3Linear(nn.Module):
         self._inner_signature: Optional[tuple[Any, ...]] = None
         self._torch_inner = None
         self._torch_inner_signature: Optional[tuple[Any, ...]] = None
+        # Serializes handle publication and teardown. `_ensure_inner` used to
+        # drop the old handle and re-read `self._inner` after building the new
+        # one, so a concurrent first forward could be handed the `None` another
+        # thread had just published (issue #4793). Per module, not process-wide:
+        # this runs on every forward.
+        self._inner_guard = threading.RLock()
 
         if tensors is not None:
             for buffer_name in _EXL3_BUFFER_NAMES:
@@ -180,6 +187,10 @@ class ExllamaV3Linear(nn.Module):
         return tuple(signature)
 
     def _drop_inner(self) -> None:
+        with self._inner_guard:
+            self._drop_inner_locked()
+
+    def _drop_inner_locked(self) -> None:
         if self._inner is not None:
             try:
                 self._inner.unload()
@@ -235,6 +246,10 @@ class ExllamaV3Linear(nn.Module):
                 setattr(self, buffer_name, tensor.half())
 
     def _ensure_inner(self) -> "LinearEXL3":
+        with self._inner_guard:
+            return self._ensure_inner_locked()
+
+    def _ensure_inner_locked(self) -> "LinearEXL3":
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
@@ -273,11 +288,16 @@ class ExllamaV3Linear(nn.Module):
             transformers_fix=True,
             key=self.name,
         )
+        inner = self._inner
         self._inner_signature = signature
-        return self._inner
+        return inner
 
     def _ensure_torch_inner(self):
         """Build the bounded FP32 reconstruction path for wide inputs."""
+        with self._inner_guard:
+            return self._ensure_torch_inner_locked()
+
+    def _ensure_torch_inner_locked(self):
         from .exllamav3_torch import ExllamaV3TorchLinear
 
         signature = self._current_signature()
@@ -305,6 +325,22 @@ class ExllamaV3Linear(nn.Module):
         object.__setattr__(self, "_torch_inner", torch_inner)
         self._torch_inner_signature = signature
         return torch_inner
+
+    def __getstate__(self):
+        # A lock cannot cross a copy or a process; the receiver recreates it.
+        state = super().__getstate__()
+        state.pop("_inner_guard", None)
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self._inner_guard = threading.RLock()
+        # The native handle belongs to the source module's process and may be
+        # shared with a shallow copy, so never unload it here - just forget it.
+        self._inner = None
+        self._inner_signature = None
+        self._torch_inner = None
+        self._torch_inner_signature = None
 
     def post_init(self) -> None:
         self._drop_inner()

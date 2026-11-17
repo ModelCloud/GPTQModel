@@ -462,3 +462,247 @@ def test_qwen4_exp_shared_expert_folds_are_neutral():
     assert "self_attn.o_proj" not in sources
     assert "linear_attn.out_proj" not in sources
     assert "linear_attn.in_proj_a" not in sources
+
+
+# ---------------------------------------------------------------------------
+# Issue #4759: an absent *sibling branch* must not take the norm away.
+#
+# #4751 exempted a block from `refuse_last_module_fallback` only when the block
+# and the preceding absent block shared one `:in=` tag. Hybrid trees whose
+# alternative mixer branches carry no tag (`mamba`/`self_attn` on Granite-4.0-H,
+# `conv`/`self_attn` on LFM2, the `mixer` alternatives of Nemotron-H,
+# `self_attn`/`attention` on Ling 2.0) still lost the norm -> projection group,
+# so the layer silently fell back to RTN. These cases assert the group is
+# emitted *and* that folding it leaves the layer output unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _tiny_granitemoehybrid_attention():
+    import transformers
+
+    config = transformers.GraniteMoeHybridConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=8,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+        # Granite-4.0-H interleaves Mamba and attention layers. An attention
+        # layer owns no `mamba` mixer, so its declared `mamba.*` blocks resolve
+        # to nothing.
+        layer_types=["full_attention", "full_attention"],
+        mamba_n_heads=4,
+        mamba_d_head=16,
+        mamba_d_state=16,
+        mamba_n_groups=1,
+        mamba_d_conv=2,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        shared_intermediate_size=16,
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(7)
+    return transformers.GraniteMoeHybridForCausalLM(config).eval()
+
+
+def test_granitemoehybrid_attention_norm_still_folds():
+    model = _tiny_granitemoehybrid_attention()
+    definition = MODEL_MAP["granitemoehybrid"]
+    ids = torch.randint(2, 60, (1, 8))
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    checked = []
+    for layer in model.model.layers:
+        checked.extend(_assert_neutral(definition, model, layer, forward))
+
+    norm_groups = [
+        targets for source, targets, _consumers in checked if source == "input_layernorm"
+    ]
+    assert ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"] in norm_groups, (
+        "the attention input norm did not fold after the absent `mamba` sibling branch"
+    )
+
+
+def _tiny_lfm2_attention():
+    import transformers
+
+    config = transformers.Lfm2Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+        # LFM2 mixes short-convolution and full-attention layers. A
+        # full-attention layer owns no `conv` mixer.
+        layer_types=["full_attention", "full_attention"],
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(7)
+    return transformers.Lfm2ForCausalLM(config).eval()
+
+
+def test_lfm2_attention_norm_still_folds():
+    model = _tiny_lfm2_attention()
+    definition = MODEL_MAP["lfm2"]
+    ids = torch.randint(2, 60, (1, 8))
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    checked = []
+    for layer in model.model.layers:
+        checked.extend(_assert_neutral(definition, model, layer, forward))
+
+    norm_groups = [
+        targets for source, targets, _consumers in checked if source == "operator_norm"
+    ]
+    assert ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"] in norm_groups, (
+        "the attention input norm did not fold after the absent `conv` sibling branch"
+    )
+
+
+def _tiny_nemotron_h_mixers():
+    import transformers
+
+    config = transformers.NemotronHConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=8,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+        # One layer of each mixer the issue names: Mamba (`M`), dense MLP (`-`)
+        # and attention (`*`). `moe` layers are covered elsewhere.
+        layers_block_type=["linear_attention", "mlp", "full_attention"],
+        mamba_num_heads=4,
+        mamba_head_dim=8,
+        ssm_state_size=8,
+        n_groups=1,
+        conv_kernel=2,
+        expand=2,
+        n_routed_experts=0,
+        n_shared_experts=1,
+        moe_intermediate_size=16,
+        moe_shared_expert_intermediate_size=16,
+        num_experts_per_tok=2,
+        use_mamba_kernels=False,
+    )
+    config._attn_implementation = "eager"
+    torch.manual_seed(7)
+    return transformers.NemotronHForCausalLM(config).eval()
+
+
+def test_nemotron_h_mixer_norms_still_fold():
+    from test_awq_scaling_groups import _mamba_ssm_cpu_unavailable_reason
+
+    reason = _mamba_ssm_cpu_unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    model = _tiny_nemotron_h_mixers()
+    definition = MODEL_MAP["nemotron_h"]
+    ids = torch.randint(2, 60, (1, 8))
+
+    def forward():
+        return model(input_ids=ids).logits
+
+    checked = []
+    for layer in model.model.layers:
+        checked.extend(_assert_neutral(definition, model, layer, forward))
+
+    norm_groups = [targets for source, targets, _consumers in checked if source == "norm"]
+    # Mamba (`M`) layer: the SSM input projection reads the block norm.
+    assert ["mixer.in_proj"] in norm_groups, (
+        "the Mamba mixer norm group was dropped after the absent `mixer.q_proj` siblings"
+    )
+    # Dense MLP (`-`) layer: `NemotronHMLP` has no `gate_proj`, and `out_proj`
+    # belongs to the other mixers.
+    assert ["mixer.up_proj"] in norm_groups, (
+        "the MLP mixer norm group was dropped after the absent `mixer.in_proj` siblings"
+    )
+    # Attention (`*`) layer keeps the group it already had.
+    assert ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"] in norm_groups
+
+
+class _LingAttention(nn.Module):
+    """Ling 2.0 remote attention: `query_key_value` + `dense`, no MLA pair."""
+
+    def __init__(self, width):
+        super().__init__()
+        self.query_key_value = nn.Linear(width, 3 * width, bias=False)
+        self.dense = nn.Linear(width, width, bias=False)
+
+    def forward(self, hidden_states):
+        qkv = self.query_key_value(hidden_states)
+        # `dense` reads the attention output, not the normed hidden state.
+        return self.dense(qkv[..., : qkv.shape[-1] // 3] * qkv[..., qkv.shape[-1] // 3 : 2 * qkv.shape[-1] // 3])
+
+
+class _LingMLP(nn.Module):
+    def __init__(self, width):
+        super().__init__()
+        self.gate_proj = nn.Linear(width, 2 * width, bias=False)
+        self.up_proj = nn.Linear(width, 2 * width, bias=False)
+        self.down_proj = nn.Linear(2 * width, width, bias=False)
+
+    def forward(self, hidden_states):
+        return self.down_proj(self.up_proj(hidden_states) * self.gate_proj(hidden_states))
+
+
+class _LingLayer(nn.Module):
+    def __init__(self, width):
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(width)
+        self.attention = _LingAttention(width)
+        self.post_attention_layernorm = nn.LayerNorm(width)
+        self.mlp = _LingMLP(width)
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states + self.attention(self.input_layernorm(hidden_states))
+        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+
+
+class _LingModel(nn.Module):
+    """Ling 2.0 (`bailing_moe`) layer built against the definition's real tree."""
+
+    def __init__(self, width):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="bailing_moe", num_experts=0)
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_LingLayer(width)])
+        self.model.norm = nn.LayerNorm(width)
+        self.lm_head = nn.Linear(width, width, bias=False)
+
+    def forward(self, hidden_states):
+        return self.lm_head(self.model.norm(self.model.layers[0](hidden_states)))
+
+
+def test_bailing_moe_input_norm_still_folds():
+    width = 8
+    model = _LingModel(width).eval()
+    definition = MODEL_MAP["bailing_moe"]
+    layer = model.model.layers[0]
+    hidden = torch.randn(2, 3, width)
+
+    def forward():
+        return model(hidden)
+
+    checked = _assert_neutral(definition, model, layer, forward)
+
+    norm_groups = [
+        targets for source, targets, _consumers in checked if source == "input_layernorm"
+    ]
+    assert norm_groups == [["attention.query_key_value"]], (
+        "the Ling 2.0 input norm must fold `attention.query_key_value` and only it; "
+        f"got {norm_groups}"
+    )

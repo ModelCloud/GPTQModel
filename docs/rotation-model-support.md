@@ -1,6 +1,6 @@
 # Rotation model support
 
-Model-wide rotation (`GPTQModel.quantize(rotation="hadamard" | "random")`)
+Model-wide rotation (`QuantizeConfig(rotation="hadamard" | "random")`)
 fuses decoder norms into the adjacent projections and rotates the residual
 stream. The fold is only an identity transform for a specific decoder layout,
 so the feature is an explicit per-model-type opt-in rather than a check on the
@@ -37,7 +37,7 @@ own opt-in.
 
 ```mermaid
 flowchart TD
-    A["quantize(rotation=...)"] --> B{"resolve_model_rotation(qcfg)"}
+    A["QuantizeConfig(rotation=...)"] --> B{"resolve_model_rotation(qcfg)"}
     B -->|"None"| Z["no rotation"]
     B -->|"hadamard / random"| C["validate_rotation_format(qcfg)"]
     C -->|"non-GPTQ format"| E0["ValueError: config, format,<br/>supported layouts<br/>no weights modified"]
@@ -90,7 +90,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Admission | `isinstance(self, (LlamaQModel, Qwen2QModel))` at `gptqmodel/models/base.py:2127` on `main` | `validate_rotation_model_support(self)` at `gptqmodel/models/base.py:2169` |
+| Admission | `isinstance(self, (LlamaQModel, Qwen2QModel))` at `gptqmodel/models/base.py:2127` on `main` | `validate_rotation_model_support(self)` at `gptqmodel/models/base.py:226` |
 | Declaration | None; the Python class was the contract | `supports_rotation = frozenset({...})` on the definition (`llama.py:20`, `qwen2.py:17`) |
 | Lookup | Class hierarchy, so every `LlamaQModel` subclass passed | Own `__dict__` only, so subclasses do not inherit it |
 | Error text | "rotation only supports: llama/qwen2 model" while 19 direct subclasses passed | Names the rejected class and `model_type`, then lists `llama, qwen2` |

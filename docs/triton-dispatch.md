@@ -95,7 +95,7 @@ flowchart TD
 
 | Mechanism | Before (`main`) | After |
 | --- | --- | --- |
-| `TritonV2Linear.forward` (`tritonv2.py:149-175`) | always `QuantLinearFunction` | gates, then `TorchLinear._forward_eager` |
+| `TritonV2Linear.forward` (`tritonv2.py:160-186`) | always `QuantLinearFunction` | gates, then `TorchLinear._forward_eager` |
 | packed words (`gptq_gemm.py:215-275`) | `[BLOCK_K, BLOCK_N]` addresses; each word fetched `32 / bits` times | one `[BLOCK_K / pack_factor, BLOCK_N]` load, unpacked in registers |
 | scales / zeros | per-element gather even for identity `g_idx` | one `[BLOCK_N]` row per K-tile when the group is uniform |
 | Ada gate (`gptq_gemm.py:144-146`, `arch.py:70-71`) | `M <= 16`, `K <= 2048`, `N <= 2048` | `M <= 64`, no K/N caps |

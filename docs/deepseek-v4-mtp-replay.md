@@ -35,7 +35,7 @@ flowchart TD
 |---|---|
 | Previous stack layer: `gptqmodel/models/definitions/deepseek_v4.py:9` | `gptqmodel/models/definitions/deepseek_v4.py:1410`: `DeepSeekV4QModel` |
 | API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/definitions/deepseek_v4.py:740`: `DeepSeekV4MTPReplay` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/definitions/deepseek_v4.py:2349`: `DeepSeekV4MTPQuantizationModel` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/definitions/deepseek_v4.py:2383`: `DeepSeekV4MTPQuantizationModel` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 
