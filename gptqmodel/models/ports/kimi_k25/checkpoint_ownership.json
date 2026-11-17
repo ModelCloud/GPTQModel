@@ -1,0 +1,353 @@
+{
+  "checkpoint": "moonshotai/Kimi-K2.5",
+  "revision": "4d01dfe0332d63057c186e0b262165819efb6611",
+  "config_sha256": "acd5bb01a16f64b309599cd6ed196be056f613c99d6bc9300692b82cd10882f6",
+  "index_sha256": "bdba19b127c4d1dc57dc3b6f3366c10739c7e7f13baf3f5424b556469a4dbc1b",
+  "key_count": 208550,
+  "patterns": [
+    {
+      "template": "language_model.lm_head.weight"
+    },
+    {
+      "template": "language_model.model.embed_tokens.weight"
+    },
+    {
+      "template": "language_model.model.layers.{layer}.input_layernorm.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.down_proj.weight",
+      "layers_inclusive": [
+        0,
+        0
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.down_proj.weight_packed",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.down_proj.weight_scale",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.down_proj.weight_shape",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.gate_proj.weight_packed",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.gate_proj.weight_scale",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.gate_proj.weight_shape",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.up_proj.weight_packed",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.up_proj.weight_scale",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.experts.{expert}.up_proj.weight_shape",
+      "layers_inclusive": [
+        1,
+        60
+      ],
+      "experts_inclusive": [
+        0,
+        383
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.gate.e_score_correction_bias",
+      "layers_inclusive": [
+        1,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.gate.weight",
+      "layers_inclusive": [
+        1,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.gate_proj.weight",
+      "layers_inclusive": [
+        0,
+        0
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.shared_experts.down_proj.weight",
+      "layers_inclusive": [
+        1,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.shared_experts.gate_proj.weight",
+      "layers_inclusive": [
+        1,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.shared_experts.up_proj.weight",
+      "layers_inclusive": [
+        1,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.mlp.up_proj.weight",
+      "layers_inclusive": [
+        0,
+        0
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.post_attention_layernorm.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.kv_a_layernorm.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.kv_a_proj_with_mqa.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.kv_b_proj.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.o_proj.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.q_a_layernorm.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.q_a_proj.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.layers.{layer}.self_attn.q_b_proj.weight",
+      "layers_inclusive": [
+        0,
+        60
+      ]
+    },
+    {
+      "template": "language_model.model.norm.weight"
+    },
+    {
+      "template": "mm_projector.pre_norm.bias"
+    },
+    {
+      "template": "mm_projector.pre_norm.weight"
+    },
+    {
+      "template": "mm_projector.proj.0.bias"
+    },
+    {
+      "template": "mm_projector.proj.0.weight"
+    },
+    {
+      "template": "mm_projector.proj.2.bias"
+    },
+    {
+      "template": "mm_projector.proj.2.weight"
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.mlp.fc0.bias",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.mlp.fc0.weight",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.mlp.fc1.bias",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.mlp.fc1.weight",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.norm0.bias",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.norm0.weight",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.norm1.bias",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.norm1.weight",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.wo.bias",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.wo.weight",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.wqkv.bias",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.blocks.{layer}.wqkv.weight",
+      "layers_inclusive": [
+        0,
+        26
+      ]
+    },
+    {
+      "template": "vision_tower.encoder.final_layernorm.bias"
+    },
+    {
+      "template": "vision_tower.encoder.final_layernorm.weight"
+    },
+    {
+      "template": "vision_tower.patch_embed.pos_emb.weight"
+    },
+    {
+      "template": "vision_tower.patch_embed.proj.bias"
+    },
+    {
+      "template": "vision_tower.patch_embed.proj.weight"
+    }
+  ]
+}

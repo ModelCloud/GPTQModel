@@ -1,0 +1,30 @@
+{
+  "auto_map": {
+    "AutoProcessor": "kimi_k25_processor.KimiK25Processor",
+    "AutoImageProcessor": "kimi_k25_vision_processing.KimiK25VisionProcessor"
+  },
+  "media_proc_cfg": {
+    "in_patch_limit": 16384,
+    "patch_size": 14,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "merge_kernel_size": 2,
+    "fixed_output_tokens": null,
+    "patch_limit_on_one_side": 512,
+    "in_patch_limit_each_frame": 4096,
+    "in_patch_limit_video": null,
+    "sample_fps": 2.0,
+    "max_num_frames_each_video": null,
+    "temporal_merge_kernel_size": 4,
+    "timestamp_mode": "hh:mm:ss.fff",
+    "config_type": "media_proc.processors.moonvit.MoonViTMediaProcessorConfig"
+  }
+}

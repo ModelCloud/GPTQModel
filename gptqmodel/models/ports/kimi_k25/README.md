@@ -1,0 +1,200 @@
+# GPT-QModel native Kimi-K2.5 ownership
+
+## Provenance and scope
+
+The sole registered model type is `kimi_k25`. Transformers **5.23.0** provides
+the exact `Kimi_K25Config` and multimodal `Kimi_K25ForConditionalGeneration`;
+the causal-LM AutoModel mapping is not applicable. This adapter does not port
+an unrelated architecture or duplicate the decoder. Native conversion rules
+own released `language_model.model.*` -> `model.language_model.*`,
+`language_model.lm_head.*` -> `lm_head.*`, vision QKV/RoPE transforms, projector
+names, and per-expert -> native fused expert conversion.
+
+Checkpoint metadata, tokenizer and tool rendering come from
+[moonshotai/Kimi-K2.5@4d01dfe0332d63057c186e0b262165819efb6611](https://huggingface.co/moonshotai/Kimi-K2.5/tree/4d01dfe0332d63057c186e0b262165819efb6611).
+Moonshot's **Modified MIT License**, including its commercial-display clause,
+is preserved in `LICENSE`; `NOTICE` identifies derived files. No trained
+weight shard is included or required by these tests.
+
+| Pinned upstream file | SHA256 |
+| --- | --- |
+| `tokenization_kimi.py` | `56aae6f32aa6d8604a119ed6097fd07968c3bc2fbbe225f151acbed9141add6f` |
+| `tool_declaration_ts.py` | `97e09ed262f1cd38f87584eaa46c5d4d5b3c9725dd299b21642f389040794ebc` |
+| `tiktoken.model` | `b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103` |
+| `tokenizer_config.json` | `12fcab43d2b6068f46769f5ff373960bf7c17a94d7abbc50e2491306b2f6cf58` |
+| `chat_template.jinja` | `7c91e4b3578b518bfb388d2e3dc645daf0fbf843656e887db75d12891e0030ff` |
+| `config.json` | `acd5bb01a16f64b309599cd6ed196be056f613c99d6bc9300692b82cd10882f6` |
+| `model.safetensors.index.json` | `bdba19b127c4d1dc57dc3b6f3366c10739c7e7f13baf3f5424b556469a4dbc1b` |
+| `LICENSE` | `c524b41658421b8b143c5b50637ef008909da56013ad12ccaba0536139ee35b0` |
+| `preprocessor_config.json` | `06ee9996113839992964e1ab2b186861f93888dd655dcb3a7264b5dbb2d4e548` |
+
+The native distribution reference is Transformers `5.23.0`, Apache-2.0:
+
+| Native `transformers/models/kimi_k25/` source | SHA256 |
+| --- | --- |
+| `configuration_kimi_k25.py` | `e29ee8b785497c56de409ee9dba1baff7f4f976105765446d6b3efb6fa3903a9` |
+| `modeling_kimi_k25.py` | `91aeaa95edb64d3c25bc0accd127c3c31f55f71df97f04e867bb4d9bc60602f4` |
+| `processing_kimi_k25.py` | `f6c18f22793e27ac6540116182031f5e53f45f7bc06a93ea60380e32c43be902` |
+| `image_processing_kimi_k25.py` | `a39eb6c98c8a7e0d09c58e7d383c165a125ab165bc518469dd74a9e72c691a4e` |
+| `video_processing_kimi_k25.py` | `a64872ddc2e3939746d438c35c29c4299164a2590ca537bc23ec876f56f0ae5b` |
+
+`checkpoint_ownership.json` losslessly expands the pinned index's **208,550**
+key names. It records compressed-tensors payload ownership separately from
+runtime-only tensors. Qualification reduces the actual released layer/expert
+inventory to the tiny model, then compares its complete converted state keys.
+Router `e_score_correction_bias` belongs to the explicitly excluded `mlp.gate`.
+`registry_plan.json` is the exact central fixture replacement for the integrator.
+
+The tokenizer preserves the checkpoint's 256 reserved tokens, UTF-8 byte
+alphabet, long-input splitting, custom encode/decode, `thinking: bool`, sorted
+tool dictionaries, and TypeScript `tools_ts_str`. Compatibility changes are
+the explicit Transformers `PythonBackend` base, local canonical byte-alphabet
+helper, import/whitespace cleanup, and an asset-content hash passed to
+`load_tiktoken_bpe` so a repaired local file cannot reuse stale cached bytes.
+The K2 and K3 tokenizer sources/chat semantics differ, despite sharing the same
+vocabulary asset; neither class substitutes for K2.5. Requires `tiktoken>=0.12.0`
+and Tokenicer's published owned-instance normalization (`0.0.17` tested).
+
+The native processor binding translates released `media_proc_cfg` into fixed
+native image/video components. It adds the native video marker at ID **163840**
+only to the processor's package-owned tokenizer; native forward masks modality
+IDs before embedding, so no checkpoint embedding row is invented. Ordinary
+tokenizer loading preserves the pinned vocabulary unchanged. Tokenicer remains
+the normalization owner and receives an instantiated package tokenizer.
+
+## Native adaptation and flow
+
+The decoder, language attention/RoPE, generation and cache methods are inherited.
+`native.py` uses the native vision encoder but restores its existing
+`temporal_patch_merger` for ragged temporal chunks: Transformers 5.23's newer
+rectangular gather cannot concatenate a full four-frame chunk and a partial
+final chunk. Feature split lengths then use **spatial** grid area, because time
+is already pooled. Both changes preserve native state keys and are tested
+against separate native clip forwards, including hidden-state outputs.
+
+Saving defaults to native-format safetensors (`save_original_format=False`)
+because 5.23's reverse vision conversion also matches dense language `q_proj`.
+Native loading still accepts both released and native names.
+
+The previous definition delegated to the wrong task family and described the
+released rather than the converted decoder tree:
+
+```mermaid
+flowchart TD
+  A["KimiK25QModel: require_trust_remote_code=True"] --> B["Inherited AutoModelForCausalLM"]
+  B --> X["No native Kimi_K25Config task mapping"]
+  A --> C["module_tree: language_model.model.layers"]
+  C --> Y["Does not own native model.language_model.layers"]
+  classDef failure fill:#fee,stroke:#a00
+  class X,Y failure
+```
+
+```mermaid
+flowchart TD
+  A["GPTQModel.load"] --> B["KimiK25QModel.loader: LocalModelLoader"]
+  B --> C["Kimi_K25Config: nested kimi_k2 to deepseek_v3"]
+  C --> D["Package Kimi_K25ForConditionalGeneration"]
+  D --> E["Native checkpoint conversion and decoder/cache"]
+  B --> F["Package TikTokenTokenizer"]
+  F --> G["Tokenicer.load: normalize owned instance"]
+  G --> H["Package Kimi_K25Processor"]
+  H --> I{"media_proc_cfg present?"}
+  I -->|yes| J["Translate supported legacy image/video options"]
+  I -->|no| K["Fixed native image/video from_pretrained"]
+  J --> L["Native image/video preprocessing"]
+  K --> L
+  J -->|unimplemented explicit media policy| X["ValueError: no code fallback"]
+  L --> M["Native encoder plus ragged temporal_patch_merger"]
+  M --> N["Spatial feature split and native multimodal forward"]
+  F -->|missing or invalid asset| X
+  R["Checkpoint auto_map and trust toggles"] -. cannot replace owned classes .-> B
+  classDef failure fill:#fee,stroke:#a00
+  class X failure
+```
+
+| Before (baseline `abb4b6afc`) | After |
+| --- | --- |
+| `definitions/kimi_k25.py:14`: remote code required | Explicit package config/model/processor/tokenizer loader; trust requirement false |
+| `definitions/kimi_k25.py:18,26-40`: remote decoder paths and omitted state owners | Native `model.language_model.layers`, latent norm and router exclusions |
+| Generic processor discovery and ignored legacy metadata | Fixed component classes and data-only `media_proc_cfg` translation |
+| Native `modeling_kimi_k25.py:445-465,545-546`: rectangular temporal gather | Native ragged temporal merger in local vision forward |
+| Native `modeling_kimi_k25.py:601-604`: temporal dimension counted twice | Spatial split after temporal pooling |
+| Native reverse conversion on save | Native-format safetensors by default |
+
+## Qualification
+
+Environment: CPython 3.14.6 free-threaded with `PYTHON_GIL=0`, Torch
+`2.15.0+cpu`, Transformers `5.23.0`, Tokenicer `0.0.17`, tiktoken `0.14.0`.
+The owned and shared suite also passes at the dependency floor `0.12.0`:
+
+| Scope | Result |
+| --- | --- |
+| Two owned Kimi suites | 38 passed in 19.34s |
+| Owned + shared loaders/tokenizer/processor/AWQ, tiktoken 0.14.0 | 175 passed in 20.36s |
+| Same suite, tiktoken 0.12.0 | 175 passed in 30.91s |
+| Added real image/video/mixed generation decoding assertions, 0.12.0 | 3 passed in 5.91s |
+| Full pinned real index vs compressed ownership fixture | All 208,550 keys equal |
+| Shared registered-model consumer contract with proposed case supplied in memory | Passed; no shared-file edits |
+
+All tokenizer fixtures are pinned, local, non-weight data; the tests run offline.
+The template retains upstream whitespace byte-for-byte; the port's attributes
+exempt only that fixture's blank-at-eol check and hide the large vocabulary diff.
+
+```bash
+PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \
+  tests/test_kimi_k25_local_port.py \
+  tests/module_tree/test_kimi_k25_local_port.py -q
+
+PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \
+  tests/test_kimi_k25_local_port.py \
+  tests/module_tree/test_kimi_k25_local_port.py \
+  tests/test_local_model_loading.py tests/test_local_model_paths.py \
+  tests/test_local_processor_loading.py tests/test_local_tokenizer_loading.py \
+  tests/test_awq_empty_groups.py tests/test_awq_scale_search_safety.py -q
+```
+
+Coverage includes public default-deny loading with all four API trust/bypass
+combinations and malicious config/processor/tokenizer metadata; exact real token
+IDs and UTF-8/tool/thinking templates; repaired-asset retry; legacy patch sizes
+2 and 14 with processor save/reload; image, five-frame video and mixed-media
+native-logit/cache-generation equivalence; four ragged-tail lengths; dense and
+split-Q layouts; hybrid/all-MoE ownership; Defuser; cache continuation;
+safetensors save/load/save/load; malformed expert retry; and plain AWQ.
+
+Red/green checks:
+
+- Ignoring legacy media options reproduces `patch_size == 14` rather than `2`
+  in `test_legacy_media_metadata_owns_native_components_and_overrides[2]`.
+- Native two-frame video splitting fails with `split_sizes=[2]` for one pooled
+  output; the native-backed split adapter makes the media/cache retry test pass.
+- Native mixed four/one-frame gather raises a tensor-size mismatch; independent
+  single-clip native forward oracles agree with the ragged adapter. Restoring
+  `NativeVision.forward` on the owned subclass makes
+  `test_native_ragged_video_pooling_matches_independent_clip_forwards[1]` fail
+  at native `torch.cat(rows, dim=0)`: expected size 4, got size 1.
+- Corrupting `tiktoken.model`, failing a public tokenizer load, repairing that
+  same path, then retrying exposed stale tiktoken cache bytes; content-validated
+  reading passes without a code fallback.
+
+### AWQ policy
+
+`awq_get_modules_for_scaling` returns `[]`: no MLA latent norm, routed/shared
+source folding or candidate search is qualified. `AWQProcessor._quantize_layer`
+plain-quantizes all selected projections, including unsampled routed experts,
+with `fallback=None` as well as the enabled fallback setting. Dense-Q has 26
+and split-Q 28 packed projections in the tiny hybrid model. Actual Torch AWQ
+packing/inference and safetensors state retry/reload preserve outputs and
+non-quantized router/norm tensors. Fusion remains unqualified (`fusable=None`).
+
+## Explicit limits
+
+No trained-weight quality/evaluation, released compressed-weight payload,
+GPU/FlashAttention/Marlin, multi-GPU, compile/export or concurrent/threaded
+execution qualification is claimed. The existing trained model support test
+requires `/monster/data/model/Kimi-K2.5` and is not a tiny CPU test.
+
+The released media policy is covered. Non-null `fixed_output_tokens`,
+`in_patch_limit_video`, or `max_num_frames_each_video`, and alternate
+`timestamp_mode`, have no equivalent in this native binding and fail explicitly
+rather than silently ignoring a requested constraint. These extended policies
+are not claimed supported; no fallback executes checkpoint code.
