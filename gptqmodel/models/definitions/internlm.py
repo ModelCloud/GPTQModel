@@ -13,6 +13,7 @@ class InternLMQModel(LlamaQModel):
     loader = LocalModelLoader(
         "gptqmodel.models.ports.internlm.configuration_internlm.InternLMConfig",
         "gptqmodel.models.ports.internlm.modeling_internlm.InternLMForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.internlm.tokenization_internlm.InternLMTokenizer",
     )
 
     # Original InternLM checkpoints serialize per-layer rotary inv_freq. It is

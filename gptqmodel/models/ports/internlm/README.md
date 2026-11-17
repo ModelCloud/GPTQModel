@@ -36,3 +36,12 @@ generation, raw-key continuation across dynamic NTK boundaries, beam operations,
 causality, padding, malicious `auto_map`, public dense loading, and safetensors
 dense/AWQ round trips. GPU kernels and trained 7B quality are not qualified by
 these tests; the checkpoint index was inspected without downloading its weights.
+
+## Package-owned release tokenizer
+
+`InternLMQModel.loader.tokenizer_class` binds `InternLMTokenizer` directly.
+It reads the release's SentencePiece `tokenizer.model` without executing
+checkpoint Python, including with explicit trust and the security bypass enabled.
+See [InternLM tokenizer selection and serialization](TOKENIZERS.md) for exact
+release/source hashes, shared InternLM2 algorithm, prompt/ID qualification,
+before/after flow diagrams, failure/retry behavior and validation commands.

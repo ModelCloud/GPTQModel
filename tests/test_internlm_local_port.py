@@ -225,13 +225,18 @@ def _write_tokenizer(path):
     tokenizer.save_pretrained(path)
 
 
+def _write_release_tokenizer(path):
+    from tests.test_internlm_tokenizers_local_port import RELEASES, copy_release_assets
+    copy_release_assets(path, RELEASES[0])
+
+
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
 def test_internlm_public_dispatch_uses_definition_owned_model(tmp_path, monkeypatch, trust, bypass):
     from gptqmodel import GPTQModel
     model = _model()
     model.save_pretrained(tmp_path)
-    _write_tokenizer(tmp_path)
+    _write_release_tokenizer(tmp_path)
     monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
     if bypass:
         monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
@@ -262,7 +267,7 @@ def test_internlm_plain_awq_quantizes_every_linear_and_reloads(tmp_path, bias):
     from gptqmodel.quantization.config import AWQConfig
     model = _model(bias=bias)
     model.save_pretrained(tmp_path)
-    _write_tokenizer(tmp_path)
+    _write_release_tokenizer(tmp_path)
     qcfg = AWQConfig(device="cpu", group_size=16, fallback=None)
     wrapper = GPTQModel.load(str(tmp_path), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []

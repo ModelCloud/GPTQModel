@@ -12,7 +12,14 @@ Authoritative implementation referenced by `tests/models/test_internlm2_5.py`:
 Inspected checkpoint Python as text before adapting it; no uninspected checkpoint
 Python was executed. The source headers and model card license the **code** under
 Apache-2.0. Copyright/attribution is retained in the port and NOTICE; LICENSE
-contains Apache-2.0. No weights or tokenizer code are vendored.
+contains Apache-2.0. No weights or vocabulary assets are vendored.
+
+`InternLM2QModel.loader.tokenizer_class` directly selects the package-owned
+`InternLM2Tokenizer`, not checkpoint Python. The inspected source algorithm
+matches InternLM1, so the implementation is reused through a package-local import
+while each checkpoint supplies its distinct vocabulary and special tokens.
+See [tokenizer selection, serialization and real-release qualification](../internlm/TOKENIZERS.md)
+for the source pins/licenses, hashes, flows, exact commands and support limits.
 
 | Source file | SHA-256 |
 | --- | --- |

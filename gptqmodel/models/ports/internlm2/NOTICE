@@ -9,5 +9,11 @@ revision 57dcbc5455bf050d27a80f0ebd7808387caa714d.
 These files are Apache-2.0 licensed, derived in turn from Hugging Face Llama.
 See LICENSE and README.md for license terms, pinned sources and adaptations.
 
-Only modeling/configuration code is distributed here, not upstream weights.
+tokenization_internlm2.py uses the common InternLM SentencePiece algorithm
+through a package-local import. The inspected Apache-2.0 source is
+https://huggingface.co/internlm/internlm2_5-7b-chat
+revision eb72b541689b0432dade0435feb339b89fdd39ff, tokenization_internlm2.py.
+See ../internlm/TOKENIZERS.md for the source/asset hashes and adaptations.
+
+Only source code is distributed here, not upstream weights or vocabulary assets.
 The upstream model-weight license is separate and is not superseded by this port.

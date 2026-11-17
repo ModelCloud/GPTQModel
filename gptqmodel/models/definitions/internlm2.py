@@ -12,6 +12,7 @@ class InternLM2QModel(BaseQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.internlm2.configuration_internlm2.InternLM2Config",
         model_class="gptqmodel.models.ports.internlm2.modeling_internlm2.InternLM2ForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.internlm2.tokenization_internlm2.InternLM2Tokenizer",
     )
     lm_head = "output"
     pre_lm_head_norm_module = "model.norm"
