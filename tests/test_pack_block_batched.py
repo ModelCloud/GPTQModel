@@ -242,6 +242,68 @@ def test_pack_block_saturates_and_keeps_caller_weight(bits: int):
 
 
 @pytest.mark.parametrize("bits", SUPPORTED_BITS)
+def test_pack_block_accepts_inference_mode_loaded_weights(bits: int):
+    """A checkpoint loaded under ``inference_mode()`` must still pack bit-exactly.
+
+    Hugging Face loaders materialize weights inside ``torch.inference_mode()``.
+    Casting such a module afterwards (``module.to(dtype)``) leaves a tensor that
+    is *not* flagged as an inference tensor but whose storage has no version
+    counter, so ``tensor._version`` raises and slicing it fails with
+    "Inference tensors do not track version counter". ``pack_block`` slices the
+    weight, so it has to materialize a version-tracked copy first.
+    """
+    in_features, out_features, group_size = 128, 64, 128
+    maxq = (1 << bits) - 1
+
+    poisoned = nn.Linear(in_features, out_features, bias=False).to(torch.bfloat16)
+    with torch.inference_mode():
+        loaded = torch.randn((out_features, in_features), dtype=torch.bfloat16) * 0.1
+        poisoned.load_state_dict({"weight": loaded}, assign=True)
+    # The dtype cast is what turns the inference storage into a normal tensor
+    # without a version counter, matching the loader + cast sequence in practice.
+    poisoned = poisoned.to(torch.float16)
+    assert not poisoned.weight.is_inference()
+    with pytest.raises(RuntimeError, match="Inference tensors do not track version counter"):
+        poisoned.weight._version
+
+    # Identical bits on a version-tracked tensor, as the control.
+    control = nn.Linear(in_features, out_features, bias=False).to(torch.float16)
+    with torch.no_grad():
+        control.weight.copy_(poisoned.weight)
+    control.weight._version
+
+    scales = torch.full((out_features, in_features // group_size), 0.02, dtype=torch.float16)
+    zeros = torch.full((out_features, in_features // group_size), maxq // 2, dtype=torch.int32)
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+
+    weight_before = poisoned.weight.detach().clone()
+    actual = _module(bits, in_features, out_features, group_size)
+    actual.pack_block(
+        linear=poisoned,
+        scales=scales.clone(),
+        zeros=zeros.clone(),
+        g_idx=g_idx.clone(),
+        workers=1,
+    )
+    expected = _module(bits, in_features, out_features, group_size)
+    expected.pack_block(
+        linear=control,
+        scales=scales.clone(),
+        zeros=zeros.clone(),
+        g_idx=g_idx.clone(),
+        workers=1,
+    )
+
+    assert torch.equal(actual.qweight, expected.qweight)
+    assert torch.equal(actual.qzeros, expected.qzeros)
+    assert torch.equal(
+        actual.qweight,
+        _oracle_words(bits, _oracle_codes(control, scales, zeros, g_idx, bits)),
+    )
+    assert torch.equal(poisoned.weight, weight_before)
+
+
+@pytest.mark.parametrize("bits", SUPPORTED_BITS)
 def test_pack_block_threaded_matches_single_thread(bits: int):
     in_features, out_features, group_size = 512, 256, 128
     linear, scales, zeros, g_idx, _ = _inputs(bits, in_features, out_features, group_size)
