@@ -46,7 +46,7 @@ DOC_FILES = (
 LINE_WINDOW = 8
 CONTRACT_REFS = (
     ("docs/adapter-rank-pattern-matching.md", "gptqmodel/quantization/config.py",
-     "extract_adapter_rank_patterns", 5569),
+     "extract_adapter_rank_patterns", 5595),
     ("docs/awq-scale-folding.md", "gptqmodel/models/base.py", "_select_prev_op", 5489),
     ("docs/calibration-replay.md", "gptqmodel/models/base.py",
      "capture_layer_type_replay_kwargs", 4022),
@@ -70,9 +70,9 @@ CONTRACT_REFS = (
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1077),
+     "compute_hessian_xtx", 1161),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 1954),
+     "hessian_inverse", 2047),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)

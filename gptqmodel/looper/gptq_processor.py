@@ -430,10 +430,16 @@ class GPTQProcessor(LoopProcessor):
             return plan
 
     @staticmethod
-    def _hessian_accumulation_settings(task: GPTQ) -> Tuple[str, Optional[int], Optional[int]]:
+    def _hessian_accumulation_settings(task: GPTQ) -> Tuple[Any, ...]:
         """Settings that alter the numerical result of Hessian accumulation; members must match to share `H`."""
         hessian = task.qcfg.hessian
-        return (str(hessian.staging_dtype), hessian.chunk_size, hessian.chunk_bytes)
+        return (
+            str(hessian.staging_dtype),
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+            # The sink-row cap rescales rows before `X^T X` (issue #4742).
+            getattr(hessian, "sink_row_cap_median_multiple", None),
+        )
 
     def _hessian_capture_signature(self, task: Any) -> Optional[Tuple[Any, ...]]:
         """Numerical capture contract; ``None`` excludes the task from sharing.

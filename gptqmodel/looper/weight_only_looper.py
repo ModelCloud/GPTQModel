@@ -913,6 +913,24 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         materialize_remaining_meta_modules(self.gptq_model, device=CPU)
 
+    def _materialize_unreached_meta_modules(self) -> None:
+        """Best-effort fill of the layers a cancelled/failed run never reached.
+
+        The weight-only loop also leaves the base modules on meta until the
+        success path fills them, so cover both before the next forward. Cleanup
+        must never mask the cancellation that got us here, so a materialization
+        failure is logged and ignored (#4860).
+        """
+
+        try:
+            self._materialize_meta_base_modules(strict=False)
+            self._materialize_remaining_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the layers the cancelled/failed run never reached",
+                exc_info=True,
+            )
+
     def _materialize_meta_base_modules(self, *, strict: bool) -> None:
         """Fill base modules that the lazy shell never materialized.
 
@@ -973,6 +991,9 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 self._restore_offloaded_base_modules(strict=False)
             finally:
+                # The loop never materialized the layers past the cancel point;
+                # fill them before the next forward (#4860).
+                self._materialize_unreached_meta_modules()
                 # ``finalize()`` is the only other place the processor closes
                 # its Device-SMI handles, and a failed run never reaches it
                 # (#4813). The release is idempotent and must not mask the run

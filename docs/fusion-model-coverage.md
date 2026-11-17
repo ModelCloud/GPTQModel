@@ -6,7 +6,7 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **205 registered model types**: **102 qualified** and **103 not
+accounts for all **206 registered model types**: **102 qualified** and **104 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert

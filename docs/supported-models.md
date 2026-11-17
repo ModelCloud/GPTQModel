@@ -20,6 +20,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) | `cohere`, `cohere2`, `cohere2_moe`, `cohere_compass` |
 | DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
 | DeciLM | `deci` |
+| Decision Transformer | `decision_transformer` |
 | DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
 | KRAFTON Raon-1 mini | `raon1_mini` |
 | DiffusionGemma | `diffusion_gemma` |

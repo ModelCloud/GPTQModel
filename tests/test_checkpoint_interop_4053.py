@@ -72,9 +72,26 @@ def _tiny_llama(seed=0):
     return config, LlamaForCausalLM(config).half()
 
 
+def _model_device(model):
+    """Device a direct forward must use.
+
+    ``#4871`` stopped installing the per-module ``AlignDevicesHook`` for a
+    single-device placement (the hooks pinned the model in a reference cycle),
+    so nothing moves inputs to the accelerator any more; a direct forward has to
+    pass them on the model's own device, as transformers and accelerate require
+    (#4908). ``generate()`` is unaffected because transformers moves its inputs.
+    """
+
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def _logits(model):
+    input_ids = torch.tensor([[1, 3, 4, 5]], device=_model_device(model))
     with torch.inference_mode():
-        return model(input_ids=torch.tensor([[1, 3, 4, 5]]), use_cache=False).logits.float()
+        return model(input_ids=input_ids, use_cache=False).logits.float()
 
 
 def _relative_error(reference, actual):

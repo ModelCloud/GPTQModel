@@ -613,6 +613,8 @@ def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = True
         config_class = None
@@ -711,6 +713,8 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = True
         HF_CONVERSION_MAP_REVERSED = (
@@ -792,6 +796,8 @@ def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -862,6 +868,8 @@ def test_model_loader_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -947,6 +955,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_profiles_use_dense_path
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1057,6 +1067,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_auto_enables_fa2_on_cud
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1159,6 +1171,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_keeps_explicit_attn_imp
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1262,6 +1276,8 @@ def test_model_loader_from_pretrained_native_bonsai_low_memory_redirects_with_ba
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1357,6 +1373,8 @@ def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(mon
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; a model double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = True
         config_class = None

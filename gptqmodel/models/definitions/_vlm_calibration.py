@@ -34,6 +34,7 @@ import torch
 from ...utils.calibration import (
     _columnar_mapping_examples,
     _frame_columns,
+    _hf_dataset_rows,
     _is_columnar_mapping,
     _is_dataset_split_mapping,
     _is_integer_sequence,
@@ -219,6 +220,10 @@ def split_calibration_dataset(
     frame_columns = _frame_columns(calibration_dataset)
     if frame_columns is not None:
         calibration_dataset = frame_columns
+
+    hf_rows = _hf_dataset_rows(calibration_dataset)
+    if hf_rows is not None:
+        calibration_dataset = hf_rows
 
     if isinstance(calibration_dataset, Mapping):
         calibration_dataset = _mapping_rows(calibration_dataset, label=label)

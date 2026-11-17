@@ -170,6 +170,34 @@ asymmetric weights where the chosen kernel supports them. `desc_act=True`
 enables GPTQ activation ordering and disables the default group-aware ordering;
 do not explicitly enable both `desc_act` and `act_group_aware`.
 
+Disabling the group-aware ordering also disables its per-group scale
+protection, so on models whose tokenizer emits a BOS token `desc_act=True`
+makes attention-sink damage much worse: the few sink rows own the largest
+Hessian diagonal, get ordered first with a tiny `Hinv[i, i]`, and their
+quantization error is amplified into every column correlated with the sink.
+On Llama-3.1-8B that saturated `layers.1.mlp.down_proj` and produced garbage
+perplexity (up to ~12000) on wikitext windows whose first token after BOS is a
+delimiter (issue #4742). To bound that, `desc_act=True` now caps each
+calibration row's norm at `min(p99.9, N x median)` before forming `X^T X`,
+where `N` is `HessianConfig.sink_row_cap_median_multiple` (default `4.0`).
+The cap keeps the sink direction but stops it from dominating the Hessian:
+
+```python
+from gptqmodel.quantization.config import GPTQConfig, HessianConfig
+
+qcfg = GPTQConfig(
+    bits=4,
+    group_size=128,
+    desc_act=True,
+    hessian=HessianConfig(sink_row_cap_median_multiple=4.0),  # default; 0 or None disables
+)
+```
+
+The cap is a no-op whenever `act_group_aware` is active, so the default GPTQ
+path is bit-for-bit unchanged. It is a mitigation, not a guarantee: still
+validate the checkpoint per model, and consider dropping the sink rows
+outright with `CalibrationConfig(exclude_attention_sinks=True)` below.
+
 Tokenizers that prepend a BOS token make it an attention sink: its activation
 norm can exceed the text tokens by hundreds of times, so a few rows dominate the
 input Hessian and the quantizer stops optimizing for text tokens (issue #4393).

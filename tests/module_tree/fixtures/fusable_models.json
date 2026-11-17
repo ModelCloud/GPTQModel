@@ -369,6 +369,10 @@
       "definition": "DeciLMQModel",
       "reason": "Heterogeneous no-op, linear and GQA attention/MLP layouts have no qualified fused executor."
     },
+    "decision_transformer": {
+      "definition": "DecisionTransformerQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
     "deepseek_ocr2": {
       "definition": "DeepSeekOCR2QModel",
       "profiles": {

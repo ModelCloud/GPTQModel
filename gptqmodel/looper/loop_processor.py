@@ -596,6 +596,7 @@ class LoopProcessor:
             calibration_summary = getattr(
                 calibration_dataset, "gptqmodel_calibration_summary", None
             )
+            token_rows = len(calibration_dataset)
             if calibration_summary is not None:
                 if not isinstance(calibration_summary, dict):
                     raise TypeError(
@@ -625,7 +626,12 @@ class LoopProcessor:
             else:
                 total_input_ids_length = 0
                 max_input_id_length = 0
+                token_rows = 0
                 for row in calibration_dataset:
+                    # Tensor-kwargs calibration (Decision Transformer) carries no
+                    # token ids, so token-length accounting does not apply.
+                    if "input_ids" not in row:
+                        continue
                     input_ids = row["input_ids"]
                     if isinstance(input_ids, torch.Tensor):
                         if input_ids.dim() <= 2:
@@ -637,14 +643,16 @@ class LoopProcessor:
                     else:
                         input_ids_length = len(input_ids)
 
+                    token_rows += 1
                     if input_ids_length > max_input_id_length:
                         max_input_id_length = input_ids_length
                     total_input_ids_length += input_ids_length
-            avg = total_input_ids_length / len(calibration_dataset)
+            if token_rows:
+                avg = total_input_ids_length / token_rows
 
-            if avg < min_calibration_dataset_input_ids_avg_length:
-                log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
-                               f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+                if avg < min_calibration_dataset_input_ids_avg_length:
+                    log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
+                                   f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
             self.num_batches = len(calibration_dataset)
             self.calibration_dataset = calibration_dataset
