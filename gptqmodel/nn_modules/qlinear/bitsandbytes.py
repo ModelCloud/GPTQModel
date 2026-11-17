@@ -902,6 +902,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                     self.weight.device,
                     compute_dtype,
                     x.numel() // self.in_features,
+                    kernel=self.kernel,
                 )
             ):
                 quant_state = self._refresh_quant_state()

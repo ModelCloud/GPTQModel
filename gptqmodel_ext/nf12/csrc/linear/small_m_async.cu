@@ -226,7 +226,9 @@ __global__ void __launch_bounds__(256, 1) small_m_async_kernel(Params p) {
           const uint32_t indices[4] = {low01.x, low01.z, low23.x, low23.z};
 #pragma unroll
           for (int group = 0; group < 4; ++group) {
-            if (metadata[group] == 0u) {
+            // Out-of-table escapes fall back to the bulk decode, as every other
+            // path does; the staged slot is then never written nor read.
+            if (metadata[group] == 0u && indices[group] < p.num_escapes) {
               const uint32_t target = smem_addr(staged_escapes + (stage * 4 + part) * kEscapeAtomBytes +
                                                 (group * 32 + lane) * sizeof(uint4));
               cp_async_16(target, p.escapes + indices[group]);
@@ -267,7 +269,7 @@ __global__ void __launch_bounds__(256, 1) small_m_async_kernel(Params p) {
 #pragma unroll
         for (int group = 0; group < 4; ++group) {
           decode_bulk(groups[group], p.base, fragments[group]);
-          if (groups[group].meta == 0u) {
+          if (groups[group].meta == 0u && groups[group].lo0 < p.num_escapes) {
             const uint4 value = load_plane(smem_addr(
                 staged_escapes + (stage * 4 + part) * kEscapeAtomBytes + (group * 32 + lane) * sizeof(uint4)));
             fragments[group][0] = value.x;

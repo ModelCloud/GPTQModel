@@ -94,30 +94,46 @@ def tuned_families() -> tuple[str, ...]:
     return tuple(sorted(_BNB_GEMM_LAUNCH))
 
 
-def available_for(device=None, dtype: Optional[torch.dtype] = None) -> bool:
+def available_for(
+    device=None,
+    dtype: Optional[torch.dtype] = None,
+    *,
+    kernel=None,
+) -> bool:
     """Return whether the Triton path is enabled for this device and dtype.
 
     Enabled on ROCm for a family with a measured tile. Elsewhere it is off
     unless ``KernelConfig.bitsandbytes_triton`` is set, because the vendor
     kernels are the measured winner on CUDA.
-    """
 
-    from ...utils.kernel import get_kernel_config
+    ``kernel`` is the module's snapshotted policy. ``None`` keeps the
+    process-wide fallback for callers that do not own a module.
+    """
 
     if dtype is not None and dtype not in (torch.float16, torch.bfloat16):
         return False
-    forced = get_kernel_config().bitsandbytes_triton
+    if kernel is None:
+        from ...utils.kernel import get_kernel_config
+
+        kernel = get_kernel_config()
+    forced = kernel.bitsandbytes_triton
     if not forced and not IS_ROCM:
         return False
     return _family(device) in _BNB_GEMM_LAUNCH
 
 
-def should_use(device=None, dtype: Optional[torch.dtype] = None, rows: int = 0) -> bool:
+def should_use(
+    device=None,
+    dtype: Optional[torch.dtype] = None,
+    rows: int = 0,
+    *,
+    kernel=None,
+) -> bool:
     """Return whether a forward with ``rows`` rows should use the fused kernel."""
 
     if rows < gemm_launch(device).min_m:
         return False
-    return available_for(device, dtype)
+    return available_for(device, dtype, kernel=kernel)
 
 
 @triton.jit
