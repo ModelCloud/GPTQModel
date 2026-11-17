@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
-
 from ...utils.calibration import batched
 from ...utils.looper_helpers import normalize_device_like
 from ...utils.model import MODALITY, move_to
@@ -12,6 +10,7 @@ from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class ApertusQModel(BaseQModel):
@@ -30,26 +29,42 @@ class ApertusQModel(BaseQModel):
         "#",
         {
             "attention_layernorm": ("attention_layernorm:!",),
-            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
+            "self_attn": (
+                "q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x",
+                "q_norm:!", "k_norm:!", "o_proj:1",
+            ),
             "feedforward_layernorm": ("feedforward_layernorm:!",),
             # The MLP activation (xIELU by default) is not positively
             # homogeneous, so ``up_proj`` cannot be an AWQ scale source for
             # ``down_proj``.
-            "mlp": ("up_proj:0:nosrc", "down_proj:1"),
+            "mlp": ("up_proj:0:nosrc", "act_fn:!", "down_proj:1"),
         }
     ]
 
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Q/K normalization and nonlinear xIELU require separately qualified folds.
+        # All decoder linears still use AWQ's plain-quantization fallback.
+        return []
+
 
 class Apertus1p5TextQModel(ApertusQModel):
-    """Text-only Apertus 1.5 checkpoints use the original Apertus decoder layout."""
+    """Apertus 1.5 text backbone, including extended/pruned vocabulary layouts."""
     fusable = None  # No qualified executor for this definition.
-
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.apertus.configuration_apertus1p5.Apertus1p5TextConfig",
+        model_class="gptqmodel.models.ports.apertus.modeling_apertus1p5.Apertus1p5TextForCausalLM",
+    )
 
 
 class Apertus1p5QModel(BaseQModel):
     """Apertus 1.5 multimodal wrapper with an Apertus language backbone."""
 
-    loader = AutoModelForMultimodalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.apertus.configuration_apertus1p5.Apertus1p5Config",
+        model_class="gptqmodel.models.ports.apertus.modeling_apertus1p5.Apertus1p5ForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.apertus.processing_apertus1p5.Apertus1p5Processor",
+    )
+    awq_get_modules_for_scaling = ApertusQModel.awq_get_modules_for_scaling
     require_load_processor = True
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
@@ -72,7 +87,7 @@ class Apertus1p5QModel(BaseQModel):
                 "o_proj:1",
             ),
             "feedforward_layernorm": ("feedforward_layernorm:!",),
-            "mlp": ("up_proj:0:nosrc", "down_proj:1"),
+            "mlp": ("up_proj:0:nosrc", "act_fn:!", "down_proj:1"),
         },
     ]
 
@@ -124,8 +139,12 @@ class Apertus1p5QModel(BaseQModel):
         for parent, name in modules:
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
-    def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
+    def load_processor(self):
+        return type(self).loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         del kwargs
