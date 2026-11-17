@@ -107,6 +107,7 @@ from ..utils.model import (
 )
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
+from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -4667,36 +4668,26 @@ class BaseQModel(nn.Module):
 
         return self._decoder_quant_method_name() == "modelopt"
 
-    def _modelopt_activation_quantization_mode(self) -> Optional[str]:
-        """Describe unsupported ModelOpt activation quantization metadata when present."""
+    def _modelopt_unsupported_metadata(self) -> Optional[UnsupportedMetadata]:
+        """Describe unsupported quantization metadata in a ModelOpt checkpoint.
+
+        The config payload is classified by the shared helper so a KV-cache
+        scheme is reported as a KV-cache scheme, not as activation
+        quantization. Checkpoints that pre-quantize activations also ship the
+        corresponding scales, which the weight map exposes as side tensors.
+        """
 
         quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
-        if not isinstance(quant_config, dict):
-            return None
-
-        config_groups = quant_config.get("config_groups")
-        if isinstance(config_groups, dict):
-            for group_cfg in config_groups.values():
-                if not isinstance(group_cfg, dict):
-                    continue
-                input_activations = group_cfg.get("input_activations")
-                if isinstance(input_activations, dict):
-                    num_bits = input_activations.get("num_bits")
-                    if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
-                        return "input_activations"
-
-        kv_cache_scheme = quant_config.get("kv_cache_scheme")
-        if isinstance(kv_cache_scheme, dict):
-            num_bits = kv_cache_scheme.get("num_bits")
-            if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
-                return "kv_cache_scheme"
+        found = find_unsupported_metadata(quant_config)
+        if found is not None:
+            return found
 
         if isinstance(self.turtle_model, LazyTurtle):
             keys = self.turtle_model._weight_map.keys()
         else:
             keys = self.model.state_dict().keys()
         if any(str(name).endswith((".input_scale", ".k_scale", ".v_scale")) for name in keys):
-            return "checkpoint_scales"
+            return UnsupportedMetadata(field="checkpoint_scales", kind="checkpoint_scales")
         return None
 
     def _configure_modelopt_runtime(self) -> None:
@@ -4713,15 +4704,11 @@ class BaseQModel(nn.Module):
         if self._active_auto_module_decoder_config() is not None:
             return
 
-        unsupported_mode = self._modelopt_activation_quantization_mode()
-        if unsupported_mode is not None:
-            log.error("GPT-QModel currently does not support loading of activation quantized models")
-            raise ValueError(
-                "GPT-QModel currently does not support loading of activation quantized models. "
-                "GPTQModel does not support loading ModelOpt checkpoints with activation quantization. "
-                "Only dense-activation weight-only variants such as W8A16/FP8 and W4A16/FP4 are supported. "
-                f"Detected unsupported metadata: {unsupported_mode}."
-            )
+        unsupported = self._modelopt_unsupported_metadata()
+        if unsupported is not None:
+            message = describe_unsupported_metadata(unsupported)
+            log.error(message)
+            raise ValueError(message)
 
     def _decoder_scale_tensor(
         self,
