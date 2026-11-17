@@ -100,11 +100,12 @@ class AwqGEMVFastLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
 
-    # Calls the native GEMV_FAST custom ops (gemv_fast_forward_decode /
-    # gemm_fast_forward_prefill), which have no fake/meta kernel, so dynamo
-    # breaks. The JIT extension could not build here (no CUDA_HOME/nvcc).
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native
+    # GEMV_FAST ops (gemv_fast_forward_decode / gemm_fast_forward_prefill) have
+    # no fake/meta kernel, so ``torch.compile`` stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     zeros_name = "qzeros"
 
@@ -352,10 +353,11 @@ class LLMAwqLinear(AwqGEMVFastLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "llm-awq"
 
-    # Same native GEMV_FAST custom ops as AwqGEMVFastLinear: no fake/meta
-    # kernel, so dynamo breaks; the extension could not build on this host.
+    # Same native GEMV_FAST ops as AwqGEMVFastLinear. Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130):
+    # eager and an explicit ``torch.cuda.graph`` capture both run with matching
+    # output; the missing fake/meta kernel keeps ``torch.compile`` at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     zeros_name = "scaled_zeros"
 

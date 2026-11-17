@@ -5,8 +5,9 @@ MACaQ/VPTQ/W4A kernels.
 
 Each case builds a real packed module with the family's own ``pack`` /
 ``pack_original`` helper, then measures it with ``tests/kernels/compile_probe.py``
-on the GB10 (sm_121, torch 2.11.0+cu130). Kernels whose native runtime cannot
-build on this host are skipped with the reason their declaration records.
+on the GB10 (sm_121, torch 2.11.0+cu130) and on sm_80 (A100-class, torch
+2.15.0.dev20260928+cu130). Kernels whose native runtime cannot build on the
+host are skipped with the reason their declaration records.
 """
 
 from __future__ import annotations
@@ -96,6 +97,18 @@ def _build_gguf(cls, bits):
     GGUFTorchLinear.pack_original(module, linear, scales=None, zeros=None)
     module = module.cuda().eval()
     return module, _input(module), True
+
+
+def _build_gguf_cpp():
+    # The ggml CPU kernel reads the same qweight layout and runs on the host.
+    linear = _linear(512, 256, dtype=torch.float32)
+    module = GGUFCppKernel(
+        bits="q4_0", group_size=-1, sym=True, desc_act=False,
+        in_features=512, out_features=256, bias=False,
+    )
+    GGUFTorchLinear.pack_original(module, linear, scales=None, zeros=None)
+    module = module.cpu().eval()
+    return module, torch.randn(ROWS, 512, dtype=torch.float16), False
 
 
 def _build_gguf_torch():
@@ -216,6 +229,22 @@ def _paro_unavailable() -> Optional[str]:
     return None
 
 
+def _fp8_capture_supported() -> bool:
+    """Whether this device dequantizes FP8 natively (and so can be captured).
+
+    ``TorchFP8Linear`` declares capture for the native-FP8 path. On a GPU
+    without native FP8 math (sm_80 here) ``dequantize_weight`` round-trips the
+    weight through the host, which a CUDA-graph capture rejects. The compile
+    level is still measured there; only the capture assertion is device-gated.
+    """
+
+    if not torch.cuda.is_available():
+        return False
+    from gptqmodel.quantization.dtype import device_supports_native_fp8
+
+    return device_supports_native_fp8(torch.device("cuda"))
+
+
 def _gguf_cpp_unavailable(cls):
     if importlib.util.find_spec("llama_cpp") is None:
         return f"{cls.__name__} needs llama-cpp-python; not installed on this host"
@@ -228,16 +257,16 @@ CASES = [
     Case(TorchFP8Linear, _build_fp8, lambda: None),
     Case(BitsAndBytesLinear, None, lambda: _unavailable(BitsAndBytesLinear)),
     Case(GGUFTorchLinear, _build_gguf_torch, lambda: None),
-    Case(GGUFCppKernel, None, lambda: _gguf_cpp_unavailable(GGUFCppKernel)),
+    Case(GGUFCppKernel, _build_gguf_cpp, lambda: _gguf_cpp_unavailable(GGUFCppKernel)),
     Case(GGUFCudaKernel, None, lambda: _gguf_cpp_unavailable(GGUFCudaKernel)),
     Case(GGUFTritonKernel, _build_gguf_triton, lambda: _unavailable(GGUFTritonKernel)),
     Case(NF12Linear, _build_nf12, lambda: None),
-    Case(ParoLinear, None, _paro_unavailable),
+    Case(ParoLinear, lambda: _build_paro(ParoLinear), _paro_unavailable),
     Case(ParoTritonLinear, lambda: _build_paro(ParoTritonLinear), lambda: None),
     Case(MacaqLinear, lambda: _build_macaq(MacaqLinear), lambda: None),
     Case(MacaqTritonLinear, lambda: _build_macaq(MacaqTritonLinear), lambda: None),
     Case(VPTQLinear, lambda: _build_vptq(VPTQLinear), lambda: None),
-    Case(VPTQCudaLinear, None, lambda: _unavailable(VPTQCudaLinear)),
+    Case(VPTQCudaLinear, lambda: _build_vptq(VPTQCudaLinear), lambda: _unavailable(VPTQCudaLinear)),
     Case(W4AFP8Linear, _build_w4a_fp8, lambda: _unavailable(W4AFP8Linear)),
     Case(W4ANVFP4Linear, _build_w4a_nvfp4, lambda: _unavailable(W4ANVFP4Linear)),
 ]
@@ -275,6 +304,12 @@ def test_kernel_reaches_declared_compile_level(case):
     )
 
     if graph_capture_safe(case.cls):
+        if case.cls is TorchFP8Linear and not _fp8_capture_supported():
+            pytest.skip(
+                "TorchFP8Linear: compile level verified, but this device has no "
+                "native FP8 math, so the host-round-trip dequant path cannot be "
+                "captured; capture is declared for the native-FP8 path"
+            )
         assert result.graph_capture is True, (
             f"{case.cls.__name__}: declares SUPPORTS_GRAPH_CAPTURE=True but capture "
             f"failed: {result.graph_capture_error}"

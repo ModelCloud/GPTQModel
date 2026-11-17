@@ -85,11 +85,12 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 class ParoLinear(AwqTorchLinear):
     """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
 
-    # The fused AWQ CUDA GEMM is a JIT extension that cannot build on this host
-    # (no CUDA toolkit), and the forward branches on host row counts around the
-    # rotation custom op. Static: EAGER, no capture.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The rotation
+    # buffers are validated in ``post_init``; dynamo stops at EAGER on
+    # ``tensor.is_inference()``.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.PARO_CUDA]
     SUPPORTS_METHODS = [METHOD.PARO]
