@@ -207,8 +207,8 @@ layout alone does not authorize it.
 | Model type | Definition | Reason |
 | --- | --- | --- |
 | `agnes` | `AgnesQModel` | Package-owned hybrid multimodal implementation; fusion executor and recurrent replay remain unqualified. |
-| `apertus1p5` | `Apertus1p5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `apertus1p5_text` | `Apertus1p5TextQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `apertus1p5` | `Apertus1p5QModel` | Package-owned multimodal implementation; fusion executor remains unqualified. |
+| `apertus1p5_text` | `Apertus1p5TextQModel` | Package-owned Apertus 1.5 text implementation; fusion executor remains unqualified. |
 | `axk2` | `AXK2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `baichuan` | `BaiChuanQModel` | Package-owned fused-QKV Baichuan implementation; fusion executor remains unqualified. |
 | `bailing_hybrid` | `BailingMoeQModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |

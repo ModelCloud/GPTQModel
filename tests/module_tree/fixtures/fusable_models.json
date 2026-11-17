@@ -89,11 +89,11 @@
     },
     "apertus1p5": {
       "definition": "Apertus1p5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned multimodal implementation; fusion executor remains unqualified."
     },
     "apertus1p5_text": {
       "definition": "Apertus1p5TextQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Apertus 1.5 text implementation; fusion executor remains unqualified."
     },
     "axk2": {
       "definition": "AXK2QModel",

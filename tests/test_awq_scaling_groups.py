@@ -486,7 +486,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
-PLAIN_QUANTIZATION_FAMILIES = {"afmoe", "agnes", "codegen", "gpt2", "minimax"}
+PLAIN_QUANTIZATION_FAMILIES = {"afmoe", "agnes", "apertus", "codegen", "gpt2", "minimax"}
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
 # `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
