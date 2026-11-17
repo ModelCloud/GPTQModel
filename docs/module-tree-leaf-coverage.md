@@ -135,4 +135,11 @@ Phi-3 longrope, Zamba/Zamba2, PhiMoE, Falcon-H1, HRM-Text, Jamba, GRIN-MoE and
 native Kimi-Linear. The registry test runs every `MODEL_MAP` entry whose config
 is locally constructible.
 
+`tests/module_tree/test_granitemoehybrid_model_tree.py` covers Granite MoE
+Hybrid, which the registry sweep previously exempted. Its `state_dict()` owners
+include a Mamba `conv1d`, a gated `norm`, parameters owned directly by the
+`mamba` container, and the MoE router; the test requires an explicit
+quantize/exclude policy for each. The exemption is gone, so the registry sweep
+builds the model on every run.
+
 Issue #4174 introduced this contract.
