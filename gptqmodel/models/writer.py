@@ -71,6 +71,7 @@ from ..utils.model import (
     OffloadTensorRef,
     TensorSource,
     _atomic_shard_path,
+    _checkpoint_tensor_keys,
     _validate_offload_sources_outside_save_dir,
     convert_loaded_qzeros_for_format_change,
     copy_py_files,
@@ -103,6 +104,62 @@ PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
+
+
+_QUANTIZED_TENSOR_SUFFIXES = (
+    "qweight",
+    "qzeros",
+    "scales",
+    "g_idx",
+    "qscale",
+    "qzero",
+    "weight_scale_inv",
+    "weight_scale",
+    "weight_bias",
+    "weight_scb",
+    "suh",
+    "svh",
+    "s_group",
+    "s_channel",
+    "theta",
+    "channel_scales",
+    "BH",
+    "pre_scale",
+)
+
+
+def _validate_export_shell_quantized_slots(model, checkpoint):
+    """Fail closed when the export shell has no slot for checkpoint quant tensors.
+
+    The shell is rebuilt from config and filled from the checkpoint. A
+    quantized checkpoint tensor without a destination module means the
+    shell's module tree does not match the checkpoint (the fused-expert MoE
+    case before #4589). Accelerate would ignore it and ``save()`` would
+    publish a checkpoint missing that payload, so raise instead of writing.
+    """
+
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        return
+
+    shell_keys = set(model.state_dict().keys())
+    dropped = sorted(
+        key
+        for key in checkpoint_keys
+        if key.rsplit(".", 1)[-1] in _QUANTIZED_TENSOR_SUFFIXES
+        and key not in shell_keys
+    )
+    if not dropped:
+        return
+
+    examples = ", ".join(dropped[:8])
+    raise ValueError(
+        "Refusing to re-save a quantized checkpoint whose export shell has no "
+        f"module for {len(dropped)} quantized tensor(s): {examples}. "
+        "The rebuilt module tree does not match the checkpoint (for fused-expert "
+        "MoE this means the expert shell was not defused). Saving would silently "
+        "drop those tensors and write an unusable checkpoint."
+    )
 
 
 def _convert_checkpoint_state_dict_keys(state_dict: Dict[str, Any], key_converter) -> Dict[str, Any]:
@@ -2539,6 +2596,24 @@ def ModelWriter(cls):
                 config, dtype=model_dtype
             )
 
+            # Re-saving a loaded quantized MoE must rebuild the same per-expert
+            # module tree the loader builds. ``from_config`` produces the fused
+            # 3-D expert parameters (OLMoE, PhiMoE, ...), and ``make_quant`` can
+            # only replace ``nn.Linear``, so without defusing here the
+            # checkpoint's per-expert quantized tensors have no destination and
+            # ``save()`` writes the fused zero shell (issue #4589). Mirror the
+            # load path: park the fused tensors on meta, let Defuser build the
+            # per-expert linears, then give those shells empty host storage.
+            from .loader import (
+                _convert_model_with_defuser,
+                _materialize_meta_expert_linears,
+                _meta_fused_expert_params,
+            )
+
+            _meta_fused_expert_params(model)
+            _convert_model_with_defuser(type(self), model, cleanup_original=True)
+            _materialize_meta_expert_linears(model)
+
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
             external_inclusions = qcfg.external_module_inclusions()
@@ -2672,6 +2747,9 @@ def ModelWriter(cls):
                 device_map={"": "cpu"},
                 # offload_state_dict=True,
                 # offload_buffers=True,
+            )
+            _validate_export_shell_quantized_slots(
+                model, self.checkpoint_file_name,
             )
             resave_conversion = resolve_resave_format_conversion(qcfg)
             if resave_conversion is not None:

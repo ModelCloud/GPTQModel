@@ -267,13 +267,19 @@ def resolve_quantize_backend(backend, qcfg, kernel=None, runtime=None, *, inheri
 
     A legacy kernel conflicts with a typed backend or a runtime wherever each
     was supplied (argument or config field). ``inherit=True`` lets
-    ``quantize(backend=AUTO)`` keep the dense load's typed selection; every
-    other call replaces it.
+    ``quantize(backend=AUTO)`` keep the dense load's typed or explicit
+    enum/string selection; every other call replaces it.
     """
     if qcfg is None:
         return resolve_backend_config(backend, kernel, runtime)
     if inherit and not isinstance(backend, BackendConfig) and normalize_backend(backend) == BACKEND.AUTO:
-        backend = getattr(qcfg, "_backend_config", None) or backend
+        # Typed choices carry their options in `_backend_config`; an explicit
+        # enum/string load choice is recorded in `_load_backend`. Both must
+        # survive into quantize(backend=AUTO).
+        inherited = getattr(qcfg, "_backend_config", None)
+        if inherited is None:
+            inherited = getattr(qcfg, "_load_backend", None)
+        backend = inherited or backend
     if kernel is not None:
         kernel = _coerce_kernel_config(kernel)
     if runtime is not None and not isinstance(runtime, RuntimeConfig):
@@ -299,7 +305,18 @@ def resolve_quantize_backend(backend, qcfg, kernel=None, runtime=None, *, inheri
         qcfg.kernel = kernel
     if runtime is not None:
         qcfg.runtime = runtime
-    qcfg._backend_config = backend if isinstance(backend, BackendConfig) else None
+    if isinstance(backend, BackendConfig):
+        qcfg._backend_config = backend
+        qcfg._load_backend = None
+    else:
+        qcfg._backend_config = None
+        if not inherit:
+            # Record the loader's explicit enum/string choice. A quantize()
+            # argument is a one-shot override, so it does not replace it.
+            resolved_backend = normalize_backend(backend)
+            qcfg._load_backend = (
+                None if resolved_backend in (None, BACKEND.AUTO) else resolved_backend
+            )
     qcfg._resolved_kernel = policy
     return selected, policy
 
