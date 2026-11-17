@@ -79,3 +79,34 @@ def test_pack_allocates_the_same_workspace(out_features, monkeypatch):
 
     assert module.workspace.numel() == _workspace_numel(out_features, module.max_par)
     assert module.workspace.numel() >= (out_features + 63) // 64
+
+
+def test_forward_allocates_a_fresh_lock_array_per_call(monkeypatch):
+    """Two streams on the same module must not share split-K counters (#4665).
+
+    ``qqq_gemm.cu`` spins on and resets the lock array, so a per-module buffer
+    let concurrent calls serving the same layers deadlock the device. Each
+    forward must pass its own zeroed array (EXL3's per-call locks precedent).
+    """
+
+    module = _build(192, monkeypatch)
+    seen = []
+
+    def fake_mul(A, B, C, D, s1, s2, s3, workspace, **kwargs):
+        seen.append(workspace)
+        D.zero_()
+
+    monkeypatch.setattr(qqq_mod, "mul", fake_mul)
+    x = torch.zeros((2, IN_FEATURES), dtype=torch.float16)
+
+    module(x)
+    module(x)
+
+    assert len(seen) == 2
+    assert seen[0] is not seen[1]
+    assert seen[0] is not module.workspace
+    assert seen[1] is not module.workspace
+    for workspace in seen:
+        assert workspace.dtype == torch.int32
+        assert workspace.numel() == _workspace_numel(module.out_features, module.max_par)
+        assert not workspace.any()

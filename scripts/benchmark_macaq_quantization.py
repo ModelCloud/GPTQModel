@@ -31,7 +31,7 @@ from datasets import load_dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear
 from gptqmodel.quantization import MacaqConfig, QuantizeConfig
 
@@ -102,9 +102,11 @@ def _run(method: str, calibration, args: argparse.Namespace, round_index: int) -
     torch.cuda.reset_peak_memory_stats(args.device)
     started = time.perf_counter()
     model.quantize(
-        calibration,
-        calibration_concat_size=args.concat_size,
-        batch_size=args.batch_size,
+        CalibrationConfig(
+            dataset=calibration,
+            concat_size=args.concat_size,
+            batch_size=args.batch_size,
+        ),
         backend=backend,
     )
     torch.cuda.synchronize(args.device)

@@ -19,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active
 from ._runtime_cache import tensor_cache_key
 
@@ -354,6 +355,12 @@ class TorchInt8Linear(GPTQQuantLinear):
 
     REQUIRES_FORMAT_V2 = True
     SUPPORTS_RAW_PACKING = False
+
+    # GB10/torch 2.11.0+cu130 (CPU forward): eager=True, but dynamo rejects
+    # `tensor.is_inference()` in the runtime-cache key, so no compiled level.
+    # The fused path is CPU-only, so an explicit CUDA-graph capture does not apply.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_int8"
     GPTQ_BUFFER_NAMES = ("qzeros", "qweight", "g_idx", "scales")

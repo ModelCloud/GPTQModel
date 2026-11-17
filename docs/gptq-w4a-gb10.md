@@ -198,7 +198,7 @@ those partial-model checkpoints.
 
 ```python
 import torch
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import QuantizeConfig
 
 qcfg = QuantizeConfig(
@@ -207,7 +207,7 @@ qcfg = QuantizeConfig(
     offload_to_disk=False,
 )
 model = GPTQModel.load(model_path, qcfg, device="cuda", dtype=torch.bfloat16)
-model.quantize(calibration_data)
+model.quantize(CalibrationConfig(dataset=calibration_data))
 model.save(output_path)
 loaded = GPTQModel.load(output_path, device="cuda", dtype=torch.bfloat16)
 ```

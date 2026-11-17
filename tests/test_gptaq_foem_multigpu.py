@@ -21,18 +21,19 @@ with ``T`` total tokens. Both use the same weight for
 with ``count_device / count_total`` must reproduce it.
 """
 
+import inspect
 import threading
 
 import pytest
 import torch
 from torch import nn
 
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY, NativeProcessor
-from gptqmodel.quantization.config import FOEMConfig, GPTAQConfig, QuantizeConfig
+from gptqmodel.quantization.config import CalibrationConfig, FOEMConfig, GPTAQConfig, QuantizeConfig
 from gptqmodel.quantization.foem import FOEM
 from gptqmodel.quantization.gptaq import GPTAQ
+from gptqmodel.quantization.gptq import GPTQ
 
 
 KINDS = ("gptaq", "foem")
@@ -164,6 +165,53 @@ def test_missing_batch_index_raises_instead_of_silently_mispairing(kind):
     task.add_batch(torch.randn(1, 3, 8), None, batch_index=0)
     with pytest.raises(RuntimeError, match="batch `1`"):
         task.add_batch(torch.randn(1, 3, 8), None, batch_index=1)
+
+
+def test_process_batch_contract_is_identical_across_gptq_gptaq_foem():
+    """``add_batch`` calls ``process_batch(inp, batch_index=...)`` polymorphically.
+
+    The base must accept the same parameters and return the same annotation as
+    the GPTAQ/FOEM overrides, or a base-class call path drifts from them.
+    """
+
+    signatures = {cls.__name__: inspect.signature(cls.process_batch) for cls in (GPTQ, GPTAQ, FOEM)}
+    base = signatures["GPTQ"]
+    assert list(base.parameters) == ["self", "inp", "batch_index"]
+    assert base.parameters["batch_index"].default is None
+    for name, signature in signatures.items():
+        assert [
+            (p.name, p.kind, p.default, p.annotation) for p in signature.parameters.values()
+        ] == [(p.name, p.kind, p.default, p.annotation) for p in base.parameters.values()], name
+        assert signature.return_annotation == base.return_annotation, name
+
+
+def test_gptq_add_batch_with_batch_index_matches_float64_oracle():
+    """GPTQ forwards ``batch_index`` to ``process_batch`` and ignores it."""
+
+    torch.manual_seed(5)
+    linear = nn.Linear(8, 4, bias=False)
+    task = GPTQ(linear, QuantizeConfig(bits=4, group_size=8))
+    x0 = torch.randn(1, 3, 8)
+    x1 = torch.randn(1, 2, 8)
+    task.add_batch(x0, None, batch_index=1)
+    task.add_batch(x1, None, batch_index=0)
+
+    rows = torch.cat([x0[0], x1[0]]).to(torch.float64)
+    oracle = 2.0 * (rows.T @ rows) / rows.shape[0]
+    assert _relative_error(task.finalize_hessian(), oracle) <= 1e-6
+    assert task.nsamples == 5
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_gptaq_foem_process_batch_returns_base_tuple(kind):
+    """The overrides return the base ``(tokens, xtx, device)`` shape; the
+    Hessian itself stays in the per-device partial."""
+
+    torch.manual_seed(6)
+    named = _named(nn.Linear(8, 4, bias=False))
+    task = _task(kind, named, [(0, torch.randn(3, 8))])
+    token_count, xtx, device = task.process_batch(torch.randn(1, 3, 8), batch_index=0)
+    assert (token_count, xtx, device) == (3, None, torch.device("cpu"))
 
 
 def _require_two_cuda_devices():

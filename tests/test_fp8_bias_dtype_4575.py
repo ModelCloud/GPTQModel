@@ -12,6 +12,7 @@ and the reloaded checkpoint disagreed.
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 
 
@@ -137,7 +138,7 @@ def test_fp8_in_session_logits_match_reload(tmp_path):
     ]
 
     model = GPTQModel.load(str(source), quantize_config=FP8Config(), dtype=torch.bfloat16, backend=BACKEND.TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     model.model.to("cuda:0")
     ids = tokenizer("the quick brown fox", return_tensors="pt")["input_ids"].to("cuda:0")
     with torch.inference_mode():

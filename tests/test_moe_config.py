@@ -9,7 +9,7 @@ import torch
 from models.model_test import ModelTest
 from torch import nn
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.writer import QUANT_LOG_NSAMPLES
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.quantization.config import (
@@ -112,7 +112,7 @@ class TestMoEConfig(ModelTest):
                 calibration_dataset_token_size += len(input_id)
 
         # Perform quantization; quant_log will record per-module calibration stats
-        model.quantize(self.calibration_dataset, batch_size=8)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=8))
 
         # Compute expected total number of quantizable modules
         # One layer contains:

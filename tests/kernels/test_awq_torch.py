@@ -344,7 +344,7 @@ def test_awq_torch_loader_preserves_checkpoint_operand_dtypes(tmp_path, checkpoi
 
 @pytest.mark.parametrize("scale", [1.0, 1e-40, 65536.0])
 def test_awq_torch_dequantize_supports_non_half_compute_dtype(scale):
-    """ParoQuant's FP32 dense fallback must retain FP32 checkpoint scales."""
+    """Paro's FP32 dense fallback must retain FP32 checkpoint scales."""
 
     scales = torch.full((1, 8), scale, dtype=torch.float32)
     bias = torch.zeros(8, dtype=torch.float32)

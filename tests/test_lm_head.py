@@ -14,7 +14,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
 
-from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 
 
@@ -65,7 +65,7 @@ class TestLmHeadQuant(ModelTest):
 
         model = GPTQModel.load(self.model_id, quant_config)
 
-        model.quantize(self.calibration_dataset, batch_size=8)
+        model.quantize(CalibrationConfig(dataset=self.calibration_dataset, batch_size=8))
 
         self.check_lm_head_loss(model.quant_log)
 

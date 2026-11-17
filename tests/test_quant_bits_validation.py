@@ -191,7 +191,7 @@ def test_quantize_config_dispatcher_uses_method_support():
 
     with pytest.raises(
         ValueError,
-        match=r"`bits=3` is not supported for method `paroquant`",
+        match=r"`bits=3` is not supported for method `paro`",
     ):
         QuantizeConfig(quant_method=METHOD.PARO, bits=3, offload_to_disk=False)
 
@@ -292,7 +292,7 @@ def test_dispatcher_honors_explicit_gguf_method():
         {"quant_method": "gptq", "bits": 2.5},
         {"quant_method": "awq", "bits": 2.5},
         {"quant_method": "qqq", "bits": 2.5},
-        {"quant_method": "paroquant", "bits": 2.5},
+        {"quant_method": "paro", "bits": 2.5},
         {"quant_method": "bitsandbytes", "bits": 4.5},
         {"quant_method": "fp8", "bits": 8.5},
         {"quant_method": "exl3", "bits": 2.5},
@@ -312,7 +312,7 @@ def test_from_quant_config_rejects_fractional_bits(payload):
     [
         {"quant_method": "awq", "bits": 5},
         {"quant_method": "qqq", "bits": 8},
-        {"quant_method": "paroquant", "bits": 2},
+        {"quant_method": "paro", "bits": 2},
         {"quant_method": "fp8", "bits": 4},
         {"quant_method": "gguf", "bits": 7},
         {"quant_method": "vptq", "bits": 9},

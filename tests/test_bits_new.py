@@ -26,7 +26,7 @@ from typing import Optional  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -99,7 +99,7 @@ class Test(ModelTest):
         rank = 128
         batch_size = 1
         calibration_dataset_rows = 512
-        calibration_dataset_concat_size = 0 # disable
+        calibration_dataset_concat_size = None  # disable
         adapter_file_name = "eora.safetensors"
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
@@ -150,9 +150,11 @@ class Test(ModelTest):
 
             if not model.quantized:
                 model.quantize(
-                    calibration=calibration_dataset,
-                    batch_size=batch_size,
-                    calibration_concat_size=calibration_dataset_concat_size,
+                    CalibrationConfig(
+                        dataset=calibration_dataset,
+                        batch_size=batch_size,
+                        concat_size=calibration_dataset_concat_size,
+                    ),
                     backend=BACKEND.TORCH,
                 ) #
 

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
     [
         "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
         "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
-        "gptqmodel_ext/paroquant/rotation.cu",
+        "gptqmodel_ext/paro/rotation.cu",
     ],
 )
 def test_cuda_entrypoints_guard_device_and_launch(source_path):
@@ -129,15 +129,15 @@ def test_awq_gemv_uses_tensor_device_instead_of_current_device():
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
-def test_paroquant_rotation_uses_tensor_device_instead_of_current_device():
+def test_paro_rotation_uses_tensor_device_instead_of_current_device():
     from gptqmodel import extension
-    from gptqmodel.utils.paroquant import (
+    from gptqmodel.utils.paro import (
         _load_rotation_extension,
         build_identity_rotation_buffers,
     )
 
     if not _load_rotation_extension():
-        pytest.skip("ParoQuant CUDA extension is unavailable")
+        pytest.skip("Paro CUDA extension is unavailable")
 
     original_device = torch.cuda.current_device()
     input_device = torch.device("cuda:1" if original_device == 0 else "cuda:0")
@@ -151,7 +151,7 @@ def test_paroquant_rotation_uses_tensor_device_instead_of_current_device():
         dtype=torch.float16,
     )
 
-    out = extension.op("paroquant", "rotate")(
+    out = extension.op("paro", "rotate")(
         x,
         pairs,
         theta,

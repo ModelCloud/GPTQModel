@@ -28,6 +28,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.utils.structure import LazyTurtle, alias_all_from_turtle_if_meta
 
@@ -189,7 +190,7 @@ def test_fp8_default_offload_save_round_trip_keeps_packed_codes(tmp_path):
     assert qcfg.offload_to_disk is True
 
     model = GPTQModel.load(QWEN_MODEL_ID, quantize_config=qcfg, device=device)
-    model.quantize(QWEN_CALIBRATION, batch_size=1, backend="torch")
+    model.quantize(CalibrationConfig(dataset=QWEN_CALIBRATION, batch_size=1), backend="torch")
 
     # The offload bundle is written from module.state_dict() at pack time, so it
     # holds the in-memory packed codes that the checkpoint must preserve.

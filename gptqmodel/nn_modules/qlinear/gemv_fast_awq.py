@@ -19,6 +19,7 @@ from ...utils.awq import (
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.packing_math import scale_to_storage_dtype, scaled_zero_offset
+from ._compile_support import COMPILE_LEVEL
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
@@ -98,6 +99,12 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
+
+    # Calls the native GEMV_FAST custom ops (gemv_fast_forward_decode /
+    # gemm_fast_forward_prefill), which have no fake/meta kernel, so dynamo
+    # breaks. The JIT extension could not build here (no CUDA_HOME/nvcc).
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     zeros_name = "qzeros"
 
@@ -344,6 +351,11 @@ class LLMAwqLinear(AwqGEMVFastLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "llm-awq"
+
+    # Same native GEMV_FAST custom ops as AwqGEMVFastLinear: no fake/meta
+    # kernel, so dynamo breaks; the extension could not build on this host.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     zeros_name = "scaled_zeros"
 

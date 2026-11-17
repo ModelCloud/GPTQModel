@@ -18,7 +18,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 import gptqmodel.models.loader as loader_module
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.ports.mimo_v2.configuration_mimo_v2 import MiMoV2Config
@@ -354,10 +354,12 @@ def test_mimo_cpu_gptq_roundtrip(
     monkeypatch.setattr(GPTQ, "quantize", record_quantize)
     calibration = [torch.randint(4, 128, (1, 16)).tolist()[0] for _ in range(4)]
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     assert captured_batches == [len(calibration)]
     assert model.quant_log

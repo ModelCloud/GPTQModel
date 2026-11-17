@@ -83,7 +83,7 @@ hf_tokenizer.save_pretrained(tmp)
 ## Lazy-load + input-capture test
 
 ```python
-from gptqmodel import GPTQModel, BACKEND
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import QuantizeConfig
 
 calibration = [
@@ -120,10 +120,8 @@ def capture(*args, **kwargs):
 
 model.shell_module_materialize = capture
 model.quantize(
-    calibration,
-    batch_size=1,
+    CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
     backend=BACKEND.GPTQ_TORCH,
-    calibration_data_min_length=1,
 )
 
 first_call_args, first_call_kwargs = calls[0]

@@ -10,14 +10,13 @@ import torch
 from torch.nn import Module
 
 from ..looper.loop_processor import (
-    CalibrationConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import CalibrationConfig, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_1
 

@@ -15,7 +15,7 @@ import unittest  # noqa: E402
 
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear  # noqa: E402
@@ -98,7 +98,7 @@ class TestBits(unittest.TestCase):
             model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(calibration_dataset, backend=quant_backend)
+        model.quantize(CalibrationConfig(dataset=calibration_dataset), backend=quant_backend)
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
                 tmp_dir,

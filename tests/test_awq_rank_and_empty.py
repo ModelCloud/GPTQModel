@@ -16,8 +16,8 @@ from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
 from gptqmodel.utils.kernel import KernelConfig
@@ -238,7 +238,7 @@ def test_empty_linear_output_keeps_autograd_connection(shape):
         AwqGEMVLinear,
         AwqGEMVFastLinear,
         ParoLinear,
-        ParoQuantTritonLinear,
+        ParoTritonLinear,
     ],
 )
 def test_representative_qlinear_empty_shape_without_native_extension(linear_cls):

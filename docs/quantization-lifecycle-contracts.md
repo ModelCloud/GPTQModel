@@ -18,9 +18,9 @@ The redesign follows two rules:
 
 | Shared contract | Consumers | Why it is shared |
 | --- | --- | --- |
-| `QuantizationRunPlan.processors` | `BaseQModel`, `ModuleLooper`, checkpoint preflight | GPTQ, QQQ, AWQ, ParoQuant, EXL3, weight-only, native, and EoRA runs need one ordered chain. |
+| `QuantizationRunPlan.processors` | `BaseQModel`, `ModuleLooper`, checkpoint preflight | GPTQ, QQQ, AWQ, Paro, EXL3, weight-only, native, and EoRA runs need one ordered chain. |
 | `ProcessorLifecycleConfig.forward` | subset planning, layer replay, capture hooks | Multiple calibrated methods use the same replay decisions. |
-| `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, ParoQuant, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
+| `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, Paro, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
 | `ProcessorLifecycleConfig.checkpointing` | checkpoint adapter and checkpoint preflight | Primary and EoRA adapter processors compose in the same continuation chain. |
 | `ResolvedModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
 | `ModuleConstructorConfig` | `create_quant_module`, checkpoint capture, checkpoint restore | Packing and restore must agree on bits, group size, symmetry, packing dtype, format, kernel, and method-specific options. |
@@ -61,7 +61,7 @@ The run plan is immutable after preflight. `BaseQModel.quantization_run_plan` ex
 ```python
 from gptqmodel.models import ProcessorStep, QuantizationRunPlan
 
-model.quantize(calibration, backend=BACKEND.AUTO)
+model.quantize(CalibrationConfig(dataset=calibration), backend=BACKEND.AUTO)
 print(model.quantization_run_plan.describe())
 
 assert ProcessorStep.GPTQ in model.quantization_run_plan.processors

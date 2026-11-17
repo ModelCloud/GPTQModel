@@ -23,7 +23,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-from gptqmodel import CheckpointConfig, CheckpointStopped, GPTQConfig, GPTQModel
+from gptqmodel import CalibrationConfig, CheckpointConfig, CheckpointStopped, GPTQConfig, GPTQModel
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 output_path = Path("Llama-3.2-1B-Instruct-gptqmodel-4bit")
@@ -45,8 +45,7 @@ model = GPTQModel.load(model_id, quant_config)
 
 try:
     model.quantize(
-        calibration_dataset,
-        batch_size=1,
+        CalibrationConfig(dataset=calibration_dataset, batch_size=1),
         checkpoint=CheckpointConfig(
             path=checkpoint_path,
             resume="auto",
@@ -203,9 +202,9 @@ override is accepted.
 The current checkpoint adapter supports:
 
 - model `model_type` values `llama` and `qwen3_moe`;
-- GPTQ, RTN, AWQ, QQQ, ParoQuant, EXL3, FP8, GGUF, and bitsandbytes
+- GPTQ, RTN, AWQ, QQQ, Paro, EXL3, FP8, GGUF, and bitsandbytes
   quantization paths;
-- EoRA continuation with GPTQ, AWQ, QQQ, and ParoQuant;
+- EoRA continuation with GPTQ, AWQ, QQQ, and Paro;
 - the same normally supported export formats and packing kernels as ordinary
   quantization.
 

@@ -307,7 +307,7 @@ def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.TORCH)
+    result = model.quantize(backend=BACKEND.TORCH)
 
     assert "weight_only_rtn" in result
     assert model.quantized is True
@@ -365,7 +365,7 @@ def test_baseqmodel_quantize_accepts_string_backend_and_describes_plan():
         tokenizer=None,
     )
 
-    model.quantize(calibration=None, backend="torch")
+    model.quantize(backend="torch")
 
     assert model.quantized is True
     described = model.quantization_run_plan.describe()
@@ -400,7 +400,7 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_rtn" in result
     assert model.quantized is True
@@ -456,7 +456,7 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     assert model.quantized is True
@@ -536,7 +536,7 @@ def test_baseqmodel_quantize_gguf_dynamic_qtype_falls_back_to_torch():
         tokenizer=None,
     )
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     # The dynamic Q4_0 module must fall back to the portable kernel while
@@ -577,7 +577,7 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
 
     monkeypatch.setattr(RTN, "quantize", _fail_quantize)
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     assert model.quantized is True
@@ -615,7 +615,7 @@ def test_baseqmodel_quantize_gguf_weight_only_applies_auto_module_decoder(monkey
 
     monkeypatch.setattr(BaseQModel, "shell_module_materialize", _spy_shell_module_materialize)
 
-    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+    result = model.quantize(backend=BACKEND.AUTO)
 
     assert "weight_only_gguf" in result
     assert materialize_calls.count("quant_source") == 4

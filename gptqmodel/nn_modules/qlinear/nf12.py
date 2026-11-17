@@ -34,6 +34,7 @@ from ...utils import nf12_hip as nf12_hip_runtime
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, linear_fp32_reduce
 
 
@@ -108,6 +109,12 @@ class NF12Linear(WeightOnlyQuantLinear):
     so this path is numerically identical to running the original BF16
     weights apart from the kernel's accumulation order.
     """
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager only. Dynamo fails on
+    # the `tensor._version` guard, and explicit capture fails because forward
+    # calls `_exp_base()` -> `int(tensor.item())`, a host sync.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.NF12]
     SUPPORTS_METHODS = [METHOD.NF12]

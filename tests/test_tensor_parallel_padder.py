@@ -7,10 +7,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.module_preprocessor import ModulePreProcessor
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization.config import QuantizeConfig, TensorParallelPadderConfig
+from gptqmodel.quantization.config import CalibrationConfig, QuantizeConfig, TensorParallelPadderConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 

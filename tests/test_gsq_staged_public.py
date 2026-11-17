@@ -361,6 +361,7 @@ def test_staged_awq_gpu_survives_post_quantize_views(tmp_path, monkeypatch):
     from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
     import gptqmodel.models.base as base_mod
+    from gptqmodel import CalibrationConfig
     from gptqmodel.models._const import DEVICE
     from gptqmodel.models.definitions.llama import LlamaQModel
     from gptqmodel.quantization import AWQConfig
@@ -393,8 +394,13 @@ def test_staged_awq_gpu_survives_post_quantize_views(tmp_path, monkeypatch):
                              offload_to_disk=False, gsq_training=training)
     wrapper = LlamaQModel(model=model, quantized=False, quantize_config=quant_config,
                           tokenizer=tokenizer, model_local_path=str(tmp_path / "dense"))
-    wrapper.quantize([{"input_ids": list(range(1, 17))}], backend=BACKEND.TORCH,
-                     calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": list(range(1, 17))}],
+            min_length=1,
+        ),
+        backend=BACKEND.TORCH,
+    )
 
     assert wrapper.quantized
     # Both layers completed their staged fit and post_quantize.
@@ -430,6 +436,7 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, monkeypatch, method, bits, 
         {f"{name}.weight": layer.get_submodule(name).weight.detach().clone() for name in attention_names}
         for layer in model.model.layers
     ]
+    from gptqmodel import CalibrationConfig
     from gptqmodel.quantization import gsq_training as gsq_mod
 
     original_loss = gsq_mod.reconstruction_stage_loss
@@ -467,8 +474,13 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, monkeypatch, method, bits, 
                                  offload_to_disk=False, gsq_training=training)
     wrapper = LlamaQModel(model=model, quantized=False, quantize_config=quant_config,
                           tokenizer=tokenizer, model_local_path=str(tmp_path / "dense"))
-    wrapper.quantize([{"input_ids": list(range(1, 17))}], backend=BACKEND.TORCH,
-                     calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(
+            dataset=[{"input_ids": list(range(1, 17))}],
+            min_length=1,
+        ),
+        backend=BACKEND.TORCH,
+    )
     assert checked_stages == {"attention", "mlp"}
     assert wrapper.quantized
     assert wrapper.quantize_config.gsq_training.enabled

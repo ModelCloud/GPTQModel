@@ -133,4 +133,4 @@ On the pre-fix revision these tests report 24 failures (the 4 that pass assert
 unchanged checkpoint buffers and the zero-scale case); with the change they
 pass. The AWQ CPU regression baseline from the AWQ safety skill and the Torch
 oracle suites (`test_awq_dequantize_tiling.py`,
-`test_awq_runtime_dtype_storage.py`, `test_paroquant.py`) also pass.
+`test_awq_runtime_dtype_storage.py`, `test_paro.py`) also pass.

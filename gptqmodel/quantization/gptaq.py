@@ -8,7 +8,7 @@
 
 import math
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -137,7 +137,10 @@ class GPTAQ(GPTQ):
     #     self.dXXT.addmm_((native_inp.T-reshaped_inp.T), reshaped_inp, beta=beta, alpha=alpha)
     #     del native_inp, reshaped_inp
 
-    def process_batch(self, inp, batch_index: Optional[int] = None):
+    def process_batch(
+        self, inp: torch.Tensor, batch_index: Optional[int] = None
+    ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
+        """Accumulate one batch; ``batch_index`` pairs it with its native input."""
         inp = inp.to(dtype=torch.float32)
         native_inp = None
         if self._use_native_delta:
@@ -176,7 +179,11 @@ class GPTAQ(GPTQ):
 
         self._accumulate_device_batch(inp, native_inp, batch_request_count)
         self._gptaq_batch_request_count += batch_request_count
-        self.nsamples += inp.shape[1]
+        token_count = inp.shape[1]
+        self.nsamples += token_count
+        # The Hessian partial is accumulated per device above, so no per-batch
+        # ``xtx`` is handed back to the caller.
+        return token_count, None, inp.device
 
     def _accumulate_device_batch(
         self,

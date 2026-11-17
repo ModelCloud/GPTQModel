@@ -21,7 +21,7 @@ from peft.tuners.lora.gptq import GPTQLoraLinear  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora  # noqa: E402
 from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -56,7 +56,7 @@ class TestTransformers(ModelTest):
         rank = 128
         batch_size = 1
         calibration_dataset_rows = self._mode_specific_test_setting("DATASET_SIZE")
-        calibration_dataset_concat_size = 0  # disable
+        calibration_dataset_concat_size = None  # disable
         adapter_path = "eora"
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
@@ -108,9 +108,11 @@ class TestTransformers(ModelTest):
             )
 
             model.quantize(
-                calibration=calibration_dataset,
-                batch_size=batch_size,
-                calibration_concat_size=calibration_dataset_concat_size,
+                CalibrationConfig(
+                    dataset=calibration_dataset,
+                    batch_size=batch_size,
+                    concat_size=calibration_dataset_concat_size,
+                ),
             )
 
             # EoRA adapter is saved according to Lora.path property

@@ -19,6 +19,7 @@ from safetensors.torch import save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
 from gptqmodel.utils.torch import release_pinned_host_cache
 
@@ -145,8 +146,10 @@ def test_quantize_releases_pinned_host_cache(tmp_path, monkeypatch):
         dtype=torch.float32,
     )
     model.quantize(
-        ["A short calibration sentence about a fox. A short calibration sentence about a fox."],
-        batch_size=1,
+        CalibrationConfig(
+            dataset=["A short calibration sentence about a fox. A short calibration sentence about a fox."],
+            batch_size=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
     )
 

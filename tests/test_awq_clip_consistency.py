@@ -4,8 +4,7 @@ from parameterized import parameterized
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig
 
 
 _GRID_DEVICES = ["cpu", pytest.param(

@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+
 DEFAULT_MODEL_PATH = "/monster/data/model/Qwen3.5-35B-A3B"
 DEFAULT_BASELINE_ROOT = "/root/gptqmodel-main"
 FAST_LAYER_COUNT_ENV = "GPTQMODEL_FAST_LAYER_COUNT"
@@ -323,14 +324,14 @@ def _single_case_main(args: argparse.Namespace) -> int:
     os.environ["DEBUG"] = "1"
 
     import torch
+    from model_test import BACKEND
+    from test_qwen3_5_moe import TestQwen3_5Moe
     from transformers.utils import is_flash_attn_2_available
 
-    from gptqmodel import DEBUG_ON, GPTQModel
+    from gptqmodel import DEBUG_ON, CalibrationConfig, GPTQModel
     from gptqmodel.looper.module_looper import StopMainLoop
     from gptqmodel.quantization.config import VramStrategy
     from gptqmodel.utils.torch import torch_empty_cache
-    from model_test import BACKEND
-    from test_qwen3_5_moe import TestQwen3_5Moe
 
     resolved_vram_strategy = VramStrategy(args.vram_strategy)
     resolved_dense_vram_strategy = VramStrategy(args.dense_vram_strategy)
@@ -469,12 +470,14 @@ def _single_case_main(args: argparse.Namespace) -> int:
                 start = time.perf_counter()
                 try:
                     model.quantize(
-                        dataset,
-                        calibration_concat_size=self.DATASET_CONCAT_SIZE,
-                        calibration_concat_separator=self.DATASET_CONCAT_SEPARATOR,
-                        calibration_sort=self.DATASET_SORT,
+                        CalibrationConfig(
+                            dataset=dataset,
+                            concat_size=self.DATASET_CONCAT_SIZE,
+                            concat_separator=self.DATASET_CONCAT_SEPARATOR,
+                            sort=self.DATASET_SORT,
+                            batch_size=self.QUANT_BATCH_SIZE,
+                        ),
                         backend=self.QUANT_BACKEND,
-                        batch_size=self.QUANT_BATCH_SIZE,
                     )
                 except StopMainLoop:
                     stop_exception = True
