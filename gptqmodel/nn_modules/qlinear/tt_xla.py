@@ -22,6 +22,7 @@ from ...utils.tt_packing import (
     repack_gptq_for_tt,
     unpack_tt_byte_planes_bf16,
 )
+from ._compile_support import COMPILE_LEVEL
 from ._g_idx import validate_g_idx_bounds
 from ._runtime_cache import tensor_cache_key
 
@@ -33,6 +34,10 @@ class XLALinear(GPTQQuantLinear):
     into output-major uint8 byte planes. Forward transiently expands nibbles to
     BF16 for matmul; it never persists dense or expanded-code weights.
     """
+
+    # XLA device tensors; no torch graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TT_XLA]
     SUPPORTS_METHODS = [METHOD.GPTQ]

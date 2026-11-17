@@ -25,12 +25,19 @@ from ...quantization.paroquant.modules.triton.gemm import (
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.kernel import resolve_kernel_config
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import _wants_fp32_reduce, matmul_fp32_reduce
 from .paroquant import ParoLinear
 
 
 class ParoQuantTritonLinear(ParoLinear):
     """Use Triton fused kernels for ParoQuant prefill/decode execution."""
+
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
+    # capture succeeds with output matching eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_TRITON]
     SUPPORTS_METHODS = ParoLinear.SUPPORTS_METHODS

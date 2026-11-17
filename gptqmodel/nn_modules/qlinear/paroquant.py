@@ -28,6 +28,7 @@ from ...utils.paroquant import (
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import linear_wide_bias
 from ._runtime_cache import tensor_cache_key
 from .gemm_awq import (
@@ -83,6 +84,12 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 
 class ParoLinear(AwqTorchLinear):
     """Run ParoQuant inference by rotating inputs and reusing AWQ packed GEMM."""
+
+    # The fused AWQ CUDA GEMM is a JIT extension that cannot build on this host
+    # (no CUDA toolkit), and the forward branches on host row counts around the
+    # rotation custom op. Static: EAGER, no capture.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_CUDA]
     SUPPORTS_METHODS = [METHOD.PARO]

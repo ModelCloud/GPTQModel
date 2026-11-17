@@ -20,6 +20,7 @@ from ...nn_modules.qlinear import (
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
     capture_fused_train_state,
@@ -113,6 +114,12 @@ class TorchAtenLinear(PackableQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # GB10/torch 2.11.0+cu130 (CPU forward): eager=True, but dynamo rejects the
+    # `_cpu_transform_lock` RLock context manager, so no compiled level. The
+    # kernel is CPU-only, so an explicit CUDA-graph capture does not apply.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_aten_kernel"
 

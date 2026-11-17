@@ -18,6 +18,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -163,6 +164,12 @@ def mul(
 
 
 class QQQLinear(GroupedQuantLinear):
+    # The native Marlin W4A8 `qqq_gemm` custom op has no fake impl and the
+    # per-call reduce scratch/locks allocation is host-side; the JIT extension
+    # is also unbuildable here (no CUDA toolkit). Static: EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
@@ -652,6 +659,12 @@ class QQQLinear(GroupedQuantLinear):
 
 
 class QQQTorchLinear(QQQLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead all pass. Explicit torch.cuda.graph capture
+    # fails: forward copies the CPU `_scale_perm_single_i` table to the device.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 90}
