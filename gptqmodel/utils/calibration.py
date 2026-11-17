@@ -136,6 +136,99 @@ def _iter_calibration_rows(dataset):
 
 _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 
+# Calibration input kinds a model definition may declare. The default is the
+# token/text path every existing definition uses; `tensor_kwargs` is the opt-in
+# path for models whose forward takes named tensors (Decision Transformer).
+CALIBRATION_INPUT_TOKEN_IDS = "token_ids"
+CALIBRATION_INPUT_TENSOR_KWARGS = "tensor_kwargs"
+_CALIBRATION_INPUT_KINDS = (CALIBRATION_INPUT_TOKEN_IDS, CALIBRATION_INPUT_TENSOR_KWARGS)
+
+
+def calibration_input_kind(qmodel) -> str:
+    """Return the calibration input kind declared by a model definition.
+
+    Only a definition that opts in with ``calibration_inputs = "tensor_kwargs"``
+    changes behavior; every other model keeps the token-id path.
+    """
+
+    kind = getattr(qmodel, "calibration_inputs", CALIBRATION_INPUT_TOKEN_IDS)
+    if kind not in _CALIBRATION_INPUT_KINDS:
+        raise ValueError(
+            f"Unsupported `calibration_inputs` {kind!r} on {type(qmodel).__name__}. "
+            f"Expected one of {_CALIBRATION_INPUT_KINDS}."
+        )
+    return kind
+
+
+def _is_tensor_kwargs_row(value: Any) -> bool:
+    """Return whether ``value`` is a non-empty mapping of tensor values."""
+
+    return (
+        isinstance(value, Mapping)
+        and len(value) > 0
+        and all(torch.is_tensor(item) for item in value.values())
+    )
+
+
+def _prepare_tensor_kwargs_dataset(
+    raw_examples: List[Any],
+    *,
+    calibration_dataset_concat_size: Optional[int],
+    batch_size: int,
+    log,
+) -> List[Dict[str, torch.Tensor]]:
+    """Validate tensor-only calibration rows and return them as batches.
+
+    Each row already carries the model's own batch dimension, so it is one
+    calibration batch. Token-level policies (minimum length, concatenation,
+    length sorting, pad collation) do not apply to named tensors.
+    """
+
+    if calibration_dataset_concat_size:
+        raise ValueError(
+            "Quantize: `calibration_dataset_concat_size` is token-based and cannot be used "
+            "with a model that declares `calibration_inputs = 'tensor_kwargs'`."
+        )
+
+    batches: List[Dict[str, torch.Tensor]] = []
+    for idx, example in enumerate(raw_examples):
+        if not _is_tensor_kwargs_row(example):
+            if not isinstance(example, Mapping) or len(example) == 0:
+                raise ValueError(
+                    "Quantize: tensor calibration example at index "
+                    f"{idx} must be a non-empty mapping of named tensors, got "
+                    f"{type(example).__name__}."
+                )
+            invalid = [
+                key for key, item in example.items() if not torch.is_tensor(item)
+            ]
+            raise ValueError(
+                f"Quantize: tensor calibration example at index {idx} must hold only "
+                f"torch tensors; keys {invalid} are not tensors."
+            )
+
+        batch: Dict[str, torch.Tensor] = {}
+        for key, value in example.items():
+            if value.ndim == 0:
+                raise ValueError(
+                    f"Quantize: tensor calibration example at index {idx} key `{key}` "
+                    "must be at least 1-D (include the batch dimension)."
+                )
+            batch[key] = value.detach()
+        batches.append(batch)
+
+    if not batches:
+        raise ValueError("Quantize: calibration dataset is empty.")
+
+    if batch_size != 1:
+        log.info(
+            "Calibration: tensor-kwargs rows are passed through one row per batch; "
+            "`batch_size=%s` is ignored.",
+            batch_size,
+        )
+
+    return batches
+
 
 def _column_entries(value: Any) -> Optional[List[Any]]:
     """Return a column's per-row entries as a Python list, else ``None``.
@@ -405,6 +498,9 @@ def prepare_calibration_dataset(
 
     tokenizer = getattr(qmodel, "tokenizer", None)
     support_batch_quantize = getattr(qmodel, "support_batch_quantize", True)
+    # Only a definition that opts into tensor kwargs changes the row handling
+    # below; every text model keeps the token-id path unchanged.
+    tensor_kwargs_inputs = calibration_input_kind(qmodel) == CALIBRATION_INPUT_TENSOR_KWARGS
 
     hf_dataset_types: tuple = _hf_dataset_types()
 
@@ -428,6 +524,9 @@ def prepare_calibration_dataset(
             )
         elif any(name in calibration_dataset for name in ("input_ids", "text", "messages")):
             raw_examples = [calibration_dataset]
+        elif tensor_kwargs_inputs and _is_tensor_kwargs_row(calibration_dataset):
+            # A bare mapping of named tensors is one tensor-kwargs example.
+            raw_examples = [calibration_dataset]
         else:
             raise ValueError(
                 "Quantize: calibration dataset mapping must provide `input_ids`, `text`, "
@@ -449,6 +548,16 @@ def prepare_calibration_dataset(
         raise ValueError(
             f"Quantize: unsupported `calibration_dataset_sort` {calibration_dataset_sort!r}. "
             "Expected `asc`, `desc`, `shuffle`, or None."
+        )
+
+    if tensor_kwargs_inputs:
+        # Named-tensor rows already carry the model's batch dimension and have no
+        # token length, so the token-level normalization below does not apply.
+        return _prepare_tensor_kwargs_dataset(
+            raw_examples,
+            calibration_dataset_concat_size=calibration_dataset_concat_size,
+            batch_size=batch_size,
+            log=log,
         )
 
     message_examples = 0

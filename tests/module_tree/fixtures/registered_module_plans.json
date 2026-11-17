@@ -20,6 +20,7 @@
     "dbrx": "DbrxQModel",
     "dbrx_converted": "DbrxConvertedQModel",
     "deci": "DeciLMQModel",
+    "decision_transformer": "DecisionTransformerQModel",
     "deepseek_ocr2": "DeepSeekOCR2QModel",
     "deepseek_v2": "DeepSeekV2QModel",
     "deepseek_v3": "DeepSeekV3QModel",
@@ -1044,6 +1045,17 @@
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"]
+      ]
+    },
+    "DecisionTransformerQModel/gptq": {
+      "layers": ["encoder.h"],
+      "blocks": [
+        ["ln_1:!"],
+        ["attn.c_attn"],
+        ["attn.c_proj"],
+        ["ln_2:!"],
+        ["mlp.c_fc"],
+        ["mlp.c_proj"]
       ]
     },
     "GPT2QModel/gptq": {
