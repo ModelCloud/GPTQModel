@@ -45,8 +45,11 @@ def test_calibrated_fp8_installs_exact_payload_and_decodes_against_torch(method,
 
     assert torch.equal(packed.weight.view(torch.uint8), codes.view(torch.uint8))
     assert torch.equal(packed.weight_scale_inv, scales)
-    assert packed.bias.dtype == torch.float16
-    assert torch.equal(packed.bias, linear.bias)
+    # FP8 keeps the bias wide on purpose: the forward adds it in FP32 after the
+    # scaled reduction (#4575/#4681), so a narrow checkpoint bias is widened
+    # rather than kept.
+    assert packed.bias.dtype == torch.float32
+    assert torch.equal(packed.bias, linear.bias.to(torch.float32))
     expanded_scales = (
         scales[:, None] if method == "row" else scales.repeat_interleave(2, dim=0).repeat_interleave(2, dim=1)
     )

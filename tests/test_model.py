@@ -33,6 +33,7 @@ from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
 from gptqmodel.models import loader
 from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_eval, _is_supported_quantization_config
 from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
+from gptqmodel.quantization.awq.utils.packing_utils import AWQ_REVERSE_ORDER
 
 
 ############ test_model_dequant.py ############
@@ -254,8 +255,13 @@ def test_dequantize_model_awq(tmp_path):
     scales = torch.rand(rows, cols, dtype=torch.float32) * 0.5 + 0.5
     bias = torch.randn(cols, dtype=torch.float32)
 
-    packed_weight = pack_cols(weight_values)
-    packed_zero = pack_cols(zero_values)
+    # A real AWQ GEMM checkpoint stores the output channels in the interleaved
+    # order that `dequantize_model` un-permutes (`reverse_awq_order`), so encode
+    # the fixture's values that way instead of in natural order.
+    interleaved = torch.arange(cols).view(-1, 8)[:, AWQ_REVERSE_ORDER].view(-1)
+    stored = torch.argsort(interleaved)
+    packed_weight = pack_cols(weight_values[:, stored])
+    packed_zero = pack_cols(zero_values[:, stored])
 
     shard_name = "awq.safetensors"
     save_file(

@@ -10,9 +10,11 @@ mask rebuild, and a tiny end-to-end GPTQ quantize/save/reload smoke run.
 """
 
 import copy
+import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -153,6 +155,9 @@ def test_jamba_definition_contract_and_module_tree():
         ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
         ["self_attn.o_proj"],
         ["mamba.in_proj"],
+        # #4245: `x_proj` is a called `nn.Linear`, so it belongs to the
+        # quantization plan instead of staying dense.
+        ["mamba.x_proj"],
         ["mamba.out_proj"],
         [
             "feed_forward.experts.0.gate_proj",
@@ -171,9 +176,10 @@ def test_jamba_definition_contract_and_module_tree():
     assert "feed_forward.router:!" in full_names
     assert "feed_forward.experts.0.gate_proj" in full_names
     assert "feed_forward.experts.0.down_proj" in full_names
-    # The mixer consumes `dt_proj.weight` and `x_proj` output directly, so the
-    # definition intentionally leaves them dense.
-    assert not any("dt_proj" in name or "x_proj" in name for name in full_names)
+    # `dt_proj` is checkpoint-owned and never called as a Linear; `x_proj` is a
+    # called Linear, so it is declared in both plans (#4245).
+    assert "mamba.dt_proj:!" in full_names
+    assert "mamba.x_proj" in full_names
 
 
 def test_jamba_moe_hooks_replay_every_routed_expert(monkeypatch):
@@ -303,6 +309,10 @@ def test_jamba_replay_mask_is_causal_not_bidirectional():
 
 
 def test_tiny_jamba_gptq_quantization_smoke(tmp_path: Path, monkeypatch):
+    if importlib.util.find_spec("mamba_ssm") is None:
+        # `JambaQModel.require_pkgs` is enforced by the loader, so the real
+        # model cannot be built without the `mamba-ssm` package.
+        pytest.skip("Jamba requires the `mamba-ssm` package")
     _use_torch_reference_kernels(monkeypatch)
 
     model_dir = tmp_path / "native"

@@ -15,10 +15,21 @@ from gptqmodel.utils.hf import INTERNAL_HF_GGUF_FILE_KWARG
 from gptqmodel.utils.structure import LazyTurtle
 
 
+def _sentinel_model():
+    """Stand-in for a loaded model.
+
+    ``GPTQModel.load`` probes ``log_kv_cache_estimate()`` on the result (#4510),
+    so a bare ``object()`` no longer works as the fake.
+    """
+
+    return SimpleNamespace(log_kv_cache_estimate=lambda *args, **kwargs: None)
+
+
+
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
     model_path = "/monster/data/model/Qwen3.5-35B-A3B"
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
 
     monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
     monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
@@ -101,7 +112,7 @@ def test_get_model_files_size_uses_remote_metadata_sizes(monkeypatch):
 
 def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     class FakeModelDefinition:
@@ -132,7 +143,7 @@ def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):
 
 def test_gptqmodel_from_pretrained_forwards_backend_and_profile(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     class FakeModelDefinition:
@@ -169,7 +180,7 @@ def test_gptqmodel_load_rejects_public_gguf_file_kwarg():
 
 def test_gptqmodel_load_normalizes_direct_gguf_path_for_config_probe(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
     config_calls = []
     captured = {}
 
@@ -209,7 +220,7 @@ def test_gptqmodel_load_normalizes_direct_gguf_path_for_config_probe(monkeypatch
 
 def test_gptqmodel_load_forwards_backend_and_profile_to_from_pretrained(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
@@ -255,7 +266,7 @@ def test_gptqmodel_load_treats_supported_floatx_checkpoint_as_source_with_auto_d
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
@@ -290,7 +301,7 @@ def test_gptqmodel_from_pretrained_allows_supported_floatx_source_with_auto_deco
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = object()
+    sentinel = _sentinel_model()
 
     class FakeModelDefinition:
         @classmethod
@@ -321,7 +332,7 @@ def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quanti
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
@@ -359,7 +370,7 @@ def test_gptqmodel_from_pretrained_routes_quantized_source_with_auto_decoder_to_
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
@@ -394,7 +405,7 @@ def test_gptqmodel_from_pretrained_routes_quantized_source_with_auto_decoder_to_
 def test_from_pretrained_redirect_preserves_explicit_load_options(monkeypatch):
     """Regression: redirecting a quantized checkpoint must not drop load options."""
     fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
@@ -459,7 +470,7 @@ def test_from_pretrained_redirect_rejects_inapplicable_profile(monkeypatch):
 
 def test_gptqmodel_load_forwards_profile_without_explicit_backend(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
@@ -498,7 +509,7 @@ def test_gptqmodel_load_forwards_profile_without_explicit_backend(monkeypatch):
 
 def test_gptqmodel_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
     config_calls = []
 
@@ -537,7 +548,7 @@ def test_gptqmodel_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
 
 
 def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
-    sentinel = object()
+    sentinel = _sentinel_model()
     captured = {}
 
     class FakeModelDefinition:
@@ -1235,7 +1246,7 @@ def test_model_loader_from_pretrained_native_bonsai_low_memory_redirects_with_ba
     config_calls = []
     tokenizer_calls = []
     captured = {}
-    sentinel = object()
+    sentinel = _sentinel_model()
     native_spec = loader.internal_gguf.GGUFQuantizedCheckpointSpec(
         model_type="qwen3",
         bits_alias="q1_0_g128",

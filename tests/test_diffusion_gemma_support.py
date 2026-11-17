@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from accelerate import init_empty_weights
 from safetensors import safe_open
@@ -17,7 +18,7 @@ from gptqmodel.models.definitions.diffusion_gemma import (
     _sync_decoder_quantized_modules,
     _sync_decoder_tied_parameters,
 )
-from gptqmodel.models.loader import _convert_model_with_defuser
+from gptqmodel.models.loader import _convert_model_with_defuser, defuser_version_too_old
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.hf import autofix_hf_model_config
 from gptqmodel.utils.model import MODALITY
@@ -232,6 +233,9 @@ def test_diffusion_gemma_refreshes_ties_when_defuser_has_no_registration(monkeyp
 def test_diffusion_gemma_generic_defusion_preserves_forward():
     # Defuser only changes the experts' storage/layout; this guards the model's
     # logits while checking that the packed module became ordinary Linear leaves.
+    outdated = defuser_version_too_old()
+    if outdated is not None:
+        pytest.skip(f"defuser {outdated} predates the supported floor; the conversion no-ops")
     model = _tiny_model()
     input_ids = torch.tensor([[2, 7, 8, 1]])
     decoder_input_ids = torch.tensor([[4, 5, 6, 7]])
@@ -308,6 +312,8 @@ def test_diffusion_gemma_post_quantize_syncs_encoder_layer():
     wrapper = object.__new__(DiffusionGemmaQModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model
+    # `BaseQModel.post_quantize` reads the activation mode off the config.
+    wrapper.quantize_config = SimpleNamespace(activation_mode=None)
     encoder_layer = model.model.encoder.language_model.layers[0]
     quantized = TorchLinear(
         bits=4,
