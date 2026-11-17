@@ -15,6 +15,7 @@ class DeepSeekV3QModel(BaseQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.deepseek_v3.DeepseekV3Config",
         model_class="gptqmodel.models.ports.deepseek_v3.DeepseekV3ForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.deepseek_v3.tokenization_deepseek_v3.DeepseekV3Tokenizer",
     )
 
     require_trust_remote_code = False
