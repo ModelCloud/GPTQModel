@@ -299,6 +299,31 @@ def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
     return len(positional) >= 2
 
 
+def _is_recurrent_attention_layer_type(layer_type: Optional[str]) -> bool:
+    """Whether ``layer_type`` is a recurrent / convolution mixer, not attention.
+
+    ``transformers`` 5 maps each declared layer type to the function that builds
+    its mask (``LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING``). The ``linear_attention``
+    and ``conv`` entries build the mask with ``create_recurrent_attention_mask``,
+    which returns ``None`` for an unpadded batch and a planar ``[batch, seq]``
+    keep mask otherwise. Those mixers apply it with
+    ``hidden * attention_mask[:, :, None]``, so they can never consume the
+    additive ``[1, 1, T, T]`` grid an attention layer takes (issue #4671).
+    """
+
+    if not layer_type:
+        return False
+    try:
+        from transformers.masking_utils import (
+            LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING,
+            create_recurrent_attention_mask,
+        )
+    except ImportError:  # pragma: no cover - older transformers
+        return False
+    builder = LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING.get(layer_type)
+    return builder is create_recurrent_attention_mask
+
+
 def _kernel_shape_supported(kernel, in_features: int, out_features: int) -> bool:
     """Return whether ``kernel`` declares it can pack this module shape.
 
@@ -1725,7 +1750,7 @@ class AWQProcessor(LoopProcessor):
         cache,
         batch_indices: List[Optional[int]],
         layer: Optional[nn.Module],
-    ) -> Dict[int, Optional[torch.Tensor]]:
+    ) -> Tuple[Dict[int, Optional[torch.Tensor]], Optional[str]]:
         """Return each capture batch's mask for ``layer``'s attention type.
 
         ``transformers`` 5 builds one mask per declared layer type and the
@@ -1733,17 +1758,22 @@ class AWQProcessor(LoopProcessor):
         ``_gptqmodel_layer_type_replay_kwargs``. Replay must select the entry
         that matches the layer being quantized; reusing layer 0's sliding mask
         for a full-attention layer hides every long-range pair.
+
+        Also returns the resolved layer type so the replay can tell a recurrent
+        mixer from an attention block: the former never accepts an attention
+        grid (issue #4671).
         """
 
         if layer is None:
-            return {}
+            return {}, None
         from ..models.base import _LAYER_TYPE_REPLAY_KWARGS_KEY
 
         resolver = getattr(self.gptq_model, "_resolve_layer_replay_type", None)
         if not callable(resolver):
-            return {}
+            return {}, None
         layer_input_kwargs = getattr(cache, "layer_input_kwargs", None) or []
         masks: Dict[int, Optional[torch.Tensor]] = {}
+        resolved_type: Optional[str] = None
         for batch_index in batch_indices:
             if batch_index is None:
                 continue
@@ -1759,10 +1789,12 @@ class AWQProcessor(LoopProcessor):
             layer_type = resolver(layer, layer_types)
             if layer_type is None:
                 continue
+            if resolved_type is None:
+                resolved_type = layer_type
             type_entry = by_type.get(layer_type) or {}
             if "attention_mask" in type_entry:
                 masks[batch_index] = type_entry["attention_mask"]
-        return masks
+        return masks, resolved_type
 
     def _token_row_replay_kwargs(
         self,
@@ -1771,6 +1803,7 @@ class AWQProcessor(LoopProcessor):
         provenance: List[Tuple[int, int]],
         dtype: torch.dtype,
         mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
+        recurrent: bool = False,
     ) -> Dict[str, Any]:
         """Rebuild the attention mask and positions for packed ``token_rows``.
 
@@ -1872,7 +1905,19 @@ class AWQProcessor(LoopProcessor):
 
             positions[packed_indices] = row_positions.to(dtype=torch.long)
 
-        if not grid_mask and form is not None:
+        if recurrent:
+            # A recurrent / convolution mixer consumes a planar [batch, seq]
+            # keep mask (`apply_mask_to_padding_states` multiplies
+            # `hidden * attention_mask[:, :, None]`). The additive
+            # [1, 1, T, T] grid is an attention-only contract and raises on the
+            # first replay: `tensor a (768) must match tensor b (366)`. The
+            # mixer applies its own causal convolution/scan, so the packed rows
+            # need no explicit causal structure. `_pack_token_rows` emits rows
+            # in source order, so each document stays contiguous and the
+            # recurrent state crosses only at a document boundary -- the same
+            # limitation the padded multi-row batch path already has.
+            attention_mask = torch.ones((1, packed_count), dtype=torch.bool)
+        elif not grid_mask and form is not None:
             # A captured planar [batch, seq] mask means the attention
             # implementation (for example FlashAttention) expects a keep mask
             # of that rank. Keep that form; every packed row is a kept token,
@@ -2127,16 +2172,18 @@ class AWQProcessor(LoopProcessor):
                     cache_key = tuple(id(tensor) for tensor in tensors)
                     replay_kwargs = token_row_kwargs_cache.get(cache_key)
                     if replay_kwargs is None:
+                        type_masks, replay_layer_type = self._token_row_layer_type_masks(
+                            getattr(self, "inputs_cache", None),
+                            batch_indices,
+                            state.layer_module,
+                        )
                         replay_kwargs = self._token_row_replay_kwargs(
                             tensors,
                             batch_indices,
                             provenance,
                             features[name].dtype,
-                            mask_overrides=self._token_row_layer_type_masks(
-                                getattr(self, "inputs_cache", None),
-                                batch_indices,
-                                state.layer_module,
-                            ),
+                            mask_overrides=type_masks,
+                            recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
                         )
                         token_row_kwargs_cache[cache_key] = replay_kwargs
                 feature_kwargs[name] = replay_kwargs

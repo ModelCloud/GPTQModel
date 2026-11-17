@@ -162,6 +162,19 @@ needs:
   `BaseQModel._resolve_layer_replay_type` and passes that type's mask to
   `_token_row_replay_kwargs` as an override. Without it a full-attention layer
   of a mixed model (gemma-3, OLMo 3) was replayed with the sliding window.
+- A **recurrent/convolution mixer never receives the additive attention grid**
+  (#4671). `transformers` 5 builds the `linear_attention` / `conv` mask with
+  `create_recurrent_attention_mask`, which returns `None` for an unpadded batch
+  and a planar `[batch, seq]` keep mask otherwise; the mixer applies it as
+  `hidden * attention_mask[:, :, None]`. The replay used to read that `None` as
+  "the module relied on its internal causal path" and fall back to the
+  `[1, 1, T, T]` grid, which raised on the first scale-search replay for every
+  Mamba/conv hybrid (Granite-4.0-H, LFM2, Nemotron-H, OLMo-Hybrid). The replay
+  now resolves the layer type, detects the recurrent builders through
+  `_is_recurrent_attention_layer_type`, and emits a planar `[1, retained]` keep
+  mask instead. `_pack_token_rows` emits rows in source order, so each document
+  stays contiguous and the recurrent state only crosses a document boundary --
+  the same limitation the padded `batch_size>1` path already has.
 - Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
   the quadratic mask is built once per unique capture list per layer.
 

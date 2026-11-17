@@ -51,6 +51,7 @@ jobs:
                 tests/test_awq_mla_scaling.py tests/test_awq_weight_mean.py \
                 tests/test_awq_per_module_bits.py tests/test_awq_position_kwargs.py \
                 tests/test_awq_scale_search_memory.py \
+                tests/test_awq_hybrid_recurrent_mask_4671.py \
                 tests/module_tree/test_awq_relationships.py \
                 tests/module_tree/test_granitemoehybrid_model_tree.py \
                 tests/module_tree/test_registered_module_plans.py \
