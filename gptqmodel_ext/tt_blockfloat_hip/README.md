@@ -251,8 +251,9 @@ other direction too: for tiny blocks every candidate's squared error underflows
 to zero, so the strict `<` never replaced the base candidate even when a
 neighbour was clearly closer.  Candidates are now scored on the block
 normalised by `2**base`, which is exact for a power of two and keeps the error
-O(1), so the search is scale invariant.  The base exponent is also clamped to
-127: `floor(log2(FLT_MAX))` rounds to 128 in float32, whose scale is `inf`.
+O(1), so the search is scale invariant.  The base exponent comes from the exact
+exponent field, and a candidate outside the storable `[-127, 127]` range is
+rejected before its error is compared, so no `2**128` scale enters the search.
 
 Hoisting the per-element `w_ok` test out of the staging loop while fixing the
 first one also helped the shapes with the widest spans, where the store loop is

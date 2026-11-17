@@ -335,7 +335,10 @@ def quantize_blockfloat(
         )
         cand_unit = _round_unit(delta)
         err = _error(cand_unit)
-        take = usable & torch.isfinite(err) & (err < best_err)
+        # ``unit`` is O(1) by construction, so a usable candidate's error is
+        # finite; a non-finite one could only come from a non-finite input,
+        # which ``_block_base_exponent`` has already rejected.
+        take = usable & (err < best_err)
         best_unit = torch.where(take.expand_as(best_unit), cand_unit, best_unit)
         best_exp = torch.where(take, candidate_exp, best_exp)
         best_err = torch.where(take, err, best_err)

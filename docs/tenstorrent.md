@@ -956,10 +956,10 @@ span, and the kernel zero-fills past `k` instead of dropping the span. The
 quantiser's exponent search is scale invariant: it scores the base exponent and
 both neighbours on the block normalised by `2**base`, so a block whose raw
 squared error would overflow (near `FLT_MAX`) or underflow (a tiny block) still
-picks the closest exponent instead of keeping `floor(log2(block_max))` by
-default. The base exponent is clamped to 127, the largest finite power of two,
-because `floor(log2(FLT_MAX))` rounds to 128 in float32 and would be stored as
-`inf`.
+picks the closest exponent instead of keeping the binade index by default. The
+base exponent comes from the exact exponent field, and every candidate outside
+the storable `[-127, 127]` range is rejected before its error is compared, so no
+`2**128` scale can enter the search.
 
 ### Shared exponent derivation and its range
 
@@ -981,7 +981,7 @@ flowchart TD
     F --> G{"candidate exponent in<br/>-127 .. 127?"}
     G -- no --> H["reject candidate<br/>(no representable 2**e)"]
     G -- yes --> I["round onto the grid,<br/>compute squared error"]
-    I --> J{"error finite and<br/>strictly lower?"}
+    I --> J{"error strictly lower?"}
     J -- yes --> K["adopt candidate"]
     J -- no --> L["keep earlier winner"]
     H --> M["best = base candidate"]
@@ -995,8 +995,10 @@ flowchart TD
 The storable range is `[-127, 127]`: the field stores `e + 127`, so `+128` is the
 all-ones pattern and `2**128` overflows, while `-128` has no normal scale. A
 candidate outside that range is rejected *before* its error is compared, so a
-NaN from `0 * inf` can never poison the per-block search, and the base candidate
-is always adopted even when its squared error overflows to `inf`.
+NaN from `0 * inf` can never poison the per-block search. The base candidate is
+adopted before any comparison so that the winner and its codes are always
+initialised; the neighbours then have to beat it strictly, which keeps the tie
+order `base`, `base - 1`, `base + 1`.
 
 `bfloat2_b` is the third block-float width the Tensix packer understands
 (`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the

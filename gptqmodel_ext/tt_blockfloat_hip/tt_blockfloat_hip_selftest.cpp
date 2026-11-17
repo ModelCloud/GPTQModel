@@ -100,11 +100,9 @@ void ref_quantise_block(const float* x, int bits, int* code_out, int* exp_out) {
             const float diff = reconstructed - unit[i];
             error += diff * diff;
         }
-        // Candidate 0 is taken unconditionally, matching the Torch reference.
-        // Comparing strictly against INFINITY leaves ``best_code`` untouched
-        // when every candidate overflows, which happens for large inputs.  A
-        // NaN/inf neighbour error must never replace the winner.
-        if (usable && (candidate == 0 || (std::isfinite(error) && error < best_error))) {
+        // Candidate 0 is taken unconditionally, matching the Torch reference:
+        // that initialises ``best_code`` and fixes the tie order.
+        if (usable && (candidate == 0 || error < best_error)) {
             best_error = error;
             best_exp = exponent;
             std::memcpy(best_code, code, sizeof(code));
