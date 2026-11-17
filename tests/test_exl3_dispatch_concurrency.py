@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -136,9 +137,24 @@ sys.exit(0)
 """
 
 
+def _free_threaded_build() -> bool:
+    """True only for a free-threaded (3.13t/3.14t) interpreter.
+
+    The child process sets ``PYTHON_GIL=0``; a regular build aborts with
+    "Disabling the GIL is not supported by this build" before running the
+    script, so the test can neither pass nor observe its sentinels (#4768).
+    """
+
+    return sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.version.hip is not None,
     reason="EXL3 tensor-core GEMM is NVIDIA-only",
+)
+@pytest.mark.skipif(
+    not _free_threaded_build(),
+    reason="the PYTHON_GIL=0 subprocess needs a free-threaded build (#4768)",
 )
 @pytest.mark.parametrize("attempt", [0, 1], ids=["first", "second"])
 def test_concurrent_first_use_of_the_exl3_dispatch_caches(attempt):
@@ -334,9 +350,24 @@ def test_exl3_linears_do_not_share_a_writable_kernel_buffer(monkeypatch):
         g_tensor_cache.cache.update(saved_cache)
 
 
+def _free_threaded_build() -> bool:
+    """True only for a free-threaded (3.13t/3.14t) interpreter.
+
+    The child process sets ``PYTHON_GIL=0``; a regular build aborts with
+    "Disabling the GIL is not supported by this build" before running the
+    script, so the test can neither pass nor observe its sentinels (#4768).
+    """
+
+    return sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.version.hip is not None,
     reason="EXL3 tensor-core GEMM is NVIDIA-only",
+)
+@pytest.mark.skipif(
+    not _free_threaded_build(),
+    reason="the PYTHON_GIL=0 subprocess needs a free-threaded build (#4768)",
 )
 def test_concurrent_streams_do_not_share_exl3_kernel_scratch():
     """Concurrent EXL3 forwards on separate streams must be bitwise correct.

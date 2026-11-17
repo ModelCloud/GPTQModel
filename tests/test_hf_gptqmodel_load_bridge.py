@@ -604,6 +604,113 @@ def test_optimum_gptq_quantizer_is_routed_through_the_native_bridge(monkeypatch)
     assert post_initialized == [(model, sentinel_context)]
 
 
+def _reset_optimum_bridge_state(monkeypatch, gptqmodel):
+    monkeypatch.setattr(gptqmodel, "_OPTIMUM_GPTQ_BRIDGE_INSTALLED", False)
+    monkeypatch.setattr(gptqmodel, "_OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE", False)
+
+
+def _fake_optimum_gptq(monkeypatch, *, quantizer=None):
+    """Put a stand-in ``optimum.gptq`` in ``sys.modules``.
+
+    ``quantizer=None`` models the real window that broke #4749: the module
+    exists because it is executing, but it has not defined ``GPTQQuantizer``
+    yet.
+    """
+
+    import sys
+    import types
+
+    fake_optimum = types.ModuleType("optimum")
+    fake_optimum.__path__ = []
+    fake_gptq = types.ModuleType("optimum.gptq")
+    if quantizer is not None:
+        fake_gptq.GPTQQuantizer = quantizer
+    monkeypatch.setitem(sys.modules, "optimum", fake_optimum)
+    monkeypatch.setitem(sys.modules, "optimum.gptq", fake_gptq)
+    return fake_gptq
+
+
+def test_optimum_bridge_defers_instead_of_declaring_optimum_absent(monkeypatch):
+    """#4749: a mid-initialization ``optimum.gptq`` is a retry, not "absent".
+
+    ``optimum/gptq/quantizer.py`` imports ``gptqmodel`` at module scope, so in
+    the plain-Transformers flow this package is imported while
+    ``optimum.gptq`` is still executing and ``GPTQQuantizer`` does not exist
+    yet. Treating that as "Optimum is not installed" latched the bridge off for
+    the rest of the process, and every ``dynamic`` override was then decoded
+    with the global bits (NLL 3.45 -> 16.49, no error).
+    """
+
+    import gptqmodel
+
+    _fake_optimum_gptq(monkeypatch, quantizer=None)
+    _reset_optimum_bridge_state(monkeypatch, gptqmodel)
+
+    assert gptqmodel._ensure_optimum_gptqmodel_load_bridge() is False
+
+    # Deferred: a later retry must still be allowed.
+    assert gptqmodel._OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE is False
+    assert gptqmodel._OPTIMUM_GPTQ_BRIDGE_INSTALLED is False
+
+
+def test_optimum_bridge_installs_once_optimum_finishes_importing(monkeypatch):
+    """The retry after ``optimum.gptq`` finishes must install the bridge."""
+
+    import gptqmodel
+
+    class _FakeQuantizer:
+        def convert_model(self, model, **kwargs):
+            return model
+
+        def post_init_model(self, model):
+            return model
+
+    fake_gptq = _fake_optimum_gptq(monkeypatch, quantizer=None)
+    _reset_optimum_bridge_state(monkeypatch, gptqmodel)
+
+    # The import window: cannot install yet.
+    assert gptqmodel._ensure_optimum_gptqmodel_load_bridge() is False
+
+    # Optimum finished loading and published the class.
+    fake_gptq.GPTQQuantizer = _FakeQuantizer
+
+    assert gptqmodel._ensure_optimum_gptqmodel_load_bridge() is True
+    assert gptqmodel._OPTIMUM_GPTQ_BRIDGE_INSTALLED is True
+    assert getattr(_FakeQuantizer.convert_model, "_gptqmodel_load_bridge", False) is True
+    assert getattr(_FakeQuantizer.post_init_model, "_gptqmodel_load_bridge", False) is True
+
+    # Idempotent: a second retry is a cheap no-op.
+    assert gptqmodel._ensure_optimum_gptqmodel_load_bridge() is True
+
+
+def test_optimum_bridge_marks_optimum_absent_only_when_it_is_missing(monkeypatch):
+    """A genuinely missing Optimum must not be retried on every load."""
+
+    import importlib.util
+    import sys
+
+    import gptqmodel
+
+    monkeypatch.delitem(sys.modules, "optimum.gptq", raising=False)
+    monkeypatch.delitem(sys.modules, "optimum", raising=False)
+    _reset_optimum_bridge_state(monkeypatch, gptqmodel)
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "optimum.gptq":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    assert gptqmodel._ensure_optimum_gptqmodel_load_bridge() is False
+    assert gptqmodel._OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE is True
+
+    # The absent latch is sticky: no repeated import attempts.
+    assert gptqmodel._ensure_optimum_gptqmodel_load_bridge() is False
+
+
 def test_transformers_awq_quantizer_is_routed_through_the_native_bridge(monkeypatch):
     """Transformers' own AWQ loader must use the bridge that GPTQ already uses.
 
