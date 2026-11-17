@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import torch
 from accelerate.utils import has_offloaded_params
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 from transformers.masking_utils import create_causal_mask
 
 from ...utils.calibration import batched_conversations
@@ -20,16 +20,20 @@ from ...utils.offload import is_meta_module, offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..local import LocalModelLoader
 
 
 class Ernie4_5_VLMoeQModel(BaseQModel):
     fusable = FusableConfig("ernie4_5_vl_moe").merge(LlamaFusableConfig(), profiles=("qkv",))
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.ernie4_5_vl_moe.configuration.ErnieVLConfig",
+        model_class="gptqmodel.models.ports.ernie4_5_vl_moe.native.Ernie4_5_VLMoeForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.ernie4_5_vl_moe.processing.ErnieVLProcessor",
+    )
 
     require_load_processor = True
     require_trust_remote_code = False
-    before_model_load_requires_remote_code = True
     # Deliberately non-strict: one tree serves both dense and sparse layers, so
     # each decoder layer legitimately misses the other branch's specs. A dense
     # layer has `mlp.gate_proj`/`up_proj`/`down_proj` but no experts; a sparse
@@ -395,7 +399,12 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
         return sample
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return self.processor
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Both modality routers and shared/routed experts need joint replay.
+        # Until qualified, keep all declared linears on plain quantization.
+        return []
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
@@ -415,28 +424,5 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
             calib_data.append(inputs)
         del processor
         return calib_data
-
-    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-        try:
-            decoder_cls = get_class_from_dynamic_module(
-                "modeling_ernie4_5_vl.Ernie4_5_DecoderLayer",
-                model_local_path,
-            )
-        except Exception:
-            return
-
-        if getattr(decoder_cls, "_gptqmodel_vl_moe_patched", False):
-            return
-
-        if not hasattr(decoder_cls, "mlp_text"):
-            def mlp_text(self):
-                return self.mlp
-
-            decoder_cls.mlp_text = mlp_text
-
-        decoder_cls._gptqmodel_vl_moe_patched = True
-
 
 __all__ = ["Ernie4_5_VLMoeQModel"]
