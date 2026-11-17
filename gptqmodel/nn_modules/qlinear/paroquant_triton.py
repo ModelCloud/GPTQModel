@@ -143,11 +143,25 @@ class ParoQuantTritonLinear(ParoLinear):
 
     def _forward_triton_decode(self, rotated: torch.Tensor) -> torch.Tensor:
         """Run the fused Triton kernel optimized for small-row decode workloads."""
-        return paroquant_gemm_triton_decode(rotated, self.qweight, self.scales, self.qzeros, self.bias)
+        return paroquant_gemm_triton_decode(
+            rotated,
+            self.qweight,
+            self.scales,
+            self.qzeros,
+            self.bias,
+            fp32_accum=self.fp32_accum,
+        )
 
     def _forward_triton_prefill(self, rotated: torch.Tensor) -> torch.Tensor:
         """Run the fused Triton kernel optimized for larger prefill batches."""
-        return paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros, self.bias)
+        return paroquant_gemm_triton_prefill(
+            rotated,
+            self.qweight,
+            self.scales,
+            self.qzeros,
+            self.bias,
+            fp32_accum=self.fp32_accum,
+        )
 
     def _needs_dense_autograd(self, rotated: torch.Tensor) -> bool:
         return torch.is_grad_enabled() and (
