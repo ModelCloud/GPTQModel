@@ -7,61 +7,84 @@ Quantized inference kernels may keep their packed weights, scales, zero points,
 and indexing metadata.  They may **not** keep dense or expanded weight copies,
 and they should not keep per-layer scratch that is only needed for the duration
 of one kernel call.  This page documents the scratch ownership introduced for
-[issue #4387](https://github.com/ModelCloud/GPTQModel/issues/4387).
+[issue #4387](https://github.com/ModelCloud/GPTQModel/issues/4387) and the
+per-call QQQ reduce scratch that replaced its stream-keyed cache in
+[issue #4621](https://github.com/ModelCloud/GPTQModel/issues/4621).
 
 ## QQQ reduce scratch
 
 `qqq_gemm` writes its INT32 global reduction into the `C` argument.  Nothing in
-`C` survives the call.  The old code registered a
-`reduce_buffer` on every `QQQLinear`, including `QQQTorchLinear`, which never
-uses it.
+`C` survives the call, and `global_reduce` writes each column slice before it
+reads that slice, so the kernel never consumes a previous call's contents.
+
+The lifetime of `C` has been wrong twice in opposite directions:
+
+| Design | Problem |
+| --- | --- |
+| One `reduce_buffer` per `QQQLinear` | 5.25 GiB of zeroed scratch on Llama-3-8B ([#4387](https://github.com/ModelCloud/GPTQModel/issues/4387)) |
+| One lazily grown buffer per device | Concurrent streams aliased one writable buffer ([#4488](https://github.com/ModelCloud/GPTQModel/issues/4488)) |
+| One buffer per `(device, stream handle)` | The cache was never pruned: 32 pooled streams pinned 1.75 GiB on 8B and `del model` freed none of it ([#4621](https://github.com/ModelCloud/GPTQModel/issues/4621)) |
 
 ```mermaid
 flowchart LR
-    subgraph OLD["Old: one buffer per module"]
-        L1["QQQLinear B=128<br/>reduce_buffer 512 KiB"] --> K1["qqq_gemm C"]
-        L2["QQQLinear B=256<br/>reduce_buffer 1 MiB"] --> K2["qqq_gemm C"]
-        L3["QQQLinear B=14336<br/>reduce_buffer 56 MiB"] --> K3["qqq_gemm C"]
+    subgraph OLD["Old: process-wide cache keyed by device + stream handle"]
+        L1["QQQLinear on stream s1"] -->|"get-or-grow"| R1["_REDUCE_SCRATCH[(cuda:0, s1)]<br/>int32[1024 * N]"]
+        L2["QQQLinear on stream s2"] -->|"get-or-grow"| R2["_REDUCE_SCRATCH[(cuda:0, s2)]<br/>int32[1024 * N]"]
+        R1 -.->|"never pruned"| LEAK["held after del model<br/>32 streams x 56 MiB"]
+        R2 -.-> LEAK
     end
 ```
 
 ```mermaid
 flowchart LR
-    subgraph NEW["New: one flat buffer per device + current stream"]
-        R1["_shared_reduce_scratch(cuda:0, stream s1)<br/>int32[1024 * max(N)]"]
-        R2["_shared_reduce_scratch(cuda:0, stream s2)<br/>int32[1024 * max(N)]"]
-        L1["QQQLinear B=128 on s1"] -->|"view(1024, 128)"| R1
-        L2["QQQLinear B=128 on s1"] -->|"ordered reuse"| R1
-        L3["QQQLinear B=256 on s2"] -->|"view(1024, 256)"| R2
-        R1 --> K1["qqq_gemm C on s1"]
-        R2 --> K2["qqq_gemm C on s2"]
+    subgraph NEW["New: one allocation per kernel call"]
+        L1["QQQLinear.forward"] -->|"_reduce_scratch(device)"| A1["_allocate_reduce_scratch<br/>torch.empty(1024, N) int32"]
+        A1 --> K1["qqq_gemm C"]
+        K1 -->|"forward returns"| FREE["block returned to the<br/>caching allocator"]
+        S1["stream s1"] --> A1
+        S2["stream s2"] --> A2["independent allocation"]
+        A2 --> K2["qqq_gemm C"]
     end
 ```
 
-`QQQLinear._reduce_scratch()` returns a contiguous view into the buffer owned
-by the call's current CUDA stream; `_shared_reduce_scratch` grows it when a
-wider layer appears.  Calls on one stream are ordered by that stream, so they
-may reuse its buffer.  Distinct streams get distinct buffers, because the
-kernel reads and writes `C` for the whole call and the allocation mutex is not
-a scratch-use lease ([issue
-#4488](https://github.com/ModelCloud/GPTQModel/issues/4488)).  CPU devices have
-no streams and keep one buffer, which is safe because the CPU path is
-synchronous and the native kernel is CUDA-only.  `QQQTorchLinear` no longer
-registers the buffer at all.  The process-wide cache is intentionally not used
-inside `torch.compile`, where it would become a graph constant.
+`QQQLinear._reduce_scratch()` calls `_allocate_reduce_scratch`, which returns a
+fresh contiguous `(max_par * 64, out_features)` INT32 tensor.  Each call owns
+its buffer, so cross-stream aliasing is impossible without a key or a lock, and
+the buffer is freed when the forward drops it.  The caching allocator only
+hands a freed block to work on the same stream, so same-stream reuse stays
+ordered and cheap.  `QQQTorchLinear` never allocates it: the portable kernel
+does not take a `C` argument.  The compiled and eager paths now share one
+implementation, since a per-call allocation cannot be captured as a graph
+constant.
 
 | Before | After |
 | --- | --- |
-| Cache key: `device` | Cache key: `(device, stream identity)` |
-| Two modules on different streams share `C` | Each stream has its own `C` |
-| Mutex only guards allocation | Stream ordering guards same-stream reuse |
-| — | CPU/no-stream callers keep one device buffer |
+| Cache key: `(device, stream handle)` | No cache; one allocation per call |
+| Entries kept for the life of the process | Freed when the forward returns |
+| One max-width buffer per stream, 56 MiB on 8B | `1024 x N x 4` bytes, live for one call |
+| Stream exclusivity via the cache key | Exclusivity by construction |
+| Two paths: cache (eager) and `torch.zeros` (compiled) | One path: `torch.empty` for both |
 
-For an 8B QQQ model with `N = 14336` the old per-module total was 5376 MiB
-(1024 rows x 14336 x 4 bytes x 96 modules); one shared buffer per stream is
-56 MiB, and the default single-stream case is unchanged.  The regression tests
-assert stream exclusivity, same-stream reuse, the shared CPU storage, and
-bitwise-equal Torch outputs.
+Measured on Llama-3-8B shapes (`N = 14336`, 4096x14336 layers), with a
+three-layer mixed-width stack in separate processes:
+
+| Streams seen | Cached design: live / after `del model` | Per-call: live / after `del model` |
+| --- | --- | --- |
+| 1 | 112.0 MiB / 281.9 MiB | 0.0 MiB / 57.9 MiB |
+| 8 | 896.0 MiB / 1065.9 MiB | 0.0 MiB / 57.9 MiB |
+| 32 | 3584.0 MiB / 3753.9 MiB | 0.0 MiB / 57.9 MiB |
+
+The per-call column's flat 57.9 MiB residual is the harness's allocation
+baseline, not scratch: it does not depend on how many streams ran.  A dedicated
+probe that loaded one layer and ran eight streams returned to `allocated 0.0
+MiB, reserved 0.0 MiB` after `del` plus `empty_cache`.  Per-call allocation cost
+measured 0.0-0.3 us on the
+4096x14336 shapes, where one kernel call is 13.9 us; the allocator's
+reservation, not the live set, absorbs the churn.  The regression tests assert
+that `C`'s initial contents do not change the output (0, -1 and `INT32_MAX`
+fills give bitwise-equal results), that no module-level cache symbol remains,
+that two calls never share storage, and that eight streams retain less than
+2 MiB after their forwards return.
 
 ## GGUF CUDA plan scratch
 
