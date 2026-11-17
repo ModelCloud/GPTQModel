@@ -52,6 +52,21 @@ def _make_looper():
     return ModuleLooper(model=_DummyQModel(), processors=processors)
 
 
+class _StageLooperDouble:
+    """Looper methods ``run_layer_stage`` calls that the doubles do not model.
+
+    ``run_layer_stage`` records and clears the in-flight layer so a cancelled
+    or failed quantize can restore its placement (#4546). The doubles below only
+    exercise the stage protocol, so they accept the calls and do nothing.
+    """
+
+    def _track_inflight_layer(self, *_args, **_kwargs):
+        pass
+
+    def _clear_inflight_layer(self, *_args, **_kwargs):
+        pass
+
+
 def test_module_looper_preserves_embedding_only_setting():
     looper = ModuleLooper(
         model=_DummyQModel(),
@@ -701,7 +716,7 @@ def test_subset_pass_without_forward_skips_forward_device_overrides(monkeypatch)
         def set_fwd_time(self, *_):
             return None
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         gptq_model = types.SimpleNamespace(
@@ -777,7 +792,7 @@ def test_subset_pass_restored_capture_skips_forward(monkeypatch):
         def set_fwd_time(self, *_):
             return None
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         gptq_model = types.SimpleNamespace(
@@ -942,7 +957,7 @@ def test_subset_pass_finishes_zero_route_recovery_before_quant_fanout(monkeypatc
         def zero_route_recovery_context(self, **_kwargs):
             return RecoveryContext()
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         gptq_model = DummyQModel()
@@ -1080,7 +1095,7 @@ def test_subset_pass_restored_recovery_frontier_is_validated_before_fanout(
         def process(self, **_kwargs):
             events.append("process")
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         gptq_model = types.SimpleNamespace(
@@ -1603,7 +1618,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -1828,7 +1843,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -2119,7 +2134,7 @@ def test_run_layer_stage_publishes_exactly_the_planned_steps(monkeypatch):
         def get_output_embeddings_name(self):
             return "lm_head"
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -2405,7 +2420,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -2516,7 +2531,7 @@ def test_replay_layer_outputs_without_plan_uses_generic_progress():
         def record(self, *args, **kwargs):
             timer_records.append((args, kwargs))
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -2635,7 +2650,7 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
         def record(self, *args, **kwargs):
             timer_records.append((args, kwargs))
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -2752,7 +2767,7 @@ def test_replay_layer_outputs_with_plan_can_skip_override_restore():
         def pb(self, iterable):
             return DummyPB()
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -2863,7 +2878,7 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
         def record(self, *args, **kwargs):
             timer_records.append((args, kwargs))
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -3113,7 +3128,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self, layers, initial_inputs):
@@ -3460,7 +3475,7 @@ def test_run_layer_stage_catches_up_packed_layer_with_original_forward_topology(
         def post_quantize(self, module):
             raise AssertionError("packed catch-up used generic post_quantize")
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def layer_modules_for_prefix(self, prefix, *, planning=False):
             return None
         def __init__(self):
@@ -3661,7 +3676,7 @@ def test_run_layer_stage_skips_boundary_commit_when_finalize_fails(monkeypatch):
         def post_quantize(self, module):
             return module
 
-    class DummyLooper:
+    class DummyLooper(_StageLooperDouble):
         def __init__(self):
             self.processors = [FailingFinalizeProcessor()]
             self.boundary = Boundary()
