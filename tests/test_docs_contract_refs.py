@@ -70,9 +70,9 @@ CONTRACT_REFS = (
     ("docs/quantize-run-summary.md", "gptqmodel/models/base.py",
      "_log_quantize_summary", None),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "compute_hessian_xtx", 1161),
+     "compute_hessian_xtx", 1207),
     ("docs/rocm-default-environment.md", "gptqmodel/quantization/gptq.py",
-     "hessian_inverse", 2047),
+     "hessian_inverse", 2108),
 )
 
 PYTHON_BLOCK = re.compile(r"```python\n(.*?)```", re.S)
