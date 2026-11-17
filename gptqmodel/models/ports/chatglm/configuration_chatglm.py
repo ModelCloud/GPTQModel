@@ -8,7 +8,11 @@ from transformers import PretrainedConfig
 
 class ChatGLMConfig(PretrainedConfig):
     model_type = "chatglm"
-    attribute_map = {"num_hidden_layers": "num_layers", "max_position_embeddings": "seq_length"}
+    attribute_map = {
+        "num_hidden_layers": "num_layers",
+        "max_position_embeddings": "seq_length",
+        "vocab_size": "padded_vocab_size",
+    }
     def __init__(
         self,
         num_layers=None,
@@ -45,6 +49,9 @@ class ChatGLMConfig(PretrainedConfig):
                 "Original ChatGLM1 transformer.layers / 2D-position checkpoints are unsupported; "
                 "this local port owns the ChatGLM2/3 and GLM4 transformer.encoder layouts."
             )
+        # Legacy vocab_size can count only unpadded tokens. Explicit padded
+        # rows remain authoritative when reading checkpoint metadata; the
+        # alias above keeps subsequent HF resize mutations synchronized.
         kwargs.pop("vocab_size", None)
         hidden_layers = kwargs.pop("num_hidden_layers", None)
         if num_layers is None:
@@ -70,7 +77,6 @@ class ChatGLMConfig(PretrainedConfig):
         if rope_ratio is not None and rope_ratio <= 0:
             raise ValueError("rope_ratio must be positive")
         self.num_layers = num_layers
-        self.vocab_size = padded_vocab_size
         self.padded_vocab_size = padded_vocab_size
         self.hidden_size = hidden_size
         self.ffn_hidden_size = ffn_hidden_size

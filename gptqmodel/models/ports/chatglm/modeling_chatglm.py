@@ -234,6 +234,9 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel, GenerationMixin):
             hidden = hidden.transpose(0, 1)
         if return_last_logit:
             logits_to_keep = 1
+        # Without final normalization the encoder still owns an FP32 residual
+        # stream. The language head consumes the embedding/model compute dtype.
+        hidden = hidden.to(self.transformer.embedding.word_embeddings.weight.dtype)
         indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.transformer.output_layer(hidden[:, indices]).contiguous()
         loss = None

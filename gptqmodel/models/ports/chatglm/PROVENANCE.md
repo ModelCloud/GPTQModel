@@ -61,6 +61,16 @@ labml.ai git `db59a04a8a2c6af922f1656f8c0fd113dd9a51b8`.
   contexts, static/sliding cache implementations and optimized kernels need
   separate validation. Current cache support is `DynamicCache`, with legacy
   tuples accepted for direct forward continuation only.
+- The HF `vocab_size` attribute aliases physical `padded_vocab_size`, keeping
+  Transformers embedding/head resizing and subsequent checkpoint reconstruction
+  synchronized. Explicit padded rows remain authoritative when older metadata
+  also records a smaller logical vocabulary.
+- With `fp32_residual_connection=True`, residual additions retain FP32 state.
+  Each normalization consumes its parameter dtype, followed by attention/MLP
+  compute in that dtype; the language head consumes the embedding/model dtype
+  when final normalization is disabled. These casts follow actual parameters
+  after `.half()`, `.bfloat16()` or dtype-selected loading, rather than stale
+  configuration dtype. CPU tests cover both norms and residual placement modes.
 - AWQ explicitly uses plain quantization for both layouts, with an empty
   scaling-group list. Packed QKV producer/consumer folding and scale-search
   replay are unqualified; no safety claim is inferred from matching widths.

@@ -62,8 +62,10 @@ See [provenance and limits](PROVENANCE.md) for the source pins and untested
 GPU/trained-checkpoint boundaries. Shared loader/security and central reference
 documentation are integrated by the parent change in PR #4620.
 
-Measured final port/registry result: **540 passed**, including 48 independent
-numerical layout/dtype/norm cases and eight real plain-AWQ quantize/reload cases.
+Measured final port/registry result after vocabulary/residual follow-up:
+**658 passed** in 12.85s, including the original 48 independent numerical
+layout/dtype/norm cases and eight real plain-AWQ quantize/reload cases, plus
+118 resize/residual regressions and controls described below.
 The shared AWQ/onboarding baseline returned **574 passed, 3 skipped**:
 `test_awq_scale_search_safety.py test_awq_moe_router_scaling.py
 test_awq_empty_groups.py test_awq_position_kwargs.py
@@ -126,3 +128,80 @@ skips because `/monster/data/model/chatglm3-6b` is absent; those skips are not
 runtime proof. The independent port suite runs the actual tiny/meta models
 without that external directory. No trained-checkpoint or accelerator result
 is inferred from it.
+
+## Vocabulary and residual state transitions
+
+`ChatGLMConfig.attribute_map` makes `vocab_size` an alias of the physical
+`padded_vocab_size`. HF resize updates that same field, including padding to
+a multiple, so save/reload reconstructs the actual embedding and output rows.
+Older metadata with a smaller logical `vocab_size` still loads its explicitly
+padded rows unchanged. This follows the generic HF resize lifecycle without
+adding a separate resize override.
+
+```mermaid
+flowchart LR
+    A["Legacy config: padded rows authoritative"] --> B["ChatGLMConfig"]
+    B --> C["PreTrainedModel.resize_token_embeddings"]
+    C --> D["config.vocab_size aliases padded_vocab_size"]
+    D --> E["save_pretrained: safetensors and config"]
+    E --> F["GPTQModel.load: local config/model"]
+    F --> G{"Tensor rows match metadata?"}
+    G -->|yes| H["Forward, cache, re-save, reload"]
+    G -->|no| X["Raise checkpoint shape mismatch"]
+    style X fill:#fdd,stroke:#900
+```
+
+FP32 residual state is independent from compute precision. Both `GLMBlock`
+implementations cast normalization inputs to actual norm parameter dtype.
+Attention and MLP outputs are added to FP32 residual values when configured,
+including post-layernorm residual selection. Final normalization, when enabled,
+also consumes its parameter dtype; the language head receives the model compute
+dtype even when final normalization is disabled.
+
+```mermaid
+flowchart TD
+    A["Embedding / inputs_embeds"] --> B{"fp32_residual_connection?"}
+    B -->|yes| C["FP32 residual state"]
+    B -->|no| D["Compute-dtype residual state"]
+    C --> E["GLMBlock: cast input to norm parameter dtype"]
+    D --> E
+    E --> F["LayerNorm / RMSNorm then attention / MLP"]
+    F --> G["Select pre/post-norm residual; promote if configured"]
+    G --> H["Residual add; preserve configured stream dtype"]
+    H --> I["Next block or optional final normalization"]
+    I --> J["Cast to model dtype; output_layer; logits / loss"]
+```
+
+| Before (port commit a0e09844c) | After |
+| --- | --- |
+| `configuration_chatglm.py:48,73-74`: independent vocabulary fields; resize leaves stale padded rows | `configuration_chatglm.py:11-15,52-55,80`: one physical field, HF alias, legacy padded precedence |
+| `core.py:424-455`, `core_glm4.py:451-482`: FP32 residual reaches low-precision norms/projections | `core.py:424-464`, `core_glm4.py:451-491`: norm compute casts and explicit FP32 residual promotion |
+| `modeling_chatglm.py:237-238`: FP32 unnormalized state reaches low-precision language head | `modeling_chatglm.py:237-241`: explicit model-compute cast |
+
+The added regressions ran before modifying those production files: **44 failed,
+65 passed** in 9.82s. Twelve resize cases failed at actual tensor shape loading,
+and 32 FP16/BF16 FP32-residual cases failed at real normalization/QKV dtype
+boundaries. FP32 and disabled-FP32-residual sibling controls passed. After the
+fix, the same command returned **109 passed, 101 deselected** in 4.97s:
+
+```bash
+PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -m pytest -q \
+  test_chatglm_local_port.py \
+  -k 'public_resize or legacy_logical_vocab or fp32_residual_compute'
+```
+
+The final suite additionally exercises the legacy padded control through public
+loading for both layouts and adds eight public low-precision load tests:
+
+| Test node | Verified transition |
+| --- | --- |
+| `test_chatglm_public_resize_safetensors_reload_resave` (12 cases) | Both layouts, tied/untied head, shrink/grow/pad, preserved rows, public poisoned-config loading, logits/cache equivalence, re-save/reload with exact tensors |
+| `test_chatglm_legacy_logical_vocab_does_not_shrink_padded_checkpoint` (2 cases) | Legacy logical 31 / physical 64 through public load, exact weight preservation and no-op resize |
+| `test_chatglm_fp32_residual_compute_dtype_oracle_and_cache` (96 cases) | Both layouts; FP32/FP16/BF16; LayerNorm/RMSNorm; pre/post-norm residual; final norm on/off; FP32 residual on/off; independent functional logits/loss oracle, QKV/residual dtypes, continuation, inputs_embeds |
+| `test_chatglm_public_load_fp32_residual_dtype_roundtrip` (8 cases) | FP32 saved weights loaded as FP16/BF16 through GPTQModel, both norms/layouts, no final norm, poisoned config, exact cast tensors/logits, cached/uncached generation, finite nonzero backward gradients, safetensors re-save/reload |
+
+The complete command earlier on this page returned **658 passed, no skips**.
+Ruff on the port and owned test paths plus `git diff --check` passed.
+These are CPU results; they do not qualify GPU concurrency or trained-model
+quality. Shared files, definition/registry fixtures and PR state are unchanged
+by this follow-up.

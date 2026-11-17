@@ -421,7 +421,9 @@ class GLMBlock(torch.nn.Module):
         # hidden_states: [s, b, h]
 
         # Layer norm at the beginning of the transformer layer.
-        layernorm_output = self.input_layernorm(hidden_states)
+        # Keep the residual stream wide while normalization/projections use
+        # their actual parameter dtype, including after model.half()/bfloat16().
+        layernorm_output = self.input_layernorm(hidden_states.to(self.input_layernorm.weight.dtype))
         # Self attention.
         attention_output, kv_cache = self.self_attention(
             layernorm_output,
@@ -436,12 +438,16 @@ class GLMBlock(torch.nn.Module):
             residual = layernorm_output
         else:
             residual = hidden_states
+        if self.fp32_residual_connection:
+            residual = residual.float()
 
         layernorm_input = torch.nn.functional.dropout(attention_output, p=self.hidden_dropout, training=self.training)
         layernorm_input = residual + layernorm_input
 
         # Layer norm post the self attention.
-        layernorm_output = self.post_attention_layernorm(layernorm_input)
+        layernorm_output = self.post_attention_layernorm(
+            layernorm_input.to(self.post_attention_layernorm.weight.dtype)
+        )
 
         # MLP.
         mlp_output = self.mlp(layernorm_output)
@@ -451,6 +457,8 @@ class GLMBlock(torch.nn.Module):
             residual = layernorm_output
         else:
             residual = layernorm_input
+        if self.fp32_residual_connection:
+            residual = residual.float()
 
         output = torch.nn.functional.dropout(mlp_output, p=self.hidden_dropout, training=self.training)
         output = residual + output
@@ -536,6 +544,6 @@ class GLMTransformer(torch.nn.Module):
 
         # Final layer norm.
         if self.post_layer_norm:
-            hidden_states = self.final_layernorm(hidden_states)
+            hidden_states = self.final_layernorm(hidden_states.to(self.final_layernorm.weight.dtype))
 
         return hidden_states, presents, all_hidden_states, all_self_attentions

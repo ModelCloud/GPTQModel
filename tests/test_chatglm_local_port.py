@@ -88,6 +88,8 @@ def _oracle(weights, config, ids, positions, padding):
         return F.linear(x, weights[name + ".weight"], weights.get(name + ".bias"))
 
     def norm(x, name):
+        if config.fp32_residual_connection:
+            x = x.to(weights[name + ".weight"].dtype)
         if not config.rmsnorm:
             return F.layer_norm(x, (config.hidden_size,), weights[name + ".weight"],
                                 weights[name + ".bias"], config.layernorm_epsilon)
@@ -110,6 +112,8 @@ def _oracle(weights, config, ids, positions, padding):
         return torch.cat((rotated, x[..., rotary_dim:]), -1)
 
     hidden = F.embedding(ids, weights["transformer.embedding.word_embeddings.weight"])
+    if config.fp32_residual_connection:
+        hidden = hidden.float()
     cache = []
     allowed = torch.arange(length)[None, :] <= torch.arange(length)[:, None]
     allowed = allowed[None, None] & padding[:, None, None, :].bool()
@@ -131,14 +135,155 @@ def _oracle(weights, config, ids, positions, padding):
         probabilities = scores.masked_fill(~allowed, float("-inf")).softmax(-1).to(v.dtype)
         context = (probabilities @ v).transpose(1, 2).reshape(batch, length, heads * dim)
         attention = linear(context, prefix + "self_attention.dense")
-        hidden = attention + (normalized if config.apply_residual_connection_post_layernorm else hidden)
+        residual = normalized if config.apply_residual_connection_post_layernorm else hidden
+        hidden = attention + (residual.float() if config.fp32_residual_connection else residual)
         normalized = norm(hidden, prefix + "post_attention_layernorm")
         gate, up = linear(normalized, prefix + "mlp.dense_h_to_4h").chunk(2, -1)
         output = linear(F.silu(gate) * up, prefix + "mlp.dense_4h_to_h")
-        hidden = output + (normalized if config.apply_residual_connection_post_layernorm else hidden)
+        residual = normalized if config.apply_residual_connection_post_layernorm else hidden
+        hidden = output + (residual.float() if config.fp32_residual_connection else residual)
     if config.post_layer_norm:
         hidden = norm(hidden, "transformer.encoder.final_layernorm")
-    return linear(hidden, "transformer.output_layer"), cache
+    return linear(hidden.to(weights["transformer.output_layer.weight"].dtype), "transformer.output_layer"), cache
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("new_size,padding", [(37, None), (71, None), (37, 8)])
+def test_chatglm_public_resize_safetensors_reload_resave(tmp_path, rope_ratio, tied, new_size, padding):
+    from gptqmodel import GPTQModel
+    model = _model(rope_ratio=rope_ratio, tie_word_embeddings=tied)
+    original = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+    model.resize_token_embeddings(new_size, pad_to_multiple_of=padding, mean_resizing=False)
+    rows = new_size if padding is None else ((new_size + padding - 1) // padding) * padding
+    ids = torch.tensor([[3, 4, rows - 1, 6], [7, 8, 9, 4]])
+    with torch.no_grad():
+        expected = model(ids).logits
+    model.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    marker = _poison(tmp_path)
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=False).model
+    for current in (model, loaded):
+        assert current.config.vocab_size == current.config.padded_vocab_size == rows
+        assert current.get_input_embeddings().weight.shape[0] == current.get_output_embeddings().weight.shape[0] == rows
+        assert (current.get_input_embeddings().weight is current.get_output_embeddings().weight) == tied
+        kept = min(rows, 64)
+        for name in ("transformer.embedding.word_embeddings.weight", "transformer.output_layer.weight"):
+            torch.testing.assert_close(current.state_dict()[name][:kept], original[name][:kept], atol=0, rtol=0)
+        with torch.no_grad():
+            torch.testing.assert_close(current(ids).logits, expected, atol=0, rtol=0)
+            cache = current(ids[:, :2]).past_key_values
+            torch.testing.assert_close(current(ids[:, 2:], past_key_values=cache).logits,
+                                       expected[:, 2:], atol=2e-7, rtol=2e-5)
+    assert not marker.exists()
+    second = tmp_path / "second"
+    loaded.save_pretrained(second)
+    again = ChatGLMQModel.loader.from_pretrained(second).eval()
+    with torch.no_grad():
+        torch.testing.assert_close(again(ids).logits, expected, atol=0, rtol=0)
+    assert again.config.vocab_size == again.config.padded_vocab_size == rows
+    for name, value in loaded.state_dict().items():
+        torch.testing.assert_close(again.state_dict()[name], value, atol=0, rtol=0)
+    assert list(second.glob("*.safetensors")) and not list(second.glob("*.bin"))
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+def test_chatglm_legacy_logical_vocab_does_not_shrink_padded_checkpoint(tmp_path, rope_ratio):
+    from gptqmodel import GPTQModel
+    original = _model(rope_ratio=rope_ratio)
+    original.save_pretrained(tmp_path)
+    payload = json.loads((tmp_path / "config.json").read_text())
+    payload["vocab_size"] = 31
+    (tmp_path / "config.json").write_text(json.dumps(payload))
+    _write_tokenizer(tmp_path)
+    model = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32).model
+    assert model.get_input_embeddings().weight.shape[0] == 64
+    before = model.get_input_embeddings()
+    assert model.resize_token_embeddings() is before
+    assert model.config.vocab_size == model.config.padded_vocab_size == 64
+    for name, value in original.state_dict().items():
+        torch.testing.assert_close(model.state_dict()[name], value, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rmsnorm", [False, True])
+@pytest.mark.parametrize("post_residual", [False, True])
+@pytest.mark.parametrize("post_norm", [False, True])
+@pytest.mark.parametrize("fp32_residual", [False, True])
+def test_chatglm_fp32_residual_compute_dtype_oracle_and_cache(
+    rope_ratio, dtype, rmsnorm, post_residual, post_norm, fp32_residual,
+):
+    model = _model(rope_ratio=rope_ratio, hidden_size=20, ffn_hidden_size=28, kv_channels=8,
+                   num_attention_heads=3, padded_vocab_size=31, seq_length=48, multi_query_group_num=1,
+                   rmsnorm=rmsnorm, multi_query_attention=rmsnorm, post_layer_norm=post_norm,
+                   apply_residual_connection_post_layernorm=post_residual,
+                   fp32_residual_connection=fp32_residual).to(dtype)
+    ids = torch.tensor([[3, 4, 5, 6], [7, 8, 9, 4]])
+    positions = torch.arange(4)[None].expand(2, -1)
+    residual_dtypes, projection_dtypes = [], []
+    handles = []
+    for layer in model.transformer.encoder.layers:
+        handles.append(layer.register_forward_hook(
+            lambda module, args, output: residual_dtypes.append(output[0].dtype)))
+        handles.append(layer.self_attention.query_key_value.register_forward_pre_hook(
+            lambda module, args: projection_dtypes.append(args[0].dtype)))
+    tolerance = 4e-6 if dtype == torch.float32 else 2e-3
+    try:
+        with torch.no_grad():
+            expected, _ = _oracle(model.state_dict(), model.config, ids, positions, torch.ones_like(ids))
+            output = model(ids, labels=ids, output_hidden_states=True)
+            assert output.logits.dtype == dtype and torch.isfinite(output.logits).all()
+            torch.testing.assert_close(output.logits, expected, atol=tolerance, rtol=tolerance)
+            expected_loss = F.cross_entropy(expected[:, :-1].float().reshape(-1, 31), ids[:, 1:].reshape(-1)).to(dtype)
+            torch.testing.assert_close(output.loss, expected_loss, atol=tolerance, rtol=tolerance)
+            cache = model(ids[:, :2]).past_key_values
+            torch.testing.assert_close(model(ids[:, 2:], past_key_values=cache).logits,
+                                       output.logits[:, 2:], atol=tolerance, rtol=tolerance)
+            embedded = model.get_input_embeddings()(ids)
+            torch.testing.assert_close(model(inputs_embeds=embedded).logits, output.logits, atol=0, rtol=0)
+        assert set(projection_dtypes) == {dtype}
+        assert set(residual_dtypes) == {torch.float32 if fp32_residual else dtype}
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+@pytest.mark.parametrize("rope_ratio", [None, 500])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rmsnorm", [False, True])
+def test_chatglm_public_load_fp32_residual_dtype_roundtrip(tmp_path, rope_ratio, dtype, rmsnorm):
+    from gptqmodel import GPTQModel
+    original = _model(rope_ratio=rope_ratio, rmsnorm=rmsnorm, fp32_residual_connection=True,
+                      post_layer_norm=False)
+    original.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    marker = _poison(tmp_path)
+    reference = copy.deepcopy(original).to(dtype)
+    loaded = GPTQModel.load(str(tmp_path), dtype=dtype, device="cpu", trust_remote_code=False).model
+    ids = torch.tensor([[3, 7, 8, 9], [4, 6, 5, 8]])
+    for name, value in reference.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], value, atol=0, rtol=0)
+    with torch.no_grad():
+        expected = reference(ids).logits
+        torch.testing.assert_close(loaded(ids).logits, expected, atol=0, rtol=0)
+        generated = loaded.generate(ids, max_new_tokens=3, eos_token_id=None)
+        assert torch.equal(generated, loaded.generate(ids, max_new_tokens=3,
+                                                      eos_token_id=None, use_cache=False))
+    assert not marker.exists()
+    output = loaded(ids, labels=ids)
+    output.loss.backward()
+    gradient = loaded.transformer.encoder.layers[0].self_attention.query_key_value.weight.grad
+    assert torch.isfinite(gradient).all() and gradient.norm() > 0
+    loaded.zero_grad(set_to_none=True)
+    second = tmp_path / "second"
+    loaded.save_pretrained(second)
+    again = ChatGLMQModel.loader.from_pretrained(second, dtype=dtype).eval()
+    with torch.no_grad():
+        torch.testing.assert_close(again(ids).logits, expected, atol=0, rtol=0)
+    for name, value in loaded.state_dict().items():
+        torch.testing.assert_close(again.state_dict()[name], value, atol=0, rtol=0)
+    assert list(second.glob("*.safetensors")) and not list(second.glob("*.bin"))
 
 
 @pytest.mark.parametrize("rope_ratio", [None, 500])
