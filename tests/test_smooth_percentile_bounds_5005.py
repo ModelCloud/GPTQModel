@@ -50,7 +50,7 @@ def test_asymmetric_fraction_bounds_are_rejected(low, high, field):
 
 
 LEGAL_BOUNDS = [
-    lambda: C.SmoothPercentileAsymmetric(),
+    C.SmoothPercentileAsymmetric,
     lambda: C.SmoothPercentileAsymmetric(low=0.5, high=99.5),
     lambda: C.SmoothPercentileAsymmetric(low=0.0, high=100.0),
     lambda: C.SmoothPercentileAsymmetric(low=1.0, high=99.9),
