@@ -40,14 +40,33 @@ back to an incompatible native model.
 
 Tokenizers receive remote trust only when both explicit trust and the safety
 bypass are present. This gate does not change Tokenicer normalization.
+Tokenizer construction also receives the policy-selected config as Transformers'
+`config` argument, separately from Tokenicer's `model_config` normalization
+argument. This prevents AutoTokenizer from importing checkpoint `AutoConfig`
+while initializing a tokenizer for a local or native model, even when tokenizer
+trust and the bypass are both enabled.
+
+```mermaid
+flowchart TD
+    A["load_model_config: selected config"] --> B["load_hf_tokenizer: model_config"]
+    B --> C["Tokenicer.load: model_config and config both receive selected config"]
+    C --> D["AutoTokenizer: reuse config; skip AutoConfig discovery"]
+    D --> E{"Tokenizer checkpoint Python requested?"}
+    E -- no --> F["Native tokenizer"]
+    E -- yes --> G{"Explicit trust AND safety bypass?"}
+    G -- yes --> H["Checkpoint tokenizer allowed"]
+    G -- no --> I["Native fallback or rejection; no checkpoint Python"]
+    style I fill:#ffcdd2,stroke:#b71c1c
+```
+
 Processor loads use the resolved model trust. Definition pre-load hooks that
 import checkpoint modules declare `before_model_load_requires_remote_code` and
 run only when remote trust has been resolved and the bypass is enabled.
 
 ## Local model ports
 
-Each model port belongs in its own pull request after the shared loader contract
-lands. Put the config and model implementation under a model-specific package
+Model ports use the shared loader contract. Put the config and model
+implementation under a model-specific package
 inside `gptqmodel`, preserving upstream license/attribution and recording the
 source revision. Set the definition's loader explicitly:
 
@@ -67,7 +86,7 @@ the existing shared model-load lock; the frozen loader metadata does not cache
 mutable model instances or modify Transformers' global registries.
 
 Remove obsolete Transformers 4 pins, remote import hooks and remote-trust
-requirements in that model's PR. Port composite config/model construction as
+requirements when wiring each model. Port composite config/model construction as
 well: nested `auto_map` must not cause checkpoint code execution. Qualify
 checkpoint key/conversion mappings, generation/cache behavior, save/reload,
 real-model module-plan ownership, and the model's explicit AWQ policy. Native
@@ -94,6 +113,7 @@ the responsibility of those engines.
 | Config selection | `AutoConfig.from_pretrained` selected checkpoint config classes (`gptqmodel/models/auto.py:643`, `gptqmodel/models/loader.py:1887,2440`) | Definition-owned config class first, then gated AutoConfig |
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
+| Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
 actual checkpoint config and model imports under explicit bypass, permission
