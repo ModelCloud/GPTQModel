@@ -196,7 +196,8 @@ def test_original_numbered_experts_and_legacy_statics_checkpoint_load_exactly(tm
     assert not marker.exists()
 
 
-def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_path, caplog):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_path, caplog, dtype):
     source = tmp_path / "source"
     reference, marker = checkpoint(source, num_hidden_layers=2, intermediate_size=32, moe_intermediate_size=16)
     router = {
@@ -205,7 +206,7 @@ def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_p
     }
     qcfg = AWQConfig(bits=4, group_size=16, device="cpu", offload_to_disk=False)
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH,
-                          dtype=torch.float16, attn_implementation="eager")
+                          dtype=dtype, attn_implementation="eager")
     ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]])
     model.quantize([{"input_ids": ids, "attention_mask": torch.ones_like(ids)}],
                    batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
@@ -232,7 +233,8 @@ def test_plain_awq_quantizes_every_native_projection_and_preserves_routers(tmp_p
     assert list(destination.glob("*.safetensors"))
     assert not list(destination.glob("*.bin"))
     restored = GPTQModel.load(str(destination), device="cpu", backend=BACKEND.AWQ_TORCH,
-                             dtype=torch.float16, attn_implementation="eager")
+                             dtype=dtype, attn_implementation="eager")
+    assert restored.model.state_dict().keys() == model.model.state_dict().keys()
     for name, value in model.model.state_dict().items():
         torch.testing.assert_close(restored.model.state_dict()[name], value, rtol=0, atol=0, msg=name)
     with torch.inference_mode():
