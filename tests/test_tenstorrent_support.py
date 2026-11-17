@@ -763,6 +763,257 @@ def test_ttnn_mesh_ownership_is_single_owner():
     assert runtime.current_mesh() is None
 
 
+def _fake_ttnn_module(opened):
+    """A TTNN stand-in that records opens and rejects no request itself."""
+
+    class _FabricConfig:
+        DISABLED = "DISABLED"
+        FABRIC_1D = "FABRIC_1D"
+
+    class _MeshShape:
+        def __init__(self, *dims):
+            self.dims = tuple(dims)
+
+    class _Module:
+        FabricConfig = _FabricConfig
+        MeshShape = _MeshShape
+
+        @staticmethod
+        def open_device(**kwargs):
+            opened.append(("device", dict(kwargs)))
+            return object()
+
+        @staticmethod
+        def open_mesh_device(shape, **kwargs):
+            opened.append(("mesh", shape.dims, dict(kwargs)))
+            return object()
+
+        @staticmethod
+        def close_device(_device):
+            return None
+
+        @staticmethod
+        def close_mesh_device(_device):
+            return None
+
+        @staticmethod
+        def set_fabric_config(_cfg):
+            return None
+
+    return _Module
+
+
+def _patch_ttnn_runtime(monkeypatch, ttnn_module):
+    from gptqmodel.utils import ttnn_runtime
+
+    monkeypatch.setattr(ttnn_runtime, "import_ttnn", lambda: ttnn_module)
+    monkeypatch.setattr(ttnn_runtime, "_reject_pjrt_owner", lambda: None)
+    monkeypatch.setattr(ttnn_runtime, "before_device_open", lambda **_: None)
+    monkeypatch.setattr(ttnn_runtime, "after_device_close", lambda **_: None)
+    monkeypatch.setattr(ttnn_runtime, "park_idle_clock", lambda: None)
+    monkeypatch.setattr(ttnn_runtime, "_MESH", None)
+    return ttnn_runtime
+
+
+def test_ttnn_open_mesh_reuse_must_match_the_requested_placement(monkeypatch):
+    """A live handle may only be reused for the exact placement requested.
+
+    Reusing a one-chip open for a four-chip or chip-1 request returned the
+    original chip with no error, so the caller received different placement and
+    fabric than it asked for. Only an explicit close may change placement.
+    """
+
+    from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
+
+    opened = []
+    runtime = _patch_ttnn_runtime(monkeypatch, _fake_ttnn_module(opened))
+    try:
+        first = runtime.open_mesh(device_count=1, device_id=0, owner="t")
+        assert (first.num_devices, first.device_id, first.fabric) == (1, 0, "DISABLED")
+        assert len(opened) == 1
+
+        # Different chip count, requested with a fabric: must not be served by
+        # the one-chip handle, and must not open a second runtime either.
+        with pytest.raises(TTNNUnavailable, match="device_count=4"):
+            runtime.open_mesh(device_count=4, fabric="FABRIC_1D", owner="t")
+        # Different chip ordinal on the same count.
+        with pytest.raises(TTNNUnavailable, match="device_id=1"):
+            runtime.open_mesh(device_count=1, device_id=1, owner="t")
+        # Different fabric on the same count.
+        with pytest.raises(TTNNUnavailable, match="fabric=FABRIC_1D"):
+            runtime.open_mesh(device_count=1, fabric="FABRIC_1D", owner="t")
+        # Different trace reservation on the same count.
+        with pytest.raises(TTNNUnavailable, match="trace_region_size=4096"):
+            runtime.open_mesh(device_count=1, trace_region_size=4096, owner="t")
+
+        # Nothing was opened behind the caller's back and the handle is unchanged.
+        assert len(opened) == 1
+        assert runtime.current_mesh() is first
+        assert first.num_devices == 1
+
+        # An identical request still reuses the live handle.
+        assert runtime.open_mesh(device_count=1, device_id=0, owner="t") is first
+        assert len(opened) == 1
+    finally:
+        runtime.close_mesh(owner="t")
+
+    # Control: after an explicit close the new placement is opened normally, and
+    # the previously valid two-chip -> four-chip rejection still fails closed.
+    two = runtime.open_mesh(device_count=2, owner="t")
+    try:
+        assert two.num_devices == 2
+        with pytest.raises(TTNNUnavailable, match="device_count=4"):
+            runtime.open_mesh(device_count=4, owner="t")
+    finally:
+        runtime.close_mesh(owner="t")
+    assert [entry[0] for entry in opened] == ["device", "mesh"]
+
+
+class _GridFakeTTNN:
+    """TTNN stand-in that tags every device-resident buffer with its device."""
+
+    uint32 = "uint32"
+    bfloat16 = "bfloat16"
+    TILE_LAYOUT = "tile"
+    ROW_MAJOR_LAYOUT = "row_major"
+    DRAM_MEMORY_CONFIG = "dram"
+
+    class _SourceType:
+        SOURCE_CODE = "source"
+
+    class KernelDescriptor:
+        SourceType = None  # filled below
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _Descriptor:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _Args(dict):
+        def __missing__(self, key):
+            self[key] = {}
+            return self[key]
+
+    class _CoreRangeSet:
+        def __init__(self, ranges):
+            self.ranges = tuple(ranges)
+
+    class _CoreRange:
+        def __init__(self, start, end):
+            self.start, self.end = start, end
+
+    class _CoreCoord:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    class _Shape:
+        def __init__(self, dims):
+            self.dims = tuple(int(dim) for dim in dims)
+
+        def __iter__(self):
+            return iter(self.dims)
+
+    def __init__(self):
+        self.uploads = []
+        self.submissions = []
+        self._addresses = 0
+        self.KernelDescriptor.SourceType = self._SourceType
+
+    def _next_address(self):
+        self._addresses += 1
+        return self._addresses
+
+    def from_torch(self, tensor, **_kwargs):
+        return tensor
+
+    def to_device(self, tensor, device):
+        buffer = type("DeviceTensor", (), {})()
+        buffer.device = device
+        buffer.host = tensor
+        buffer.address = self._next_address()
+        buffer.buffer_address = lambda: buffer.address
+        self.uploads.append(buffer)
+        return buffer
+
+    def allocate_tensor_on_device(self, shape, _dtype, _layout, device, _memory):
+        buffer = type("DeviceTensor", (), {})()
+        buffer.device = device
+        buffer.dims = tuple(shape)
+        buffer.address = self._next_address()
+        buffer.buffer_address = lambda: buffer.address
+        return buffer
+
+    def to_torch(self, tensor):
+        return torch.zeros(tensor.dims)
+
+    def generic_op(self, io, _program):
+        self.submissions.append([buffer.device for buffer in io])
+
+    def synchronize_device(self, _device):
+        return None
+
+    Shape = _Shape
+    CoreRangeSet = _CoreRangeSet
+    CoreRange = _CoreRange
+    CoreCoord = _CoreCoord
+    RuntimeArgs = _Args
+    CBDescriptor = _Descriptor
+    CBFormatDescriptor = _Descriptor
+    ProgramDescriptor = _Descriptor
+    ReaderConfigDescriptor = _Descriptor
+    ComputeConfigDescriptor = _Descriptor
+    WriterConfigDescriptor = _Descriptor
+
+
+def test_fused_grid_caches_are_owned_by_the_consuming_device(monkeypatch):
+    """Packed weights and the LUT must be uploaded per device, not shared.
+
+    The cache key covered the source codes and (scale, zero) only, so a second
+    live device was handed the first device's buffers next to its own
+    activations and output: a mixed-owner native submission.
+    """
+
+    from gptqmodel.utils import ttnn_runtime
+    from gptqmodel.utils.tt_int4_kernel import clear_grid_weight_cache, run_fused_gemm_grid
+
+    driver = _GridFakeTTNN()
+    monkeypatch.setattr(ttnn_runtime, "import_ttnn", lambda: driver)
+    chip0, chip1 = object(), object()
+    codes = torch.arange(1024).remainder(16).reshape(1, 1, 1024)
+    act = torch.ones(32, 32)
+
+    clear_grid_weight_cache()
+    try:
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip0, grid=(1, 1))
+        assert driver.submissions[-1] == [chip0, chip0, chip0, chip0]
+        uploads_after_first = len(driver.uploads)
+
+        # Same weights on another live device: every operand it receives must
+        # belong to that device, so the weights and LUT are uploaded again.
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip1, grid=(1, 1))
+        assert driver.submissions[-1] == [chip1, chip1, chip1, chip1]
+        assert len(driver.uploads) == uploads_after_first + 3
+
+        # The per-device entries are real caches: repeating either device's call
+        # must upload its activation only, never its weights or LUT again.
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip0, grid=(1, 1))
+        assert driver.submissions[-1] == [chip0, chip0, chip0, chip0]
+        assert len(driver.uploads) == uploads_after_first + 4
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip1, grid=(1, 1))
+        assert driver.submissions[-1] == [chip1, chip1, chip1, chip1]
+        assert len(driver.uploads) == uploads_after_first + 5
+
+        # Control: clearing the cache is still enough to force a fresh upload.
+        clear_grid_weight_cache()
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip1, grid=(1, 1))
+        assert driver.submissions[-1] == [chip1, chip1, chip1, chip1]
+        assert len(driver.uploads) == uploads_after_first + 8
+    finally:
+        clear_grid_weight_cache()
+
+
 class _ThermalClock:
     """Deterministic monotonic clock and sleeper for the pacing tests."""
 
