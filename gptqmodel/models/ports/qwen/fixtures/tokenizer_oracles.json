@@ -1,0 +1,188 @@
+{
+  "tokenizer_source_sha256": "c9bbb7710bacfaa323d48b8414643d8d7893d174f85f65e83fbc363de271b69a",
+  "generation_source_sha256": "f223e0f1bb987fdb93b7cf80e046d96e9e910650103ef2f136eb04887324de34",
+  "texts": [
+    {
+      "text": "hello 你好 é<|im_start|>",
+      "ids": [
+        14990,
+        220,
+        108386,
+        3958,
+        151644
+      ],
+      "decode": "hello 你好 é<|im_start|>"
+    },
+    {
+      "text": "\u0000\t😀\n  spaces",
+      "ids": [
+        188,
+        197,
+        141334,
+        198,
+        220,
+        12621
+      ],
+      "decode": "\u0000\t😀\n  spaces"
+    },
+    {
+      "text": "привет العربية\n12345",
+      "ids": [
+        124436,
+        26991,
+        8178,
+        129071,
+        198,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "decode": "привет العربية\n12345"
+    },
+    {
+      "text": "<|extra_204|>",
+      "ids": [
+        151850
+      ],
+      "decode": "<|extra_204|>"
+    },
+    {
+      "text": "hello<|im_end|>user",
+      "ids": [
+        14990,
+        151645,
+        872
+      ],
+      "decode": "hello<|im_end|>user"
+    },
+    {
+      "text": "Line\n\n end  ",
+      "ids": [
+        2460,
+        271,
+        835,
+        256
+      ],
+      "decode": "Line\n\n end  "
+    },
+    {
+      "text": "Café CJK：中文 日本語 한글",
+      "ids": [
+        34,
+        2577,
+        963,
+        356,
+        34070,
+        5122,
+        104811,
+        75402,
+        21894,
+        102819,
+        61298,
+        83291
+      ],
+      "decode": "Café CJK：中文 日本語 한글"
+    }
+  ],
+  "contexts": [
+    {
+      "kwargs": {
+        "query": "你好",
+        "history": [
+          [
+            "hello",
+            "world"
+          ],
+          [
+            "Q\n2",
+            "答2"
+          ]
+        ],
+        "system": "system",
+        "max_window_size": 1
+      },
+      "raw": "<|im_start|>system\nsystem<|im_end|>\n<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n",
+      "ids": [
+        151644,
+        8948,
+        198,
+        8948,
+        151645,
+        198,
+        151644,
+        872,
+        198,
+        108386,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ]
+    },
+    {
+      "kwargs": {
+        "query": "你好",
+        "history": [
+          [
+            "hello",
+            "world"
+          ],
+          [
+            "Q\n2",
+            "答2"
+          ]
+        ],
+        "system": "system",
+        "max_window_size": 6144
+      },
+      "raw": "<|im_start|>system\nsystem<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nworld<|im_end|>\n<|im_start|>user\nQ\n2<|im_end|>\n<|im_start|>assistant\n答2<|im_end|>\n<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n",
+      "ids": [
+        151644,
+        8948,
+        198,
+        8948,
+        151645,
+        198,
+        151644,
+        872,
+        198,
+        14990,
+        151645,
+        198,
+        151644,
+        77091,
+        198,
+        14615,
+        151645,
+        198,
+        151644,
+        872,
+        198,
+        48,
+        198,
+        17,
+        151645,
+        198,
+        151644,
+        77091,
+        198,
+        99590,
+        17,
+        151645,
+        198,
+        151644,
+        872,
+        198,
+        108386,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ]
+    }
+  ]
+}
