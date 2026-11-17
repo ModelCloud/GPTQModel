@@ -116,7 +116,7 @@ from ..utils.model import (
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
 from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
-from ..utils.resource_budget import ResourceBudget, device_memory_bytes
+from ..utils.resource_budget import DeviceBudget, ResourceBudget, device_memory_bytes
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -394,34 +394,87 @@ def _log_quantize_summary(
 
 
 
-def _model_storage_bytes(inner: object) -> int:
-    """(measured) Storage of the model's parameters and buffers.
+def _parameter_devices(inner: object) -> Dict[int, int]:
+    """(measured) Weight bytes per device index, meta tensors skipped.
 
-    Meta tensors are skipped: they carry shapes but no storage, and counting
-    them would inflate the weight budget on a lazy-loaded checkpoint.
+    Parameters and buffers whose storage does not live on a CUDA device are
+    reported under ``-1`` so a CPU or meta-only model still has a measured
+    weight total.
     """
 
-    total = 0
+    per_device: Dict[int, int] = {}
     try:
-        for tensor in list(inner.parameters()) + list(inner.buffers()):
+        tensors = list(inner.parameters()) + list(inner.buffers())
+    except Exception:  # pragma: no cover - exotic module trees
+        return per_device
+    for tensor in tensors:
+        if getattr(tensor, "is_meta", False):
+            continue
+        device = getattr(tensor, "device", None)
+        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        per_device[index] = per_device.get(index, 0) + tensor.numel() * tensor.element_size()
+    return per_device
+
+
+def _device_budgets(per_device: Dict[int, int]) -> Tuple[DeviceBudget, ...]:
+    """(measured) One DeviceBudget per device that holds weights."""
+
+    budgets = []
+    for index, weights in sorted(per_device.items()):
+        free, total = (None, None) if index < 0 else device_memory_bytes(index)
+        budgets.append(DeviceBudget(index=index, free_bytes=free, total_bytes=total, weights_bytes=weights))
+    return tuple(budgets)
+
+
+def _layer_device_indices(inner: object, layer_count: int) -> Optional[Tuple[int, ...]]:
+    """(measured) Device index of each decoder layer, or None when unresolvable."""
+
+    layers_paths = getattr(inner, "extract_layers_node", None)
+    if not callable(layers_paths):
+        layers_paths = getattr(type(inner), "extract_layers_node", None)
+    try:
+        paths = list(layers_paths()) if callable(layers_paths) else []
+    except Exception:  # pragma: no cover - exotic definitions
+        return None
+    if len(paths) != 1:
+        # Multi-branch definitions do not map 1:1 onto the config's layer list.
+        return None
+    try:
+        layers = inner.model.get_submodule(paths[0])
+    except Exception:
+        try:
+            layers = inner.get_submodule(paths[0])
+        except Exception:
+            return None
+    indices = []
+    for layer in layers:
+        tensors = list(layer.parameters()) + list(layer.buffers())
+        device = None
+        for tensor in tensors:
             if getattr(tensor, "is_meta", False):
                 continue
-            total += tensor.numel() * tensor.element_size()
-    except Exception:  # pragma: no cover - exotic module trees
-        return total
-    return total
+            device = getattr(tensor, "device", None)
+            break
+        index = device.index if getattr(device, "type", None) == "cuda" and device.index is not None else -1
+        indices.append(index)
+    if len(indices) != layer_count:
+        return None
+    return tuple(indices)
 
 
 def _budget_for(inner: object, *, reserve: float = 0.1,
                 dtype: Optional[torch.dtype] = None) -> ResourceBudget:
-    """Resource budget for a decoder module: measured device numbers + estimates."""
+    """Resource budget for a decoder module: measured per-device numbers + estimates."""
 
-    free, total = device_memory_bytes()
+    per_device = _parameter_devices(inner)
+    estimate = _kv_cache_estimate_for(inner, dtype=dtype)
+    layer_devices = None
+    if estimate is not None:
+        layer_devices = _layer_device_indices(inner, len(estimate.layers))
     return ResourceBudget(
-        weights_bytes=_model_storage_bytes(inner),
-        device_free_bytes=free,
-        device_total_bytes=total,
-        kv_cache=_kv_cache_estimate_for(inner, dtype=dtype),
+        devices=_device_budgets(per_device),
+        kv_cache=estimate,
+        layer_devices=layer_devices,
         reserve_fraction=reserve,
     )
 
