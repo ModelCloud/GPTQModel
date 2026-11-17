@@ -107,6 +107,60 @@ The runtime 1B model owns the remaining 133 tensors. Tests assert the complete
 tensor inventory for all official sizes and validate legacy-mask loading,
 mask causality, cache continuation and output equivalence.
 
+### FP32 derived rotary state
+
+Both native four-partition attention and the eight-partition port use the
+original **FP32 sinusoidal table**, even with FP16/BF16 learned weights.
+`CodeGenForCausalLM._reset_rotary_positions` computes the original frequency,
+sine and cosine formula with explicit FP32 operands on CPU, then transfers
+only the derived table to its buffer's destination device (or constructs on
+meta for a meta model). It does not change trained tensors or checkpoint keys.
+
+The wrapper calls this after `initialize_weights`, including Hugging Face's
+post-load materialization of nonpersistent buffers, and from `_apply`'s
+`finally` path. Thus `.half()`, `.bfloat16()`, `.float()`, `.to(...)`, and
+`.to_empty(...)` at the model boundary cannot leave rounded or uninitialized
+rotary phases. A failed conversion propagates its original exception, restores
+the derived tables, and permits an ordinary conversion retry. The transformer
+for four-partition configs remains exactly `NativeCodeGenModel`.
+
+```mermaid
+flowchart TD
+    A["CodeGenForCausalLM.initialize_weights"] --> B["Native initialization / missing-buffer materialization"]
+    C["CodeGenForCausalLM._apply"] --> D["Native dtype/device conversion"]
+    B --> E["_reset_rotary_positions: original FP32 math"]
+    D -->|finally: success or exception| E
+    E --> F["Nonpersistent FP32 table on destination device"]
+    F --> G{"Conversion raised?"}
+    G -->|no| H["Forward / save / reload / cast back"]
+    G -->|yes| I["Propagate original exception; conversion can retry"]
+    style I fill:#fdd,stroke:#a00
+```
+
+Before this policy, native `CodeGenAttention.__init__` (Transformers 5.23.0,
+lines 90–92) registered `embed_positions` as a nonpersistent buffer, and
+ordinary `nn.Module._apply` narrowed it alongside weights. Saving omitted the
+table, while reloading regenerated it, so equal state dicts produced different
+logits. Upcasting the narrowed table could not restore the original values.
+Native sinusoid construction under a low default dtype could also round the
+frequencies before placing them in FP32 storage. The wrapper now regenerates
+from explicit FP32 operands at both lifecycle boundaries.
+
+The before-fix regression
+`test_postconstruction_cast_save_public_reload_and_cast_back` failed all four
+layout × dtype cases at exact forward parity after safetensors reload. With
+seed 2027, width 128, two layers, rotary width 16, and positions 1900–1902,
+FP16 max errors were **0.001953125** for both layouts; BF16 errors were
+**0.017578125** (four partitions) and **0.015625** (eight). The eight-partition
+last-token prediction changed from **16 to 7** after reload. The fixed tests
+require bitwise parity for logits, unchanged narrowed learned tensors, matching
+generation, public `GPTQModel.load`, re-save/reload and FP32 cast-back. Additional
+tests compare low-dtype construction to the original FP32 native formula,
+materialize meta models with both `load_state_dict(assign=False/True)`, and
+inject a failure after the first table conversion before retrying. CPU/meta
+execution establishes these lifecycle properties; accelerator movement remains
+unqualified on this CPU host.
+
 The decoder module plan covers the norm with `:!` and all four supported
 projections with quantized tags. Existing central registry blocks remain
 unchanged; no alias is added (`model_type=codegen` covers all these layouts).

@@ -115,3 +115,30 @@ class CodeGenForCausalLM(NativeCodeGenForCausalLM):
         self.transformer = model_class(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
         self.post_init()
+
+    def _reset_rotary_positions(self):
+        # These nonpersistent buffers are derived state, not learned weights.
+        # Recompute from an explicit FP32 base: .float() cannot recover values
+        # rounded by .half()/.bfloat16() or a low-default-dtype construction.
+        for layer in self.transformer.h:
+            attention = layer.attn
+            target = attention.embed_positions.device
+            device = "meta" if target.type == "meta" else "cpu"
+            dim = attention.pos_embd_dim
+            inverse = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+            angles = torch.arange(attention.max_positions, dtype=torch.float32, device=device)[:, None] * inverse
+            attention.embed_positions = torch.cat((angles.sin(), angles.cos()), dim=-1).to(target)
+
+    def initialize_weights(self):
+        # HF also calls this after materializing missing nonpersistent buffers
+        # from meta during from_pretrained. Leave every trained tensor to HF.
+        super().initialize_weights()
+        self._reset_rotary_positions()
+
+    def _apply(self, fn, recurse=True):
+        try:
+            return super()._apply(fn, recurse=recurse)
+        finally:
+            # Preserve the table even if a conversion fails partway through;
+            # a subsequent dtype/device retry must not reuse rounded phases.
+            self._reset_rotary_positions()
