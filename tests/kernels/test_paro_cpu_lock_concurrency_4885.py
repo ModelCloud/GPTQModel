@@ -220,14 +220,14 @@ def test_warm_forwards_overlap_while_the_first_gemm_is_in_flight(path, monkeypat
         try:
             with torch.inference_mode():
                 outputs.append(module(x))
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             errors.append(exc)
 
     def second_forward():
         try:
             with torch.inference_mode():
                 outputs.append(module(x))
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             errors.append(exc)
         finally:
             second_done.set()
@@ -292,7 +292,7 @@ def test_concurrent_state_dict_during_warm_forwards_stays_consistent(path, monke
                     if not torch.equal(out, expected):
                         mismatches.append("concurrent forward output differs")
                         return
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             errors.append(exc)
 
     def save_loop():
@@ -311,7 +311,7 @@ def test_concurrent_state_dict_during_warm_forwards_stays_consistent(path, monke
                         )
                     elif not torch.equal(actual, reference):
                         mismatches.append(f"{name} values differ")
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             errors.append(exc)
 
     threads = [
