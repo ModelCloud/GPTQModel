@@ -8,7 +8,7 @@ from model_test import ModelTest
 from PIL import Image
 
 
-class TestQwen3_VL(ModelTest):
+class TestErnie4_5_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/ERNIE-4.5-VL-28B-A3B-PT"
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
@@ -22,7 +22,7 @@ class TestQwen3_VL(ModelTest):
     USE_FLASH_ATTN = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 
-    def test_qwen3_vl(self):
+    def test_ernie4_5_vl(self):
         with self.model_compat_test_context():
             model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
                                                           dtype=self.TORCH_DTYPE)
