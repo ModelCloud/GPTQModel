@@ -84,11 +84,11 @@ flowchart TD
 | --- | --- | --- |
 | `models/loader.py:1756` pops `subfolder` and forwards it only through `cached_file_kwargs` to `AutoConfig` | Architecture config honored the subfolder; every other artifact used the root | One `checkpoint_dir` is resolved and reused |
 | `utils/model.py:1714` local branch of `get_checkpoints` | Searched `model_id_or_path` directly; `subfolder` was ignored | Joins the validated subfolder before searching |
-| `quantization/config.py:4753` `QuantizeConfig.from_pretrained` | Popped only `format`; joined `QUANT_CONFIG_FILENAME_COMPAT` under `save_dir` (`:4759`) | Honors `subfolder` and records the resolved directory as the adapter provenance |
+| `quantization/config.py:5868` `QuantizeConfig.from_pretrained` | Popped only `format`; joined `QUANT_CONFIG_FILENAME_COMPAT` under `save_dir` (`:4759`) | Honors `subfolder` and records the resolved directory as the adapter provenance |
 | `models/loader.py:1828` adapter manifest resolution | Used `model_local_path`, so a manifest under `nested/` was rejected as outside the checkpoint | Uses `checkpoint_dir` |
 | `quantization/config.py:4776` adapter provenance | `(abspath(save_dir), manifest)` | `(abspath(checkpoint_dir), manifest)` |
-| `models/auto.py:607` `_get_config_load_kwargs` | Returned only the GGUF selector, so `{"subfolder": "nested"}` produced `{}` and detection read the root config | Forwards the validated config-selection options |
-| `models/loader.py:1075` `_get_tokenizer_load_kwargs` | Returned only the GGUF selector | Forwards the validated config-selection options |
+| `models/auto.py:628` `_get_config_load_kwargs` | Returned only the GGUF selector, so `{"subfolder": "nested"}` produced `{}` and detection read the root config | Forwards the validated config-selection options |
+| `models/loader.py:1684` `_get_tokenizer_load_kwargs` | Returned only the GGUF selector | Forwards the validated config-selection options |
 | `models/loader.py:1899` tokenizer load in `from_quantized` | Received only `hf_gguf_load_kwargs`, so a nested checkpoint used the root tokenizer | Receives the resolved subfolder/revision selection |
 
 ## Failure and ambiguity contract

@@ -84,7 +84,7 @@ inverse scales; the multiplier spelling is accepted for loaded checkpoints.
 | --- | --- | --- |
 | Forward wrapper semantics | `TorchFP8Linear` only divided; a multiplier checkpoint was wrong by 1e4 (`gptqmodel/models/base.py:4045`) | `_build_fp8_forward_module` passes the resolved semantics (`gptqmodel/models/base.py:4070`, `:4114`) |
 | Quant-source semantics | `dequantize_fp8` defaulted to multiplier (`gptqmodel/models/base.py:3683`) | Same resolved value is passed explicitly (`gptqmodel/models/base.py:3683-3686`) |
-| Resolution | Two independent decisions | One cached `_decoder_fp8_scale_semantics()` per checkpoint (`gptqmodel/models/base.py:3731`) |
+| Resolution | Two independent decisions | One cached `_decoder_fp8_scale_semantics()` per checkpoint (`gptqmodel/models/base.py:4752`) |
 | Wrapper arithmetic | `inverse` only; other values raised `NotImplementedError` (`gptqmodel/nn_modules/qlinear/fp8.py:492`) | `multiplier` and `inverse` in native, CPU, and `_scaled_mm` paths (`:532`, `:575`, `:592`) |
 | Direct `weight_scale` | Reciprocated and divided | Reciprocated and explicitly `inverse` |
 

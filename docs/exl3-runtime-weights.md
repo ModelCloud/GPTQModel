@@ -11,7 +11,7 @@ contract for the generic `EXL3Processor`. The refresh was introduced with
 ## Why the layer inventory is refreshed, not only the subset
 
 One decoder layer is quantized in subsets. After subset `n` is packed,
-`EXL3Processor._stage_runtime_weight` (`gptqmodel/looper/exllamav3_processor.py:2388`)
+`EXL3Processor._stage_runtime_weight` (`gptqmodel/looper/exllamav3_processor.py:2432`)
 replaces that subset's dense weight with a META placeholder and stores a marker
 in `NamedModule.state`. The layer forward that follows still executes every
 module in the layer: earlier subsets are already packed, and later subsets are

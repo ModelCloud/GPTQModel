@@ -23,10 +23,10 @@ flowchart TD
 
 | Before this extraction layer | Carried implementation |
 |---|---|
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/writer.py:658`: `_validated_save_state_overlay` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/writer.py:792`: `_exllamav3_checkpoint_passthrough_plan` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/writer.py:936`: `_build_exllamav3_checkpoint_passthrough_state_dict` |
-| Previous stack layer: `gptqmodel/models/writer.py:799` | `gptqmodel/models/writer.py:1387`: `ModelWriter` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/writer.py:1110`: `_validated_save_state_overlay` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/writer.py:1244`: `_exllamav3_checkpoint_passthrough_plan` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/writer.py:1405`: `_build_exllamav3_checkpoint_passthrough_state_dict` |
+| Previous stack layer: `gptqmodel/models/writer.py:799` | `gptqmodel/models/writer.py:1886`: `ModelWriter` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

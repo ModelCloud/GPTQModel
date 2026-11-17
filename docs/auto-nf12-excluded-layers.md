@@ -74,7 +74,7 @@ flowchart TD
     style G fill:#dfd,stroke:#080
 ```
 
-`_module_declares_nf12_checkpoint` (`gptqmodel/models/writer.py:418`) resolves
+`_module_declares_nf12_checkpoint` (`gptqmodel/models/writer.py:666`) resolves
 the winning `dynamic` rule for the module and its effective format, so a mixed
 config that genuinely asks for NF12 storage on a path still saves, while an
 excluded path or a non-NF12 method never does. The error names the offending

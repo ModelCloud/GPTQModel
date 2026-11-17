@@ -7,7 +7,7 @@ GPTQ zero points are stored packed, and two format conversions rewrite them:
 v1 -> v2 on load, and v2 -> v1 when a checkpoint is serialized (the live
 buffer keeps the kernel's runtime layout; see
 [the runtime vs checkpoint layout](gptq-qzero-runtime-layout.md)). Both go
-through `_shift_gptq_qzeros` (`gptqmodel/utils/model_dequant.py:990`), which
+through `_shift_gptq_qzeros` (`gptqmodel/utils/model_dequant.py:1003`), which
 decodes every packed field with `unpack_cols` (`:804`), shifts the logical
 values, and re-encodes them with `pack_cols` (`:827`). The same unpackers feed
 the dense dequantizer: `unpack_rows` (`:855`) for `qweight` and `unpack_cols`
