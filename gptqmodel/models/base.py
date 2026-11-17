@@ -5511,6 +5511,11 @@ class BaseQModel(nn.Module):
             layer). `last_module` then still points at the run before that
             absent block, which is not this block's producer: falling back to it
             folded `attention.dense` into `input_layernorm` (#4677).
+
+            The caller clears the flag when this block declares the same
+            `:in=<tag>` shared input as the absent block: the two are siblings
+            reading one tensor, so the norm before them is still this block's
+            producer (#4732).
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -5670,6 +5675,10 @@ class BaseQModel(nn.Module):
         # True when the previous block declared only modules this layer does not
         # own (`layer_modules_strict=False` alternative layouts).
         prev_block_absent = False
+        # Input tags declared by that absent block. A block that resolved to no
+        # module still declares which tensor it would have read, so a following
+        # block with the same tag is its sibling rather than its consumer.
+        prev_absent_block_tags: set[str] = set()
         for block in full_layer_modules:
             block_absent = False
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
@@ -5694,6 +5703,7 @@ class BaseQModel(nn.Module):
                 prev_not_quantized = True
                 # A declared norm block is a real producer for the next run.
                 prev_block_absent = False
+                prev_absent_block_tags = set()
                 continue
 
             prev_not_quantized = False
@@ -5723,6 +5733,16 @@ class BaseQModel(nn.Module):
                     if spec is not None:
                         block_input_tags.update(flag[3:] for flag in spec.flags if flag.startswith("in="))
             shared_tag = next(iter(block_input_tags)) if len(block_input_tags) == 1 else None
+            # Qwen3.5-style hybrid trees declare `self_attn` and `linear_attn`
+            # against one `:in=` tag, and a linear-attention layer owns no
+            # `self_attn`. The absent `self_attn` block still declares that tag,
+            # so a following block with the same tag reads the same tensor the
+            # absent block read: the two are siblings, and the norm before them
+            # is still the fold source. Refusing the fallback here dropped the
+            # whole DeltaNet input group (#4732).
+            sibling_of_absent_block = (
+                shared_tag is not None and shared_tag in prev_absent_block_tags
+            )
             skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 pending_nonquant.clear()
@@ -5841,7 +5861,9 @@ class BaseQModel(nn.Module):
                         input_width,
                         allow_block_norm=allow_block_norm,
                         shared_source=shared_source,
-                        refuse_last_module_fallback=prev_block_absent,
+                        refuse_last_module_fallback=(
+                            prev_block_absent and not sibling_of_absent_block
+                        ),
                     )
                     moe_consumers = (
                         _moe_block_consumers(block, input_width, subset)
@@ -5916,6 +5938,13 @@ class BaseQModel(nn.Module):
                     nodes.append(n)
 
             prev_block_absent = block_absent
+            # Keep the tags of a whole run of absent blocks: Qwen3.5 splits
+            # `self_attn` into the `q/k/v` block and the `o_proj` block, and only
+            # the first declares `:in=`. Unioning them keeps the sibling tag
+            # visible to the block that follows the run (#4732).
+            prev_absent_block_tags = (
+                (prev_absent_block_tags | set(block_input_tags)) if block_absent else set()
+            )
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
                 # Mixed MoE blocks can legitimately place shared-expert projections
