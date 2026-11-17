@@ -972,6 +972,19 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 self._restore_offloaded_base_modules(strict=False)
             finally:
+                # ``finalize()`` is the only other place the processor closes
+                # its Device-SMI handles, and a failed run never reaches it
+                # (#4813). The release is idempotent and must not mask the run
+                # failure; a processor that does not implement it is skipped.
+                release = getattr(self.processor, "release_failed_run", None)
+                if callable(release):
+                    try:
+                        release()
+                    except Exception:
+                        log.warn(
+                            "failed to release processor resources while failing the weight-only run",
+                            exc_info=True,
+                        )
                 # A failed run cannot be saved, so its per-run offload bundles
                 # are no longer reachable (issue #4368).
                 release_private_offload_root(self.gptq_model)
