@@ -123,6 +123,50 @@ def torch_stable_abi_target_define(major: int, minor: int) -> str:
     return f"-DTORCH_TARGET_VERSION=0x{encoded_version:016X}"
 
 
+
+def _rocm_cache_fingerprint_payload(hip_version: str) -> list[str]:
+    """Return the HIP target set ``hipcc`` actually compiles code objects for.
+
+    ``hipcc`` ignores ``TORCH_CUDA_ARCH_LIST``, and ``get_device_capability()``
+    reports an unrelated pair on ROCm (gfx1201 and gfx1200 both say ``(12, 0)``),
+    so the CUDA payload cannot distinguish two HIP targets. ``PYTORCH_ROCM_ARCH``
+    is what torch passes to ``--offload-arch``; when it is unset torch compiles
+    for every visible device's ``gcnArchName``. A binary built for one target is
+    rejected by another with ``invalid device function``, so both inputs belong
+    in the cache key (issue #4815).
+    """
+
+    from .arch import normalize_arch
+
+    payload = [f"rocm={hip_version}"]
+    override = os.getenv("PYTORCH_ROCM_ARCH")
+    if override:
+        # Mirror torch's own parser: `;`-separated, one `--offload-arch` each.
+        archs = sorted(
+            {normalize_arch(part) for part in override.split(";")} - {""}
+        )
+        payload.append(f"rocm_arch_list={','.join(archs) if archs else override}")
+        return payload
+
+    if not torch.cuda.is_available():
+        payload.append("rocm_available=0")
+        return payload
+
+    archs: set[str] = set()
+    try:
+        for device_index in range(torch.cuda.device_count()):
+            properties = torch.cuda.get_device_properties(device_index)
+            name = normalize_arch(getattr(properties, "gcnArchName", None))
+            if name:
+                archs.add(name)
+    except Exception:
+        # Never let a failed probe collapse the key to "no target".
+        payload.append("rocm_arch=unavailable")
+        return payload
+    payload.append(f"rocm_arch={','.join(sorted(archs)) or 'none'}")
+    return payload
+
+
 def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
     """Drop NVCC scheduling knobs that cannot change generated device code."""
 
@@ -1739,12 +1783,20 @@ class TorchOpsJitExtension:
         return digest[:16]
 
     def _cuda_cache_fingerprint_payload(self) -> list[str]:
-        """Capture the effective CUDA target set so cached binaries stay device-compatible."""
+        """Capture the effective CUDA/HIP target set so cached binaries stay device-compatible."""
 
         if not self.requires_cuda:
             return ["cuda_ext=0"]
 
         payload = ["cuda_ext=1"]
+        hip_version = torch.version.hip
+        if hip_version is not None:
+            # hipcc ignores TORCH_CUDA_ARCH_LIST and get_device_capability()
+            # is meaningless on ROCm, so the CUDA payload below cannot tell two
+            # HIP targets apart (issue #4815).
+            payload.extend(_rocm_cache_fingerprint_payload(hip_version))
+            return payload
+
         override = os.getenv("TORCH_CUDA_ARCH_LIST")
         if override:
             payload.append(f"arch_list={override}")
