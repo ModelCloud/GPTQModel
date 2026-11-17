@@ -73,6 +73,13 @@ class _FakeWeight:
     def close(self) -> None:
         pass
 
+    # The layer's qweight stays on the CPU while the input claims CUDA, so the
+    # kernel keeps this weight as a cache and never adopts it as storage.
+    device = torch.device("cuda:0")
+
+    def backs(self, tensor) -> bool:
+        return False
+
 
 def _make_bare_bridge() -> _GGMLBridge:
     """Create a bridge without importing llama-cpp-python.

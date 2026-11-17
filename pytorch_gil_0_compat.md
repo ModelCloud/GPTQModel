@@ -158,6 +158,7 @@ results below for that build.
 | `torch.eye` | SAFE (concurrent) | tests | - |
 | `torch.tensor` | SAFE (concurrent) | constants | Copies host data; prefer `as_tensor` when the input is already a tensor. |
 | `torch.as_tensor` | SAFE (concurrent) | constants | No copy when dtype/device already match. |
+| `torch.as_tensor` over a `__cuda_array_interface__` exporter | SAFE (concurrent), NVIDIA CUDA | `_GGMLSharedWeight.as_tensor`: `GGUFCudaKernel.qweight` as a zero-copy view of the ggml weight buffer (#4387) | `scripts/gil0_api_probe.py --only 'torch.as_tensor (__cuda_array_interface__ view)'` passed three separate processes on 2026-11-17, each 8 threads × 4 iterations, with Python 3.14.10 GIL disabled, PyTorch 2.16.0.dev20261102+cu130 and one RTX 4090. The probe checks that the view aliases the exporter's pointer, is not an inference tensor under `inference_mode(False)`, and reads the same bytes. The view keeps the exporter alive. In GPT-QModel the call also runs under `_GGMLBridge.cuda_backend_lock`. |
 | `torch.from_numpy` | SAFE (concurrent) | host-side data | CPU only; shares memory with the array. Do not resize the source. |
 | `torch.zeros_like` | SAFE (concurrent) | accumulators | - |
 | `torch.ones_like` | SAFE (concurrent) | masks | - |
