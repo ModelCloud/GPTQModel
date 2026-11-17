@@ -662,6 +662,10 @@ def hf_gptqmodel_repair_awq_load(
         dtype=dtype,
         transfer_from=loaded,
     )
+    # The rebuild runs after Transformers put the model in eval, so the fresh
+    # modules must follow the model's mode or the CPU int4pack kernels latch
+    # the dense-dequant training path on the first forward (#4907).
+    model.train(model.training)
     log.info(
         "Transformers: rebuilt `%s` native GPTQModel AWQ modules after the "
         "bridge missed this load's import order (#4795).",
