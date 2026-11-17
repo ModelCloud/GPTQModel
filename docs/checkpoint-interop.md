@@ -1,10 +1,10 @@
-# Checkpoint interop: module filters, format changes, save, Marlin, export, and mixed-bit dequantization
+# Checkpoint interop: module filters, format changes, save, Marlin, and dequantization
 
 This page describes how GPT-QModel reads third-party checkpoints and how it
-saves and exports them without changing the caller's live model. It covers the
+saves and dequantizes them without changing the caller's live model. It covers the
 interop fixes shipped for issue #4053: producer module filters, format-changing
 re-saves, `save_pretrained()` layout safety, `save()` model replacement, Marlin
-activation-order indices, `is_marlin_format`, `GPTQModel.export`, and
+activation-order indices, `is_marlin_format`, dense dequantization, and
 per-module `dynamic` bit widths in `dequantize_model`.
 
 Two rules run through every flow: the checkpoint's stored metadata and tensors
@@ -307,41 +307,82 @@ flowchart TD
     style X fill:#f8d7da,stroke:#b02a37
 ```
 
-## 7. `export(..., "hf")` routes through the checkpoint dequantizer
+## 7. Dense dequantization with `dequantize_model`
 
-`GPTQModel.export()` sends `format="hf"` to
-`gptqmodel.utils.model_dequant.dequantize_model()` before selecting a runtime
-backend. That decoder handles AWQ GEMM/GEMV layouts, GPTQ, quantized
-embeddings, and checkpoints that only ship `quantize_config.json`. The output
-is a dense Transformers directory that reloads with
-`AutoModelForCausalLM.from_pretrained()`.
+`gptqmodel.utils.model_dequant.dequantize_model()` writes a dense Transformers
+directory from a quantized checkpoint. It handles AWQ GEMM/GEMV layouts, GPTQ,
+quantized embeddings, and checkpoints that only ship `quantize_config.json`.
+The output reloads with `AutoModelForCausalLM.from_pretrained()`.
 
 ```mermaid
 flowchart TD
-    A["GPTQModel.export(model, target, format)"] --> B{"format == hf?"}
-    B -- yes --> C["resolve local snapshot"]
-    C --> D["dequantize_model(source, target, trust_remote_code)"]
-    D --> E["config.json without quantization_config"]
-    E --> F["dense safetensors + copied aux files"]
-    B -- no --> G["AutoConfig + backend selection"]
-    G --> H["GPTQModel.load"]
-    H --> I["format == mlx: convert_gptq_to_mlx_weights"]
-    style D fill:#fff4cc,stroke:#b8860b
-    style F fill:#d9f2d9,stroke:#2e7d32
+    A["dequantize_model(source, target)"] --> B["resolve local snapshot / read config"]
+    B --> C["detect_format + resolve_dense_target_dtype"]
+    C --> D["config.json without quantization_config"]
+    D --> E["dense safetensors + copied aux files"]
+    style C fill:#fff4cc,stroke:#b8860b
+    style E fill:#d9f2d9,stroke:#2e7d32
 ```
 
-The old path loaded the model with a runtime backend and called
+The decoder replaced the older runtime-backed path that called
 `nn_modules.qlinear.torch.dequantize_model()`. That function accepted only
 `TorchLinear` (so AWQ failed), turned quantized embeddings into `nn.Linear`
-(shape error on forward), and hard-coded fp16. The new path never selects a
-runtime kernel for `hf`.
+(shape error on forward), and hard-coded fp16. The checkpoint-level path never
+selects a runtime kernel.
 
 The dense dtype is the checkpoint's own: with no explicit `target_dtype`,
 `dequantize_model()` calls `resolve_dense_target_dtype(config)`, which reads
 `dtype`, legacy `torch_dtype`, or `text_config` and accepts float16, bfloat16
 and float32. Only a checkpoint that declares none of them falls back to
-bfloat16. An fp16 GPTQ checkpoint therefore exports `dtype=float16` with F16
+bfloat16. An fp16 GPTQ checkpoint therefore dequantizes to `dtype=float16` with F16
 tensors instead of being rewritten as bf16 (#4455).
+
+### The `GPTQModel.export()` API was removed
+
+`GPTQModel.export(model_id_or_path, target_path, format)` no longer exists. It
+was a static convenience wrapper that guessed a runtime backend from
+`quantization_config` and then either called `dequantize_model()` (`format="hf"`)
+or `GPTQModel.load()` + `convert_gptq_to_mlx_weights(stock_compatible=True)`
+(`format="mlx"`). Both destinations are checkpoint-level operations that own
+their own arguments, so the wrapper only duplicated dispatch and could select a
+decoder that does not understand the stored layout.
+
+| Need | Replacement |
+| --- | --- |
+| Dense Transformers checkpoint | `gptqmodel.utils.model_dequant.dequantize_model(source, target, target_dtype=None, device=None, resume=False, trust_remote_code=False)` |
+| MLX-LM weights and config | `GPTQModel.load(source, backend=...)`, then `gptqmodel.utils.mlx.convert_gptq_to_mlx_weights(path, model, quant_config, lm_head, stock_compatible=True)`, then `mlx_lm.utils.save_model` / `save_config` |
+| Hugging Face repo id instead of a local path | `gptqmodel.utils.hub.snapshot_download(repo_id=...)` first |
+
+```mermaid
+flowchart TD
+    subgraph REMOVED["Removed flow"]
+        A["GPTQModel.export(model, target, format)"] --> B{"format"}
+        B -- hf --> C["snapshot_download when not local"]
+        C --> D["dequantize_model()"]
+        B -- mlx --> E["guess backend from quant_method"]
+        E --> F["GPTQModel.load()"]
+        F --> G["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
+        B -- other --> X["ValueError"]
+    end
+    style X fill:#f8d7da,stroke:#b02a37
+```
+
+```mermaid
+flowchart TD
+    S["caller"] --> Q{"destination"}
+    Q -- "dense Transformers" --> R["snapshot_download for repo ids"]
+    R --> T["dequantize_model(source, target)"]
+    T --> U["dense safetensors + config<br/>without quantization_config"]
+    Q -- "MLX-LM" --> V["GPTQModel.load(source, backend=...)"]
+    V --> W["convert_gptq_to_mlx_weights<br/>stock_compatible=True"]
+    W --> Y["mlx_lm.utils.save_model / save_config"]
+    style U fill:#d9f2d9,stroke:#2e7d32
+    style Y fill:#d9f2d9,stroke:#2e7d32
+```
+
+Calling `GPTQModel.export` raises `AttributeError`. There is no deprecation
+shim, warning, or hidden alias; `tests/test_export_api_removed.py` pins the
+absence of both the attribute and the call path.
 
 ## 8. `dequantize_model` resolves per-module bits
 
@@ -607,8 +648,8 @@ longer matches the snapshot has no inverse, so export raises instead of writing
 | `is_marlin_format: false` | accepted and dropped |
 | Non-contiguous `g_idx`, `desc_act=False`, tile-aligned | activation-order decode |
 | Non-contiguous `g_idx`, `desc_act=False`, misaligned | `NotImplementedError`; use a non-Marlin backend |
-| `export("hf")` on AWQ / quantized embeddings / legacy config | dense reloadable directory |
-| Unknown/undetectable export format | `ValueError` from `detect_format` |
+| `dequantize_model()` on AWQ / quantized embeddings / legacy config | dense reloadable directory |
+| Unknown/undetectable checkpoint format | `ValueError` from `detect_format` |
 | `dynamic` bits override | applied per module, not globally |
 
 ## Tests
@@ -619,7 +660,7 @@ oracle, the Optimum inclusion parse, v1 to v2 re-save, the refusal path, the
 `load_state_dict(state_dict())` identity (Torch and Triton), the partial-load
 layout, `torch.save`/`torch.load`, and the packed-GGUF refusal. The items 4-8
 tests live beside their modules (`tests/test_q4_marlin.py`,
-`tests/test_model_dequant_dynamic_bits.py`, `tests/test_export.py`, and the
+`tests/test_model_dequant_dynamic_bits.py`, `tests/test_model_dequant_dense.py`, and the
 Marlin `g_idx` regressions). `tests/qcfg/test_config_serialization.py` pins the
 RTN export method, and `tests/test_checkpoint_compat.py` pins the GGUF
 `quant_method` alias and save-time warning.

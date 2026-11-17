@@ -208,6 +208,27 @@ def test_hf_compat_warning_for_8bit_awq():
     ) == []
 
 
+def test_hf_compat_warning_for_dynamic_awq():
+    from gptqmodel.models.writer import hf_compat_warnings
+
+    warnings = hf_compat_warnings(
+        QuantizeConfig(
+            bits=4,
+            group_size=128,
+            method=METHOD.AWQ,
+            dynamic={"model.layers.0.mlp.down_proj": {"group_size": 32}},
+        ),
+        FORMAT.GEMM,
+    )
+
+    assert len(warnings) == 1
+    assert "dynamic" in warnings[0]
+    assert "qzeros" in warnings[0]
+    assert hf_compat_warnings(
+        QuantizeConfig(bits=4, group_size=128, method=METHOD.AWQ), FORMAT.GEMM
+    ) == []
+
+
 def test_gguf_config_publishes_non_colliding_quant_method():
     """Packed GGUF must not claim transformers' `gguf` quant method."""
 
