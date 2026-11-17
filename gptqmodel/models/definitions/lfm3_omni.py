@@ -39,13 +39,18 @@ class LFM3OmniQModel(LFM3QModel):
         {
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
-            "conv": ("in_proj:0", "out_proj:1"),
+            "conv": {
+                "in_proj": ("in_proj:0",),
+                "conv": ("conv:!",),
+                "out_proj": ("out_proj:1",),
+            },
             "self_attn": (
                 "q_proj:0",
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
                 "v_proj:0",
+                "g_proj:!",
                 "gate_proj:!",
                 "o_proj:1",
             ),
