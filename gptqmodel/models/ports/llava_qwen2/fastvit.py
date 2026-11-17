@@ -1423,5 +1423,3 @@ class FastViT(nn.Module):
             return out_dict
         else:
             return cls_out
-
-

@@ -6,7 +6,7 @@
   "auto_map": {
     "AutoConfig": "llava_qwen.LlavaConfig",
     "AutoModelForCausalLM": "llava_qwen.LlavaQwen2ForCausalLM"
-  },  
+  },
   "attention_dropout": 0.0,
   "bos_token_id": 151643,
   "eos_token_id": 151645,
