@@ -23,7 +23,8 @@ def test_lazy_sync_excludes_packed_modules_from_dense_source():
         assert kwargs["shell_sub"] is not model.packed
         return 0
 
-    turtle = SimpleNamespace(_lock=threading.RLock(), _materialize_direct_meta_tensors=materialize)
+    turtle = SimpleNamespace(_lock=threading.RLock(), _materialize_direct_meta_tensors=materialize,
+                             _prepare_native_fp32_slots=lambda *_args: None)
     LazyTurtle.sync_all_meta(turtle, shell_model=model, skip_module_types=(Packed,), tie_after=False)
     assert seen == ["", "norm"]
     assert model.packed.weight.device.type == "meta"
