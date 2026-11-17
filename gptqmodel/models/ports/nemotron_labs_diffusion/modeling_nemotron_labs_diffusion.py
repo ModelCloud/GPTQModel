@@ -232,4 +232,3 @@ class NemotronLabsDiffusionModel(Ministral3PreTrainedModel, DiffusionGenerationM
             hidden_states=enc_out.hidden_states,
             attentions=enc_out.attentions,
         )
-

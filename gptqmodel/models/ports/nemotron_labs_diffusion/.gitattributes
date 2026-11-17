@@ -1,0 +1,2 @@
+# Preserve the pinned upstream license's Markdown hard break byte-for-byte.
+LICENSE whitespace=-blank-at-eol
