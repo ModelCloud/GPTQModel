@@ -190,6 +190,37 @@ def test_public_loader_ignores_all_checkpoint_code(tmp_path, monkeypatch, trust,
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("architectures", [["MiniCPMForCausalLM", "ForeignForCausalLM"],
+                                           ["MiniCPMForCausalLM", None]])
+def test_legacy_architecture_conflict_fails_before_code_and_repairs(tmp_path, monkeypatch, moe, architectures):
+    monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", "1")
+    source, marker = _checkpoint(tmp_path, num_experts=3 if moe else 0, num_experts_per_tok=2 if moe else 0)
+    path = tmp_path / "config.json"
+    payload = json.loads(path.read_text())
+    payload.pop("model_type")
+    path.write_text(json.dumps(payload))
+    first = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32,
+                           trust_remote_code=True, attn_implementation="eager")
+    broken = dict(payload, architectures=architectures)
+    path.write_text(json.dumps(broken))
+    with pytest.raises(ValueError, match="architectures"):
+        load_model_config(tmp_path, trust_remote_code=True)
+    with pytest.raises(ValueError, match="architectures"):
+        GPTQModel.load(str(tmp_path), device="cpu", trust_remote_code=True)
+    assert not marker.exists()
+    path.write_text(json.dumps(payload))
+    repaired = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32,
+                              trust_remote_code=True, attn_implementation="eager")
+    assert type(repaired.model) is MiniCPMForCausalLM
+    ids = torch.tensor([[2, 4, 7, 6]])
+    with torch.no_grad():
+        expected = source(ids).logits
+        torch.testing.assert_close(first.model(ids).logits, expected, atol=0, rtol=0)
+        torch.testing.assert_close(repaired.model(ids).logits, expected, atol=0, rtol=0)
+    assert not marker.exists()
+
+
 def test_legacy_sentencepiece_bpe_is_not_rewritten_as_mistral_bytelevel(tmp_path):
     vocab = {token: i for i, token in enumerate(["<unk>", "<s>", "</s>", "▁", "H", "e", "l", "o"])}
     for value in range(256):
@@ -205,7 +236,9 @@ def test_legacy_sentencepiece_bpe_is_not_rewritten_as_mistral_bytelevel(tmp_path
     metadata = json.loads((tmp_path / "tokenizer_config.json").read_text())
     metadata.update(tokenizer_class="LlamaTokenizer", legacy=True)
     (tmp_path / "tokenizer_config.json").write_text(json.dumps(metadata))
-    config = _config()
+    config = _config(vocab_size=len(vocab))
+    source = MiniCPMForCausalLM(config).eval()
+    source.save_pretrained(tmp_path, safe_serialization=True)
     payload = config.to_dict()
     payload.pop("model_type")
     payload["transformers_version"] = "4.36.0"
@@ -216,6 +249,12 @@ def test_legacy_sentencepiece_bpe_is_not_rewritten_as_mistral_bytelevel(tmp_path
     assert native.encode(text, add_special_tokens=False) == expected
     loaded = load_hf_tokenizer(tmp_path, model_config=config, trust_remote_code=False)
     assert loaded.encode(text, add_special_tokens=False) == expected
+    public = GPTQModel.load(str(tmp_path), quantize_config=None, device="cpu", dtype=torch.float32,
+                           trust_remote_code=False, attn_implementation="eager")
+    assert public.tokenizer.encode(text, add_special_tokens=False) == expected
+    ids = torch.tensor([expected])
+    with torch.no_grad():
+        torch.testing.assert_close(public.model(ids).logits, source(ids).logits, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("kv", [1, 2, 4])

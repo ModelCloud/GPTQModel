@@ -14,6 +14,7 @@ class MiniCPMGPTQ(BaseQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.minicpm.configuration_minicpm.MiniCPMConfig",
         model_class="gptqmodel.models.ports.minicpm.modeling_minicpm.MiniCPMForCausalLM",
+        config_architectures=("MiniCPMForCausalLM",),
     )
     dynamic_expert_index = "num_experts"
     moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()

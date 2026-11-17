@@ -44,7 +44,11 @@ The model cards separately require the OpenBMB General Model License for
 ```mermaid
 flowchart TD
     A[GPTQModel.load] --> B[load_model_config]
-    B --> C[MiniCPMGPTQ.loader: LocalModelLoader]
+    B --> S{Explicit model_type?}
+    S -->|yes| T[Use explicit model type]
+    S -->|absent| U[Exact declared architecture allowlist]
+    T --> C[MiniCPMGPTQ.loader: LocalModelLoader]
+    U --> C
     C --> D[Packaged MiniCPMConfig]
     D --> E[Packaged MiniCPMForCausalLM]
     E --> F[Dense or original MoE layers]
@@ -57,6 +61,7 @@ flowchart TD
 | Mechanism | Before | Now |
 | --- | --- | --- |
 | Model selection | Checkpoint `auto_map` could request legacy Python | Fixed package classes from the definition |
+| Original configs without model type | Native config detection fails | Exact `MiniCPMForCausalLM` architecture declaration; explicit type remains authoritative |
 | Cache/generation | Legacy usable-length/`seen_tokens` assumptions | Transformers 5 `DynamicCache` and `GenerationMixin` |
 | Dense/MoE tree | Dense-only declaration | Request-local dense or `w1/w3/w2` expert tree; router excluded |
 | RoPE lifetime | Mutable model-wide cached frequency tables | Request-local frequency construction; no cross-request residue |
@@ -131,8 +136,19 @@ for `pretraining_tp=1`; split-TP quantized execution is not qualified.
 ## Qualification and reproducibility
 
 Environment: Python 3.14.6t, `PYTHON_GIL=0`, Transformers 5.23.0, CPU Torch
-2.15.0 and released Tokenicer 0.0.17. The earlier Tokenicer 0.0.14 run also
-passed the then-current 104-case suite; final qualification uses 0.0.17.
+2.15.0 and source-installed Tokenicer 0.0.18 from
+[Tokenicer PR #65](https://github.com/ModelCloud/Tokenicer/pull/65). This is a
+release candidate, not a published-package qualification; PyPI still reports
+0.0.17. The pinned installation used:
+
+```bash
+uv pip install --python /home/ubuntu/.venvs/gptqmodel-tf5/bin/python --no-deps \
+  'git+https://github.com/ModelCloud/Tokenicer.git@87794a557e03b1233e13fdf703583edcc3807dc6'
+```
+
+The final shared fallback prerequisite is parent commit
+`0fdfd2396646a129f165822e66fc7c5ecec90cc0` (local qualification copy
+`4f51c1e1a5b2261d2a86012b7d238ddeaffe9e27`), not a MiniCPM-owned commit.
 
 ```bash
 PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest -q \
@@ -140,7 +156,7 @@ PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest -q \
   tests/module_tree/test_minicpm_local_port.py
 ```
 
-Owned suites: **129 passed, no skips, 9.11s**. These execute independent
+Owned suites: **146 passed, no skips, 10.34s**. These execute independent
 functional dense/MoE attention/residual/RoPE equations; FP32 SDPA is also
 checked against explicit eager equations. Low-precision SDPA is checked with
 an independently assembled mask/head mapping around the native SDPA operator,
@@ -166,7 +182,7 @@ PATH=/home/ubuntu/.venvs/gptqmodel-tf5/bin:$PATH format/check.sh
 git diff --check
 ```
 
-Combined result: **935 passed, 475 existing skips, 10 warnings, 30.71s**.
+Combined result: **963 passed, 475 existing skips, 10 warnings, 26.18s**.
 The skips are 468 NVIDIA/CUDA Marlin numerical-fusion cases plus seven
 existing optional dependency/checkpoint/definition fixture cases. The full
 repository Ruff 0.14.2 gate and changed-path Ruff/diff checks pass.
@@ -178,20 +194,22 @@ repository Ruff 0.14.2 gate and changed-path Ruff/diff checks pass.
 | Narrow eager trig to V dtype | `test_eager_fp32_rotary_trig_reaches_first_layer_cache_without_narrowing` | Both FP16/BF16 cases fail exact K checks; BF16 max difference 0.0078125 |
 | Omit residual depth normalization | Dense MQA independent-equation case | 640/640 logits differ; max absolute error 0.22019887 |
 | Read `DynamicCache.seen_tokens` | Eager FP32 cache/generation lifecycle case | Trap raises `legacy seen_tokens cache API was read` |
+| Remove shared architecture selection | Twelve hostile missing-type public loads plus public BPE/logit regression | 13 failed, 129 passed before prerequisite; all 142 pass afterward |
+| Restore Tokenicer's unconditional regex repair | Eight synthetic native-BPE cases and two pinned upstream MiniCPM cases | All ten fail with wrong IDs; corrected upstream suite passes |
 
 All mutations were removed before the green combined run. These are detection
 probes, not alternative runtime modes or claims of a trained-checkpoint run.
 
 ## Integration and limits
 
-### Required shared follow-ups discovered with real assets
+### Shared prerequisites discovered with real assets
 
-The core green counts above precede thirteen additional integration
-regressions. These expose two shared preconditions, not modeling failures:
+Thirteen integration regressions exposed two shared preconditions; both are
+included in the final green counts above:
 
 1. All seven original source configs omit `model_type` and identify
    `MiniCPMForCausalLM` via `architectures`. The shared config/trust preflight
-   must infer a package-owned definition from exact allowlisted architecture
+   now infers a package-owned definition from exact allowlisted architecture
    metadata **only when the model type is absent**. Filename guessing or a
    native MiniCPM3 substitution is not valid. Twelve owned public regressions
    cover dense/MoE, caller trust and bypass settings with malicious auto maps.
@@ -202,11 +220,23 @@ regressions. These expose two shared preconditions, not modeling failures:
    `[21045, 1527, 7809, 63, 95544, 3709, 73, 95320, 23523, 65, 2925, 66]`;
    Tokenicer instead produces 27 IDs. A self-contained 100,001-token synthetic
    BPE regression reproduces this without downloading assets. Corrective
-   normalization must be fixed upstream in Tokenicer, **not** in this port.
+   normalization is fixed upstream in Tokenicer, **not** in this port. The
+   upstream 0.0.18 candidate passes its full suite: **106 passed, 28 existing
+   skips, 16.37s**; focused config/regex siblings pass **48 cases**. Skips are
+   27 unavailable `/monster` fixture cases and one existing serialized-class
+   fixture obsolete under Transformers 5.23. Mistral derivative/Laguna
+   defaults, explicit overrides and fallback/retry propagation are retained.
 
-Until both shared follow-ups are integrated and the added regressions are
-green, this port is not ready for default loading of the original checkpoints.
-No per-model tokenizer flag, wrapper or normalization shim is included.
+The public synthetic BPE regression also performs an actual GPT-QModel load
+with the legacy missing-type config, exact tokenizer IDs and exact model-logit
+parity. Four more dense/MoE cases exercise successful public load, conflicting
+or malformed known architecture metadata, both config/model preflight failures
+even with trust+bypass enabled, repaired same-path retry and exact logits.
+Both pinned real 128k/DPO asset sets preserve the raw/native IDs, chat
+rendering and tokenizer save/reload without executing their Python. The parent
+owns the Tokenicer release/dependency-floor integration; published 0.0.17 is
+not sufficient for original checkpoint tokenizer correctness. No per-model
+tokenizer flag, wrapper or normalization shim is included.
 
 The dense `MiniCPMGPTQ/gptq` registered-plan fixture is unchanged. The owned
 module-tree suite independently checks the request-local MoE variant. Central
@@ -216,8 +246,8 @@ fusion metadata should replace `models.minicpm.reason` with:
 
 The parent integration owns central docs/README/PR diagrams and package-data
 inclusion of the license, notice, source manifest and compressed JSON fixture.
-The local package adds no dependency. No separate PR, merge or PR-state change
-is needed.
+There is no new package dependency beyond the corrected Tokenicer version.
+No separate GPT-QModel PR, merge or PR-state change is needed.
 
 Not qualified: trained tensor payloads or quality/evaluation, actual 128k
 context execution, GPU/FlashAttention/fused kernels, fusion execution,
