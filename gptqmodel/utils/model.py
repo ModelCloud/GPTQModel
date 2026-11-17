@@ -49,7 +49,6 @@ from ..models._const import (
 )
 from ..nn_modules.qlinear import (
     QZEROS_FORMAT_BUFFER,
-    AWQuantLinear,
     BaseQuantLinear,
     GPTQQuantLinear,
 )
@@ -2826,6 +2825,12 @@ def _restore_checkpoint_layout_for_export(model: nn.Module) -> int:
 
     restored = 0
     for module in model.modules():
+        # A kernel that dropped its checkpoint buffers for a derived cache has
+        # to publish them again: `named_buffers` skips `None`, so the manifest
+        # would silently omit the quantized weights (#5010).
+        materialize = getattr(module, "materialize_checkpoint_layout_for_export", None)
+        if callable(materialize) and materialize():
+            restored += 1
         if getattr(module, "_fused_train_state", None) is None:
             continue
         if restore_fused_train_state(module):
@@ -3064,23 +3069,25 @@ def _checkpoint_tensor_keys(
 def validate_checkpoint_qweights(
     model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
-    # AWQ producers (AutoAWQ, llm-compressor) and shared Marlin/BitBLAS
-    # checkpoints expose the same `qweight` key as GPTQ.  Skipping validation
-    # for them let a module whose checkpoint tensor was never loaded keep its
-    # zero-filled placeholder and produce silent NaN output.
-    validated_formats = {
-        FORMAT.GPTQ,
-        FORMAT.GPTQ_V2,
-        FORMAT.GPTQ_P,
-        FORMAT.GEMM,
-        FORMAT.GEMV,
-        FORMAT.GEMV_FAST,
-        FORMAT.LLM_AWQ,
-        FORMAT.MARLIN,
-        FORMAT.BITBLAS,
-    }
-    if format not in validated_formats:
-        return
+    """Fail a load whose checkpoint lacks a kernel's required payload.
+
+    Every quantized kernel declares the checkpoint tensors it cannot rebuild
+    (``BaseQuantLinear.CHECKPOINT_REQUIRED_BUFFERS``): ``qweight`` for the
+    GPTQ/AWQ/Marlin/BitBLAS family, ``B``/``s_group``/``s_channel`` for QQQ.
+    AWQ producers (AutoAWQ, llm-compressor) and shared Marlin/BitBLAS
+    checkpoints expose the same ``qweight`` key as GPTQ, so the declaration
+    replaces the old format allow-list.
+
+    Without this, a module whose checkpoint tensor was never loaded kept its
+    zero-filled placeholder and produced silent NaN output, and a QQQ
+    checkpoint saved after an in-session forward (which had dropped its
+    buffers, #4856) loaded into uninitialized buffers -- a CUDA
+    illegal-address fault or all-NaN logits (#5010). A truncated checkpoint
+    must raise, not corrupt the context.
+
+    ``format`` is kept for the call-site signature; the per-kernel declaration
+    is the source of truth.
+    """
 
     checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
     if checkpoint_keys is None:
@@ -3089,11 +3096,17 @@ def validate_checkpoint_qweights(
     # A shared quantized module can be saved under any one of its aliases.
     module_keys = collections.defaultdict(set)
     for name, module in model.named_modules(remove_duplicate=False):
-        if isinstance(module, (GPTQQuantLinear, AWQuantLinear)):
-            tensor_name = f"{name}.qweight" if name else "qweight"
-            module_keys[id(module)].add(tensor_name)
-            if callable(key_converter):
-                module_keys[id(module)].add(key_converter(tensor_name))
+        required = getattr(module, "CHECKPOINT_REQUIRED_BUFFERS", ())
+        if not required:
+            continue
+        aliases = [name]
+        if callable(key_converter):
+            aliases.append(key_converter(name))
+        for suffix in required:
+            for alias in aliases:
+                module_keys[(id(module), suffix)].add(
+                    f"{alias}.{suffix}" if alias else suffix
+                )
     missing = sorted(
         min(keys) for keys in module_keys.values() if not keys & checkpoint_keys
     )
