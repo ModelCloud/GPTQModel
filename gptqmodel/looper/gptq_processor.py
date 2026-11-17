@@ -7,6 +7,7 @@ import copy
 import math
 import threading
 import time
+from collections.abc import Mapping
 from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -63,6 +64,7 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from ..quantization.gptq import SharedHessianFactorCache
+from ..utils.calibration import attention_sink_bos_flags
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -185,6 +187,19 @@ def clone_gptq_config_for_module(
                 raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
 
         qcfg_clone.validate_gsq()
+
+    # `dynamic` is mutable after construction, so re-check the invariant here:
+    # GPTAQ/FOEM never consult the sink mask and would silently ignore it.
+    # Non-GPTQ configs (AWQ/ParoQuant) share this clone helper but have no such
+    # field, hence the `getattr`.
+    if getattr(qcfg_clone, "exclude_attention_sinks", False) and (
+        qcfg_clone.gptaq is not None or qcfg_clone.foem is not None
+    ):
+        raise ValueError(
+            "QuantizeConfig: `exclude_attention_sinks` is only implemented for the "
+            f"plain GPTQ Hessian path; module `{module_full_name}` runs GPTAQ/FOEM, "
+            "which accumulate their own Hessian and ignore it. Leave it False."
+        )
 
     return qcfg_clone
 
@@ -572,6 +587,116 @@ class GPTQProcessor(LoopProcessor):
         with lock:
             return leaders.get(name)
 
+    def _warn_attention_sink_skip_once(self, reason: str, message: str) -> None:
+        """Warn once per run that ``exclude_attention_sinks`` masked nothing."""
+
+        warned = getattr(self, "_attention_sink_warned", None)
+        if warned is None:
+            warned = set()
+            self._attention_sink_warned = warned
+        lock = getattr(self, "lock", None)
+        if lock is None:
+            if reason in warned:
+                return
+            warned.add(reason)
+        else:
+            with lock:
+                if reason in warned:
+                    return
+                warned.add(reason)
+        log.warn(message)
+
+    def _attention_sink_bos_mask_for_batch(
+        self, batch_index: Optional[int], batch_size: Optional[int]
+    ) -> Optional[torch.Tensor]:
+        """Per-sample ``first token is BOS`` flags for one calibration batch.
+
+        Returns ``None`` when the flag is off, otherwise a bool tensor over the
+        batch's samples. Batches whose BOS decision cannot be proven resolve to
+        all ``False`` (mask nothing) and are counted once as skipped. Cached per
+        ``(batch_index, batch_size)`` because every module hook of a layer asks
+        for the same batch.
+        """
+
+        qcfg = getattr(self, "qcfg", None)
+        if not getattr(qcfg, "exclude_attention_sinks", False):
+            return None
+        if batch_index is None or batch_size is None or int(batch_size) <= 0:
+            return None
+        batch_size = int(batch_size)
+        cache_key = (int(batch_index), batch_size)
+        cache = getattr(self, "_attention_sink_bos_cache", None)
+        if cache is None:
+            cache = {}
+            self._attention_sink_bos_cache = cache
+        if cache_key in cache:
+            return cache[cache_key]
+        flags = self._compute_attention_sink_bos_mask(int(batch_index), batch_size)
+        cache[cache_key] = flags
+        return flags
+
+    def _attention_sink_skip(self, batch_size: int, reason: str, message: str) -> torch.Tensor:
+        """Record one batch that cannot prove a BOS sink and mask nothing."""
+
+        self._warn_attention_sink_skip_once(reason, message)
+        with self.lock:
+            self.attention_sink_skipped_batches = (
+                getattr(self, "attention_sink_skipped_batches", 0) + 1
+            )
+        # A positive decision: leave every row in the Hessian.
+        return torch.zeros(batch_size, dtype=torch.bool)
+
+    def _compute_attention_sink_bos_mask(
+        self, batch_index: int, batch_size: int
+    ) -> torch.Tensor:
+        """Resolve the BOS decision from the prepared calibration dataset."""
+
+        dataset = getattr(self, "calibration_dataset", None)
+        row = None
+        if dataset:
+            try:
+                row = dataset[batch_index]
+            except (IndexError, KeyError, TypeError):
+                row = None
+        if not isinstance(row, Mapping):
+            return self._attention_sink_skip(
+                batch_size,
+                "no_metadata",
+                "GPTQ: `exclude_attention_sinks` is enabled but the calibration batch "
+                "has no metadata; position 0 is kept in the calibration Hessian.",
+            )
+        input_ids = row.get("input_ids")
+        if input_ids is None:
+            return self._attention_sink_skip(
+                batch_size,
+                "unusable_ids",
+                "GPTQ: `exclude_attention_sinks` is enabled but this calibration "
+                "batch carries no usable `input_ids`; position 0 is kept in the "
+                "calibration Hessian.",
+            )
+        tokenizer = getattr(self, "tokenizer", None)
+        bos_token_id = getattr(tokenizer, "bos_token_id", None)
+        if bos_token_id is None:
+            return self._attention_sink_skip(
+                batch_size,
+                "no_bos",
+                "GPTQ: `exclude_attention_sinks` is enabled but the tokenizer has no "
+                "BOS token (`bos_token_id` is None); position 0 is kept in the "
+                "calibration Hessian.",
+            )
+        flags = attention_sink_bos_flags(
+            input_ids, row.get("attention_mask"), bos_token_id
+        )
+        if flags is None or int(flags.numel()) != batch_size:
+            return self._attention_sink_skip(
+                batch_size,
+                "unusable_ids",
+                "GPTQ: `exclude_attention_sinks` is enabled but this calibration "
+                "batch carries no usable `input_ids`; position 0 is kept in the "
+                "calibration Hessian.",
+            )
+        return flags
+
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the GPTQ task."""
 
@@ -597,6 +722,15 @@ class GPTQProcessor(LoopProcessor):
                     del inp, out
                     return
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+            sink_bos_mask = None
+            if (
+                torch.is_tensor(inp_tensor)
+                and inp_tensor.dim() >= 3
+                and getattr(getattr(self, "qcfg", None), "exclude_attention_sinks", False)
+            ):
+                sink_bos_mask = self._attention_sink_bos_mask_for_batch(
+                    batch_idx, int(inp_tensor.shape[0])
+                )
 
             if (
                 isinstance(getattr(g, "module", None), torch.nn.Embedding)
@@ -643,7 +777,18 @@ class GPTQProcessor(LoopProcessor):
                         ].contiguous()
                     else:
                         sample_out = out
-                    g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+                    if sink_bos_mask is None:
+                        g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
+                    else:
+                        # ``sample_inp`` is already sliced to this sample's
+                        # retained positions, so its index 0 is the first token
+                        # the flag describes.
+                        g.add_batch(
+                            sample_inp.data,
+                            sample_out.data,
+                            batch_index=batch_idx,
+                            sink_bos_mask=sink_bos_mask[sample_index : sample_index + 1],
+                        )  # noqa: F821
             elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
@@ -726,7 +871,15 @@ class GPTQProcessor(LoopProcessor):
                 else:
                     g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
             else:
-                g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                if sink_bos_mask is None:
+                    g.add_batch(inp_tensor.data, out.data, batch_index=batch_idx)  # noqa: F821
+                else:
+                    g.add_batch(
+                        inp_tensor.data,
+                        out.data,
+                        batch_index=batch_idx,
+                        sink_bos_mask=sink_bos_mask,
+                    )  # noqa: F821
             del inp, out
         return tmp
 
@@ -933,6 +1086,17 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: self.device_memory_report(),
         }
+
+        if getattr(self.qcfg, "exclude_attention_sinks", False):
+            # Report what the opt-in actually did: with BOS-less tokenizers the
+            # flag is a deliberate no-op, and a silent zero-row difference is
+            # indistinguishable from "no sinks in this calibration set".
+            stat["attention_sink_rows_dropped"] = str(
+                getattr(g, "attention_sink_dropped_rows", 0)
+            )
+            stat["attention_sink_batches_skipped"] = str(
+                getattr(self, "attention_sink_skipped_batches", 0)
+            )
 
         if workspace_summary:
             requests = int(workspace_summary.get("requests", 0) or 0)

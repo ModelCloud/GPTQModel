@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ import torch
 import torch.nn as nn
 from models.model_test import ModelTest
 
+from gptqmodel.looper import gptq_processor as gptq_processor_mod
+from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import (
@@ -35,6 +38,7 @@ from gptqmodel.quantization.quantizer import (
     _replace_zero_scale,
     quantize,
 )
+from gptqmodel.utils.calibration import attention_sink_bos_flags
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -195,14 +199,221 @@ def _normalized_hessian_oracle(rows: torch.Tensor) -> torch.Tensor:
 
 def test_gptq_exclude_attention_sinks_drops_only_leading_token():
     gptq, inp = _attention_sink_fixture(exclude=True)
-    gptq.add_batch(inp, None)
+    # A Llama-style tokenizer: every row starts with BOS id 1.
+    flags = attention_sink_bos_flags(
+        torch.tensor([[1, 5, 6, 7], [1, 8, 9, 10]]),
+        torch.ones((2, 4), dtype=torch.long),
+        bos_token_id=1,
+    )
+    assert flags.tolist() == [True, True]
+    gptq.add_batch(inp, None, sink_bos_mask=flags)
 
     # Keep every token except position 0 of each sequence.
     expected_rows = inp[:, 1:, :].reshape(-1, inp.shape[-1])
     expected = _normalized_hessian_oracle(expected_rows)
 
     assert gptq.nsamples == expected_rows.shape[0]
+    assert gptq.attention_sink_dropped_rows == 2
+    assert gptq.attention_sink_skipped_batches == 0
     torch.testing.assert_close(gptq.finalize_hessian(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_gptq_exclude_attention_sinks_keeps_bos_less_first_token():
+    # Qwen2.5/Qwen3 tokenizers add no BOS, so position 0 is a real text token.
+    gptq, inp = _attention_sink_fixture(exclude=True)
+    flags = attention_sink_bos_flags(
+        torch.tensor([[5, 6, 7, 8], [9, 10, 11, 12]]),
+        torch.ones((2, 4), dtype=torch.long),
+        bos_token_id=None,
+    )
+    assert flags is None
+    # The processor turns "tokenizer has no BOS" into an explicit all-False
+    # decision, so GPTQ neither drops a row nor warns about missing ids.
+    gptq.add_batch(inp, None, sink_bos_mask=torch.zeros(2, dtype=torch.bool))
+
+    assert gptq.nsamples == inp.shape[0] * inp.shape[1]
+    assert gptq.attention_sink_dropped_rows == 0
+    assert gptq.attention_sink_skipped_batches == 0
+    torch.testing.assert_close(
+        gptq.finalize_hessian(),
+        _normalized_hessian_oracle(inp),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_gptq_exclude_attention_sinks_masks_only_bos_rows():
+    # Mixed batch: only the row whose first token is BOS is a sink.
+    gptq, inp = _attention_sink_fixture(exclude=True)
+    flags = attention_sink_bos_flags(
+        torch.tensor([[1, 5, 6, 7], [5, 6, 7, 8]]),
+        torch.ones((2, 4), dtype=torch.long),
+        bos_token_id=1,
+    )
+    assert flags.tolist() == [True, False]
+    gptq.add_batch(inp, None, sink_bos_mask=flags)
+
+    expected_rows = torch.cat((inp[0, 1:, :], inp[1, :, :]), dim=0)
+    assert gptq.nsamples == 7
+    assert gptq.attention_sink_dropped_rows == 1
+    torch.testing.assert_close(
+        gptq.finalize_hessian(),
+        _normalized_hessian_oracle(expected_rows),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_gptq_exclude_attention_sinks_skips_without_token_ids(monkeypatch):
+    # Direct add_batch callers have no calibration ids: never guess, warn once,
+    # and keep every row instead of silently dropping a real token.
+    warnings = []
+    monkeypatch.setattr(gptq_mod.log, "warn", warnings.append)
+    gptq_mod._ATTENTION_SINK_WARNED.clear()
+
+    gptq, inp = _attention_sink_fixture(exclude=True)
+    gptq.add_batch(inp, None)
+    gptq.add_batch(inp, None)
+
+    assert gptq.nsamples == 2 * inp.shape[0] * inp.shape[1]
+    assert gptq.attention_sink_dropped_rows == 0
+    assert gptq.attention_sink_skipped_batches == 2
+    assert len(warnings) == 1
+    assert "token ids" in warnings[0]
+    torch.testing.assert_close(
+        gptq.finalize_hessian(),
+        _normalized_hessian_oracle(inp),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_attention_sink_bos_flags_uses_first_unpadded_token():
+    # Left padding: the first *kept* token is BOS even though index 0 is pad.
+    flags = attention_sink_bos_flags(
+        torch.tensor([[0, 0, 1, 5], [1, 6, 7, 8], [0, 0, 0, 0]]),
+        torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1], [0, 0, 0, 0]]),
+        bos_token_id=1,
+    )
+    assert flags.tolist() == [True, True, False]
+
+    # 1-D ids describe a single sample; unusable metadata resolves to None.
+    assert attention_sink_bos_flags([1, 5, 6], None, bos_token_id=1).tolist() == [True]
+    assert attention_sink_bos_flags(None, None, bos_token_id=1) is None
+    assert attention_sink_bos_flags([1, 5, 6], None, bos_token_id=None) is None
+    assert attention_sink_bos_flags([[1, 5]], torch.ones((2, 2)), bos_token_id=1) is None
+
+
+def test_gptq_processor_attention_sink_uses_tokenizer_bos(monkeypatch):
+    processor = object.__new__(GPTQProcessor)
+    processor.qcfg = GPTQConfig(bits=4, group_size=2, exclude_attention_sinks=True)
+    processor.lock = threading.Lock()
+    processor.calibration_dataset = [
+        {
+            "input_ids": torch.tensor([[1, 5, 6], [1, 7, 8]]),
+            "attention_mask": torch.ones((2, 3), dtype=torch.long),
+        },
+        {
+            "input_ids": torch.tensor([[5, 6, 7]]),
+            "attention_mask": torch.ones((1, 3), dtype=torch.long),
+        },
+    ]
+    processor.tokenizer = SimpleNamespace(bos_token_id=1)
+
+    flags = processor._attention_sink_bos_mask_for_batch(0, 2)
+    assert flags.tolist() == [True, True]
+    # Per-layer hooks ask for the same batch repeatedly; the decision is cached.
+    assert processor._attention_sink_bos_mask_for_batch(0, 2) is flags
+
+    warnings = []
+    monkeypatch.setattr(gptq_processor_mod.log, "warn", warnings.append)
+    processor.tokenizer = SimpleNamespace(bos_token_id=None)
+    flags = processor._attention_sink_bos_mask_for_batch(1, 1)
+    assert flags.tolist() == [False]
+    assert len(warnings) == 1
+    assert "no BOS" in warnings[0]
+    # The batch is reported once as skipped, and a second call (another layer)
+    # must neither repeat the warning nor the count.
+    assert processor.attention_sink_skipped_batches == 1
+    processor._attention_sink_bos_mask_for_batch(1, 1)
+    assert len(warnings) == 1
+    assert processor.attention_sink_skipped_batches == 1
+
+
+def test_gptq_processor_attention_sink_skips_when_ids_are_unknown(monkeypatch):
+    # A prepared batch without usable token ids cannot prove a BOS sink. The
+    # processor must keep every row and warn once instead of dropping a token.
+    processor = object.__new__(GPTQProcessor)
+    processor.qcfg = GPTQConfig(bits=4, group_size=2, exclude_attention_sinks=True)
+    processor.lock = threading.Lock()
+    processor.calibration_dataset = [
+        {"attention_mask": torch.ones((1, 3), dtype=torch.long)}
+    ]
+    processor.tokenizer = SimpleNamespace(bos_token_id=1)
+
+    warnings = []
+    monkeypatch.setattr(gptq_processor_mod.log, "warn", warnings.append)
+    flags = processor._attention_sink_bos_mask_for_batch(0, 1)
+    assert flags.tolist() == [False]
+    assert processor.attention_sink_skipped_batches == 1
+    assert len(warnings) == 1
+    assert "no usable `input_ids`" in warnings[0]
+
+    # The decision is cached per batch: another module's hook must not warn or
+    # count the same batch again.
+    processor._attention_sink_bos_mask_for_batch(0, 1)
+    assert processor.attention_sink_skipped_batches == 1
+    assert len(warnings) == 1
+
+
+def test_gptq_processor_attention_sink_hook_masks_only_bos_rows():
+    # End-to-end CPU check of the plumbing: the hook resolves BOS flags from the
+    # calibration ids and GPTQ consumes exactly the retained rows.
+    layer = nn.Linear(4, 3, bias=False, dtype=torch.float32).eval()
+    task = GPTQ(layer, qcfg=GPTQConfig(bits=4, group_size=2, exclude_attention_sinks=True))
+    task.quantizer.configure(perchannel=True)
+
+    processor = object.__new__(GPTQProcessor)
+    processor.tasks = {"linear": task}
+    processor.qcfg = task.qcfg
+    processor.lock = threading.Lock()
+    processor._batch_tls = SimpleNamespace(index=0)
+    processor._mask_tls = SimpleNamespace(value=torch.ones((2, 3), dtype=torch.bool))
+    processor.calibration_dataset = [
+        {
+            "input_ids": torch.tensor([[1, 5, 6], [5, 6, 7]]),
+            "attention_mask": torch.ones((2, 3), dtype=torch.long),
+        }
+    ]
+    processor.tokenizer = SimpleNamespace(bos_token_id=1)
+
+    inputs = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) / 7.0
+    outputs = layer(inputs)
+    processor.pre_process_fwd_hook("linear")(layer, (inputs,), outputs)
+
+    expected_rows = torch.cat((inputs[0, 1:, :], inputs[1, :, :]), dim=0)
+    assert task.nsamples == 5
+    assert task.attention_sink_dropped_rows == 1
+    assert task.attention_sink_skipped_batches == 0
+    torch.testing.assert_close(
+        task.finalize_hessian(),
+        _normalized_hessian_oracle(expected_rows),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_gptq_processor_attention_sink_is_inert_when_flag_off():
+    processor = object.__new__(GPTQProcessor)
+    processor.qcfg = GPTQConfig(bits=4, group_size=2)
+    processor.calibration_dataset = [
+        {
+            "input_ids": torch.tensor([[1, 5, 6]]),
+            "attention_mask": torch.ones((1, 3), dtype=torch.long),
+        }
+    ]
+    processor.tokenizer = SimpleNamespace(bos_token_id=1)
+    assert processor._attention_sink_bos_mask_for_batch(0, 1) is None
 
 
 def test_gptq_attention_sink_default_and_flat_inputs_are_unchanged():

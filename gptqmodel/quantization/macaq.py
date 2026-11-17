@@ -123,11 +123,38 @@ def balance_pre_scale_from_diag(
     ``p_j = w_std_j^alpha / act_rms_j^(1 - alpha)`` with
     ``act_rms_j = sqrt(sum_x2_j / T)``.  Folding ``p`` into the input and
     ``1/p`` into the weight cancels in the GEMM.
+
+    ``w_std_j`` is the unbiased per-input-channel weight standard deviation.
+    That estimate is undefined for a single output row, so the degenerate
+    one-row case uses the population standard deviation, which is exactly
+    zero, and then the documented positive floor.  Zero-variance columns take
+    the same floor.  Non-finite statistics are rejected here rather than
+    clamped into a plausible-looking scale.
     """
 
-    w_std = weight.float().std(dim=0).clamp_min(1e-8)
+    weight = weight.float()
+    if weight.ndim != 2:
+        raise ValueError(f"MACaQ: balance pre-scale expects a 2-D weight, got shape {tuple(weight.shape)}.")
+    if weight.shape[0] == 0:
+        raise ValueError("MACaQ: balance pre-scale needs at least one output row.")
+    if weight.shape[0] == 1:
+        # `torch.std` defaults to the unbiased estimate (correction=1), which
+        # is 0/0 for one sample.  The population standard deviation is well
+        # defined here and is exactly zero; the floor below keeps the result
+        # finite instead of clamping NaN into a plausible-looking scale.
+        w_std = weight.std(dim=0, correction=0)
+    else:
+        w_std = weight.std(dim=0)
+    if not torch.isfinite(w_std).all():
+        raise ValueError("MACaQ: weight standard deviation is non-finite; D1 balance pre-scale is undefined.")
+    w_std = w_std.clamp_min(1e-8)
     act_rms = (sum_x2.float() / max(float(n_tokens), 1.0)).clamp_min(1e-12).sqrt()
-    return (w_std.pow(alpha) / act_rms.pow(1.0 - alpha)).clamp(1e-4, 1e4)
+    if not torch.isfinite(act_rms).all():
+        raise ValueError("MACaQ: activation RMS is non-finite; D1 balance pre-scale is undefined.")
+    pre_scale = (w_std.pow(alpha) / act_rms.pow(1.0 - alpha)).clamp(1e-4, 1e4)
+    if not torch.isfinite(pre_scale).all():
+        raise ValueError("MACaQ: D1 balance pre-scale is non-finite; refusing to emit NaN artifacts.")
+    return pre_scale
 
 
 def balance_pre_scale(

@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 from copy import deepcopy
@@ -193,6 +194,30 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+#: ``_atomic_write`` stages ``.<final-name>.<mkstemp random>`` beside the final
+#: path and publishes it with ``os.replace``.  A process that dies between
+#: ``mkstemp`` and the replace leaves that file behind, in the prefix directory
+#: of the request it was publishing.  Matching the exact staged shape keeps this
+#: namespace writer-owned: a hidden file that does not look like one of ours is
+#: still corruption.
+_TEMPORARY_NAME = re.compile(
+    r"^\.(?P<request_sha256>[0-9a-f]{64})\.(?P<suffix>json|safetensors)\.[A-Za-z0-9_]+$"
+)
+
+
+def _temporary_request_sha256(name: str) -> str | None:
+    """Return the request digest when ``name`` is a staged ``_atomic_write`` file.
+
+    An interrupted publication leaves one of these behind: it was never
+    ``os.replace``d, so it holds no committed checkpoint.  Discovery ignores it
+    and :meth:`EXL3ProjectionCheckpointStore.prune` reclaims it, while the
+    strict checks for every other unexpected file stay in place.
+    """
+
+    match = _TEMPORARY_NAME.match(name)
+    return match.group("request_sha256") if match is not None else None
 
 
 class EXL3ProjectionCheckpointStore:
@@ -388,6 +413,18 @@ class EXL3ProjectionCheckpointStore:
                 for path in second.iterdir():
                     if not path.is_file() or path.is_symlink():
                         raise ValueError("EXL3 checkpoint contains a non-regular file")
+                    temporary_sha256 = _temporary_request_sha256(path.name)
+                    if temporary_sha256 is not None:
+                        if (
+                            temporary_sha256[:2] != first.name
+                            or temporary_sha256[2:4] != second.name
+                        ):
+                            raise ValueError(
+                                "EXL3 checkpoint temporary file is under the wrong prefix"
+                            )
+                        # Staged but never published: uncommitted, so it is not
+                        # a result. prune reclaims it.
+                        continue
                     if path.suffix not in {".json", ".safetensors"}:
                         raise ValueError("EXL3 checkpoint contains an unexpected file")
                     request_sha256 = path.name.removesuffix(path.suffix)
@@ -646,6 +683,7 @@ class EXL3ProjectionCheckpointStore:
 
         entries: list[tuple[int, str, Path, Path]] = []
         orphan_tensors: list[Path] = []
+        stale_temporaries: list[Path] = []
         seen_manifests: set[str] = set()
         seen_tensors: set[str] = set()
         hex_chars = frozenset("0123456789abcdef")
@@ -668,6 +706,19 @@ class EXL3ProjectionCheckpointStore:
                 for path in second.iterdir():
                     if not path.is_file() or path.is_symlink():
                         raise ValueError("EXL3 checkpoint contains a non-regular file")
+                    temporary_sha256 = _temporary_request_sha256(path.name)
+                    if temporary_sha256 is not None:
+                        if (
+                            temporary_sha256[:2] != first.name
+                            or temporary_sha256[2:4] != second.name
+                        ):
+                            raise ValueError(
+                                "EXL3 checkpoint temporary file is under the wrong prefix"
+                            )
+                        # A publication interrupted before os.replace; reclaim
+                        # it below instead of counting it as a committed entry.
+                        stale_temporaries.append(path)
+                        continue
                     if path.suffix not in {".json", ".safetensors"}:
                         raise ValueError("EXL3 checkpoint contains an unexpected file")
                     request_sha256 = path.name.removesuffix(path.suffix)
@@ -740,6 +791,10 @@ class EXL3ProjectionCheckpointStore:
             removed_bytes += tensor_path.stat().st_size
             tensor_path.unlink()
             touched_directories.add(tensor_path.parent)
+        for temporary_path in stale_temporaries:
+            removed_bytes += temporary_path.stat().st_size
+            temporary_path.unlink()
+            touched_directories.add(temporary_path.parent)
         for directory in sorted(
             touched_directories,
             key=lambda path: len(path.parts),
@@ -756,7 +811,7 @@ class EXL3ProjectionCheckpointStore:
             "retained_entries": len(keep),
             "removed_entries": removed_entries,
             "removed_bytes": removed_bytes,
-            "removed_orphans": len(orphan_tensors),
+            "removed_orphans": len(orphan_tensors) + len(stale_temporaries),
         }
 
 
