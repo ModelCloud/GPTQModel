@@ -1,0 +1,114 @@
+{
+  "tokenizer_class": "Telechat2Tokenizer",
+  "auto_map": {
+    "AutoTokenizer": [
+      "tokenization_telechat2.Telechat2Tokenizer",
+      null
+    ]
+  },
+  "added_tokens_decoder": {
+    "1": {
+      "content": "<_start>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2": {
+      "content": "<_end>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "3": {
+      "content": "<_pad>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "4": {
+      "content": "<_user>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "5": {
+      "content": "<_bot>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "6": {
+      "content": "<_system>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "9": {
+      "content": "<tool_call>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "10": {
+      "content": "</tool_call>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "11": {
+      "content": "<tool_response>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "12": {
+      "content": "</tool_response>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "additional_special_tokens": [
+    "<_start>",
+    "<_end>",
+    "<_pad>",
+    "<_user>",
+    "<_bot>",
+    "<_system>",
+    "<tool_call>",
+    "</tool_call>",
+    "<tool_response>",
+    "</tool_response>"
+  ],
+  "add_bos_token": false,
+  "add_eos_token": false,
+  "use_fast": false,
+  "clean_up_tokenization_spaces": false,
+  "split_special_tokens": false,
+  "model_max_length": 100000000,
+  "sp_model_kwargs": {},
+  "bos_token": "<_start>",
+  "eos_token": "<_end>",
+  "pad_token": "<_pad>",
+  "chat_template": "{%- if tools %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{-'<_system>'+messages[0]['content'] }}\n    {%- else %}\n        {{- '<_system>'+'你是中国电信星辰语义大模型，英文名是TeleChat，你是由中电信人工智能科技有限公司和中国电信人工智能研究院（TeleAI）研发的人工智能助手。' }}\n    {%- endif %}\n    {{- '\\n\\n# 可用工具\\n你可以调用<tools></tools>标签中包含的一个或多个工具来辅助你回答问题,以下是可用工具详情：\\n<tools>\\n' }}\n    {%- for tool in tools %}\n        {{- tool | tojson }}\n        {{-'\\n'}}\n    {%- endfor %}\n    {{- '</tools>\\n\\n# 调用方法\\n你需要遵循工具的要求，使用json格式返回工具名称及参数，并用<tool_call></tool_call>包含。下方是一个调用模板：\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call>\\n\\n' }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<_system>' + messages[0]['content'] + '\\n' }}\n    {%- else %}\n        {{- '<_system>'+'你是中国电信星辰语义大模型，英文名是TeleChat，你是由中电信人工智能科技有限公司和中国电信人工智能研究院（TeleAI）研发的人工智能助手。\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == 'user') %}\n        {{- '<_user>' + message.content }}\n    {%- elif message.role == 'bot' or message.role == 'assistant' %}\n        {{- '<_bot>' }}\n        {%- if message.content %}\n            {{- message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {%- if loop.index0 == 0 %}\n                {{-'<tool_call>'}}\n            {%- else %}\n                {{-'\\n<tool_call>'}}\n            {%- endif %}\n            {{- '\\n{\"name\": \"' }}{{ tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<_end>\\n' }}\n    {%- elif message.role == 'tool' %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != 'tool') %}\n            {{- '<_user>'+'<tool_response>\\n' }}\n        {%- else %}\n            {{- '\\n<tool_response>\\n' }}\n        {%- endif %}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<_bot>' }}\n{%- endif %}"
+}

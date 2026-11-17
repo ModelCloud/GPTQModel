@@ -1,0 +1,12 @@
+{
+  "registered_module_plans": "UNCHANGED",
+  "fusable_models": {
+    "models": {
+      "telechat": {
+        "definition": "TeleChat2QModel",
+        "reason": "Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified."
+      }
+    }
+  },
+  "awq_plain_quantization_families": "UNCHANGED"
+}

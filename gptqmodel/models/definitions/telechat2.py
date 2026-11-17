@@ -3,18 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import inspect
-
-import torch
-
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 class TeleChat2QModel(BaseQModel):
-    # telechat2 requires custom model code
-    require_trust_remote_code = True
-    # telechat2 requires float16
-    require_dtype = torch.float16
+    loader = LocalModelLoader(
+        "gptqmodel.models.ports.telechat2.configuration_telechat2.Telechat2Config",
+        "gptqmodel.models.ports.telechat2.modeling_telechat2.Telechat2ForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.telechat2.tokenization_telechat2.TelechatTokenizerFactory",
+    )
+    fusable = None
 
     pre_lm_head_norm_module = "transformer.ln_f"
 
@@ -34,37 +33,8 @@ class TeleChat2QModel(BaseQModel):
         }
     ]
 
-    def awq_module_replay_inputs(self, module, x, module_kwargs):
-        """Give TeleChat2's attention replay the arguments its forward requires.
-
-        AWQ scores the ``query``/``key_value`` scaling group by replaying their
-        common parent, ``TelechatAttention``. Its forward signature is
-        ``(hidden_states, residual, attention_mask, ...)``, but the activation
-        capture only records the Linears' input, so the replay raised
-        ``TypeError: missing 'residual' and 'attention_mask'``. The residual is
-        an additive constant shared by the reference and candidate outputs, so
-        using the block input is enough for the scale search; a full causal
-        bool mask matches the calibration replay (no padding).
-        """
-
-        x, module_kwargs = super().awq_module_replay_inputs(module, x, module_kwargs)
-        try:
-            parameters = inspect.signature(module.forward).parameters
-        except (TypeError, ValueError):
-            return x, module_kwargs
-        if "residual" not in parameters:
-            return x, module_kwargs
-
-        kwargs = dict(module_kwargs)
-        if x.dim() == 2:
-            x = x.unsqueeze(0)
-        if not torch.is_tensor(kwargs.get("residual")):
-            kwargs["residual"] = x
-        if "attention_mask" in parameters and kwargs.get("attention_mask") is None:
-            seq_len = int(x.shape[-2])
-            kwargs["attention_mask"] = torch.ones(
-                seq_len, seq_len, dtype=torch.bool, device=x.device
-            ).triu(1)
-        return x, kwargs
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Residual modes and interleaved KV/RoPE are not scale-search-qualified.
+        return []
 
 __all__ = ["TeleChat2QModel"]
