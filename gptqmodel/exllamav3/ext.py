@@ -229,7 +229,6 @@ class _BCLinearEXL3:
         bias: Optional[torch.Tensor],
         mcg: bool,
         mul1: bool,
-        xh: torch.Tensor,
     ):
         if not exllamav3_runtime_available():
             raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
@@ -240,7 +239,6 @@ class _BCLinearEXL3:
         self.bias = bias
         self.mcg = bool(mcg)
         self.mul1 = bool(mul1)
-        self.xh = xh
 
     def run(self, x: torch.Tensor, y: torch.Tensor) -> None:
         _runtime_op("bc_linear_exl3_run")(
@@ -251,7 +249,6 @@ class _BCLinearEXL3:
             self.bias,
             self.mcg,
             self.mul1,
-            self.xh,
             x,
             y,
         )
