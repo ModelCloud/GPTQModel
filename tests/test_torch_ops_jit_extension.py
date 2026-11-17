@@ -1730,3 +1730,42 @@ def test_torch_ops_jit_extension_build_failure_includes_toolchain(monkeypatch, t
     assert "Ninja is required" in message
     assert "ninja=<not on PATH>" in message
     assert "needs `ninja` on PATH" in message
+
+
+def test_exl3_build_env_does_not_mutate_the_process_arch_list(monkeypatch):
+    """EXL3 must not rewrite `TORCH_CUDA_ARCH_LIST` for the whole process (#4634).
+
+    Every other `TorchOpsJitExtension` fingerprints its CUDA cache on the
+    visible capabilities while the variable is unset. EXL3 wrote a sorted,
+    `+PTX`-suffixed list into the environment at import and on every entry
+    point, so any later Marlin/ExLlamaV2/AWQ/QQQ build computed a different
+    cache key and recompiled from scratch.
+    """
+
+    import importlib
+
+    import torch
+
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.setattr(torch.version, "cuda", "13.2")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_capability",
+        lambda device_index=0: (12, 0) if int(device_index) == 0 else (8, 9),
+    )
+    monkeypatch.setattr(torch.cuda, "get_arch_list", lambda: ["sm_89", "sm_120"])
+
+    from gptqmodel.utils.marlin import _MARLIN_FP16_TORCH_OPS_EXTENSION as marlin
+
+    cache_before = marlin.build_root()
+
+    from gptqmodel.exllamav3 import ext as exl3_ext
+
+    # Reload so the import-time build environment runs under the faked runtime.
+    exl3_ext = importlib.reload(exl3_ext)
+    exl3_ext._prepare_build_env()
+
+    assert "TORCH_CUDA_ARCH_LIST" not in os.environ
+    assert marlin.build_root() == cache_before

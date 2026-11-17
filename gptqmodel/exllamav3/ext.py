@@ -23,7 +23,6 @@ from ..utils.cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
-from .util.arch_list import maybe_set_arch_list_env
 
 
 extension_name = "gptqmodel_exllamav3_ops"
@@ -148,8 +147,13 @@ def _extra_ldflags() -> list[str]:
 
 
 def _prepare_build_env() -> None:
+    # No process-wide `TORCH_CUDA_ARCH_LIST` write: the EXL3 extension is a
+    # `TorchOpsJitExtension` like every other one, so torch resolves its arch
+    # flags from the visible devices (or the caller's override) and the cache
+    # fingerprint matches the rest of the extensions. Setting the variable here
+    # made every later Marlin/ExLlamaV2/AWQ/QQQ build miss its cache and
+    # recompile, and doubled the extension cache (#4634).
     _ensure_windows_compiler()
-    maybe_set_arch_list_env()
 
 
 # Shared singleton so EXL3 quantization and inference both reuse the same
