@@ -115,12 +115,17 @@ Environment: Python 3.14.6t with `PYTHON_GIL=0`, Transformers 5.23.0,
 Torch 2.15.0+cpu, released Tokenicer 0.0.17, Ruff 0.14.2. Execution is serial CPU;
 this does not establish concurrent PyTorch safety.
 
-Final owned result: **58 passed, no skips, 4 warnings, 32.14s**. Final combined loader,
+Final owned result: **58 passed, no skips, 4 warnings, 29.44s**. Final combined loader,
 processor, security, HF config, InternLM sibling, required AWQ baseline,
 module-plan and fusion admission run:
-**1068 passed, 477 skipped, 2 deselected, 19 warnings, 52.23s**.
+**1068 passed, 477 skipped, 2 deselected, 20 warnings, 70.89s**.
 The explicit exclusions and skip reasons are recorded below. The full
 `format/check.sh` gate, compileall, package discovery and diff checks pass.
+The final environment was audited from the imported package path and installed
+distribution metadata. Earlier runs labeled Tokenicer 0.0.17 actually used
+0.0.14; that earlier version also passed all 58 owned and 1068 combined cases
+(32.14s and 52.23s respectively). The final counts above were independently rerun
+on the installed, released 0.0.17 package; no tokenizer shim was needed.
 
 Run from the repository root with the isolated environment's Python:
 
