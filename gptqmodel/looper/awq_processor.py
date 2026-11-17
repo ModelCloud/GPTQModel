@@ -2786,6 +2786,7 @@ class AWQProcessor(LoopProcessor):
         for layer, scale_consumers in zip(sanitized_module_config, scale_consumers_by_group):
             search_layers = layer.pop("_awq_search_layers", None)
             allow_partial_replay = bool(layer.pop("_awq_allow_partial_replay", False))
+            allow_outside_fold = bool(layer.pop("_awq_allow_outside_fold", False))
             call_kwargs = dict(layer)
             if search_layers is not None:
                 # Search with the covered members only; fold into every member.
@@ -2796,6 +2797,7 @@ class AWQProcessor(LoopProcessor):
                     layer_module_ref,
                     scale_consumers=scale_consumers,
                     allow_partial_replay=allow_partial_replay,
+                    allow_outside_fold=allow_outside_fold,
                     **call_kwargs,
                 ))
             except _AWQScaleGroupError as exc:
@@ -2942,12 +2944,17 @@ class AWQProcessor(LoopProcessor):
     @staticmethod
     def _validate_scale_group(
         module, prev_op, layers, inp, module2inspect, scale_consumers, extra_layers=None,
+        allow_outside_fold=False,
     ):
         """Check exact bindings, widths and the existing replay boundary.
 
-        ``extra_layers`` are fold-only members: they must still bind, match the
-        source width, and live inside the replay boundary, but the search does
-        not score them, so they are not replayed targets.
+        ``extra_layers`` are fold-only members: they must still bind and match
+        the source width, but the search does not score them, so they are not
+        replayed targets. They normally also have to live inside the replay
+        boundary; ``allow_outside_fold`` lifts that for a group the tree
+        declares across sibling branches of one norm (Falcon-H1's attention and
+        Mamba mixer). Those members read the same tensor, so the same folded
+        scale is correct for them even though this replay cannot score them.
         """
 
         try:
@@ -2980,7 +2987,8 @@ class AWQProcessor(LoopProcessor):
             if source_weight.ndim in (1, 2) and source_weight.shape[0] != width:
                 raise _AWQScaleGroupError(f"AWQ: source `{source_name}` cannot produce {width} channels.")
         inspection_modules = {id(child) for child in module2inspect.modules()}
-        outside = [name for name, target in targets + extra + consumers if id(target) not in inspection_modules]
+        checked = targets + consumers if allow_outside_fold else targets + extra + consumers
+        outside = [name for name, target in checked if id(target) not in inspection_modules]
         if outside:
             raise _AWQScaleGroupError(
                 f"AWQ: replay boundary `{inspect_name}` does not contain targets {outside} for source "
@@ -3171,6 +3179,7 @@ class AWQProcessor(LoopProcessor):
             scale_consumers: Optional[List[str]] = None,
             fold_layers: Optional[List[nn.Linear]] = None,
             allow_partial_replay: bool = False,
+            allow_outside_fold: bool = False,
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
@@ -3202,7 +3211,7 @@ class AWQProcessor(LoopProcessor):
         fold_layers = list(fold_layers) if fold_layers is not None else list(layers)
         replay_targets = self._validate_scale_group(
             module, prev_op, layers, inp, module2inspect, scale_consumers,
-            extra_layers=fold_layers,
+            extra_layers=fold_layers, allow_outside_fold=allow_outside_fold,
         )
         kwargs = dict(kwargs)
         if "use_cache" in kwargs:

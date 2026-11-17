@@ -39,6 +39,7 @@ from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
+from ..quantization.awq.quantize.scale import is_foldable_source
 from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import (
     FORMAT,
@@ -5893,6 +5894,18 @@ class BaseQModel(nn.Module):
                     if prev_op is None:
                         log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
                         skip_block = True
+                    elif not is_foldable_source(prev_op):
+                        # A Conv1d (Falcon-H1's `mamba.conv1d`), a weightless
+                        # norm or a gated norm has no plain gain to divide, so
+                        # `apply_scale` would discard the group after paying for
+                        # the search. Do not build it at all.
+                        log.debug(
+                            "awq_get_modules_for_scaling: skipping block %s; `%s` is not a foldable scale source",
+                            block,
+                            get_op_name(module, prev_op),
+                        )
+                        pending_nonquant.clear()
+                        skip_block = True
 
                 # One group shares one scale vector, so it can only contain
                 # consumers of the same tensor. A layer whose input width differs
@@ -6061,6 +6074,20 @@ class BaseQModel(nn.Module):
                 inspect_module, _ = get_module_by_name_prefix(layer_module, inspect_name)
                 if inspect_module is not None:
                     base["module2inspect"] = inspect_module
+            # Parallel branches of one norm (Falcon-H1's attention and Mamba
+            # mixer) have no shared ancestor below the decoder layer, and the
+            # captured replay input is the post-norm activation, so replaying
+            # the layer itself would apply that norm twice. Score the members
+            # the current boundary covers and fold the same scale into the rest:
+            # every member reads this one tensor, so the fold is correct for
+            # all of them even though only some can be scored (#4741).
+            inspect_module = base.get("module2inspect")
+            if inspect_module is not None and len(base_layers) > 1:
+                inside = {id(child) for child in inspect_module.modules()}
+                covered = [layer for layer in base_layers if id(layer) in inside]
+                if covered and len(covered) < len(base_layers):
+                    base["_awq_search_layers"] = covered
+                    base["_awq_allow_outside_fold"] = True
         return merged
 
     def _filter_awq_scaling_sources(self, layer_module, nodes):
