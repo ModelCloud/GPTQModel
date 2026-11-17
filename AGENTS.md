@@ -11,7 +11,7 @@ instructions. It is the map: **what** the repository is, **where** things live,
 
 ## What this repository is
 
-GPT-QModel quantizes LLMs (GPTQ, AWQ, QQQ, FP8, GGUF, EXL3, ParoQuant, RTN, and
+GPT-QModel quantizes LLMs (GPTQ, AWQ, QQQ, FP8, GGUF, EXL3, Paro, RTN, and
 more), writes loadable checkpoints, and runs them through many inference
 kernels across NVIDIA, AMD ROCm, Apple MLX, CPU, Ascend, and Tenstorrent.
 Most bugs live where those dimensions cross: a model layout, a quantization

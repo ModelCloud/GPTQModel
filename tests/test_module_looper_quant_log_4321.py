@@ -5,7 +5,7 @@
 
 #4321: the looper used to copy a processor's per-module ``log`` into
 ``model.quant_log`` only for a hardcoded list of processor names. FOEM, QQQ,
-VPTQ, ParoQuant, FP8-GSQ and RTN were therefore quantized but produced no
+VPTQ, Paro, FP8-GSQ and RTN were therefore quantized but produced no
 ``quant_log.csv``.
 
 #4367: the GPTQ+EoRA chain then concatenated the logs of *every* processor, so
@@ -52,7 +52,7 @@ class _StubProcessor:
         "foem",
         "qqq",
         "vptq",
-        "paroquant",
+        "paro",
         "fp8_gsq",
         "weight_only_rtn",
         # Existing methods must keep working unchanged.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# ParoQuant reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-"""Benchmark ParoQuant's output dtype correction against merged main."""
+# Paro reference: Z Lab, MIT, https://github.com/z-lab/paroquant
+"""Benchmark Paro's output dtype correction against merged main."""
 
 import argparse
 import gc

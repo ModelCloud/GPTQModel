@@ -80,7 +80,7 @@ def test_numpy_is_declared_by_the_optional_extras() -> None:
     (
         "gptqmodel/utils/hf.py",
         "gptqmodel/models/loader.py",
-        "gptqmodel/looper/paroquant_processor.py",
+        "gptqmodel/looper/paro_processor.py",
         "gptqmodel/nn_modules/qlinear/fp8.py",
     ),
 )
@@ -90,7 +90,7 @@ def test_optional_numpy_modules_are_not_imported_eagerly(relative_path: str) -> 
         "qlinear.gguf",
         "internal_gguf",
         "qlinear.mlx",
-        "mlx_paroquant",
+        "mlx_paro",
         "mlx_packing",
         "mlx_bitsandbytes",
         "rco_mlx",

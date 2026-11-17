@@ -26,7 +26,7 @@ import pcre
 import torch
 from packaging import version
 
-from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
+from .._quant_methods import GGUF_EXPORT_QUANT_METHOD, LEGACY_PARO_QUANT_METHOD
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
@@ -154,7 +154,7 @@ class FORMAT(str, Enum):
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
-    PAROQUANT = "paroquant"
+    PARO = "paro"
     # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales
     # plus its activation transforms (block-Hadamard `BH`, D1 `pre_scale`).
     MXFP4_MACAQ = "mxfp4_macaq"
@@ -181,7 +181,7 @@ class METHOD(str, Enum):
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
-    PARO = "paroquant"
+    PARO = "paro"
     VPTQ = "vptq"
     MACAQ = "macaq"
     NF12 = "nf12"
@@ -201,7 +201,7 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run. Request GEMM plus
     # AWQ_TORCH; the AWQ processor also selects it for non-4-bit GEMM modules.
     METHOD.AWQ: (2, 3, 4, 8),
-    # QQQ and ParoQuant kernels are 4-bit only.
+    # QQQ and Paro kernels are 4-bit only.
     METHOD.QQQ: (4,),
     METHOD.PARO: (4,),
     # FP8 is a fixed 8-bit storage format.
@@ -1161,7 +1161,7 @@ def resolve_quant_format(
     if method == METHOD.EXL3:
         return FORMAT.EXL3
     if method == METHOD.PARO:
-        return FORMAT.PAROQUANT
+        return FORMAT.PARO
     if method == METHOD.MACAQ:
         if isinstance(format_value, (str, FORMAT)) and str(getattr(format_value, "value", format_value)).strip().lower() == FORMAT.MXFP4.value:
             return FORMAT.MXFP4
@@ -2418,7 +2418,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.LLM_AWQ,
     },
     METHOD.PARO: {
-        FORMAT.PAROQUANT,
+        FORMAT.PARO,
     },
     METHOD.VPTQ: {
         FORMAT.VPTQ,
@@ -2447,13 +2447,13 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.BITBLAS,
     FORMAT.LLM_AWQ,
 )
-PAROQUANT_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
-    FORMAT.PAROQUANT,
+PARO_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.PARO,
 )
-# Keep ParoQuant channel-scale clamps configurable so users can relax or
+# Keep Paro channel-scale clamps configurable so users can relax or
 # tighten the safeguard without patching the optimizer code.
-PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT = 1e-2
-PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
+PARO_OPT_SCALE_CLAMP_MIN_DEFAULT = 1e-2
+PARO_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
@@ -2511,7 +2511,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GEMV: METHOD.AWQ,
     FORMAT.GEMV_FAST: METHOD.AWQ,
     FORMAT.LLM_AWQ: METHOD.AWQ,
-    FORMAT.PAROQUANT: METHOD.PARO,
+    FORMAT.PARO: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
     FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
@@ -3811,6 +3811,8 @@ def resolve_module_config_snapshot(config: "BaseQuantizeConfig", module_name: st
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     if isinstance(value, str):
         value = value.lower()
+        if value == LEGACY_PARO_QUANT_METHOD:
+            return METHOD.PARO
         if value == FORMAT.MARLIN:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
@@ -3823,7 +3825,7 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.EXL3
         if value == GGUF_EXPORT_QUANT_METHOD:
             return METHOD.GGUF
-        if value == FORMAT.PAROQUANT:
+        if value == FORMAT.PARO:
             return METHOD.PARO
         try:
             return METHOD(value)
@@ -3836,6 +3838,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
 
 def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
     if isinstance(value, str):
+        if value.lower() == LEGACY_PARO_QUANT_METHOD:
+            return FORMAT.PARO
         try:
             return FORMAT(value.lower())
         except ValueError as exc:
@@ -3865,8 +3869,8 @@ def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torc
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
 
 
-def _normalize_paroquant_best_state_dtype(best_state_dtype: Optional[Union[str, torch.dtype]]) -> str:
-    """Canonicalize the ParoQuant best-state snapshot dtype into a serialized string."""
+def _normalize_paro_best_state_dtype(best_state_dtype: Optional[Union[str, torch.dtype]]) -> str:
+    """Canonicalize the Paro best-state snapshot dtype into a serialized string."""
     if best_state_dtype is None:
         return "fp32"
     if isinstance(best_state_dtype, str):
@@ -4525,9 +4529,9 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
                 normalized[FORMAT_FIELD_CODE] = normalized_format
             except ValueError:
                 normalized_format = None
-        if normalized_format is not None and normalized_format != FORMAT.PAROQUANT:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
-            normalized[FORMAT_FIELD_CODE] = FORMAT.PAROQUANT
+        if normalized_format is not None and normalized_format != FORMAT.PARO:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PARO}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.PARO
     elif target_cls is GGUFConfig:
         expected_method = METHOD.GGUF
     elif target_cls is QQQConfig:
@@ -6441,7 +6445,7 @@ class AWQConfig(PreProcessorConfig):
 @dataclass
 class ParoConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.PARO)
-    format: FORMAT = field(default=FORMAT.PAROQUANT)
+    format: FORMAT = field(default=FORMAT.PARO)
     gsq: Optional[GSQConfig] = field(default=None)
     krot: int = field(default=8)
     opt_rotation_epochs: int = field(default=10)
@@ -6475,14 +6479,14 @@ class ParoConfig(PreProcessorConfig):
     opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
-    opt_channel_scale_clamp_min: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT)
-    opt_channel_scale_clamp_max: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT)
+    opt_channel_scale_clamp_min: float = field(default=PARO_OPT_SCALE_CLAMP_MIN_DEFAULT)
+    opt_channel_scale_clamp_max: float = field(default=PARO_OPT_SCALE_CLAMP_MAX_DEFAULT)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PARO,)
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
-        return PAROQUANT_EXPORT_FORMATS
+        return PARO_EXPORT_FORMATS
 
     @staticmethod
     def default_opt_gradient_checkpointing_for_scope(opt_scope: str) -> bool:
@@ -6492,9 +6496,9 @@ class ParoConfig(PreProcessorConfig):
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
-        if self.format != FORMAT.PAROQUANT:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
-            self.format = FORMAT.PAROQUANT
+        if self.format != FORMAT.PARO:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PARO}`")
+            self.format = FORMAT.PARO
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled:
@@ -6543,7 +6547,7 @@ class ParoConfig(PreProcessorConfig):
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
         if self.opt_amp is not None:
             self.opt_amp = bool(self.opt_amp)
-        self.opt_best_state_dtype = _normalize_paroquant_best_state_dtype(self.opt_best_state_dtype)
+        self.opt_best_state_dtype = _normalize_paro_best_state_dtype(self.opt_best_state_dtype)
         self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
@@ -8189,7 +8193,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3Config
-    if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
+    if method == METHOD.PARO or format_value == FORMAT.PARO:
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig

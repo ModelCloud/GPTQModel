@@ -122,7 +122,7 @@ model.layers.0.mlp.down_proj.linear.biases ...
 `GPTQModel.export(..., format="mlx")` now passes `stock_compatible=True`. The
 exact packed transfer still runs for layers that map onto a stock
 `nn.QuantizedLinear` (direct `weight` / `scales` / `biases` names), and layers
-that need the custom runtime (group 16, ParoQuant, QQQ, FP8, GGUF,
+that need the custom runtime (group 16, Paro, QQQ, FP8, GGUF,
 bitsandbytes, EXL3) go through the stock `quantize_model` fallback. Formats
 with no requantization path fail with the existing `ValueError` naming the
 format instead of writing an unreadable layout. The in-process
@@ -132,7 +132,7 @@ custom kernels are unchanged.
 | Situation | Before #4091 | After #4091 |
 | --- | --- | --- |
 | Linux export of a GPTQ/AWQ checkpoint | `*.linear.*` keys + custom-runtime flag; stock `mlx_lm.load` rejects | direct keys; stock `nn.QuantizedLinear`; `mlx_lm.load` succeeds |
-| Export of a group-16 / ParoQuant / QQQ / FP8 / GGUF / bitsandbytes / EXL3 / MACaQ / NF12 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
+| Export of a group-16 / Paro / QQQ / FP8 / GGUF / bitsandbytes / EXL3 / MACaQ / NF12 checkpoint | custom-runtime layout | requantization when supported, otherwise `ValueError` naming the format |
 | Runtime `GPTQModel.load(backend="mlx")` | exact packed transfer + custom runtime | unchanged |
 
 ### Before/after mechanism

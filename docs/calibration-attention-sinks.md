@@ -74,12 +74,12 @@ drops.
 flowchart LR
     subgraph Before
       B1["GPTQConfig.exclude_attention_sinks"] --> B2["GPTQ.process_batch<br/>drop position 0 when it is BOS"]
-      B1 -. rejected .-> B3["GPTAQ / FOEM / QQQ / VPTQ / AWQ<br/>ParoQuant / EXL3 / MACaQ / ..."]
+      B1 -. rejected .-> B3["GPTAQ / FOEM / QQQ / VPTQ / AWQ<br/>Paro / EXL3 / MACaQ / ..."]
     end
     subgraph After
       A1["CalibrationConfig.exclude_attention_sinks"] --> A2["LoopProcessor.calibration_keep_mask<br/>drop every attended BOS"]
       A2 --> A3["every calibration processor hook"]
-      A1 -. rejected .-> A4["VPTQ / ParoQuant / staged GSQ"]
+      A1 -. rejected .-> A4["VPTQ / Paro / staged GSQ"]
     end
 ```
 
@@ -92,7 +92,7 @@ nothing.
 ## Failure and ambiguity paths
 
 * **Rejected methods.** VPTQ raises a `ValueError`: dropping the sink rows from
-  its Hessian made perplexity 4.5-4.7x worse (table below). ParoQuant optimizes
+  its Hessian made perplexity 4.5-4.7x worse (table below). Paro optimizes
   whole replayed layer outputs, not per-token rows, and raises too. Staged GSQ
   rejects it with its other unsupported `quantize()` arguments. The EoRA pass
   binds a copy with `exclude_attention_sinks=False` and is unaffected; weight-only methods warn that it has

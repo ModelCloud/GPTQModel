@@ -199,7 +199,7 @@ unknown name, `supports_quant_method` only warns
 `Unknown quantization type, got <name> ... skip the quantization` and
 `from_pretrained` then random-initializes every linear layer. GPT-QModel
 publishes several layouts transformers does not implement (`bitsandbytes`,
-`exl3`, `qqq`, `paroquant`, `macaq`, `nf12`, `tt-blockfloat`) plus the
+`exl3`, `qqq`, `paro`, `macaq`, `nf12`, `tt-blockfloat`) plus the
 deliberate `gptqmodel_gguf` alias.
 
 `gptqmodel/__init__.py` registers a refusing quantizer for each name from the

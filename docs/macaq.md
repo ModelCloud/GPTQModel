@@ -232,7 +232,7 @@ extends the same registration.
 | `gptqmodel_gguf` | packed GGUF | `GPTQModelGGUFHfQuantizer` refuses |
 | `exl3` | EXL3 trellis | `GPTQModelRefusingHfQuantizer` refuses |
 | `macaq` | MACaQ MXFP4 | `GPTQModelRefusingHfQuantizer` refuses |
-| `paroquant` | ParoQuant | `GPTQModelRefusingHfQuantizer` refuses |
+| `paro` | Paro | `GPTQModelRefusingHfQuantizer` refuses |
 | `qqq` | QQQ | `GPTQModelRefusingHfQuantizer` refuses |
 | `nf12` | NF12 | `GPTQModelRefusingHfQuantizer` refuses |
 | `tt-blockfloat` | Tenstorrent block-float | `GPTQModelRefusingHfQuantizer` refuses |

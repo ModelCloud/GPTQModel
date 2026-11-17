@@ -6,7 +6,7 @@
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
 # BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
-# Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
+# Format references: Paro (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
 # in the source implementations and method-specific runtime modules.
 """Validated GPT-QModel checkpoint holders for MLX native linear inference."""
@@ -30,6 +30,7 @@ from ...utils.mlx_packing import (
     repack_gptq_bitblas,
 )
 from . import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from .bitsandbytes import BitsAndBytesLinear
 from .fp8 import TorchFP8Linear
 from .gemv_awq import AwqGEMVLinear
@@ -37,7 +38,7 @@ from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from .gguf import GGUFTorchLinear
 from .macaq import MacaqLinear
 from .nf12 import NF12Linear
-from .paroquant import ParoLinear
+from .paro import ParoLinear
 from .qqq import QQQTorchLinear
 from .torch import TorchLinear
 from .torch_awq import AwqTorchLinear
@@ -148,6 +149,10 @@ class _MlxLinearContract:
 class MlxQuantLinear(_MlxLinearContract, TorchLinear):
     """GPTQ v2 holder validated by GPT-QModel, then transferred to MLX."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Loader AUTO selects MLX only for inference; direct backend selection uses this registry entry.
@@ -192,6 +197,10 @@ class MlxQuantLinear(_MlxLinearContract, TorchLinear):
 
 class GPTQMarlinMlxQuantLinear(_MlxLinearContract, TorchLinear):
     """Legacy Marlin checkpoint holder transcoded to packed GPTQ MLX inference."""
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -263,6 +272,10 @@ class GPTQMarlinMlxQuantLinear(_MlxLinearContract, TorchLinear):
 
 class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
     """BitBLAS checkpoint holder transcoded to packed GPTQ MLX inference."""
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -387,6 +400,10 @@ class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
 class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
     """AWQ GEMM holder validated by GPT-QModel, then transferred to MLX."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0}
@@ -428,6 +445,10 @@ class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
 class AWQMarlinMlxQuantLinear(AwqMlxQuantLinear):
     """AWQ Marlin checkpoint holder transcoded to packed MLX inference."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.MARLIN: 0}
@@ -449,6 +470,10 @@ class AWQMarlinMlxQuantLinear(AwqMlxQuantLinear):
 
 class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
     """AWQ BitBLAS checkpoint holder transcoded to packed MLX inference."""
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
@@ -573,6 +598,10 @@ class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
 class AwqGemvMlxQuantLinear(_MlxLinearContract, AwqGEMVLinear):
     """AWQ GEMV output-major checkpoint holder converted to MLX affine."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV: 0}
@@ -660,6 +689,10 @@ class _MlxGemvFastTransfer(_MlxLinearContract):
 class AwqGemvFastMlxQuantLinear(_MlxGemvFastTransfer, AwqGEMVFastLinear):
     """AWQ GEMV_FAST holder with exact packed MLX transfer."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 0}
@@ -685,6 +718,10 @@ class AwqGemvFastMlxQuantLinear(_MlxGemvFastTransfer, AwqGEMVFastLinear):
 class LLMAwqMlxQuantLinear(_MlxGemvFastTransfer, LLMAwqLinear):
     """LLM_AWQ holder with exact packed MLX transfer."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 0}
@@ -708,11 +745,15 @@ class LLMAwqMlxQuantLinear(_MlxGemvFastTransfer, LLMAwqLinear):
 
 
 class ParoMlxQuantLinear(_MlxLinearContract, ParoLinear):
-    """ParoQuant holder with the source AWQ codes and learned rotation state."""
+    """Paro holder with the source AWQ codes and learned rotation state."""
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.PARO]
-    SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 0}
+    SUPPORTS_FORMATS = {FORMAT.PARO: 0}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -749,6 +790,10 @@ class ParoMlxQuantLinear(_MlxLinearContract, ParoLinear):
 
 class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
     """QQQ holder for exact INT8 weights and dynamic input quantization on MLX."""
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.QQQ]
@@ -835,6 +880,10 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
 class GGUFMlxQuantLinear(_MlxLinearContract, GGUFTorchLinear):
     """GGUF affine checkpoint holder using exact source block codes on MLX."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 0}
@@ -915,6 +964,10 @@ class _MlxDenseContract(_MlxLinearContract):
 
 class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
     """FP8 holder for native MXFP8 and general packed Metal inference."""
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.FP8]
@@ -998,6 +1051,10 @@ class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
 class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
     """BNB checkpoint holder transferred to packed MLX Metal matmul."""
 
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
     SUPPORTS_FORMATS = {FORMAT.BITSANDBYTES: 0}
@@ -1067,6 +1124,10 @@ class MacaqMlxQuantLinear(_MlxDenseContract, MacaqLinear):
     no requantization, and the rotated-frame pre-scale/Hadamard state moves
     across unchanged.
     """
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.MACAQ]
@@ -1165,6 +1226,10 @@ class NF12MlxQuantLinear(_MlxDenseContract, NF12Linear):
     NF12 stores a lossless 12-bit BF16 stream, so the packed bytes and the
     escape table move across unchanged and Metal decodes them exactly.
     """
+
+    # MLX arrays; mx.compile owns the graph
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.NF12]

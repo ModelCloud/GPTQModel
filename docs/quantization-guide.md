@@ -22,7 +22,7 @@ unquantized modules add storage beyond the nominal weight bit width.
 | GPTQ | Integer 2, 3, 4, 5, 6, 7, or 8 bits | Normally FP16/BF16; kernel support varies by bit width | Required |
 | AWQ | Integer weights; start with 4 bits | Normally FP16/BF16; optimized kernels commonly require 4-bit weights | Required |
 | RTN | Rounded integer weights exported in GPTQ or AWQ layout | Normally FP16/BF16, according to the destination kernel | Not required |
-| ParoQuant | INT4 with learned rotations | FP16/BF16 | Required; includes optimization |
+| Paro | INT4 with learned rotations | FP16/BF16 | Required; includes optimization |
 | QQQ | Symmetric INT4, group size 128 or -1 | Dynamic INT8 activation quantization inside the linear operation; FP16/BF16 inputs and outputs | Required |
 | GGUF | Format-specific blocks, e.g. Q4_0 or Q4_K_M | Native kernels consume floating-point activations | Not required |
 | FP8 | E4M3 or E5M2 weights with scales | The native Torch path consumes floating-point activations; this config alone does not select W8A8 | Not required |
@@ -184,7 +184,7 @@ model.quantize(CalibrationConfig(dataset=texts, exclude_attention_sinks=True))
 
 The default is `False`, which keeps the historical statistics bit for bit. A
 tokenizer without a BOS token (Qwen2.5/Qwen3) has no sink to drop, so the option
-changes nothing for it (issue #4459). VPTQ, ParoQuant and staged GSQ reject the
+changes nothing for it (issue #4459). VPTQ, Paro and staged GSQ reject the
 option. The effect is model-dependent, so validate it per model. See
 [calibration attention-sink exclusion](calibration-attention-sinks.md) for the
 exact token rule, the flow, and measurements.
@@ -340,17 +340,17 @@ requires FP32 scales. Compressed 4-bit statistics can also cause a
 by leaving statistics uncompressed and reloading in FP32. Its reloaded model
 therefore uses FP32 activations, rather than the W4A16 workflow above.
 
-### ParoQuant W4A16
+### Paro W4A16
 
 ```python
 from gptqmodel.quantization import ParoConfig
 
 qcfg = ParoConfig(bits=4, group_size=128)
-backend = BACKEND.PAROQUANT_CUDA
+backend = BACKEND.PARO_CUDA
 ```
 
-ParoQuant learns rotations during calibration. Budget for optimization time
-and activation memory; see [optimization scopes and checkpointing](paroquant.md).
+Paro learns rotations during calibration. Budget for optimization time
+and activation memory; see [optimization scopes and checkpointing](paro.md).
 The CUDA recipe requires a compatible GPU and build toolchain.
 
 ### EXL3 variable bitrate

@@ -314,7 +314,7 @@ hid it) and a read-only site-packages install could not build at all.
 `TorchOpsJitExtension(stage_hip_sources=True)` copies the source root into
 `<base_build_root>/_src` before the fingerprint/build, rewrites the source and
 include paths to that copy, and leaves the shipped tree untouched. It is used
-by `allspark_hip`, `hadamard`, `gptq_cuda`, `exllamav3` and `paroquant`;
+by `allspark_hip`, `hadamard`, `gptq_cuda`, `exllamav3` and `paro`;
 `nf12_hip` and `tt_blockfloat_hip` already stage their own sources.
 
 ```mermaid
@@ -331,10 +331,10 @@ flowchart TD
     style H fill:#d1e7dd,stroke:#146c43,stroke-width:2px
 ```
 
-## 6. ParoQuant strided decode
+## 6. Paro strided decode
 
 `generate()` feeds `hidden_states[:, -1:, :]`, which is a strided view.
-`ParoLinear.forward` packed it after #4047, but `ParoQuantTritonLinear`
+`ParoLinear.forward` packed it after #4047, but `ParoTritonLinear`
 overrode `forward` and passed `x.reshape(-1, K)` to the fused rotation, which
 rejects non-contiguous tensors. The Triton override now calls
 `.contiguous()` on the flat activation.
@@ -382,7 +382,7 @@ flowchart TD
 | `tests/test_cpu_kernel_optimize.py` | `model.optimize()` reaches all five CPU kernel overrides |
 | `tests/test_inference_fp16_overflow.py::test_cpu_fused_layers_compile_through_the_int4pack_path` | FP16+Bias and BF16 int4pack layers compile and stay finite |
 | `tests/test_hip_jit_source_staging.py` | HIP sources are staged under the build cache; no loader writes into the checkout |
-| `tests/kernels/test_paroquant.py::test_paroquant_cuda_forward_packs_a_strided_activation` | both `ParoLinear` and `ParoQuantTritonLinear` accept a strided decode slice |
+| `tests/kernels/test_paro.py::test_paro_cuda_forward_packs_a_strided_activation` | both `ParoLinear` and `ParoTritonLinear` accept a strided decode slice |
 | `tests/kernels/test_bitsandbytes_rocm_triton.py::test_triton_dispatch_falls_back_when_the_input_needs_grad` | M=16 grad input uses the vendor kernel |
 | `tests/kernels/test_gguf_triton_bias_epilogue.py::test_grad_input_uses_the_differentiable_torch_path` | GGUF grad input uses `GGUFTorchLinear` |
 | `tests/kernels/test_linear_fp32_reduce.py::test_bias_path_eager_output_is_bitwise_unchanged` | eager bias rounding is bitwise unchanged |
