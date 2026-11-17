@@ -502,6 +502,123 @@ def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
     assert _relative_l2(out, expected.to(torch.float16)) < 2e-3
 
 
+# #4746: shapes whose 2-D cuBLASLt INT8 IMMA launch raises for M > 16. Both
+# K % 16 != 0 (with K % 4 == 0) and N % 4 != 0 must stay covered.
+_INT8_IMMA_MISALIGNED_SHAPES = [(100, 37), (100, 2050), (104, 37), (104, 2050)]
+
+
+def _build_int8_kernel(in_features: int, out_features: int) -> BitsAndBytesLinear:
+    torch.manual_seed(4746 + in_features * 1000 + out_features)
+    linear = nn.Linear(in_features, out_features, bias=False).to(torch.float16).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        dtype=torch.float16,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    return kernel.eval()
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 cuBLASLt IMMA path is CUDA/HIP-only",
+)
+@pytest.mark.parametrize(("in_features", "out_features"), _INT8_IMMA_MISALIGNED_SHAPES)
+def test_bitsandbytes_int8_misaligned_imma_shapes_match_dequantized_reference(
+    in_features: int,
+    out_features: int,
+):
+    """#4746: M > 16 must not reach cuBLASLt IMMA for a shape it rejects."""
+
+    kernel = _build_int8_kernel(in_features, out_features).to("cuda")
+    dequant32 = kernel.dequantize_weight()
+    assert dequant32.dtype == torch.float32
+    dequant64 = dequant32.to(torch.float64)
+
+    for rows in (1, 17):
+        torch.manual_seed(4746 + rows)
+        x = torch.randn(rows, in_features, device="cuda", dtype=torch.float16)
+        with torch.inference_mode():
+            out = kernel(x)
+
+        expected32 = x.to(torch.float32) @ dequant32.t()
+        expected64 = x.to(torch.float64) @ dequant64.t()
+
+        assert out.dtype == torch.float16
+        # The M=1 path still quantizes activations to INT8, so it only tracks
+        # the dequantized-weight reference to A8W8 precision. The M=17
+        # fallback multiplies the full-precision activation by the dequantized
+        # weight, so it must match both references tightly.
+        torch.testing.assert_close(
+            out.to(torch.float32),
+            expected64.to(torch.float32),
+            rtol=5e-2 if rows == 1 else 2e-3,
+            atol=2e-2 if rows == 1 else 2e-3,
+        )
+        if rows == 17:
+            torch.testing.assert_close(
+                out,
+                expected32.to(torch.float16),
+                rtol=1e-3,
+                atol=1e-3,
+            )
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 cuBLASLt IMMA path is CUDA/HIP-only",
+)
+def test_bitsandbytes_int8_imma_guard_only_reroutes_misaligned_shapes(monkeypatch):
+    """#4746: the fallback is exact; aligned shapes keep the native INT8 kernel."""
+
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import import_bitsandbytes
+
+    bnb = import_bitsandbytes()
+    native_calls = []
+    fallback_calls = []
+    native = bnb.functional.int8_linear_matmul
+
+    def counted_native(*args, **kwargs):
+        native_calls.append(1)
+        return native(*args, **kwargs)
+
+    def counted_fallback(self, x, bias):
+        fallback_calls.append(1)
+        return fallback(self, x, bias)
+
+    monkeypatch.setattr(bnb.functional, "int8_linear_matmul", counted_native)
+    fallback = getattr(BitsAndBytesLinear, "_int8_dequant_tiled_forward", None)
+    monkeypatch.setattr(
+        BitsAndBytesLinear,
+        "_int8_dequant_tiled_forward",
+        counted_fallback,
+        raising=False,
+    )
+
+    aligned = _build_int8_kernel(128, 64).to("cuda")
+    x = torch.randn(17, 128, device="cuda", dtype=torch.float16)
+    with torch.inference_mode():
+        aligned(x)
+    assert native_calls and not fallback_calls
+
+    native_calls.clear()
+    fallback_calls.clear()
+    misaligned = _build_int8_kernel(100, 37).to("cuda")
+    x = torch.randn(17, 100, device="cuda", dtype=torch.float16)
+    with torch.inference_mode():
+        misaligned(x)
+    assert fallback_calls == [1]
+    assert not native_calls
+
+
 def _install_fake_bitsandbytes(monkeypatch) -> None:
     """Install a rank-2-faithful fake of the optional bitsandbytes module.
 
