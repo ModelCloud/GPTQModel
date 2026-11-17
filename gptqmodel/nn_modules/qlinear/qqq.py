@@ -597,7 +597,12 @@ class QQQLinear(GroupedQuantLinear):
         quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
         quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
-        return x, quant_scale
+        # The element-wise fallback preserves the input's memory format, so a
+        # column-strided activation (``x.t()`` of a ``[K, M]`` buffer) comes back
+        # column-major. ``qqq_gemm`` reads the operand row-major with no stride
+        # argument, so hand it a packed INT8 buffer (#4740). The copy is int8,
+        # i.e. a quarter of the fp16 operand it replaces.
+        return x.contiguous(), quant_scale
 
     def _split_k_locks(self, device) -> torch.Tensor:
         """A fresh zeroed split-K lock array for one forward call.
