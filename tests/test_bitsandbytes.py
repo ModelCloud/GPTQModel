@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 
 import pytest
 import torch
@@ -432,6 +433,115 @@ def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
     assert out.dtype == x.dtype
     assert _relative_l2(out, expected) < 2e-3
     assert _relative_l2(out, expected.to(torch.float16)) < 2e-3
+
+
+def _install_fake_bitsandbytes(monkeypatch) -> None:
+    """Install a rank-2-faithful fake of the optional bitsandbytes module.
+
+    Used only when bitsandbytes is absent (the CUDA venv). The stubs mirror the
+    native kernels: the vectorwise quantizer accepts rank 2 only, while
+    ``int8_linear_matmul`` broadcasts the rank-3 product exactly like Torch
+    does, which is what surfaces the missing flatten in the FP32 epilogue.
+    """
+
+    fake = types.ModuleType("bitsandbytes")
+    fake.__version__ = "0.50.2"
+    function = types.ModuleType("bitsandbytes.functional")
+
+    def int8_vectorwise_quant(x, threshold=0.0):
+        del threshold
+        assert x.dim() == 2, f"native int8_vectorwise_quant expects rank 2, got {tuple(x.shape)}"
+        x_fp32 = x.to(torch.float32)
+        row_absmax = x_fp32.abs().amax(dim=1)
+        scale = row_absmax / 127.0
+        scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+        codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+        return codes, row_absmax, None
+
+    def int8_linear_matmul(x_int8, weight):
+        return torch.matmul(x_int8.to(torch.int32), weight.to(torch.int32).t())
+
+    def int8_mm_dequant(mm_out, row_stats, col_stats):
+        return (
+            mm_out.to(torch.float32)
+            * row_stats.to(torch.float32).reshape(-1, 1)
+            * col_stats.to(torch.float32).reshape(1, -1)
+            / (127.0 * 127.0)
+        )
+
+    function.int8_vectorwise_quant = int8_vectorwise_quant
+    function.int8_linear_matmul = int8_linear_matmul
+    function.int8_mm_dequant = int8_mm_dequant
+    fake.functional = function
+
+    monkeypatch.setitem(sys.modules, "bitsandbytes", fake)
+    monkeypatch.setitem(sys.modules, "bitsandbytes.functional", function)
+    monkeypatch.setattr(
+        sys.modules[BitsAndBytesLinear.__module__],
+        "_VALIDATED_BITSANDBYTES",
+        fake,
+    )
+    # Skip only the install probe; the shape/dtype validation still runs.
+    monkeypatch.setattr(
+        BitsAndBytesLinear,
+        "cached_validate_once",
+        classmethod(lambda cls: (True, None)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "bias"),
+    [
+        (torch.float32, False),
+        (torch.bfloat16, True),
+        (torch.float16, False),
+    ],
+)
+@pytest.mark.parametrize("leading", [(2, 3), (4, 2, 3), ()])
+def test_bitsandbytes_int8_forward_preserves_batched_activation_dims(
+    monkeypatch,
+    dtype: torch.dtype,
+    bias: bool,
+    leading: tuple[int, ...],
+):
+    if not BITSANDBYTES_AVAILABLE:
+        _install_fake_bitsandbytes(monkeypatch)
+
+    torch.manual_seed(4479)
+    linear = nn.Linear(128, 64, bias=bias).to(dtype).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=64,
+        bias=bias,
+        dtype=dtype,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    kernel.eval()
+
+    x = torch.randn(*leading, 128, dtype=dtype)
+    with torch.inference_mode():
+        flattened = kernel(x.reshape(-1, 128))
+        batched = kernel(x)
+
+    assert batched.shape == leading + (64,)
+    assert torch.equal(batched, flattened.reshape(batched.shape))
+
+    if dtype is torch.float32:
+        # Independent Torch oracle for the quantize -> INT8 matmul -> dequant
+        # arithmetic; it does not call the kernel or reuse its intermediates.
+        x_flat = x.reshape(-1, 128).float()
+        absmax = x_flat.abs().amax(dim=1)
+        x_scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
+        x_codes = (x_flat / x_scale[:, None]).round().clamp(-127, 127)
+        expected = (
+            (x_codes * x_scale[:, None]) @ kernel.dequantize_weight().float().t()
+        ).reshape(batched.shape)
+        torch.testing.assert_close(batched, expected, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.skipif(

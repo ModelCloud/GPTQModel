@@ -123,6 +123,17 @@ class _BlockfloatStorage(nn.Module):
         self.register_buffer(
             "exponents", torch.zeros(exponents_shape, dtype=torch.int8)
         )
+        # ``_kernel_linear`` reads the cuBLAS execution policy off this storage
+        # owner. A ``BaseQuantLinear`` subclass has already resolved its own
+        # policy before storage is initialised; an embedding table is a plain
+        # ``nn.Module``, so it must snapshot the process policy here. Without
+        # this, a tied head sharing the table's codes reached
+        # ``self.kernel.blockfloat_cublas`` on an undefined attribute and failed
+        # before the native matmul.
+        if not hasattr(self, "kernel"):
+            from ...utils.kernel import snapshot_kernel_config
+
+            self.kernel = snapshot_kernel_config()
 
     def hip_dispatch(self, tensor: torch.Tensor) -> bool:
         """Whether the HIP kernels can serve ``tensor`` for this storage.

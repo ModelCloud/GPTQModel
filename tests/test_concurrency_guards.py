@@ -42,7 +42,7 @@ def _run_two_threads(enter):
                 entered.set()
                 if not release.wait(timeout=10):
                     raise TimeoutError("guard was never released")
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             errors.append(exc)
 
     thread_a = threading.Thread(target=worker, args=(entered_a, release_a))
@@ -270,3 +270,82 @@ def test_cpu_bf16x3_matmul_entry_point_keeps_the_second_caller(monkeypatch):
         assert torch.backends.mkldnn.matmul.fp32_precision == "none"
     finally:
         torch.backends.mkldnn.matmul.fp32_precision = previous
+
+
+def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
+    """A capability probe must not restore a stale snapshot over a live scope.
+
+    ``has_cpu_bf16x3_precision`` mutates the process-global precision to probe
+    it. Pre-fix it did so without the owner lock, so a concurrent probe could
+    snapshot IEEE, race a scope entry, and then restore IEEE while the scope
+    was still active (issue #4486).
+    """
+
+    state, _ = _install_cpu_bf16x3_state(monkeypatch, precision="ieee")
+    monkeypatch.setattr(torch.backends.mkldnn, "is_available", lambda: True)
+
+    real_getter = cpu_features._cpu_bf16x3_precision
+    read_done = threading.Event()
+    release_probe = threading.Event()
+    forward_started = threading.Event()
+    scope_entered = threading.Event()
+    probe_done = threading.Event()
+    results = {}
+
+    def gated_getter():
+        value = real_getter()
+        if threading.current_thread().name == "capability-probe":
+            read_done.set()
+            assert release_probe.wait(timeout=10)
+        return value
+
+    monkeypatch.setattr(cpu_features, "_cpu_bf16x3_precision", gated_getter)
+    cpu_features.has_cpu_bf16x3_precision.cache_clear()
+
+    def probe():
+        try:
+            results["supported"] = cpu_features.has_cpu_bf16x3_precision()
+        except Exception as exc:  # noqa: BLE001 - re-raised below
+            results["probe_error"] = exc
+        finally:
+            probe_done.set()
+
+    def forward():
+        try:
+            assert read_done.wait(timeout=10)
+            forward_started.set()
+            with cpu_features.cpu_bf16x3_scope():
+                results["scope_entered"] = True
+                scope_entered.set()
+                assert probe_done.wait(timeout=10)
+                results["precision_in_scope"] = real_getter()
+                results["depth_in_scope"] = cpu_features._CPU_BF16X3_DEPTH
+        except Exception as exc:  # noqa: BLE001 - re-raised below
+            results["forward_error"] = exc
+
+    probe_thread = threading.Thread(target=probe, name="capability-probe")
+    forward_thread = threading.Thread(target=forward, name="forward")
+    try:
+        probe_thread.start()
+        assert read_done.wait(timeout=10)
+        forward_thread.start()
+        assert forward_started.wait(timeout=10)
+        # Pre-fix the forward enters the scope while the probe is paused. With
+        # the fix it blocks on the owner lock, so this wait times out.
+        scope_entered.wait(timeout=1.0)
+        release_probe.set()
+        probe_thread.join(timeout=10)
+        forward_thread.join(timeout=10)
+    finally:
+        release_probe.set()
+        cpu_features.has_cpu_bf16x3_precision.cache_clear()
+
+    assert not probe_thread.is_alive()
+    assert not forward_thread.is_alive()
+    assert "probe_error" not in results, results.get("probe_error")
+    assert "forward_error" not in results, results.get("forward_error")
+    assert results["supported"] is True
+    assert results["precision_in_scope"] == "bf16"
+    assert results["depth_in_scope"] == 1
+    assert state["precision"] == "ieee"
+    assert cpu_features._CPU_BF16X3_DEPTH == 0
