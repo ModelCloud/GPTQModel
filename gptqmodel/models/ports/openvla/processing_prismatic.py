@@ -37,8 +37,14 @@ class PrismaticImageProcessor(BaseImageProcessor):
             raise ValueError("OpenVLA requires three means and positive standard deviations per image")
 
     def apply_transform(self, image):
-        from torchvision.transforms import InterpolationMode
-        from torchvision.transforms import functional as tvf
+        try:
+            from torchvision.transforms import InterpolationMode
+            from torchvision.transforms import functional as tvf
+        except ImportError as exc:
+            raise ImportError(
+                "OpenVLA image processing requires torchvision; install with `pip install 'gptqmodel[vision]'` "
+                "using a torchvision build compatible with your PyTorch installation."
+            ) from exc
 
         if not isinstance(image, Image.Image):
             raise TypeError("OpenVLA image processing accepts PIL images")

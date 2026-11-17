@@ -43,7 +43,13 @@ class MiniCPMV(PreTrainedModel, GenerationMixin):
         else:
             # A fixed, inspected timm constructor; checkpoint strings cannot
             # select a Hub model, external registry, or downloaded implementation.
-            from timm.models.vision_transformer import vit_so400m_patch14_siglip_384
+            try:
+                from timm.models.vision_transformer import vit_so400m_patch14_siglip_384
+            except ImportError as exc:
+                raise ImportError(
+                    "Legacy MiniCPM-V vision requires timm; install with `pip install 'gptqmodel[vision]'` "
+                    "using a torchvision build compatible with your PyTorch installation."
+                ) from exc
 
             if config.vision_encoder != "vit_so400m_patch14_siglip_384.webli":
                 raise ValueError(f"Unqualified MiniCPM-V vision encoder: {config.vision_encoder}")

@@ -9,8 +9,24 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.layers import AttentionPoolLatent, DropPath, LayerType, Mlp, PatchDropout, PatchEmbed, resample_abs_pos_embed
-from timm.models._manipulate import checkpoint_seq, named_apply
+
+
+try:
+    from timm.layers import (
+        AttentionPoolLatent,
+        DropPath,
+        LayerType,
+        Mlp,
+        PatchDropout,
+        PatchEmbed,
+        resample_abs_pos_embed,
+    )
+    from timm.models._manipulate import checkpoint_seq, named_apply
+except ImportError as exc:
+    raise ImportError(
+        "DeepSeek-VL2 vision requires timm and torchvision; install with `pip install 'gptqmodel[vision]'` "
+        "using a torchvision build compatible with your PyTorch installation."
+    ) from exc
 
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
