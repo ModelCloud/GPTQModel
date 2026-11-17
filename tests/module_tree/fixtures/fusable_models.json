@@ -2512,7 +2512,7 @@
     },
     "internlm2": {
       "definition": "InternLM2QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned InternLM2/2.5 packed KV-group-interleaved QKV; fusion executor has not been qualified."
     },
     "interns1": {
       "definition": "InternS1QModel",

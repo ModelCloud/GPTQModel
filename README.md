@@ -272,6 +272,8 @@ have model-specific compatibility boundaries, source references and CPU validati
 [GRIN-MoE, Instella, EXAONE 3 and both ERNIE VL aliases](docs/transformers5-model-ports.md#grin-moe-instella-exaone-3-and-ernie-vl-selection)
 use package-selected implementations with explicit plain AWQ policies; the
 reference records processor selection, cache failure behavior and provenance.
+[Hymba hybrid replay and InternLM2/2.5 packed attention](docs/transformers5-model-ports.md#hymba-hybrid-replay-and-internlm2-packed-attention)
+describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

@@ -30,6 +30,8 @@ definition ownership corrections alongside the package-owned ports.
 | `ExaOneQModel` / `exaone` | [EXAONE 3.0/3.5 source and rollback flow](../gptqmodel/models/ports/exaone/PROVENANCE.md), [validation](../gptqmodel/models/ports/exaone/VALIDATION.md) | Published 3.0/3.5 meta/index layouts, independent six-mode RoPE oracle, MHA/GQA/MQA, static/dynamic cache rollback through LM output, greedy/beam generation and safetensors reload | Public CPU plain-AWQ calibration/packing/save/reload of 14 tiny linears; no scale groups | No trained-checkpoint quality, GPU, FlashAttention or fusion qualification; unsupported cache layers/offloading rejected |
 | `GrinMoeQModel` / `grinmoe` | [Pinned Microsoft GRIN-MoE source and SparseMixer flow](../gptqmodel/models/ports/grinmoe/PROVENANCE.md), [validation](../gptqmodel/models/ports/grinmoe/VALIDATION.md) | Exact 1957-key published meta schema, independent routing/attention equations, inspected source parity, cache/generation, dense/packed safetensors reload and public hostile metadata matrix | Actual CPU plain AWQ packs every supported projection; norms/router unchanged; no scale groups | Native dynamic cache only; eager and SDPA retain distinct source window semantics; no GPU, trained-checkpoint quality or fusion qualification |
 | `InstellaQModel` / `instella` | [Pinned AMD Instella source](../gptqmodel/models/ports/instella/PROVENANCE.md), [selection and qualification](../gptqmodel/models/ports/instella/COVERAGE.md) | Exact 399-key published meta schema, full-width Q/K norms, MHA/GQA/MQA, eager/SDPA low-precision forwards, static/dynamic cache, generation, scaled-RoPE reload and hostile metadata isolation | Actual CPU plain AWQ packs seven decoder linears; Q/K norms stay dense; no scale groups | Research-only RAIL-MS source terms retained; failed cache needs reset; no trained 3B, GPU, FlashAttention or fusion qualification |
+| `HymbaQModel` / `hymba` | [Pinned NVIDIA hybrid, cache and calibration flow](../gptqmodel/models/ports/hymba/README.md), [provenance](../gptqmodel/models/ports/hymba/PROVENANCE.md), [coverage](../gptqmodel/models/ports/hymba/COVERAGE.md) | Complete 611-key published meta inventory plus tied head alias, independent FP64 hybrid oracle, shared KV/memory, actual calibration-worker replay, generation, safetensors reload and public hostile metadata matrix | Actual CPU AWQProcessor plain staging across four layouts; SSM/norm/router state excluded; no scale groups | Failed hybrid cache requires reset; no trained 1.5B, accelerator kernels/packing, offload or multi-GPU qualification |
+| `InternLM2QModel` / `internlm2` (InternLM2/2.5) | [Pinned InternLM2/2.5 sources, packed layout and cache limits](../gptqmodel/models/ports/internlm2/README.md) | Real published-layout meta ownership, KV-group-interleaved QKV, independent low-precision attention oracle, eager/SDPA, cache/generation, safetensors reload and public hostile metadata matrix | Actual CPU plain AWQ of all five decoder linears; no scale groups | No trained 1.8B/7B/20B or GPU qualification; static/foreign caches and fusion unsupported; cached NTK boundary crossing differs from full-sequence recomputation |
 | `Exaone4QModel`, `Exaone4_5QModel` / `exaone4`, `exaone4_5_text`, `exaone4_5` | [Native text/vision alias, checkpoint schemas and flow](../gptqmodel/models/ports/exaone4/README.md) | Published 707/1064-key reduced index contracts, MHA/GQA, cache/generation, image/video processor input, hostile metadata isolation and safetensors reload | Actual CPU plain-AWQ quantization of decoder linears; no scale groups | Native MTP omitted; no trained-checkpoint quality, GPU packed kernels or fusion qualification |
 | `BailingMoeQModel` / `bailing_moe`, `bailing_hybrid` | [Ling dense/MLA/hybrid/MTP provenance](../gptqmodel/models/ports/bailing_moe/README.md) | Three full meta indexes; dense GQA, normalized heads, low-rank/dense-query MLA, recurrence, MTP replay, generation, safetensors reload and head/loss failure-reset coverage | Actual CPU plain quantization/packing/inference; no scale groups | No GPU, trained evaluation, fused FLA or full public quantize/save/load qualification |
 | `ApertusQModel`, `Apertus1p5TextQModel`, `Apertus1p5QModel` / `apertus`, `apertus1p5_text`, `apertus1p5` | [Native Apertus and package-owned 1.5 text/multimodal qualification](../gptqmodel/models/ports/apertus/README.md); pinned Apache-2.0 Swiss AI fork | Native text oracle; full/pruned output vocabularies, bias/activation variants, live CPU/meta ownership, eager/decoder-SDPA cache/generation and safetensors reload, actual image/audio processor and embedding splice, public hostile metadata matrix | Actual CPU plain quantization of every decoder projection across layouts, including failure/retry; no scale folding/search | Official gated checkpoint returned HTTP 401: no trained weights, official tokenizer/chat template or checkpoint key audit; no GPU/FlashAttention/CUDA xIELU, packed GPTQ/AWQ roundtrip or fusion qualification; vision attention remains the source's fixed implementation |
@@ -289,3 +291,54 @@ Run the InternLM checks from the repository root:
 ```shell
 python -m pytest tests/test_internlm_local_port.py tests/module_tree/test_internlm_local_port.py tests/module_tree/test_registered_module_plans.py -q --tb=short
 ```
+
+## Hymba hybrid replay and InternLM2 packed attention
+
+Hymba uses its own parallel attention/SSM architecture and hybrid cache.
+InternLM2/2.5 uses its original KV-group-interleaved packed QKV layout. Neither
+definition selects a related Transformers architecture as a substitute.
+
+```mermaid
+flowchart TD
+    A["load_model_config / local_model_loader"] --> B{"model_type"}
+    B -->|hymba| H["LocalModelLoader: HymbaConfig / HymbaForCausalLM"]
+    H --> V{"Dimensions and shared-KV groups valid?"}
+    V -->|no| X["ValueError before model/cache allocation"]
+    V -->|yes| M["HymbaModel: insert memory and physical positions"]
+    M --> T["Hybrid cache transaction: decoder, head and loss"]
+    T -->|success| R["Commit physical/user lengths and masks"]
+    T -->|failure| F["Mark cache invalid; reset every state before replay"]
+    W["forward_batch_worker / ForwardExecutor"] --> P["HymbaQModel.prepare_layer_replay_kwargs"]
+    P --> S["Current layer window policy and this batch's KV producer frontier"]
+    S -->|producer missing| Y["ValueError before unrelated KV substitution"]
+    S --> D["HymbaDecoderLayer: attention + selective SSM"]
+    D --> U["update_layer_replay_kwargs_from_output: refresh and retire producers"]
+    B -->|internlm2| I["LocalModelLoader: InternLM2Config / InternLM2ForCausalLM"]
+    I --> Q["attention.wqkv: split Q rows, K and V within each KV group"]
+    Q --> N["Request-local RoPE, eager/SDPA and native DynamicCache"]
+    N -->|unsupported cache| Z["Reject before decoder"]
+    B --> G["Explicit empty AWQ scale groups: plain weight quantization"]
+    C["Checkpoint auto_map, trust and bypass"] -. cannot replace package classes .-> B
+    classDef failure fill:#fee,stroke:#b00
+    class X,F,Y,Z failure
+```
+
+| Mechanism | Before | Shipped behavior |
+| --- | --- | --- |
+| Hymba construction | Base `22bea1201`, `definitions/hymba.py:12-22,45-55`: remote hook, mandatory CUDA dependencies and late config mutation | Package-selected native Hymba architecture; dimension/group validation in `HymbaConfig`; portable Torch recurrence |
+| Hymba ownership and replay | Base `22bea1201`, `definitions/hymba.py:34-39`: omitted SSM state, nonexistent norm and expert zero; replay reused first-layer policy/previous KV | Explicit dense SSM/norm/router ownership, wildcard experts, actual `pre_moe_layernorm`; layer-owned window policy and batch-owned KV frontier |
+| InternLM2 selection | Base `22bea1201`, `definitions/internlm2.py:10-11`: checkpoint trust and Transformers 4 pin | Direct package config/model, `output` head identity and source packed layout; no fusion admission |
+
+Hymba cache rejection covers cross-request ownership and failed partial updates;
+reset clears KV, convolution, SSM, masks, lengths and ownership together.
+Its locking test rejects a second transaction before Torch access; this is not
+evidence of concurrent accelerator execution. InternLM2's RoPE calculation is
+request-local, but cached keys retain the source model's original rotations
+when the NTK base changes. Read the linked references before selecting cache
+operations or interpreting full-versus-chunked parity.
+
+Combined Hymba, InternLM1/2, loader, security, registry, AWQ and calibration
+helper validation passed **881 tests with 36 skips** in 43.97 seconds on the
+CPU environment above. Skips cover unavailable NVIDIA paths and unrelated
+generic-family fixtures. The final InternLM2 packed AWQ save/reload follow-up
+then passed all **66 owned tests**, with no skips, in 4.79 seconds.

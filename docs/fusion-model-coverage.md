@@ -247,7 +247,7 @@ layout alone does not authorize it.
 | `instella` | `InstellaQModel` | Package-owned Instella implementation; full-width Q/K normalization and projection fusion have not been qualified. |
 | `intern_s2_preview` | `InternS2PreviewQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `internlm` | `InternLMQModel` | Package-owned InternLM 1 port; fusion executor has not been qualified. |
-| `internlm2` | `InternLM2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `internlm2` | `InternLM2QModel` | Package-owned InternLM2/2.5 packed KV-group-interleaved QKV; fusion executor has not been qualified. |
 | `interns1` | `InternS1QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `internvl_chat` | `InternVLChatQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `k2_horizon` | `K2HorizonQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
