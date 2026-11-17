@@ -8,11 +8,13 @@ on:
       - 'gptqmodel/quantization/**'
       - 'gptqmodel/models/**'
       - 'gptqmodel/nn_modules/qlinear/torch_awq.py'
+      - 'gptqmodel/utils/calibration.py'
       - 'gptqmodel/nn_modules/qlinear/_numerics.py'
       - 'gptqmodel/nn_modules/qlinear/gemm_awq.py'
       - 'gptqmodel/nn_modules/qlinear/gemm_awq_triton.py'
       - 'docs/**'
       - 'tests/test_awq_*.py'
+      - 'tests/test_calibration_*.py'
       - 'tests/test_docs_contract_refs.py'
       - 'tests/module_tree/**'
       - 'requirements.txt'
@@ -61,6 +63,8 @@ jobs:
                 tests/test_rotation_format_gate_4666.py \
                 tests/test_rotation_validate_first_4935.py \
                 tests/test_awq_conv1d_gpt2_4887.py \
+                tests/test_calibration_messages_tools_4858.py \
+                tests/test_calibration_tools_formats_4934.py \
                 tests/test_awq_hybrid_moe_root_4903.py \
                 tests/test_awq_deepseek_v4_hash_moe_4880.py \
                 tests/test_awq_cohere2_moe_parallel_norm_4898.py \
