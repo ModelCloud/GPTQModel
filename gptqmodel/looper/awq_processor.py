@@ -4987,6 +4987,16 @@ class AWQProcessor(LoopProcessor):
                 Target module to quantize.
         """
         module_signature = inspect.signature(module.forward).parameters
+        if any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in module_signature.values()
+        ):
+            # A `**kwargs`-only forward reads named entries out of the dict
+            # itself (Hymba's `HymbaBlock.forward(hidden_states,
+            # past_key_value=None, **kwargs)` indexes `kwargs["attention_mask"]`
+            # and friends), so filtering by parameter name hands it an empty
+            # dict and the replay raises `KeyError` (#4891).
+            return dict(inputs_kwargs)
         sanitized_kwargs = {}
         for k, v in inputs_kwargs.items():
             if k in module_signature or k == _AWQ_ROTARY_POSITION_IDS:

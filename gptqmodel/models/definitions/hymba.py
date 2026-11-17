@@ -32,8 +32,18 @@ class HymbaQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "mamba": ("in_proj:0", "out_proj:1"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # `in_proj` feeds a conv/SSM/attention path that is not positively
+            # homogeneous, so it is never an AWQ scale source for `out_proj`
+            # (#4891). Without `nosrc` the fold was only avoided by a width
+            # mismatch, which is not a guarantee.
+            "mamba": ("in_proj:0:nosrc", "out_proj:1"),
+            # `HymbaDecoderLayer` has no `post_attention_layernorm`: the norm in
+            # front of the MoE is `pre_moe_layernorm`, applied to
+            # `residual + mamba_out`. Declaring the absent name left the
+            # experts block without a producer of its own, so its gate/up were
+            # folded into `input_layernorm` -- not output-preserving, because
+            # they read `pre_moe_layernorm`'s output (#4891).
+            "pre_moe_layernorm": ("pre_moe_layernorm:!",),
             "moe:moe": {
                 "experts": {
                     "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
