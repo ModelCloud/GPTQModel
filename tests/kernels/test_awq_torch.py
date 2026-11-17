@@ -652,3 +652,105 @@ def test_awq_torch_decode_range_widens_past_fp32(device):
     actual = module(x)
     assert torch.isfinite(actual).all()
     assert actual[0, 0].item() == float(torch.tensor(scale, dtype=torch.bfloat16))
+
+
+def _under_compile(fn):
+    """Run ``fn`` while ``torch.compiler.is_compiling()`` reports ``True``.
+
+    The compiled region cannot read the scale tensor on the host, so this is
+    the branch a dynamo trace takes.
+    """
+
+    original = torch.compiler.is_compiling
+    torch.compiler.is_compiling = lambda: True
+    try:
+        return fn()
+    finally:
+        torch.compiler.is_compiling = original
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+@pytest.mark.parametrize(
+    ("label", "scale", "code", "zero"),
+    [
+        ("fits", 0.001, 3, 2),
+        ("weight-overflow", 10000.0, 7, 0),
+        ("scale-underflow", 1e-8, 1, 0),
+    ],
+)
+def test_awq_torch_compiled_decode_dtype_matches_eager(device, label, scale, code, zero):
+    """A compiled graph must choose the same decode dtype as eager (#4794).
+
+    #4737 moved the compile guard in front of the cache key and returned
+    ``False`` for every dtype, so ``_decode_dtype_for_activation`` fell through
+    to FP64 inside every compiled graph. ``linear_wide_bias`` then promoted the
+    product too, running the whole GEMM in FP64.
+    """
+
+    module = _pack_layer(scale=scale, code=code, zero=zero, device=device)
+    for activation_dtype in (torch.float16, torch.bfloat16):
+        eager = module._decode_dtype_for_activation(activation_dtype)
+        compiled = _under_compile(
+            lambda dtype=activation_dtype: module._decode_dtype_for_activation(dtype)
+        )
+        assert compiled is eager, label
+        assert compiled is not torch.float64, label
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_compiled_decode_keeps_fp64_past_fp32(device):
+    """A BF16 scale beyond the FP32 range must still decode in FP64 (#4794).
+
+    The narrow decode is now decided outside the compiled region, so the
+    pathological widening that `_decode_dtype_for_activation` already
+    documents must survive the change.
+    """
+
+    module = _pack_layer(
+        scale=1e38, code=1, zero=0, scale_dtype=torch.bfloat16, device=device
+    )
+    compiled = _under_compile(
+        lambda: module._decode_dtype_for_activation(torch.bfloat16)
+    )
+    assert compiled is torch.float64
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_compiled_decode_follows_the_scales(device):
+    """The compiled answer is recomputed when the scales change (#4794)."""
+
+    module = _pack_layer(scale=10000.0, code=7, zero=0, device=device)
+    assert (
+        _under_compile(lambda: module._decode_dtype_for_activation(torch.float16))
+        is torch.float32
+    )
+
+    module.scales = torch.full_like(module.scales, 0.5)
+    module.clear_weight_cache()
+    assert (
+        _under_compile(lambda: module._decode_dtype_for_activation(torch.float16))
+        is torch.float16
+    )
+
+
+@pytest.mark.parametrize("device", _AWQ_DEVICES, ids=str)
+def test_awq_torch_compiled_forward_is_bitwise_eager(device):
+    """The traced forward must not silently widen the decode (#4794).
+
+    A real ``torch.compile`` trace takes the compiled branch, so a decode that
+    escalated to FP64 changed the visible result (up to 0.03 on the reporter's
+    checkpoint) and cost the FP64 GEMM.
+    """
+
+    module = _pack_layer(scale=0.001, code=3, zero=2, device=device)
+    x = torch.randn(1, 8, 128, dtype=torch.float16, device=device)
+
+    with torch.inference_mode():
+        eager = module(x)
+
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+    with torch.inference_mode():
+        actual = compiled(x)
+
+    assert actual.dtype is torch.float16
+    assert torch.equal(actual, eager)
