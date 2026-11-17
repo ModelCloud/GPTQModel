@@ -587,6 +587,29 @@ def _module_tensor_bytes(module: torch.nn.Module) -> int:
     return total
 
 
+def _default_accelerator_family() -> DEVICE:
+    """Return the accelerator an integer ``max_memory`` key refers to.
+
+    Accelerate treats integer keys as accelerator ordinals. When the caller
+    passed no ``device`` the family has to come from the runtime instead of
+    defaulting to CPU, otherwise ``{1: "20GiB"}`` would name ``cpu:1`` and the
+    budget would look accelerator-free (#4632).
+    """
+
+    if torch.cuda.is_available():
+        return DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
+    for candidate in (DEVICE.XPU, DEVICE.NPU):
+        runtime = getattr(torch, candidate.type, None)
+        is_available = getattr(runtime, "is_available", None)
+        if is_available is not None:
+            try:
+                if is_available():
+                    return candidate
+            except Exception:
+                continue
+    return DEVICE.CPU
+
+
 def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
     """Normalize an Accelerate-style ``max_memory`` map into ordered budgets.
 
@@ -600,11 +623,21 @@ def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
 
     from accelerate.utils import convert_file_size_to_int
 
-    family = selector_device_family(device) or DEVICE.CPU
+    family = selector_device_family(device) or _default_accelerator_family()
     budgets: List[tuple[str, int]] = []
     seen = set()
     for key, value in max_memory.items():
         if isinstance(key, int):
+            # An integer key is an accelerator ordinal. Without an explicit
+            # `device` the family must come from the active accelerator, not
+            # from CPU: `max_memory={1: "20GiB"}` names `cuda:1` on a CUDA host
+            # (#4632).
+            if family == DEVICE.CPU:
+                raise ValueError(
+                    f"`max_memory` names the accelerator ordinal `{key}` but no "
+                    "accelerator is available; use the `\"cpu\"` key for a CPU-only "
+                    "budget."
+                )
             name = f"{family.type}:{key}"
         else:
             name = str(key).strip().lower()
@@ -807,33 +840,80 @@ def _normalize_explicit_placement(device, device_map, max_memory):
     return requested_device_map, explicit_device_map
 
 
-def _resolve_max_memory_device(max_memory, device) -> Optional[DEVICE]:
-    """Validate ``device`` against the devices a ``max_memory`` budget names.
+def _max_memory_device_name_is_cpu(name: str) -> bool:
+    """Whether a normalized ``max_memory`` key is the CPU budget."""
+
+    if name == "cpu":
+        return True
+    try:
+        return torch.device(name).type == "cpu"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def _resolve_max_memory_device(max_memory, device) -> Optional[Union[DEVICE, tuple]]:
+    """Resolve the devices a ``max_memory`` budget may place weights on.
 
     ``max_memory`` is the authoritative list of devices that may hold weights
-    (#4082). When every entry is ``cpu`` the budget can only place layers on
-    CPU, so kernel selection must use CPU too; otherwise a CUDA kernel is
-    selected for a CPU-resident model and the first forward raises
-    ``Expected a cuda device, but got: cpu`` (#4091 item 7).
+    (#4082), so kernel selection must see exactly the accelerator devices the
+    budget names. Expanding the CUDA family to every visible GPU made the
+    mixed-capability check reject budgets that never touched the other card: on
+    a 4090 + 5090 host even ``max_memory={0: "20GiB"}`` failed with
+    ``cuda:0=12.0, cuda:1=8.9`` (#4632).
 
-    Returns ``DEVICE.CPU`` for a CPU-only budget and ``None`` when the budget
-    admits an accelerator. An explicit accelerator ``device`` that contradicts
-    a CPU-only budget is rejected rather than silently ignored.
+    Returns ``DEVICE.CPU`` for a CPU-only budget, the tuple of concrete
+    accelerator devices for an accelerator budget, and ``None`` without a
+    budget. An explicit ``device`` that contradicts the budget is rejected
+    rather than silently ignored.
     """
 
     if max_memory is None:
         return None
-    if any(name != "cpu" for name, _ in _normalize_max_memory(max_memory, device)):
-        return None
+    budgets = _normalize_max_memory(max_memory, device)
+    accelerators: List[torch.device] = []
+    for name, _ in budgets:
+        if _max_memory_device_name_is_cpu(name):
+            continue
+        try:
+            target = torch.device(name)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f"`max_memory` has an unsupported device key `{name}`."
+            ) from exc
+        if target not in accelerators:
+            accelerators.append(target)
+
     requested_family = selector_device_family(device) if device is not None else None
+    if not accelerators:
+        if requested_family is not None and requested_family != DEVICE.CPU:
+            raise ValueError(
+                "`max_memory` has no accelerator entry, so it can only place layers "
+                f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
+                "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
+                "CPU-only placement."
+            )
+        return DEVICE.CPU
+
     if requested_family is not None and requested_family != DEVICE.CPU:
-        raise ValueError(
-            "`max_memory` has no accelerator entry, so it can only place layers "
-            f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
-            "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
-            "CPU-only placement."
+        budget_family = selector_device_family(tuple(accelerators))
+        if requested_family != budget_family:
+            raise ValueError(
+                f"`device={device!r}` selects {requested_family.value} but `max_memory` "
+                f"funds {budget_family.value} devices ({', '.join(str(d) for d in accelerators)}). "
+                "Pass one placement argument, or make them agree."
+            )
+        explicit = _explicit_requested_devices(
+            device if isinstance(device, (tuple, list)) else (device,)
         )
-    return DEVICE.CPU
+        if explicit is not None:
+            missing = [target for target in explicit if target not in accelerators]
+            if missing:
+                raise ValueError(
+                    f"`device={device!r}` names {', '.join(str(d) for d in missing)} but "
+                    "`max_memory` does not fund it. Add that device to `max_memory`, or "
+                    "drop it from `device`."
+                )
+    return tuple(accelerators)
 
 
 def _external_runtime_device_kwargs(
