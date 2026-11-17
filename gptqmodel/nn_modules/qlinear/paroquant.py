@@ -93,6 +93,10 @@ class ParoLinear(AwqTorchLinear):
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # The rotation and fused AWQ GEMM branch on host-side row counts and call
+    # custom ops, so a compiled decode loop cannot capture this forward. Do not
+    # inherit the Torch-AWQ declaration.
+    SUPPORTS_COMPILE = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     # The inherited INT4 AWQ packer writes eight codes per int32, so an output

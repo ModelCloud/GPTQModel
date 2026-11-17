@@ -337,6 +337,19 @@ class BaseQuantLinear(nn.Module):
     # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
 
+    # Whether a compiled generation path (transformers' static-cache
+    # auto-compile, a CUDA-graph decode loop) is not a pessimization for this
+    # kernel. False does not mean the forward is untraceable: most kernels
+    # here break the graph on every linear because they call a custom op
+    # without a fake implementation or branch on host values (`data_ptr()`,
+    # `id()`, `._version`) inside `forward`. When capture fails, each decode
+    # step pays for dozens of graph fragments and the guard checks, so the
+    # static cache ends up 2-4x slower than eager (#4669). A kernel opts in
+    # only with a measurement on the hardware it claims; an opt-in on a
+    # graph-breaking kernel whose eager path is already fast is strictly
+    # slower than eager.
+    SUPPORTS_COMPILE: bool = False
+
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY: List[int] = None

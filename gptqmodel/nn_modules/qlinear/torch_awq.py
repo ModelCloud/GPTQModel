@@ -30,6 +30,13 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # Measured, not assumed: the reporter of #4669 saw a static-cache
+    # `generate()` improve from 1.36 s to 0.76 s on Llama-3.2-1B (4090), and
+    # this host's tiny Llama fixture measured parity (0.167 s dynamic vs
+    # 0.155 s static steady state). The forward still breaks the graph on its
+    # scale/bias cache keys, but the eager dequantize path is slow enough that
+    # compiling it is not a pessimization, unlike the custom-op kernels.
+    SUPPORTS_COMPILE = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
