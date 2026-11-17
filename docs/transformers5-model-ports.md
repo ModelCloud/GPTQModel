@@ -55,6 +55,11 @@ quality coverage on this checkout.
 
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `Raon1MiniQModel` / `raon1_mini` | [Owned RDA/MLA, mHC and SiTU-MoE](../gptqmodel/models/ports/raon1_mini/README.md) | 19,434 released key/shape/dtype entries; independent recurrent/MLA equations and all 65,536 E4M3/E8M0 byte pairs; cache, hostile metadata and repeated reloads | Eight public dense-source plain-AWQ cases and two exact reloads; source MXFP8 re-quantization rejects before mutation | Persistent byte weights/scales only; no trained quality, GPU, native MXFP8 GEMM, extended context, fusion or performance qualification |
+| `Spark2_5QModel` / `spark2_5` | [Owned packed-QKV/head-gated hybrid decoder](../gptqmodel/models/ports/spark2_5/README.md) | All 290 released shapes; independent partial-RoPE/FP32-residual equations, three dtypes, cache/generation, real BPE and hostile metadata | Six public plain-AWQ cases, all ten physical decoder linears and two exact reloads | No trained quality, GPU, model disk placement, extended context, fusion or concurrent-execution qualification |
+| `RwgQModel`, `FalconQModel` | [Native Falcon, historical RW config adapter and local ALiBi repair](../gptqmodel/models/ports/rw/README.md) | 680 real 7B/40B keys and 196 header shapes; independent legacy layouts and eager/SDPA ALiBi oracle; real tokenizers, cache, hostile metadata | Twelve public plain-AWQ cases, all eight decoder linears and two exact reloads; dual norms explicit in both registry plans | RW1B source/meta only; 180B config inaccessible. No trained quality, GPU/FlashAttention, extended context or fusion qualification |
+| `TeleChat2QModel` / `telechat` | [Owned TeleChat/TeleChat2 decoder and source tokenizer dialects](../gptqmodel/models/ports/telechat2/README.md) | Four causal release inventories/2,152 keys, 1,606 actual header shapes, independent interleaved-KV/rounded-RoPE equations, source IDs, cache/generation and hostile metadata | Six public plain-AWQ cases, all twelve decoder linears and two exact reloads; headless legacy causal loading rejects | Apache code notices do not grant model-artifact commercial rights; later model cards reference community terms. Original requested 7B endpoint inaccessible; no trained/GPU/fusion qualification |
+| `SolarOpen2QModel` / `solar_open2` | [Owned hybrid GQA/KDA decoder and Upstage provenance](../gptqmodel/models/ports/solar_open2/README.md) | All 47,019 released key/shapes; independent vector-decay/routing/RoPE equations, dtype/cache/generation, hostile metadata and repair/retry | Six public plain-AWQ cases, all 39/40/27 applicable linears, dense recurrent controls, exact FP32 router bias and two reloads; no scale groups | Apache source and separate Upstage Solar artifact license with derivative-model branding conditions. No trained payload, GPU, FLA, fusion, million-token context or concurrent execution qualification |
 | `Ovis2_5QModel` / `ovis2_5` | [Owned Qwen3/SigLIP2 NaViT soft-visual-vocabulary binding and Apache notices](../gptqmodel/models/ports/ovis2_5/README.md) | Both released header inventories, independent vision/merge equations, saved generation policy, hostile metadata, native decoder cache/generation and two safetensors cycles | Six public image-calibrated plain-AWQ cases, all 14 decoder linears and dense vision exclusions; no scale groups | Native Ovis2 remains separate; no trained-payload quality, GPU, fusion, concurrency or foreign-cache qualification |
 | `Ovis2_6_MoeQModel`, `Ovis2_6_NextQModel` | [Owned NaViT/visual-vocabulary wrapper and native Qwen3 MoE/Next decoders](../gptqmodel/models/ports/ovis2_6_moe/README.md) | Independent checkpoint inventories and media equations, hostile metadata, tokenizer/processor, dtype/cache/generation and repeated safetensors reloads | Public image-calibrated plain AWQ, native expert ownership and dense exclusions; linear-attention containers and routers excluded | No trained-payload quality, GPU, optimized FLA, fusion, concurrency or foreign-cache qualification |
 | `OvisQModel` / `ovis` | [Package-owned Ovis 1.0/1.5/1.6 visual vocabulary and pinned Apache notices](../gptqmodel/models/ports/ovis/README.md) | Eight release indexes and four full header inventories, independent vision/media merge equations, native Llama/Qwen2/Gemma2 decoders, released generation policy, hostile metadata, cache and safetensors reload | Eight public image-calibrated plain-AWQ cases, all 14 decoder linears, dense exclusions and two exact reloads; no scale groups | Native Ovis2 is separate; no trained weights, GPU, fusion, concurrent execution, foreign cache or AWQ fold/search qualification |
@@ -1392,3 +1397,202 @@ suites. Skips were 460 NVIDIA Marlin cases and three absent DeciLM/EXAONE/
 Nanbeige fixtures. The migrated Qwen-Drive support suite separately passed all
 13 cases in 3.89 seconds; five old assertions had failed because they required
 optional registration, AutoModel and deleting an instantiated planner.
+
+## Solar-Open2 recurrent implementation selection
+
+[Solar-Open2](../gptqmodel/models/ports/solar_open2/README.md) uses the inspected
+Upstage Transformers fork at `ef5c37485091057070b36dd0620798f74988eb01`.
+Transformers 5.23.0 has no exact `solar_open2` mapping. The definition binds
+`SolarOpen2Config` and `SolarOpen2ForCausalLM` directly, retaining released
+per-expert keys, full GQA and vector-decay KDA attention. `SolarOpen2DynamicCache`
+owns convolution/recurrent state and sequence accounting for each generation.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: solar_open2 metadata"] --> B["SolarOpen2QModel.loader: LocalModelLoader"]
+    B --> C["SolarOpen2Config and SolarOpen2ForCausalLM"]
+    C --> D{"Configured layer type?"}
+    D -->|full_attention| E["SolarOpen2Attention: native Torch GQA"]
+    D -->|linear_attention| F["SolarOpen2LinearAttention: causal convolution and vector-decay KDA"]
+    E --> G["SolarOpen2DynamicCache: request-owned state"]
+    F --> G
+    G --> H{"Foreign cache or recurrent rollback requested?"}
+    H -->|Yes| X["ValueError or NotImplementedError before unsupported execution"]
+    H -->|No| I["Forward or generation with owned cache"]
+    C --> J["CalibrationConfig to public plain AWQ; scaling groups empty"]
+    J --> K["Pack decoder linears; keep recurrent controls and router bias dense"]
+    K --> L["Safetensors save/load/re-save/reload; FP32 router bias exact"]
+    classDef fail fill:#fee,stroke:#b00
+    class X fail
+```
+
+| Mechanism before the port | Shipped mechanism and evidence |
+| --- | --- |
+| `bf4003d:definitions/solar_open2.py:30-42`: inherited AutoModel loader with no exact installed mapping | `definitions/solar_open2.py:35-42`: explicit package classes, plain AWQ and unqualified fusion |
+| `bf4003d:definitions/solar_open2.py:57-71`: projection/norm plan omitted recurrent controls and correction bias | Complete KDA decay/gate/convolution and `mlp.gate.e_score_correction_bias:!` exclusions in the definition and central registry |
+| No package-owned hybrid cache implementation | `ports/solar_open2/modeling_solar_open2.py:758-859`: per-request cache, independent sequence count, reset and explicit foreign-cache/rollback rejection |
+
+The source-derived gate applies decay independently along each key dimension;
+the port's independent float64 oracle detects scalar substitution. Public AWQ
+tests exercise both calibration offload settings, every packed and dense tensor,
+and nonrepresentable FP32 correction biases through two exact reload cycles.
+The port README records source/header/license hashes, intended mutation failures,
+exact commands and CPU-only qualification. Source code retains Apache notices;
+released artifact metadata retains the separate
+[Upstage Solar License](../gptqmodel/models/ports/solar_open2/SOLAR_LICENSE),
+including the derivative-model naming and attribution conditions. This is not
+trained 250B quality, GPU/FLA, million-token-context or fusion qualification.
+
+## Raon, Spark2.5, RW/Falcon and TeleChat selection
+
+These definitions bind their own loader before checkpoint Python selection.
+Raon, Spark2.5 and TeleChat have no exact installed Transformers 5.23 model
+mapping. RW/Falcon reuses native Falcon projection modules and models, with
+historical config translation and a family-local correction for the measured
+duplicate eager ALiBi bias. Native RoPE and SDPA dispatch retain their existing
+implementations; native FlashAttention is not qualified by CPU checks.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load: selected checkpoint metadata"] --> B{"Definition-owned loader?"}
+    B -->|Raon1MiniQModel| C["Raon1MiniConfig and Raon1MiniForCausalLM"]
+    B -->|Spark2_5QModel| D["Spark2_5Config and Spark2_5ForCausalLM"]
+    B -->|TeleChat2QModel| E["Telechat2Config and Telechat2ForCausalLM"]
+    B -->|RwgQModel or FalconQModel| F{"RWModelLoader: config.alibi?"}
+    F -->|false| G["Native FalconForCausalLM"]
+    F -->|true| H["RWAlibiForCausalLM: local eager bias repair"]
+    C --> I["Owned or exact native tokenizer through Tokenicer"]
+    D --> I
+    G --> I
+    H --> I
+    B -->|unsupported or ambiguous owned metadata| X["Raise; checkpoint Python cannot replace an owned loader"]
+    E --> J{"Complete causal checkpoint weights?"}
+    J -->|no LM head| X
+    J -->|yes| I
+    I --> K["Public forward and generation"]
+    classDef fail fill:#fee,stroke:#b00
+    class X fail
+```
+
+Raon's source MXFP8 tensors stay in E4M3 byte weights plus U8 E8M0 scales during
+dtype movement and safetensors round trips. Each routed projection expands
+only for its current `F.linear` call. The byte-pair oracle includes signed
+zero, subnormals, both E4M3 FN NaNs and E8M0 exponent 255; weak references and
+in-place weight/scale mutation prove that later forwards rebuild temporary
+values and retain no expanded weight cache.
+
+```mermaid
+flowchart TD
+    A["Raon1MiniQModel.quantize"] --> B{"raon_mxfp8_config set?"}
+    B -->|yes| X["NotImplementedError before quantization mutates state"]
+    B -->|no| C["CalibrationConfig to public dense-source plain AWQ"]
+    C --> D["Packed decoder weights and dense exclusions"]
+    D --> E["Two exact safetensors save/load cycles"]
+    F["Raon1MiniRoutedLinear.forward"] --> G{"E4M3 source weight?"}
+    G -->|yes| H["dequantize_mxfp8: temporary activation-dtype tensor"]
+    G -->|no| I["F.linear with stored dense weight"]
+    H --> J["F.linear consumes expansion"]
+    J --> K["Release temporary; retain only compressed source buffers"]
+    classDef fail fill:#fee,stroke:#b00
+    class X fail
+```
+
+| Before at `bf4003d` | Shipped mechanism and evidence |
+| --- | --- |
+| `gptqmodel/models/definitions/raon1_mini.py:11`: checkpoint trust required | `definitions/raon1_mini.py:12-17`: owned loader; `ports/raon1_mini/modeling_raon1_mini.py:445-473`: compressed projection storage/lifetime; `definitions/raon1_mini.py:73-78`: source MXFP8 quantization rejection |
+| `gptqmodel/models/definitions/spark2_5.py:12-13,43`: trusted checkpoint registration hook | `definitions/spark2_5.py:13-17`: packaged config/model; `ports/spark2_5/modeling_spark.py:261-315`: source FP32 residual and per-layer attention behavior |
+| `gptqmodel/models/definitions/rw.py:9,18-20`: nonexistent `ln_1`/`ln_2` ownership | `definitions/rw.py:9-72`: native-backed loaders and variant-aware norms/parallel tags; `ports/rw/modeling_rw.py:8-25`: eager ALiBi correction while SDPA remains native |
+| `gptqmodel/models/definitions/telechat2.py:15-17`: remote trust and forced FP16 | `definitions/telechat2.py:10-18`: owned model/tokenizer selection; `ports/telechat2/modeling_telechat2.py:32-56,210-238`: source-rounded rotary tables and missing-head rejection |
+
+All four use explicit plain AWQ with empty scaling groups and `fusable=None`.
+Falcon joins the generic plain-family expectation; Raon, Spark and TeleChat
+are qualified by their public port tests. This does not qualify scale search,
+folding, optimized kernels, concurrent PyTorch execution or trained quality.
+The port READMEs retain exact source pins, independent oracles, mutation
+failures, layout boundaries and commands. TeleChat's source code has Apache
+notices, while its 35B/115B cards also reference community-model terms and
+prior commercial authorization. The verbatim
+[retained PDF](../gptqmodel/models/ports/telechat2/TELECHAT_MODEL_LICENSE.pdf)
+explicitly names legacy TeleChat-7B and does not establish the precise license
+version for later artifacts. Both wheel and sdist must preserve that PDF;
+GPT-QModel makes no Apache-only model-artifact rights claim.
+
+## Calibration consumer validation
+
+Port tests use the frozen public `CalibrationConfig` API. The migration wraps
+the original dataset and moves only calibration policy arguments into that
+object; backend, quantizer, assertions and packed/dense round-trip checks remain
+the same. An AST comparison against `7737de616` verified 57 public method calls
+in 52 files, including `requantize()` and the negative-policy consumers. Separate
+`LoopProcessor`/calibration-input tests passed **34 tests, two warnings, 9.18 s**.
+Helper/quantizer methods named `quantize` were not mistaken for model methods.
+
+The initial legacy calls produced the intended removed-keyword `TypeError`
+(three failed, 178 passed in the focused writer/security run); after migration
+that focused run passed 181 tests. The wider run also found two stale
+`SimpleNamespace` registry configs: InternS1 needs `get_text_config()`, and
+InternVL-chat needs `llm_config`. The shared-input test now constructs their
+actual configs. Qwen-Drive's hostile-map test independently hit early random EOS;
+its fixed-length check requests both `min_new_tokens=2` and `max_new_tokens=2`.
+Dedicated generation-policy/EOS tests retain their original behavior checks.
+
+The eleven batches below passed **5,392 tests**. They cover 97 distinct files:
+96 migrated/sibling files plus the shared-input forward suite. Batch 11 includes
+that shared suite after the config repairs. No skipped or deselected cases are
+included in this total. These are CPU checks on Python 3.14.6t with
+`PYTHON_GIL=0`, Transformers 5.23.0, Torch 2.15.0+cpu, published Tokenicer 0.0.19
+and SentencePiece 0.2.1. They do not qualify concurrent PyTorch calls or GPUs.
+
+Run each row separately from the repository root using Bash brace expansion:
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest <file arguments below> -q -rs --tb=short
+```
+
+| Batch | File arguments | Passed | Warnings | Seconds |
+| --- | --- | ---: | ---: | ---: |
+| 1 | `tests/module_tree/test_{exaone,interns1}_local_port.py tests/test_baichuan_tokenizer.py tests/{,module_tree/}test_{brumby,chatglm}_local_port.py` | 430 | 2 | 98.02 |
+| 2 | `tests/{,module_tree/}test_{dbrx_converted,decilm,ernie4_5_moe,grinmoe,intern_s2_preview}_local_port.py` | 277 | 146 | 22.14 |
+| 3 | `tests/{,module_tree/}test_{internlm2,internlm,internvl_chat,k2_horizon,kimi_k25}_local_port.py` | 351 | 6 | 237.28 |
+| 4 | `tests/{,module_tree/}test_{klear,lfm3,lfm3_omni,lfm3_vl}_local_port.py tests/test_lazy_native_fp32_materialization.py` | 316 | 9 | 84.17 |
+| 5 | `tests/{,module_tree/}test_{llada2,llama,llava_qwen2,locateanything,mage_vl}_local_port.py` | 837 | 3 | 63.21 |
+| 6 | `tests/{,module_tree/}test_{mimo,mimo_v2,minicpm,minicpmv}_local_port.py tests/test_minicpmv46_awq_port.py` | 577 | 31 | 330.21 |
+| 7 | `tests/{,module_tree/}test_{minimax_m2,mobilellm,moss,nanbeige}_local_port.py tests/test_native_fp32_checkpoint_loading.py` | 752 | 2 | 382.78 |
+| 8 | `tests/{,module_tree/}test_{nemotron_h,nemotron_h_puzzle,nemotron_labs_diffusion,nemotron_omni}_local_port.py tests/test_norm_teacher_loading.py` | 368 | 3 | 130.46 |
+| 9 | `tests/{,module_tree/}test_{openvla,ouro,ovis2_5,ovis2_6_moe,ovis}_local_port.py` | 660 | 37 | 213.97 |
+| 10 | `tests/{,module_tree/}test_{phi4,qwen2_5_vl,qwen2_vl,qwen3,qwen_drive}_local_port.py` | 456 | 3 | 175.70 |
+| 11 | `tests/{,module_tree/}test_qwen_local_port.py tests/test_shared_module_placement.py tests/module_tree/test_shared_input_cpu_forward.py` | 368 | 2 | 37.98 |
+
+The additional central-consumer command passed **835 tests, 465 skipped,
+18 warnings, 44.90 s**:
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest \
+  tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_fusable_models.py tests/test_awq_scaling_groups.py \
+  tests/test_awq_scale_folding.py tests/test_awq_empty_groups.py \
+  tests/test_local_model_loading.py tests/test_local_tokenizer_loading.py \
+  tests/test_local_processor_loading.py tests/test_checkpoint_subfolder_resolution.py \
+  -q -rs --tb=short
+```
+
+The skips were 460 NVIDIA-only Marlin cases, three absent Pangu fixture cases
+and the non-buildable `opt350`/`muse_glimmer` CausalLM fixtures. Solar's focused
+parent run passed 108 cases (one trained case deselected); combined Raon/Spark
+passed 266 cases; RW/Falcon plus TeleChat passed 223 cases. Their port READMEs
+retain the source inventories, actual public plain-AWQ cases and negative probes.
+
+Quality gates passed `bash format/check.sh`, explicit Ruff 0.14.2 over
+`gptqmodel docs/eora tests setup.py`, `python -m compileall -q gptqmodel` and
+`git diff --check`. This is not a claim of whole-port Pyright cleanliness.
+Fresh wheel/sdist builds used `uv build --no-build-isolation --wheel --sdist`
+with the qualification interpreter, because its environment has no executable
+`python -m build` frontend. Artifact verification found 727 byte-identical port
+files and 63 valid compressed JSON assets in each, including the TeleChat PDF,
+all required dependency floors, and no tests/scripts, Kimi-K2.5 qualification
+assets, MiniCPM-o or Pangu runtime implementation.
+
+String/path norm teachers resolve their own config and loader. `NormConfig`
+does not expose independent revision/subfolder/cache arguments; pass an already
+constructed dense teacher module when those selections are needed. Student
+selection metadata is deliberately not reused for a different teacher source.

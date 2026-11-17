@@ -693,10 +693,12 @@
     "RwgQModel/gptq": {
       "layers": ["transformer.h"],
       "blocks": [
-        ["ln_1:!"],
+        ["input_layernorm:!"],
+        ["ln_attn:!"],
+        ["ln_mlp:!"],
         ["self_attention.query_key_value"],
         ["self_attention.dense"],
-        ["ln_2:!"],
+        ["post_attention_layernorm:!"],
         ["mlp.dense_h_to_4h"],
         ["mlp.dense_4h_to_h"]
       ]
@@ -705,6 +707,8 @@
       "layers": ["transformer.h"],
       "blocks": [
         ["input_layernorm:!"],
+        ["ln_attn:!"],
+        ["ln_mlp:!"],
         ["self_attention.query_key_value"],
         ["self_attention.dense"],
         ["post_attention_layernorm:!"],
@@ -2470,15 +2474,14 @@
     "Raon1MiniQModel/gptq": {
       "layers": ["model.layers"],
       "blocks": [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.f_a_proj", "self_attn.b_proj", "self_attn.rda_w_proj", "self_attn.g_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
-        ["self_attn.f_b_proj", "self_attn.q_b_proj", "self_attn.kv_b_proj"],
+        ["input_layernorm:!"],
+        ["self_attn_raon_mhc:!", "self_attn_raon_mhc.res:!"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj", "self_attn.g_proj", "self_attn.b_proj", "self_attn.rda_w_proj", "self_attn.f_a_proj", "self_attn.f_b_proj", "self_attn.q_a_layernorm:!", "self_attn.kv_a_layernorm:!", "self_attn.o_norm:!", "self_attn.q_conv1d:!", "self_attn.k_conv1d:!", "self_attn.v_conv1d:!", "self_attn.A_log:!", "self_attn.dt_bias:!"],
         ["self_attn.o_proj"],
+        ["post_attention_layernorm:!"],
+        ["mlp_raon_mhc:!", "mlp_raon_mhc.res:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
-        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
-        ["mlp.experts.{expert_index}.down_proj"],
-        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
-        ["mlp.shared_experts.down_proj"],
         ["moe.gate:!", "moe.gate.e_score_correction_bias:!"],
         ["moe.experts.{expert_index}.gate_proj", "moe.experts.{expert_index}.up_proj"],
         ["moe.experts.{expert_index}.down_proj"],
@@ -2527,17 +2530,60 @@
       ]
     },
     "SolarOpen2QModel/gptq": {
-      "layers": ["model.layers"],
+      "layers": [
+        "model.layers"
+      ],
       "blocks": [
-        ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj", "self_attn.g_proj", "self_attn.o_norm:!"],
-        ["self_attn.o_proj"],
-        ["post_attention_layernorm:!"],
-        ["mlp.gate_proj", "mlp.up_proj", "mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
-        ["mlp.down_proj", "mlp.shared_experts.down_proj"],
-        ["mlp.gate:!"],
-        ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
-        ["mlp.experts.{expert_index}.down_proj"]
+        [
+          "input_layernorm:!"
+        ],
+        [
+          "self_attn.q_proj",
+          "self_attn.q_norm:!",
+          "self_attn.k_proj",
+          "self_attn.k_norm:!",
+          "self_attn.v_proj",
+          "self_attn.g_proj",
+          "self_attn.o_norm:!",
+          "self_attn.A_log:!",
+          "self_attn.dt_bias:!",
+          "self_attn.b_proj:!",
+          "self_attn.f_proj:!",
+          "self_attn.f_a_proj:!",
+          "self_attn.f_b_proj:!",
+          "self_attn.g_a_proj:!",
+          "self_attn.g_b_proj:!",
+          "self_attn.q_conv1d:!",
+          "self_attn.k_conv1d:!",
+          "self_attn.v_conv1d:!"
+        ],
+        [
+          "self_attn.o_proj"
+        ],
+        [
+          "post_attention_layernorm:!"
+        ],
+        [
+          "mlp.gate_proj",
+          "mlp.up_proj",
+          "mlp.shared_experts.gate_proj",
+          "mlp.shared_experts.up_proj"
+        ],
+        [
+          "mlp.down_proj",
+          "mlp.shared_experts.down_proj"
+        ],
+        [
+          "mlp.gate:!",
+          "mlp.gate.e_score_correction_bias:!"
+        ],
+        [
+          "mlp.experts.{expert_index}.gate_proj",
+          "mlp.experts.{expert_index}.up_proj"
+        ],
+        [
+          "mlp.experts.{expert_index}.down_proj"
+        ]
       ]
     },
     "Spark2_5QModel/gptq": {

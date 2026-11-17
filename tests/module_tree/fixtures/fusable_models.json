@@ -960,7 +960,7 @@
     },
     "falcon": {
       "definition": "FalconQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified."
     },
     "falcon_h1": {
       "definition": "FalconH1QModel",
@@ -5509,15 +5509,15 @@
     },
     "raon1_mini": {
       "definition": "Raon1MiniQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Raon RDA/MLA, four-stream mHC and SiTU-MoE with persistent MXFP8 experts; fusion executor has not been qualified."
     },
     "refinedWeb": {
       "definition": "RwgQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified."
     },
     "refinedWebModel": {
       "definition": "RwgQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified."
     },
     "ricursive": {
       "definition": "RicursiveQModel",
@@ -5740,11 +5740,11 @@
     },
     "solar_open2": {
       "definition": "SolarOpen2QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified."
     },
     "spark2_5": {
       "definition": "Spark2_5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified."
     },
     "stablelm": {
       "definition": "LlamaQModel",
@@ -5838,7 +5838,7 @@
     },
     "telechat": {
       "definition": "TeleChat2QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified."
     },
     "unlimited_ocr": {
       "definition": "UnlimitedOCRQModel",

@@ -344,6 +344,18 @@ and research restrictions remain separate from the port's Apache code license.
 binds Qwen2/2.5-VL to exact native composite or headless text models and Qwen-Drive
 to its package-owned root VLM wrapper. Headless text artifacts support feature
 extraction and explicitly reject generation; Qwen-Drive support covers the VLM.
+[Solar-Open2 recurrent implementation selection](docs/transformers5-model-ports.md#solar-open2-recurrent-implementation-selection)
+documents the owned hybrid GQA/KDA decoder, request-owned recurrent cache,
+plain AWQ and exact FP32 routing state through repeated reloads. Released
+artifacts retain the separate Upstage Solar license and derivative-model terms.
+[Raon, Spark2.5, RW/Falcon and TeleChat selection](docs/transformers5-model-ports.md#raon-spark25-rwfalcon-and-telechat-selection)
+documents owned hybrid decoders, persistent MXFP8 storage, exact native Falcon
+reuse and the local eager ALiBi repair. Dense-source plain AWQ is qualified
+separately from source MXFP8 re-quantization, which rejects before mutation.
+TeleChat code notices and community-model artifact terms remain distinct;
+the retained legacy license PDF does not grant later-version commercial rights.
+The [calibration consumer validation](docs/transformers5-model-ports.md#calibration-consumer-validation)
+records current public-API migration coverage and reproducible CPU test batches.
 [Checkpoint config selection](docs/checkpoint-config-selection.md)
 preserves the selected subfolder/revision when rebuilding a quantized save shell,
 including subsequent saves after a public reload.
@@ -485,8 +497,12 @@ Swordfish kernel is [AGPL-3.0-or-later](https://github.com/ModelCloud/GPTQModel/
 Vendored model ports retain their upstream licenses and notices; see the
 [port coverage and licensing table](docs/transformers5-model-ports.md).
 In particular, MobileLLM and LocateAnything carry noncommercial restrictions,
-and OpenVLA's tokenizer assets retain Meta Llama 2 terms. These components are
+OpenVLA's tokenizer assets retain Meta Llama 2 terms, and Solar-Open2 artifacts
+retain Upstage Solar derivative-model naming and attribution terms. These components are
 not relicensed by GPT-QModel's Apache license.
+TeleChat's model cards also reference separate community terms and prior
+commercial authorization; the port preserves the available legacy license
+PDF and explicitly records uncertainty about later-version artifact terms.
 
 ## Attributions and citations 📚
 
