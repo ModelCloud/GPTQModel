@@ -174,6 +174,18 @@ def _nvcc_path() -> Optional[str]:
     return None
 
 
+def cuda_toolkit_available() -> bool:
+    """Whether a CUDA toolkit ``nvcc`` is resolvable for a JIT build.
+
+    Mirrors the resolution the extension builder uses (``CUDA_HOME``, then
+    ``PATH``, then the conventional install location), so callers can gate on
+    the same toolkit the library will actually compile with instead of a
+    stricter ``PATH``-only probe.
+    """
+
+    return _nvcc_path() is not None
+
+
 def _nvcc_text(*args: str) -> str:
     nvcc_path = _nvcc_path()
     if not nvcc_path:

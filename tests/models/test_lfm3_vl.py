@@ -11,7 +11,7 @@ from PIL import Image
 
 class TestLFM3VL(ModelTest):
     # Text decoder only; vision tower and multimodal projector stay unquantized.
-    NATIVE_MODEL_ID = "/monster/data/models/LFM3-VL-2B"  # LiquidAI/LFM3-VL-2B
+    NATIVE_MODEL_ID = "/monster/data/model/LFM3-VL-2B"  # LiquidAI/LFM3-VL-2B
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 1
