@@ -90,6 +90,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [AWQ split-K kernel boundaries](awq-kernel-splitk.md)
 - [AWQ packed layout](awq-packed-layout.md)
 - [AWQ runtime dtype precision](awq-runtime-dtype-precision.md)
+- [AWQ Torch forward decode range](awq-torch-decode-range.md)
 - [AWQ pack-time scale representability](awq-pack-scale-representability.md)
 - [CUDA quantized linear epilogue](cuda-quantized-bias-epilogue.md)
 - [Checkpoint metadata and runtime decision contracts](checkpoint-and-runtime-contracts.md)

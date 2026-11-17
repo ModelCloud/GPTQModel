@@ -112,6 +112,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ reduce scratch
 - **Reject unrepresentable AWQ pack scales.** The native GEMM/GEMV packers
   validate the actual FP16 storage cast before replacing module state; see
   [AWQ pack-time scale representability](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-scale-representability.md).
+- **Decode AWQ weights in range.** The portable Torch AWQ forward picks its
+  decode dtype from the stored scale range, so a wide or tiny checkpoint scale
+  no longer becomes `inf`/`0` before the product; see
+  [AWQ Torch forward decode range](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-torch-decode-range.md).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.
