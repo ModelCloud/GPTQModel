@@ -13,7 +13,7 @@ from PIL import Image
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis2.5-2B" # AIDC-AI/Ovis2.5-2B
 
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 1
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
 

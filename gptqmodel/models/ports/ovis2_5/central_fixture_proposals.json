@@ -1,0 +1,17 @@
+{
+  "registered_module_plans.cases.Ovis2_5QModel/gptq": {
+    "layers": ["llm.model.layers"],
+    "blocks": [
+      ["input_layernorm:!"],
+      ["self_attn.q_proj", "self_attn.q_norm:!", "self_attn.k_proj", "self_attn.k_norm:!", "self_attn.v_proj"],
+      ["self_attn.o_proj"],
+      ["post_attention_layernorm:!"],
+      ["mlp.gate_proj", "mlp.up_proj"],
+      ["mlp.down_proj"]
+    ]
+  },
+  "fusable_models.models.ovis2_5": {
+    "definition": "Ovis2_5QModel",
+    "reason": "Package-owned Ovis2.5 Qwen3/Siglip2 NaViT multimodal binding; fusion executor has not been qualified."
+  }
+}
