@@ -114,6 +114,9 @@ class Ovis2_6_MoeForCausalLM(PreTrainedModel, GenerationMixin):
         inputs = kwargs.pop("input_ids", inputs)
         if inputs is None:
             raise ValueError("Ovis2.6 generate requires inputs or input_ids")
+        # HF loads the released generation policy onto this wrapper, not its decoder.
+        generation_config = kwargs.pop("generation_config", None) or self.generation_config
+        kwargs["generation_config"] = generation_config
         pad = self.config.pad_token_id
         attention_mask = kwargs.pop("attention_mask", inputs.ne(pad) if pad is not None else torch.ones_like(inputs))
         inputs_embeds = self.merge_multimodal(
@@ -126,14 +129,14 @@ class Ovis2_6_MoeForCausalLM(PreTrainedModel, GenerationMixin):
         if enable_thinking and enable_thinking_budget:
             if (
                 inputs.shape[0] != 1
-                or kwargs.get("num_beams", 1) != 1
-                or kwargs.get("num_return_sequences", 1) != 1
-                or kwargs.get("return_dict_in_generate", False)
+                or kwargs.get("num_beams", generation_config.num_beams) not in (None, 1)
+                or kwargs.get("num_return_sequences", generation_config.num_return_sequences) not in (None, 1)
+                or kwargs.get("return_dict_in_generate", generation_config.return_dict_in_generate)
             ):
                 raise ValueError("Source thinking-budget continuation requires one non-beam tensor result")
-            if thinking_budget < 1 or kwargs.get("max_new_tokens", 0) <= thinking_budget + 25:
+            actual_max_new_tokens = kwargs.get("max_new_tokens", generation_config.max_new_tokens)
+            if thinking_budget < 1 or actual_max_new_tokens is None or actual_max_new_tokens <= thinking_budget + 25:
                 raise ValueError("max_new_tokens must exceed thinking_budget + 25")
-            actual_max_new_tokens = kwargs["max_new_tokens"]
             kwargs["max_new_tokens"] = thinking_budget
             generated_ids = self.llm.generate(
                 inputs=None, inputs_embeds=inputs_embeds, attention_mask=attention_mask, **kwargs

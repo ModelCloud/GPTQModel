@@ -72,20 +72,92 @@ flowchart TD
 Original `llm.*`, `visual_tokenizer.*`, `vte.*` tensor names and source
 pre-post-LN vision feature selection remain intact. Native caches are not
 converted into an invented shared format. The source thinking-budget path
-is retained, but trained thinking quality and budget-boundary semantics have
-not been independently qualified. Frame-list video is supported; no container
+is retained; policy precedence and two-stage token accounting are tested, but
+trained thinking quality and exact special-token boundary semantics have not
+been independently qualified. Frame-list video is supported; no container
 decoder is added. Source temporal patch size is one; other values fail closed.
+
+## Saved generation policy
+
+Both pinned releases ship byte-identical `generation_config.json` (checked in
+under `fixtures/`; SHA-256 in `provenance.json`): sampling is enabled with
+temperature 0.6, top-k 20, top-p 0.95, repetition penalty 1.05 and two EOS IDs,
+151645/151643. Their inspected wrapper source delegates to `llm.generate`
+without forwarding the root policy. HF loads that released file onto the
+wrapper, not its freshly constructed native decoder; the original local port
+therefore silently used the decoder defaults even after dense/quantized reload.
+The released model card's ordinary generation calls provide token budgets but
+do not repeat all those sampling defaults.
+
+The local wrapper explicitly forwards the caller's `generation_config`, or
+its own root policy when absent/`None`, to every native generation stage. Native
+Transformers still applies explicit generation kwargs last. Neither the saved
+root policy, nested decoder policy nor caller-owned policy is mutated. This
+matches the sibling Ovis2.5 repair's precedence, rather than preserving the
+source wrapper's lost-policy defect. Budgeted thinking checks the same effective
+policy for unsupported beam/multiple-result/dictionary output and reads saved
+`max_new_tokens` when no call override exists; existing budget validation and
+source continuation text remain unchanged.
+
+```mermaid
+flowchart TD
+    A["Ovis2_6_MoeForCausalLM.generate / inherited Next.generate"] --> B{"Caller generation_config supplied?"}
+    B -->|yes| C[Caller policy]
+    B -->|absent or None| D["self.generation_config from checkpoint"]
+    C --> E["Explicit kwargs retain highest priority"]
+    D --> E
+    E --> F{"Budgeted thinking?"}
+    F -->|no| G["llm.generate: sampling, EOS, scores and output type"]
+    F -->|yes| H{"One non-beam tensor result and valid token budget?"}
+    H -->|yes| I["llm.generate: same policy for both source stages"]
+    H -->|no| X["ValueError before native generation"]
+    style X fill:#fdd
+```
+
+| Old owner behavior | Current behavior |
+| --- | --- |
+| `modeling_ovis2_6.py:generate` delegated only kwargs | Pass caller/root policy to every native generation stage |
+| Root EOS/sampling/scores ignored after loading | Public dense and AWQ reloads consume saved root defaults |
+| Budget guards inspected only call kwargs | Effective root/caller policy checked; explicit kwargs still win |
+| Saved `max_new_tokens` rejected by thinking guard | Saved budget or explicit override used for both stages |
+
+The pre-fix focused command below produced **20 intended failures in 17.84s**:
+twelve lost-policy reds (including both aliases after two real AWQ save/reloads
+with disk offload false/true), six ignored inherited guard reds, and two saved
+token-budget reds. After the narrow repair the same cases passed in 14.81s.
+Tests use the actual release sampling policy with only tiny-vocabulary token IDs
+and bounded budgets, plus saved score/dictionary-output options. An independent
+native-decoder invocation checks seeded sequences and every processed score;
+an explicit native logits processor forces the additional EOS to prove real
+early stopping. Caller policy replacement, kwargs overriding that policy,
+explicit `None`, and exact root/nested/caller policy immutability are checked.
+The two-stage thinking control verifies source continuation tokens and exact
+remaining-token accounting, not trained reasoning quality. As in source,
+`inputs_embeds` generation applies repetition penalties only to newly generated
+tokens, not the embedded prompt; this boundary is not silently changed.
 
 ## Validation and reproduction
 
 Validated with Python 3.14.6t (`PYTHON_GIL=0`), Transformers 5.23.0,
 Torch 2.15.0+cpu, released Tokenicer 0.0.17. No tokenizer shim is present.
+The generation-policy follow-up uses independently SHA-verified published
+Tokenicer 0.0.19 on the same free-threaded CPU environment.
+Follow-up owned result: **127 passed, no skips, 54.33s**. Combined original
+loader/security/processor/registry/AWQ/fusion families: **856 passed, 477 skipped,
+one deselected, 68.01s**, applying only the original central proposals in memory.
+The exclusion is the already-observed unrelated shared Prism-GGUF checkpoint
+hook regression. Skips are 468 NVIDIA Marlin cases, two CUDA processor cases,
+one absent PEFT dependency, four missing remote-fixture cases and two generic
+non-buildable CausalLM families. No new hardware coverage is inferred.
 
 ```bash
 export PATH=/home/ubuntu/.venvs/gptqmodel-tf5/bin:$PATH
 PYTHON_GIL=0 python -m pytest -q tests/test_ovis2_6_moe_local_port.py tests/module_tree/test_ovis2_6_moe_local_port.py
+PYTHON_GIL=0 python -m pytest -q tests/test_ovis2_6_moe_local_port.py -k 'public_saved_generation_policy or thinking_guard_resolves or thinking_uses_saved or public_image_calibrated_plain_awq'
 bash format/check.sh
+uvx --from ruff==0.14.2 ruff check gptqmodel docs/eora tests setup.py
 python -m compileall -q gptqmodel/models/ports/ovis2_6_moe gptqmodel/models/definitions/ovis2_6_moe.py
+pyright --pythonpath /home/ubuntu/.venvs/gptqmodel-tf5/bin/python gptqmodel/models/ports/ovis2_6_moe/modeling_ovis2_6.py
 git diff --check
 ```
 
@@ -126,3 +198,6 @@ PyTorch execution, compile, training, fusion executor, extended-context or
 foreign/static/offloaded/quantized-cache claim. CPU disk offload here means
 LazyTurtle quantization, not a claim about inference-cache offload. Existing
 trained model tests use uncached `/monster/data/model` paths and are not run.
+Runtime Pyright is not clean: four `GenerationMixin` override/native protocol
+diagnostics remain; the same diagnostics exist on the original port snapshot.
+The full Ruff gate, including an explicit pinned 0.14.2 run, passes.
