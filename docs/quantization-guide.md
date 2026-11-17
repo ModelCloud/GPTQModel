@@ -209,6 +209,13 @@ with `AWQ_GEMV_TRITON` on ROCm, and with the portable Torch reader
 layers on CPU, so `quantize()` -> `save()` completes on every host and still
 writes the requested GEMV checkpoint (issue #4554).
 
+`FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` follow the same rule: the native
+CUDA GEMV_FAST kernel packs on CUDA, and the portable Torch readers
+(`AwqGEMVFastTorchLinear`, `LLMAwqTorchLinear`, `BACKEND.AWQ_TORCH`) pack on a
+CPU-only host and serve as the in-session CPU kernel, so `quantize()` ->
+`save()` keeps the calibration and writes the requested interleaved checkpoint
+(issue #4736).
+
 ### RTN W4A16 without calibration
 
 ```python

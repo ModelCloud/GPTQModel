@@ -4,6 +4,8 @@ GPT-QModel GPTQ/AWQ checkpoints can be loaded through Transformers and fine-tune
 
 Use a current PEFT release together with `optimum>=2.3.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The FSDP recipe was validated with PEFT `0.21.3.dev0` (main checkout), Optimum 2.3.0, Transformers 5.20.2, and PyTorch 2.14.
 
+Loading a native GPTQ checkpoint through `AutoModelForCausalLM.from_pretrained` does not require importing `gptqmodel` first. The Optimum load bridge installs itself from Transformers' GPTQ quantizer, so per-module `dynamic` bit widths and group sizes from the checkpoint are honoured in the plain-Transformers flow below. No `import gptqmodel` line is needed in these examples.
+
 For training, select the trainable kernel for the checkpoint's quantization method: `gptq_torch` for GPTQ and `torch_awq` for AWQ. `torch_awq` is the Transformers-facing alias for GPT-QModel's `AWQ_TORCH` kernel. The default inference kernels do not propagate gradients through the quantized layers, so a backward pass will fail.
 
 ```bash

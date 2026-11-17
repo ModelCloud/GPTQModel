@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Regression tests for #4554.
+"""Regression tests for #4554 and #4736.
 
-AWQ ``FORMAT.GEMV`` had no in-session kernel for the CPU the quantize loop
-leaves the packed layers on: the native ``AwqGEMVLinear`` is CUDA-only and the
-Triton reader needs an accelerator. ``quantize()`` therefore raised after the
-whole calibration and the documented quantize -> save flow lost the result.
-These tests pin the CPU reader and the end-to-end flow.
+AWQ ``FORMAT.GEMV`` (#4554) and ``FORMAT.GEMV_FAST`` / ``FORMAT.LLM_AWQ``
+(#4736) had no in-session kernel for the CPU the quantize loop leaves the
+packed layers on: the native classes are CUDA-only and the Triton reader needs
+an accelerator. ``quantize()`` therefore raised after the whole calibration and
+the documented quantize -> save flow lost the result. These tests pin the CPU
+readers and the end-to-end flow.
 """
 
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors.torch import load_file
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -23,19 +25,34 @@ from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models._const import DEVICE
 from gptqmodel.models.base import rehome_quantized_kernel, select_in_session_quant_linear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear, AwqGEMVTorchLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import (
+    AwqGEMVFastLinear,
+    AwqGEMVFastTorchLinear,
+    LLMAwqLinear,
+    LLMAwqTorchLinear,
+)
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import AWQConfig
 
 
 HIDDEN_SIZE = 64
 VOCAB_SIZE = 64
+# GEMV_FAST packs four output rows per word and its kernels require
+# out_features % 128 == 0, so its tiny model needs a wider hidden size.
+GEMV_FAST_HIDDEN_SIZE = 128
+
+# (format, native CUDA-only class, portable CPU reader)
+GEMV_FAST_FAMILY = [
+    pytest.param(FORMAT.GEMV_FAST, AwqGEMVFastLinear, AwqGEMVFastTorchLinear, id="gemv_fast"),
+    pytest.param(FORMAT.LLM_AWQ, LLMAwqLinear, LLMAwqTorchLinear, id="llm_awq"),
+]
 
 
-def _write_tiny_llama(directory: Path) -> None:
+def _write_tiny_llama(directory: Path, hidden_size: int = HIDDEN_SIZE) -> None:
     config = LlamaConfig(
         vocab_size=VOCAB_SIZE,
-        hidden_size=HIDDEN_SIZE,
-        intermediate_size=128,
+        hidden_size=hidden_size,
+        intermediate_size=hidden_size * 2,
         num_hidden_layers=1,
         num_attention_heads=4,
         num_key_value_heads=4,
@@ -191,6 +208,135 @@ def test_awq_gemv_quantize_save_and_reload_on_cpu(tmp_path):
 
     reloaded = GPTQModel.load(str(out), dtype=torch.float16, device="cpu")
     assert reloaded.qlinear_kernel is AwqGEMVTorchLinear
+    with torch.inference_mode():
+        relogits = reloaded(ids).logits
+    assert torch.equal(relogits, logits)
+
+
+def _gemv_fast_oracle(linear: nn.Linear, scales: torch.Tensor, zeros: torch.Tensor, group_size: int, x):
+    """Independent fake-quant reference for the GEMV_FAST pack contract.
+
+    Codes are ``round((W + z * s) / s)`` clamped to 4 bits; the checkpoint stores
+    the FP16 scale and the FP16-rounded offset ``-s * z``, so the dequantized
+    weight is ``code * s + fp16(-s * z)``, accumulated in FP32.
+    """
+
+    group_index = torch.arange(linear.in_features) // group_size
+    s = scales.float()[:, group_index]
+    z = zeros.float()[:, group_index]
+    codes = torch.round((linear.weight.float() + z * s) / s).clamp(0, 15)
+    offset = (-s * z).to(torch.float16).float()
+    weight = codes * s + offset
+    out = x.float() @ weight.t()
+    if linear.bias is not None:
+        out = out + linear.bias.float()
+    return out.to(x.dtype)
+
+
+def _packed_gemv_fast(native_cls, in_features=256, out_features=128, group_size=128):
+    torch.manual_seed(4736)
+    groups = in_features // group_size
+    linear = nn.Linear(in_features, out_features, bias=True).half()
+    scales = (torch.rand(out_features, groups) * 0.02 + 0.005).half()
+    zeros = torch.randint(0, 16, (out_features, groups)).half()
+    module = native_cls(
+        bits=4,
+        group_size=group_size,
+        sym=False,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        pack_dtype=torch.int16,
+        register_buffers=True,
+    )
+    module.pack(linear, scales, zeros)
+    return module, linear, scales, zeros
+
+
+@pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
+def test_awq_gemv_fast_cpu_insession_kernel_is_the_documented_fallback(fmt, native_cls, torch_cls):
+    qcfg = AWQConfig(bits=4, format=fmt, group_size=128, pack_dtype=torch.int16, offload_to_disk=False)
+
+    selected = select_in_session_quant_linear(qcfg, torch.device("cpu"))
+
+    assert selected is torch_cls
+    assert DEVICE.CPU in selected.SUPPORTS_DEVICES
+    # Explicit-only: accelerator AUTO order must not change.
+    assert selected.SUPPORTS_FORMATS == {fmt: 0}
+    assert DEVICE.CPU not in native_cls.SUPPORTS_DEVICES
+
+
+@pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
+def test_rehome_switches_native_gemv_fast_module_to_cpu_reader(fmt, native_cls, torch_cls):
+    qcfg = AWQConfig(bits=4, format=fmt, group_size=128, pack_dtype=torch.int16, offload_to_disk=False)
+    module, linear, scales, zeros = _packed_gemv_fast(native_cls)
+    packed = {name: buf.clone() for name, buf in module.named_buffers()}
+
+    class _Tree(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = module
+
+    fake_model = SimpleNamespace(model=_Tree(), quantize_config=qcfg, qlinear_kernel=native_cls)
+
+    # Used to raise RuntimeError (no CPU kernel) and lose the calibration.
+    rehome_quantized_kernel(fake_model)
+
+    assert type(module) is torch_cls
+    assert fake_model.qlinear_kernel is torch_cls
+    # The switch only reinterprets the packed state; the checkpoint layout is untouched.
+    for name, buf in module.named_buffers():
+        if name in packed:
+            assert torch.equal(buf, packed[name]), name
+
+    inputs = torch.randn(2, 3, linear.in_features).half()
+    with torch.inference_mode():
+        out = module(inputs)
+    assert out.dtype == inputs.dtype
+    assert out.shape == (2, 3, linear.out_features)
+    torch.testing.assert_close(
+        out, _gemv_fast_oracle(linear, scales, zeros, 128, inputs), rtol=1e-3, atol=1e-2
+    )
+    # No dense weight copy outlives the forward.
+    assert all(buf.dtype != torch.float32 for buf in module.buffers())
+
+
+@pytest.mark.parametrize("fmt, native_cls, torch_cls", GEMV_FAST_FAMILY)
+def test_awq_gemv_fast_quantize_save_and_reload_on_cpu(tmp_path, fmt, native_cls, torch_cls):
+    hidden = GEMV_FAST_HIDDEN_SIZE
+    source = tmp_path / "source"
+    _write_tiny_llama(source, hidden_size=hidden)
+    out = tmp_path / "out"
+    qcfg = QuantizeConfig(bits=4, group_size=128, format=fmt, device="cpu", offload_to_disk=False)
+    model = GPTQModel.load(str(source), quantize_config=qcfg, dtype=torch.float16)
+
+    model.quantize(CalibrationConfig(dataset=_calibration(), batch_size=1, min_length=1))
+
+    quant_linear = [m for m in model.model.modules() if isinstance(m, native_cls)]
+    assert quant_linear
+    assert all(type(m) is torch_cls for m in quant_linear)
+    assert model.qlinear_kernel is torch_cls
+
+    ids = torch.tensor([[1, 4, 4, 4]])
+    with torch.inference_mode():
+        logits = model(ids).logits
+    assert logits.shape == (1, 4, VOCAB_SIZE)
+    assert torch.isfinite(logits).all()
+
+    model.save(str(out))
+    saved = json.loads((out / "config.json").read_text())
+    assert saved["quantization_config"]["format"] == fmt.value
+
+    # The checkpoint keeps the GEMV_FAST interleaved packing: INT16 qweight of
+    # shape [out_features / 4, in_features].
+    tensors = load_file(str(out / "model.safetensors"))
+    qweight = tensors["model.layers.0.self_attn.q_proj.qweight"]
+    assert qweight.dtype == torch.int16
+    assert qweight.shape == (hidden // 4, hidden)
+
+    reloaded = GPTQModel.load(str(out), dtype=torch.float16, device="cpu")
+    assert reloaded.qlinear_kernel is torch_cls
     with torch.inference_mode():
         relogits = reloaded(ids).logits
     assert torch.equal(relogits, logits)

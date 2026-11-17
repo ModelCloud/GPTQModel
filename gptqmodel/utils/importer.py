@@ -1235,6 +1235,14 @@ def hf_select_quant_linear_v2(
         device_map: Optional[Union[str, dict]] = None,
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
+    # Optimum resolves this entry point at import time but calls it only after
+    # ``optimum.gptq`` has finished importing. Retry the idempotent bridge
+    # install here so a checkpoint loaded by Optimum directly (no Transformers
+    # ``GptqHfQuantizer``) still gets the native loader for later loads (#4749).
+    from gptqmodel import _ensure_optimum_gptqmodel_load_bridge
+
+    _ensure_optimum_gptqmodel_load_bridge()
+
     # convert hf string backend to backend.enum
     backend = normalize_backend(backend, quant_method=quant_method)
 
