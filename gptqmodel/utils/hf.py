@@ -2804,6 +2804,7 @@ def load_hf_tokenizer(
         *,
         model_config: Any = None,
         trust_remote_code: bool = False,
+        return_tokenicer: bool = False,
         **kwargs,
 ):
     from tokenicer import Tokenicer
@@ -2843,7 +2844,7 @@ def load_hf_tokenizer(
     # constructed. Keep this loader's native-tokenizer return contract while
     # delegating tokenizer construction and compatibility normalization to
     # Tokenicer.
-    return tokenicer.tokenizer
+    return tokenicer if return_tokenicer else tokenicer.tokenizer
 
 
 

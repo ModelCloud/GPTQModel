@@ -2045,6 +2045,7 @@ def ModelLoader(cls):
 
         tokenizer = load_hf_tokenizer(
             model_local_path,
+            return_tokenicer=True,
             model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
             **_get_tokenizer_load_kwargs(model_init_kwargs),
@@ -2687,6 +2688,7 @@ def ModelLoader(cls):
 
         tokenizer = load_hf_tokenizer(
             model_local_path,
+            return_tokenicer=True,
             model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
             # The tokenizer must come from the same directory and revision as
