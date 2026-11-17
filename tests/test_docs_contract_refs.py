@@ -60,7 +60,7 @@ CONTRACT_REFS = (
     ("docs/layer-type-replay-masks.md", "gptqmodel/models/definitions/olmo3.py",
      "Olmo3QModel", 53),
     ("docs/multi_gpu_quantization.md", "gptqmodel/utils/torch.py", "torch_sync", 611),
-    ("docs/native-checkpoint-export.md", "gptqmodel/models/writer.py", "ModelWriter", 1886),
+    ("docs/native-checkpoint-export.md", "gptqmodel/models/writer.py", "ModelWriter", 1935),
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",
      "_validate_bind", None),
     ("docs/openai-server-exposure.md", "gptqmodel/utils/openai_server.py",
