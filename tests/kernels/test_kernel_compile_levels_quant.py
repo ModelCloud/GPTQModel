@@ -111,6 +111,37 @@ def _build_gguf_cpp():
     return module, torch.randn(ROWS, 512, dtype=torch.float16), False
 
 
+def _build_gguf_cuda():
+    """The ggml CUDA kernel reads the same qweight layout as the torch packer."""
+    linear = _linear(512, 256, dtype=torch.float32)
+    module = GGUFCudaKernel(
+        bits="q4_0", group_size=-1, sym=True, desc_act=False,
+        in_features=512, out_features=256, bias=False,
+    )
+    GGUFTorchLinear.pack_original(module, linear, scales=None, zeros=None)
+    module = module.cuda().eval()
+    return module, _input(module), True
+
+
+def _build_bnb():
+    in_features, out_features = 256, 64
+    linear = _linear(in_features, out_features)
+    module = BitsAndBytesLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        dtype=torch.float16,
+    )
+    module.pack_original(linear, scales=None, zeros=None)
+    module = module.cuda().eval()
+    x = torch.randn(ROWS, in_features, dtype=torch.float16, device="cuda")
+    return module, x, True
+
+
 def _build_gguf_torch():
     return _build_gguf(GGUFTorchLinear, "q4_0")
 
@@ -255,10 +286,10 @@ CASES = [
     Case(QQQLinear, lambda: _pack_qqq(QQQLinear), lambda: _unavailable(QQQLinear)),
     Case(QQQTorchLinear, lambda: _pack_qqq(QQQTorchLinear), lambda: None),
     Case(TorchFP8Linear, _build_fp8, lambda: None),
-    Case(BitsAndBytesLinear, None, lambda: _unavailable(BitsAndBytesLinear)),
+    Case(BitsAndBytesLinear, _build_bnb, lambda: _unavailable(BitsAndBytesLinear)),
     Case(GGUFTorchLinear, _build_gguf_torch, lambda: None),
     Case(GGUFCppKernel, _build_gguf_cpp, lambda: _gguf_cpp_unavailable(GGUFCppKernel)),
-    Case(GGUFCudaKernel, None, lambda: _gguf_cpp_unavailable(GGUFCudaKernel)),
+    Case(GGUFCudaKernel, _build_gguf_cuda, lambda: _gguf_cpp_unavailable(GGUFCudaKernel)),
     Case(GGUFTritonKernel, _build_gguf_triton, lambda: _unavailable(GGUFTritonKernel)),
     Case(NF12Linear, _build_nf12, lambda: None),
     Case(ParoLinear, lambda: _build_paro(ParoLinear), _paro_unavailable),

@@ -214,6 +214,14 @@ def _build_allspark_awq():
     return module, x, True
 
 
+def _build_cpu_avx512_awq():
+    """BF16 activations drive the fused AVX512-BF16 AWQ path on first call."""
+
+    module, _, _ = _checkpoint(TorchCpuAvx512AwqLinear, device="cpu", cuda_graph=False)
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.bfloat16)
+    return module, x, False
+
+
 def _validate_unavailable(cls) -> Optional[str]:
     try:
         ok, error = cls.validate_once()
@@ -309,7 +317,7 @@ CASES = [
     ),
     Case(
         TorchCpuAvx512AwqLinear,
-        None,
+        _build_cpu_avx512_awq,
         lambda: _validate_unavailable(TorchCpuAvx512AwqLinear),
     ),
     Case(

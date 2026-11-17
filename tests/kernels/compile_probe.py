@@ -22,7 +22,9 @@ Levels, ascending (see ``gptqmodel/nn_modules/qlinear/_compile_support.py``):
 from __future__ import annotations
 
 import inspect
+import io
 import re
+import tokenize
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -265,6 +267,25 @@ def skip_without_measurable_device(kernel_cls) -> None:
         )
 
 
+def _strip_comments_and_strings(source: str) -> str:
+    """Blank out comments and string literals before the static scan.
+
+    A comment that *documents* a host transfer (``# the op reads data_ptr()``)
+    is not a host transfer, and an error string is not an executed call. Only
+    real code can invalidate a capture, so scan the token stream with
+    ``COMMENT``/``STRING`` tokens removed.
+    """
+
+    skip = {tokenize.COMMENT, tokenize.STRING}
+    pieces: List[str] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            pieces.append(" " if token.type in skip else token.string)
+    except (tokenize.TokenError, IndentationError):
+        return source
+    return "".join(pieces)
+
+
 def graph_unsafe_constructs(kernel_cls: type) -> List[str]:
     """Static scan of the kernel's own ``forward`` for capture-unsafe calls."""
 
@@ -275,8 +296,9 @@ def graph_unsafe_constructs(kernel_cls: type) -> List[str]:
         source = inspect.getsource(forward)
     except (OSError, TypeError):
         return []
+    code = _strip_comments_and_strings(source)
     found = []
     for pattern, reason in GRAPH_UNSAFE_PATTERNS.items():
-        if pattern in source:
+        if pattern in code:
             found.append(f"{pattern} ({reason})")
     return found
