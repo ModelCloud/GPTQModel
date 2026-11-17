@@ -1,0 +1,18 @@
+MOSS Moon-003 Transformers 5 adaptation for GPT-QModel
+
+Derived from OpenMOSS/MOSS, revision
+24bc88737d83fa5561bf3c284b2895b8ac41bff6, and the released fnlp/MOSS
+checkpoint source files pinned in source_inventory.json.
+
+Original modeling, configuration and tokenization source is licensed under
+Apache License 2.0. Copyright OpenMOSS and the HuggingFace teams; portions of
+the upstream modeling source carry Microsoft and NVIDIA copyright notices.
+See LICENSE and the retained attribution headers. Modifications copyright
+2026 ModelCloud.ai, under Apache License 2.0.
+
+This package contains source and checkpoint metadata, not trained weights or
+training datasets. Upstream separately describes its MODEL WEIGHTS under
+GNU AGPL 3.0 and its DATA under CC BY-NC 4.0, with additional upstream use
+conditions for commercial/public-serving applications. The Apache source
+license does not grant rights to those separate artifacts. Consult the
+pinned OpenMOSS README and the checkpoint licenses for their terms.
