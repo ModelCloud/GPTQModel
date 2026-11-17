@@ -2965,12 +2965,31 @@ def load_hf_tokenizer(
     from tokenicer import Tokenicer
 
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
-    if isinstance(model_config, PreTrainedConfig):
+    selected_model_config = model_config if isinstance(model_config, PreTrainedConfig) else kwargs.get("config")
+    if isinstance(tokenizer_or_path, (str, os.PathLike)):
+        from ..models.local import local_model_loader
+
+        tokenizer_or_path = os.fspath(tokenizer_or_path)
+        loader = local_model_loader(getattr(selected_model_config, "model_type", None))
+        if loader is not None:
+            # A package-owned model never delegates tokenizer Python to its
+            # checkpoint, including when it uses an ordinary native tokenizer.
+            trust_remote_code = False
+        if loader is not None and getattr(loader, "tokenizer_class", None) is not None:
+            # Class selection belongs to the definition, including when two
+            # checkpoints declare the same tokenizer class name. Tokenicer
+            # receives the owned instance and remains the normalization owner.
+            tokenizer_kwargs = {
+                key: value for key, value in kwargs.items()
+                if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
+            }
+            tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
+    if isinstance(selected_model_config, PreTrainedConfig):
         # Tokenicer's model_config controls normalization; AutoTokenizer uses
         # the separate `config` argument for class selection. Reuse the config
         # already selected by our policy so tokenizer initialization cannot
         # import checkpoint AutoConfig code behind a definition-owned port.
-        kwargs["config"] = model_config
+        kwargs["config"] = selected_model_config
     tokenicer = Tokenicer.load(
         tokenizer_or_path,
         model_config=model_config,
