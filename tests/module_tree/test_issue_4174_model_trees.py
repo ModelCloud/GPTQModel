@@ -188,6 +188,48 @@ def test_llama4_dense_layers_are_declared_next_to_moe():
     assert Llama4QModel.lm_head == "language_model.lm_head"
 
 
+def _llama4_scout_config():
+    config = transformers.AutoConfig.for_model("llama4_text")
+    config.num_hidden_layers = 2
+    config.interleave_moe_layer_step = 1
+    config.moe_layers = [0, 1]
+    return config
+
+
+def test_llama4_scout_declares_no_dense_feed_forward_branch():
+    """Scout is all-MoE, so #4245's dense fallback must not be required (#4689)."""
+
+    definition, config, model, layers = _build_meta("llama4_text", _llama4_scout_config())
+
+    assert [type(layer.feed_forward).__name__ for layer in layers] == [
+        "Llama4TextMoe",
+        "Llama4TextMoe",
+    ]
+
+    # The class tree still declares the dense branch for Maverick.
+    assert ModulePlan.from_tree(Llama4TextQModel.module_tree).find("feed_forward.gate_proj") is not None
+
+    # A Scout checkpoint resolves an effective tree without it, so a strict
+    # `create_named_modules` never asks for `feed_forward.gate_proj`.
+    tree = definition._resolve_effective_module_tree(model, QC)
+    plan = ModulePlan.from_tree(tree)
+    assert plan.find("feed_forward.gate_proj") is None
+    _assert_plan_resolves(
+        plan,
+        (
+            "feed_forward.experts.0.gate_proj",
+            "feed_forward.shared_expert.gate_proj",
+        ),
+        quantize=True,
+    )
+
+    with definition._module_tree_context(tree):
+        modules = definition.simple_layer_modules(config, QC)
+    names = {name.split(":", 1)[0] for block in modules for name in block}
+    assert "feed_forward.experts.0.gate_proj" in names
+    assert "feed_forward.gate_proj" not in names
+
+
 def _gemma4_moe_config():
     config = transformers.AutoConfig.for_model("gemma4_text")
     config.num_hidden_layers = 2
