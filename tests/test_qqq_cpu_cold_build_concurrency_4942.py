@@ -61,7 +61,7 @@ def _run_cold_forward_burst(module, x, *, threads: int = 4, stagger: float = 0.0
 
 def test_concurrent_cold_forwards_do_not_read_a_dropped_checkpoint(monkeypatch):
     module = _build_torch_module(in_features=256, out_features=128, group_size=128)
-    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", lambda: _FakePackedKernel())
+    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", _FakePackedKernel)
 
     # Widen the gap between "no cache yet" and the checkpoint reads, so a
     # thread that loses the race deterministically observes the dropped buffers.
@@ -92,7 +92,7 @@ def test_concurrent_cold_forwards_do_not_read_a_dropped_checkpoint(monkeypatch):
 
 def test_repeated_cold_bursts_keep_the_cache_consistent(monkeypatch):
     module = _build_torch_module(in_features=256, out_features=128, group_size=128)
-    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", lambda: _FakePackedKernel())
+    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", _FakePackedKernel)
 
     x = torch.randn(2, module.in_features, dtype=torch.float16)
     with torch.inference_mode():
