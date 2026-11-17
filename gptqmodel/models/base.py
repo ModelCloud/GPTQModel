@@ -3252,6 +3252,75 @@ class BaseQModel(nn.Module):
 
         return runtime_generate(self.model, **kwargs)
 
+    def _kernels_support_compile(self) -> bool:
+        """Whether a compiled generation path can beat this model's eager forward.
+
+        Transformers compiles the forward pass of a static-cache ``generate()``
+        (``CompileConfig``, ``mode="reduce-overhead"``). That only pays off
+        when the selected kernels are traceable. A custom op without a fake
+        implementation, or a host-side ``data_ptr()``/``id()``/``._version``
+        guard inside ``forward``, breaks the graph on every quantized linear,
+        so CUDA-graph capture never covers a layer and each decode step pays
+        for the fragments and guard checks: the static cache then runs 2-4x
+        slower than eager (#4669). Kernels declare the answer with
+        ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False until a
+        capture is measured.
+
+        A model with no quantized linear (dense) has nothing that breaks the
+        graph, so it keeps whatever compile policy the caller chose.
+        """
+
+        # ``optimize()`` wraps the model in an ``OptimizedModule``; the kernels
+        # live on the original module.
+        model = getattr(self.model, "_orig_mod", self.model)
+        if not isinstance(model, nn.Module):
+            # Nothing to inspect (a test double or a foreign runtime): keep the
+            # caller's policy instead of guessing.
+            return True
+        modules = find_modules(model, layers=[BaseQuantLinear, ExllamaV3TorchLinear])
+        if not modules:
+            return True
+        return all(getattr(module, "SUPPORTS_COMPILE", False) for module in modules.values())
+
+    def _generation_compile_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the generation kwargs to pass, with the compile policy applied.
+
+        Transformers enables auto-compile for a static-cache generation unless
+        the generation config says otherwise. With graph-breaking kernels that
+        default is a pessimization (#4669), so it is turned off for this call.
+        Every explicit caller choice wins: ``disable_compile`` as a keyword or
+        on a supplied ``generation_config``, and an explicit ``compile_config``
+        (the caller opted into compiling). The policy never mutates the
+        caller's ``generation_config``.
+        """
+
+        if kwargs.get("disable_compile") is not None:
+            return kwargs
+        generation_config = kwargs.get("generation_config")
+        if generation_config is not None:
+            if getattr(generation_config, "disable_compile", None) is not None:
+                return kwargs
+            if getattr(generation_config, "compile_config", None) is not None:
+                return kwargs
+        elif kwargs.get("compile_config") is not None:
+            return kwargs
+        if self._kernels_support_compile():
+            return kwargs
+
+        log.warn.once(
+            "Generation: the selected quantized kernels break `torch.compile` graphs, so the "
+            "static-cache auto-compile is disabled for this call; it would be slower than eager. "
+            "Pass `disable_compile=False` or a `compile_config` to compile anyway (#4669)."
+        )
+        merged = dict(kwargs)
+        if generation_config is not None:
+            config = copy.deepcopy(generation_config)
+            config.disable_compile = True
+            merged["generation_config"] = config
+        else:
+            merged["disable_compile"] = True
+        return merged
+
     def generate(self, inputs=None, **kwargs):
         # Torch/XLA represents a slice as an in-place view update during graph
         # construction. Inference tensors cannot receive a version counter, so
@@ -3293,7 +3362,7 @@ class BaseQModel(nn.Module):
                         inputs["attention_mask"],
                     )
                 inputs = inputs.to(self.model.device)
-                return self.model.generate(**inputs, **kwargs)
+                return self.model.generate(**inputs, **self._generation_compile_kwargs(kwargs))
 
             if hasattr(inputs, "get") and not torch.is_tensor(inputs):
                 if "attention_mask" in inputs:
@@ -3301,7 +3370,9 @@ class BaseQModel(nn.Module):
                         inputs.get("input_ids"),
                         inputs["attention_mask"],
                     )
-                return self.model.generate(**inputs, **kwargs)
+                # A caller may put generation options in the mapping, so the
+                # policy has to see both sides before it injects a default.
+                return self.model.generate(**self._generation_compile_kwargs({**inputs, **kwargs}))
 
             if "attention_mask" in kwargs:
                 kwargs["attention_mask"] = _normalize_generate_attention_mask(
@@ -3309,7 +3380,7 @@ class BaseQModel(nn.Module):
                     kwargs["attention_mask"],
                 )
 
-            return self.model.generate(inputs=inputs, **kwargs)
+            return self.model.generate(inputs=inputs, **self._generation_compile_kwargs(kwargs))
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
