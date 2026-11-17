@@ -38,6 +38,15 @@ class ParoTritonLinear(ParoLinear):
     # capture succeeds with output matching eager.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = True
+    # A single-layer trace is clean, but under a static-cache `generate()` the
+    # Paro Triton decode recompiles per step (24-115 graph breaks) and runs
+    # 1.3-8x slower than eager on RTX 4090/5090, so the #4669 policy stays off
+    # (#4984). Re-measure the model-level decode before opting in.
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "single-layer trace is clean, but static-cache generate recompiles per "
+        "step and is 1.3-8x slower than eager (#4984)"
+    )
 
     SUPPORTS_BACKENDS = [BACKEND.PARO_TRITON]
     SUPPORTS_METHODS = ParoLinear.SUPPORTS_METHODS

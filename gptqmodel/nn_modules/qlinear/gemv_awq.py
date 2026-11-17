@@ -394,6 +394,14 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
     # of the eager forward succeeds.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = True
+    # Only reachable through an explicit `BACKEND.AWQ_GEMV_TRITON` selection
+    # (FORMAT priority 0), and no static-cache `generate()` win has been
+    # measured for it, so the #4669 policy stays off (#4984).
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "explicit-selection-only GEMV decode kernel; no static-cache generate "
+        "win measured (#4984)"
+    )
 
     @classmethod
     def validate(cls, bits, group_size=-1, desc_act=False, sym=True, in_features=None,
@@ -522,6 +530,13 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
     # captures into a CUDA graph on the GPU probe.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
     SUPPORTS_GRAPH_CAPTURE = True
+    # CPU-only portable fallback for the packed GEMV layout: compiling a CPU
+    # static-cache decode has no measured win, so the #4669 policy stays off
+    # (#4984).
+    SUPPORTS_COMPILE = False
+    SUPPORTS_COMPILE_EAGER_REASON = (
+        "CPU-only portable GEMV fallback; no measured static-cache win (#4984)"
+    )
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.AWQ_TORCH)

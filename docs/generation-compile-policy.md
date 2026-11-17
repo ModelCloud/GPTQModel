@@ -53,12 +53,39 @@ decode step, so it loses even when its eager path is slow. A clean trace of a
 forward whose eager path is already fast is a wash, and one timing on one
 architecture does not qualify a kernel (#4739).
 
+A kernel that reaches `INDUCTOR` or higher already satisfies half of that bar,
+so it must answer the other half explicitly: either opt in, or record the
+measured loss in `SUPPORTS_COMPILE_EAGER_REASON`. The protocol test rejects the
+silent case, because that is exactly how `BitsAndBytesLinear` and `MacaqLinear`
+ended up trace-clean and forced eager at the same time (#4984).
+
 | Kernel | `SUPPORTS_COMPILE` | Evidence |
 | --- | --- | --- |
 | `TorchFP8Linear` | `True` | `fullgraph=True` traces clean (host-visible constants only; the decoded-weight bound is a load-time cache). Static-cache decode 0.126 s -> 0.055 s (2.3x, 1 graph, 0 breaks) on the tiny Llama here (#4739) |
 | `AwqTorchLinear` | `True` | trace-clean since #4737's decode-range guard returns before `tensor_cache_key()` under `is_compiling()`. Static-cache decode 0.174 s -> 0.047 s (1 graph, 0 breaks) on the tiny Llama here; 1.36 s -> 0.76 s on Llama-1B/4090 (#4669). Its subclass `ParoLinear` re-declares `False` because its rotation/GEMM path branches on host row counts |
-| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, QQQ, EXL3, Paro | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
+| `BitsAndBytesLinear` | `True` | the accelerator path is straight-line: 1 graph, 0 breaks, and a compiled static-cache decode is 2.2-3.5x faster than eager on 4090/5090/R9700. Reproduced here on sm_80 (Qwen2.5-0.5B BnB NF4, 4 prompts x 48 tokens): 1.78 s eager, 1.80 s on the old default path, 0.37 s on the default path after the opt-in (5.5x). AUTO selects this kernel for every BitsAndBytes checkpoint on CUDA, so the opt-out cost 2.2-3.5x by default (#4984) |
+| `MacaqLinear` | `True` | `MACAQ_TORCH` traces to 1 graph with 0 breaks and the compiled decode is 9x faster than its eager torch path (6.67 s -> 0.73 s, #4984). The eager forward still cannot be captured (a host->device table copy), which is why `SUPPORTS_GRAPH_CAPTURE` stays `False`: the policy question is about dynamo, not capture |
+| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, `QQQLinear`, EXL3, `ParoLinear` | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
 | `FP8MlxQuantLinear` | `False` | native Metal MXFP8 kernels on MPS; never traced or timed, so it does not inherit the Torch FP8 opt-in |
+
+A kernel whose `SUPPORTS_COMPILE_LEVEL` is `INDUCTOR` or higher has a traceable,
+lowerable forward, which is the same bar as the policy question above. Opting
+out from there is still allowed (eager really can be faster), but it must record
+the measured loss in `SUPPORTS_COMPILE_EAGER_REASON`, so the two declarations
+cannot drift apart again:
+
+| Kernel | Level | `SUPPORTS_COMPILE` | Recorded reason |
+| --- | --- | --- | --- |
+| `QQQTorchLinear` | `CUDAGRAPH` | `False` | a model-level static-cache `generate()` recompiles per step (172 graphs, 24-115 breaks) and runs 1.3-8x slower than eager |
+| `ParoTritonLinear` | `CUDAGRAPH` | `False` | same model-level loss; the single-layer trace is clean, the decode loop is not |
+| `VPTQLinear` | `CUDAGRAPH` | `False` | no measured static-cache win for the portable torch path yet |
+| `AwqGEMVTritonLinear`, `AwqGEMVTorchLinear` | `CUDAGRAPH` | `False` | explicit-selection-only / CPU-only GEMV paths, never timed under `generate()` |
+| `BitsAndBytesMlxQuantLinear`, `MacaqMlxQuantLinear` | `NOT_APPLICABLE` | `False` | native Metal matmuls; never traced or timed, so they do not inherit the Torch opt-in |
+
+`tests/kernels/test_kernel_compile_protocol.py` rejects a `>= INDUCTOR` kernel
+that opts out without a reason, and `tests/kernels/test_compile_policy_levels_4984.py`
+re-checks the pairing against the measured trace on real hardware (and skips
+kernels this device cannot run).
 
 A dense model has no quantized linear to break the graph, so it keeps whatever
 compile policy the caller chose.
@@ -75,6 +102,20 @@ GB10 (sm_121):
 | `AWQ_TORCH`, after #4737 | 0.171 s | 0.047 s | 0.174 s | 1 |
 | FP8, before #4739 (declares `False`) | 0.123 s | 0.126 s | 0.126 s | 0 |
 | FP8, after #4739 (declares `True`) | 0.123 s | 0.055 s | 0.126 s | 1 |
+
+BitsAndBytes NF4, Qwen2.5-0.5B-Instruct (24 layers), 4 left-padded prompts x 48
+greedy tokens, fp16, PG506 (sm_80), torch 2.15.0.dev+cu130, one shared GPU:
+
+| run | dynamic cache | static cache | static, `disable_compile=True` | static, `disable_compile=False` | dynamo |
+| --- | --- | --- | --- | --- | --- |
+| before #4984 (declares `False`) | 1.873 s | 1.795 s | 1.779 s | 0.607 s | 1 graph, 0 breaks |
+| after #4984 (declares `True`) | 1.961 s | 0.367 s | 2.012 s | 0.311 s | 1 graph, 0 breaks |
+
+The compiled decode reproduced the eager greedy tokens on all four rows here;
+the first compiled call costs 18-35 s of compile time. The two rows are separate
+processes on a shared GPU, so the eager baseline moved (1.78 s vs 2.01 s); the
+point is that the default policy now takes the compiled path instead of adding
+`disable_compile=True`.
 
 Compiling FP8 changes the reduction order, so a compiled greedy decode can pick
 a different token from the eager one on some weights, while staying
