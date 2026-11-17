@@ -219,6 +219,54 @@ def test_qqq_reduce_scratch_is_exclusive_per_cuda_stream():
         qqq_module._clear_reduce_scratch()
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or IS_ROCM,
+    reason="QQQ's native kernel is CUDA-only; HIP exposes CUDA streams too",
+)
+def test_qqq_native_forward_separates_scratch_across_streams(monkeypatch):
+    """Two eager modules on different streams must not pass the same C range."""
+
+    qqq_module._clear_reduce_scratch()
+    monkeypatch.setattr(
+        QQQLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
+    monkeypatch.setattr(qqq_module, "qqq_runtime_available", lambda: True)
+    pointers = []
+
+    def fake_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16):
+        pointers.append(C.data_ptr())
+        D.zero_()
+
+    monkeypatch.setattr(qqq_module, "qqq_gemm", fake_gemm)
+    device = torch.device("cuda", torch.cuda.current_device())
+    modules = [
+        QQQLinear(
+            bits=4,
+            group_size=128,
+            sym=True,
+            desc_act=False,
+            in_features=128,
+            out_features=128,
+            register_buffers=True,
+        ).to(device)
+        for _ in range(2)
+    ]
+    x = torch.randn(2, 128, dtype=torch.float16, device=device)
+    streams = [torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)]
+    try:
+        for module, stream in zip(modules, streams):
+            with torch.cuda.stream(stream):
+                module(x)
+    finally:
+        for stream in streams:
+            stream.synchronize()
+        qqq_module._clear_reduce_scratch()
+
+    assert len(pointers) == 2
+    assert pointers[0] != pointers[1]
+
+
 def test_qqq_torch_unpack_uint4_matches_int64_oracle_bitwise():
     torch.manual_seed(4387)
     packed = torch.randint(-(2**31), 2**31 - 1, (11, 7), dtype=torch.int32)
