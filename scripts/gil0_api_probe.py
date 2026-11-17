@@ -42,7 +42,13 @@ ITERS = 4
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Probes that must only run once, on the main thread (process-global state).
-SINGLE_SHOT = {"torch.cuda.CUDAGraph + torch.cuda.graph"}
+SINGLE_SHOT = {
+    "torch.cuda.CUDAGraph + torch.cuda.graph",
+    # Mutates libtorch's process-global num_threads and then checks a fresh
+    # caller thread; concurrent probe invocations would observe each other's
+    # scopes rather than this invocation's post-task state.
+    "torch.set_num_threads (per worker)",
+}
 
 
 def _gpu_count() -> int:
@@ -168,15 +174,14 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     def set_num_threads_thread_local() -> bool:
         """Split the intra-op budget across workers and re-enter it twice.
 
-        ``DeviceThreadPool`` calls ``torch.set_num_threads`` once per worker
-        thread so each OpenMP team is bounded (issue #4356). The probe checks
-        the two properties the fix relies on: the new value is visible to
-        threads the worker spawns (an OpenMP team is per pthread that enters
-        the region, and nested helper threads inherit the worker's value) and
-        it never leaks back to the caller.
+        ``DeviceThreadPool`` scopes ``torch.set_num_threads`` to each task so
+        each OpenMP team is bounded (issue #4356) without changing the process
+        budget for threads created afterwards (issue #4601). The probe checks
+        the new value inside the worker and a nested thread, then checks that a
+        fresh thread created by the caller sees the original budget.
         """
 
-        from gptqmodel.utils.threadx import split_intraop_threads
+        from gptqmodel.utils.threadx import _scoped_intraop_threads, split_intraop_threads
 
         caller_before = torch.get_num_threads()
         target = split_intraop_threads(8, 8)
@@ -188,22 +193,22 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         state: Dict[str, int] = {}
 
         def worker() -> None:
-            torch.set_num_threads(target)
-            state["worker"] = torch.get_num_threads()
-            matrix = torch.randn(256, 256)
-            state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+            with _scoped_intraop_threads(target):
+                state["worker"] = torch.get_num_threads()
+                matrix = torch.randn(256, 256)
+                state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
 
-            child: Dict[str, int] = {}
+                child: Dict[str, int] = {}
 
-            def nested() -> None:
-                child["value"] = torch.get_num_threads()
-                child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+                def nested() -> None:
+                    child["value"] = torch.get_num_threads()
+                    child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
 
-            thread = threading.Thread(target=nested)
-            thread.start()
-            thread.join()
-            state["child"] = child["value"]
-            state["child_finite"] = child["sum_finite"]
+                thread = threading.Thread(target=nested)
+                thread.start()
+                thread.join()
+                state["child"] = child["value"]
+                state["child_finite"] = child["sum_finite"]
 
         with ThreadPoolExecutor(max_workers=THREADS) as pool:
             list(pool.map(lambda _: worker(), range(THREADS)))
@@ -212,6 +217,19 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError(f"worker saw {state['worker']}, nested thread saw {state['child']}")
         if not (state["sum_finite"] and state["child_finite"]):
             raise AssertionError("matmul produced non-finite values under a split intra-op pool")
+        fresh: Dict[str, int] = {}
+
+        def fresh_thread() -> None:
+            fresh["value"] = torch.get_num_threads()
+
+        thread = threading.Thread(target=fresh_thread)
+        thread.start()
+        thread.join()
+        if fresh["value"] != caller_before:
+            raise AssertionError(
+                f"worker set_num_threads leaked into a new caller thread: "
+                f"{caller_before} -> {fresh['value']}"
+            )
         if torch.get_num_threads() != caller_before:
             raise AssertionError(
                 f"worker set_num_threads leaked into the caller: {caller_before} -> {torch.get_num_threads()}"
