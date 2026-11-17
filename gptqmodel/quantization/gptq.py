@@ -449,24 +449,6 @@ def _move_static_groups(groups, device: torch.device):
     )
 
 
-# One warning per process for each way ``exclude_attention_sinks`` can end up
-# a no-op. The flag is opt-in, so a silent skip would look identical to "this
-# run had no sinks to drop"; the warning names the reason once per run instead
-# of once per module (issue #4459).
-_ATTENTION_SINK_WARNED: set = set()
-_ATTENTION_SINK_WARN_LOCK = threading.Lock()
-
-
-def _warn_attention_sink_once(reason: str, message: str) -> None:
-    """Log ``message`` at most once per process for ``reason``."""
-
-    with _ATTENTION_SINK_WARN_LOCK:
-        if reason in _ATTENTION_SINK_WARNED:
-            return
-        _ATTENTION_SINK_WARNED.add(reason)
-    log.warn(message)
-
-
 class GPTQ:
     @property
     def H(self) -> Optional[torch.Tensor]:
@@ -630,12 +612,6 @@ class GPTQ:
 
         # fwd counter
         self.fwd_counter = 0
-
-        # ``exclude_attention_sinks`` telemetry: how many calibration rows were
-        # actually dropped as BOS sinks, and how many batches were left
-        # untouched because the BOS decision could not be made.
-        self.attention_sink_dropped_rows = 0
-        self.attention_sink_skipped_batches = 0
 
         self.fallback = self.qcfg.fallback
         self.expected_nsamples: Optional[float] = None
@@ -865,13 +841,7 @@ class GPTQ:
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
-    def add_batch(
-        self,
-        inp: torch.Tensor,
-        out: torch.Tensor,
-        batch_index: Optional[int] = None,
-        sink_bos_mask: Optional[torch.Tensor] = None,
-    ):
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         if not self._hessian_capture_enabled:
             return
         if isinstance(self.module, nn.Embedding):
@@ -895,14 +865,7 @@ class GPTQ:
                 self._hessian_dirty = True
             return
 
-        if sink_bos_mask is None:
-            # Keep the historical call shape when nothing is masked: subclasses
-            # such as GPTAQ/FOEM override ``process_batch`` without the keyword.
-            batch_token_size, xtx, device = self.process_batch(inp)
-        else:
-            batch_token_size, xtx, device = self.process_batch(
-                inp, sink_bos_mask=sink_bos_mask
-            )
+        batch_token_size, xtx, device = self.process_batch(inp)
         if batch_token_size == 0 or xtx is None:
             return
 
@@ -1145,74 +1108,12 @@ class GPTQ:
 
         return xtx_accum
 
-    def _attention_sink_row_keep(
-        self,
-        inp: torch.Tensor,
-        rows: int,
-        device: torch.device,
-        sink_bos_mask: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        """Row mask that drops the leading token of BOS-led calibration rows.
-
-        ``GPTQConfig.exclude_attention_sinks`` is a calibration-only opt-in for
-        tokenizers that prepend a BOS/special token: that position becomes an
-        attention sink whose activation norm can dwarf every text token, so a
-        single row dominates the input Hessian (issue #4393). Returning a mask
-        here lets ``process_batch`` accumulate ``X^T X`` over exactly the rows
-        GPTQ should optimize for.
-
-        ``sink_bos_mask`` is the per-sample decision computed from the
-        calibration ``input_ids`` (see
-        :func:`gptqmodel.utils.calibration.attention_sink_bos_flags`): ``True``
-        means the sample's first retained token is the tokenizer's BOS id, so
-        position 0 may be dropped. Without that evidence nothing is masked --
-        BOS-less tokenizers such as Qwen2.5/Qwen3 used to lose a real text
-        token here and could end up worse than RTN (issue #4459).
-
-        Only a 3-D linear/Conv1D batch still carries its sequence axis. The
-        calibration hook flattens routed-expert inputs to ``[rows, hidden]``
-        before they reach us, so their token boundaries are unrecoverable and
-        they are left untouched rather than guessed at.
-        """
-
-        if not getattr(self.qcfg, "exclude_attention_sinks", False):
-            return None
-        if not isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            return None
-        if inp.dim() != 3:
-            return None
-        batch, seq_len = int(inp.shape[0]), int(inp.shape[1])
-        if seq_len <= 1 or batch * seq_len != rows:
-            return None
-        if sink_bos_mask is None:
-            _warn_attention_sink_once(
-                "no_token_ids",
-                "GPTQ: `exclude_attention_sinks` is enabled but calibration token ids "
-                "are unavailable, so position 0 is not masked. Pass the per-sample BOS "
-                "flags from the calibration dataset (see "
-                "`attention_sink_bos_flags`) to mask real BOS sinks.",
-            )
-            with self.lock:
-                self.attention_sink_skipped_batches += 1
-            return None
-        flags = torch.as_tensor(sink_bos_mask, dtype=torch.bool).reshape(-1)
-        if flags.numel() != batch:
-            with self.lock:
-                self.attention_sink_skipped_batches += 1
-            return None
-        flags = flags.to(device=device)
-        if not bool(flags.any()):
-            # Explicit decision: no row in this batch starts with BOS.
-            return None
-        keep = torch.ones((batch, seq_len), dtype=torch.bool, device=device)
-        keep[:, 0] = ~flags
-        return keep.reshape(-1)
-
     def process_batch(
-        self,
-        inp: torch.Tensor,
-        sink_bos_mask: Optional[torch.Tensor] = None,
+        self, inp: torch.Tensor, batch_index: Optional[int] = None
     ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
+        # `batch_index` keeps the override chain (GPTAQ/FOEM pair a native input
+        # per batch) signature-compatible; the plain Hessian path is order-free.
+        del batch_index
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
@@ -1304,23 +1205,6 @@ class GPTQ:
                 non_blocking=False,
             )
             canonical_device = accumulator_device
-
-        sink_keep = self._attention_sink_row_keep(
-            inp,
-            reshaped_inp.shape[0],
-            reshaped_inp.device,
-            sink_bos_mask=sink_bos_mask,
-        )
-        if sink_keep is not None:
-            # Drop attention-sink rows before the Hessian GEMM so ``H`` and the
-            # sample count describe the same token set.
-            sink_keep = sink_keep.to(device=reshaped_inp.device)
-            dropped_rows = int(reshaped_inp.shape[0]) - int(sink_keep.sum().item())
-            reshaped_inp = reshaped_inp[sink_keep].contiguous()
-            del sink_keep
-            if dropped_rows:
-                with self.lock:
-                    self.attention_sink_dropped_rows += dropped_rows
 
         batch_token_size = reshaped_inp.shape[0]
 

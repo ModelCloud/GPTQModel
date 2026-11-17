@@ -36,6 +36,7 @@ from ..looper.loop_processor import (
     CheckpointSupport,
     ForwardConfig,
     ProcessorLifecycleConfig,
+    active_padding_mask,
 )
 from ..looper.named_module import NamedModule
 from ..looper.shared_input import SharedInputCaptureProcessor
@@ -388,7 +389,9 @@ class _EXL3NaturalRouteCapture:
         # below must continue to retain only calibration-valid rows.
         verification_router_input = router_input
         verification_top_indices = indices
-        keep_mask = getattr(getattr(self.processor, "_mask_tls", None), "value", None)
+        # Expert hooks receive every routed row, the BOS sinks included, so
+        # route evidence keeps the same padding-only row set.
+        keep_mask = active_padding_mask(self.processor)
         if keep_mask is None:
             mask_mode = "absent"
         else:
@@ -2281,7 +2284,9 @@ class EXL3Processor(SharedInputCaptureProcessor):
             )
             if active_batch_capture is not None:
                 active_batch_capture.capture_expert_input(name, inp[0].data)
-            capture.add_batch(inp[0].data, out.data, batch_index=batch_idx)
+            capture.add_batch(
+                self.calibration_rows(inp[0].data), out.data, batch_index=batch_idx
+            )
             del inp, out
 
         return tmp

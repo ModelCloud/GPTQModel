@@ -13,6 +13,7 @@ import os
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from itertools import count
@@ -42,6 +43,7 @@ from ..nn_modules.qlinear.torch import TorchLinear
 from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import (
     FORMAT,
+    META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS,
     METHOD,
     QUANTIZE_BLACK_LIST,
     AutoDtypeCast,
@@ -2109,8 +2111,21 @@ class BaseQModel(nn.Module):
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         checkpoint: Optional["CheckpointConfig"] = None,
         fuse: Optional[bool] = None,
+        # Drop attention-sink tokens (every attended BOS token) from every
+        # processor's calibration statistics (issue #4393).
+        calibration_exclude_attention_sinks: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         run_started = time.perf_counter()
+        if type(calibration_exclude_attention_sinks) is not bool:
+            raise TypeError("`calibration_exclude_attention_sinks` must be a bool")
+        for pattern, override in (getattr(self.quantize_config, "dynamic", None) or {}).items():
+            if isinstance(override, Mapping) and "exclude_attention_sinks" in override:
+                # The sink rows are a property of the calibration batch, not of
+                # one module, so a per-module rule would silently do nothing.
+                raise ValueError(
+                    f"QuantizeConfig: `dynamic['{pattern}'].exclude_attention_sinks` is not a "
+                    "per-module option; use `quantize(calibration_exclude_attention_sinks=True)`."
+                )
         vram_devices = _quantize_vram_devices(self.quantize_config)
         _reset_peak_vram_stats(vram_devices)
 
@@ -2185,6 +2200,9 @@ class BaseQModel(nn.Module):
                             "adapter_calibration_dataset": adapter_calibration_dataset,
                             "embed_quant_config": embed_quant_config,
                             "checkpoint": checkpoint,
+                            "calibration_exclude_attention_sinks": (
+                                True if calibration_exclude_attention_sinks else None
+                            ),
                         },
                     )
                 self.after_quantize()
@@ -2484,6 +2502,11 @@ class BaseQModel(nn.Module):
         )
         with blas_context:
             if run_plan.weight_only:
+                if calibration_exclude_attention_sinks:
+                    log.warn(
+                        "Quantize: `calibration_exclude_attention_sinks` has no effect on "
+                        "weight-only quantization, which uses no calibration rows."
+                    )
                 result = self._quantize_weight_only(
                     run_plan=run_plan,
                     checkpoint=checkpoint,
@@ -2500,6 +2523,17 @@ class BaseQModel(nn.Module):
                     raise ValueError(
                         "Calibration dataset is required unless a weight-only quantize config is configured."
                     )
+                # Record the calibration row policy for provenance. The key is
+                # absent for the default policy, so a default run never changes
+                # the serialized config.
+                if calibration_exclude_attention_sinks:
+                    self.quantize_config.meta_set(
+                        key=META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS, value=True
+                    )
+                elif isinstance(self.quantize_config.meta, dict):
+                    self.quantize_config.meta.pop(
+                        META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS, None
+                    )
                 result = self._quantize_with_calibration(
                     run_plan=run_plan,
                     calibration=calibration,
@@ -2512,6 +2546,7 @@ class BaseQModel(nn.Module):
                     calibration_concat_separator=calibration_concat_separator,
                     embed_quant_config=embed_quant_config,
                     checkpoint=checkpoint,
+                    calibration_exclude_attention_sinks=calibration_exclude_attention_sinks,
                 )
 
         # Some definitions need the complete layer stack before they can
@@ -2804,6 +2839,7 @@ class BaseQModel(nn.Module):
         sort: Optional[str],
         concat_separator: Optional[str],
         batch_size: int,
+        exclude_attention_sinks: bool = False,
     ):
         from ..looper.loop_processor import CalibrationConfig
 
@@ -2814,6 +2850,7 @@ class BaseQModel(nn.Module):
             sort=sort,
             concat_separator=concat_separator,
             batch_size=batch_size,
+            exclude_attention_sinks=exclude_attention_sinks,
         )
 
     def _quantize_with_calibration(
@@ -2830,6 +2867,7 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[QuantizeEmbedConfig],
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
+        calibration_exclude_attention_sinks: bool = False,
     ):
         from ..looper.loop_processor import CalibrationConfig, _reusable_calibration_dataset
         from ..looper.module_looper import ModuleLooper
@@ -2867,6 +2905,7 @@ class BaseQModel(nn.Module):
             calibration_sort,
             calibration_concat_separator,
             run_plan.batch_size,
+            exclude_attention_sinks=calibration_exclude_attention_sinks,
         )
         args = {
             "tokenizer": self.tokenizer,

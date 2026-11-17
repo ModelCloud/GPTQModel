@@ -233,7 +233,7 @@ class QQQProcessor(SharedInputCaptureProcessor):
 
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
-            q.add_batch(inp[0].data, out.data)  # noqa: F821
+            q.add_batch(self.calibration_rows(inp[0].data), out.data)  # noqa: F821
         return tmp
 
     def _shared_input_task_enabled(self, task: QQQ) -> bool:

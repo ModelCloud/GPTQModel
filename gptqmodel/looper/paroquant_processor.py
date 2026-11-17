@@ -245,6 +245,13 @@ class ParoQuantProcessor(LoopProcessor):
         calculate_w_wq_diff: bool = False,
     ):
         """Configure a looper that captures activations and quantizes after replay."""
+        if calibration is not None and calibration.exclude_attention_sinks:
+            # ParoQuant optimizes rotations against whole replayed layer
+            # outputs, not per-token calibration rows; refusing is better than
+            # silently ignoring the request.
+            raise ValueError(
+                "ParoQuant does not support `calibration_exclude_attention_sinks`; leave it False."
+            )
         capture_group_layer_context = str(getattr(qcfg, "opt_scope", "module")).strip().lower() != "module"
         if forward is None:
             forward = ForwardConfig(
