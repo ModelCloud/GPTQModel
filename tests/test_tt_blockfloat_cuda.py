@@ -284,7 +284,10 @@ def test_embedding_module_routes_through_the_kernel():
     assert torch.count_nonzero(out_of_range) == 0
 
 
-def test_tied_head_routes_through_the_kernel():
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.float32], ids=["fp16", "bf16", "fp32"]
+)
+def test_tied_head_routes_through_the_kernel(dtype):
     """The tied head's CUDA branch must own a policy and reach the native matmul.
 
     Regression for #4482: the head delegates to the embedding's
@@ -308,13 +311,13 @@ def test_tied_head_routes_through_the_kernel():
     )
     head = TTBlockfloatTiedHead(module)
 
-    hidden = torch.randn(2, 3, 64, device="cuda", dtype=torch.bfloat16)
+    hidden = torch.randn(2, 3, 64, device="cuda", dtype=dtype)
     assert module._kernel_linear(hidden) is not None
     got = head(hidden)
 
     grid = module.dequantize(dtype=torch.float32).to(torch.float64)
-    expected = (hidden.to(torch.float64) @ grid.T).to(torch.bfloat16)
-    assert got.dtype is torch.bfloat16
+    expected = (hidden.to(torch.float64) @ grid.T).to(dtype)
+    assert got.dtype is dtype
     torch.testing.assert_close(
         got.to(torch.float64), expected.to(torch.float64), rtol=2e-3, atol=2e-3
     )
