@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import difflib
 import inspect
 import json
 import os
@@ -3342,6 +3343,35 @@ class BaseQModel(nn.Module):
 
         try:
             if self.quantized:
+                # The quantized branch has no `save_pretrained` passthrough, so
+                # any extra keyword used to be discarded without a word — a
+                # typo of a real parameter, or an HF option such as
+                # `push_to_hub=True`, reported success and did nothing (#4686).
+                # This is the save-side counterpart of #4052/#4057.
+                if kwargs:
+                    accepted = (
+                        "save_dir",
+                        "safetensors_metadata",
+                        "max_shard_size",
+                        "meta_quantizer",
+                        "eora_path",
+                        "split_by",
+                    )
+                    details = []
+                    for key in sorted(kwargs):
+                        matches = difflib.get_close_matches(key, accepted, n=1)
+                        details.append(
+                            f"`{key}`" + (f" (did you mean `{matches[0]}`?)" if matches else "")
+                        )
+                    raise TypeError(
+                        "GPTQModel.save: unexpected keyword argument(s) for a quantized "
+                        "model: "
+                        + ", ".join(details)
+                        + ". A quantized save accepts "
+                        + ", ".join(f"`{name}`" for name in accepted)
+                        + "."
+                    )
+
                 # Saving an already quantized model (for example one loaded from
                 # an older checkpoint) is the last point where a `dynamic` rule
                 # the fused engines cannot honor can be reported.
@@ -3351,6 +3381,22 @@ class BaseQModel(nn.Module):
                 #untie_weights(self.model)
 
                 if getattr(self, "_model_free_weight_only_replacements_only", False):
+                    # `save_quantized_embeddings` writes a module-replacement
+                    # checkpoint and has no adapter or split support, so it used
+                    # to drop two of `save()`'s own named parameters (#4686).
+                    unsupported = [
+                        name
+                        for name, value in (("eora_path", eora_path), ("split_by", split_by))
+                        if value is not None
+                    ]
+                    if unsupported:
+                        raise ValueError(
+                            "GPTQModel.save: "
+                            + ", ".join(f"`{name}`" for name in unsupported)
+                            + " is not supported when saving a weight-only replacement "
+                            "(module-replacement) checkpoint; only `save_dir`, "
+                            "`safetensors_metadata` and `meta_quantizer` apply."
+                        )
                     self.save_quantized_embeddings(
                         save_dir=save_dir,
                         safetensors_metadata=safetensors_metadata,
