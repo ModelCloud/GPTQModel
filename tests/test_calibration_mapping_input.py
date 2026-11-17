@@ -172,3 +172,111 @@ def test_columnar_mapping_with_mismatched_column_lengths_is_rejected():
             {"input_ids": [[1, 2], [3, 4]], "attention_mask": [[1, 1]]},
             calibration_data_min_length=1,
         )
+
+
+def _columnar_token_rows():
+    return (
+        [[11, 12, 13, 14], [21, 22, 23, 24, 25]],
+        [[1, 1, 1, 1], [1, 1, 1, 1, 1]],
+    )
+
+
+def _assert_token_rows(prepared):
+    ids, masks = _columnar_token_rows()
+    assert [batch["input_ids"].tolist() for batch in prepared] == [[row] for row in ids]
+    assert [batch["attention_mask"].tolist() for batch in prepared] == [[mask] for mask in masks]
+
+
+@pytest.mark.parametrize("format", ["numpy", "pandas", "torch", None])
+def test_dataset_formats_unpack_into_token_rows(format):
+    """`Dataset.with_format(...)[:]` must reach the same rows as the dataset itself.
+
+    ``numpy`` hands back a 1-D ``ndarray(dtype=object)`` per column, and
+    ``pandas`` hands back a ``DataFrame``; neither was recognised as a columnar
+    container, so ``numpy`` crashed in tensor conversion and ``pandas``
+    calibrated on the column labels.
+    """
+
+    datasets = pytest.importorskip("datasets")
+    ids, masks = _columnar_token_rows()
+    dataset = datasets.Dataset.from_dict({"input_ids": ids, "attention_mask": masks})
+    calibration_input = dataset.with_format(format)[:] if format else dataset
+
+    _assert_token_rows(
+        prepare_calibration_dataset(
+            _qmodel(), calibration_input, batch_size=1, calibration_data_min_length=0
+        )
+    )
+
+
+def test_object_dtype_column_of_arrays_is_one_row_per_element():
+    np = pytest.importorskip("numpy")
+    ids, masks = _columnar_token_rows()
+    object_ids = np.empty(len(ids), dtype=object)
+    object_ids[:] = [np.asarray(row, dtype=np.int64) for row in ids]
+    object_masks = np.empty(len(masks), dtype=object)
+    object_masks[:] = [np.asarray(row, dtype=np.int64) for row in masks]
+
+    _assert_token_rows(
+        prepare_calibration_dataset(
+            _qmodel(),
+            {"input_ids": object_ids, "attention_mask": object_masks},
+            batch_size=1,
+            calibration_data_min_length=0,
+        )
+    )
+
+
+def test_dataframe_columns_are_unpacked_into_token_rows():
+    pandas = pytest.importorskip("pandas")
+    ids, masks = _columnar_token_rows()
+
+    _assert_token_rows(
+        prepare_calibration_dataset(
+            _qmodel(),
+            pandas.DataFrame({"input_ids": ids, "attention_mask": masks}),
+            batch_size=1,
+            calibration_data_min_length=0,
+        )
+    )
+
+
+def test_dataframe_text_column_is_tokenized_per_row():
+    pandas = pytest.importorskip("pandas")
+    texts = ["one two three four", "five six seven eight"]
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(),
+        pandas.DataFrame({"text": texts}),
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    # A DataFrame is not a Mapping; iterating it yields the column label
+    # `"text"` and would calibrate on that single word.
+    assert [batch["input_ids"].tolist() for batch in prepared] == [[[4]], [[4]]]
+
+
+def test_dataframe_without_calibration_columns_is_rejected():
+    pandas = pytest.importorskip("pandas")
+
+    with pytest.raises(ValueError, match="must provide `input_ids`, `text`, or `messages`"):
+        prepare_calibration_dataset(
+            _qmodel(),
+            pandas.DataFrame({"foo": [1, 2]}),
+            calibration_data_min_length=1,
+        )
+
+
+def test_flat_object_column_is_still_one_token_row():
+    np = pytest.importorskip("numpy")
+
+    prepared = prepare_calibration_dataset(
+        _qmodel(),
+        {"input_ids": np.array([7, 8, 9], dtype=object)},
+        batch_size=1,
+        calibration_data_min_length=1,
+    )
+
+    assert [batch["input_ids"].tolist() for batch in prepared] == [[[7, 8, 9]]]
+
