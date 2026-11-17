@@ -5521,7 +5521,7 @@
     },
     "ricursive": {
       "definition": "RicursiveQModel",
-      "reason": "Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable."
+      "reason": "Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified."
     },
     "seed_oss": {
       "definition": "LlamaQModel",
@@ -5842,11 +5842,11 @@
     },
     "unlimited_ocr": {
       "definition": "UnlimitedOCRQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "unlimited-ocr": {
       "definition": "UnlimitedOCRQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "voxtral": {
       "definition": "VoxtralGPTQ",
@@ -5854,11 +5854,11 @@
     },
     "xing4_0": {
       "definition": "Xing4_0QModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned Xing4.0 MLA/hyperconnection dense and routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "xverse": {
       "definition": "XverseQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned XVERSE dense/256K and routed/shared MoE decoder; fusion executor has not been qualified."
     },
     "yi": {
       "definition": "LlamaQModel",
@@ -5874,7 +5874,7 @@
     },
     "zdtaichu5_0": {
       "definition": "ZDTaichu5QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned ZDTaichu5 C-RADIO/native Qwen3.5 hybrid multimodal binding; fusion executor has not been qualified."
     },
     "dots3_note": {
       "definition": "Dots3NoteQModel",

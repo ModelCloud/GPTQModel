@@ -356,6 +356,11 @@ TeleChat code notices and community-model artifact terms remain distinct;
 the retained legacy license PDF does not grant later-version commercial rights.
 The [calibration consumer validation](docs/transformers5-model-ports.md#calibration-consumer-validation)
 records current public-API migration coverage and reproducible CPU test batches.
+[Ricursive, Xing4.0, XVERSE, Unlimited-OCR and ZDTaichu5 selection](docs/transformers5-model-ports.md#ripple-xing4-xverse-and-native-ocr-selection)
+documents the owned decoders, exact native OCR task and media bindings. XVERSE's
+legacy Metaspace tokenizer remains blocked on released Tokenicer 0.0.19; its
+upstream correction is qualified separately and does not establish released
+compatibility. ZDTaichu5 retains the NVIDIA Open Model License and notices.
 [Checkpoint config selection](docs/checkpoint-config-selection.md)
 preserves the selected subfolder/revision when rebuilding a quantized save shell,
 including subsequent saves after a public reload.

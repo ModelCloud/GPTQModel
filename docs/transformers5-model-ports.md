@@ -127,6 +127,56 @@ quality coverage on this checkout.
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
 
+### Ripple, Xing4, XVERSE and native OCR selection
+
+These definitions select the actual owned decoder or exact native task before
+checkpoint Python is considered. Their package READMEs retain pinned source,
+license, numerical oracles, negative probes and exact reproduction commands.
+
+| Definition | Selection and evidence | Quantization and compatibility limits |
+| --- | --- | --- |
+| `RicursiveQModel` / `ricursive` | [Owned Ripple PeriNorm/value-residual decoder](../gptqmodel/models/ports/ricursive/README.md); both 1,203-key release schemas, serialized BPE, hybrid caches and explicit `config.mlp_chunk_size` (zero disables) | Six public plain-AWQ cases and two exact reloads; empty scale groups, no runtime chunking environment switch. No trained 65B/NVFP4 payload, full 2M context, GPU, general concurrent execution or fusion qualification |
+| `Xing4_0QModel` / `xing4_0` | [Owned MLA/hyperconnection dense and routed/shared MoE](../gptqmodel/models/ports/xing4_0/README.md); actual SentencePiece dialect and released checkpoint inventory, including auxiliary MTP | Public plain AWQ preserves excluded MTP state; no trained-payload, GPU, full-context or fusion qualification |
+| `XverseQModel` / `xverse` | [Owned dense/256K/routed/shared MoE](../gptqmodel/models/ports/xverse/README.md); thirteen pinned inventories and independent decoder equations | Six public plain-AWQ cases are qualified **only with unreleased Tokenicer candidate** `63abe8cfba72bb02d62b9df1d069d53d915883c5`. Released 0.0.19 cannot parse the legacy Metaspace tokenizer; migration remains incomplete for those assets. No trained-payload, full 256K context, GPU or fusion qualification |
+| `UnlimitedOCRQModel` / `unlimited_ocr`, `unlimited-ocr` | [Exact native UnlimitedOcrForConditionalGeneration](../gptqmodel/models/ports/unlimited_ocr/README.md), native config/processor/BPE; 2,710 source tensors accounted, with the unused source vision patch preserved in exports | Six public image-calibrated plain-AWQ cases and two exact reloads on released Tokenicer 0.0.19. Native eager GQA is explicitly rejected with SDPA retry. No OCR-quality, trained-payload, GPU or fusion qualification |
+| `ZDTaichu5QModel` / `zdtaichu5_0` | [Owned C-RADIO/media wrapper and native Qwen3.5 decoder](../gptqmodel/models/ports/zdtaichu5/README.md); all 820 released key/shapes and source video-before-image order | Six public image-calibrated plain-AWQ cases and two exact reloads on released Tokenicer 0.0.19. NVIDIA Open Model License and notices retained; distinct from LocateAnything's noncommercial license. No trained-payload, GPU, encoded-container decoding or fusion qualification |
+
+| Mechanism | Before | Shipped selection |
+| --- | --- | --- |
+| Ripple and Xing4 modeling | Checkpoint Python and obsolete Transformer APIs | Definition-owned config/model/tokenizer and explicit cache policies |
+| Unlimited-OCR task | Headless `AutoModel` and legacy `model.layers` assumptions | Exact native generative task and `model.language_model.layers` |
+| ZDTaichu5 vision and media | Checkpoint C-RADIO/wrapper code | Owned media/C-RADIO with exact native language decoder |
+| XVERSE legacy tokenizer | Modern Rust parser rejects legacy boolean-only Metaspace | Still blocked with published Tokenicer 0.0.19; generic upstream fix remains a release prerequisite |
+
+```mermaid
+flowchart TD
+    A["load_model_config selects LocalModelLoader"] --> B{"Declared model type?"}
+    B -->|ricursive / xing4_0| C["Owned config, decoder and tokenizer"]
+    B -->|unlimited_ocr / unlimited-ocr| D["UnlimitedOcrConfigLoader + native conditional generation"]
+    B -->|zdtaichu5_0| E["Owned C-RADIO/media + native Qwen3.5"]
+    B -->|xverse| F["Owned XVERSE decoder + selected serialized tokenizer"]
+    F --> G{"Selected JSON readable by released Tokenicer?"}
+    G -->|yes| H["One outer Tokenicer normalization"]
+    G -->|legacy Metaspace| X["Fail closed; upstream release required"]
+    C --> H
+    D --> H
+    E --> H
+    H --> I["Declared ModulePlan and public CalibrationConfig"]
+    I --> J["Plain AWQ; preserve dense exclusions and repeated safetensors saves"]
+    B -->|unknown or invalid geometry| Y["Reject before executing checkpoint Python"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X,Y failure
+```
+
+This flow does not change the dependency to an unpublished candidate. The exact
+candidate is reviewed in [Tokenicer PR #67](https://github.com/ModelCloud/Tokenicer/pull/67).
+The parent independently ran its complete suite: 219 passed, 28 skipped.
+The original three-bundle archive was independently SHA-checked and replayed
+under tokenizers 0.15.2 / Transformers 4.38.2 (30 raw/HF source comparisons)
+and the candidate (45 comparisons with repeated saves); all nine source assets
+remained byte-identical. The parent XVERSE-plus-shared-tokenizer run passed
+180 tests with two warnings on the exact candidate, not released 0.0.19.
+
 ### Recurrent, Nemotron and diffusion implementation selection
 
 MOSS and Nanbeige retain their own packed-attention and recurrent semantics.

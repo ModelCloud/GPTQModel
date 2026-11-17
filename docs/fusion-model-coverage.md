@@ -292,19 +292,19 @@ layout alone does not authorize it.
 | `raon1_mini` | `Raon1MiniQModel` | Package-owned Raon RDA/MLA, four-stream mHC and SiTU-MoE with persistent MXFP8 experts; fusion executor has not been qualified. |
 | `refinedWeb` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
 | `refinedWebModel` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
-| `ricursive` | `RicursiveQModel` | Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable. |
+| `ricursive` | `RicursiveQModel` | Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified. |
 | `solar_open2` | `SolarOpen2QModel` | Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified. |
 | `spark2_5` | `Spark2_5QModel` | Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified. |
 | `stablelm_epoch` | `LlamaQModel` | Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified. |
 | `telechat` | `TeleChat2QModel` | Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified. |
-| `unlimited-ocr` | `UnlimitedOCRQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `unlimited-ocr` | `UnlimitedOCRQModel` | Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified. |
 | `voxtral` | `VoxtralGPTQ` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
-| `xing4_0` | `Xing4_0QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `xverse` | `XverseQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `xing4_0` | `Xing4_0QModel` | Package-owned Xing4.0 MLA/hyperconnection dense and routed/shared MoE decoder; fusion executor has not been qualified. |
+| `xverse` | `XverseQModel` | Package-owned XVERSE dense/256K and routed/shared MoE decoder; fusion executor has not been qualified. |
 | `yi` | `LlamaQModel` | Native Transformers 5 Llama-backed Yi legacy alias; fusion executor has not been qualified. |
 | `zamba` | `ZambaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `zamba2` | `Zamba2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `zdtaichu5_0` | `ZDTaichu5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `zdtaichu5_0` | `ZDTaichu5QModel` | Package-owned ZDTaichu5 C-RADIO/native Qwen3.5 hybrid multimodal binding; fusion executor has not been qualified. |
 
 ## Adding or extending a qualification
 
