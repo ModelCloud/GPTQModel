@@ -1944,6 +1944,25 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         for processor in getattr(self, "processors", ()) or ():
             processor.release_run_workspace()
 
+    def _release_failed_run_processors(self) -> None:
+        """Close the per-run resources a successful loop releases in ``finalize``.
+
+        A cancelled or failed run never reaches ``finalize()``, which is the only
+        other place a processor closes its Device-SMI handles. Without this every
+        attempt leaves one daemon sampler thread per device (and CPU) polling for
+        the life of the process (#4813). Each release is independent and must
+        never mask the failure that got us here.
+        """
+
+        for processor in getattr(self, "processors", ()) or ():
+            try:
+                processor.release_failed_run()
+            except Exception:
+                log.warning(
+                    "failed to release processor resources while failing the quantization run",
+                    exc_info=True,
+                )
+
     def _track_inflight_layer(
         self,
         module: torch.nn.Module,
@@ -2047,6 +2066,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 try:
                     self._fence_run_work()
                 finally:
+                    # ``finalize()`` is the only other place the processors close
+                    # their Device-SMI handles, and a failed run never reaches it:
+                    # every cancelled attempt would leave its sampler threads
+                    # polling for the life of the process (#4813). Release them
+                    # after the fence drained the workers that use them.
+                    self._release_failed_run_processors()
                     # A cancelled or failed run must also release the layer that
                     # was mid-stage: the success path moves it back only after
                     # post_quantize, which the exception skipped (#4546).
