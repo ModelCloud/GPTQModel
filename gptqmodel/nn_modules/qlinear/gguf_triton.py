@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -1797,6 +1798,13 @@ def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) ->
                 value.record_stream(current)
 
 
+# One lock for every module's first-forward re-layout. The permute itself is a
+# single enqueue plus a short stream wait, so serializing it across modules is
+# cheap, and it makes "already permuted" a decision no two threads can race on
+# (#4879).
+_PACKED_WEIGHT_PERMUTE_LOCK = threading.Lock()
+
+
 class GGUFTritonKernel(GGUFTorchLinear):
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
     # torch.cuda.graph capture succeeds, but dynamo breaks on
@@ -1924,20 +1932,34 @@ class GGUFTritonKernel(GGUFTorchLinear):
         buffer is one module, not the whole model, and is released as soon as
         the copy completes.
         """
-        qweight = self.qweight
-        if qweight.numel() == 0 or self._packed_weight_is_permuted():
-            return
-        # The first cache build runs under the caller's ``inference_mode``.
-        # ``qweight`` is a public buffer that callers may still mutate in place,
-        # so keep its storage a normal (non-inference) tensor.
-        with torch.inference_mode(False):
-            storage = torch.empty(
-                (qweight.shape[1], qweight.shape[0]),
-                dtype=qweight.dtype,
-                device=qweight.device,
-            )
-        storage.copy_(qweight.t())
-        self.qweight = storage.t()
+        # Two cold builds of the same module can run concurrently on different
+        # streams (multi-threaded serving), so the re-layout is serialized and
+        # published only once the copy has actually run (#4879).
+        with _PACKED_WEIGHT_PERMUTE_LOCK:
+            qweight = self.qweight
+            if qweight.numel() == 0 or self._packed_weight_is_permuted():
+                return
+            # The first cache build runs under the caller's ``inference_mode``.
+            # ``qweight`` is a public buffer that callers may still mutate in place,
+            # so keep its storage a normal (non-inference) tensor.
+            with torch.inference_mode(False):
+                storage = torch.empty(
+                    (qweight.shape[1], qweight.shape[0]),
+                    dtype=qweight.dtype,
+                    device=qweight.device,
+                )
+            storage.copy_(qweight.t())
+            # ``copy_`` only *enqueues* the transpose on the calling stream. The
+            # permuted view is published below, and a second cold build on another
+            # stream would otherwise read bytes this copy has not written yet and
+            # bake them into its own cache -- silently wrong output (including
+            # NaN) for the rest of the session (#4879). Wait for this stream, so
+            # publishing ``self.qweight`` is the point of visibility. A cold build
+            # cannot happen inside a capture (allocations are not capturable), but
+            # ``synchronize`` would be illegal there, so keep the guard.
+            if storage.device.type == "cuda" and not _is_current_stream_capturing():
+                torch.cuda.current_stream(storage.device).synchronize()
+            self.qweight = storage.t()
 
     def _reshape_blocks(
         self,
