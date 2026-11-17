@@ -108,6 +108,12 @@ two tokenizer reload cases, four public plain-AWQ cases and three source-chat
 cases. The XVERSE-Ent tokenizer cases passed. The parent runs above separately
 verify the subsequent DeepSeek fixture and media-hygiene changes. Neither this
 audit nor the green CI result establishes complete released-Tokenicer support.
+All 13 dedicated-audit skips were uncached Kimi tokenizer assets: six native
+contraction checks, six public native-load checks and one pinned K3 asset check.
+The transferable audit archive contains all 19 exact commands, environment/source
+metadata, failure and skip node IDs, raw logs and JUnit results. Its SHA-256 is
+`b854ba62838c03366ede7377b6a728869cec0cfd1ddf4a985c7aa44db851c37b`;
+all 75 member checksums were independently verified by the parent.
 
 | Integrated batch on the final Tokenicer runtime candidate | Result |
 | --- | --- |
