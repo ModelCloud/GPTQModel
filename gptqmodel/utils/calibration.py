@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import numbers
 import os
 import random
@@ -133,6 +134,11 @@ def _iter_calibration_rows(dataset):
     for example in dataset:
         yield from zip(example["input_ids"], example["attention_mask"])
 
+
+# A chat row can carry the schema block the model sees at inference besides
+# `messages`. Both must survive the columnar (`dataset[:]`) split, which used
+# to keep only the four primary columns and silently dropped them (#4934).
+_CHAT_TEMPLATE_COLUMNS = ("tools", "documents")
 
 _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 
@@ -367,6 +373,77 @@ def _unwrap_object_array(value: Any) -> Any:
     return tolist()
 
 
+def _is_single_tool_definition(value: Any) -> bool:
+    """Return True for one tool schema rather than a list of them.
+
+    `apply_chat_template(tools=...)` iterates its argument, so a single tool
+    stored as one object (the layout a JSON string round-trip yields for a
+    one-tool dataset) is rejected. The marker keys below are the tool
+    definition's, not a parameters schema's (`{"type": "object", ...}`).
+    """
+
+    return isinstance(value, Mapping) and (
+        "function" in value or value.get("type") == "function"
+    )
+
+
+def _normalize_chat_template_payload(value: Any, *, key: str) -> Any:
+    """Return a `tools`/`documents` payload a chat template reads as declared.
+
+    HF datasets store these columns in two layouts that `apply_chat_template`
+    does not read the way inference sends them (#4934):
+
+    * a JSON string, because Arrow cannot hold a heterogeneous struct column.
+      The template rejects it outright ("Tools should either be a JSON schema
+      ..."), and the row was then rendered without any tools at all.
+    * a struct column that Arrow unified across rows, so every row's JSON
+      schema gains the other rows' parameter names as `null`. A JSON schema
+      never defines a property as `null`, and the rendered block then differs
+      from what the model sees at inference.
+
+    Decoding a JSON string, dropping `None`-valued mapping entries, and
+    presenting a one-tool `tools` payload as the list the templates iterate
+    restores what the caller declared. Anything else is returned unchanged, and
+    a string that is not a JSON object/array is left alone (a plain `documents`
+    string is not JSON).
+    """
+
+    normalized = _normalize_chat_template_value(value)
+    if key == "tools" and _is_single_tool_definition(normalized):
+        return [normalized]
+    return normalized
+
+
+def _normalize_chat_template_value(value: Any) -> Any:
+    """Decode a JSON string and drop Arrow's injected `None` entries."""
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[0] not in "[{":
+            return value
+        try:
+            return _normalize_chat_template_value(json.loads(text))
+        except ValueError:
+            return value
+    # An object-dtype ndarray (`dataset.with_format("numpy")[:]`) holds one
+    # entry per row; unwrap it so the recursion sees python containers.
+    value = _unwrap_object_array(value)
+    if isinstance(value, Mapping):
+        return {
+            name: _normalize_chat_template_value(item)
+            for name, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_chat_template_value(item) for item in value]
+    return value
+
+
 def _is_batched_column(value: Any) -> bool:
     """Return True when ``value`` holds one entry per calibration row."""
 
@@ -451,12 +528,14 @@ def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
 
     Object-dtype NumPy columns and pandas ``Series`` columns are indexed through
     ``_column_entries`` so each row receives one element, not the whole column.
+    The chat template columns (`tools`, `documents`) are split the same way so a
+    `dataset[:]` row keeps the schema block it declares (#4934).
     """
 
     primary = next(name for name in _CALIBRATION_COLUMNS if mapping.get(name) is not None)
 
     columns: Dict[str, Any] = {}
-    for name in _CALIBRATION_COLUMNS:
+    for name in _CALIBRATION_COLUMNS + _CHAT_TEMPLATE_COLUMNS:
         if name not in mapping or mapping[name] is None:
             continue
         entries = _column_entries(mapping[name])
@@ -773,7 +852,10 @@ def prepare_calibration_dataset(
             for key in ("tools", "documents"):
                 value = row.get(key)
                 if value is not None:
-                    template_inputs[key] = value
+                    # HF storage layouts (JSON string, Arrow-unified schema with
+                    # injected `null` properties) are normalized back to the
+                    # payload inference sends (#4934).
+                    template_inputs[key] = _normalize_chat_template_payload(value, key=key)
         try:
             if template_name == "apply_chat_template":
                 templated = apply_fn(
