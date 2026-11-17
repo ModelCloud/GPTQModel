@@ -83,6 +83,12 @@ class _AWQScaleGroupError(ValueError):
 # accept `position_ids`, so the ordinary key is dropped before
 # `_prepare_module_forward` would otherwise fall back to `arange`.
 _AWQ_ROTARY_POSITION_IDS = "_awq_rotary_position_ids"
+# Kwargs whose entries line up one-for-one with the replayed token rows. AWQ
+# replays a packed sample of captured rows, so these values must be packed with
+# the same provenance (and their row count validated) or a router that indexes
+# them (`hash_moe`: `tid2eid[input_ids]`) sees a different token count than the
+# hidden states and raises deep inside the block (#4880).
+_AWQ_TOKEN_ALIGNED_KWARGS = ("input_ids",)
 
 
 def _resolve_module_exec_device(module: nn.Module) -> torch.device:
@@ -1827,6 +1833,58 @@ class AWQProcessor(LoopProcessor):
                 masks[batch_index] = type_entry["attention_mask"]
         return masks, resolved_type
 
+    def _pack_token_aligned_kwargs(
+        self,
+        provenance: List[Tuple[int, int]],
+        batch_indices: List[Optional[int]],
+    ) -> Dict[str, Any]:
+        """Pack per-token kwargs (for example ``input_ids``) with the replayed rows.
+
+        ``token_rows`` keeps a bounded, evenly sampled subset of the captured
+        rows. A token-aligned kwarg must be selected with the same provenance,
+        or the module receives metadata for a different token count: DeepSeek-V4
+        ``hash_moe`` routes with ``tid2eid[input_ids.reshape(-1)]`` and indexed
+        the hidden states with a stale batch's ids (#4880).
+
+        Values that cannot be aligned are skipped here; the replay guard in
+        :meth:`_prepare_module_forward` turns the remaining mismatch into an
+        ``_AWQScaleGroupError`` so the configured fallback applies instead of an
+        unhandled ``IndexError``.
+        """
+
+        cache = getattr(self, "inputs_cache", None)
+        layer_kwargs = getattr(cache, "layer_input_kwargs", None) or []
+        if not provenance or not layer_kwargs:
+            return {}
+
+        packed: Dict[str, Any] = {}
+        for key in _AWQ_TOKEN_ALIGNED_KWARGS:
+            rows: List[torch.Tensor] = []
+            usable = True
+            for source_index, row_index in provenance:
+                batch_index = (
+                    batch_indices[source_index]
+                    if source_index < len(batch_indices)
+                    else None
+                )
+                if batch_index is None or not 0 <= int(batch_index) < len(layer_kwargs):
+                    usable = False
+                    break
+                entry = layer_kwargs[int(batch_index)]
+                value = entry.get(key) if isinstance(entry, Mapping) else None
+                if not torch.is_tensor(value) or value.numel() == 0:
+                    usable = False
+                    break
+                flat = value.detach().reshape(-1)
+                if not 0 <= int(row_index) < int(flat.numel()):
+                    usable = False
+                    break
+                rows.append(flat[int(row_index)].reshape(1))
+            if not usable or len(rows) != len(provenance):
+                continue
+            packed[key] = torch.cat(rows, dim=0).unsqueeze(0)
+        return packed
+
     def _token_row_replay_kwargs(
         self,
         tensors: List[torch.Tensor],
@@ -1857,10 +1915,13 @@ class AWQProcessor(LoopProcessor):
         cache = getattr(self, "inputs_cache", None)
         masks = getattr(cache, "attention_masks", None) or []
         mask_overrides = mask_overrides or {}
+        token_aligned = self._pack_token_aligned_kwargs(provenance, batch_indices)
         if cache is None or not provenance or (not masks and not mask_overrides):
             # Without a captured mask there is no document structure to replay;
-            # keep the previous kwargs rather than invent one.
-            return {}
+            # keep the previous kwargs rather than invent one. Token-aligned
+            # kwargs are still packed: `hash_moe` routing needs them even when
+            # the module's attention takes no mask (#4880).
+            return token_aligned
 
         cached_position_ids = getattr(cache, "position_ids", None) or []
 
@@ -1983,6 +2044,7 @@ class AWQProcessor(LoopProcessor):
             additive.masked_fill_(~allowed, torch.finfo(dtype).min)
             attention_mask = additive.unsqueeze(0).unsqueeze(0)
         return {
+            **token_aligned,
             "attention_mask": attention_mask,
             "position_ids": positions.unsqueeze(0),
             _AWQ_ROTARY_POSITION_IDS: positions.unsqueeze(0),
@@ -4209,6 +4271,29 @@ class AWQProcessor(LoopProcessor):
                 raise _AWQScaleGroupError(f"AWQ: unsupported replay for {type(module).__name__}: {exc}") from exc
         module_kwargs = dict(module_kwargs)
         rotary_position_ids = module_kwargs.pop(_AWQ_ROTARY_POSITION_IDS, None)
+
+        # A token-aligned kwarg must describe the rows that are actually
+        # replayed. DeepSeek-V4 `hash_moe` routes with
+        # `tid2eid[input_ids.reshape(-1)]`, so a stale batch's ids either index
+        # the wrong experts or raise an `IndexError` deep inside the block, which
+        # the scale-group fallback cannot catch (#4880).
+        if x.dim() >= 3:
+            token_rows = int(x.shape[0]) * int(x.shape[1])
+        elif x.dim() == 2:
+            token_rows = int(x.shape[0])
+        elif x.dim() == 1:
+            token_rows = 1
+        else:
+            token_rows = None
+        if token_rows is not None:
+            for key in _AWQ_TOKEN_ALIGNED_KWARGS:
+                value = module_kwargs.get(key)
+                if torch.is_tensor(value) and int(value.numel()) != token_rows:
+                    raise _AWQScaleGroupError(
+                        f"AWQ: replayed `{key}` describes {int(value.numel())} token rows but "
+                        f"`{type(module).__name__}` received {token_rows}; the replay cannot "
+                        "align a token-aligned kwarg with the captured activation."
+                    )
 
         target_device = None
         try:

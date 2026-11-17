@@ -181,6 +181,16 @@ needs:
   the same limitation the padded `batch_size>1` path already has.
 - Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
   the quadratic mask is built once per unique capture list per layer.
+- **Token-aligned kwargs travel with the same provenance** (#4880).
+  `AWQProcessor._pack_token_aligned_kwargs` selects `input_ids` (every entry of
+  `_AWQ_TOKEN_ALIGNED_KWARGS`) with the retained rows' provenance and returns it
+  as `[1, retained]`. DeepSeek-V4 `hash_moe` layers route with
+  `gate.tid2eid[input_ids.reshape(-1)]`, so forwarding the current calibration
+  batch's ids instead handed the router a different number of index rows than
+  the replayed hidden states and raised `IndexError` in the first decoder layer.
+  If a token-aligned kwarg still does not describe the replayed rows,
+  `_prepare_module_forward` raises `_AWQScaleGroupError`, so the configured
+  plain-quantization fallback applies instead of aborting `quantize()`.
 
 ### Bloom ALiBi
 
@@ -257,7 +267,7 @@ sequenceDiagram
     Hook->>Pack: kept rows per document
     Pack->>Kw: provenance source batch and row
     Kw->>Kw: source structure maps row to document and position
-    Kw->>Attn: mask in the captured form and position_ids for packed rows
+    Kw->>Attn: mask in the captured form, position_ids and token-aligned kwargs for packed rows
     Note over Attn: same-document causal only
 ```
 
