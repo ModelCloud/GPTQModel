@@ -75,7 +75,7 @@ compatible deployment engine.
 | **[BitsAndBytes](https://github.com/ModelCloud/GPTQModel/wiki/BitsAndBytes)** | NF4/FP4 and INT8 quantization options. |
 | **[NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12)** | Lossless BF16 weight compression, distinct from lossy low-bit quantization. |
 
-Quantized kernels keep only packed weights resident; shared per-device scratch and plan lifetimes are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md).
+Quantized kernels keep only packed weights resident; shared per-device scratch and plan lifetimes are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md). CPU layer packing quantizes and packs each bounded input block in one shift/reduce pass; see [CPU block packing](docs/cpu-block-packing.md).
 
 ### Control, scale, and quality ⚙️
 
