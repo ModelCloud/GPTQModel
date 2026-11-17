@@ -1753,6 +1753,14 @@ def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> 
     cache["ready_event"] = event
 
 
+def _record_triton_cache_stream(cache: dict[str, Any], stream: torch.cuda.Stream) -> None:
+    """Tell the allocator that ``stream`` reads the cached tensors."""
+
+    for value in cache.values():
+        if isinstance(value, torch.Tensor):
+            value.record_stream(stream)
+
+
 def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
     """Make the caller's stream wait for the cache builder, when they differ."""
 
@@ -1768,12 +1776,28 @@ def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) ->
         # Same stream: the build is already ordered before this forward, so the
         # common single-stream path stays free of any bookkeeping.
         return
+    if torch.cuda.is_current_stream_capturing():
+        # A capturing stream may neither wait on nor query an event recorded
+        # outside the capture (cudaErrorStreamCaptureIsolation /
+        # cudaErrorStreamCaptureUnsupported), which used to invalidate every
+        # capture of a warmed module (#4867).  ``torch.cuda.graph`` synchronizes
+        # the device before capturing, so the build this event covers is already
+        # complete: retire the handshake and let the capture proceed.
+        cache.pop("ready_event", None)
+        cache.pop("ready_stream", None)
+        return
+    if event.query():
+        # The build has completed, so the handshake is retired: later forwards
+        # on any stream read a finished cache and need no ordering.  Steady
+        # state, captures included, then pays nothing (#4867).
+        _record_triton_cache_stream(cache, current)
+        cache.pop("ready_event", None)
+        cache.pop("ready_stream", None)
+        return
     current.wait_event(event)
     # The cached tensors outlive every forward, but the allocator still has to
     # know this stream reads them.
-    for value in cache.values():
-        if isinstance(value, torch.Tensor):
-            value.record_stream(current)
+    _record_triton_cache_stream(cache, current)
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
