@@ -344,7 +344,7 @@ class DeciLMModel(DeciLMPreTrainedModel):
         if position_ids is None:
             position_ids = torch.arange(seen, seen + x.shape[1], device=x.device)[None]
         states, attentions = (() if output_hidden_states else None), (() if output_attentions else None)
-        # Publish no KV updates until all layers and final norm complete.
+        # Publish no KV updates until layers, final norm and output encoding complete.
         for layer in self.layers:
             if output_hidden_states:
                 states += (x,)
@@ -357,14 +357,15 @@ class DeciLMModel(DeciLMPreTrainedModel):
         x = self.norm(x)
         if output_hidden_states:
             states += (x,)
-        if use_cache:
-            cache.layers = working.layers
-            cache.seen_tokens = seen + x.shape[1]
         result = BaseModelOutputWithPast(
             last_hidden_state=x, past_key_values=cache if use_cache else None,
             hidden_states=states, attentions=attentions,
         )
-        return result if return_dict else result.to_tuple()
+        encoded = result if return_dict else result.to_tuple()
+        if use_cache:
+            cache.layers = working.layers
+            cache.seen_tokens = seen + x.shape[1]
+        return encoded
 
 
 class DeciLMForCausalLM(DeciLMPreTrainedModel, GenerationMixin):
@@ -397,9 +398,14 @@ class DeciLMForCausalLM(DeciLMPreTrainedModel, GenerationMixin):
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
                 inputs_embeds=None, labels=None, use_cache=None, output_attentions=False,
                 output_hidden_states=False, return_dict=True, logits_to_keep=0, **kwargs):
+        # The decoder's transaction ends before LM projection/loss/encoding.
+        # Stage its publication too, so a failure anywhere in this public
+        # forward leaves the caller's populated cache (including sinks) intact.
+        caller_cache = past_key_values if isinstance(past_key_values, DeciLMCache) else None
+        working_cache = caller_cache.fork() if caller_cache is not None else past_key_values
         outputs = self.model(
             input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache,
+            past_key_values=working_cache, inputs_embeds=inputs_embeds, use_cache=use_cache,
             output_attentions=output_attentions, output_hidden_states=output_hidden_states,
             **kwargs,
         )
@@ -408,8 +414,13 @@ class DeciLMForCausalLM(DeciLMPreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+        publish = caller_cache is not None and outputs.past_key_values is not None
         result = CausalLMOutputWithPast(
-            loss=loss, logits=logits, past_key_values=outputs.past_key_values,
+            loss=loss, logits=logits, past_key_values=caller_cache if publish else outputs.past_key_values,
             hidden_states=outputs.hidden_states, attentions=outputs.attentions,
         )
-        return result if return_dict else result.to_tuple()
+        encoded = result if return_dict else result.to_tuple()
+        if publish:
+            caller_cache.layers = outputs.past_key_values.layers
+            caller_cache.seen_tokens = outputs.past_key_values.seen_tokens
+        return encoded

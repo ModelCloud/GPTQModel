@@ -39,18 +39,22 @@ flowchart TD
     C --> D{"Valid heterogeneous layout?"}
     D -->|no| E["ValueError; no remote-code retry"]
     D -->|yes| F["Package DeciLMForCausalLM"]
-    F --> G["DeciLMCache.fork: caller-owned layer state"]
-    G --> H["Decoder layers: full, no_op, or linear subblocks"]
-    H --> I{"Every layer and final norm succeeded?"}
+    F --> G["DeciLMForCausalLM.forward: fork caller cache"]
+    G --> H["DeciLMModel.forward: fork again, run decoder layers"]
+    H --> I{"Layers, final norm and decoder output encoding succeeded?"}
     I -->|no| J["Raise; original cache remains reusable"]
-    I -->|yes| K["Commit cache layers and global seen_tokens"]
+    I -->|yes| K["Commit decoder cache into LM staging cache"]
+    K --> L["LM head, loss and final output encoding"]
+    L --> M{"Complete LM output succeeded?"}
+    M -->|no| J
+    M -->|yes| N["Commit layers and seen_tokens to original caller cache"]
 ```
 
 | Mechanism | Before | Shipped behavior / evidence |
 | --- | --- | --- |
 | Model ownership | Definition required checkpoint code; no exact native architecture | `definitions/decilm.py:13-17`: explicit LocalModelLoader and `require_trust_remote_code=False` |
 | Heterogeneous module discovery | Inherited Llama paths omitted NAS linear replacements | `definitions/decilm.py:20-27`: `linear_attn` and `linear_mlp`, explicit non-quantized norms |
-| Cache lifecycle | Legacy per-layer caches/old HF API | `modeling_decilm.py:68-148,322-367`: package Cache, fork then commit, first-layer pruning supported |
+| Cache lifecycle | Legacy per-layer caches/old HF API; early publication before LM head/loss | `modeling_decilm.py:68-148,322-426`: package Cache; decoder and full LM forward both commit after output encoding; first-layer pruning supported |
 | Shifted sink boundary | Upstream SinkCache shifts when old length + incoming width reaches the window | `modeling_decilm.py:98-132`: preserve strict less-than growth boundary and pinned RoPE re-rotation |
 | AWQ scaling | Inherited Llama group assumptions | `definitions/decilm.py:29-32`: no scaling groups; all declared linears use plain AWQ |
 
@@ -72,7 +76,8 @@ port-local reference supplies the flow and evidence for that page.
   window minus sink count; larger chunks raise instead of silently changing
   sink semantics. Static/compiled/offloaded caches are unsupported.
 - Greedy and beam generation, cache reset/reorder, failure after a completed
-  layer followed by retry, and corrected-config retry are tested. Model RoPE
+  layer followed by retry, head/loss/output-encoding failures after a populated
+  prefix, and corrected-config retry are tested. Model RoPE
   computation stores no mutable per-model frequency cache. Each concurrent
   caller must own its cache; GPU concurrent execution remains unqualified.
 - Public GPTQModel.load and LocalModelLoader safetensors reloads ignore malicious
@@ -96,7 +101,7 @@ PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -m pytest \
   -q -x --disable-warnings
 ```
 
-59 passed. Restoring the legacy AutoModel loader in an isolated Python process
+89 passed. Restoring the legacy AutoModel loader in an isolated Python process
 makes all eight `test_public_config_ignores_checkpoint_code` cases fail: the
 default policy refuses the unported architecture, and both permissions allow
 the test checkpoint's sentinel code to execute. Restoring `<= window` in a
@@ -105,6 +110,17 @@ separate process fails
 assertion (127/192 mismatched elements; max absolute error 2.6500034).
 The shipped strict-boundary implementation passes. Mutation probes never
 change the working files.
+
+The public LM originally published the caller cache before the LM head, loss
+and tuple encoding completed. Thirty regressions reproduced this as a prefix
+cache advancing from 5 to 7 tokens despite failure: head prehook exceptions,
+real invalid-label errors, LM tuple conversion failures and direct decoder
+tuple conversion failures across heterogeneous Deci, pruned/linear NAS,
+sliding, unshifted-sink and shifted-sink layouts. The shipped implementation
+stages decoder publication and commits only after the complete LM output is
+ready. Every case now preserves the original layer/tensor identities, KV and
+sink rotation tables; retry logits/loss/cache match an independent successful
+continuation exactly. Both dict and tuple success preserve caller cache identity.
 
 The 7B/253B key audits use metadata and meta tensors; they are not trained-weight
 or accelerator qualification. The existing full model evaluation tests now
