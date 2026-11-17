@@ -1730,6 +1730,52 @@ def fused_q6_k_matmul(
     )
 
 
+def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
+    """Order a freshly built cache against later forwards on other streams.
+
+    ``_build_triton_cache`` only *enqueues* the re-layout kernels that fill the
+    cache, and the dict is published as soon as it returns. A first forward of
+    the same module on another stream would then launch the fused matmul
+    against tensors that the building stream has not written yet, reading
+    uninitialized memory (#4797). Recording the building stream and an event
+    lets a consumer on a different stream wait for exactly that work.
+    """
+
+    try:
+        stream = torch.cuda.current_stream(device)
+        event = torch.cuda.Event()
+        event.record(stream)
+    except Exception:
+        # No usable stream (CPU/meta placement or a runtime that cannot record
+        # events): nothing can be enqueued out of order either.
+        return
+    cache["ready_stream"] = stream
+    cache["ready_event"] = event
+
+
+def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
+    """Make the caller's stream wait for the cache builder, when they differ."""
+
+    event = cache.get("ready_event")
+    if event is None:
+        return
+    try:
+        current = torch.cuda.current_stream(device)
+    except Exception:
+        return
+    builder = cache.get("ready_stream")
+    if builder is not None and current == builder:
+        # Same stream: the build is already ordered before this forward, so the
+        # common single-stream path stays free of any bookkeeping.
+        return
+    current.wait_event(event)
+    # The cached tensors outlive every forward, but the allocator still has to
+    # know this stream reads them.
+    for value in cache.values():
+        if isinstance(value, torch.Tensor):
+            value.record_stream(current)
+
+
 class GGUFTritonKernel(GGUFTorchLinear):
     # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
     # torch.cuda.graph capture succeeds, but dynamo breaks on
@@ -2042,12 +2088,14 @@ class GGUFTritonKernel(GGUFTorchLinear):
         qweight_key = tensor_cache_key(self.qweight)
         cached = self._gguf_triton_cache.get(key)
         if cached is not None and cached.get("qweight_key") == qweight_key:
+            _wait_for_triton_cache_ready(cached, device)
             return cached
 
         cached = self._build_triton_cache(device, wide_dot)
         # The first build re-lays out ``qweight`` (#4811), so key the cache by
         # the tensor that is actually resident now or every forward rebuilds it.
         cached["qweight_key"] = tensor_cache_key(self.qweight)
+        _publish_triton_cache_ready(cached, device)
         self._gguf_triton_cache[key] = cached
         return cached
 

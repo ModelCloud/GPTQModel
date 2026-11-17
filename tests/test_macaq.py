@@ -1566,3 +1566,165 @@ def test_triton_plain_mxfp4_matches_forced_transforms(activation_precision):
     fast = plain(x)
     assert not plain._triton_disabled
     assert torch.equal(forced(x), fast)
+
+
+# ---------------------------------------------------------------------------
+# issue #4820: the exponent screen must not materialize int64 planes
+# ---------------------------------------------------------------------------
+def _bitwise_equal(left, right):
+    """Bitwise equality, with NaN treated as equal to itself."""
+
+    return torch.allclose(left, right, rtol=0, atol=0, equal_nan=True)
+
+
+def _reference_signed_index(weight, block_size=32, offset=0, *, tie_high=False):
+    """Independent int64 E2M1 index build (the pre-#4820 algorithm)."""
+
+    out_features, in_features = weight.shape
+    groups = in_features // block_size
+    grouped = weight.float().view(out_features, groups, block_size)
+    amax = grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    log2_scale = torch.floor(torch.log2(amax)) - 2.0 + float(offset)
+    scale = torch.exp2(log2_scale)
+    normalized = (grouped / scale).abs()
+
+    code = torch.zeros_like(grouped, dtype=torch.long)
+    for threshold, level in _E2M1_THRESHOLDS:
+        above = normalized >= threshold if tie_high else normalized > threshold
+        code = torch.where(above, torch.full_like(code, level), code)
+    negative = grouped < 0
+    signed = torch.where(
+        code == 0, torch.full_like(code, 7), torch.where(negative, 7 - code, 7 + code)
+    ).reshape(out_features, in_features)
+    scale_element = (
+        scale.expand(out_features, groups, block_size)
+        .reshape(out_features, in_features)
+        .contiguous()
+    )
+    return signed, log2_scale.squeeze(-1), scale_element
+
+
+def _reference_screen(weight, hessian_diagonal, block_size=32, offsets=(1, 0, -1)):
+    """Independent int64 exponent screen (the pre-#4820 algorithm)."""
+
+    out_features, in_features = weight.shape
+    groups = in_features // block_size
+    grid = macaq.E2M1_VALUES.to(weight.device)
+    hdiag = hessian_diagonal.float().view(1, groups, block_size)
+
+    best = None
+    for offset in offsets:
+        signed, log2_scale, scale_element = _reference_signed_index(
+            weight, block_size, offset
+        )
+        dequant = grid[signed] * scale_element
+        error = (
+            (weight.float() - dequant).pow(2).view(out_features, groups, block_size) * hdiag
+        ).sum(-1)
+        if best is None:
+            best = [error, signed, log2_scale, scale_element]
+            continue
+        best_error, best_index, best_log2, best_scale = best
+        better = error < best_error
+        expand = better.unsqueeze(-1)
+        best = [
+            torch.where(better, error, best_error),
+            torch.where(
+                expand,
+                signed.view(out_features, groups, block_size),
+                best_index.view(out_features, groups, block_size),
+            ).view(out_features, in_features),
+            torch.where(better, log2_scale, best_log2),
+            torch.where(
+                expand,
+                scale_element.view(out_features, groups, block_size),
+                best_scale.view(out_features, groups, block_size),
+            ).reshape(out_features, in_features),
+        ]
+    return best[1].contiguous(), best[2], best[3].contiguous()
+
+
+def _screen_fixtures():
+    torch.manual_seed(4820)
+    yield "random", torch.randn(64, 512) * 0.02
+
+    edge = torch.tensor(
+        [[0.0, -0.0, 1e-12, -1e-12, 65504.0, -65504.0, float("nan"), float("inf")]]
+    )
+    yield "edge", torch.cat([edge, torch.randn(1, 504) * 0.02], dim=1)
+
+    # Exactly on every threshold, in both tie modes. The row repeats until the
+    # width is a whole number of 32-wide blocks.
+    thresholds = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+    row = torch.cat([thresholds, -thresholds, thresholds * 2, -thresholds * 2])
+    row = row.repeat(512 // row.numel() + 1)[:512]
+    yield "thresholds", row.unsqueeze(0).repeat(64, 1)
+
+
+@pytest.mark.parametrize("tie_high", [False, True])
+def test_mxfp4_rtn_signed_index_matches_the_int64_reference(tie_high):
+    """The narrow index dtype must not change a single code (#4820).
+
+    The screen built every plane as int64 for values 0..14; int32 is the
+    narrowest dtype PyTorch accepts as a gather index.
+    """
+
+    for label, weight in _screen_fixtures():
+        signed, log2_scale, scale_element = macaq.mxfp4_rtn_signed_index(
+            weight, tie_high=tie_high
+        )
+        ref_signed, ref_log2, ref_scale = _reference_signed_index(
+            weight, tie_high=tie_high
+        )
+
+        assert signed.dtype is torch.int32, label
+        assert _bitwise_equal(signed.to(torch.int64), ref_signed), label
+        assert _bitwise_equal(log2_scale, ref_log2), label
+        assert _bitwise_equal(scale_element, ref_scale), label
+        # The indices must stay inside the E2M1 grid.
+        assert int(signed.min()) >= 0 and int(signed.max()) <= 14, label
+
+
+def test_screen_block_exponents_matches_the_int64_reference():
+    """The screen's index, exponent and scale stay bitwise identical (#4820)."""
+
+    for label, weight in _screen_fixtures():
+        hessian_diagonal = torch.rand(weight.shape[1]) + 0.1
+
+        index, log2_scale, scale_element = macaq.screen_block_exponents(
+            weight, hessian_diagonal
+        )
+        ref_index, ref_log2, ref_scale = _reference_screen(weight, hessian_diagonal)
+
+        assert index.dtype is torch.int32, label
+        assert _bitwise_equal(index.to(torch.int64), ref_index), label
+        assert _bitwise_equal(log2_scale, ref_log2), label
+        assert _bitwise_equal(scale_element, ref_scale), label
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="peak accounting needs a GPU")
+def test_screen_block_exponents_peak_memory_stays_bounded():
+    """The screen must not allocate int64 planes for four-bit codes (#4820).
+
+    On a 1024x4096 fp32 weight the pre-#4820 algorithm peaked at 300 MiB above
+    its inputs (int64 index planes); the bounded version peaks at 144 MiB.
+    """
+
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < 3 * 2**30:
+        pytest.skip("needs about 3 GiB of free GPU memory")
+
+    torch.manual_seed(4820)
+    weight = torch.randn(1024, 4096, device="cuda") * 0.02
+    hessian_diagonal = torch.rand(4096, device="cuda") + 0.1
+    torch.cuda.synchronize()
+
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    index, _, _ = macaq.screen_block_exponents(weight, hessian_diagonal)
+    torch.cuda.synchronize()
+    extra_peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
+
+    assert index.dtype is torch.int32
+    assert extra_peak_mib < 200, extra_peak_mib

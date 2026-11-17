@@ -3,7 +3,9 @@ import types
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
+# The allocator default belongs to ``gptqmodel/_alloc_conf.py``, which is
+# backend-aware and defers to the caller; pinning it here forced
+# ``expandable_segments`` on ROCm and overrode the caller (#4821).
 
 import time
 

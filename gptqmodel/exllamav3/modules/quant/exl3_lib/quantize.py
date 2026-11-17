@@ -30,6 +30,9 @@ EXL3_FEATURE_BLOCK = had_k
 
 EXL3_HESSIAN_NUMERICAL_CONTRACT = "signed-block-hadamard-congruence-fp64-v1"
 EXL3_HESSIAN_SYMMETRY_CONTRACT = "mean-with-transpose-fp64"
+# Symmetrization tile edge. The fp64 working copy is C^2 either way; tiling
+# bounds the *temporary* pair to this many elements instead of another C^2.
+EXL3_HESSIAN_SYMMETRY_TILE = 1024
 codebook_scale = 1.24371088
 
 
@@ -752,8 +755,18 @@ finalize_capture_H_mutex = threading.Lock()
 
 
 @torch.no_grad()
-def restore_hessian_symmetry_(H: torch.Tensor, quant_args: dict) -> None:
-    """Restore symmetry lost to independent finite-precision Hadamard GEMMs."""
+def restore_hessian_symmetry_(
+    H: torch.Tensor,
+    quant_args: dict,
+    tile: int = EXL3_HESSIAN_SYMMETRY_TILE,
+) -> None:
+    """Restore symmetry lost to independent finite-precision Hadamard GEMMs.
+
+    The average ``(H + H.T) * 0.5`` is applied tile by tile so the fp64 working
+    copy never gains more than one tile pair of temporaries. Elementwise add
+    and subtract are commutative and exact per element, so both the resulting
+    ``H`` and ``correction_max_abs`` are bitwise identical to the untiled form.
+    """
 
     if H.ndim != 2 or H.shape[0] != H.shape[1]:
         raise ValueError("EXL3 Hessian symmetry restoration requires a square matrix")
@@ -761,10 +774,28 @@ def restore_hessian_symmetry_(H: torch.Tensor, quant_args: dict) -> None:
         raise ValueError(
             "EXL3 Hessian symmetry restoration requires FP32 or FP64 input"
         )
-    symmetric = (H + H.transpose(0, 1)) * 0.5
-    correction_max_abs = float((H - symmetric).abs().max().item())
-    H.copy_(symmetric)
-    del symmetric
+    if isinstance(tile, bool) or not isinstance(tile, int) or tile <= 0:
+        raise ValueError("EXL3 Hessian symmetry tile must be a positive integer")
+
+    size = H.shape[0]
+    correction = H.new_zeros(())
+    for row in range(0, size, tile):
+        row_end = min(row + tile, size)
+        for col in range(row, size, tile):
+            col_end = min(col + tile, size)
+            block = H[row:row_end, col:col_end]
+            transpose_block = H[col:col_end, row:row_end]
+            mean = (block + transpose_block.transpose(0, 1)) * 0.5
+            correction = torch.maximum(correction, (block - mean).abs().max())
+            if row != col:
+                correction = torch.maximum(
+                    correction,
+                    (transpose_block - mean.transpose(0, 1)).abs().max(),
+                )
+            block.copy_(mean)
+            if row != col:
+                transpose_block.copy_(mean.transpose(0, 1))
+    correction_max_abs = float(correction.item())
     quant_args["hessian_symmetry_restoration"] = (
         "mean-with-transpose-fp64"
         if H.dtype == torch.float64

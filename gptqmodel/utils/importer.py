@@ -1239,9 +1239,18 @@ def hf_select_quant_linear_v2(
     # ``optimum.gptq`` has finished importing. Retry the idempotent bridge
     # install here so a checkpoint loaded by Optimum directly (no Transformers
     # ``GptqHfQuantizer``) still gets the native loader for later loads (#4749).
-    from gptqmodel import _ensure_optimum_gptqmodel_load_bridge
+    from gptqmodel import (
+        _ensure_optimum_gptqmodel_load_bridge,
+        _ensure_transformers_awq_gptqmodel_load_bridge,
+    )
 
     _ensure_optimum_gptqmodel_load_bridge()
+    # Transformers' AWQ loader reaches this function from inside
+    # ``replace_with_awq_linear``, i.e. from the ``gptqmodel`` import that is
+    # already too late for *this* load's prepare step. Installing here still
+    # covers every later AWQ load in the process, and the AWQ post hook repairs
+    # the current one (#4795).
+    _ensure_transformers_awq_gptqmodel_load_bridge()
 
     # convert hf string backend to backend.enum
     backend = normalize_backend(backend, quant_method=quant_method)

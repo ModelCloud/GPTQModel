@@ -72,6 +72,7 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     ensure_version_counters,
+    has_disk_offloaded_modules,
     materialize_remaining_meta_modules,
     offload_to_disk,
     release_private_offload_root,
@@ -1944,6 +1945,25 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         for processor in getattr(self, "processors", ()) or ():
             processor.release_run_workspace()
 
+    def _release_failed_run_processors(self) -> None:
+        """Close the per-run resources a successful loop releases in ``finalize``.
+
+        A cancelled or failed run never reaches ``finalize()``, which is the only
+        other place a processor closes its Device-SMI handles. Without this every
+        attempt leaves one daemon sampler thread per device (and CPU) polling for
+        the life of the process (#4813). Each release is independent and must
+        never mask the failure that got us here.
+        """
+
+        for processor in getattr(self, "processors", ()) or ():
+            try:
+                processor.release_failed_run()
+            except Exception:
+                log.warning(
+                    "failed to release processor resources while failing the quantization run",
+                    exc_info=True,
+                )
+
     def _track_inflight_layer(
         self,
         module: torch.nn.Module,
@@ -2047,6 +2067,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 try:
                     self._fence_run_work()
                 finally:
+                    # ``finalize()`` is the only other place the processors close
+                    # their Device-SMI handles, and a failed run never reaches it:
+                    # every cancelled attempt would leave its sampler threads
+                    # polling for the life of the process (#4813). Release them
+                    # after the fence drained the workers that use them.
+                    self._release_failed_run_processors()
                     # A cancelled or failed run must also release the layer that
                     # was mid-stage: the success path moves it back only after
                     # post_quantize, which the exception skipped (#4546).
@@ -2057,9 +2083,27 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                         try:
                             self._restore_offloaded_base_modules(strict=False)
                         finally:
-                            # A failed run cannot be saved, so its per-run offload
-                            # bundles are no longer reachable (issue #4368).
-                            release_private_offload_root(self.gptq_model)
+                            # Layers that finished before the cancel stay as
+                            # disk-offloaded meta shells pointing into this run's
+                            # private offload root. Deleting that root now would
+                            # make them unrecoverable and break the next forward
+                            # with FileNotFoundError (#4807). A cancelled run must
+                            # also stay cheap: materializing every finished layer
+                            # would defeat the memory bound the default
+                            # ``offload_to_disk=True`` exists for. Keep the root
+                            # instead; ``bind_private_offload_root`` already
+                            # registered a model-lifetime finalizer that removes
+                            # it, and the next run on this model releases it
+                            # (#4368). Only release it eagerly when no module
+                            # still reads from it.
+                            model = getattr(self.gptq_model, "model", None)
+                            if model is not None and has_disk_offloaded_modules(model):
+                                log.debug(
+                                    "Offload: keeping the per-run directory for the "
+                                    "disk-offloaded layers of a cancelled/failed run."
+                                )
+                            else:
+                                release_private_offload_root(self.gptq_model)
                 raise
             finally:
                 # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
