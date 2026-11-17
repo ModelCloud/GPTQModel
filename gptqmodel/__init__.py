@@ -452,6 +452,12 @@ def _patch_optimum_gptqmodel_load_bridge():
                 model,
                 checkpoint_files=kwargs.get("checkpoint_files"),
                 device_map=kwargs.get("device_map"),
+                # Forward the caller's `quantization_config["backend"]`. Without
+                # it `_resolve_backend_for_checkpoint` always sees `None` and
+                # resolves AUTO, so a documented PEFT/trainable-kernel choice (or
+                # a deliberately incompatible one, e.g. marlin on CPU) was
+                # silently ignored for native checkpoints (#4680).
+                backend=getattr(self, "backend", None),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:
@@ -523,6 +529,10 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 model,
                 checkpoint_files=kwargs.get("checkpoint_files"),
                 device_map=kwargs.get("device_map"),
+                # Same forwarding as the GPTQ bridge: an explicit
+                # `quantization_config["backend"]` must not be replaced by AUTO
+                # (#4680).
+                backend=getattr(self, "backend", None),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:
