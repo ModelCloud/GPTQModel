@@ -346,12 +346,12 @@ def hf_compat_warnings(
         warnings.append(
             "This checkpoint stores per-expert quantized weights "
             "(`experts.<n>.*.qweight`). Transformers 5 builds fused 3-D expert "
-            "tensors and Optimum's GPTQ loader only replaces `nn.Linear`, so "
-            "`AutoModelForCausalLM.from_pretrained` reports every expert tensor "
+            "tensors and its built-in GPTQ/AWQ loaders only replace `nn.Linear`, "
+            "so a loader without the native bridge reports every expert tensor "
             "as MISSING/UNEXPECTED and silently random-initializes the experts "
-            "(garbage output, no error). Load this checkpoint with "
-            "`GPTQModel.load`, or import `gptqmodel` before Transformers so its "
-            "native loading bridge is installed."
+            "(garbage output, no error). Import `gptqmodel` before Transformers "
+            "to install the native loading bridge for both methods, or load this "
+            "checkpoint with `GPTQModel.load`."
         )
     return warnings
 

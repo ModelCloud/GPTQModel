@@ -1083,6 +1083,9 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_rng_state_all": rng_roundtrip,
         "torch.cuda.can_device_access_peer": lambda: bool(torch.cuda.can_device_access_peer(0, 1)),
         "torch.cuda.is_initialized": lambda: bool(torch.cuda.is_initialized()),
+        "torch._C._cuda_hasPrimaryContext": lambda: bool(
+            getattr(torch._C, "_cuda_hasPrimaryContext", lambda index: True)(0)
+        ),
         "torch.cuda.is_current_stream_capturing": lambda: bool(torch.cuda.is_current_stream_capturing()),
         "torch.cuda.get_arch_list": lambda: len(torch.cuda.get_arch_list()),
         "torch.cuda.CUDAGraph + torch.cuda.graph": graph_capture,

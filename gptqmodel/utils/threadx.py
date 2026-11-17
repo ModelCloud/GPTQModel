@@ -30,7 +30,7 @@ from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
 from ..utils.device_telemetry import capture_device_telemetry
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_NPU, torch_empty_cache_any
+from ..utils.torch import HAS_NPU, accelerator_context_claimed, torch_empty_cache_any
 
 
 log = setup_logger()
@@ -1084,6 +1084,26 @@ class DeviceThreadPool:
             keys.sort()
 
         self._family_keys = fam_map
+
+    def set_warmup_devices(self, warmup_devices: Optional[Iterable[DeviceLike]]) -> None:
+        """Replace the eager-warmup allow-list of a retained pool.
+
+        Worker threads and their installed kernel policy survive a load, but the
+        allow-list is consumed only by the one-shot warmup submitted at
+        construction. A retained pool must apply this load's filtered pool for
+        the echoed no-op warmups; devices outside it stay unactivated.
+        """
+
+        if warmup_devices is None:
+            keys = None
+        else:
+            keys = {self._key(_coerce_device(device)) for device in warmup_devices}
+        # A freshly built pool already submitted these warmups in __init__;
+        # resubmitting them would only enqueue duplicate no-ops.
+        if keys == self._warmup_device_keys:
+            return
+        self._warmup_device_keys = keys
+        self._kick_worker_warmups()
 
     def _kick_worker_warmups(self) -> None:
         """
@@ -2308,8 +2328,10 @@ class DeviceThreadPool:
                     self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
                 continue
 
-            # A single trigger runs a full accelerator sweep so memory pressure is
-            # normalized across all active devices under the janitor's exclusive pass.
+            # A trigger runs a full sweep over the devices that actually hold a
+            # context so memory pressure is normalized across the active pool.
+            # `empty_cache` creates the primary context of an untouched device,
+            # which claimed an excluded GPU the run never used (issue #4653).
             sweep_targets: List[str] = []
             seen_targets: Set[str] = set()
             for candidate in self._ordered_keys:
@@ -2320,6 +2342,8 @@ class DeviceThreadPool:
                 if dev is None or dev.type not in ("cuda", "xpu", "npu", "mps"):
                     continue
                 if physical not in self._locks:
+                    continue
+                if not accelerator_context_claimed(dev.type, dev.index):
                     continue
                 seen_targets.add(physical)
                 sweep_targets.append(physical)
