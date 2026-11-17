@@ -4159,6 +4159,14 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
 
     allowed = _known_quantize_config_field_names() | _DYNAMIC_LEGACY_KEYS
     unknown = sorted(key for key in layer_dict if key not in allowed)
+    if "exclude_attention_sinks" in unknown:
+        # The sink rows are a property of the calibration batch, not of one
+        # module, so a per-module rule would silently do nothing. Point at the
+        # option that does apply it (#4393).
+        raise ValueError(
+            f"{owner.__class__.__name__}: `dynamic['{layer_name}'].exclude_attention_sinks` is "
+            "not a per-module option; use `quantize(calibration_exclude_attention_sinks=True)`."
+        )
     if unknown:
         details = []
         for key in unknown:

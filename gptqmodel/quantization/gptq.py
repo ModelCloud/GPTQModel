@@ -1108,7 +1108,12 @@ class GPTQ:
 
         return xtx_accum
 
-    def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
+    def process_batch(
+        self, inp: torch.Tensor, batch_index: Optional[int] = None
+    ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
+        # `batch_index` keeps the override chain (GPTAQ/FOEM pair a native input
+        # per batch) signature-compatible; the plain Hessian path is order-free.
+        del batch_index
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)

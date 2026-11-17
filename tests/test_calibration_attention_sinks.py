@@ -651,13 +651,21 @@ def test_quantize_exposes_the_calibration_option():
     assert config.exclude_attention_sinks is True
 
 
-def test_quantize_rejects_a_per_module_sink_rule():
+def test_rejects_a_per_module_sink_rule():
     from gptqmodel.models.base import BaseQModel
 
+    # Construction rejects the rule, before any module is matched.
+    with pytest.raises(ValueError, match="calibration_exclude_attention_sinks"):
+        GPTQConfig(
+            bits=4,
+            group_size=128,
+            dynamic={r"+:.*down_proj.*": {"exclude_attention_sinks": True}},
+        )
+
+    # A rule attached after construction is still refused before calibration.
     model = object.__new__(BaseQModel)
-    model.quantize_config = GPTQConfig(
-        bits=4, group_size=128, dynamic={r"+:.*down_proj.*": {"exclude_attention_sinks": True}}
-    )
+    model.quantize_config = GPTQConfig(bits=4, group_size=128)
+    model.quantize_config.dynamic = {r"+:.*down_proj.*": {"exclude_attention_sinks": True}}
     with pytest.raises(ValueError, match="calibration_exclude_attention_sinks"):
         model.quantize(None)
 
