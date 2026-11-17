@@ -85,10 +85,12 @@ The fallback is armed lazily and permanently: the first compiler failure drops
 the compiled callable, logs once, and runs `dequantize_weight` / the module
 forward eagerly. Later calls never re-enter the broken compiler.
 
-`BaseQModel.optimize()` assigns the result to `self.model`, so a module input
-must stay an `nn.Module`. When `torch.compile` returns anything else, the eager
-module is kept and the unusable replacement is reported once instead of being
-stored where a child module is required.
+`BaseQModel.optimize()` compiles the model's `forward` in place rather than
+replacing `self.model`, because `generate()` calls the original module's
+`generate` and would otherwise never enter the compiled wrapper (#4669). The
+compiled proxy keeps `self.model` an `nn.Module`; when `torch.compile` returns
+an unusable object the eager forward is kept and the replacement is reported
+once instead of being stored where a callable is required.
 
 ## Opting out
 

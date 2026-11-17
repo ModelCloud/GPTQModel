@@ -6,7 +6,7 @@ parents and roles come exclusively from `model.module_plan()`; matching a name,
 shape, or inheritance chain does not grant eligibility.
 
 The checked-in [qualification inventory](../tests/module_tree/fixtures/fusable_models.json)
-accounts for all **206 registered model types**: **102 qualified** and **104 not
+accounts for all **208 registered model types**: **102 qualified** and **106 not
 qualified for the current executor**. Qualified means the real tiny native
 model resolves the declared parents and the planner admits them. It does not
 mean every layer or quantization setting is compatible. In particular, expert
@@ -284,20 +284,21 @@ layout alone does not authorize it.
 | `ovis2_6_moe` | `Ovis2_6_MoeQModel` | Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 MoE; fusion executor has not been qualified. |
 | `ovis2_6_next` | `Ovis2_6_NextQModel` | Package-owned Ovis2.6 NaViT/soft-visual-vocabulary wrapper with native Qwen3 Next linear-attention/MoE; fusion executor has not been qualified. |
 | `phi3` | `Phi3QModel` | No compatible native projection forward: projections already combined, conditional, or preprocessed. |
-| `phi4mm` | `Phi4MMGPTQ` | Package-owned legacy Phi-4 multimodal LoRA/vision/audio binding with packed QKV and gate-up; fusion executor has not been qualified. |
-| `qwen` | `QwenQModel` | Package-owned original Qwen fused-QKV decoder with cache-owned NTK/logn attention; fusion executor has not been qualified. |
-| `qwen2_5_vl_text` | `Qwen2_5_VLQModel` | Native Transformers 5 Qwen2.5-VL headless text backbone; generation is unsupported and fusion executor has not been qualified. |
-| `qwen2_vl_text` | `Qwen2VLQModel` | Native Transformers 5 headless Qwen2VLTextModel feature extraction; generation is unsupported and fusion executor has not been qualified. |
-| `qwen_drive` | `QwenDriveQModel` | Package-owned Qwen-Drive root VLM wrapper with native Qwen3.5 hybrid recurrent/full attention; fusion executor has not been qualified. |
-| `raon1_mini` | `Raon1MiniQModel` | Package-owned Raon RDA/MLA, four-stream mHC and SiTU-MoE with persistent MXFP8 experts; fusion executor has not been qualified. |
-| `refinedWeb` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
-| `refinedWebModel` | `RwgQModel` | Native Transformers 5 Falcon with historical RW config adaptation and a family-local eager ALiBi correction; fusion executor has not been qualified. |
-| `ricursive` | `RicursiveQModel` | Package-owned Ricursive hybrid sliding/full attention with value residuals, gated attention and PeriNorm; fusion executor has not been qualified. |
-| `solar_open2` | `SolarOpen2QModel` | Package-owned Solar-Open2 hybrid GQA/KDA MoE with vector-decay recurrent state; fusion executor has not been qualified. |
-| `spark2_5` | `Spark2_5QModel` | Package-owned Spark2.5 packed-QKV/head-gated hybrid decoder; fusion executor has not been qualified. |
-| `stablelm_epoch` | `LlamaQModel` | Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified. |
-| `telechat` | `TeleChat2QModel` | Package-owned TeleChat/TeleChat2 interleaved-KV dense decoder with source-rounded dynamic NTK RoPE; fusion executor has not been qualified. |
-| `unlimited-ocr` | `UnlimitedOCRQModel` | Native Transformers 5 Unlimited-OCR conditional generation with SAM/vision encoder and dense or routed/shared MoE decoder; fusion executor has not been qualified. |
+| `phi4mm` | `Phi4MMGPTQ` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `qwen` | `QwenQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `qwen2_5_vl_text` | `Qwen2_5_VLQModel` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
+| `qwen2_vl_text` | `Qwen2VLQModel` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
+| `qwen_drive` | `QwenDriveQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `raon1_mini` | `Raon1MiniQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `refinedWeb` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `refinedWebModel` | `RwgQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
+| `ricursive` | `RicursiveQModel` | Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable. |
+| `sensenova_loop` | `SenseNovaLoopQModel` | Custom/remote looped implementation: the mHC decoder layer runs the remote forward, so QKV and gate/up fusion needs its own native-forward qualification. |
+| `solar_open2` | `SolarOpen2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `spark2_5` | `Spark2_5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `stablelm_epoch` | `LlamaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `telechat` | `TeleChat2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `unlimited-ocr` | `UnlimitedOCRQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `voxtral` | `VoxtralGPTQ` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
 | `xing4_0` | `Xing4_0QModel` | Package-owned Xing4.0 MLA/hyperconnection dense and routed/shared MoE decoder; fusion executor has not been qualified. |
 | `xverse` | `XverseQModel` | Package-owned XVERSE dense/256K and routed/shared MoE decoder; fusion executor has not been qualified. |

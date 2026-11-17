@@ -928,8 +928,22 @@ def prepare_calibration_dataset(
             f"Unsupported tokenizer.truncation_side `{truncation_side}`. Expected `left` or `right`."
         )
 
+    # Concatenation packs real tokens into windows of exactly this width, so a
+    # window can only fit the model's position budget when the width does. The
+    # per-row position trim below is then unnecessary: it used to cut a long
+    # document to the budget *before* windowing, discarding everything past it
+    # even though every resulting window was far below the budget (#4892).
+    concat_mode = bool(calibration_dataset_concat_size)
+    if concat_mode and max_positions is not None and calibration_dataset_concat_size > max_positions:
+        raise ValueError(
+            f"Quantize: calibration_dataset_concat_size={calibration_dataset_concat_size} exceeds "
+            f"{max_positions_source}={max_positions}, so a packed window could never fit the model's "
+            "position budget. Lower `concat_size`."
+        )
+
     dropped_padded_row_count = 0
     too_short_row_count = 0
+    too_short_window_count = 0
 
     for example_index, example in enumerate(calibration_dataset):
         input_ids = _convert_tensor_to_list(example["input_ids"])
@@ -962,7 +976,7 @@ def prepare_calibration_dataset(
                 )
 
             row_len = len(row_ids)
-            if max_positions is not None and row_len > max_positions:
+            if not concat_mode and max_positions is not None and row_len > max_positions:
                 trimmed_row_count += 1
                 longest_trimmed_row = max(longest_trimmed_row, row_len)
                 rows_changed = True
@@ -994,7 +1008,12 @@ def prepare_calibration_dataset(
             # The minimum-length filter is per row and measures real tokens from
             # the attention mask, not the padded width. Otherwise a long first
             # row hides later rows that are mostly padding.
-            if sum(1 for keep in row_mask if keep) <= calibration_data_min_length:
+            #
+            # Concatenation skips it: packing exists to combine short samples
+            # into full windows, and filtering first discarded almost the whole
+            # corpus on a dataset of short utterances (#4892). The filter is
+            # applied to the packed windows instead.
+            if not concat_mode and sum(1 for keep in row_mask if keep) <= calibration_data_min_length:
                 too_short_row_count += 1
                 rows_changed = True
                 continue
@@ -1109,13 +1128,19 @@ def prepare_calibration_dataset(
         new_line_input_ids_len = len(new_line_input_ids)
 
         def flush_buffer():
-            nonlocal input_ids_buff, attention_mask_buff, current_length
-            concatenated_data.append(
-                {
-                    "input_ids": [input_ids_buff],
-                    "attention_mask": [attention_mask_buff],
-                }
-            )
+            nonlocal input_ids_buff, attention_mask_buff, current_length, too_short_window_count
+            # `min_length` is measured on the packed window here, not on the
+            # source rows: a full window carries `concat_size` real tokens, so
+            # only a near-empty tail window is dropped.
+            if sum(attention_mask_buff) <= calibration_data_min_length:
+                too_short_window_count += 1
+            else:
+                concatenated_data.append(
+                    {
+                        "input_ids": [input_ids_buff],
+                        "attention_mask": [attention_mask_buff],
+                    }
+                )
             input_ids_buff = []
             attention_mask_buff = []
             current_length = 0
@@ -1161,6 +1186,13 @@ def prepare_calibration_dataset(
                 if current_length == calibration_dataset_concat_size:
                     flush_buffer()
 
+        if input_ids_buff and sum(attention_mask_buff) <= calibration_data_min_length:
+            # The tail window never reached a full block and is shorter than the
+            # minimum, so it carries no usable activation statistics.
+            too_short_window_count += 1
+            input_ids_buff = []
+            attention_mask_buff = []
+
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
@@ -1184,6 +1216,20 @@ def prepare_calibration_dataset(
                     "input_ids": [input_ids_buff],
                     "attention_mask": [attention_mask_buff],
                 }
+            )
+
+        if too_short_window_count > 0:
+            log.warn(
+                f"Quantize: {too_short_window_count} concatenated calibration windows with "
+                f"<= {calibration_data_min_length} non-padding tokens were removed. "
+                "`min_length` is applied to the packed windows when `concat_size` is set."
+            )
+
+        if not concatenated_data:
+            raise ValueError(
+                "Quantize: concatenation produced no calibration window with more than "
+                f"{calibration_data_min_length} non-padding tokens. "
+                "`calibration_dataset_concat_size` must be larger than `min_length`."
             )
 
         new_calibration_dataset = concatenated_data
