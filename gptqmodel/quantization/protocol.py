@@ -265,11 +265,16 @@ def compile_plan_to_quantize_config(plan: ExecutionPlan):
                 # Validated, never dropped: an unknown method or a bad argument
                 # fails the plan before any model or calibration work starts.
                 compile_rule_actions(rule.actions)
+            unsupported_targets = [
+                name for name in ("input", "output", "kv_cache") if getattr(rule, name) is not None
+            ]
+            if unsupported_targets:
+                requested = ", ".join(f"`{name}`" for name in unsupported_targets)
+                raise NotImplementedError(
+                    "Initial protocol implementation only supports weight-target compilation; "
+                    f"this rule also requests {requested}."
+                )
             if rule.weight is None:
-                if rule.input is not None or rule.output is not None or rule.kv_cache is not None:
-                    raise NotImplementedError(
-                        "Initial protocol implementation only supports weight-target compilation."
-                    )
                 continue
             config_rules.append(rule)
 
@@ -475,12 +480,21 @@ def _capture_smoothquant_statistics(model: Any, calibration: Callable[[], None])
 
     def _root_pre_hook(module, args, kwargs):
         state["pass"] += 1
+        # Every pass carries its own 2-D padding mask. Keeping only the first
+        # pass's mask applies batch 0's padding to later batches and silently
+        # corrupts the channel maxima. Clear the holder when this pass has no
+        # usable mask so a stale mask can never leak forward.
+        mask = kwargs.get("attention_mask")
+        if mask is None and len(args) > 1:
+            # HF causal-LM signatures take `attention_mask` as the second
+            # positional argument after `input_ids`.
+            mask = args[1]
+        mask_holder["mask"] = (
+            mask if isinstance(mask, torch.Tensor) and mask.dim() == 2 else None
+        )
         if state["pass"] != 1:
             return None
         capture.call_args = (args, kwargs)
-        mask = kwargs.get("attention_mask")
-        if isinstance(mask, torch.Tensor) and mask.dim() == 2:
-            mask_holder["mask"] = mask
         return None
 
     def _root_post_hook(module, args, output):
@@ -1085,6 +1099,29 @@ def _compile_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...
     )
 
 
+# `weight.quantize.args` keys the initial compiler actually honors. Anything
+# else (including the common `act_order` alias and `group-size`/`symmetric`
+# spellings) is rejected instead of silently dropped.
+_WEIGHT_QUANTIZE_ARGS = {
+    METHOD.GGUF: ("bits",),
+    METHOD.GPTQ: ("bits", "group_size", "sym", "desc_act", "act_group_aware"),
+    METHOD.AWQ: ("bits", "group_size", "sym", "desc_act"),
+}
+
+
+def _validate_weight_quantize_args(quantize: QuantizeSpec, method: METHOD) -> None:
+    supported = _WEIGHT_QUANTIZE_ARGS[method]
+    unknown = sorted(set(quantize.args) - set(supported))
+    if not unknown:
+        return
+    unsupported = ", ".join(f"`{key}`" for key in unknown)
+    allowed = ", ".join(f"`{key}`" for key in supported)
+    raise ValueError(
+        f"{method.value.upper()} weight target has unsupported `weight.quantize` argument(s): "
+        f"{unsupported}. Supported keys: {allowed}."
+    )
+
+
 def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...]) -> GGUFConfig:
     if not _supports_initial_weight_match_compilation(matchers):
         raise NotImplementedError(
@@ -1098,6 +1135,7 @@ def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec
         raise NotImplementedError(
             "Initial GGUF compiler supports only `weight.quantize.method = \"gguf\"`."
         )
+    _validate_weight_quantize_args(quantize, METHOD.GGUF)
 
     bits = quantize.args.get("bits")
     if bits is None:
@@ -1130,6 +1168,7 @@ def _compile_quantize_config_weight_target(weight: TargetSpec, *, matchers: tupl
         raise NotImplementedError(
             f"Initial {method.value.upper()} compiler supports only `weight.quantize.method = \"{method.value}\"`."
         )
+    _validate_weight_quantize_args(quantize, method)
 
     bits = quantize.args.get("bits")
     if bits is None:
