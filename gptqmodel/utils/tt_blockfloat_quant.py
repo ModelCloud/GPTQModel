@@ -287,6 +287,7 @@ def quantize_blockfloat(
     # Shared exponent from the block maximum; the binade index keeps the largest
     # value inside the mantissa range rather than scaling it out.
     base_exponent = _block_base_exponent(blocks)
+    base_scale = torch.pow(2.0, base_exponent)
 
     mant_bits = stored_mantissa_bits(total_bits)
     # ``mant_bits`` explicit bits plus one implicit leading bit.
@@ -294,11 +295,24 @@ def quantize_blockfloat(
     # Clamp to the representable range for an exponent: [0, 2) in normalised
     # space with one implicit bit, i.e. below 2x the shared scale.
     limit = 2.0 - 1.0 / levels
+    # Rank the candidates inside the block's own binade: scale the block by its
+    # base scale once and measure each candidate on that normalised grid.
+    # Dividing and multiplying by a power of two is exact, so the grid and the
+    # codes are unchanged, but every squared error is now O(1) instead of
+    # O(2**(2*exponent)). Comparing the raw errors instead pins the base
+    # candidate at both extremes -- they overflow to ``inf`` for large blocks
+    # (no candidate is ``< inf``) and underflow to ``0`` for tiny ones (a strict
+    # ``<`` never replaces the incumbent) -- even when another exponent is the
+    # closer one by a wide margin.
+    unit = blocks / base_scale
 
-    def _round_with(exp: torch.Tensor) -> torch.Tensor:
-        scale = torch.pow(2.0, exp)
-        rounded = torch.round(blocks / scale * levels) / levels
-        return rounded.clamp(min=-limit, max=limit) * scale
+    def _round_unit(delta: float) -> torch.Tensor:
+        step = 2.0**delta
+        rounded = torch.round(unit / step * levels) / levels
+        return rounded.clamp(min=-limit, max=limit) * step
+
+    def _error(candidate: torch.Tensor) -> torch.Tensor:
+        return (candidate - unit).pow(2).sum(dim=-1, keepdim=True)
 
     # The binade index of the block maximum is not always the exponent with the
     # lowest error: the grid only reaches ``limit * 2**exp``, so a block whose
@@ -306,8 +320,8 @@ def quantize_blockfloat(
     # of its largest value. Neighbouring exponents trade that clipping against a
     # coarser step, and the winner differs per block. Pick it per block by
     # measured squared error; the grid itself is unchanged.
-    best = _round_with(base_exponent)
-    best_err = (best - blocks).pow(2).sum(dim=-1, keepdim=True)
+    best_unit = _round_unit(0.0)
+    best_err = _error(best_unit)
     best_exp = base_exponent
     for delta in (-1, 1):
         candidate_exp = base_exponent + delta
@@ -319,14 +333,15 @@ def quantize_blockfloat(
         usable = (candidate_exp >= BLOCKFLOAT_EXPONENT_MIN) & (
             candidate_exp <= BLOCKFLOAT_EXPONENT_MAX
         )
-        cand = _round_with(candidate_exp)
-        err = (cand - blocks).pow(2).sum(dim=-1, keepdim=True)
+        cand_unit = _round_unit(delta)
+        err = _error(cand_unit)
         take = usable & torch.isfinite(err) & (err < best_err)
-        best = torch.where(take.expand_as(best), cand, best)
+        best_unit = torch.where(take.expand_as(best_unit), cand_unit, best_unit)
         best_exp = torch.where(take, candidate_exp, best_exp)
         best_err = torch.where(take, err, best_err)
 
     exponent = best_exp
+    best = best_unit * base_scale
     out = best.reshape(*shape[:-1], x.shape[-1])
     if pad:
         out = out[..., :last]

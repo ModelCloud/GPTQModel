@@ -198,6 +198,40 @@ def test_quantize_extreme_finite_blocks_follow_the_exact_binade(bits):
     assert torch.isfinite(grid).all(), "an illegal candidate leaked a NaN"
 
 @pytest.mark.parametrize("bits", BITS)
+@pytest.mark.parametrize("exponent", [-80, -40, 0, 40, 80])
+def test_quantize_exponent_matches_the_float64_oracle_across_scales(bits, exponent):
+    """The exponent search is scale invariant on the device too.
+
+    The raw squared error of a block near ``2**80`` overflows to ``inf`` and of a
+    block near ``2**-80`` underflows to ``0``, which used to pin the base
+    exponent instead of comparing the two neighbours. The expected exponent comes
+    from an independent float64 enumeration, not from the Torch quantiser, so a
+    defect present in both implementations still fails here.
+    """
+
+    from tests.test_blockfloat_exponent_search_scaling import oracle_block
+
+    torch.manual_seed(9000 + bits + exponent)
+    weight = torch.randn(32, 128, device="cuda", dtype=torch.float32)
+    weight = (weight.abs().clamp_min(0.5) * torch.exp2(
+        weight.new_tensor(float(exponent))
+    )).contiguous()
+
+    codes, exponents = _cuda_quantize(weight, bits)
+    unpacked = _unpack_codes(codes, bits, tuple(weight.shape))
+
+    offset = 2 * (1 << (bits - 2)) - 1
+    for row in range(weight.shape[0]):
+        for block in range(weight.shape[1] // 16):
+            expected_exponent, expected_codes, tied, _ = oracle_block(
+                weight[row, block * 16:(block + 1) * 16], bits
+            )
+            assert int(exponents.reshape(32, -1)[row, block]) == expected_exponent
+            got_codes = (unpacked[row, block * 16:(block + 1) * 16] - offset).cpu()
+            assert torch.equal(got_codes[~tied], expected_codes[~tied])
+
+
+@pytest.mark.parametrize("bits", BITS)
 @pytest.mark.parametrize("rows,k", SHAPES)
 def test_dequant_matches_reference(bits, rows, k):
     torch.manual_seed(rows * 7 + k + bits)
