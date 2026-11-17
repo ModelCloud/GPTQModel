@@ -2,10 +2,18 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-issue-claims
-description: Scan open GPT-QModel GitHub issues and claim one before starting work, only as many workloads as the agent can run right now (bounded by sub-agents and test hardware), with correlated issues claimed together as one workload, using an opaque per-session agent id (a hash of host and session id, never published raw) and a post-then-verify race check so that no two agents, even on the same GitHub account, work the same issue. Use whenever an agent picks up, starts, continues, hands off, or finishes work on a repository issue, or is asked to find something to work on.
+description: Scan open GPT-QModel GitHub issues and claim work before starting it, so that no two agents (even on one shared GitHub account) work the same issue. Claims carry an opaque per-session agent id, are bounded by the sub-agents and test hardware available now, and group correlated issues into one workload. Use whenever an agent picks up, starts, continues, hands off, or finishes work on a repository issue, or is asked to find something to work on.
 ---
 
 # Claiming GPT-QModel issues
+
+## At a glance
+
+- **What:** a public, race-safe claim comment on each issue an agent session is working on right now.
+- **Why:** many agents share one GitHub login across hosts; without per-session claims, two of them burn GPU time on the same fix.
+- **When:** immediately before reproducing, editing, or spending GPU time on an issue; heartbeat while working, verify before publishing, release when done or stopping.
+- **Where:** `.agents/skills/gptqmodel-issue-claims/scripts/issue_claim.py` (needs only Python and an authenticated `gh`).
+- **How:** `scan`, then `claim --capacity N --note ...`, then `heartbeat`, `verify`, and `release --pr`. Act on the exit codes in the [workflow](#workflow).
 
 Many agents run in parallel, often on different hosts under the **same GitHub
 account**. The account login alone cannot tell them apart, and two agents
@@ -22,12 +30,12 @@ CLAIM=.agents/skills/gptqmodel-issue-claims/scripts/issue_claim.py
 python3 $CLAIM whoami                 # print this agent's claim identity
 python3 $CLAIM scan --available       # open issues this agent may claim
 python3 $CLAIM held                   # this session's live workloads
-python3 $CLAIM claim 4690 --note "Reproducing the per-linear GSQ crash on CPU"
-python3 $CLAIM claim 4690 4691 --related "Both are the per-linear GSQ path" \
+python3 $CLAIM claim 1234 --note "Reproducing the per-linear GSQ crash on CPU"
+python3 $CLAIM claim 1234 1235 --related "Both are the per-linear GSQ path" \
     --note "Reproducing both on one GSQ fixture"
-python3 $CLAIM verify 4690 4691       # exit 0 only while this agent holds every claim
-python3 $CLAIM heartbeat 4690 4691
-python3 $CLAIM release 4690 4691 --pr https://github.com/ModelCloud/GPTQModel/pull/NNNN
+python3 $CLAIM verify 1234 1235       # exit 0 only while this agent holds every claim
+python3 $CLAIM heartbeat 1234 1235
+python3 $CLAIM release 1234 1235 --pr https://github.com/ModelCloud/GPTQModel/pull/NNNN
 ```
 
 It needs only Python and an authenticated `gh`. `--repo OWNER/NAME` targets
@@ -35,7 +43,7 @@ another repository.
 
 ## Agent identity
 
-A claim is owned by an opaque agent id such as `agent-e9a2bf080c86`: the first
+A claim is owned by an opaque agent id such as `agent-1a2b3c4d5e6f`: the first
 12 hex digits of a SHA-256 over the host name and the agent session id. Agents
 on different hosts, or in different sessions on one host, get different ids,
 while the host name and session id themselves never appear on GitHub.
@@ -99,7 +107,7 @@ or conflict. List the issues in one `claim` call and state the correlation
 publicly with `--related`:
 
 ```bash
-python3 $CLAIM claim 4690 4691 --related "Both are the per-linear GSQ path" \
+python3 $CLAIM claim 1234 1235 --related "Both are the per-linear GSQ path" \
     --note "Reproducing both on one GSQ fixture"
 ```
 
@@ -108,7 +116,7 @@ python3 $CLAIM claim 4690 4691 --related "Both are the per-linear GSQ path" \
   another agent wins any issue in the race, every new claim in the workload is
   withdrawn (`LOST RACE`).
 - If you find a correlated issue mid-work, claim it together with one issue you
-  already hold (`claim 4690 4705 --related "..."`). It joins the running
+  already hold (`claim 1234 1236 --related "..."`). It joins the running
   workload without using more capacity.
 - Similar titles, the same label, or the same reporter are not correlation.
   Unrelated issues are separate workloads, subject to capacity.

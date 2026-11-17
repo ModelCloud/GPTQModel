@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Lazy-Load Smoke Test"
+  short_description: "CPU smoke test for lazy loading"
+  default_prompt: "Use $gptqmodel-lazy-load-smoke-testing to smoke-test lazy load and first-layer materialization on CPU."

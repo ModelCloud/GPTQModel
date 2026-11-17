@@ -1,9 +1,19 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-logic-flow-diagrams
 description: Require Mermaid diagrams and before/after tables for major logic-flow changes, both in the PR description and in a committed docs/ reference page. Use when a change alters control flow, resolution/selection order, dispatch, data or tensor lifecycle, or removes or replaces a decision mechanism.
 ---
 
 # Logic-flow diagrams for major changes
+
+## At a glance
+
+- **What:** Mermaid diagrams of the new flow plus a before/after view of the replaced mechanism, in the PR description and in a committed `docs/` page.
+- **Why:** a change that moves decision-making cannot be reviewed from the diff alone, and silent fallbacks hide in flows that nobody drew.
+- **When:** before opening a PR that changes control flow, a decision mechanism, selection order, tensor lifecycle, or a fail-closed or fail-open contract.
+- **Where:** the PR body and `docs/<mechanism>.md`, linked from `README.md`.
+- **How:** draw from the shipped code with real symbols, mark failure paths, validate the Mermaid, and re-read the live PR body.
 
 A change that moves *decision-making* is not fully reviewed until a reader can
 see the old flow, the new flow, and the boundary between them without opening

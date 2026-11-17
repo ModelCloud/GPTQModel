@@ -1,23 +1,33 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-device-families
-description: Keep NVIDIA and AMD support explicit when editing GPTQModel device selection, model loading, placement, hardware checks, or quant-linear SUPPORTS declarations.
+description: Keep NVIDIA and AMD support explicit when editing GPT-QModel device selection, model loading, placement, hardware checks, or quant-linear SUPPORTS declarations.
 ---
 
 # Explicit GPU families
 
-GPTQModel's support-family enum is the hardware contract. PyTorch's device
+## At a glance
+
+- **What:** keep the hardware family (`DEVICE.CUDA` = NVIDIA, `DEVICE.ROCM` = AMD) separate from PyTorch's runtime namespace (`cuda:N` on both).
+- **Why:** PyTorch's HIP build reports AMD GPUs as `cuda`. Treating that spelling as NVIDIA runs NVIDIA-only kernels on AMD, or hides ROCm support that exists.
+- **When:** editing device selection, placement, loading, accelerator checks, or a kernel's `SUPPORTS_*` declarations.
+- **Where:** `gptqmodel/models/_const.py` (`DEVICE`, `normalize_device`), `gptqmodel/utils/importer.py` (selectors), `gptqmodel/utils/torch.py` (`as_torch_device`), `tests/test_rocm_kernel_contracts.py`.
+- **How:** decide with families, place with concrete devices, declare support statically per kernel, validate architecture on every selected GPU.
+
+GPT-QModel's support-family enum is the hardware contract. PyTorch's device
 namespace is the execution API. Keep those concepts separate.
 
 | Context | NVIDIA | AMD ROCm |
 | --- | --- | --- |
-| GPTQModel support family | `DEVICE.CUDA` | `DEVICE.ROCM` |
+| GPT-QModel support family | `DEVICE.CUDA` | `DEVICE.ROCM` |
 | Torch runtime device | `torch.device("cuda:N")` | `torch.device("cuda:N")` under HIP |
 | Runtime identification | CUDA build, no HIP | `torch.version.hip is not None` / centralized `IS_ROCM` |
 
 `torch.cuda.is_available()`, `tensor.is_cuda`, and `device.type == "cuda"`
 identify the runtime API, not NVIDIA hardware. Do not use them alone to choose
 an NVIDIA kernel. Fold the HIP distinction into the family resolver and use
-explicit families in GPTQModel logic.
+explicit families in GPT-QModel logic.
 
 ## Declarations and selection
 
@@ -29,11 +39,11 @@ explicit families in GPTQModel logic.
 - Preserve `DEVICE.ROCM` in family-valued configuration such as
   `quantize_config.device`. Do not store `DEVICE.CUDA` just to satisfy a Torch
   API that rejects the string `"rocm"`.
-- Use `models._const.normalize_device()` for a family-only decision. On HIP it
+- Use `gptqmodel.models._const.normalize_device()` for a family-only decision. On HIP it
   maps runtime `"cuda"`, `"cuda:N"`, ordinal and Torch-device inputs to ROCm.
   For backward compatibility it also normalizes a `DEVICE.CUDA` *request* on
   HIP; new AMD-facing callers should request `DEVICE.ROCM` explicitly.
-- Use the selector helpers in `utils/importer.py` when a concrete device or a
+- Use the selector helpers in `gptqmodel/utils/importer.py` when a concrete device or a
   device map is needed. Preserve ordinals for placement, capability checks and
   validation-cache keys. Do not replace `cuda:3` with a family and reconstruct
   it later as device 0. Never infer a family with `DEVICE(tensor.device.type)`.
@@ -51,7 +61,7 @@ explicit families in GPTQModel logic.
 
 ## Torch boundaries and mixed GPU systems
 
-Use `utils.torch.as_torch_device()` when passing a family enum to Torch tensor
+Use `gptqmodel.utils.torch.as_torch_device()` when passing a family enum to Torch tensor
 creation, moves, streams, or other execution APIs. It maps `DEVICE.ROCM` to the
 HIP runtime's `cuda` spelling and leaves families indexless so the current
 device context remains effective. Explicit Torch devices retain their ordinal.

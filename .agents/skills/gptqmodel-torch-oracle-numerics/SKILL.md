@@ -7,6 +7,14 @@ description: Validate quantization math, packed formats, and inference kernels a
 
 # Torch oracle for numerical changes
 
+## At a glance
+
+- **What:** prove every numerical change against an independent Torch oracle within fixed limits, and keep inference weights in quantized form between uses.
+- **Why:** fast kernels drift silently, and dense weight caches quietly multiply memory. Neither shows up in a smoke test or a generation sample.
+- **When:** adding or changing quantization math, a packer, an inference kernel, dispatch, a fusion backend, or runtime weight storage; also when auditing existing kernels.
+- **Where:** `gptqmodel/nn_modules/qlinear/`, `gptqmodel/quantization/`, `gptqmodel_ext/`, `tests/module_tree/test_fusion_kernel_backends.py`, `tests/qwen38_27b_shapes.py`.
+- **How:** deterministic A/B tests against oracle arithmetic, boundary and tie cases, the [acceptance limits](#acceptance-limits), storage inspection after repeated forwards, and runs on the target hardware.
+
 Apply this skill when adding or changing quantization math, a weight packer,
 an inference kernel, inference dispatch, or runtime weight storage, regardless
 of backend or performance intent. Also apply it when auditing existing kernels. Build
@@ -15,15 +23,17 @@ changed path and a separate Torch reference. The oracle must perform its own
 arithmetic; do not call the changed kernel or reuse its intermediate outputs as
 expected results.
 
-Selecting a packer, thread count, or code path from an environment variable is
-not acceptable. Route the choice through the config object or an explicit
-argument, and test that argument directly. See *No environment-variable
-behaviour switches* in `AGENTS.md`.
+Select packers, thread counts, and code paths through config or explicit
+arguments and test those arguments directly; never through environment
+variables (see `AGENTS.md`).
 
 ## Persistent inference weight storage
 
 The repository-wide storage rule in `AGENTS.md` is an acceptance gate for all
-quantization methods and all inference backends/devices. After an operation
+quantization methods and all inference backends and devices. Temporary
+dequantization for the current computation is allowed; moving an expanded
+cache to another device, marking it non-persistent, or hiding it behind an
+opt-in flag does not make it allowed. After an operation
 finishes consuming temporary weights, no inference-owned reference may retain
 a dense, dequantized, or expanded copy for reuse. Apply the gate to optimized
 and fallback paths, eager execution, JIT/compiled execution, warmup, and
@@ -65,6 +75,19 @@ For changed inference/storage paths:
   any remaining audited violations with file references; do not claim that
   documentation alone establishes compliance for every existing kernel.
 
+## Fusion backends
+
+Fusion backend changes must preserve AUTO's native kernel selection. Each newly
+admitted kernel needs an explicit native-layout contract and actual-device
+numerical tests; a portable substitution or mocked dispatch does not qualify
+it. Cover supported activation dtypes, unequal QKV widths, gate/up, native
+shape boundaries, workspace and descriptor lifecycle, mutation, direct source
+calls, exact packed-weight restoration, and persistent storage. Keep the
+kernel inventory and measured device report in
+`tests/module_tree/test_fusion_kernel_backends.py` current; unavailable
+architectures, dependencies, and formats need explicit coverage reasons.
+Model-level fusion eligibility is covered by `gptqmodel-model-plan-tests`.
+
 ## Acceptance limits
 
 - **Quantization:** Packed codes, indices, and other discrete outputs must match
@@ -104,10 +127,14 @@ do not turn a broad numerical tolerance into a blanket code exception.
 Report total mismatches, adjudicated tie mismatches, maximum output drift,
 maximum floating drift away from ties, and the reference precision in the PR.
 
+## Running and reporting
+
 Use representative sizes and supported dtypes. Synchronize asynchronous
 backends before reading results or timing them. Run the tests on the target
 hardware. Report the tested shapes, dtypes, tolerances, observed errors, and
 benchmark method in the pull request.
+
+## MLX kernels
 
 For MLX weight quantizers, packers, and inference kernels, include every
 projection in `tests/qwen38_27b_shapes.py`: full-attention Q/K/V/O, fused
@@ -129,6 +156,8 @@ the visible output with the Torch oracle rounded to the same dtype, so kernel
 error can be distinguished from mandatory output rounding. Report both error
 measurements; keep `rtol=atol=2e-3` or tighter and do not hide raw-oracle drift
 caused by low-precision output rounding.
+
+## Execution paths and failures
 
 Cover each execution path used by the kernel, including native and dense
 fallback paths when both exist. If FP16 or BF16 is unsupported, test its

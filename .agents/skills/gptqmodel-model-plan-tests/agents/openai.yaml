@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Model Plan Tests"
+  short_description: "Module-plan tests for model support"
+  default_prompt: "Use $gptqmodel-model-plan-tests to add registry, module-plan, and fusion-eligibility coverage for this model change."
