@@ -23,6 +23,7 @@ from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
 from ...utils.paro import (
     apply_paro_rotation,
+    apply_paro_rotation_autograd,
     apply_paro_rotation_vectorized,
     build_identity_rotation_buffers,
     is_identity_rotation,
@@ -567,14 +568,32 @@ class ParoLinear(AwqTorchLinear):
             self._rotation_runtime_key = runtime_key
         return self._runtime_theta, self._runtime_channel_scales
 
+    def _rotation_needs_autograd(self, x_flat: torch.Tensor) -> bool:
+        """Whether this rotation must stay inside the autograd graph.
+
+        The fused rotation op has no registered autograd kernel, so calling it
+        while a gradient is needed silently returns ``None`` for the input and
+        for every rotation parameter (issue #4958). The autograd wrapper runs
+        the same fused kernel in its forward and implements the backward.
+        """
+
+        if not torch.is_grad_enabled():
+            return False
+        return bool(
+            x_flat.requires_grad
+            or self.theta.requires_grad
+            or self.channel_scales.requires_grad
+        )
+
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
         if self._rotation_identity:
             return x_flat
+        needs_autograd = self._rotation_needs_autograd(x_flat)
         if (
-            x_flat.device.type == "cpu"
+            not needs_autograd
+            and x_flat.device.type == "cpu"
             and not self.training
-            and not x_flat.requires_grad
         ):
             theta, channel_scales = self._ensure_rotation_runtime_dtype(
                 x_flat.device,
@@ -594,6 +613,14 @@ class ParoLinear(AwqTorchLinear):
         channel_scales = self.channel_scales
         if use_cached_rotation_dtype:
             theta, channel_scales = self._ensure_rotation_runtime_dtype(x_flat.device, x_flat.dtype)
+        if needs_autograd:
+            return apply_paro_rotation_autograd(
+                x_flat,
+                self.pairs,
+                theta,
+                scales=channel_scales,
+                group_size=self.group_size,
+            )
         return apply_paro_rotation(
             x_flat,
             self.pairs,
@@ -666,6 +693,12 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
+        if torch.is_grad_enabled() and x_flat.requires_grad:
+            # The native AWQ GEMM op has no autograd kernel, so a gradient
+            # taken through it is silently dropped (issue #4958). The dense
+            # reference below is the differentiable path; inference keeps the
+            # native kernel.
+            return None
         compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
         if not self._cuda_awq_kernel_supported(compute_dtype):
             return None
