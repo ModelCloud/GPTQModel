@@ -70,10 +70,13 @@ class LocalModelLoader:
         return _local_class(self.processor_class).from_pretrained(model_id_or_path, **kwargs)
 
     def load_tokenizer(self, model_id_or_path, **kwargs):
+        from tokenicer import Tokenicer
+
         if self.tokenizer_class is None:
             raise ValueError("This local model loader does not declare a tokenizer class")
         kwargs.pop("trust_remote_code", None)
         kwargs.pop("code_revision", None)
+        kwargs = Tokenicer.prepare_load_kwargs(model_id_or_path, **kwargs)
         return _local_class(self.tokenizer_class).from_pretrained(model_id_or_path, **kwargs)
 
 

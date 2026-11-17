@@ -282,8 +282,9 @@ reference records processor selection, cache failure behavior and provenance.
 describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
 [Package-owned tokenizer selection and LFM3 decoder ownership](docs/transformers5-model-ports.md#package-owned-tokenizer-selection)
 cover definition-specific scientific tokenizer dispatch and native gate/convolution
-exclusions. Tokenizer normalization and trust enforcement require Tokenicer 0.0.17
-or newer.
+exclusions. [Owned tokenizer construction and normalization](docs/owned-tokenizer-lifecycle.md)
+requires Tokenicer 0.0.19; the API is qualified from the unreleased candidate
+in [Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
 [Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
 documents dense/MoE ownership, distinct tokenizer semantics and the explicit
 AttnRes quantization boundary. Packaged TikToken implementations require
