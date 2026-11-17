@@ -81,7 +81,7 @@ flowchart TD
 | --- | --- |
 | Definition trust requirement (`ricursive.py:30` at base `bf4003d`) and checkpoint `auto_map` | `ricursive.py:RicursiveQModel.loader` selects only packaged config/model/tokenizer classes; trust and bypass cannot replace them. |
 | Definition `after_model_load` runtime patch (`ricursive.py:72-76` at base) | Explicit `GenerationMixin` and native cache/generation preparation inside `modeling_ricursive.py`. |
-| Upstream `RIPPLE_MLP_CHUNK` environment selection | `RicursiveConfig.mlp_chunk_size`, default 2048, zero disables row chunking; saved in config. |
+| Upstream `RIPPLE_MLP_CHUNK` environment selection | `RicursiveConfig.mlp_chunk_size`, default 2048, zero disables row chunking; saved in config. The isolated historical compatibility helper uses the same explicit config field. |
 | Native cache derives sliding storage even with no window | `get_text_config(decoder=True)` returns a copied full-storage view when `sliding_window=None`; decoder RoPE layout and caller config remain unchanged. |
 | Static tree assumes every variant has `g_proj` | Definition effective-tree selection excludes the absent owner for ungated layouts. |
 | Checkpoint-source test downloads | Ricursive-only helpers read trusted package files; isolated copies exist only where tests deliberately mutate classes for old-shim unit coverage. Independent raw-tensor oracles remain independent. |
@@ -134,16 +134,16 @@ PATH=/home/ubuntu/.venvs/gptqmodel-tf5/bin:$PATH format/check.sh
 git diff --check
 ```
 
-The final combined run completed in 83.53 seconds:
+The final combined run completed in 71.06 seconds:
 
 | Family | Passed | Skipped / deselected |
 | --- | ---: | --- |
 | New port/model-owner suites | 132 | 0 |
-| All Ricursive suites, including the migrated siblings | 454 | 22 CUDA cases |
+| All Ricursive suites, including the migrated siblings | 460 | 22 CUDA cases |
 | Required AWQ and registry/order baseline | 574 | 3 absent DeciLM/Exaone/Nanbeige checkpoints |
 | Shared loader/path/tokenizer/security | 116 | 1 known shared stale-API case deselected |
 | Fusion admission | 101 | 460 NVIDIA Marlin cases |
-| Combined (the 132 new cases are included in the 454) | 1,245 | 485 skipped, 1 deselected |
+| Combined (the 132 new cases are included in the 460) | 1,251 | 485 skipped, 1 deselected |
 
 The shared `test_quantized_reload_retains_once_normalized_wrapper` was actually
 run and fails because it still passes a raw dataset and removed `batch_size` /
@@ -152,6 +152,18 @@ needs `CalibrationConfig`; it is the only deselection above. No shared test or
 algorithm was changed here. All six real public plain-AWQ cases use the current
 API, reach decoder input capture, pack every declared linear, preserve every
 dense owner, generate, and compare every tensor after two saves/reloads.
+
+The separately run shared
+`tests/module_tree/test_awq_fold_safety_4175.py::test_ricursive_value_residual_folds_are_neutral`
+fails inside `_assert_neutral` because it assumes a nonempty scaling group.
+The parent must migrate that case to assert this definition's explicit empty
+groups/plain policy; it is outside the combined command and was not edited or
+silently skipped. Actual plain quantization is exercised by all six public
+round-trip cases. Its direct reproduction is:
+
+```bash
+PYTHON_GIL=0 python -m pytest -q tests/module_tree/test_awq_fold_safety_4175.py -k ricursive
+```
 
 The full combined reproduction adds this baseline to the owned command above:
 
@@ -183,6 +195,7 @@ Process-only negative probes were removed before the green run:
 | Omit post-attention PeriNorm | All 72 raw-equation cases fail | All 72 pass |
 | Ignore blended input at `v_proj` | 36 failures across all four dtypes/KV layouts | All 36 no-value-residual controls pass |
 | Remove owned tokenizer binding | Base whitespace IDs become `[220,264,197,65,271,272]` rather than `[220,264,2282,271,272]` | Preview control passes; all 12 owned trust/bypass/release cases pass |
+| Legacy helper ignores explicit chunk config | Five failures: zero ignored, 3-row budget ignored, three invalid values accepted; the default-budget control passes | All six pass in 3.07 seconds after removing the remaining environment read |
 
 The oracle performs its own interpolation, Q/K/V projections, RMS/rotary,
 masking, softmax, value mixing, MLP and head arithmetic. It uses FP32
