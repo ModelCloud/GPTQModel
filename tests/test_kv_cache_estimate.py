@@ -14,6 +14,7 @@ the estimator refuses rather than guessing.
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from gptqmodel.utils.kv_cache import KVCacheEstimate, LayerCache, estimate_kv_cache
@@ -246,3 +247,46 @@ def test_compressed_attention_counts_sliding_branch_plus_pooled_entries():
     assert estimate.bytes_for(8192) == expected(8192)
     # The compressed slope dominates long contexts and is far below per-head K/V.
     assert estimate.bytes_for(32768) < 32768 * 2 * 64 * 512
+
+
+def test_chunked_attention_counts_as_full_attention():
+    """Llama4 masking pattern: global attention, cache covers the whole context.
+
+    Its hybrid stack is 36 chunked + 12 full layers out of 48; treating the
+    chunked ones as unknown under-reported the cache by 4x.
+    """
+
+    config = _gqa(num_hidden_layers=48)
+    config.layer_types = ["chunked_attention"] * 36 + ["full_attention"] * 12
+    estimate = estimate_kv_cache(config, dtype=torch.float16)
+    assert estimate.exact is True
+    assert estimate.growing_layers == 48
+    assert estimate.bytes_per_token == 48 * 2 * 8 * 128 * 2
+
+
+def test_non_attention_blocks_contribute_nothing():
+    """Nemotron-H dispatches moe/mlp blocks to non-attention mixers."""
+
+    config = _gqa(num_hidden_layers=4)
+    config.layer_types = ["linear_attention", "moe", "full_attention", "mlp"]
+    estimate = estimate_kv_cache(config, dtype=torch.float16)
+    assert estimate.exact is True
+    assert estimate.growing_layers == 1
+    assert estimate.linear_layers == 1
+    assert estimate.block_layers == 2
+    assert estimate.bytes_per_token == 2 * 8 * 128 * 2
+    line = estimate.format()
+    assert "2 non-attention block(s)" in line
+    assert "linear-attention" in line
+
+
+def test_fp8_kv_cache_is_one_byte_per_element():
+    """vLLM/SGLang store the cache in fp8 to halve it; the estimate follows."""
+
+    fp16 = estimate_kv_cache(_gqa(), dtype=torch.float16)
+    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+    if fp8_dtype is None:
+        pytest.skip("this torch build has no fp8 dtype")
+    fp8 = estimate_kv_cache(_gqa(), dtype=fp8_dtype)
+    assert fp8 is not None
+    assert fp8.bytes_per_token * 2 == fp16.bytes_per_token

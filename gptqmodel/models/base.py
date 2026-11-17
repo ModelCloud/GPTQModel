@@ -90,7 +90,7 @@ from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
-from ..utils.kv_cache import estimate_kv_cache
+from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.model import (
@@ -107,6 +107,7 @@ from ..utils.model import (
 )
 from ..utils.model_dequant import infer_block_shape
 from ..utils.p2p import safe_module_to
+from ..utils.quant_metadata import UnsupportedMetadata, describe_unsupported_metadata, find_unsupported_metadata
 from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
@@ -376,27 +377,27 @@ def _log_quantize_summary(
     )
 
 
-def _log_kv_cache_estimate(model: object) -> None:
-    """State what context costs, since weight quantization does not change it.
 
-    The dtype comes from the weights that were just quantized, not from the
-    config: ``torch_dtype`` is often unset and a cache is only as small as the
-    activations that fill it.
-    """
 
-    inner = getattr(model, "model", None)
-    config = getattr(inner, "config", None)
-    dtype = None
+def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+    """KV-cache estimate for a decoder module, dtype taken from its weights."""
+
+    return estimate_kv_cache(
+        getattr(inner, "config", None),
+        dtype=dtype or _module_weight_dtype(inner),
+    )
+
+
+def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
+    """dtype of the first floating parameter of a module, or None."""
+
     try:
-        for parameter in inner.parameters():
+        for parameter in module.parameters():
             if parameter.is_floating_point():
-                dtype = parameter.dtype
-                break
+                return parameter.dtype
     except Exception:  # pragma: no cover - exotic module trees
-        dtype = None
-    estimate = estimate_kv_cache(config, dtype=dtype)
-    if estimate is not None:
-        log.info(estimate.format())
+        return None
+    return None
 
 
 class _QuantizedCheckpointSource:
@@ -2062,6 +2063,25 @@ class BaseQModel(nn.Module):
 
         warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
 
+    def kv_cache_estimate(self, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
+        """Per-token KV-cache cost of this model, or None when the config hides it.
+
+        Weight quantization does not change the cache, so this is the number a
+        user needs after loading to decide how much context fits next to the
+        weights. The dtype defaults to the dtype of the model's own weights: a
+        cache is as large as the activations that fill it, and
+        ``config.torch_dtype`` is usually unset.
+        """
+
+        return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
+
+    def log_kv_cache_estimate(self) -> None:
+        """Log the KV-cache cost once, when the config supports the estimate."""
+
+        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
+        if estimate is not None:
+            log.info(estimate.format())
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -2533,7 +2553,7 @@ class BaseQModel(nn.Module):
         # copies are gone once the loop returns, but PyTorch keeps the pinned
         # blocks cached (non-swappable ``RssShmem``) for the process lifetime.
         release_pinned_host_cache()
-        _log_kv_cache_estimate(self)
+        self.log_kv_cache_estimate()
         return result
 
     @staticmethod
@@ -4648,36 +4668,26 @@ class BaseQModel(nn.Module):
 
         return self._decoder_quant_method_name() == "modelopt"
 
-    def _modelopt_activation_quantization_mode(self) -> Optional[str]:
-        """Describe unsupported ModelOpt activation quantization metadata when present."""
+    def _modelopt_unsupported_metadata(self) -> Optional[UnsupportedMetadata]:
+        """Describe unsupported quantization metadata in a ModelOpt checkpoint.
+
+        The config payload is classified by the shared helper so a KV-cache
+        scheme is reported as a KV-cache scheme, not as activation
+        quantization. Checkpoints that pre-quantize activations also ship the
+        corresponding scales, which the weight map exposes as side tensors.
+        """
 
         quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
-        if not isinstance(quant_config, dict):
-            return None
-
-        config_groups = quant_config.get("config_groups")
-        if isinstance(config_groups, dict):
-            for group_cfg in config_groups.values():
-                if not isinstance(group_cfg, dict):
-                    continue
-                input_activations = group_cfg.get("input_activations")
-                if isinstance(input_activations, dict):
-                    num_bits = input_activations.get("num_bits")
-                    if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
-                        return "input_activations"
-
-        kv_cache_scheme = quant_config.get("kv_cache_scheme")
-        if isinstance(kv_cache_scheme, dict):
-            num_bits = kv_cache_scheme.get("num_bits")
-            if isinstance(num_bits, (int, float)) and int(num_bits) < 16:
-                return "kv_cache_scheme"
+        found = find_unsupported_metadata(quant_config)
+        if found is not None:
+            return found
 
         if isinstance(self.turtle_model, LazyTurtle):
             keys = self.turtle_model._weight_map.keys()
         else:
             keys = self.model.state_dict().keys()
         if any(str(name).endswith((".input_scale", ".k_scale", ".v_scale")) for name in keys):
-            return "checkpoint_scales"
+            return UnsupportedMetadata(field="checkpoint_scales", kind="checkpoint_scales")
         return None
 
     def _configure_modelopt_runtime(self) -> None:
@@ -4694,15 +4704,11 @@ class BaseQModel(nn.Module):
         if self._active_auto_module_decoder_config() is not None:
             return
 
-        unsupported_mode = self._modelopt_activation_quantization_mode()
-        if unsupported_mode is not None:
-            log.error("GPT-QModel currently does not support loading of activation quantized models")
-            raise ValueError(
-                "GPT-QModel currently does not support loading of activation quantized models. "
-                "GPTQModel does not support loading ModelOpt checkpoints with activation quantization. "
-                "Only dense-activation weight-only variants such as W8A16/FP8 and W4A16/FP4 are supported. "
-                f"Detected unsupported metadata: {unsupported_mode}."
-            )
+        unsupported = self._modelopt_unsupported_metadata()
+        if unsupported is not None:
+            message = describe_unsupported_metadata(unsupported)
+            log.error(message)
+            raise ValueError(message)
 
     def _decoder_scale_tensor(
         self,

@@ -88,6 +88,61 @@ def test_clip_grid_edge_cases(device, kind):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("out_features", [96, 100, 130])
+@pytest.mark.parametrize("group_size", [-1, 32])
+def test_clip_search_handles_a_partial_output_tile(out_features, group_size):
+    """#4474: clip search owns a tile size, not a second shape predicate.
+
+    The portable AWQ packer only requires ``out_features`` divisible by its own
+    packing factor, but clip search asserted divisibility by 64/256 and aborted
+    a supported ``quantize()`` with a bare ``AssertionError``. The final tile is
+    now partial, and each output row must still get its own bound.
+    """
+
+    g = torch.Generator().manual_seed(4474 + out_features)
+    w = torch.randn(out_features, 128, generator=g)
+    x = torch.randn(17, 128, generator=g)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=group_size,
+        mse={"clip_grid_budget": 0},
+    )
+    processor = _ClipTestAWQProcessor(qcfg)
+
+    actual = processor._compute_best_clip(w, x)
+
+    assert actual.shape[0] == out_features
+    assert torch.isfinite(actual).all()
+    assert (actual > 0).all()
+
+    # Clip search is row-independent, so each tile must reproduce the same
+    # single-tile search over its own rows. A missing tail would leave zeros.
+    head = processor._compute_best_clip(w[:64], x)
+    torch.testing.assert_close(actual[:64], head, rtol=0, atol=0)
+    tail = processor._compute_best_clip(w[64:], x)
+    torch.testing.assert_close(actual[64:], tail, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("out_features", [1, 7, 63, 65])
+def test_clip_search_covers_every_row_for_awkward_widths(out_features):
+    """Widths below, at, and just above the tile size all get a bound per row."""
+
+    g = torch.Generator().manual_seed(out_features)
+    w = torch.randn(out_features, 64, generator=g)
+    x = torch.randn(11, 64, generator=g)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32,
+        mse={"clip_grid_budget": 0},
+    )
+    processor = _ClipTestAWQProcessor(qcfg)
+
+    actual = processor._compute_best_clip(w, x)
+
+    assert actual.shape[0] == out_features
+    torch.testing.assert_close(
+        actual, _sequential_clip_grid(qcfg, w, x), rtol=0, atol=0
+    )
+
+
 def test_clip_grid_slices_reference_product():
     """The unclipped reference must obey the same token tiling as candidates."""
     products = []

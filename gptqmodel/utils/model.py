@@ -2859,7 +2859,12 @@ def validate_checkpoint_qweights(
         )
 
 
-def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | None) -> None:
+def _tie_weights_after_checkpoint_load(
+    model,
+    checkpoint: str | os.PathLike | None,
+    *,
+    extra_keys: set[str] | frozenset[str] | None = None,
+) -> None:
     # Match transformers.from_pretrained(): when both sides of a tied-weight
     # pair are present in the checkpoint, tie_weights(missing_keys=...) checks
     # whether their loaded values are equal and skips tying if they differ.
@@ -2869,6 +2874,11 @@ def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | No
     if checkpoint is not None:
         checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
         if checkpoint_keys is not None:
+            if extra_keys:
+                # Accelerate may have received a temporary checkpoint without
+                # some tensors the loader restored itself; they were present
+                # in the source checkpoint, so do not treat them as missing.
+                checkpoint_keys |= set(extra_keys)
             missing_keys = set(model.state_dict().keys()) - checkpoint_keys
 
     if missing_keys is None:
@@ -2881,23 +2891,42 @@ def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | No
         model.tie_weights()
 
 
-def _convert_safetensors_header_keys(header: dict, key_converter) -> Tuple[dict, bool]:
+def _convert_safetensors_header_keys(
+    header: dict, key_converter, exclude_names=frozenset(),
+) -> Tuple[dict, bool, bool]:
     converted_header = {}
     changed = False
+    excluded = False
     for name, tensor_info in header.items():
         if name == "__metadata__":
             converted_header[name] = tensor_info
             continue
-        converted_name = key_converter(name)
+        converted_name = key_converter(name) if callable(key_converter) else name
+        if converted_name in exclude_names:
+            # The caller owns these tensors (for example packed FP8 weights)
+            # and loads them directly from the source checkpoint. Keeping
+            # them out of this file also keeps accelerate from reading the
+            # packed bytes into its per-shard staging buffer.
+            changed = True
+            excluded = True
+            continue
         if converted_name in converted_header:
             raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
         converted_header[converted_name] = tensor_info
         changed |= converted_name != name
-    return converted_header, changed
+    return converted_header, changed, excluded
 
 
-def _write_safetensors_with_converted_header(source_path: str, target_path: str, key_converter) -> bool:
-    """Copy a safetensors file, rewriting its header keys. Returns whether any key changed."""
+def _write_safetensors_with_converted_header(
+    source_path: str, target_path: str, key_converter, exclude_names=frozenset(),
+) -> bool:
+    """Copy a safetensors file, rewriting its header keys.
+
+    ``exclude_names`` drops converted tensors from the copy. A safetensors
+    data section must be contiguous, so an exclusion rewrites the remaining
+    payload with fresh offsets; without one the data section is copied
+    verbatim. Returns whether the file changed.
+    """
     with open(source_path, "rb") as source:
         header_size_bytes = source.read(8)
         if len(header_size_bytes) != 8:
@@ -2906,21 +2935,55 @@ def _write_safetensors_with_converted_header(source_path: str, target_path: str,
         header = json.loads(source.read(header_size))
         data_offset = 8 + header_size
 
-    converted_header, changed = _convert_safetensors_header_keys(header, key_converter)
+    converted_header, changed, excluded = _convert_safetensors_header_keys(
+        header, key_converter, exclude_names,
+    )
     if not changed:
         return False
 
+    if not excluded:
+        encoded_header = json.dumps(converted_header, separators=(",", ":")).encode("utf-8")
+        encoded_header += b" " * ((-len(encoded_header)) % 8)
+        with open(target_path, "wb") as target, open(source_path, "rb") as source:
+            target.write(struct.pack("<Q", len(encoded_header)))
+            target.write(encoded_header)
+            source.seek(data_offset)
+            shutil.copyfileobj(source, target, length=32 * 1024 * 1024)
+        return True
+
+    # Compact the kept tensors so their offsets stay contiguous from zero.
+    kept = []
+    offset = 0
+    for name, tensor_info in converted_header.items():
+        if name == "__metadata__":
+            continue
+        start, end = tensor_info["data_offsets"]
+        kept.append((start, end))
+        tensor_info["data_offsets"] = [offset, offset + (end - start)]
+        offset += end - start
     encoded_header = json.dumps(converted_header, separators=(",", ":")).encode("utf-8")
     encoded_header += b" " * ((-len(encoded_header)) % 8)
+    buffer = bytearray(4 * 1024 * 1024)
+    view = memoryview(buffer)
     with open(target_path, "wb") as target, open(source_path, "rb") as source:
         target.write(struct.pack("<Q", len(encoded_header)))
         target.write(encoded_header)
-        source.seek(data_offset)
-        shutil.copyfileobj(source, target, length=32 * 1024 * 1024)
+        for start, end in kept:
+            source.seek(data_offset + start)
+            remaining = end - start
+            while remaining > 0:
+                chunk = min(len(buffer), remaining)
+                read = source.readinto(view[:chunk])
+                if not read:
+                    raise IOError(f"Unexpected EOF while copying {source_path}")
+                target.write(view[:read])
+                remaining -= read
     return True
 
 
-def _remap_safetensors_index(checkpoint: str, key_converter) -> Optional[str]:
+def _remap_safetensors_index(
+    checkpoint: str, key_converter, exclude_names=frozenset(),
+) -> Optional[str]:
     """Rewrite a sharded safetensors index and its shard headers into a temporary directory."""
     with open(checkpoint, encoding="utf-8") as handle:
         index = json.load(handle)
@@ -2942,7 +3005,10 @@ def _remap_safetensors_index(checkpoint: str, key_converter) -> Optional[str]:
     converted_weight_map = {}
     changed = False
     for name, shard in weight_map.items():
-        converted_name = key_converter(name)
+        converted_name = key_converter(name) if callable(key_converter) else name
+        if converted_name in exclude_names:
+            changed = True
+            continue
         if converted_name in converted_weight_map:
             raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
         converted_weight_map[converted_name] = shard
@@ -2950,10 +3016,20 @@ def _remap_safetensors_index(checkpoint: str, key_converter) -> Optional[str]:
     if not changed:
         return None
 
-    remap_dir = tempfile.mkdtemp(prefix="gptqmodel-key-remap-")
+    try:
+        remap_dir = tempfile.mkdtemp(
+            prefix="gptqmodel-key-remap-", dir=_remap_temp_dir(checkpoint)
+        )
+    except OSError:
+        remap_dir = tempfile.mkdtemp(prefix="gptqmodel-key-remap-")
     try:
         target_names = {}
+        used_shards = set(converted_weight_map.values())
         for shard_name in shard_names:
+            if shard_name not in used_shards:
+                # Every tensor in this shard was excluded. Accelerate reads
+                # the shard set from the rewritten index, so skip the copy.
+                continue
             # Keep relative subdirectories, but never let a malformed index
             # escape the temporary directory.
             normalized = os.path.normpath(shard_name)
@@ -2963,7 +3039,7 @@ def _remap_safetensors_index(checkpoint: str, key_converter) -> Optional[str]:
             target_path = os.path.join(remap_dir, normalized)
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             if not _write_safetensors_with_converted_header(
-                shard_paths[shard_name], target_path, key_converter
+                shard_paths[shard_name], target_path, key_converter, exclude_names,
             ):
                 shutil.copyfile(shard_paths[shard_name], target_path)
 
@@ -2999,19 +3075,68 @@ def _cleanup_remapped_checkpoint(checkpoint: Optional[str]) -> None:
 
 
 # Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
-def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_converter) -> Optional[str]:
+def _remap_temp_dir(checkpoint: str) -> Optional[str]:
+    """Keep large temporary checkpoint copies off a RAM-backed temp dir.
+
+    ``tempfile`` defaults to ``/tmp``, which is commonly tmpfs. An FP8 subset
+    copy can be many GiB, so prefer the checkpoint's own filesystem and fall
+    back to the platform default when it is not writable.
+    """
+
+    parent = os.path.dirname(os.path.abspath(checkpoint))
+    try:
+        if os.path.isdir(parent) and os.access(parent, os.W_OK):
+            return parent
+    except OSError:
+        pass
+    return None
+
+
+def _remap_safetensors_checkpoint_keys(
+    checkpoint: str | os.PathLike, key_converter, exclude_names=frozenset(),
+) -> Optional[str]:
     checkpoint = os.fspath(checkpoint)
+    if not callable(key_converter) and not exclude_names:
+        return None
+    if os.path.isdir(checkpoint):
+        if not exclude_names:
+            return None
+        # Mirror Accelerate's file resolution. A pickle checkpoint cannot be
+        # rewritten here, so leave it to the previous load path.
+        if os.path.isfile(os.path.join(checkpoint, "pytorch_model.bin")):
+            return None
+        safetensors_path = os.path.join(checkpoint, "model.safetensors")
+        if os.path.isfile(safetensors_path):
+            checkpoint = safetensors_path
+        else:
+            indexes = [
+                name for name in os.listdir(checkpoint) if name.endswith(".index.json")
+            ]
+            if len(indexes) != 1:
+                return None
+            checkpoint = os.path.join(checkpoint, indexes[0])
     if not os.path.isfile(checkpoint):
         return None
     if checkpoint.endswith(".index.json"):
-        return _remap_safetensors_index(checkpoint, key_converter)
+        return _remap_safetensors_index(checkpoint, key_converter, exclude_names)
     if not checkpoint.endswith(".safetensors"):
         return None
 
-    descriptor, converted_path = tempfile.mkstemp(prefix="gptqmodel-key-remap-", suffix=".safetensors")
+    try:
+        descriptor, converted_path = tempfile.mkstemp(
+            prefix="gptqmodel-key-remap-",
+            suffix=".safetensors",
+            dir=_remap_temp_dir(checkpoint),
+        )
+    except OSError:
+        descriptor, converted_path = tempfile.mkstemp(
+            prefix="gptqmodel-key-remap-", suffix=".safetensors"
+        )
     os.close(descriptor)
     try:
-        if not _write_safetensors_with_converted_header(checkpoint, converted_path, key_converter):
+        if not _write_safetensors_with_converted_header(
+            checkpoint, converted_path, key_converter, exclude_names,
+        ):
             os.unlink(converted_path)
             return None
     except BaseException:
@@ -3154,12 +3279,69 @@ def _prepare_variable_quant_buffers(model, checkpoint) -> None:
         module.register_buffer(buffer_name, torch.empty(shape, dtype=dtype, device=current.device))
 
 
+def _checkpoint_runtime_to_source_keys(
+    checkpoint, key_converter,
+) -> Optional[dict[str, str]]:
+    """Map runtime tensor names to the names stored in the source checkpoint.
+
+    The loader may hand Accelerate a temporary checkpoint whose keys were
+    converted. Buffers restored from the source checkpoint still need the
+    original names, so read the header keys and apply the converter once.
+    """
+
+    if not callable(key_converter):
+        return None
+    keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if keys is None:
+        return None
+    mapping: dict[str, str] = {}
+    for key in keys:
+        runtime = key_converter(key)
+        existing = mapping.get(runtime)
+        if existing is not None and existing != key:
+            raise ValueError(
+                "Checkpoint key conversion produced duplicate tensor name: "
+                f"{runtime}"
+            )
+        mapping[runtime] = key
+    return mapping
+
+
 def _restore_checkpoint_buffers(
     model, checkpoint, dtypes: dict[str, torch.dtype | None],
     *, exact_source_names: set[str] | frozenset[str] = frozenset(),
+    name_map: dict[str, str] | None = None,
+    device_map: dict | None = None,
 ) -> None:
-    """Restore buffers after Accelerate casts; ``None`` keeps the source dtype."""
+    """Restore buffers and dense parameters after Accelerate casts.
+
+    ``None`` keeps the source dtype. Dense parameters are restored only by the
+    export shell (``restore_checkpoint_buffer_dtypes``); a normal load passes
+    its requested model dtype and must keep casting them.
+
+    ``name_map`` maps a runtime tensor name to the name stored in the
+    checkpoint. It lets the restore read from the original checkpoint when
+    Accelerate was given a temporary, key-converted copy.
+
+    ``device_map`` places a tensor that Accelerate never saw (packed FP8
+    weights removed from its checkpoint) on the device the map assigns.
+    """
     names = set(dtypes)
+    source_name = (lambda name: name_map.get(name, name)) if name_map else (lambda name: name)
+
+    def mapped_device(name: str):
+        if not isinstance(device_map, dict):
+            return None
+        module_name = name
+        while module_name and module_name not in device_map:
+            module_name = ".".join(module_name.split(".")[:-1])
+        if module_name == "" and "" not in device_map:
+            return None
+        target = device_map[module_name]
+        if target in ("disk", "meta"):
+            return None
+        return target
+
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
         # Match Accelerate's directory resolution so the second read comes
@@ -3178,39 +3360,55 @@ def _restore_checkpoint_buffers(
     if checkpoint.endswith(".index.json"):
         with open(checkpoint, encoding="utf-8") as handle:
             weight_map = json.load(handle)["weight_map"]
-        files: dict[str, set[str]] = {}
+        files: dict[str, dict[str, str]] = {}
         for name in names:
-            shard = weight_map.get(name)
+            source = source_name(name)
+            shard = weight_map.get(source)
             if shard is not None:
-                files.setdefault(os.path.join(os.path.dirname(checkpoint), shard), set()).add(name)
+                files.setdefault(
+                    os.path.join(os.path.dirname(checkpoint), shard), {}
+                )[source] = name
     else:
-        files = {checkpoint: names}
+        files = {checkpoint: {source_name(name): name for name in names}}
 
     restored: set[str] = set()
 
     def restore_one(name: str, value: torch.Tensor) -> None:
-        module_name, _, buffer_name = name.rpartition(".")
+        module_name, _, tensor_name = name.rpartition(".")
         module = model.get_submodule(module_name) if module_name else model
-        current = module._buffers.get(buffer_name)
-        if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
-            raise RuntimeError(f"Cannot restore checkpoint buffer {name!r}: missing or mismatched model slot")
-        if current.device.type == "meta":
-            raise RuntimeError(f"Cannot restore checkpoint buffer {name!r} on a meta device")
+        current = module._buffers.get(tensor_name)
+        parameter = module._parameters.get(tensor_name)
+        if current is None and parameter is None:
+            raise RuntimeError(f"Cannot restore checkpoint tensor {name!r}: missing model slot")
+        slot = current if current is not None else parameter
+        if not isinstance(slot, torch.Tensor) or tuple(slot.shape) != tuple(value.shape):
+            raise RuntimeError(f"Cannot restore checkpoint tensor {name!r}: missing or mismatched model slot")
+        if slot.device.type == "meta":
+            raise RuntimeError(f"Cannot restore checkpoint tensor {name!r} on a meta device")
         if name in exact_source_names and value.dtype != dtypes[name]:
             raise RuntimeError(
-                f"Checkpoint buffer {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
+                f"Checkpoint tensor {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
             )
         target_dtype = dtypes[name]
-        module._buffers[buffer_name] = value.to(
-            device=current.device, dtype=value.dtype if target_dtype is None else target_dtype
+        target_device = slot.device
+        if name in exact_source_names:
+            target_device = mapped_device(name) or target_device
+        restored_value = value.to(
+            device=target_device, dtype=value.dtype if target_dtype is None else target_dtype
         )
+        if parameter is not None:
+            # Keep the Parameter object so tied weights stay tied.
+            parameter.data = restored_value
+        else:
+            module._buffers[tensor_name] = restored_value
         restored.add(name)
 
     for path, selected in files.items():
         if path.endswith(".safetensors"):
             with safe_open(path, framework="pt", device="cpu") as handle:
-                for name in sorted(selected & set(handle.keys())):
-                    restore_one(name, handle.get_tensor(name))
+                available = set(handle.keys())
+                for source in sorted(set(selected) & available):
+                    restore_one(selected[source], handle.get_tensor(source))
         else:
             try:
                 state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
@@ -3218,13 +3416,13 @@ def _restore_checkpoint_buffers(
                 if "mmap" not in str(error):
                     raise
                 state = torch.load(path, map_location="cpu", weights_only=True)
-            for name in sorted(selected & set(state)):
-                restore_one(name, state[name])
+            for source in sorted(set(selected) & set(state)):
+                restore_one(selected[source], state[source])
 
     missing = names - restored
     if missing:
         raise RuntimeError(
-            "Cannot restore checkpoint buffers missing from checkpoint: "
+            "Cannot restore checkpoint tensors missing from checkpoint: "
             + ", ".join(sorted(missing))
         )
 
@@ -3261,11 +3459,30 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     restore_checkpoint_buffer_dtypes = bool(
         kwargs.pop("restore_checkpoint_buffer_dtypes", False)
     )
+    fp8_weight_names = set(packed_fp8_buffer_dtypes)
     converted_checkpoint = None
-    if callable(key_converter) and checkpoint is not None:
-        converted_checkpoint = _remap_safetensors_checkpoint_keys(checkpoint, key_converter)
+    restore_checkpoint = checkpoint
+    restore_name_map = None
+    if checkpoint is not None and (callable(key_converter) or fp8_weight_names):
+        converted_checkpoint = _remap_safetensors_checkpoint_keys(
+            checkpoint, key_converter, fp8_weight_names,
+        )
         if converted_checkpoint is not None:
             kwargs["checkpoint"] = converted_checkpoint
+            if fp8_weight_names:
+                # Packed FP8 weights are absent from the temporary checkpoint:
+                # Accelerate would cast them to the model dtype (and stage the
+                # whole shard on the target device) before the loader restored
+                # the packed bytes. Read them from the source checkpoint
+                # instead, and use the same source for every other restored
+                # buffer so key conversion is applied only once.
+                restore_checkpoint = checkpoint
+                if callable(key_converter):
+                    restore_name_map = _checkpoint_runtime_to_source_keys(
+                        checkpoint, key_converter,
+                    )
+            else:
+                restore_checkpoint = converted_checkpoint
     try:
         _prepare_variable_quant_buffers(
             model,
@@ -3308,6 +3525,25 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                     )
                 if restore:
                     restore_dtypes[full_name] = None
+            if restore_checkpoint_buffer_dtypes:
+                # Dense parameters (norms, embeddings, unquantized heads and
+                # projections) are allocated in the export shell's model dtype
+                # too. With ``dtype=None`` Accelerate copies a checkpoint
+                # tensor into that slot, so a mixed-dtype checkpoint was
+                # narrowed on re-save (#4466). The normal load path passes an
+                # explicit model dtype and must keep casting them.
+                for parameter_name, current in module._parameters.items():
+                    full_name = f"{prefix}{parameter_name}"
+                    checkpoint_dtype = checkpoint_dtypes.get(full_name)
+                    if (
+                        checkpoint_dtype is None
+                        or full_name in restore_dtypes
+                        or not isinstance(current, torch.Tensor)
+                        or not current.is_floating_point()
+                        or current.dtype == checkpoint_dtype
+                    ):
+                        continue
+                    restore_dtypes[full_name] = None
         # BitsAndBytes keeps its 4-bit quant metadata in state buffers whose
         # dtype is part of the kernel contract: the floating state tables must
         # stay FP32 and the packed map/QuantState bytes must stay byte-exact.
@@ -3334,10 +3570,16 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                         restore_dtypes[f"{prefix}{buffer_name}"] = None
         if restore_dtypes:
             _restore_checkpoint_buffers(
-                model, kwargs.get("checkpoint", checkpoint), restore_dtypes,
+                model, restore_checkpoint, restore_dtypes,
                 exact_source_names=set(packed_fp8_buffer_dtypes),
+                name_map=restore_name_map,
+                device_map=kwargs.get("device_map"),
             )
-        _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
+        _tie_weights_after_checkpoint_load(
+            model,
+            kwargs.get("checkpoint", checkpoint),
+            extra_keys=fp8_weight_names if converted_checkpoint is not None else None,
+        )
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)
         # Accelerate stages offloaded checkpoint tensors through pinned host
