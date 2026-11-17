@@ -108,6 +108,13 @@ def _log_hessian_verbose() -> bool:
     return env_flag("GPTQMODEL_LOG_HESSIAN")
 
 
+# ``desc_act`` orders the columns by Hessian diagonal, so a handful of
+# massive-activation rows can own the ordering and saturate the columns
+# correlated with them (issue #4742). Rows above this percentile of the
+# row-norm distribution are clamped to it before ``X^T X``.
+SINK_ROW_CAP_PERCENTILE = 99.9
+
+
 _WORKSPACE_LOCKS_GUARD = threading.Lock()
 
 
@@ -1074,6 +1081,83 @@ class GPTQ:
                     finally:
                         pass
 
+    def sink_row_cap_median_multiple(self) -> Optional[float]:
+        """Return the sink-row cap multiplier, or ``None`` when it does not apply.
+
+        ``desc_act=True`` disables ``act_group_aware``, and with it the
+        per-group scale protection that keeps a few massive-activation
+        ("attention sink") rows from dominating ``X^T X``. Those rows then own
+        the largest Hessian diagonal entries, so ``desc_act`` quantizes their
+        columns first with a tiny ``Hinv[i, i]``; the resulting error is
+        amplified into every column correlated with the sink and saturates it
+        (issue #4742). Capping each row's norm bounds that contribution while
+        keeping the sink direction in the Hessian.
+
+        The cap is a no-op whenever ``act_group_aware`` is active (the default
+        GPTQ path) so that configuration stays bit-identical.
+        """
+
+        if not self.qcfg.desc_act or self.qcfg.act_group_aware:
+            return None
+
+        multiple = getattr(self.qcfg.hessian, "sink_row_cap_median_multiple", None)
+        if multiple is None:
+            return None
+        multiple = float(multiple)
+        if multiple <= 0.0:
+            return None
+        return multiple
+
+    def resolve_sink_row_cap_scale(self, matrix: torch.Tensor, chunk_size: Optional[int]) -> Optional[torch.Tensor]:
+        """Return a per-row clamp scale that caps sink-row norms, or ``None``.
+
+        The threshold is ``min(p99.9 of the row norms, multiple x median)``.
+        The percentile alone is not enough on a small batch, where it *is* the
+        largest row (two sink rows in a 64-row batch sit above p99.9); the
+        median multiple then supplies the bound. On a large calibration window
+        the percentile is the binding term and the cap only touches the few
+        extreme rows.
+
+        The threshold is derived from the whole batch, not per chunk, so the
+        result does not depend on ``HessianConfig.chunk_size``. Row norms are
+        computed chunk-by-chunk in fp32, so the whole matrix is never staged in
+        fp32 just to take the norms.
+        """
+
+        multiple = self.sink_row_cap_median_multiple()
+        if multiple is None:
+            return None
+
+        rows = matrix.shape[0]
+        norms = torch.empty(rows, dtype=torch.float32, device=matrix.device)
+        # Keep the fp32 staging bounded even when the caller accumulates the
+        # Hessian in one chunk.
+        step = chunk_size if chunk_size is not None else max(1, (1 << 20) // max(1, matrix.shape[1]))
+        step = min(step, rows)
+        for start in range(0, rows, step):
+            stop = min(start + step, rows)
+            norms[start:stop] = torch.linalg.vector_norm(
+                matrix[start:stop], ord=2, dim=1, dtype=torch.float32
+            )
+
+        if not bool(torch.isfinite(norms).all()):
+            return None
+
+        median = torch.kthvalue(norms, (rows + 1) // 2).values
+        rank = max(1, min(rows, math.ceil(SINK_ROW_CAP_PERCENTILE / 100.0 * rows)))
+        percentile = torch.kthvalue(norms, rank).values
+        threshold = torch.minimum(percentile, median * multiple)
+        if not bool(torch.isfinite(threshold)) or float(threshold) <= 0.0:
+            return None
+
+        scale = torch.clamp(
+            threshold / norms.clamp_min(torch.finfo(torch.float32).tiny),
+            max=1.0,
+        )
+        if bool((scale >= 1.0).all()):
+            return None
+        return scale
+
     def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
@@ -1084,7 +1168,9 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = stage_dtype
         self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
-        if chunk_size is None:
+        cap_scale = self.resolve_sink_row_cap_scale(matrix, chunk_size)
+
+        if chunk_size is None and cap_scale is None:
             mat32 = matrix.to(dtype=torch.float32)
             # Determinism across processes comes from this fp32 X^T X GEMM
             # running on rocBLAS (see ``utils/rocm.py``). The quantization run
@@ -1096,6 +1182,9 @@ class GPTQ:
             del mat32
             return xtx
 
+        if chunk_size is None:
+            chunk_size = rows
+
         xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         for start in range(0, rows, chunk_size):
@@ -1103,6 +1192,10 @@ class GPTQ:
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
+                if cap_scale is not None:
+                    # ``materialized`` is a private workspace copy, so the
+                    # in-place clamp never touches the caller's activations.
+                    materialized32.mul_(cap_scale[start:start + rows_this].unsqueeze(1))
                 with quant_blas_backend(matrix.device):
                     xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
