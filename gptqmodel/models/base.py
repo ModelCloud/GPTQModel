@@ -946,6 +946,7 @@ class BaseQModel(nn.Module):
         effective_module_tree: Optional[Any] = None,
         fusion_enabled: bool = False,
         processor_load_kwargs: Optional[Dict[str, Any]] = None,
+        config_load_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         if type(fusion_enabled) is not bool:
@@ -987,6 +988,7 @@ class BaseQModel(nn.Module):
         self.quantize_backend: Optional[BACKEND] = None
         self.trust_remote_code = trust_remote_code
         self.model_local_path = model_local_path
+        self._config_load_kwargs = copy.deepcopy(config_load_kwargs or {})
         self.quantize_config = quantize_config
         self.quantization_run_plan: Optional[QuantizationRunPlan] = None
         self.quant_region_timer = QuantizationRegionTimer(logger=log)
