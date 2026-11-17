@@ -105,7 +105,7 @@ PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \
   -q --disable-warnings
 ```
 
-Measured with the processor trust/bypass matrix: **113 passed, no skips, 20.14s**.
+Measured with the processor trust/bypass matrix: **113 passed, no skips, 10.17s**.
 Tests use tiny real CPU models, not mocked modeling kernels. In particular:
 
 - Hostile config/model/tokenizer/processor maps across trust and bypass values.
