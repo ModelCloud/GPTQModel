@@ -37,12 +37,22 @@ _DTYPE_ITEMSIZE = {
     torch.float64: 8,
 }
 
+# Serving engines store the KV cache in fp8 to halve it. One byte per element is
+# the whole cache except for the per-head scale, which is negligible here.
+for _fp8_name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"):
+    _fp8_dtype = getattr(torch, _fp8_name, None)
+    if isinstance(_fp8_dtype, torch.dtype):
+        _DTYPE_ITEMSIZE[_fp8_dtype] = 1
+
 _FULL_ATTENTION_TYPES = frozenset({
     "full_attention", "attention", "self_attention", "indexed_attention",
     "deepseek_sparse_attention", "sparse_attention", "mla", "multi_latent_attention",
     # A layer that mixes a recurrent branch with an attention branch still keeps
     # standard K/V for the attention half; the recurrent half is constant state.
     "hybrid",
+    # Llama4 masking pattern: global attention with a chunked causal mask, so the
+    # cache covers the whole context like any full-attention layer.
+    "chunked_attention",
 })
 _SLIDING_ATTENTION_TYPES = frozenset({
     "sliding_attention", "sliding_window_attention", "window_attention",
@@ -51,6 +61,10 @@ _SLIDING_ATTENTION_TYPES = frozenset({
 _COMPRESSED_ATTENTION_TYPES = frozenset({
     "heavily_compressed_attention", "compressed_sparse_attention", "compressed_attention",
 })
+# Block types that carry no attention at all: Nemotron-H dispatches these to
+# ``NemotronHMoE`` / ``NemotronHMLP`` mixers instead of an attention module, so
+# they contribute nothing to the cache.
+_NO_ATTENTION_TYPES = frozenset({"moe", "mlp"})
 _LINEAR_ATTENTION_TYPES = frozenset({
     "linear_attention", "gated_deltanet", "deltanet", "gla", "recurrent",
     "mamba", "mamba2", "ssm", "lightning_attention",
@@ -122,6 +136,10 @@ class KVCacheEstimate:
         return sum(1 for layer in self.layers if layer.kind == "linear")
 
     @property
+    def block_layers(self) -> int:
+        return sum(1 for layer in self.layers if layer.kind == "block")
+
+    @property
     def layer_type(self) -> str:
         kinds = {layer.kind for layer in self.layers if layer.kind in ("gqa", "mla", "compressed")}
         if not kinds:
@@ -180,6 +198,8 @@ class KVCacheEstimate:
             parts.append(f"{self.sliding_layers} sliding layer(s) capped at {_tokens_name(self.window)}")
         if self.linear_layers:
             parts.append(f"{self.linear_layers} linear-attention layer(s) hold constant state")
+        if self.block_layers:
+            parts.append(f"{self.block_layers} non-attention block(s)")
         if self.mtp_layers:
             parts.append(f"incl. {self.mtp_layers} MTP layer(s)")
         if self.unclassified:
@@ -356,6 +376,9 @@ def _estimate_for_stack(
 
         if layer_type in _LINEAR_ATTENTION_TYPES:
             resolved.append(LayerCache(kind="linear"))
+            continue
+        if layer_type in _NO_ATTENTION_TYPES:
+            resolved.append(LayerCache(kind="block"))
             continue
 
         dims = _mla_dims(source, layer_cfg)
