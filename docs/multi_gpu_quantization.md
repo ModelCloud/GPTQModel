@@ -62,6 +62,11 @@ single-device map, while `from_pretrained` needs a sequence to constrain its
 quantization device pool. A bare family such as `device="cuda"` spans all
 visible GPUs.
 
+A quantization pool may span GPU generations: `device=(0, 1)` on a 5090 + 4090
+quantizes on both, exactly like the default pool. The single-compute-capability
+rule applies to inference kernel selection only, because one quantized kernel is
+chosen for a whole placement map (#4875).
+
 ```mermaid
 flowchart TD
     A["ModelLoader.from_quantized device argument"] --> B{"Explicit device_map?"}

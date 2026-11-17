@@ -138,7 +138,7 @@ def test_prebuild_passes_explicit_devices_to_pool(monkeypatch):
     monkeypatch.setattr(
         auto,
         "_explicit_requested_devices",
-        lambda device: [torch.device("cuda:1")],
+        lambda device, **_kwargs: [torch.device("cuda:1")],
     )
 
     auto._prebuild_device_thread_pool(("cuda:1",))
