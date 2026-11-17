@@ -372,7 +372,6 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
     keep = final_rows <= best_rows
     best_codes = torch.where(keep.unsqueeze(-1), best_codes, base_codes)
     best_scales = torch.where(keep.unsqueeze(-1), best_scales, base_scales)
-    best_rows = torch.where(keep, final_rows, best_rows)
     best_weight = decode(best_codes, best_scales)
     # The aggregate history has one entry per configured step plus the
     # initializer. A converged sweep stops early and scale learning may add its
