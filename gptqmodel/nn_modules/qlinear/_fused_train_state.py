@@ -92,6 +92,11 @@ def _rebuild_layout_key(module: nn.Module, rebuild) -> tuple:
         from ._cpu_int4pack_layout import int4pack_block_size
 
         parts.append(int4pack_block_size())
+    if getattr(module, "_FUSED_TRAIN_STATE_REBUILD", None) == "avx512_awq":
+        # ``pack_awq_int4`` applies no channel reorder, so every module of this
+        # layout shares one inverse and one proof (#5013).
+        parts.append("awq-noreorder")
+        return tuple(parts)
     identity = getattr(module, "_ret_idx_is_identity", None)
     if not callable(identity):
         parts.append(None)
