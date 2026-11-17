@@ -972,6 +972,10 @@ class GPTQModel:
         # if debug:
         #     print_module_tree(m.model)
 
+        # Weight quantization does not change the cache, so state what context
+        # costs as soon as a model is loaded for inference.
+        m.log_kv_cache_estimate()
+
         return m
 
 

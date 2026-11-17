@@ -143,6 +143,29 @@ def refinalize_fused_state_after_apply(
     return restore_fused_train_state(module)
 
 
+def checkpoint_layout_tensor(module: nn.Module, name: str):
+    """Return the checkpoint tensor a CPU transform replaced with a runtime one.
+
+    Returns ``None`` when no transform replaced ``name``. A transformed module
+    whose runtime operands were modified has no guaranteed inverse, so callers
+    that serialize or repack must fail closed instead of copying the runtime
+    ABI. The snapshot is the canonical checkpoint payload; using it here keeps
+    a repack independent of whether a forward already ran.
+    """
+
+    snapshot = getattr(module, "_fused_train_state", None)
+    if not snapshot or name not in snapshot:
+        return None
+    if not getattr(module, "_fused_train_state_exportable", True):
+        raise RuntimeError(
+            f"{type(module).__name__} holds a modified CPU int4pack runtime state "
+            "that cannot be converted back to the checkpoint layout. Load "
+            "checkpoint-layout weights before saving or repacking."
+        )
+    tensor = module._buffers.get(snapshot[name])
+    return tensor if isinstance(tensor, torch.Tensor) else None
+
+
 def discard_fused_train_state(module: nn.Module) -> None:
     snapshot = getattr(module, "_fused_train_state", None)
     if snapshot:
@@ -272,6 +295,7 @@ def state_dict_matches_runtime_layout(module: nn.Module, state_dict, prefix: str
 __all__ = [
     "QZEROS_FORMAT_BUFFER",
     "capture_fused_train_state",
+    "checkpoint_layout_tensor",
     "classify_fused_state_layout",
     "discard_fused_train_state",
     "materialize_fused_runtime_state",

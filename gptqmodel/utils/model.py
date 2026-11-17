@@ -3313,13 +3313,17 @@ def _restore_checkpoint_buffers(
     name_map: dict[str, str] | None = None,
     device_map: dict | None = None,
 ) -> None:
-    """Restore buffers after Accelerate casts; ``None`` keeps the source dtype.
+    """Restore buffers and dense parameters after Accelerate casts.
 
-    ``name_map`` maps a runtime buffer name to the name stored in the
+    ``None`` keeps the source dtype. Dense parameters are restored only by the
+    export shell (``restore_checkpoint_buffer_dtypes``); a normal load passes
+    its requested model dtype and must keep casting them.
+
+    ``name_map`` maps a runtime tensor name to the name stored in the
     checkpoint. It lets the restore read from the original checkpoint when
     Accelerate was given a temporary, key-converted copy.
 
-    ``device_map`` places a buffer that Accelerate never saw (packed FP8
+    ``device_map`` places a tensor that Accelerate never saw (packed FP8
     weights removed from its checkpoint) on the device the map assigns.
     """
     names = set(dtypes)
@@ -3370,24 +3374,33 @@ def _restore_checkpoint_buffers(
     restored: set[str] = set()
 
     def restore_one(name: str, value: torch.Tensor) -> None:
-        module_name, _, buffer_name = name.rpartition(".")
+        module_name, _, tensor_name = name.rpartition(".")
         module = model.get_submodule(module_name) if module_name else model
-        current = module._buffers.get(buffer_name)
-        if not isinstance(current, torch.Tensor) or tuple(current.shape) != tuple(value.shape):
-            raise RuntimeError(f"Cannot restore checkpoint buffer {name!r}: missing or mismatched model slot")
-        if current.device.type == "meta":
-            raise RuntimeError(f"Cannot restore checkpoint buffer {name!r} on a meta device")
+        current = module._buffers.get(tensor_name)
+        parameter = module._parameters.get(tensor_name)
+        if current is None and parameter is None:
+            raise RuntimeError(f"Cannot restore checkpoint tensor {name!r}: missing model slot")
+        slot = current if current is not None else parameter
+        if not isinstance(slot, torch.Tensor) or tuple(slot.shape) != tuple(value.shape):
+            raise RuntimeError(f"Cannot restore checkpoint tensor {name!r}: missing or mismatched model slot")
+        if slot.device.type == "meta":
+            raise RuntimeError(f"Cannot restore checkpoint tensor {name!r} on a meta device")
         if name in exact_source_names and value.dtype != dtypes[name]:
             raise RuntimeError(
-                f"Checkpoint buffer {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
+                f"Checkpoint tensor {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
             )
         target_dtype = dtypes[name]
-        target_device = current.device
+        target_device = slot.device
         if name in exact_source_names:
             target_device = mapped_device(name) or target_device
-        module._buffers[buffer_name] = value.to(
+        restored_value = value.to(
             device=target_device, dtype=value.dtype if target_dtype is None else target_dtype
         )
+        if parameter is not None:
+            # Keep the Parameter object so tied weights stay tied.
+            parameter.data = restored_value
+        else:
+            module._buffers[tensor_name] = restored_value
         restored.add(name)
 
     for path, selected in files.items():
@@ -3409,7 +3422,7 @@ def _restore_checkpoint_buffers(
     missing = names - restored
     if missing:
         raise RuntimeError(
-            "Cannot restore checkpoint buffers missing from checkpoint: "
+            "Cannot restore checkpoint tensors missing from checkpoint: "
             + ", ".join(sorted(missing))
         )
 
@@ -3511,6 +3524,25 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                         checkpoint_dtype, current.dtype
                     )
                 if restore:
+                    restore_dtypes[full_name] = None
+            if restore_checkpoint_buffer_dtypes:
+                # Dense parameters (norms, embeddings, unquantized heads and
+                # projections) are allocated in the export shell's model dtype
+                # too. With ``dtype=None`` Accelerate copies a checkpoint
+                # tensor into that slot, so a mixed-dtype checkpoint was
+                # narrowed on re-save (#4466). The normal load path passes an
+                # explicit model dtype and must keep casting them.
+                for parameter_name, current in module._parameters.items():
+                    full_name = f"{prefix}{parameter_name}"
+                    checkpoint_dtype = checkpoint_dtypes.get(full_name)
+                    if (
+                        checkpoint_dtype is None
+                        or full_name in restore_dtypes
+                        or not isinstance(current, torch.Tensor)
+                        or not current.is_floating_point()
+                        or current.dtype == checkpoint_dtype
+                    ):
+                        continue
                     restore_dtypes[full_name] = None
         # BitsAndBytes keeps its 4-bit quant metadata in state buffers whose
         # dtype is part of the kernel contract: the floating state tables must
