@@ -1704,6 +1704,20 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     )
 
 
+def _requires_tokenizer(cls) -> bool:
+    """Whether a definition needs the text path for this load.
+
+    Read defensively: only ``BaseQModel`` and its subclasses inherit the
+    ``require_load_tokenizer`` default that #4894 added, so plain-class test
+    doubles and third-party definitions raised ``AttributeError`` at this call
+    site (#4923, #4941). An absent attribute means "text model", which is the
+    behaviour every definition had before #4894; a definition that really has no
+    tokenizer declares ``require_load_tokenizer = False``.
+    """
+
+    return bool(getattr(cls, "require_load_tokenizer", True))
+
+
 def _get_tokenizer_load_kwargs(model_init_kwargs: Dict) -> Dict:
     """Tokenizer options that must match the config/weight selection.
 
@@ -2077,7 +2091,7 @@ def ModelLoader(cls):
         # Definitions that declare no tokenizer (Decision Transformer) skip the
         # whole text path: these checkpoints never ship one and calibration
         # samples are named tensors, so the loader must not require it.
-        if cls.require_load_tokenizer:
+        if _requires_tokenizer(cls):
             tokenizer = load_hf_tokenizer(
                 model_local_path,
                 model_config=config,
@@ -2732,7 +2746,7 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        if cls.require_load_tokenizer:
+        if _requires_tokenizer(cls):
             tokenizer = load_hf_tokenizer(
                 model_local_path,
                 model_config=config,

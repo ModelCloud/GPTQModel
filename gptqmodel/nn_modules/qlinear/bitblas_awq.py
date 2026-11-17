@@ -13,7 +13,7 @@ from torch import nn
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
+from ...quantization.awq.utils.packing_utils import reverse_awq_order, source_weight_out_in, unpack_awq
 from ...utils.backend import BACKEND
 from ._compile_support import COMPILE_LEVEL
 from .bitblas import (
@@ -131,7 +131,7 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
 
-        weight = linear.weight.detach().contiguous()
+        weight = source_weight_out_in(linear).contiguous()
         group_idx = torch.arange(self.in_features, device=weight.device, dtype=torch.int64) // self.group_size
         maxq = (1 << self.bits) - 1
 

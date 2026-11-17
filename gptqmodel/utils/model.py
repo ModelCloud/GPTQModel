@@ -867,6 +867,11 @@ def create_quant_module(
                 f"did not assign {sample}. Load this checkpoint with `GPTQModel.load`."
             )
         new_layer.load_state_dict(source_state, strict=False)
+        # A freshly constructed module is in training mode; the module it
+        # replaces may not be (a completed load is in eval). The CPU int4pack
+        # kernels pick their layout from `self.training` on the first forward
+        # and latch it, so carry the replaced module's mode over (#4907).
+        new_layer.train(transfer_from.training)
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
@@ -1716,6 +1721,27 @@ def _parameter_by_name(model: nn.Module, parameter_name: str):
     for part in parts[:-1]:
         module = getattr(module, part)
     return getattr(module, parts[-1])
+
+
+def _declared_tied_weights_keys(model) -> dict[str, str]:
+    """Return the ``{target: source}`` pairs the model declares as tied.
+
+    This is the same source ``tie_weights(recompute_mapping=True)`` uses, so
+    every pair it may compare is a pair this loader can place.
+    """
+
+    getter = getattr(model, "get_expanded_tied_weights_keys", None)
+    if callable(getter):
+        try:
+            keys = getter(all_submodels=True)
+        except TypeError:  # pragma: no cover - older signature
+            keys = getter()
+        if isinstance(keys, dict):
+            return dict(keys)
+    declared = getattr(model, "all_tied_weights_keys", None)
+    if not isinstance(declared, dict):
+        declared = getattr(model, "_tied_weights_keys", None)
+    return dict(declared) if isinstance(declared, dict) else {}
 
 
 def _keep_tied_groups_on_one_device(device_map, tied_params) -> None:
@@ -3891,7 +3917,23 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     if isinstance(device_map, dict):
         # Read every shard with the int ordinal so the checkpoint read does not
         # initialize a context on cuda:0 for a `cuda:N` placement (#4863).
-        kwargs["device_map"] = _int_ordinal_device_map(device_map)
+        device_map = _int_ordinal_device_map(device_map)
+        # `_tie_weights_after_checkpoint_load` below delegates to
+        # `tie_weights(missing_keys=...)`, which compares the two sides of a
+        # tied pair with `torch.equal` when the checkpoint stores both copies
+        # (AutoAWQ, GPTQModel <= 1.x). A map that splits the pair across devices
+        # makes that comparison raise, so give each pair one placement before
+        # the load -- the same rule `simple_dispatch_model` applies to the
+        # hooks (#4943, #4866). The model is not tied yet at this point, so the
+        # pairs come from its declared mapping, which is also what
+        # `tie_weights` iterates.
+        tied_groups = [
+            [target, source]
+            for target, source in _declared_tied_weights_keys(model).items()
+        ]
+        tied_groups.extend(accelerate.utils.modeling.find_tied_parameters(model))
+        _keep_tied_groups_on_one_device(device_map, tied_groups)
+        kwargs["device_map"] = device_map
     converted_checkpoint = None
     restore_checkpoint = checkpoint
     restore_name_map = None
