@@ -67,10 +67,10 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
         format=format, pack_impl="original")  # Exercise the default disk-offload lifecycle.
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
     model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
-    assert any(t.is_meta or torch.is_inference(t) for t in model.model.parameters())
-    with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-        model.requantize(calibration, norm=NormConfig(teacher="must-not-load", steps=1),
-            calibration_data_min_length=1)
+    # quantize() now restores the in-session model before returning, including
+    # the default disk-offload path. Guard tests cover actual meta/inference
+    # tensors; this lifecycle must exercise the materialized public result.
+    assert all(not t.is_meta and not torch.is_inference(t) for t in model.model.parameters())
     model.save(str(packed))
     basename = "model" if layout == "canonical" else "gptq_model-4bit-16g"
     if layout == "legacy":

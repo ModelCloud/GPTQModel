@@ -69,9 +69,8 @@ _VIDEO_BLOCK_RE = re.compile(
 class DcvcConfig:
     """DCVC-RT neural-codec knobs (nested under ``CodecConfig.dcvc``).
 
-    Only used when ``CodecConfig.engine == "dcvc-rt"``. Checkpoints default to
-    the ``DCVC_INTRA_TAR`` / ``DCVC_INTER_TAR`` env vars (environment-specific,
-    so better left out of the model config).
+    Retained explicit metadata under ``CodecConfig.engine == "dcvc-rt"``;
+    neural execution is rejected. Asset paths come only from the config/API.
     """
     qp: int = 42                          # quantization (0-63); scoring only
     reset_interval: int = 64              # feature-adaptor reset period (frames)
@@ -96,8 +95,8 @@ class DcvcConfig:
     bitcost_pct: int = 99
     decode_backsearch_max: int = 16
     max_group_frames: int = 128
-    intra_ckpt: str = field(default_factory=lambda: os.getenv("DCVC_INTRA_TAR", ""))
-    inter_ckpt: str = field(default_factory=lambda: os.getenv("DCVC_INTER_TAR", ""))
+    intra_ckpt: str = ""
+    inter_ckpt: str = ""
     device: str = "cuda:0"
     pkg_dir: str = ""                     # dir with dcvc_rt_engine.py + dcvc_readiness_gen.py + codec_tools/
 
@@ -119,15 +118,7 @@ class CodecConfig:
     min_group_frames: int = 8
     max_group_frames: int = 64
     spatial_mask_mode: str = "off"
-    cache_root: Path = field(default_factory=lambda: Path(
-        os.getenv(
-            "ONLINE_CODEC_CACHE_DIR",
-            os.path.join(
-                os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
-                "online_codec",
-            ),
-        )
-    ))
+    cache_root: Path = field(default_factory=lambda: Path.home() / ".cache" / "huggingface" / "online_codec")
     timeout_seconds: int = 7200
 
     # ---- codec engine selection ------------------------------------------
@@ -142,6 +133,7 @@ class CodecConfig:
     dcvc: "DcvcConfig" = field(default_factory=DcvcConfig)
 
     def __post_init__(self):
+        self.cache_root = Path(self.cache_root)
         if isinstance(self.dcvc, dict):
             # Filter to known DcvcConfig fields — preprocessor_config.json's
             # codec.dcvc also carries selection knobs (per_frame_cap_ratio,
@@ -327,8 +319,8 @@ def _codec_binary() -> str:
 
 def _run_cv_preinfer(video_url: str, out_dir: Path, cfg: CodecConfig) -> dict:
     bin_name = _codec_binary()
-    tmp_dir = Path(tempfile.mkdtemp(dir=str(cfg.cache_root), prefix=f".tmp_{out_dir.name[:48]}_"))
     num_sampled = min(cfg.num_sampled_frames(), _get_video_total_frames(video_url))
+    tmp_dir = Path(tempfile.mkdtemp(dir=str(cfg.cache_root), prefix=f".tmp_{out_dir.name[:48]}_"))
     cmd = [
         bin_name, "--video", video_url, "--out_dir", str(tmp_dir),
         "--num_sampled_frames", str(num_sampled),

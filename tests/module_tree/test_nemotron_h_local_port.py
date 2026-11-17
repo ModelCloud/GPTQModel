@@ -100,15 +100,21 @@ def test_every_live_checkpoint_tensor_has_a_declared_exact_owner_and_policy(devi
     assert NemotronHQModel.fusable is None
 
 
-def test_effective_native_exclusions_do_not_mutate_legacy_sibling_tree():
+def test_effective_native_exclusions_do_not_mutate_independently_owned_sibling_trees():
     from gptqmodel.models.definitions.nemotron_h_puzzle import NemotronHPuzzleQModel
     from gptqmodel.models.definitions.nemotron_omni import NemotronOmniQModel
 
-    original = json.dumps(NemotronHQModel.module_tree)
+    originals = {owner: json.dumps(owner.module_tree)
+                 for owner in (NemotronHQModel, NemotronHPuzzleQModel, NemotronOmniQModel)}
     for owner in [NemotronHQModel, NemotronHPuzzleQModel, NemotronOmniQModel, NemotronHQModel]:
-        model = SimpleNamespace(config=SimpleNamespace(model_type="nemotron_h"))
+        model_type = {NemotronHQModel: "nemotron_h", NemotronHPuzzleQModel: "nemotron_h_puzzle",
+                      NemotronOmniQModel: "nemotron_h_omni"}[owner]
+        model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
         tree = owner._resolve_effective_module_tree(model, None)
         plan = ModulePlan.from_tree(tree)
-        assert bool(plan.find("mixer.A_log")) is (owner is NemotronHQModel)
-        assert bool(owner.require_trust_remote_code) is (owner is not NemotronHQModel)
-    assert json.dumps(NemotronHQModel.module_tree) == original
+        # All three released architectures own this excluded Mamba state.
+        assert "!" in plan.find("mixer.A_log").flags
+        assert owner.require_trust_remote_code is False
+        assert json.dumps(owner.module_tree) == originals[owner]
+    for owner, original in originals.items():
+        assert json.dumps(owner.module_tree) == original

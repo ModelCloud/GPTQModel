@@ -14,8 +14,31 @@ Definitions with exact native Transformers 5 support retain their native
 implementation. Their rows record checkpoint/layout qualification and any
 definition ownership corrections alongside the package-owned ports.
 
+Current integrated qualification uses Python 3.14.6t with `PYTHON_GIL=0`,
+Torch 2.15.0 CPU, Transformers 5.23.0, SentencePiece 0.2.1, TikToken 0.12.0,
+timm 1.0.22 and Tokenicer's unreleased 0.0.19 runtime candidate
+`4f23746c7aeac3bf054d1d0dd7dc66e951468989` from
+[Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
+The dependency floor does not imply that this candidate is published.
+
+| Integrated batch on the final Tokenicer runtime candidate | Result |
+| --- | --- |
+| Registry, fusion admission, ordering, AWQ plain/fold policy, loader/security/processor/config, norm lifecycle/teacher, Ouro support and native Nemotron-H | 999 passed, 466 skipped, 19 warnings; 73.68s |
+| Baichuan model/tokenizer/rotary, owned tokenizer options/loading, InternLM tokenizers, ChatGLM, DeepSeek-V3 and MOSS | 673 passed, no skips, 2 warnings; 114.24s |
+| OpenVLA model/module plan, stage capture and multimodal calibration | 293 passed, no skips, 3 warnings; 41.25s |
+| Mage-VL model/module plan, including codec metadata failure/retry and explicit API configuration | 51 passed, no skips, 2 warnings; 6.54s |
+| Ovis model/module plan and generation wrapper, original MiniCPM model/module plan | 356 passed, no skips, 13 warnings; 25.33s |
+
+The 466 skips are 460 NVIDIA-only Marlin tests, three unavailable Pangu
+checkpoint fixtures, two non-buildable CausalLM families (`opt350` and
+`muse_glimmer`), and one missing optional PEFT dependency. These batches overlap
+and are not additive. Port-local evidence and older batches below retain their
+stated dependency revisions; they are not claims of accelerator or trained-model
+quality coverage on this checkout.
+
 | Definition / model type | Implementation and provenance | CPU validation | AWQ policy | Limits |
 | --- | --- | --- | --- | --- |
+| `OvisQModel` / `ovis` | [Package-owned Ovis 1.0/1.5/1.6 visual vocabulary and pinned Apache notices](../gptqmodel/models/ports/ovis/README.md) | Eight release indexes and four full header inventories, independent vision/media merge equations, native Llama/Qwen2/Gemma2 decoders, released generation policy, hostile metadata, cache and safetensors reload | Eight public image-calibrated plain-AWQ cases, all 14 decoder linears, dense exclusions and two exact reloads; no scale groups | Native Ovis2 is separate; no trained weights, GPU, fusion, concurrent execution, foreign cache or AWQ fold/search qualification |
 | `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
 | `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
@@ -51,13 +74,209 @@ definition ownership corrections alongside the package-owned ports.
 | `K2HorizonQModel` / `k2_horizon` | [Pinned IFM dense/MoVA/sparse-MoE sources, Apache license and notice](../gptqmodel/models/ports/k2_horizon/README.md) | Exact 255/16998/34076-key meta inventories, independent eager/SDPA routing/attention oracles, cache/generation, dtype preservation and hostile metadata | Real processor coverage across variants; public dense/MoVA CPU plain-AWQ packing and safetensors reload with `fallback=None` | DynamicCache only; no trained weights, GPU/FlashAttention/FlexAttention, sliding-window, distributed or fusion qualification |
 | `InternS2PreviewQModel` / `intern_s2_preview` | [Pinned hybrid model, processor and distinct scientific tokenizer](../gptqmodel/models/ports/intern_s2_preview/README.md), [Apache-2.0 provenance](../gptqmodel/models/ports/intern_s2_preview/PROVENANCE.md) | Exact 1313-key non-MTP schema, independent DeltaNet oracle, four attention orders/bias variants, cache continuations, image/video generation and FP32/FP16/BF16 time series | Public plain AWQ packs all 31 tiny hybrid decoder linears; exact packed/dense state and time-series save/reload parity | PROT/XNA semantics differ from S1; no trained weights, GPU/fused FLA/FlashAttention, concurrent execution, static/offloaded/arbitrary-beam caches or MTP qualification |
 | `InternS1QModel` / `interns1` | [Pinned dense/MoE model, vision, media processor and scientific tokenizer](../gptqmodel/models/ports/interns1/README.md); Apache-2.0 | Actual 841/37630-key dense/MoE meta schemas; native Qwen3/Qwen3-MoE numerics, image/video/cache/generation, hostile metadata and repeated exact safetensors | Four public plain-AWQ pack/infer/media/save/reload layouts with `fallback=None`; every packed and dense tensor preserved | IUPAC/FASTA semantics differ from S2; no trained weights, GPU/FlashAttention/FlexAttention, concurrent execution, training, RDKit chemistry or video-file decoding qualification |
-
 | `LlamaQModel` legacy aliases / `longllama`, `stablelm_epoch`, `yi` | [Pinned source, license and native-class selection](../gptqmodel/models/ports/llama/README.md) | Exact LongLLaMA/Epoch/Yi checkpoint schemas; independent memory/attention and Epoch equations; eleven native aliases and derived native loaders preserved | Nine public plain-AWQ cases, exact packed/dense state and strict FP32 rotary buffers through two safetensors reloads | No trained weights, GPU, concurrent execution, compiler or fusion qualification; memory eviction prevents speculative cache cropping |
 | `MimoQModel` / `mimo` | [Pinned XiaomiMiMo source and original MIT/repository notices](../gptqmodel/models/ports/mimo/README.md) | Five exact 451-key source inventories; native Qwen2 extension with all auxiliary MTP owners, cache/generation and independent decoder/MTP equations | Six public plain-AWQ pack/infer/generation/reload cases; MTP stays dense | Distinct from native MiMo-V2-Flash; no speculative MTP decoding, trained-weight, GPU, concurrent execution or fusion qualification |
 | `LlavaQwen2QModel` / `llava_qwen2` | [Pinned Apple/S2 sources, licenses and acknowledgements](../gptqmodel/models/ports/llava_qwen2/README.md) | Exact flat 924-key FastVLM-0.5B and 629-key vision inventories; independent vision/projector/Qwen2 equations, image/cache/beam generation | Four public image-conversation plain-AWQ pack/infer/reload cases; only image sentinel survives invalid-ID sanitization; excluded vision/projector/newline retained | No video, trained weights, GPU, concurrent execution or fusion qualification; 103 port-wide static diagnostics remain documented |
+| `LocateAnythingQModel` / `locateanything` | [Pinned NVIDIA source, notices and full restrictive license](../gptqmodel/models/ports/locateanything/README.md); **noncommercial research/evaluation only**, including derivatives, subject to section 3.3's NVIDIA exception | Exact 770-key source schema, packed MoonViT, independent block-diffusion/Qwen2 and native Qwen3 equations, localization samplers and hostile metadata | Two public image-conversation plain-AWQ decoder pack/infer/safetensors reloads, preserving dense vision and projector | No trained weights, GPU/Magi/FlashAttention, compiler, concurrent execution or fusion qualification; decoded PIL frames only, no container/live video qualification |
+| `MageVLQModel` / `mage_vl` | [Pinned Microsoft source, Apache/MIT licenses and notices](../gptqmodel/models/ports/mage_vl/README.md) | Exact 696-key source schema, independent custom vision/native Qwen3 equations, image/frame-video/cache/beam generation and hostile metadata | Three public image-conversation plain-AWQ pack/infer/two-safetensors-reload cases; all decoder linears packed and dense vision preserved | Neural DCVC rejected; traditional codec lifecycle fixture only; optional StreamMind gate unqualified; no trained weights, GPU, concurrent execution or fusion qualification |
+| `MiniCPMGPTQ` / `minicpm` | [Original MiniCPM scaled dense/8x2B MoE port](../gptqmodel/models/ports/minicpm/README.md), Apache-2.0 | Seven source variants, 2437 real header entries, independent residual/rotary/MoE equations, missing-model-type selection, cache/generation and requested-dtype safetensors loading | Eight public plain-AWQ pack/infer/two-reload cases; no fold/search groups | Tokenicer candidate required for legacy serialized-BPE normalization; no trained weights, actual 128k execution, GPU or fusion qualification |
+| `MiniCPMVQModel` / `minicpmv` | [Six legacy MiniCPM-V vision/resampler/decoder layouts](../gptqmodel/models/ports/minicpmv/README.md), Apache-2.0 | Exact 3719 pinned keys/shapes, independent muP/vision/resampler equations, image/cache/beam generation and hostile metadata | Twelve public image-calibrated plain-AWQ cases, preserving dense media owners through two reloads | Native MiniCPM-V 4.6 remains separate; no trained weights, GPU, foreign-cache or fusion qualification |
+| `MiniMaxQModel`, `MiniMaxM2GPTQ` | [Owned Text-01 hybrid attention/cache and exact native M2](../gptqmodel/models/ports/minimax_m2/README.md), MIT/Apache notices | Both full pinned checkpoint indexes, partial RoPE, native versus owned cache semantics, independent equations, dtype/cache/generation and hostile metadata | Six public plain-AWQ offload/non-offload pack/infer/two-reload cases | No trained weights, GPU, long-context RoPE or fusion qualification |
+| `MimoV2QModel` / `mimo_v2` | [Source-matched XiaomiMiMo hybrid decoder](../gptqmodel/models/ports/mimo_v2/README.md), pinned provenance and MIT notices | Exact source checkpoint schema, hybrid attention, independent equations, MTP ownership, requested-dtype/cache/generation and malicious metadata | Public plain-AWQ packing and exact dense exclusions | Separate from original MiMo and native MiMo-V2-Flash; no trained weights, GPU or fusion qualification |
+| `MobileLLMQModel` / `mobilellm` | [Pinned public FAIR architecture source](../gptqmodel/models/ports/mobilellm/README.md), **FAIR Noncommercial Research License and AUP** | Five source training-config geometries; independent sharing/repeated-layer/rotary/cache equations, dtype/generation and hostile metadata | Twenty-four public plain-AWQ cases, all physical decoder linears and dense exclusions through two reloads | Official HF assets returned HTTP 401: architecture qualification only; no released-checkpoint/tokenizer or trained-weight quality claim; commercial use not granted |
+
+| `MossQModel` / `moss` | [Pinned Moon-003 source, Apache code license and separate weight/data terms](../gptqmodel/models/ports/moss/README.md) | Three exact released schemas; four-way packed Q/V/K, parallel attention/MLP, independent equations, mixed-dtype cache, real tokenizer and hostile metadata | Four public plain-AWQ offload/non-offload cases with two exact reloads | Legacy source int4/int8 converter payloads unsupported; no trained weights, GPU or fusion qualification |
+| `NanbeigeQModel` / `nanbeige` | [Pinned Apache source and checkpoint contract](../gptqmodel/models/ports/nanbeige/README.md) | Exact 201-key standard/Base schemas, physical recurrent decoder ownership, independent equations and cache behavior | Public plain-AWQ quantization and exact packed/dense safetensors reloads | No trained weights, GPU or fusion qualification |
+| `NemotronHQModel` / `nemotron_h` | [Exact native Transformers 5 binding and pinned schemas](../gptqmodel/models/ports/nemotron_h/README.md) | Three complete released inventories, native Mamba/attention/dense/latent-MoE owners, independent equations, strict-FP32 state and hostile metadata | Eight public plain-AWQ offload/non-offload cases with two exact reloads | MTP payload preserved without execution; no trained weights, optimized Mamba, GPU or fusion qualification |
+| `NemotronHPuzzleQModel` / `nemotron_h_puzzle` | [Owned heterogeneous decoder, OpenMDW/Apache licenses](../gptqmodel/models/ports/nemotron_h_puzzle/README.md) | Exact 41643-key decoder inventory, variable expert widths/top-k, latent projections, native Mamba, independent equations and cache | Three public plain-AWQ cases with exact packed/dense state and auxiliary MTP preservation | No trained weights, MTP decoding, optimized Mamba, GPU or fusion qualification |
+| `NemotronLabsDiffusionQModel` / `nemotron_labs_diffusion` | [Owned tri-mode decoder and separate code/weight licenses](../gptqmodel/models/ports/nemotron_labs_diffusion/README.md) | Exact 237-key schema, bidirectional denoising, causal verification and independent sampler equations | Public plain-AWQ decoder packing and safetensors reloads | Distinct from causal Nemotron and Nemotron-H; no trained weights, GPU or fusion qualification |
+| `NemotronOmniQModel` / `nemotron_h_omni` | [Native Nemotron-H/RADIO/Parakeet with owned legacy media binding](../gptqmodel/models/ports/nemotron_omni/README.md), Apache code and separate NOMA weights | All 7349 released tensor owners accounted for, legacy prefix/QKV conversion, temporal media merge, real tokenizer and hostile metadata | Four public image-calibrated plain-AWQ native/legacy × offload cases with two exact reloads | Preprocessing buffers preserved; no trained weights, arbitrary video containers, optimized Mamba, GPU or fusion qualification |
+| `OuroQModel` / `ouro` | [Owned recurrent decoder, Apache source and pinned checkpoint schemas](../gptqmodel/models/ports/ouro/README.md) | All 1604 released keys/shapes, four sandwich norms, per-step dynamic KV cache, token-wise exits and independent recurrent equations | Six public plain-AWQ depth/offload cases, all decoder linears and dense exclusions through two reloads | No fold/search, trained weights, extended-context, static/offloaded/quantized caches, GPU or fusion qualification |
+| `OpenVLAQModel` / `openvla` | [Pinned Prismatic model/processor/action port](../gptqmodel/models/ports/openvla/README.md), MIT code and retained Llama 2 tokenizer license/AUP | Exact 982-key schema, single/fused timm vision, native Llama/Mistral/Phi, independent vision/action equations, cache/generation and hostile metadata | Twelve public image-calibrated plain-AWQ cases across vision/decoder/offload layouts with two exact packed/dense reloads | No trained weights, robot quality, GPU, reused beam-cache or fusion qualification; 21 port static diagnostics remain documented |
 
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
+
+### Recurrent, Nemotron and diffusion implementation selection
+
+MOSS and Nanbeige retain their own packed-attention and recurrent semantics.
+Ouro shares physical decoder weights across recurrent steps but gives every
+step an independent KV slot and applies its source token-wise exit policy.
+None selects a generic causal decoder by resemblance.
+
+Nemotron-H uses the exact native Transformers 5 implementation. Puzzle owns
+the heterogeneous decoder around native Mamba primitives. Nemotron-Omni uses
+native Nemotron-H/RADIO/Parakeet with explicit legacy checkpoint conversion,
+processor/tokenizer binding and temporal media merging. Nemotron Labs Diffusion
+owns the distinct tri-mode decoder. Their loaders, trees and excluded Mamba
+state are independently declared; sibling inheritance cannot replace a loader.
+
+```mermaid
+flowchart TD
+    A["load_model_config selects definition-owned LocalModelLoader"] --> B{"Exact declared model type?"}
+    B -->|nemotron_h| C["Native NemotronHForCausalLM"]
+    B -->|nemotron_h_puzzle| D["Owned heterogeneous Puzzle decoder"]
+    B -->|nemotron_h_omni| E["Owned legacy media binding + native language/vision/audio"]
+    B -->|nemotron_labs_diffusion| F["Owned denoising / verification / generation decoder"]
+    B -->|moss / nanbeige / ouro| G["Owned packed or recurrent decoder and cache policy"]
+    C --> H["Declared module plan; plain AWQ where folding is unqualified"]
+    D --> H
+    E --> H
+    F --> H
+    G --> H
+    B -->|Invalid geometry or ambiguous variant| X["Reject before model construction"]
+    H -->|Missing or malformed checkpoint asset| Y["Fail closed; repair and retry"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X,Y failure
+```
+
+| Mechanism | Before | Current behavior |
+| --- | --- | --- |
+| Recurrent Ouro | `7181724a1^:gptqmodel/models/definitions/ouro.py:13-14,45-58` required remote trust and patched remote rotary/mask helpers | `definitions/ouro.py:15-21`: `LocalModelLoader` selects owned config/model; per-step caches and token-wise exits replace compatibility monkeypatches |
+| Native Nemotron-H siblings | Historical native-only tests assumed Puzzle/Omni still loaded checkpoint Python | Each definition owns its loader and module tree; all three retain explicit excluded Mamba state |
+| Legacy Omni tensors | `a963b1f0d^:gptqmodel/models/definitions/nemotron_omni.py:37-49` described `language_model.backbone.layers` | `definitions/nemotron_omni.py:48-60`: native `language_model.model.layers`, explicit legacy prefix/QKV conversion and preserved preprocessing buffers |
+| Lazy expert storage | `7f84e0da7^:gptqmodel/utils/structure.py:2823-2826` offered only `gate_up_proj` | Try fused gated storage first, then separate gate/up tensors; missing shards raise and permit same-reader retry |
+
+The [checkpoint materialization reference](checkpoint-owned-materialization.md)
+records the shared placement, strict-FP32 and expert-storage contracts. These
+ports do not qualify trained checkpoints or GPU execution. Pangu remains on a
+licensing hold: the inspected custom upstream extension has no established
+redistribution license. MiniCPM-o also remains excluded pending license clearance.
+
+### OpenVLA model and action selection
+
+[OpenVLA](../gptqmodel/models/ports/openvla/README.md) has no exact Transformers
+5.23 mapping. The package owns the Prismatic config, single/fused timm vision
+wrapper, image processor and action decoder, and explicitly selects native
+Llama, Mistral or Phi text. Phi retains its Q/K norms, parallel MLP and final
+LayerNorm; it is not substituted with a gated Llama MLP. The image-expanded
+first-decoder inputs are independently checked during actual public AWQ.
+
+```mermaid
+flowchart TD
+    A["OpenVLAQModel.loader"] --> B["OpenVLAConfig validates vision/text IDs"]
+    B --> C["OpenVLAForActionPrediction: timm vision + projector + native text"]
+    A --> D["PrismaticProcessor: selected tokenizer and owned image processing"]
+    D --> E["prepare_vlm_calibration_dataset: real PIL conversations"]
+    E --> F["Image-expanded decoder inputs; plain AWQ of language linears"]
+    C --> F
+    C --> G["predict_action: prompt spacing, token bins, masked unnormalization"]
+    G --> H["Action array; no robot execution"]
+    B -->|Unknown architecture| X["Raise before model construction"]
+    D -->|Malformed asset| Y["Fail closed; repaired asset can retry"]
+    G -->|Invalid or ambiguous statistics| Y
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X,Y failure
+```
+
+Before `a81cc785f`, `definitions/openvla.py:35,175-180` required remote trust
+and used AutoProcessor discovery.
+`gptqmodel/models/definitions/openvla.py:34-38` now declares config/model/processor
+classes directly; `:67-68` explicitly selects plain AWQ. Checkpoint root,
+nested-text, tokenizer and processor maps cannot replace these implementations,
+even with trust plus the security bypass. The integration preserves the shared
+conversation-calibration helper while combining the new loader import.
+
+MIT source notices and the released tokenizer's separate Meta Llama 2 Community
+License and acceptable-use policy ship together; the MIT source card does not
+relicense tokenizer assets. No trained robot/model quality, GPU, foreign-cache,
+compiler, concurrent execution, fold/search or fusion qualification is claimed.
+
+### Ovis visual-vocabulary selection
+
+`OvisQModel.loader` selects package-owned `OvisConfig`, `Ovis` and
+`OvisProcessor`. Ovis 1.0 uses CLIP patch tokens; 1.5 additionally supports
+SigLIP and plain/adaptive S2; 1.6 uses the partitioned visual vocabulary.
+The text owners are native Llama, Qwen2 or Gemma2. Native `ovis2` remains a
+separate definition. Unknown nested text types and unsupported native Gemma2
+SDPA fail explicitly. The root wrapper retains released generation metadata
+through `GenerationMixin` and repeated safetensors saves.
+
+```mermaid
+flowchart TD
+    A["OvisQModel.loader: LocalModelLoader"] --> B["OvisConfig: version and nested native config"]
+    B --> C["VisualTokenizer: native CLIP or SigLIP plus owned stride/S2/vocabulary"]
+    C --> D["Ovis: VisualEmbedding and source media merge"]
+    D --> E["Native LlamaForCausalLM, Qwen2ForCausalLM or Gemma2ForCausalLM"]
+    E --> F["Plain decoder AWQ: no scaling groups; visual owners stay dense"]
+    B -->|Unknown nested text model_type| X["ValueError before checkpoint Python"]
+    E -->|Gemma2 SDPA requested| Y["Reject unsupported attention; eager remains available"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X,Y failure
+```
+
+Before this port, `22bea1201:gptqmodel/models/definitions/ovis.py:21-31`
+declared a visual-backbone remapping without owning the config/model/processor.
+The definition now owns the config/model/processor,
+binds the single normalized tokenizer and explicitly uses plain AWQ. Eight
+pinned release indexes contain 6,588 keys; four full header inventories contain
+3,499 shapes. The [port reference](../gptqmodel/models/ports/ovis/README.md)
+records independent vision/merge equations, actual image-calibrated packing and
+two exact reloads, real tokenizer assets, four red/green probes, Apache-2.0
+source attribution and limitations. No trained-model, accelerator, fusion,
+foreign-cache, concurrent execution or AWQ fold/search qualification is claimed.
+
+### MiniCPM, MiniCPM-V, MiniMax and MiMo-V2 selection
+
+Original MiniCPM owns scaled embeddings and residuals, optional W1/W3/W2 MoE,
+and rotary/cache behavior. Configs omitting `model_type` can select this loader
+only through the package-declared `MiniCPMForCausalLM` architecture. Ambiguous,
+partial or conflicting architecture declarations fail before checkpoint Python.
+The real 128k serialized-BPE tokenizer exposed a reusable Tokenicer issue; the
+final 0.0.19 runtime candidate `4f23746c7aeac3bf054d1d0dd7dc66e951468989`
+preserves its original token IDs. This candidate is installed from source;
+publication of Tokenicer 0.0.19 remains a release prerequisite.
+
+Legacy MiniCPM-V selects original/2/2.5/2.6/4/4.5 layouts with their own muP,
+Llama, Qwen2 or Qwen3 decoder, vision tower and spatial/temporal resampler.
+Its AWQ policy is explicitly plain. The separate native `minicpmv4_6`
+definition retains its own loader, processor and hybrid AWQ policy.
+
+Original MiniMax-Text-01 needs its source partial-RoPE and hybrid cache owner;
+native MiniMax-M2 is selected directly. Both remain plain AWQ and excluded from
+fusion. MiMo-V2 owns its hybrid attention implementation and dense auxiliary
+state; source attention-sink bias is explicitly excluded from quantization.
+
+```mermaid
+flowchart TD
+    A["load_model_config: read selected checkpoint data"] --> B{"Definition-owned LocalModelLoader?"}
+    B -->|MiniCPM| C["Owned scaled dense or w1/w3/w2 MoE decoder"]
+    B -->|Legacy MiniCPM-V| D["Owned versioned vision, resampler and decoder"]
+    B -->|MiniMax Text-01| E["Owned partial-RoPE hybrid decoder/cache"]
+    B -->|MiMo-V2| F["Owned hybrid decoder and dense auxiliary state"]
+    B -->|No| G["Native MiniMax-M2 or separate native MiniCPM-V 4.6"]
+    C --> H["Checkpoint auto_map cannot replace selected implementation"]
+    D --> H
+    E --> H
+    F --> H
+    A -->|Ambiguous missing model_type| X["Reject before checkpoint Python"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X failure
+```
+
+| Mechanism | Before | Current behavior |
+| --- | --- | --- |
+| Original MiniCPM | `5e8bfc029^:gptqmodel/models/definitions/minicpm.py` required checkpoint trust | Explicit owned config/model, declared missing-type architecture and plain AWQ |
+| Legacy media wrapper | `fecb30425:gptqmodel/models/definitions/minicpmv.py` relied on checkpoint classes | Versioned owned media components; native 4.6 definition remains independent |
+| Original MiniMax | `22bea1201:gptqmodel/models/definitions/minimax.py` delegated to AutoModel | Preserve source half-head rotary and hybrid cache explicitly |
+
+MobileLLM's [full license and acceptable-use policy](../gptqmodel/models/ports/mobilellm/LICENSE)
+remain packaged with its Apache attribution and notice. Official HF assets were
+inaccessible, so its independently checked public-source architecture is not a
+released-checkpoint inventory or tokenizer qualification. The MiniCPM-o port is
+**excluded from integration**: the provenance audit found a broader ChatTTS
+boundary spanning codec and repetition/generation helpers with historical
+noncommercial/AGPL licensing. Including notices does not resolve that boundary.
+
+[Checkpoint ownership during placement and materialization](checkpoint-owned-materialization.md)
+documents the shared alias-map completion and native FP32 destination policy.
+An earlier integration batch on Python 3.14.6t with `PYTHON_GIL=0`, Torch 2.15.0 CPU, Transformers 5.23.0,
+Tokenicer source candidate `87794a5`, SentencePiece 0.2.1, TikToken 0.12.0 and
+timm 1.0.22, the combined new-port/loader/security/registry/fusion/AWQ baseline
+passed **1638 tests with 463 skips in 133.19 seconds**. The skips are 460
+NVIDIA-only Marlin cases and three absent trained DeciLM/EXAONE/Nanbeige fixtures.
+A separate placement/FP32/Klear/LLaDA2/ERNIE batch passed **478 tests without
+skips in 55.14 seconds**. These overlapping batches are not additive.
 
 ### Bailing / Ling selection and replay
 
@@ -210,18 +429,18 @@ after casts and reloads. Its continuation and failure contract is shown below.
 
 ```mermaid
 flowchart TD
-    A["DeepseekV2Model.forward: past_key_values"] --> B{"_fork_cache: supported native cache?"}
+    A["DeepseekV2Model.forward: past_key_values"] --> B{"_cache_transaction: supported native cache?"}
     B -->|unsupported type or offloading| X[TypeError before decoder]
     B -->|incomplete or nonuniform prefix| Y[ValueError before decoder]
-    B -->|supported| C[Copy cache and layer metadata; retain prefix tensors]
+    B -->|supported| C[Snapshot layer metadata; retain original cache identity and prefix tensors]
     B -->|None| D["Native forward: optional new DynamicCache"]
     C --> D
     D --> E["Native DynamicLayer.update: new concatenated tensors"]
     E --> F[Decoder output; native CausalLM head and loss]
-    E -->|decoder fails| G[Propagate error; caller prefix unchanged]
+    E -->|decoder fails| G[Restore original layers and metadata; propagate error]
     F -->|head or loss fails| G
-    F -->|success| H[Public output carries continuation cache]
-    H --> I["Caller continues with outputs.past_key_values"]
+    F -->|success| H[Commit in-place update; return original caller cache]
+    H --> I["Caller continues with the same past_key_values object"]
     G --> J[Retry suffix with original caller prefix]
     classDef failure fill:#fee,stroke:#b00
     class X,Y,G failure
@@ -282,7 +501,7 @@ flowchart TD
 | Instella selection and norms | Base `22bea1201`, `definitions/instella.py:12,25`: remote loader and omitted Q/K norms | `InstellaQModel.loader` owns selection; `module_tree` includes non-quantized full-width Q/K norms before projections |
 | EXAONE 3 selection | Base `22bea1201`, `definitions/exaone.py:10-11`: checkpoint Python required | `ExaOneQModel.loader` selects package config/model; `_rollback_cache_on_error` protects decoder/head/loss/output failures |
 | ERNIE VL model and processor | Base `22bea1201`, `definitions/ernie4_5_vl_moe.py:28,397-398,419-427`: auto model/processor and dynamic decoder import | Package config/model/processor selection, native model re-export, no decoder hook, selected processor reused for calibration |
-| DeepSeek V2 continuation | Base `da3ecd85c`, `ports/deepseek_v2/modeling_deepseek_v2.py:102-132`: inherited forward mutated caller prefix | `_fork_cache` isolates metadata and native concatenation replaces tensors; only returned `past_key_values` carries the continuation |
+| DeepSeek V2 continuation | Before `c1ec93caf`, `ports/deepseek_v2/modeling_deepseek_v2.py`: `_fork_cache` returned a different cache and left a retained caller handle stale | `_cache_transaction` preserves caller identity and in-place success, restoring exact prior metadata after decoder/head/loss/tuple failures |
 
 ERNIE VL uses a packaged Roboto font for native video timestamps. Its bytes
 match pinned upstream SHA-256

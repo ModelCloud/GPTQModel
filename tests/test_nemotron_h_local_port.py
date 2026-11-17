@@ -89,11 +89,15 @@ def test_native_binding_is_definition_owned_and_not_inherited_by_other_architect
     assert isinstance(NemotronHQModel.loader, LocalModelLoader)
     actual = NemotronHQModel.loader.from_config(config())
     assert type(actual) is NemotronHForCausalLM
-    for sibling in (NemotronHPuzzleQModel, NemotronOmniQModel):
-        assert sibling.loader is AutoModelForCausalLM
-        assert sibling.require_trust_remote_code is True
-        assert sibling.require_monkeypatch is True
-        assert sibling.out_of_model_tensors is None
+    # Siblings now have their own qualified bindings; none may inherit the
+    # native text-only loader descriptor or its architecture-specific policy.
+    for sibling, package in ((NemotronHPuzzleQModel, "nemotron_h_puzzle"),
+                             (NemotronOmniQModel, "nemotron_omni")):
+        assert isinstance(sibling.__dict__["loader"], LocalModelLoader)
+        assert sibling.loader is not NemotronHQModel.loader
+        assert sibling.loader.model_class.startswith(f"gptqmodel.models.ports.{package}.")
+        assert sibling.require_trust_remote_code is False
+        assert sibling.require_monkeypatch is False
 
 
 def test_native_hook_never_overwrites_legacy_shaped_mixers():

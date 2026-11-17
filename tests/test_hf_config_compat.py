@@ -31,7 +31,7 @@ class _LegacyRemoteRopeConfig:
     def __init__(
         self,
         *,
-        model_type="nanbeige",
+        model_type="legacy_remote_rope_fixture",
         rope_scaling=None,
         rope_theta=70_000_000.0,
         **kwargs,
@@ -276,8 +276,8 @@ def test_normalize_hf_config_compat_keeps_legacy_default_rope_unscaled():
 
 
 @pytest.mark.parametrize("model_type", ["nanbeige", "minicpm", "mobilellm"])
-def test_normalize_hf_config_compat_clears_unscaled_legacy_rope(model_type):
-    """Legacy remote code indexes ``rope_scaling["type"]`` for any non-None dict."""
+def test_normalize_hf_config_compat_preserves_unscaled_owned_rope(model_type):
+    """A raw trust flag cannot apply remote rewrites to packaged families."""
 
     config = _LegacyRemoteRopeConfig(
         model_type=model_type,
@@ -286,8 +286,9 @@ def test_normalize_hf_config_compat_clears_unscaled_legacy_rope(model_type):
 
     normalize_hf_config_compat(config, trust_remote_code=True)
 
-    assert config.rope_scaling is None
-    assert config.rope_parameters is None
+    expected = {"rope_type": "default", "rope_theta": 10000.0}
+    assert config.rope_scaling == expected
+    assert config.rope_parameters == expected
 
 
 def test_normalize_hf_config_compat_preserves_legacy_scaled_rope():

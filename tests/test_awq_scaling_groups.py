@@ -516,7 +516,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {
     "exaone", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
-    "afmoe", "agnes", "apertus", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax"
+    "afmoe", "agnes", "apertus", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax", "minimax_m2", "nemotron_h"
 }
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through

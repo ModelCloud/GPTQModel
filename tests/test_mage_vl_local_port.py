@@ -381,7 +381,7 @@ def test_traditional_codec_missing_dependency_and_failed_job_retry(tmp_path, mon
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cache = tmp_path / "cache"
-    config = codec.CodecConfig(cache_root=cache)
+    config = codec.CodecConfig(cache_root=str(cache))
     monkeypatch.setenv("PATH", str(bindir))
     with pytest.raises(RuntimeError, match="installed codec-video-prep.*cv-preinfer"):
         codec.process_codec_video("video.mp4", config)
@@ -390,6 +390,14 @@ def test_traditional_codec_missing_dependency_and_failed_job_retry(tmp_path, mon
     binary = bindir / "cv-preinfer"
     binary.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('fixture failure')\nsys.exit(9)\n")
     binary.chmod(0o755)
+    monkeypatch.setattr(codec, "_get_video_total_frames", lambda _: 256)
+    def broken_metadata(_):
+        raise ValueError("injected metadata failure")
+
+    monkeypatch.setattr(codec, "_get_video_total_frames", broken_metadata)
+    with pytest.raises(ValueError, match="injected metadata failure"):
+        codec.process_codec_video("video.mp4", config)
+    assert not list(cache.glob(".tmp_*")) and not list(cache.glob("*/meta.json"))
     monkeypatch.setattr(codec, "_get_video_total_frames", lambda _: 256)
     with pytest.raises(RuntimeError, match="rc=9.*fixture failure"):
         codec.process_codec_video("video.mp4", config)
@@ -407,6 +415,24 @@ def test_traditional_codec_missing_dependency_and_failed_job_retry(tmp_path, mon
     binary.unlink()
     replay = codec.process_codec_video("video.mp4", config)
     assert replay["out_dir"] == payload["out_dir"]
+
+
+def test_codec_defaults_ignore_environment_and_accept_explicit_api_paths(tmp_path, monkeypatch):
+    from gptqmodel.models.ports.mage_vl import codec_video_processing_mage_vl as codec
+
+    baseline = codec.CodecConfig()
+    # These variables must never select a different runtime configuration.
+    for key in ("DCVC_INTRA_TAR", "DCVC_INTER_TAR", "ONLINE_CODEC_CACHE_DIR", "HF_HOME"):
+        monkeypatch.setenv(key, str(tmp_path / key))
+    actual = codec.CodecConfig()
+    assert actual == baseline
+    explicit = codec.CodecConfig(
+        cache_root=str(tmp_path / "explicit"),
+        dcvc={"intra_ckpt": "explicit-intra", "inter_ckpt": "explicit-inter"},
+    )
+    assert explicit.cache_root == tmp_path / "explicit"
+    assert explicit.dcvc.intra_ckpt == "explicit-intra"
+    assert explicit.dcvc.inter_ckpt == "explicit-inter"
 
 
 def test_streammind_missing_dependency_is_lazy_and_transactional(tmp_path, monkeypatch):

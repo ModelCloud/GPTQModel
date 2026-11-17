@@ -1710,7 +1710,7 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.qkv_proj", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.qkv_proj", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.attention_sink_bias:!"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp:?"],
@@ -1759,7 +1759,7 @@
       "layers": ["llm.model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.q_norm:!", "self_attn.k_norm:!"],
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
@@ -1784,10 +1784,13 @@
       "layers": ["model.layers"],
       "blocks": [
         ["input_layernorm:!"],
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.qkv_proj", "self_attn.output_gate"],
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.qkv_proj", "self_attn.output_gate", "self_attn.norm:!"],
         ["self_attn.o_proj"],
         ["self_attn.out_proj"],
         ["post_attention_layernorm:!"],
+        ["shared_mlp.gate_proj", "shared_mlp.up_proj"],
+        ["shared_mlp.down_proj"],
+        ["coefficient:!"],
         ["mlp.gate:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
         ["mlp.experts.{expert_index}.down_proj"]
@@ -1801,6 +1804,7 @@
         ["self_attn.o_proj"],
         ["post_attention_layernorm:!"],
         ["mlp.gate:!"],
+        ["mlp.e_score_correction_bias:!"],
         ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
         ["mlp.experts.{expert_index}.down_proj"]
       ]
@@ -1893,6 +1897,7 @@
       "layers": ["transformer.h"],
       "blocks": [
         ["ln_1:!"],
+        ["attn:!"],
         ["attn.qkv_proj"],
         ["attn.out_proj"],
         ["mlp.fc_in"],
@@ -1957,8 +1962,11 @@
       "layers": ["model.layers"],
       "blocks": [
         ["norm:!"],
-        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.in_proj"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.in_proj", "mixer.A_log:!", "mixer.D:!", "mixer.dt_bias:!"],
         ["mixer.o_proj", "mixer.out_proj"],
+        ["mixer.conv1d:!"],
+        ["mixer.norm:!"],
+        ["mixer.gate:!"],
         ["mixer.fc1_latent_proj"],
         ["mixer.experts.{expert_index}.up_proj"],
         ["mixer.experts.{expert_index}.down_proj"],
@@ -1979,10 +1987,10 @@
       ]
     },
     "NemotronOmniQModel/gptq": {
-      "layers": ["language_model.backbone.layers"],
+      "layers": ["language_model.model.layers"],
       "blocks": [
         ["norm:!"],
-        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj"],
+        ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.A_log:!", "mixer.D:!", "mixer.dt_bias:!"],
         ["mixer.o_proj"],
         ["mixer.in_proj"],
         ["mixer.out_proj", "mixer.gate_proj", "mixer.up_proj"],
@@ -1994,7 +2002,8 @@
         ["mixer.fc1_latent_proj"],
         ["mixer.experts.{expert_index}.up_proj"],
         ["mixer.experts.{expert_index}.down_proj"],
-        ["mixer.fc2_latent_proj"]
+        ["mixer.fc2_latent_proj"],
+        ["mixer.norm:!"]
       ]
     },
     "Olmo3QModel/gptq": {

@@ -14,12 +14,11 @@ Each test builds a real tiny CPU layer, asks the definition for its scaling
 groups, applies one non-unit non-uniform fold **without quantization**, and
 compares the full output with a fresh native baseline. A correct fold is
 neutral to about 1e-7; the parent commit changes these outputs by 1e-3..2e-1.
+Definitions explicitly using plain AWQ emit no fold groups; those cases check
+unchanged layer state and output here, with actual public packing/reload
+coverage in the owned port suites.
 """
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +33,6 @@ from gptqmodel.quantization.awq.utils.module import get_op_name
 
 
 TOLERANCE = 1e-5
-_INTERN_REVISION = "4f57cab513689b089019fce4ad24e26520df183c"
 
 
 def _wrapper(definition, model, tree):
@@ -189,34 +187,12 @@ def test_minicpmv_4_6_linear_attn_tags_preserve_layer_output():
 
 @pytest.fixture(scope="module")
 def intern_s2_module():
-    try:
-        from huggingface_hub import snapshot_download
+    from gptqmodel.models.ports.intern_s2_preview import modeling_interns2_preview
 
-        root = Path(
-            snapshot_download(
-                "internlm/Intern-S2-Preview",
-                revision=_INTERN_REVISION,
-                allow_patterns=[
-                    "configuration_interns2_preview.py",
-                    "modeling_interns2_preview.py",
-                ],
-            )
-        )
-    except Exception as exc:  # noqa: BLE001 - optional remote reference code
-        pytest.skip(f"Intern-S2 reference code unavailable: {exc}")
-
-    package = types.ModuleType("intern_s2_reference")
-    package.__path__ = [str(root)]
-    sys.modules[package.__name__] = package
-    for name in ("configuration_interns2_preview", "modeling_interns2_preview"):
-        spec = importlib.util.spec_from_file_location(f"{package.__name__}.{name}", root / f"{name}.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-    return sys.modules[f"{package.__name__}.modeling_interns2_preview"]
+    return modeling_interns2_preview
 
 
-def test_intern_s2_preview_linear_attn_tags_preserve_layer_output(intern_s2_module):
+def test_intern_s2_preview_plain_policy_preserves_layer_state(intern_s2_module):
     config = intern_s2_module.InternS2PreviewTextConfig(
         vocab_size=64,
         hidden_size=32,
@@ -238,17 +214,14 @@ def test_intern_s2_preview_linear_attn_tags_preserve_layer_output(intern_s2_modu
     )
     config._attn_implementation = "eager"
     torch.manual_seed(7)
-    # Build the real text model so `post_init`/`_init_weights` initialize the
-    # DeltaNet `dt_bias`/`A_log` and the experts. Its `forward` targets a newer
-    # Transformers mask signature, so the tests drive the layers directly.
+    # Exercise the shipped text owner and both hybrid layer types.
     text = intern_s2_module.InternS2PreviewTextModel(config).eval()
     model = nn.Module()
     model.config = config
     model.model = nn.Module()
     model.model.language_model = text
     # The shipped checkpoint stores packed 3-D experts; the loader defuses them
-    # into per-expert projections before quantization. Mirror that so the
-    # routed-expert consumers share the norm's single scale group.
+    # into per-expert projections before quantization.
     from gptqmodel.models.loader import _convert_model_with_defuser
 
     _convert_model_with_defuser(MODEL_MAP["intern_s2_preview"], model, cleanup_original=False)
@@ -259,7 +232,8 @@ def test_intern_s2_preview_linear_attn_tags_preserve_layer_output(intern_s2_modu
     cos = torch.randn(1, 8, 8)
     sin = torch.randn(1, 8, 8)
 
-    checked = []
+    definition = MODEL_MAP["intern_s2_preview"]
+    wrapper = _wrapper(definition, model, definition.module_tree)
     for layer in layers:
         def forward(layer=layer):
             return layer(
@@ -269,17 +243,14 @@ def test_intern_s2_preview_linear_attn_tags_preserve_layer_output(intern_s2_modu
                 position_ids=position_ids,
             )
 
-        checked.extend(_assert_neutral(MODEL_MAP["intern_s2_preview"], model, layer, forward))
-
-    linear_groups = [
-        (targets, consumers)
-        for source, targets, consumers in checked
-        if source == "input_layernorm" and "linear_attn.in_proj_qkv" in targets
-    ]
-    assert linear_groups, "the linear-attention input norm did not fold"
-    targets, consumers = linear_groups[0]
-    assert targets == ["linear_attn.in_proj_qkv", "linear_attn.in_proj_z"]
-    assert {"linear_attn.in_proj_b", "linear_attn.in_proj_a"} <= set(consumers)
+        reference, features = _capture(layer, forward)
+        features = _quantized_features(layer, features, definition.module_tree)
+        snapshot = {name: value.clone() for name, value in layer.state_dict().items()}
+        assert wrapper.awq_get_modules_for_scaling(layer, features, {}) == []
+        with torch.inference_mode():
+            torch.testing.assert_close(forward(), reference, rtol=0, atol=0)
+        for name, value in layer.state_dict().items():
+            torch.testing.assert_close(value, snapshot[name], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("model_type", ["minicpmv", "minicpmo"])
@@ -310,14 +281,21 @@ def test_minicpm_attention_and_mlp_stages_preserve_layer_output(model_type):
         return llm(input_ids=ids).logits
 
     checked = []
-    for layer in llm.model.layers:
-        checked.extend(_assert_neutral(MODEL_MAP[model_type], model, layer, forward))
+    if model_type == "minicpmv":
+        # Legacy MiniCPM-V is deliberately plain-only. Its owned real-model
+        # acceptance suite packs every decoder projection across six versions.
+        definition = MODEL_MAP[model_type].__new__(MODEL_MAP[model_type])
+        for layer in llm.model.layers:
+            assert definition.awq_get_modules_for_scaling(layer, {}, {}) == []
+    else:
+        for layer in llm.model.layers:
+            checked.extend(_assert_neutral(MODEL_MAP[model_type], model, layer, forward))
 
-    flat = {(source, tuple(targets)) for source, targets, _consumers in checked}
-    assert ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")) in flat
-    assert ("self_attn.v_proj", ("self_attn.o_proj",)) in flat
-    assert ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")) in flat
-    assert ("mlp.up_proj", ("mlp.down_proj",)) in flat
+        flat = {(source, tuple(targets)) for source, targets, _consumers in checked}
+        assert ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")) in flat
+        assert ("self_attn.v_proj", ("self_attn.o_proj",)) in flat
+        assert ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")) in flat
+        assert ("mlp.up_proj", ("mlp.down_proj",)) in flat
 
     blocks = [
         [entry.split(":", 1)[0] for entry in block]

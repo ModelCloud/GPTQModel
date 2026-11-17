@@ -108,8 +108,17 @@ skips** and **6 explicitly deselected baseline failures**, in **22.77 seconds**.
 Those six `test_norm_lifecycle.py` fresh-quantization cases fail their assertion
 that a model contains meta/inference tensors **before teacher loading**. A clean
 unchanged `0fdfd2396646a129f165822e66fc7c5ecec90cc0` worktree independently
-reproduced all six in 5.89 seconds. They remain unresolved outside this bounded
-teacher-loading change; the complete run was not green.
+reproduced all six in 5.89 seconds; that complete run was not green. Parent
+integration traced the stale assumption to `ModuleLooper.loop`'s successful
+completion at `gptqmodel/looper/module_looper.py:2069-2078`: it restores disk
+offload, materializes remaining meta tensors and repairs inference version
+counters before returning. The lifecycle test now requires this materialized
+state and continues through real embedding/norm tuning and exact packed-state
+save/reload. `test_norm_requant.py` still injects real meta/inference tensors
+and requires their rejection before teacher loading. With the corrected
+lifecycle expectation, the integrated lifecycle/guards/teacher batch passes
+**44 tests, no skips, in 13.70 seconds**; no production norm-tuning code changed
+for that correction.
 
 ```sh
 PYTHON_GIL=0 python -m pytest -q tests/test_norm_teacher_loading.py \

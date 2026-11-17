@@ -251,6 +251,7 @@ def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch,
     from gptqmodel import BACKEND
     from gptqmodel.quantization.config import AWQConfig
 
+    torch.manual_seed(123)
     config = _config()
     config.intermediate_size = 32
     reference = InternLMForCausalLM(config).eval()
@@ -269,6 +270,7 @@ def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch,
     monkeypatch.setattr(Tokenicer, "load", classmethod(record_normalization))
     loaded = GPTQModel.load(
         str(tmp_path), dtype=torch.float16, trust_remote_code=True,
+        attn_implementation="eager",
         quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=False),
         backend=BACKEND.TORCH,
     )
@@ -276,17 +278,26 @@ def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch,
     sample = {"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 2]]),
               "attention_mask": torch.ones(1, 8, dtype=torch.long)}
     loaded.quantize([sample, sample], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    # Keep the source's castable rotary buffer at the requested reload dtype.
+    loaded.model.half()
+    expected_state = {name: value.detach().clone() for name, value in loaded.model.state_dict().items()}
     with torch.inference_mode():
         expected = loaded.model(**sample, use_cache=False).logits
     for cycle in range(2):
         saved = tmp_path / f"quantized-{cycle}"
         loaded.save_quantized(str(saved))
         normalized.clear()
-        loaded = GPTQModel.load(str(saved), device="cpu", dtype=torch.float16, backend=BACKEND.TORCH)
+        loaded = GPTQModel.load(
+            str(saved), device="cpu", dtype=torch.float16, backend=BACKEND.TORCH,
+            attn_implementation="eager",
+        )
         assert len(normalized) == 1
         assert loaded.tokenizer is normalized[0]
         assert loaded.model.tokenizer is normalized[0].tokenizer
         assert loaded.tokenizer("hello science", add_special_tokens=False).input_ids == [3, 4]
+        assert loaded.model.state_dict().keys() == expected_state.keys()
+        for name, value in loaded.model.state_dict().items():
+            torch.testing.assert_close(value, expected_state[name], rtol=0, atol=0)
         with torch.inference_mode():
             torch.testing.assert_close(loaded.model(**sample, use_cache=False).logits, expected, rtol=0, atol=0)
     assert not marker.exists()

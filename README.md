@@ -285,6 +285,9 @@ cover definition-specific scientific tokenizer dispatch and native gate/convolut
 exclusions. [Owned tokenizer construction and normalization](docs/owned-tokenizer-lifecycle.md)
 requires Tokenicer 0.0.19; the API is qualified from the unreleased candidate
 in [Tokenicer PR #66](https://github.com/ModelCloud/Tokenicer/pull/66).
+The checked source candidate also fixes Baichuan's legacy special-token map
+precedence; exact source IDs and public safetensors reloads pass without
+changing the packaged tokenizer or its oracle assertions.
 [Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
 documents dense/MoE ownership, distinct tokenizer semantics and the explicit
 AttnRes quantization boundary. Packaged TikToken implementations require
@@ -298,9 +301,39 @@ routing state through lazy AWQ and repeated safetensors reloads.
 [Llama aliases, MiMo and flat LLaVA-Qwen2 selection](docs/transformers5-model-ports.md#llama-aliases-mimo-and-flat-llava-qwen2-selection)
 covers LongLLaMA memory, source-matched native aliases, dense auxiliary MTP
 and image-aware calibration through package-owned model selection.
+[LocateAnything model, media and localization selection](docs/transformers5-model-ports.md#locateanything-model-media-and-localization-selection)
+uses package-owned code. NVIDIA's license restricts this port and its derivatives
+to noncommercial research/evaluation, with the stated exception for NVIDIA and
+its affiliates; see the full [license](gptqmodel/models/ports/locateanything/LICENSE)
+and [notice](gptqmodel/models/ports/locateanything/NOTICE).
 [InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
 documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
 decoder selection, pinned licenses and CPU plain-AWQ validation.
+[MiniCPM, MiniCPM-V, MiniMax and MiMo-V2 selection](docs/transformers5-model-ports.md#minicpm-minicpm-v-minimax-and-mimo-v2-selection)
+records original scaled decoders, six legacy vision layouts, native MiniMax-M2,
+hybrid Text-01 attention and source-specific MiMo-V2. Native MiniCPM-V 4.6 keeps
+its separate Transformers loader. [MobileLLM](gptqmodel/models/ports/mobilellm/README.md)
+has public-source architecture coverage only; its FAIR Noncommercial Research
+License and acceptable-use policy do not grant commercial use. MiniCPM-o's local
+port remains excluded pending resolution of its ChatTTS licensing boundary.
+[Recurrent, Nemotron and diffusion selection](docs/transformers5-model-ports.md#recurrent-nemotron-and-diffusion-implementation-selection)
+also records Ouro's owned recurrent decoder and Nemotron-Omni's native media
+owners. [OpenVLA model and action selection](docs/transformers5-model-ports.md#openvla-model-and-action-selection)
+documents Prismatic vision/action processing and native text decoders, with
+Meta Llama 2 license/use-policy notices retained for released tokenizer assets.
+Pangu's source-derived port is excluded while its redistribution license is
+unestablished.
+[Ovis visual-vocabulary selection](docs/transformers5-model-ports.md#ovis-visual-vocabulary-selection)
+preserves Ovis 1.0/1.5/1.6 vision and image-token layouts with native text
+decoders and plain AWQ; native Ovis2 keeps its separate definition.
+[Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
+explains generated device maps for tied aliases and native FP32 destinations
+during lazy offload, including the exclusions for packed weights.
+[MOSS, looped Nanbeige and the Nemotron execution layouts](docs/transformers5-model-ports.md#recurrent-nemotron-and-diffusion-implementation-selection)
+have distinct native or package-owned implementations, explicit plain AWQ,
+pinned licenses and CPU/meta qualification. MOSS covers Moon-003 base/SFT/plugin;
+historical MOSS2 remains unqualified. [Norm-teacher loading](docs/norm-teacher-loading.md)
+selects the teacher's own config and loader under the same security policy.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
@@ -418,6 +451,12 @@ also appreciated. Ongoing sponsors will be credited on this README page.
 
 GPT-QModel is licensed under [Apache-2.0](https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE). The optional, JIT-loaded
 Swordfish kernel is [AGPL-3.0-or-later](https://github.com/ModelCloud/GPTQModel/blob/main/licenses/SWORDFISH).
+
+Vendored model ports retain their upstream licenses and notices; see the
+[port coverage and licensing table](docs/transformers5-model-ports.md).
+In particular, MobileLLM and LocateAnything carry noncommercial restrictions,
+and OpenVLA's tokenizer assets retain Meta Llama 2 terms. These components are
+not relicensed by GPT-QModel's Apache license.
 
 ## Attributions and citations 📚
 

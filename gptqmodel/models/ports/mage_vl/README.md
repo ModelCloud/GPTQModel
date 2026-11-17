@@ -160,6 +160,16 @@ codec output numerics. Use `video_backend="frames"` with predecoded frames
 to avoid this dependency. Neural `engine="dcvc-rt"` always raises an actionable
 `NotImplementedError`, even if old codec cache files exist.
 
+Codec asset paths and cache location come from explicit `codec_config` values;
+legacy `DCVC_INTRA_TAR`, `DCVC_INTER_TAR`, `ONLINE_CODEC_CACHE_DIR` and `HF_HOME`
+do not choose codec behavior. The default cache is
+`Path.home() / ".cache/huggingface/online_codec"`, and string `cache_root`
+values from JSON/API arguments are normalized to `Path`. Metadata validation
+runs before temporary-directory creation. The parent regression first fails
+for environment-dependent defaults/string-path use, then passes after the
+repair; it also injects metadata and subprocess failures and checks that the
+same-key repaired retry and cached replay leave no temporary or partial output.
+
 StreamMind remains optional and lazy. It requires an installed `mamba-ssm`
 and its device kernels plus a local `streammind_gate.safetensors`. Missing
 dependencies/assets are checked before vision execution or gate assignment;
