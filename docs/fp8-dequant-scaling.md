@@ -77,9 +77,9 @@ which removes the fp16-before-bias rounding it previously had.
 | --- | --- | --- |
 | FP8 block scale | `fp8.py:_dequantize_native` called `_expanded_scale_inv`, which ran two `repeat_interleave` calls, then `weight / expanded` | `fp8.py:520` divides `deq.view(nb, br, kb, bc)` in place with `scale_inv[:, None, :, None]` |
 | FP8 row scale | `weight / scale_inv.view(-1, 1)` allocated a second full-size FP32 tensor | `fp8.py:534` `deq.div_(scale_inv.view(-1, 1))` |
-| FP8 non-divisible block | full expansion could not broadcast to a smaller weight | `fp8.py:453` `_expanded_scale_inv` pads the last scale row/column and crops to the weight shape |
+| FP8 non-divisible block | full expansion could not broadcast to a smaller weight | `fp8.py:536` `_expanded_scale_inv` pads the last scale row/column and crops to the weight shape |
 | AWQ threshold | `gemm_awq.py:84` `rows > 1024` | `gemm_awq.py:101` `rows > 1024 or (rows >= 640 and fp32_accum)` |
-| AWQ output precision | `torch.matmul(x_2d, weight.to(x.dtype))` produced fp16/bf16 before the bias add | `gemm_awq.py:40` `_awq_fp32_output_mm` returns FP32; bias is added in FP32 and cast once |
+| AWQ output precision | `torch.matmul(x_2d, weight.to(x.dtype))` produced fp16/bf16 before the bias add | `gemm_awq.py:58` `_awq_fp32_output_mm` returns FP32; bias is added in FP32 and cast once |
 | AWQ CPU tests | n/a | `_awq_fp32_output_mm` falls back to an FP32-input `torch.mm` |
 
 ## Contracts

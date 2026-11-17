@@ -17,9 +17,9 @@ flowchart TD
 
 | Before this extraction layer | Carried implementation |
 |---|---|
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_error_ledger.py:642`: `build_projection_record` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_error_ledger.py:929`: `append_exl3_error_journal` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_error_ledger.py:995`: `write_exl3_error_ledger` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_error_ledger.py:651`: `build_projection_record` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_error_ledger.py:942`: `append_exl3_error_journal` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/exl3_error_ledger.py:1008`: `write_exl3_error_ledger` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

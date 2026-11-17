@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import sysconfig
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -300,6 +301,21 @@ raise SystemExit(0)
 """
 
 
+def _free_threaded_build() -> bool:
+    """True only for a free-threaded (3.13t/3.14t) interpreter.
+
+    The child process sets ``PYTHON_GIL=0``; a regular build aborts with
+    "Disabling the GIL is not supported by this build" before running the
+    script, so the test can neither pass nor observe its sentinels (#4768).
+    """
+
+    return sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+
+
+@pytest.mark.skipif(
+    not _free_threaded_build(),
+    reason="the PYTHON_GIL=0 subprocess needs a free-threaded build (#4768)",
+)
 def test_concurrent_quantize_shares_one_stream_and_scratch_per_device():
     """Four concurrent projections must not each own a stream and a scratch set.
 

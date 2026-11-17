@@ -59,6 +59,9 @@ _CPU_INT8_DENSE_MAX_ROWS = 256
 _CPU_INT8_DENSE_SQUARE = 512
 _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS = 512 * 512
 _CPU_INT8_DENSE_TILE_FEATURES = 512
+# bitsandbytes uses a separate small-M kernel for at most 16 rows; above that
+# the 2-D INT8 GEMM goes to cuBLASLt IMMA (#4746).
+_BNB_INT8_IMMA_MAX_ROWS = 16
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -305,6 +308,22 @@ def _dequantize_int8_weight(
     return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
 
 
+def _int8_imma_misaligned(in_features: int, out_features: int) -> bool:
+    """Return whether cuBLASLt INT8 IMMA rejects this 2-D GEMM shape.
+
+    ``int8_linear_matmul`` handles ``in_features % 4 != 0`` itself with an FP32
+    fallback. For the remaining shapes, cuBLASLt IMMA needs ``in_features``
+    divisible by 16 and ``out_features`` divisible by 4; otherwise the first
+    launch with more than 16 rows raises ``cublasLt ran into an error!``
+    (#4746). Keep this predicate exact so aligned shapes stay on the native
+    kernel.
+    """
+
+    if in_features % 4 != 0:
+        return False
+    return in_features % 16 != 0 or out_features % 4 != 0
+
+
 def _int8_vectorwise_quant_fp32(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, None]:
@@ -433,11 +452,14 @@ def _buffer_spec_4bit(
 
 
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
-    # bitsandbytes is not installed on this host, so nothing is measurable.
-    # Statically the forward calls bnb custom ops and branches on grad/device
-    # state, and `graph_unsafe_constructs` finds `data_ptr()`: EAGER, no capture.
-    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    # Measured on RTX 4090 (sm_89), RTX 5090 (sm_120) and Radeon R9700
+    # (gfx1201) with torch 2.15/2.16: dynamo, aot_eager, inductor and
+    # reduce-overhead all pass, and an explicit eager CUDA-graph capture
+    # replays the eager output. The accelerator path is straight-line; the CPU
+    # packing branch is never taken on a device. (The old static `data_ptr()`
+    # hit came from a comment, not an executed call.)
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @staticmethod
     def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
@@ -719,7 +741,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         relative_error = (packed - canonical).norm() / denominator
         return bool(relative_error <= _CPU_PACKED_REL_TOL)
 
-    def _cpu_int8_tiled_forward(
+    def _int8_dequant_tiled_forward(
         self,
         x: torch.Tensor,
         bias: Optional[torch.Tensor],
@@ -733,21 +755,30 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             device=x_flat.device,
         )
 
-        with cpu_bf16x3_matmul():
-            for start in range(0, self.in_features, _CPU_INT8_DENSE_TILE_FEATURES):
-                end = min(start + _CPU_INT8_DENSE_TILE_FEATURES, self.in_features)
-                weight = _dequantize_int8_weight(
-                    self.weight[:, start:end],
-                    self.weight_scb,
-                )
-                output = output + torch.matmul(
-                    x_flat[:, start:end].to(torch.float32),
-                    weight.t(),
-                )
+        for start in range(0, self.in_features, _CPU_INT8_DENSE_TILE_FEATURES):
+            end = min(start + _CPU_INT8_DENSE_TILE_FEATURES, self.in_features)
+            weight = _dequantize_int8_weight(
+                self.weight[:, start:end],
+                self.weight_scb,
+            )
+            output = output + torch.matmul(
+                x_flat[:, start:end].to(torch.float32),
+                weight.t(),
+            )
 
         if bias is not None:
             output = output + bias.to(torch.float32)
         return output.reshape(x.shape[:-1] + (self.out_features,)).to(x.dtype)
+
+    def _cpu_int8_tiled_forward(
+        self,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Run the tiled INT8 recompute with oneDNN BF16x3 on the CPU."""
+
+        with cpu_bf16x3_matmul():
+            return self._int8_dequant_tiled_forward(x, bias)
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         self._ensure_unpacked()
@@ -1011,6 +1042,16 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             )
         ):
             return self._cpu_int8_tiled_forward(x, bias)
+
+        if (
+            self.weight.device.type == "cuda"
+            and rows > _BNB_INT8_IMMA_MAX_ROWS
+            and _int8_imma_misaligned(self.in_features, self.out_features)
+        ):
+            # cuBLASLt IMMA raises for these shapes once M > 16 (#4746).
+            # Dequantize the INT8 weight and use the same bounded FP32 tiled
+            # epilogue as the CPU recompute; decode-sized M stays native.
+            return self._int8_dequant_tiled_forward(x, bias)
 
         # ``int8_vectorwise_quant`` and ``int8_linear_matmul`` are rank-2
         # kernels. Flatten arbitrary leading activation dimensions and restore

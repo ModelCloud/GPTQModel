@@ -32,7 +32,12 @@ from gptqmodel.nn_modules.qlinear.gemv_awq import (
     AwqGEMVTorchLinear,
     AwqGEMVTritonLinear,
 )
-from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import (
+    AwqGEMVFastLinear,
+    AwqGEMVFastTorchLinear,
+    LLMAwqLinear,
+    LLMAwqTorchLinear,
+)
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
@@ -303,6 +308,18 @@ CASES = [
     Case(
         AwqGEMMTritonLinear,
         lambda: _checkpoint(AwqGEMMTritonLinear, device="cuda", cuda_graph=True),
+        lambda: None,
+    ),
+    # Portable CPU readers (#4736): the declared level is measured on CPU, so
+    # inductor/cudagraph are device-only skips and capture is not claimed.
+    Case(
+        AwqGEMVFastTorchLinear,
+        lambda: _packed(AwqGEMVFastTorchLinear, device="cpu", cuda_graph=False),
+        lambda: None,
+    ),
+    Case(
+        LLMAwqTorchLinear,
+        lambda: _packed(LLMAwqTorchLinear, device="cpu", cuda_graph=False),
         lambda: None,
     ),
     Case(

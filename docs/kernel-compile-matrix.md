@@ -60,6 +60,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqGEMMLinear` | `gemm_awq` | `EAGER` | yes | no |
 | `AwqGEMMTritonLinear` | `gemm_awq_triton` | `EAGER` | yes | no |
 | `AwqGEMVFastLinear` | `gemv_fast_awq` | `EAGER` | yes | no |
+| `AwqGEMVFastTorchLinear` | `gemv_fast_awq` | `AOT_EAGER` | no | no |
 | `AwqGEMVLinear` | `gemv_awq` | `EAGER` | yes | no |
 | `AwqGEMVTorchLinear` | `gemv_awq` | `CUDAGRAPH` | yes | no |
 | `AwqGEMVTritonLinear` | `gemv_awq` | `CUDAGRAPH` | yes | no |
@@ -71,7 +72,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqSwordfishLinear` | `swordfish` | `EAGER` | no | no |
 | `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | no | yes |
 | `BitblasLinear` | `bitblas` | `EAGER` | no | no |
-| `BitsAndBytesLinear` | `bitsandbytes` | `EAGER` | no | no |
+| `BitsAndBytesLinear` | `bitsandbytes` | `CUDAGRAPH` | yes | no |
 | `BitsAndBytesMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `ExllamaV2Linear` | `exllamav2` | `EAGER` | yes | no |
 | `FP8MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
@@ -84,6 +85,7 @@ python -m tests.kernels.gen_compile_matrix
 | `GPTQMarlinMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `LLMAwqLinear` | `gemv_fast_awq` | `EAGER` | yes | no |
 | `LLMAwqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
+| `LLMAwqTorchLinear` | `gemv_fast_awq` | `AOT_EAGER` | no | no |
 | `MacaqLinear` | `macaq` | `CUDAGRAPH` | no | no |
 | `MacaqMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `MacaqTritonLinear` | `macaq` | `EAGER` | yes | no |

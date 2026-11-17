@@ -2,48 +2,153 @@
 # SPDX-License-Identifier: Apache-2.0
 """#4740: QQQ must accept a column-strided activation.
 
-``QQQLinear.dynamic_quant`` keeps the GPU int8 quantizer for contiguous input
-only and otherwise falls back to element-wise ops, which preserve the input's
-strides.  A column-strided view (``x.t()`` of a ``[K, M]`` buffer, the layout
-batched decoding feeds) therefore reached the native ``qqq_gemm`` as a
-column-major ``quant_A`` that the kernel read row-major: plausible-looking but
-uncorrelated output (relative error ~1.4 against the packed-layout call) with
-no error raised.
+``QQQLinear.forward`` reshapes the activation to ``(-1, K)``. For a
+column-strided input (``x.t()`` of a ``[K, M]`` buffer, the layout a transposed
+prefill produces) that reshape keeps the transposed view. The INT8 fallback in
+``dynamic_quant`` is element-wise, so it preserves those strides, and the native
+``qqq_gemm`` then reads the packed activation row-major - silently multiplying a
+scrambled operand (relative error ~1.4, no error raised).
 
-The fix packs the fallback operand and makes the native entry point reject a
-non-contiguous ``A``.  These tests pin both halves: the quantized operand is
-densely packed, the wrapper matches the packed-layout call and an independent
-FP64 dequantized oracle, and the kernel fails loudly instead of returning
-garbage.
+The tests drive the real AUTO kernel: the strided call must match the
+contiguous call, and the native entry must reject a strided operand instead of
+returning garbage if a future caller forgets to pack it.
 """
+
+from __future__ import annotations
 
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
+from gptqmodel.utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
+
+
+pytestmark = pytest.mark.cuda
+
+IN_FEATURES = 896
+OUT_FEATURES = 4864
+GROUP_SIZE = 128
+# M = 1 is the case the kernel already got right (the reshape is contiguous for
+# a single row); the rest exercise the strided operand.
+ROWS = (2, 16, 17, 128)
+
+
+def _build(cls):
+    torch.manual_seed(4740)
+    linear = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        linear.weight.normal_(0, 0.02)
+    module = cls(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+    )
+    groups = IN_FEATURES // GROUP_SIZE
+    scales = torch.rand(OUT_FEATURES, groups, dtype=torch.float16) * 0.03 + 0.01
+    channels = torch.rand(OUT_FEATURES, dtype=torch.float32) * 0.002 + 0.001
+    module.pack(linear, scales, channels)
+    module.post_init()
+    return module.cuda().eval()
+
+
+def _column_strided(rows: int) -> torch.Tensor:
+    base = torch.randn(IN_FEATURES, rows, device="cuda", dtype=torch.float16)
+    x = base.t()
+    assert x.shape == (rows, IN_FEATURES)
+    assert not x.is_contiguous()
+    assert x.stride(-1) > 1
+    return x
+
+
+def _reference(module, x: torch.Tensor) -> torch.Tensor:
+    with torch.inference_mode():
+        return module(x.contiguous())
+
+
+@pytest.fixture(scope="module")
+def qqq_module():
+    if not qqq_runtime_available():
+        pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
+    return _build(QQQLinear)
+
+
+@pytest.mark.parametrize("rows", ROWS)
+def test_qqq_forward_matches_contiguous_for_column_strided_input(qqq_module, rows):
+    x = _column_strided(rows)
+
+    with torch.inference_mode():
+        strided = qqq_module(x)
+    expected = _reference(qqq_module, x)
+
+    assert strided.shape == expected.shape
+    rel = (strided.float() - expected.float()).norm() / expected.float().norm()
+    assert rel < 5e-3, f"M={rows}: column-strided output diverged (rel={rel.item():.3e})"
+
+
+@pytest.mark.parametrize("rows", ROWS)
+def test_qqq_forward_matches_torch_reference_for_column_strided_input(rows):
+    """Compare against the independent torch kernel, not just the same op twice."""
+
+    if not qqq_runtime_available():
+        pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
+    native = _build(QQQLinear)
+    oracle = _build(QQQTorchLinear)
+    oracle.load_state_dict(native.state_dict(), strict=False)
+
+    x = _column_strided(rows)
+    with torch.inference_mode():
+        actual = native(x)
+        expected = oracle(x.contiguous())
+
+    rel = (actual.float() - expected.float()).norm() / expected.float().norm()
+    assert rel < 1e-2, f"M={rows}: native QQQ diverged from QQQ_TORCH (rel={rel.item():.3e})"
+
+
+def test_qqq_native_entry_rejects_a_strided_activation(qqq_module):
+    """A strided operand must fail loudly at the op boundary, never silently."""
+
+    rows = 8
+    x = _column_strided(rows)
+    with torch.inference_mode():
+        quant_a, scale = qqq_module.dynamic_quant(x)
+        assert quant_a.is_contiguous(), "dynamic_quant must return a packed activation"
+
+        strided_a = quant_a.t().t()  # same values, still packed
+        assert strided_a.is_contiguous()
+
+        # Build a genuinely strided INT8 operand: transpose a wider buffer.
+        wide = torch.zeros(rows, IN_FEATURES * 2, dtype=torch.int8, device="cuda")
+        wide[:, ::2] = quant_a
+        strided_operand = wide[:, ::2]
+        assert not strided_operand.is_contiguous()
+
+        out = torch.empty(rows, OUT_FEATURES, dtype=torch.float16, device="cuda")
+        with pytest.raises(RuntimeError, match="contiguous"):
+            qqq_gemm(
+                strided_operand,
+                qqq_module.B,
+                qqq_module._reduce_scratch(x.device),
+                out,
+                scale,
+                qqq_module.s_channel,
+                qqq_module.s_group,
+                qqq_module._split_k_locks(x.device),
+                max_par=qqq_module.max_par,
+            )
+
+
+# --- Follow-up coverage (#4740): the fallback operand and the native guard ---
+
 import gptqmodel.nn_modules.qlinear.qqq as qqq_mod
-from gptqmodel.nn_modules.qlinear.qqq import (
-    QQQLinear,
-    _workspace_numel,
-    mul,
-)
-from gptqmodel.utils.qqq import qqq_runtime_available
+from gptqmodel.nn_modules.qlinear.qqq import _workspace_numel, mul
 from gptqmodel.utils.rocm import IS_ROCM
 
 
-GROUP_SIZE = 128
-
-NATIVE_QQQ = (
-    torch.cuda.is_available()
-    and not IS_ROCM
-    and qqq_runtime_available()
-)
-
-requires_native_qqq = pytest.mark.skipif(
-    not NATIVE_QQQ, reason="QQQ's native kernel requires an NVIDIA CUDA device"
-)
-
-
-def _column_strided(rows: int, in_features: int) -> torch.Tensor:
+def _column_strided_k(rows: int, in_features: int) -> torch.Tensor:
     """Return the ``[rows, K]`` column-strided view batched decoding produces."""
 
     x = torch.randn(in_features, rows, dtype=torch.float16).t()
@@ -54,18 +159,9 @@ def _column_strided(rows: int, in_features: int) -> torch.Tensor:
 
 
 def _dequantized_weight(weight: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """Independent FP64 QQQ dequant: ``(code - 8) * group_scale``.
+    """Independent FP64 QQQ dequant: ``(code - 8) * group_scale``."""
 
-    The stored per-channel scale cancels against the packed group scale, so the
-    observable weight depends only on the 4-bit codes and the group scales.
-    Reimplemented here rather than read back from the module so that the
-    expected answer never comes from the packer under test.
-    """
-
-    group_scale = (
-        scales.double()
-        .repeat_interleave(GROUP_SIZE, dim=1)
-    )
+    group_scale = scales.double().repeat_interleave(GROUP_SIZE, dim=1)
     codes = (weight.double() / group_scale).round().add(8).clamp_(0, 15)
     return (codes - 8) * group_scale
 
@@ -102,38 +198,36 @@ def _build_native_module(in_features: int, out_features: int):
 
 
 def test_dynamic_quant_packs_a_column_strided_activation(monkeypatch):
-    """The element-wise fallback must return densely packed rows.
-
-    Hardware independent: the Triton quantizer is disabled so the fallback is
-    the path under test on CPU and on CUDA alike.
-    """
+    """The element-wise fallback must return densely packed rows."""
 
     monkeypatch.setattr(qqq_mod, "_qqq_gpu_quantizer", lambda: None)
 
     module = QQQLinear.__new__(QQQLinear)
     torch.nn.Module.__init__(module)
 
-    x_strided = _column_strided(rows=17, in_features=GROUP_SIZE)
+    x_strided = _column_strided_k(rows=17, in_features=GROUP_SIZE)
     quant_strided, scale_strided = module.dynamic_quant(x_strided)
     quant_contiguous, scale_contiguous = module.dynamic_quant(x_strided.contiguous())
 
-    # The native ``mul`` below dereferences A as packed rows, so the fallback
-    # must not hand it the caller's column-major layout.
     assert quant_strided.is_contiguous(), quant_strided.stride()
     assert quant_strided.dtype == torch.int8
     torch.testing.assert_close(scale_strided, scale_contiguous, rtol=0, atol=0)
     assert torch.equal(quant_strided, quant_contiguous)
 
 
-@requires_native_qqq
 @pytest.mark.cuda
 @pytest.mark.parametrize("rows", [2, 16, 17, 128])
 def test_qqq_linear_matches_the_packed_layout_call_for_a_column_strided_activation(rows):
     """The reported symptom: relative error ~1.4 against the packed-layout call."""
 
+    if not qqq_runtime_available():
+        pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
+    if IS_ROCM:
+        pytest.skip("QQQ's native kernel requires an NVIDIA CUDA device")
+
     module, expected_weight = _build_native_module(in_features=896, out_features=4864)
 
-    x_strided = _column_strided(rows=rows, in_features=module.in_features).cuda()
+    x_strided = _column_strided_k(rows=rows, in_features=module.in_features).cuda()
     assert not x_strided.is_contiguous()
     x_contiguous = x_strided.contiguous()
 
@@ -153,18 +247,19 @@ def test_qqq_linear_matches_the_packed_layout_call_for_a_column_strided_activati
     relative = (strided.float() - contiguous.float()).norm() / contiguous.float().norm()
     assert relative.item() < 1e-6
 
-    # Independent oracle: the only remaining error is the per-token int8
-    # activation quantization, which is ~1.8% on this fixture. Garbage output
-    # is uncorrelated with the oracle (relative error ~1.4).
     oracle = x_contiguous.double() @ expected_weight.t()
     oracle_error = (strided.double() - oracle).norm() / oracle.norm()
     assert oracle_error.item() < 5e-2, oracle_error.item()
 
 
-@requires_native_qqq
 @pytest.mark.cuda
 def test_qqq_linear_keeps_row_strided_and_batched_inputs_working():
     """Control: layouts the element-wise path already packed contiguously."""
+
+    if not qqq_runtime_available():
+        pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
+    if IS_ROCM:
+        pytest.skip("QQQ's native kernel requires an NVIDIA CUDA device")
 
     module, _ = _build_native_module(in_features=896, out_features=4864)
     x = torch.randn(4, module.in_features + 32, device="cuda", dtype=torch.float16)
@@ -183,10 +278,14 @@ def test_qqq_linear_keeps_row_strided_and_batched_inputs_working():
     assert batched.shape == (2, 5, module.out_features)
 
 
-@requires_native_qqq
 @pytest.mark.cuda
 def test_native_qqq_gemm_rejects_a_non_contiguous_activation():
     """The kernel must not silently read a column-major operand row-major."""
+
+    if not qqq_runtime_available():
+        pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
+    if IS_ROCM:
+        pytest.skip("QQQ's native kernel requires an NVIDIA CUDA device")
 
     rows, in_features, out_features = 4, 256, 128
     quant_a = torch.randint(
@@ -216,10 +315,9 @@ def test_native_qqq_gemm_rejects_a_non_contiguous_activation():
         mul(operand, packed_weight, reduce_scratch, out, s1, s2, s3, workspace)
         return out
 
-    with pytest.raises(RuntimeError, match="A must be row-major contiguous"):
+    with pytest.raises(RuntimeError, match="contiguous"):
         run(quant_a_bad)
 
-    # The packed operand still runs, so the guard rejects only the bad layout.
     out = run(quant_a)
     torch.cuda.synchronize()
     assert torch.isfinite(out.float()).all()

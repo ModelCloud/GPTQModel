@@ -48,14 +48,22 @@ flowchart TD
 ```
 
 The wrapper is installed by `_patch_optimum_gptqmodel_load_bridge` in
-`gptqmodel/__init__.py`. It is installed at the end of package import because
-`optimum.gptq` imports `gptqmodel` while it loads.
+`gptqmodel/__init__.py`. Installation is import-order independent: the eager
+attempt at the end of package import can lose a race with `optimum.gptq`
+importing `gptqmodel` mid-initialization, so the same idempotent install is
+retried from Transformers' `GptqHfQuantizer` pre/post weight-loading hooks and
+from the `hf_select_quant_linear_v2` / `hf_gptqmodel_post_init` entry points
+Optimum calls. A partially initialized `optimum.gptq` is treated as "retry
+later", never as "Optimum is not installed". Loading a native GPTQ checkpoint
+through `AutoModelForCausalLM.from_pretrained` therefore does not require an
+`import gptqmodel` first.
 
 | Situation | Before | After |
 | --- | --- | --- |
 | Native GPT-QModel checkpoint | Optimum replaces attention only; experts missing | Bridge rebuilds every serialized module, then Optimum post-init is replaced |
 | Optimum-owned checkpoint | Optimum path | Bridge returns `None`, original Optimum path |
 | Per-module `dynamic` bits/group size | Global config wins | `QuantizeConfig.from_pretrained` manifest wins |
+| Native checkpoint, plain `AutoModelForCausalLM` without `import gptqmodel` | Bridge not installed; global bits silently applied | Bridge installs from Transformers' GPTQ hooks before `convert_model` |
 | Optimum not installed | ImportError from Transformers | Same; the patch is skipped |
 
 ### AWQ: the second loader Transformers owns
@@ -254,6 +262,7 @@ per-format table also appears in [the MACaQ page](macaq.md#transformers-interop)
 | Test | Invariant |
 | --- | --- |
 | `tests/test_hf_gptqmodel_load_bridge.py::test_optimum_gptq_quantizer_is_routed_through_the_native_bridge` | Optimum's hooks call the bridge |
+| `tests/test_hf_optimum_bridge_import_order.py` | A fresh interpreter that never imports `gptqmodel` installs the bridge and keeps `dynamic` bit widths |
 | `tests/test_checkpoint_compat.py::test_hf_compat_warning_for_defused_moe_checkpoint` | Per-expert saves warn |
 | `tests/test_checkpoint_compat.py::test_saved_config_drops_auto_map_when_remote_code_is_not_copied` | `auto_map` is dropped only when `.py` files are not copied |
 | `tests/test_legacy_vl_checkpoint_load.py` | Legacy keys convert both directions and a real legacy VL checkpoint loads |
