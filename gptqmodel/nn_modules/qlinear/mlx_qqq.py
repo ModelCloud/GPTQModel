@@ -71,7 +71,7 @@ def _dynamic_quant(x):
 
 @lru_cache(maxsize=3)
 def _finalize_kernel(output_dtype):
-    """Apply QQQ output scales, FP16 rounding, bias, and dtype storage."""
+    """Apply QQQ output scales, bias, and one visible dtype cast."""
     output_types = {
         mx.float16: ("fp16", "half"),
         mx.bfloat16: ("bf16", "bfloat16_t"),
@@ -89,10 +89,8 @@ def _finalize_kernel(output_dtype):
             uint index = thread_position_in_grid.x;
             uint column = index % N;
             uint row = index / N;
-            half value = half(
-                float(raw[index]) * input_scale[row] * channel_scale[column]
-            );
-            if (HAS_BIAS) value = half(value + half(bias[column]));
+            float value = float(raw[index]) * input_scale[row] * channel_scale[column];
+            if (HAS_BIAS) value += float(bias[column]);
             output[index] = OUTPUT_TYPE(value);
         """.replace("OUTPUT_TYPE", output_type),
     )
@@ -145,8 +143,9 @@ class MlxQQQLinear(nn.Module):
                 output_shapes=[(*x.shape[:-1], output_dims)],
                 output_dtypes=[original_dtype],
             )[0]
+        # Keep the scaled reduction and bias in the wide product dtype; only
+        # the final cast below may narrow to the activation dtype.
         output = raw * input_scale * self.channel_scale
-        output = output.astype(mx.float16)
         if "bias" in self:
             output = output + self.bias
         return output.astype(original_dtype)
