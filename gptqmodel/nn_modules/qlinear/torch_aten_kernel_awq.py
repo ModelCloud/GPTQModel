@@ -259,7 +259,7 @@ class TorchAtenAwqLinear(AWQuantLinear):
         ).to(device=device, dtype=dtype)
 
     @torch.no_grad()
-    def _fused_op_forward(self, x):
+    def _fused_op_forward(self, x, out_dtype=None):
         self._refresh_fused_state()
         if x.device.type != "cpu":
             raise NotImplementedError
@@ -269,16 +269,21 @@ class TorchAtenAwqLinear(AWQuantLinear):
                 f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
+        if (
+            out_dtype is None
+            and self.bias is not None
+            and x.dtype in (torch.float16, torch.bfloat16)
+        ):
+            # A caller that adds its own bias after this call needs the wide
+            # product across the boundary; narrowing here overflows before the
+            # outer epilogue can cancel it.
+            out_dtype = torch.float32
         return _cpu_int4pack_mm(
             x,
             self.qweight,
             self.group_size,
             self.scales_and_zeros,
-            out_dtype=(
-                torch.float32
-                if self.bias is not None and x.dtype in (torch.float16, torch.bfloat16)
-                else None
-            ),
+            out_dtype=out_dtype,
         )
 
     # The native affine operand is derived metadata, shared with GPTQ's ATen

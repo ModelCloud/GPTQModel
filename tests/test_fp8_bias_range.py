@@ -39,6 +39,34 @@ def test_fp8_packing_preserves_fp32_bias_range():
     assert torch.equal(output, torch.full((2, 1), 70000.0))
 
 
+def test_fp8_bias_free_fallback_keeps_decoded_weight_range():
+    """A finite cancellation must not NaN because the decoded weight narrowed."""
+    linear = torch.nn.Linear(2, 1, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        linear.weight.fill_(65536.0)
+    module = TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=2,
+        out_features=1,
+        bias=False,
+        register_buffers=False,
+        format="float8_e4m3fn",
+    )
+    module.pack_original(linear, None, None)
+
+    x = torch.tensor([[1.0, -1.0]], dtype=torch.float16)
+    decoded = module.weight.float() / module.weight_scale_inv.float().view(-1, 1)
+    expected = (x.double() @ decoded.double().T).half()
+
+    actual = module(x)
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dtype,input_value", [
     (torch.float16, 70.0),
     (torch.bfloat16, 68.5),

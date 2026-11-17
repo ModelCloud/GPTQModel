@@ -563,7 +563,13 @@ class ParoLinear(AwqTorchLinear):
             self._cpu_aten_failed_key = None
 
         try:
-            out = layer._fused_op_forward(x_flat)
+            # The child has no bias: the parent adds it after return. Ask for
+            # the wide product so a finite sum is not rounded to infinity
+            # before the outer bias epilogue (issue #4471).
+            out = layer._fused_op_forward(
+                x_flat,
+                out_dtype=torch.float32 if self.bias is not None else None,
+            )
         except Exception as exc:
             if not self._cpu_aten_warning_logged:
                 log.warning(
