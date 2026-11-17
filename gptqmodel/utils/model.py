@@ -1578,6 +1578,64 @@ def _split_device_map_around_module(
         current_name = f"{current_name}.{path_child}" if current_name else path_child
 
 
+def co_locate_shared_module_aliases(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Dict[str, Union[str, int]]:
+    """Keep shared tensor owners on their first registered owner's placement.
+
+    This completes a generated layer-wise map; explicit user maps are not
+    rewritten. No tensors move here, and device families/ordinals stay intact.
+    """
+    result = dict(device_map)
+    modules = list(model.named_modules(remove_duplicate=False))
+    parents = {id(module): id(module) for _, module in modules}
+
+    def root(identity):
+        while parents[identity] != identity:
+            parents[identity] = parents[parents[identity]]
+            identity = parents[identity]
+        return identity
+
+    tensor_owners = {}
+    for _, module in modules:
+        for tensor in (*module.parameters(recurse=False), *module.buffers(recurse=False)):
+            previous = tensor_owners.setdefault(id(tensor), id(module))
+            parents[root(id(module))] = root(previous)
+
+    groups = {}
+    for name, module in modules:
+        # Container aliases are covered by their actual tensor-owning children.
+        if not any(True for _ in module.parameters(recurse=False)) and not any(True for _ in module.buffers(recurse=False)):
+            continue
+        groups.setdefault(root(id(module)), []).append(name)
+
+    def placement(name):
+        candidates = [key for key in result if not key or key == name or name.startswith(f'{key}.')]
+        if not candidates:
+            return None, None
+        key = max(candidates, key=len)
+        return key, result[key]
+
+    changed = False
+    for names in groups.values():
+        if len(names) < 2:
+            continue
+        selected = next((device for name in names if (device := placement(name)[1]) is not None), None)
+        if selected is None:
+            continue
+        for name in names:
+            ancestor, previous = placement(name)
+            if previous == selected:
+                continue
+            if ancestor is not None and ancestor != name:
+                _split_device_map_around_module(model, result, ancestor, name, previous)
+                result.pop(ancestor, None)
+            result[name] = selected
+            changed = True
+            log.info(f'Loader: shared owner alias `{name}` follows `{names[0]}` on {selected}.')
+    if changed:
+        _remove_redundant_device_map_children(result)
+    return result
+
+
 def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Dict[str, Union[str, int]]:
     """Build a non-overlapping load map with excluded leaf modules on CPU."""
 

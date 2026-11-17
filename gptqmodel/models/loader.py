@@ -98,6 +98,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import (
     apply_no_placement_to_device_map,
     auto_dtype,
+    co_locate_shared_module_aliases,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
     find_modules,
@@ -3131,6 +3132,7 @@ def ModelLoader(cls):
 
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
+            layers = list(dict.fromkeys(layers))
             mod2name = {m: n for n, m in model.named_modules()}
 
             def assign(mod, device_id):
@@ -3138,7 +3140,7 @@ def ModelLoader(cls):
                     return
                 name = mod2name.get(mod)
                 if name is not None:
-                    device_map[name] = device_strs[device_id]
+                    device_map.setdefault(name, device_strs[device_id])
 
             def default_fallback_device_id() -> int:
                 if device_budgets is None:
@@ -3299,6 +3301,7 @@ def ModelLoader(cls):
                         device_map.setdefault(owner, device_strs[fallback_device])
                     else:
                         log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
+            device_map = co_locate_shared_module_aliases(model, device_map)
             # optional logging for debug
             log.info(f"Loader: Built map across {num_gpus} GPU(s), "
                   f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
