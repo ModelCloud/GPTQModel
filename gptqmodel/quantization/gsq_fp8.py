@@ -122,7 +122,17 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, he
         if (hessian.shape != (weight.shape[1], weight.shape[1]) or not hessian.is_floating_point()
                 or hessian.device != weight.device or not torch.isfinite(hessian).all()):
             raise ValueError('FP8 GSQ Hessian must be finite floating [in,in] on the weight device')
-        if not torch.allclose(hessian, hessian.T, rtol=1e-5, atol=1e-7):
+        # ``X.T @ X`` is symmetric mathematically, but a GEMM reduces the two
+        # triangles in different orders. rocBLAS/hipBLASLt leave normal fp32
+        # rounding asymmetry (~2e-7 relative to max|H| on gfx1201), so the old
+        # absolute ``atol=1e-7`` rejected valid Grams. Compare the skew to the
+        # matrix magnitude instead: 1e-5 * max|H| is ~84 fp32 eps, well above
+        # reduction-order noise and far below a genuinely asymmetric matrix.
+        # The consumer ``_metric_factor`` already symmetrises with
+        # ``0.5 * (H + H.T)``, so this check only guards grossly broken input.
+        scale = float(hessian.detach().abs().max())
+        skew = float((hessian - hessian.T).detach().abs().max())
+        if skew > 1e-5 * scale:
             raise ValueError('FP8 GSQ Hessian must be symmetric')
     count = min(config.candidates, 256)
     bytes_per_row = count * weight.shape[1] * 4

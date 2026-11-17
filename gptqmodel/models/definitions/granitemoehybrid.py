@@ -26,10 +26,37 @@ class GraniteMoeHybridQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "mamba": ("in_proj:0", "out_proj:1"),
+            # The Mamba mixer owns checkpoint state the generic Llama tree does
+            # not name: `dt_bias`, `A_log` and `D` are parameters of the
+            # container itself, while `conv1d` and the gated output `norm` are
+            # modules. None of them is a quantized projection, so they are
+            # declared dense and stay in the checkpoint dtype.
+            "mamba:!": (
+                # `in_proj` feeds a split (gate, conv input, dt) that the
+                # convolution and the SSM scan consume non-linearly. Dividing
+                # its output channels for `out_proj` is not a homogenous linear
+                # fold: on a tiny model it changed the logits by 1.6e-1. Mark
+                # it a target only, so `out_proj` folds the gated output norm
+                # instead, which is exact (1.6e-7).
+                "in_proj:0:nosrc",
+                "out_proj:1",
+                "conv1d:!",
+                "norm:!",
+            ),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            # The post-attention norm feeds three consumers: the router, the
+            # routed experts and `shared_mlp`. The current replay boundary is
+            # the MoE block, which does not contain `shared_mlp`, so a fold
+            # that scales gate/up and the router still changes the shared
+            # branch (measured 1.5e-2 relative logit drift on a tiny model).
+            # Disable the fold instead of emitting an unscoreable group; every
+            # projection still quantizes plainly.
+            "post_attention_layernorm": ("post_attention_layernorm:!:nosrc",),
             "block_sparse_moe:moe:?": {
+                # The top-k router owns a 2-D checkpoint weight on the MoE
+                # block input. Declare it so the plan covers that weight; it
+                # stays in the source dtype.
+                "router:!": (),
                 # Defuser expands each packed parallel projection into
                 # `<projection>.<expert>.gate_proj/up_proj/down_proj` modules.
                 "experts": {

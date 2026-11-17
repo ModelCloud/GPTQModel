@@ -209,6 +209,78 @@ def test_patched_autotuner_lazily_initializes_concurrent_first_lookup(monkeypatc
     assert autotuner._cache_futures == {}
 
 
+def test_patched_autotuner_pruning_exception_resolves_future(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
+
+    class _FakeConfig:
+        pre_hook = None
+
+        def all_kwargs(self):
+            return {"BLOCK_SIZE": 16}
+
+    config = _FakeConfig()
+
+    class _FakeAutotuner:
+        def __init__(self):
+            self.cache = {}
+            self.cache_results = False
+            self.nargs = {}
+            self.fail_pruning = True
+            self.published_futures = []
+
+        def prune_configs(self, _kwargs):
+            self.published_futures.append(self._cache_futures["key"])
+            if self.fail_pruning:
+                raise ValueError("pruner rejected input")
+            return [config]
+
+        def _bench(self, *args, config, **kwargs):
+            return 1.0
+
+        def pre_hook(self, _nargs, reset_only):
+            assert reset_only is True
+
+    autotuner = _FakeAutotuner()
+
+    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
+    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
+    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
+
+    nogil_patcher.patch_triton_autotuner()
+
+    with pytest.raises(ValueError, match="pruner rejected input") as exc_info:
+        autotuner._get_config_for_key("key", (), {})
+
+    failed_future = autotuner.published_futures[0]
+
+    # The failure must not leave the key's future pending: a same-key retry
+    # has to run rather than park on an Event that no one will set.
+    autotuner.fail_pruning = False
+    completed = threading.Event()
+    results = []
+
+    def retry():
+        try:
+            results.append(autotuner._get_config_for_key("key", (), {}))
+        finally:
+            completed.set()
+
+    thread = threading.Thread(target=retry, daemon=True)
+    thread.start()
+    if not completed.wait(1.0):
+        failed_future.event.set()
+        thread.join(1.0)
+        pytest.fail("same-key retry blocked after a pruning exception")
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert results[0][0] is config
+    assert results[0][1] is False
+    assert failed_future.event.is_set()
+    assert failed_future.error is exc_info.value
+    assert autotuner._cache_futures == {}
+
+
 def test_package_init_uses_triton_patch_api():
     init_py = Path(__file__).resolve().parents[1] / "gptqmodel" / "__init__.py"
     tree = ast.parse(init_py.read_text(encoding="utf-8"))

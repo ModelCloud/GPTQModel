@@ -115,6 +115,12 @@ modeling file subclasses the checkpoint's own causal-LM class; a fixed Llama
 base class only works for Llama. The class comes from the live model, with the
 declared `model_type` as the fallback for wrappers and subclasses.
 
+The quantization config records the shipped modeling file. The HF
+refusing-quantizer guard, which stops silent random-init loads of packed
+formats that transformers cannot read, therefore lets this documented
+`auto_map` path through. A `tt-blockfloat` config with no shipped loader still
+fails closed.
+
 ```mermaid
 flowchart TD
     A["save_blockfloat_model(model)"] --> B{"type(model).__module__<br/>starts with transformers.?"}
@@ -160,6 +166,85 @@ flowchart LR
 
 A checkpoint whose architecture cannot be resolved fails at save time instead
 of writing an entry point that only loads Llama.
+
+## Native block-float checkpoint payload (`save_blockfloat_checkpoint`)
+
+`save_blockfloat_checkpoint()` writes the decoder blocks of a model into a
+single payload (`blockfloat.safetensors`) plus a sidecar manifest
+(`blockfloat.json`). It is the checkpoint format read by
+`read_blockfloat_checkpoint()`, `expand_native_layer()`,
+`load_native_checkpoint_into_dense_model()` and `load_blockfloat_into_model()`.
+It is not the HF-style directory written by `save_blockfloat_model()`, which
+publishes every tensor as sharded safetensors and has no sidecar manifest.
+
+A decoder tensor is only storable as codes when it is exactly on the block-float
+grid; `decompose_blockfloat()` raises `ValueError` otherwise. The writer catches
+that error and stores `<layer>.weight` (and its bias) as dense floats at the
+module's own dtype, so an off-grid layer is preserved rather than narrowed.
+
+The manifest used to list only the encoded layers. A dense fallback therefore
+had no entry: `read_blockfloat_checkpoint()` never returned it and
+`load_native_checkpoint_into_dense_model()` treated the missing entry as "no
+work to do". The load succeeded and left exactly those fallback layers at their
+initial values -- the weights the save path had just written.
+
+The manifest now lists both kinds of decoder layer, and the reader dispatches on
+the recorded `kind`:
+
+```mermaid
+flowchart TD
+    A["save_blockfloat_checkpoint: block.named_modules()"] --> B{"module.weight is 2D?"}
+    B -- no --> Z["skipped: not a decoder linear"]
+    B -- yes --> C{"decompose_blockfloat succeeds?"}
+    C -- yes --> D["codes + exponents + code_shape"]
+    D --> E["manifest entry kind=blockfloat<br/>bits, shape, numel, has_bias"]
+    C -- no --> F["dense src-dtype weight<br/>kind=dense, source dtype"]
+    F --> G["manifest entry kind=dense<br/>shape, dtype, has_bias"]
+    E --> H{"module.bias is a tensor?"}
+    G --> I{"module.bias is a tensor?"}
+    H -- yes --> J["payload .bias at source dtype<br/>manifest bias_dtype"]
+    I -- yes --> J
+    H -- no --> K["no .bias tensor"]
+    I -- no --> K
+    J --> L["blockfloat.safetensors<br/>format/version/bits/block"]
+    K --> L
+    L --> M["blockfloat.json<br/>layers: kind per layer"]
+    M --> N["read_blockfloat_checkpoint<br/>dispatch on kind"]
+    N --> O{"kind"}
+    O -- blockfloat --> P["entry codes/exponents/bits"]
+    O -- dense --> Q["entry weight/dtype"]
+    P --> R["expand_native_layer: recompose"]
+    Q --> S["expand_native_layer: return weight"]
+    R --> T["load_native_checkpoint_into_dense_model:<br/>copy weight + bias"]
+    S --> T
+    T --> U{"every manifest layer matched?"}
+    U -- no --> V["ValueError: no target module"]:::fail
+    U -- yes --> W["restored map"]
+
+    classDef fail fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+```
+
+| Old mechanism | New mechanism | Evidence (before) |
+| --- | --- | --- |
+| dense fallback wrote `<layer>.weight` and `continue`d without a manifest entry | manifest entry `kind="dense"` with source dtype, shape and bias record | `gptqmodel/utils/tt_blockfloat_quant.py:1304-1307` (pre-change) |
+| `read_blockfloat_checkpoint` iterated only manifest layers and skipped missing codes | reader returns dense entries too; a declared layer with missing tensors raises | `gptqmodel/utils/tt_blockfloat_quant.py:1427-1434` (pre-change) |
+| loader `continue`d on any layer with no entry | loader expands either kind and raises when a manifest layer has no target module | `gptqmodel/utils/tt_blockfloat_quant.py:1473-1475` (pre-change) |
+
+A `dense` entry stores the tensor at the dtype the module had, and records that
+dtype in the manifest. A `blockfloat` entry keeps its packed codes and stores
+its bias unmodified, because a bias is dense state rather than part of the grid.
+Every manifest entry also records `has_bias` and, when present, `bias_dtype`, so
+a reader knows which tensors the payload must contain.
+
+Existing version-1 checkpoints keep loading: a manifest entry without a `kind`
+is treated as `blockfloat`, and an absent `bits` falls back to the global width.
+The dense tensors a version-1 writer emitted were never attributed to a layer,
+so they cannot be recovered from the file; re-saving such a checkpoint from a
+model that still holds them writes a version-2 manifest that lists them.
+`BLOCKFLOAT_SAVE_FORMAT_VERSION` is `2`.
+
+The native checkpoint still covers decoder blocks only. Embeddings, norms and
+the lm-head are `save_blockfloat_model()`'s job, not this writer's.
 
 ## Block-float kernel dispatch
 
@@ -868,9 +953,52 @@ R9700: 207-208 us and 262 us against 185 us at the time.
 Any `in_features` that is a multiple of 16 is supported, including one that is
 not a multiple of the tile width: the last tile of such a `k` stages a partial
 span, and the kernel zero-fills past `k` instead of dropping the span. The
-quantiser likewise takes its base exponent candidate unconditionally, so a block
-whose squared error overflows -- inputs near `FLT_MAX` -- still produces the
-reference codes rather than zeros.
+quantiser's exponent search is scale invariant: it scores the base exponent and
+both neighbours on the block normalised by `2**base`, so a block whose raw
+squared error would overflow (near `FLT_MAX`) or underflow (a tiny block) still
+picks the closest exponent instead of keeping the binade index by default. The
+base exponent comes from the exact exponent field, and every candidate outside
+the storable `[-127, 127]` range is rejected before its error is compared, so no
+`2**128` scale can enter the search.
+
+### Shared exponent derivation and its range
+
+A block's shared exponent is the binade index of its largest magnitude, which
+must be read exactly. `log2`/`log2f`/`torch.log2` round to nearest, so they
+report `128` for `FLT_MAX` (one ulp below `2**128`) and `k` for a value one ulp
+below `2**k`; `floor` then yields an unusable exponent. Every implementation
+decodes the IEEE-754 exponent field instead (`frexp` in the Torch reference),
+which cannot round.
+
+```mermaid
+flowchart TD
+    A["block values"] --> B["magnitude = max(abs(block))"]
+    B --> C{"all finite?"}
+    C -- no --> R["ValueError: block-float storage<br/>cannot represent NaN or infinity"]
+    C -- yes --> D["safe = max(magnitude, FLT_MIN)<br/>(zero block keeps binade -126)"]
+    D --> E["base = exponent field - 127<br/>exact binade index"]
+    E --> F["candidates base, base-1, base+1"]
+    F --> G{"candidate exponent in<br/>-127 .. 127?"}
+    G -- no --> H["reject candidate<br/>(no representable 2**e)"]
+    G -- yes --> I["round onto the grid,<br/>compute squared error"]
+    I --> J{"error strictly lower?"}
+    J -- yes --> K["adopt candidate"]
+    J -- no --> L["keep earlier winner"]
+    H --> M["best = base candidate"]
+    K --> M
+    L --> M
+    M --> N["codes + int8 exponent"]
+    style R fill:#ffe0e0,stroke:#b00020
+    style H fill:#ffe0e0,stroke:#b00020
+```
+
+The storable range is `[-127, 127]`: the field stores `e + 127`, so `+128` is the
+all-ones pattern and `2**128` overflows, while `-128` has no normal scale. A
+candidate outside that range is rejected *before* its error is compared, so a
+NaN from `0 * inf` can never poison the per-block search. The base candidate is
+adopted before any comparison so that the winner and its codes are always
+initialised; the neighbours then have to beat it strictly, which keeps the tie
+order `base`, `base - 1`, `base + 1`.
 
 `bfloat2_b` is the third block-float width the Tensix packer understands
 (`DataFormat::Bfp2_b` in the Blackhole LLK, and Block FP2 appears among the

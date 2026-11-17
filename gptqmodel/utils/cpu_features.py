@@ -72,6 +72,11 @@ def _set_cpu_bf16x3_precision(value: str) -> None:
     torch.backends.mkldnn.matmul.fp32_precision = value
 
 
+_CPU_BF16X3_LOCK = threading.RLock()
+_CPU_BF16X3_DEPTH = 0
+_CPU_BF16X3_RESTORE = None
+
+
 @lru_cache(maxsize=1)
 def has_cpu_bf16x3_precision() -> bool:
     """Return whether oneDNN accepts the BF16x3 FP32 matmul precision.
@@ -79,34 +84,43 @@ def has_cpu_bf16x3_precision() -> bool:
     Capability only: the environment-variable gates stay in each caller's
     predicate (``has_cpu_bf16x3_matmul`` here and ``_cpu_bf16x3_support`` in the
     EXL3 torch kernel), so both entry points probe oneDNN the same way.
+
+    The probe mutates the process-global precision, so it takes the same owner
+    lock as :func:`cpu_bf16x3_scope`. Without that lock a concurrent probe can
+    snapshot IEEE, race a scope entry, and then restore its stale snapshot over
+    the active scope (issue #4486). When a scope is already active the owner
+    has proven BF16x3 is accepted, so there is nothing to probe.
     """
 
     if not torch.backends.mkldnn.is_available():
         return False
 
-    try:
-        previous = _cpu_bf16x3_precision()
-        _set_cpu_bf16x3_precision("bf16")
-        _set_cpu_bf16x3_precision(previous)
-    except (AttributeError, RuntimeError, ValueError):
-        return False
-    return True
+    with _CPU_BF16X3_LOCK:
+        if _CPU_BF16X3_DEPTH > 0:
+            return True
+        try:
+            previous = _cpu_bf16x3_precision()
+            _set_cpu_bf16x3_precision("bf16")
+            _set_cpu_bf16x3_precision(previous)
+        except (AttributeError, RuntimeError, ValueError):
+            return False
+        return True
 
 
-@lru_cache(maxsize=1)
 def has_cpu_bf16x3_matmul() -> bool:
-    """Return whether this process may run FP32 matmul as BF16x3."""
+    """Return whether this process may run FP32 matmul as BF16x3.
+
+    The policy is deliberately *not* cached: callers may install a different
+    ``KernelConfig`` between runs and expect the next matmul to observe it.
+    Only the host capability probes (``has_avx512_bf16`` and
+    ``has_cpu_bf16x3_precision``) are process constants and stay cached.
+    """
 
     if not get_kernel_config().cpu_bf16x3_matmul:
         return False
     if not has_avx512_bf16():
         return False
     return has_cpu_bf16x3_precision()
-
-
-_CPU_BF16X3_LOCK = threading.RLock()
-_CPU_BF16X3_DEPTH = 0
-_CPU_BF16X3_RESTORE = None
 
 
 @contextmanager

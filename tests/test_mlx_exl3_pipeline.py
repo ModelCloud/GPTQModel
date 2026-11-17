@@ -5,7 +5,6 @@
 
 import gc
 import sys
-import threading
 
 import numpy as np
 import pytest
@@ -33,7 +32,6 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.looper import exllamav3_processor as processor_module  # noqa: E402
 from gptqmodel.looper.exllamav3_processor import EXL3Processor  # noqa: E402
 from gptqmodel.looper.named_module import NamedModule  # noqa: E402
 from gptqmodel.quantization.config import EXL3Config  # noqa: E402
@@ -368,7 +366,17 @@ def test_exl3_pipeline_qwen38_projection_oracle(
         err_msg=f"{name} {dtype} reconstructed weight",
     )
     assert _normalized_drift(actual_weight, expected[0]) <= 1e-6
-    assert float(actual[1].item()) == expected[1] == 0.0
+    # A zero Hessian selects EXL3's fallback quantizer, whose proxy error is
+    # the normalized reconstruction error, not zero: compare it to the oracle.
+    assert expected[5] is True
+    assert bool(actual[5]) is True
+    np.testing.assert_allclose(
+        float(actual[1].item()),
+        expected[1],
+        rtol=1e-5,
+        atol=0.0,
+        err_msg=f"{name} {dtype} proxy error",
+    )
 
     del source_tensor, source, hessian, input_signs, output_signs
     del expected, actual, actual_weight
@@ -399,77 +407,16 @@ def test_exl3_pipeline_rejects_invalid_inputs():
         )
 
 
-def test_exl3_processor_routes_cpu_quantization_through_mlx(monkeypatch):
-    linear = torch.nn.Linear(128, 128, bias=False)
-    named = NamedModule(linear, "proj", "layers.0.proj", 0)
+def test_exl3_processor_rejects_cpu_quantization():
+    """EXL3 quantization is CUDA/HIP-only in the shipped processor contract.
 
-    class Capture:
-        nsamples = 8
-        H = torch.eye(128, dtype=torch.float32)
-        freed = False
-
-        def finalize_hessian(self, target_device=None):
-            self.H = self.H.to(target_device)
-            return self.H
-
-        def clone_module(self, copy=True, device=None):
-            return linear.weight.detach().to(device=device, copy=copy).float()
-
-        def free(self):
-            self.freed = True
-
-    capture = Capture()
-    config = EXL3Config(bits=4, codebook="mcg")
+    #3601 removed the CPU/Metal MLX branch from `EXL3Processor.process` (and
+    `models/base.py` already rejects EXL3 quantization without CUDA), so a CPU
+    target always raises. The MLX EXL3 quantization pipeline is still covered
+    directly by the oracle tests in this module.
+    """
     processor = object.__new__(EXL3Processor)
-    processor.tasks = {named.name: {"capture": capture, "qcfg": config}}
-    processor.qcfg = config
-    processor.lm_head_name = "lm_head"
-    processor.avg_losses = []
-    processor.durations = []
-    processor.module_names = []
-    processor.log = []
-    processor._stats_lock = threading.Lock()
-    processor.draw_progress = lambda *args, **kwargs: None
-    processor.module_feature_summary = lambda module: ""
-    processor.module_dtype_size_summary = lambda module: ""
-    processor.formatted_fwd_time = lambda: "0.000"
-    processor.device_memory_report = lambda: ""
-    processor.log_new_row = lambda stat: None
-
-    calls = []
-
-    def fake_quantize(weight, hessian, **kwargs):
-        calls.append((weight.clone(), hessian.clone(), kwargs))
-        tensors = {
-            "trellis": torch.zeros((8, 8, 64), dtype=torch.int16),
-            "suh": torch.ones(128, dtype=torch.float16),
-            "svh": torch.ones(128, dtype=torch.float16),
-            "mcg": torch.tensor(-878_191_635, dtype=torch.int32),
-        }
-        return weight + 0.25, 0.125, tensors
-
-    monkeypatch.setattr(
-        processor_module, "exl3_mlx_quantization_available", lambda: True
-    )
-    monkeypatch.setattr(
-        processor_module, "exl3_quantize_weight_mlx_to_torch", fake_quantize
-    )
-    processor.process(named, device=torch.device("cpu"))
-
-    assert len(calls) == 1
-    assert calls[0][0].shape == (128, 128)
-    assert calls[0][2]["bits"] == 4
-    assert calls[0][2]["codebook"] == "mcg"
-    assert capture.freed
-    assert {"trellis", "suh", "svh", "mcg"} <= named.state.keys()
-    torch.testing.assert_close(
-        named.weight,
-        calls[0][0].T.to(named.weight.dtype) + 0.25,
-    )
-
-
-def test_exl3_processor_rejects_cpu_without_mlx(monkeypatch):
-    processor = object.__new__(EXL3Processor)
+    processor.qcfg = EXL3Config(bits=4)
     processor.tasks = {
         "proj": {
             "capture": object(),
@@ -482,9 +429,6 @@ def test_exl3_processor_rejects_cpu_without_mlx(monkeypatch):
         "proj",
         "layers.0.proj",
         0,
-    )
-    monkeypatch.setattr(
-        processor_module, "exl3_mlx_quantization_available", lambda: False
     )
     with pytest.raises(ValueError, match="requires CUDA/HIP"):
         processor.process(module, device=torch.device("cpu"))

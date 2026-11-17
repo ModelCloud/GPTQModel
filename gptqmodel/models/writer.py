@@ -23,7 +23,7 @@ from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS
+from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
@@ -71,6 +71,7 @@ from ..utils.model import (
     OffloadTensorRef,
     TensorSource,
     _atomic_shard_path,
+    _checkpoint_tensor_keys,
     _validate_offload_sources_outside_save_dir,
     convert_loaded_qzeros_for_format_change,
     copy_py_files,
@@ -103,6 +104,62 @@ PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
+
+
+_QUANTIZED_TENSOR_SUFFIXES = (
+    "qweight",
+    "qzeros",
+    "scales",
+    "g_idx",
+    "qscale",
+    "qzero",
+    "weight_scale_inv",
+    "weight_scale",
+    "weight_bias",
+    "weight_scb",
+    "suh",
+    "svh",
+    "s_group",
+    "s_channel",
+    "theta",
+    "channel_scales",
+    "BH",
+    "pre_scale",
+)
+
+
+def _validate_export_shell_quantized_slots(model, checkpoint):
+    """Fail closed when the export shell has no slot for checkpoint quant tensors.
+
+    The shell is rebuilt from config and filled from the checkpoint. A
+    quantized checkpoint tensor without a destination module means the
+    shell's module tree does not match the checkpoint (the fused-expert MoE
+    case before #4589). Accelerate would ignore it and ``save()`` would
+    publish a checkpoint missing that payload, so raise instead of writing.
+    """
+
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        return
+
+    shell_keys = set(model.state_dict().keys())
+    dropped = sorted(
+        key
+        for key in checkpoint_keys
+        if key.rsplit(".", 1)[-1] in _QUANTIZED_TENSOR_SUFFIXES
+        and key not in shell_keys
+    )
+    if not dropped:
+        return
+
+    examples = ", ".join(dropped[:8])
+    raise ValueError(
+        "Refusing to re-save a quantized checkpoint whose export shell has no "
+        f"module for {len(dropped)} quantized tensor(s): {examples}. "
+        "The rebuilt module tree does not match the checkpoint (for fused-expert "
+        "MoE this means the expert shell was not defused). Saving would silently "
+        "drop those tensors and write an unusable checkpoint."
+    )
 
 
 def _convert_checkpoint_state_dict_keys(state_dict: Dict[str, Any], key_converter) -> Dict[str, Any]:
@@ -272,7 +329,7 @@ def hf_compat_warnings(
             "`.gguf` file. This checkpoint publishes "
             f"`quant_method: \"{GGUF_EXPORT_QUANT_METHOD}\"` so an HF loader "
             "refuses it instead of random-initializing every linear layer. Load "
-            "it with `GPTQModel.load` or vLLM."
+            "it with `GPTQModel.load`."
         )
     method = getattr(quantize_config, "method", None)
     method_name = getattr(method, "value", method)
@@ -283,18 +340,18 @@ def hf_compat_warnings(
             "only warns `Unknown quantization type` and then random-initializes "
             "every linear layer. Importing `gptqmodel` installs a refusing "
             "quantizer, so plain HF raises instead. Load this checkpoint with "
-            "`GPTQModel.load` or vLLM."
+            f"{refused_hf_load_remedy(method_name)}."
         )
     if _has_per_expert_quantized_modules(model):
         warnings.append(
             "This checkpoint stores per-expert quantized weights "
             "(`experts.<n>.*.qweight`). Transformers 5 builds fused 3-D expert "
-            "tensors and Optimum's GPTQ loader only replaces `nn.Linear`, so "
-            "`AutoModelForCausalLM.from_pretrained` reports every expert tensor "
+            "tensors and its built-in GPTQ/AWQ loaders only replace `nn.Linear`, "
+            "so a loader without the native bridge reports every expert tensor "
             "as MISSING/UNEXPECTED and silently random-initializes the experts "
-            "(garbage output, no error). Load this checkpoint with "
-            "`GPTQModel.load`, or import `gptqmodel` before Transformers so its "
-            "native loading bridge is installed."
+            "(garbage output, no error). Import `gptqmodel` before Transformers "
+            "to install the native loading bridge for both methods, or load this "
+            "checkpoint with `GPTQModel.load`."
         )
     return warnings
 
@@ -2219,6 +2276,11 @@ def ModelWriter(cls):
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
+            live_generation_config = getattr(self.model, "generation_config", None)
+            if live_generation_config is not None:
+                # The save-time shell derives its generation config from the
+                # model config. Preserve the live checkpoint settings instead.
+                model_for_save.generation_config = copy.deepcopy(live_generation_config)
 
         # --- start config save block ---
         # Keep the Transformers config small. EXL3's per-tensor storage map can
@@ -2534,6 +2596,24 @@ def ModelWriter(cls):
                 config, dtype=model_dtype
             )
 
+            # Re-saving a loaded quantized MoE must rebuild the same per-expert
+            # module tree the loader builds. ``from_config`` produces the fused
+            # 3-D expert parameters (OLMoE, PhiMoE, ...), and ``make_quant`` can
+            # only replace ``nn.Linear``, so without defusing here the
+            # checkpoint's per-expert quantized tensors have no destination and
+            # ``save()`` writes the fused zero shell (issue #4589). Mirror the
+            # load path: park the fused tensors on meta, let Defuser build the
+            # per-expert linears, then give those shells empty host storage.
+            from .loader import (
+                _convert_model_with_defuser,
+                _materialize_meta_expert_linears,
+                _meta_fused_expert_params,
+            )
+
+            _meta_fused_expert_params(model)
+            _convert_model_with_defuser(type(self), model, cleanup_original=True)
+            _materialize_meta_expert_linears(model)
+
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
             external_inclusions = qcfg.external_module_inclusions()
@@ -2653,6 +2733,12 @@ def ModelWriter(cls):
                 # lossy (issue #4303).
                 dtype=None,
                 checkpoint=self.checkpoint_file_name,
+                # The shell allocates non-quantized buffers (for example a
+                # quantized module's bias) in the model dtype. When a legacy
+                # checkpoint stores one at another dtype, restore the
+                # checkpoint value instead of republishing the narrowed shell
+                # slot (issue #4379).
+                restore_checkpoint_buffer_dtypes=True,
                 # Load each tensor exactly once. With ``device_map=None``
                 # accelerate 1.15 calls ``set_model_state_dict`` once per
                 # checkpoint file, so the whole module ``load_state_dict``
@@ -2661,6 +2747,9 @@ def ModelWriter(cls):
                 device_map={"": "cpu"},
                 # offload_state_dict=True,
                 # offload_buffers=True,
+            )
+            _validate_export_shell_quantized_slots(
+                model, self.checkpoint_file_name,
             )
             resave_conversion = resolve_resave_format_conversion(qcfg)
             if resave_conversion is not None:

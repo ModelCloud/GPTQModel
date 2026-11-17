@@ -21,7 +21,9 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -116,6 +118,13 @@ class TorchAtenLinear(PackableQuantLinear):
 
     gemm_int4_forward_kernel = None
     _fused_op_handles_bias = False
+
+    # ``transform_cpu`` keeps ``scales`` in the checkpoint dtype and layout, so
+    # only the rewritten qweight/qzeros need a checkpoint snapshot.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros")
+    # The ATen CPU int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "gptq"
 
     @classmethod
     def _validate(
@@ -318,6 +327,11 @@ class TorchAtenLinear(PackableQuantLinear):
         self.scales_and_zeros = pack_scales_and_zeros(
             scales.to(dtype), qzeros.to(dtype)
         )
+        # ``qzeros`` is byte-identical to the packed metadata's zero column.
+        # Keep it as a view instead of a second allocation, then key the cache
+        # on the view that is actually installed.
+        if bind_runtime_qzeros(self):
+            key = (tensor_cache_key(scales), tensor_cache_key(self.qzeros))
         self._fused_state_key = key
 
     def _build_ret_idx(self) -> torch.Tensor:
@@ -417,8 +431,12 @@ class TorchAtenLinear(PackableQuantLinear):
 
         self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, compute_scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":
@@ -429,28 +447,29 @@ class TorchAtenLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and self._cpu_fused_available()
-            and x.device.type == "cpu"
-            and self._fused_input_dtype(x)
-            # The fused kernel writes the activation dtype before a separate
-            # bias add unless ``_fused_op_forward`` asks for an FP32 product.
-            # Biased FP16 layers take that path so the pre-bias sum cannot
-            # overflow before the bias cancels it.
-            and (
-                self.bias is None
-                or self._fused_op_handles_bias
-                or x.dtype in (torch.bfloat16, torch.float16)
-            )
-        ):
-            capture_fused_train_state(self)
-            self.transform(x.device.type, dtype=x.dtype)
-            self.linear_mode = "inference"
-        elif self.linear_mode is None:
-            self.linear_mode = "train"
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x.requires_grad
+                and self.linear_mode is None
+                and self._cpu_fused_available()
+                and x.device.type == "cpu"
+                and self._fused_input_dtype(x)
+                # The fused kernel writes the activation dtype before a
+                # separate bias add unless ``_fused_op_forward`` asks for an
+                # FP32 product. Biased FP16 layers take that path so the
+                # pre-bias sum cannot overflow before the bias cancels it.
+                and (
+                    self.bias is None
+                    or self._fused_op_handles_bias
+                    or x.dtype in (torch.bfloat16, torch.float16)
+                )
+            ):
+                capture_fused_train_state(self)
+                self.transform(x.device.type, dtype=x.dtype)
+                self.linear_mode = "inference"
+            elif self.linear_mode is None:
+                self.linear_mode = "train"
 
         # A fused op or a dense matmul both write the activation dtype before a
         # separate bias add. Keep the biased product in FP32 instead so a
@@ -529,19 +548,23 @@ def dequantize_model(model: PreTrainedModel, dtype: Optional[torch.dtype] = None
         if isinstance(module, TorchAtenLinear):
             if target_dtype is None:
                 target_dtype = resolve_dequantize_dtype(model, module, dtype)
+            # Keep the quantized module's device; the shell is built on meta
+            # because both parameters are replaced below.
+            device = module.qweight.device
             new_module = nn.Linear(
                 module.in_features,
                 module.out_features,
                 bias=module.bias is not None,
+                device="meta",
             )
             new_module.weight = nn.Parameter(
-                module.dequantize_weight().T.detach().to("cpu", target_dtype)
+                module.dequantize_weight().T.detach().to(device, target_dtype)
             )
             # ``nn.Parameter(None)`` is a shape-[0] tensor, not an absent
             # bias. Every bias-less layer (all of Llama, for example) then
             # failed in forward.
             new_module.bias = (
-                nn.Parameter(module.bias.detach().to("cpu", target_dtype))
+                nn.Parameter(module.bias.detach().to(device, target_dtype))
                 if module.bias is not None
                 else None
             )

@@ -6,8 +6,9 @@
 import copy
 import math
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch as t  # conflict with torch.py
@@ -33,11 +34,103 @@ from ...utils.planar_packing import (
 )
 from ...utils.safe import threadpool_limits
 from ..compiled_state import compiled_module_getstate
-from ._fused_train_state import QZEROS_FORMAT_BUFFER
+from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+
+def new_validation_error(error_type, message):
+    """Rebuild a validation error from cached ``(type, message)`` metadata.
+
+    Validation caches must not hold exception objects: a raised exception's
+    ``__traceback__``, ``__cause__`` and ``__context__`` keep the frames that
+    were live at the failure, and through ``f_back`` every caller frame,
+    including a model being loaded. Each caller gets a fresh exception instead.
+    """
+
+    if error_type is None:
+        return None
+    try:
+        return error_type(message)
+    except Exception:
+        return ValueError(message)
+
+
+def _cache_validation_status(validate_once):
+    """``lru_cache`` a ``validate_once`` result as immutable status metadata.
+
+    The cache stores ``(ok, error_type, message)`` and each call returns a new
+    exception, so a failed probe never pins the frames it failed in and a
+    caller that raises the returned error cannot attach a traceback to the
+    cached entry. ``cache_clear`` and ``cache_info`` stay on the wrapper.
+    """
+
+    @lru_cache(maxsize=1024)
+    def status(cls):
+        ok, error = validate_once(cls)
+        if not ok and error is not None:
+            message = str(error)
+            error_type = type(error) if isinstance(error, BaseException) else ValueError
+            return False, error_type, message
+        return True, None, None
+
+    @wraps(validate_once)
+    def cached(cls):
+        ok, error_type, message = status(cls)
+        return ok, new_validation_error(error_type, message)
+
+    cached.cache_clear = status.cache_clear
+    cached.cache_info = status.cache_info
+    return cached
+
+
+#: Element budget for one ``pack_gpu`` input block. The packer keeps several
+#: ``[out_features, block_in]`` tensors live (fp32 rounding, int32 transpose,
+#: int64 shifts), about 32 bytes per element, so a whole-matrix block peaks at
+#: ~15x the fp16 weight. Capping the block keeps the transient bounded without
+#: changing the packed output: blocks only partition the input axis into
+#: disjoint output rows.
+PACK_GPU_MAX_BLOCK_ELEMS = 4 << 20
+
+
+#: Element budget for one ``pack_block`` input block. The CPU packer keeps the
+#: fp32 block, its int32 codes, and the int64 pack view live at once, so a
+#: whole-matrix block on a 4096x4096 layer peaks at several times the weight.
+#: The block only partitions the input axis, so capping it bounds the transient
+#: without changing the packed words.
+PACK_BLOCK_MAX_BLOCK_ELEMS = 1 << 20
+
+
+def _pack_block_block_in(out_features: int, block_in: int, word_bits: int) -> int:
+    """Cap ``pack_block``'s input block by :data:`PACK_BLOCK_MAX_BLOCK_ELEMS`.
+
+    Rounded down to a whole packing word so every block ends on a word
+    boundary, and never below one word.
+    """
+
+    max_block_in = (
+        PACK_BLOCK_MAX_BLOCK_ELEMS // max(out_features, 1) // word_bits * word_bits
+    )
+    block_in = min(block_in, max_block_in)
+    return max(word_bits, (block_in // word_bits) * word_bits)
+
+
+def _pack_gpu_block_in(out_features: int, block_in: int, word_bits: int) -> int:
+    """Cap ``pack_gpu``'s input block by :data:`PACK_GPU_MAX_BLOCK_ELEMS`.
+
+    The per-block transient is roughly ``out_features * block_in`` elements
+    times the number of live dtype views, so bounding the element count bounds
+    peak memory independently of the matrix width. Rounded down to a whole
+    packing word so every block ends on a word boundary.
+    """
+
+    max_block_in = (
+        PACK_GPU_MAX_BLOCK_ELEMS // max(out_features, 1) // word_bits * word_bits
+    )
+    block_in = min(block_in, max_block_in)
+    return max(word_bits, (block_in // word_bits) * word_bits)
 
 
 def _device_family(device: DEVICE | t.device | str):
@@ -166,42 +259,34 @@ def _pack_codes_to_words(
 
 
 @t.inference_mode()
-def _pack_block_rows_2_4_8(
-        block_32xN: t.Tensor,
-        dst: t.Tensor,
-        dst_rows_base: int,
-        bits: int,
-        pack_factor: int,
-        shifts: t.Tensor,
-):
-    """Pack one 32-input block into ``bits`` rows of ``dst`` (32-bit words)."""
-    dst[dst_rows_base:dst_rows_base + bits] = _pack_codes_to_words(
-        block_32xN, pack_factor, 32, shifts
-    )
+def _pack_rows_3(codes: t.Tensor) -> t.Tensor:
+    """Pack every 32-input group of ``codes`` with the 10 | 1 | 10 | 1 | 10 scheme.
 
-
-@t.inference_mode()
-def _pack_block_rows_3(block_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-    """Pack one 32-input block into 3 rows using the 10 | 1 | 10 | 1 | 10 scheme.
+    ``codes`` is ``[rows, N]`` with ``rows`` a multiple of 32; the result is
+    ``[rows // 32 * 3, N]``. One vectorized shift/reduce covers every 32-row
+    group instead of one small dispatch chain per group, and the result is
+    bit-identical to packing the groups one at a time.
 
     int32 arithmetic wraps exactly like the old uint32 path, so the shifts and
     sums below need no explicit 32-bit mask.
     """
-    x = block_32xN.to(t.int32)  # [32, N]
-    offsets = t.arange(10, dtype=t.int32).view(-1, 1) * 3
+    rows, cols = codes.shape
+    if rows % 32 != 0:
+        raise ValueError(f"3-bit packing expects 32-aligned rows, got shape {tuple(codes.shape)}")
+    groups = rows // 32
+    x = codes.to(t.int32).view(groups, 32, cols)
+    offsets = t.arange(10, dtype=t.int32).view(1, -1, 1) * 3
     # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th at bit 30
-    A = (x[0:10] << offsets).sum(dim=0, dtype=t.int32)
-    A = A | (x[10] << 30)
+    A = (x[:, 0:10] << offsets).sum(dim=1, dtype=t.int32)
+    A = A | (x[:, 10] << 30)
     # B: carry bit 2 of the 11th into bit 0, then 10 values at offsets {1,4,7,...,28}, then bit 31 from the 22nd
-    B = (x[10] >> 2) & 1
-    B = B | (x[11:21] << (offsets + 1)).sum(dim=0, dtype=t.int32)
-    B = B | (x[21] << 31)
+    B = (x[:, 10] >> 2) & 1
+    B = B | (x[:, 11:21] << (offsets + 1)).sum(dim=1, dtype=t.int32)
+    B = B | (x[:, 21] << 31)
     # C: carry bits 1..0 of the 22nd into bits 0..1, then 10 values at offsets {2,5,8,...,29}
-    C = (x[21] >> 1) & 0x3
-    C = C | (x[22:32] << (offsets + 2)).sum(dim=0, dtype=t.int32)
-    dst[dst_rows_base + 0] = A
-    dst[dst_rows_base + 1] = B
-    dst[dst_rows_base + 2] = C
+    C = (x[:, 21] >> 1) & 0x3
+    C = C | (x[:, 22:32] << (offsets + 2)).sum(dim=1, dtype=t.int32)
+    return t.stack((A, B, C), dim=1).reshape(groups * 3, cols)
 
 
 @t.inference_mode()
@@ -222,14 +307,22 @@ def _pack_code_cols_2_4_8(values: t.Tensor, bits: int, pack_factor: int) -> t.Te
 def _pack_code_cols_3(values: t.Tensor) -> t.Tensor:
     """Pack 3-bit codes stored along the last dimension (10 | 1 | 10 | 1 | 10)."""
     rows, count = values.shape
+    if count % 32 != 0:
+        raise ValueError(
+            f"3-bit packing expects a 32-aligned code count, got shape {tuple(values.shape)}"
+        )
     transposed = values.T.contiguous()  # [count, rows]: codes become the 32-row axis
-    packed = t.zeros((count // 32 * 3, rows), dtype=t.int32)
-    for block in range(count // 32):
-        _pack_block_rows_3(transposed[block * 32:(block + 1) * 32], packed, block * 3)
-    return packed.T.contiguous()
+    return _pack_rows_3(transposed).T.contiguous()
 
 
 class BaseQuantLinear(nn.Module):
+    # CPU int4pack kernels rewrite checkpoint buffers into their runtime layout
+    # on the first forward. Serialize that cold check-and-transform so a
+    # concurrent first forward cannot observe half-converted tensors or repack
+    # already-packed words (issue #4565). One process-wide lock is enough: the
+    # transform runs once per module and avoids per-instance lock pickling.
+    _cpu_transform_lock = threading.RLock()
+
     SUPPORTS_BACKENDS: List[BACKEND] = None
     # False for role-specific modules that are instantiated explicitly and
     # must never participate in general backend discovery.
@@ -264,6 +357,14 @@ class BaseQuantLinear(nn.Module):
 
     REQUIRES_FORMAT_V2: bool = False
     AUTOTUNE: bool = False
+
+    # Floating buffers whose dtype follows the model dtype at load time:
+    # activation-side operands the forward consumes at the activation dtype.
+    # Every other persistent floating buffer is quantization state (scales,
+    # zero points, codebook scales, sign vectors, ...) and loads at the dtype
+    # the checkpoint stores, because the kernel computes with that precision.
+    # See docs/checkpoint-and-runtime-contracts.md section 4.
+    MODEL_DTYPE_BUFFERS: Tuple[str, ...] = ("bias",)
 
     def __init__(self,
                  bits: int,
@@ -566,15 +667,9 @@ class BaseQuantLinear(nn.Module):
         return self._autotune_result
 
     @classmethod
-    @lru_cache(maxsize=1024)
+    @_cache_validation_status
     def cached_validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        ok, exp = cls.validate_once()
-
-        if not ok and exp is not None:
-            exp.with_traceback(None)
-            return False, exp
-
-        return True, None
+        return cls.validate_once()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -1136,6 +1231,60 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             for flag in ("_marlin_repacked", "_native_shuffled", "_awq_repacked")
         )
 
+    #: CPU int4pack family whose runtime words have a verified inverse:
+    #: ``"gptq"`` or ``"awq"``. ``None`` keeps a full checkpoint snapshot.
+    _FUSED_TRAIN_STATE_REBUILD = None
+
+    def _can_rebuild_checkpoint_qweight(self) -> bool:
+        """Whether the checkpoint ``qweight`` can be rebuilt on demand.
+
+        Only the ATen CPU int4pack permutation has an inverse. The AVX512
+        extension and the XPU packing use different layouts, so their
+        subclasses leave ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+
+        This is only a cheap pre-filter: the clone is dropped by
+        ``finalize_fused_train_state`` only after the rebuilt words match the
+        checkpoint bytes this module actually carried.
+        """
+
+        if self._FUSED_TRAIN_STATE_REBUILD is None:
+            return False
+        weight = getattr(self, "qweight", None)
+        if not isinstance(weight, t.Tensor) or weight.device.type != "cpu":
+            return False
+        if weight.dtype != t.int32:
+            # The rebuilt words are int32; any other checkpoint dtype keeps
+            # its snapshot.
+            return False
+        from ._cpu_int4pack_layout import int4pack_block_size
+
+        if int4pack_block_size() is None:
+            return False
+        identity = getattr(self, "_ret_idx_is_identity", None)
+        if (
+            self._FUSED_TRAIN_STATE_REBUILD == "gptq"
+            and callable(identity)
+            and not identity()
+        ):
+            # The fused transform reorders the input rows by ``ret_idx``; only
+            # the identity order leaves the packed words invertible here.
+            return False
+        return True
+
+    def _rebuild_checkpoint_qweight(self) -> t.Tensor:
+        """Rebuild the checkpoint ``qweight`` from the live runtime layout."""
+
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
+            )
+        from ._cpu_int4pack_layout import rebuild_awq_qweight, rebuild_gptq_qweight
+
+        if kind == "awq":
+            return rebuild_awq_qweight(self)
+        return rebuild_gptq_qweight(self)
+
     def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the checkpoint-layout tensors captured before a CPU transform.
 
@@ -1144,8 +1293,9 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         runtime operands are not a checkpoint: the integer v1/v2 conversion
         turns float offsets into `inf`/`65536`, and the int4pack `qweight` has a
         different shape. The snapshot taken by `capture_fused_train_state`
-        still holds the checkpoint tensors, so serialization emits those
-        instead of the transformed buffers.
+        holds the checkpoint tensors (or, for `qweight`, the verified inverse
+        rebuilt on demand), so serialization emits those instead of the
+        transformed buffers.
 
         A modified runtime layout has no inverse snapshot; exporting it must
         fail closed rather than write garbage.
@@ -1160,8 +1310,8 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 "that cannot be converted back to the checkpoint layout. Load "
                 "checkpoint-layout weights before saving."
             )
-        for name, buffer_name in snapshot.items():
-            tensor = self._buffers.get(buffer_name)
+        for name, entry in snapshot.items():
+            tensor = _materialize_snapshot_entry(self, entry)
             if isinstance(tensor, t.Tensor):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
@@ -1437,6 +1587,12 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         # GPTQ v1/v2 conversions only apply to GPTQ-style qzero storage.
         self._qzeros_format = 1
+        # The line above is only a placeholder: a fresh module owns no words in
+        # a known layout yet. ``qzero_format(format=...)`` records a resolved
+        # layout (packing, loading, an explicit conversion); the load hook must
+        # not mistake the placeholder for a layout that matches an incoming
+        # marker (issue #4377).
+        self._qzeros_format_established = False
 
         if register_buffers:
             self._register_gptq_buffers(
@@ -1547,6 +1703,27 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
         return getattr(self, "_qzeros_format", 1)
 
+    def _load_target_qzeros_format(self) -> int:
+        """Layout this module's kernel decodes once the load completes.
+
+        ``_qzeros_format`` starts as a constructor placeholder (v1) and only
+        records a real layout after :meth:`qzero_format` resolves it (packing,
+        loading, or an explicit conversion). A ``REQUIRES_FORMAT_V2`` kernel
+        decodes v2 even while that placeholder still says v1, so a copied v1
+        marker must be converted instead of being treated as an exact match
+        (issue #4377). An established v1 layout is left alone: the public
+        ``convert_gptq_v2_to_v1_format`` path deliberately holds v1 words.
+        """
+
+        runtime_format = self._runtime_qzeros_format()
+        if (
+            runtime_format == 1
+            and getattr(self, "REQUIRES_FORMAT_V2", False)
+            and not getattr(self, "_qzeros_format_established", False)
+        ):
+            return 2
+        return runtime_format
+
     def qzero_format(self, format: int = None) -> int:
         if format is None:
             return self._runtime_qzeros_format()
@@ -1555,6 +1732,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             raise ValueError("Unsupported qzero format. Only 1 and 2 are supported.")
 
         self._qzeros_format = format
+        self._qzeros_format_established = True
         # Keep the persistent marker in sync with the words actually held by the
         # live buffers. ``accelerate`` builds a shard's load dict from these
         # buffers, so a stale placeholder would label v2 words as v1 and make
@@ -1778,6 +1956,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         """Convert the copied qzeros words to this kernel's runtime layout."""
 
         requires_v2 = getattr(self, "REQUIRES_FORMAT_V2", False)
+        self._qzeros_format_established = True
         if incoming_format == 1:
             if requires_v2:
                 # The checkpoint v1 convention stores `zero_point - 1`, but
@@ -1831,8 +2010,14 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             if layout_code in (1, 2):
                 # The marker travels with the words it labels. When it already
                 # matches this kernel's live layout the copy is a no-op, which
-                # is what makes a repeated load idempotent.
-                if layout_code != self._runtime_qzeros_format():
+                # is what makes a repeated load idempotent. A fresh module only
+                # holds the constructor placeholder, so even a matching marker
+                # must resolve the label; ``_restore_qzeros_format`` leaves the
+                # words untouched when no conversion is required.
+                if (
+                    layout_code != self._load_target_qzeros_format()
+                    or not getattr(self, "_qzeros_format_established", False)
+                ):
                     self._restore_qzeros_format(layout_code)
             elif layout_code == 0:
                 # A runtime-layout payload; the receiver is in the same layout
@@ -2090,6 +2275,15 @@ class PackableQuantLinear(GPTQQuantLinear):
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             W = W.T
         W = W.to("cpu", copy=False)
+        try:
+            # A loader can hand us a weight whose storage was created under
+            # ``inference_mode()`` (so it has no version counter) while the
+            # tensor itself is not flagged as an inference tensor. Slicing such
+            # a tensor raises "Inference tensors do not track version counter"
+            # on recent Torch, so materialize one that follows the active mode.
+            W._version
+        except RuntimeError:
+            W = W.clone()
         out_features, in_features = W.shape
 
         # ---------- g_idx buffer ----------
@@ -2152,14 +2346,36 @@ class PackableQuantLinear(GPTQQuantLinear):
             shifts_pf64 = _pack_shifts(bits, pack_factor)
 
         # ---------- thread task: process a single [i0,i1) block ----------
-        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        # Cap the block by an element budget: the quant math transient, the
+        # int32 codes and the pack view are all [block_in, out_features], so a
+        # wide matrix must not force a whole-matrix block. Blocks partition the
+        # input axis only and every block ends on a packing-word boundary, so
+        # the packed words do not depend on the block size.
+        block_in = _pack_block_block_in(out_features, block_in, word_bits)
+
+        @t.inference_mode()
+        def _pack_block_code_rows(i0: int, int_block: t.Tensor):
+            """Pack ``int_block`` (``[blk, out]`` codes) into its qweight rows.
+
+            Every supported layout packs whole 32-input groups, so the whole
+            block is packed by one vectorized shift/reduce instead of ``bits``
+            small dispatch chains per 32-row group.
+            """
+            dst_rows = (i0 // word_bits) * rows_per_group
+            if bits in (2, 4, 8):
+                packed = _pack_codes_to_words(int_block, pack_factor, word_bits, shifts_pf64)
+            elif bits == 3 and not planar:
+                packed = _pack_rows_3(int_block)
+            elif planar:
+                packed = planar_pack_rows(int_block, bits)
+            else:
+                raise NotImplementedError(f"Unsupported bits={bits}")
+            qweight[dst_rows:dst_rows + packed.shape[0]] = packed
 
         @t.inference_mode()
         def _process_block(i0: int, i1: int):
             blk = i1 - i0
-            # [out, blk]
-            Wblk = W[:, i0:i1]
-            # select group rows for these inputs from [G, out] -> [blk, out], then T -> [out, blk]
+            # select group rows for these inputs from [G, out] -> [blk, out]
             gsel = g_idx[i0:i1].to(dtype=t.int64, copy=False)  # [blk]
             if gsel.numel() == 0:
                 return
@@ -2176,37 +2392,26 @@ class PackableQuantLinear(GPTQQuantLinear):
                     f"pack_block: g_idx values out of range after normalization (min={gsel_min}, max={gsel_max}, groups={num_groups})."
                 )
 
-            sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
-            s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
-
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            # The add allocates the one temporary we need; divide/round/clamp
-            # then run in place instead of materializing two more full copies.
-            int_block = Wblk.to(t.float32) + sz_blk_T  # [out, blk]
-            int_block.div_(s_blk_T)
+            # Quantize directly in the [blk, out] layout the packer consumes:
+            # the transpose happens once on the fp16 weight instead of on the
+            # larger fp32 intermediate. `copy_` always allocates, so an fp32
+            # caller weight is never mutated by the in-place math below.
+            int_block = t.empty((blk, out_features), dtype=t.float32)  # [blk, out]
+            int_block.copy_(W[:, i0:i1].T)
+            int_block += scale_zeros.index_select(0, gsel)
+            int_block /= scales.index_select(0, gsel)
             int_block.round_()
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
             int_block.clamp_(0, self.maxq)
-            int_block = int_block.to(t.int32).T.contiguous()  # [blk, out]
+            int_block = int_block.to(t.int32)  # [blk, out]
 
-            groups32 = blk // word_bits
-            base_group = (i0 // word_bits)
-            for g in range(groups32):
-                sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
-                dst_rows = (base_group + g) * rows_per_group
-                if bits in (2, 4, 8):
-                    _pack_block_rows_2_4_8(sub, qweight, dst_rows, bits, pack_factor, shifts_pf64)
-                elif bits == 3 and not planar:
-                    _pack_block_rows_3(sub, qweight, dst_rows)
-                elif planar:
-                    qweight[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits)
-                else:
-                    raise NotImplementedError(f"Unsupported bits={bits}")
+            _pack_block_code_rows(i0, int_block)
 
             # free temps
-            del Wblk, gsel, sz_blk_T, s_blk_T, int_block
+            del gsel, int_block
 
         # ---------- schedule blocks across a thread pool ----------
         starts = list(range(0, in_features, block_in))
@@ -2382,7 +2587,7 @@ class PackableQuantLinear(GPTQQuantLinear):
         range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
 
         @t.inference_mode()
-        def _pack_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
+        def _pack_gpu_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
             x = int32_blk_32xN.to(t.int64)
             A = ((x[0:10] << (range10 * 3)).sum(dim=0, dtype=t.int64)) & mask_tensor
             A = (A | ((x[10] << 30) & mask_tensor)) & mask_tensor
@@ -2396,11 +2601,16 @@ class PackableQuantLinear(GPTQQuantLinear):
 
             return t.stack([A, B, C], dim=0)
 
-        def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            packed = _pack_rows_3_values(int32_blk_32xN)
+        def _pack_gpu_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            packed = _pack_gpu_rows_3_values(int32_blk_32xN)
             dst[dst_rows_base:dst_rows_base + 3] = packed.to(self.pack_dtype)
 
-        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        # Derive the block from an element budget instead of trusting the
+        # caller's 8192 default, which covers a whole 4096-wide matrix and
+        # peaks at ~15x the fp16 weight transient. The input-axis split only
+        # assigns disjoint output rows, so qweight/qzeros stay bitwise
+        # identical.
+        block_in = _pack_gpu_block_in(out_features, block_in, word_bits)
         for i0 in range(0, in_features, block_in):
             i1 = min(i0 + block_in, in_features)
             blk = i1 - i0
@@ -2434,7 +2644,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                     sub = int_block[g * word_bits:(g + 1) * word_bits]
                     dst_rows = (base_group + g) * rows_per_group
                     if bits == 3 and not self.planar:
-                        _pack_rows_3(sub, qweight_dev, dst_rows)
+                        _pack_gpu_rows_3(sub, qweight_dev, dst_rows)
                     elif self.planar:
                         qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
                     else:
@@ -2466,7 +2676,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             qzeros_chunks: List[t.Tensor] = []
             for g in range(groups):
                 block = zeros_int[:, g * word_bits:(g + 1) * word_bits]
-                packed = _pack_rows_3_values(block.T).transpose(0, 1)
+                packed = _pack_gpu_rows_3_values(block.T).transpose(0, 1)
                 qzeros_chunks.append(packed.to(dtype=self.pack_dtype))
             qzeros_dev = t.cat(qzeros_chunks, dim=1)
         elif self.planar:
@@ -2566,10 +2776,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                             qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
                 if self.pack_dtype_bits == 32 and int_weight.shape[0] % 32 == 0:
-                    for blk in range(int_weight.shape[0] // 32):
-                        _pack_block_rows_3(
-                            int_weight[blk * 32:(blk + 1) * 32], qweight, blk * 3
-                        )
+                    qweight = _pack_rows_3(int_weight)
                 else:
                     qweight = t.zeros_like(qweight)
                     i = 0

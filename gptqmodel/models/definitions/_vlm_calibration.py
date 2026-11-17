@@ -12,26 +12,33 @@ base text path for pre-tokenized rows instead of handing token ids to
 ``processor.apply_chat_template`` (issue #4228).
 
 The base text path keeps only ``input_ids``/``attention_mask``. A row that also
-carries multimodal tensors (``pixel_values``, ``image_grid_thw``, ...) cannot use
+carries multimodal inputs (``pixel_values``, ``image_grid_thw``, ...) cannot use
 that path without silently dropping them, so the splitter rejects it with an
-actionable error instead of routing it to either path (issue #4371).
+actionable error instead of routing it to either path (issue #4371). Scalar or
+string metadata columns that ``datasets.map(tokenize)`` keeps (``id``, ``url``,
+``source``, ...) are not model inputs, so they do not block the text path
+(issue #4455).
 """
 
 from __future__ import annotations
 
 import itertools
+import numbers
 import random
-from collections.abc import Mapping
-from typing import Any, Iterable, Optional
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, Optional
 
 import numpy as np
 import torch
 
 from ...utils.calibration import (
     _columnar_mapping_examples,
+    _frame_columns,
     _is_columnar_mapping,
     _is_dataset_split_mapping,
     _is_integer_sequence,
+    batched_conversations,
+    prepare_calibration_dataset,
 )
 from ...utils.logger import setup_logger
 
@@ -40,8 +47,9 @@ log = setup_logger()
 
 _MISSING = object()
 
-# Columns the base text path can consume or safely ignore. Anything else may
-# carry multimodal model inputs and must not be dropped silently.
+# Columns the base text path can consume or safely ignore. Any other column must
+# hold plain metadata (see `_is_metadata_value`); it may otherwise carry
+# multimodal model inputs that must not be dropped silently.
 _TEXT_ONLY_COLUMNS = frozenset(
     {
         "input_ids",
@@ -59,10 +67,73 @@ _TEXT_ONLY_COLUMNS = frozenset(
 )
 
 
-def _non_text_columns(sample: Mapping) -> list[str]:
-    """Return mapping columns the text calibration path cannot consume."""
+# Column-name parts that identify multimodal model inputs or references to
+# them (``pixel_values``, ``image_grid_thw``, ``video_grid_thw``, ``image_url``,
+# ``input_features``, ...). Such a column is rejected even when it holds a
+# string or scalar: a path, URL or size for an image is still an image input.
+_MULTIMODAL_COLUMN_NAME_PARTS = frozenset(
+    {
+        "pixel",
+        "pixels",
+        "image",
+        "images",
+        "img",
+        "video",
+        "videos",
+        "audio",
+        "audios",
+        "vision",
+        "visual",
+        "thw",
+        "features",
+    }
+)
 
-    return [str(name) for name in sample if name not in _TEXT_ONLY_COLUMNS]
+
+def _is_multimodal_column_name(name: Any) -> bool:
+    parts = str(name).lower().replace("-", "_").split("_")
+    return any(part in _MULTIMODAL_COLUMN_NAME_PARTS for part in parts)
+
+
+def _is_metadata_value(value: Any) -> bool:
+    """Return whether ``value`` is plain row metadata, not a model input.
+
+    Scalars (``None``, bool, numbers, strings) and flat string lists are
+    metadata. Tensors, arrays, numeric sequences, bytes, mappings and any other
+    object may hold multimodal inputs and are not.
+    """
+
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, np.generic):
+        return value.ndim == 0
+    if isinstance(value, numbers.Number):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(isinstance(item, str) for item in value)
+    return False
+
+
+def _non_text_columns(sample: Mapping, *, columnar: bool = False) -> list[str]:
+    """Return mapping columns the text calibration path would drop as model inputs.
+
+    ``columnar`` checks every row value of a column-major mapping.
+    """
+
+    columns = []
+    for name, value in sample.items():
+        if name in _TEXT_ONLY_COLUMNS:
+            continue
+        if _is_multimodal_column_name(name):
+            columns.append(str(name))
+            continue
+        if columnar and isinstance(value, (list, tuple)):
+            is_metadata = all(_is_metadata_value(item) for item in value)
+        else:
+            is_metadata = _is_metadata_value(value)
+        if not is_metadata:
+            columns.append(str(name))
+    return columns
 
 
 def _raise_non_text_columns(columns: list[str], *, label: str) -> None:
@@ -102,7 +173,7 @@ def _mapping_rows(calibration_dataset: Mapping, *, label: str) -> list[Any]:
         return []
     if _is_columnar_mapping(calibration_dataset):
         if "input_ids" in calibration_dataset:
-            columns = _non_text_columns(calibration_dataset)
+            columns = _non_text_columns(calibration_dataset, columnar=True)
             if columns:
                 _raise_non_text_columns(columns, label=label)
         return _columnar_mapping_examples(calibration_dataset)
@@ -144,6 +215,10 @@ def split_calibration_dataset(
     rejected outright: neither path can forward them, and the text path would
     drop them silently.
     """
+
+    frame_columns = _frame_columns(calibration_dataset)
+    if frame_columns is not None:
+        calibration_dataset = frame_columns
 
     if isinstance(calibration_dataset, Mapping):
         calibration_dataset = _mapping_rows(calibration_dataset, label=label)
@@ -248,3 +323,86 @@ def finalize_conversation_batches(
         random.shuffle(batches)
 
     return batches
+
+
+def _model_processor(model: Any) -> Any:
+    """Return the loaded processor, loading it only when the model has none.
+
+    ``__dict__`` is read first: an uninitialized wrapper built with
+    ``object.__new__`` cannot go through ``nn.Module.__getattr__``.
+    """
+
+    processor = getattr(model, "__dict__", {}).get("processor")
+    if processor is not None:
+        return processor
+    return model.load_processor()
+
+
+def prepare_vlm_calibration_dataset(
+    model: Any,
+    calibration_dataset: Any,
+    *,
+    batch_size: int = 1,
+    options: Optional[Mapping[str, Any]] = None,
+    prepare_batch: Optional[Callable[[Any, list[Any]], Any]] = None,
+    prepare_conversations: Optional[Callable[[Iterable[Any]], Iterable[Any]]] = None,
+    preprocess_func: Optional[Callable[[Any], Any]] = None,
+    processor: Any = None,
+    label: Optional[str] = None,
+) -> list[Any]:
+    """Prepare VLM calibration data through the shared #4228/#4308 contract.
+
+    Every vision-language ``prepare_dataset`` override delegates here so the
+    contract cannot drift per model again:
+
+    * pre-tokenized rows (and columnar mappings) take the base text path;
+    * ``calibration_concat_size`` is rejected for conversations;
+    * ``calibration_dataset_sort`` / ``calibration_data_min_length`` are applied;
+    * rows that mix token ids with conversations are rejected.
+
+    ``prepare_batch(processor, conversations)`` prepares one processor batch and
+    is the usual hook: it defaults to the model's
+    ``prepare_inputs_for_conversations``. Definitions whose input rows are not
+    chat conversations pass ``prepare_conversations`` instead; it receives the
+    raw non-tokenized rows and returns the prepared batches.
+    """
+
+    label = label or type(model).__name__
+    options = dict(options or {})
+
+    pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+    if pretokenized is not None:
+        return prepare_calibration_dataset(
+            model,
+            calibration_dataset=pretokenized,
+            batch_size=batch_size,
+            **options,
+        )
+
+    sort, min_length = pop_conversation_calibration_options(options, label=label)
+
+    if prepare_conversations is not None:
+        if prepare_batch is not None:
+            raise ValueError(
+                f"{label}: pass either `prepare_batch` or `prepare_conversations`, not both."
+            )
+        batches = list(prepare_conversations(conversations))
+    else:
+        if prepare_batch is None:
+            prepare_batch = getattr(model, "prepare_inputs_for_conversations", None)
+            if prepare_batch is None:
+                raise ValueError(
+                    f"{label}: the VLM calibration helper needs a "
+                    "`prepare_inputs_for_conversations` hook or an explicit `prepare_batch`."
+                )
+        processor = processor if processor is not None else _model_processor(model)
+        batches = [
+            prepare_batch(processor, batch)
+            for batch in batched_conversations(
+                conversations, batch_size, process_func=preprocess_func
+            )
+        ]
+
+    return finalize_conversation_batches(
+        batches, sort=sort, min_length=min_length, label=label
+    )

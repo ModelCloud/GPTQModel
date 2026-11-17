@@ -167,6 +167,25 @@ asymmetric weights where the chosen kernel supports them. `desc_act=True`
 enables GPTQ activation ordering and disables the default group-aware ordering;
 do not explicitly enable both `desc_act` and `act_group_aware`.
 
+Tokenizers that prepend a BOS token make that position an attention sink: its
+activation norm can exceed the rest of the sequence by hundreds of times, so a
+single calibration row dominates the input Hessian and GPTQ stops optimizing
+for text tokens (issue #4393). Set `exclude_attention_sinks=True` to drop the
+leading BOS token before the Hessian is accumulated:
+
+```python
+qcfg = GPTQConfig(bits=4, group_size=128, exclude_attention_sinks=True)
+```
+
+The token is dropped only when the calibration `input_ids` show the tokenizer's
+BOS id at the first unpadded position. BOS-less tokenizers such as Qwen2.5/Qwen3
+keep their first real text token (issue #4459), and when the decision cannot be
+made the position is left in the Hessian with a one-time warning. The default is
+`False`, which keeps the historical Hessian. A flattened routed-expert batch has
+no sequence axis and is never masked. On Llama-3.2-1B this option lowered
+wikitext-2 perplexity from 23.21 to 19.51 at the same 4-bit/group-128 GPTQ
+settings.
+
 ### AWQ W4A16
 
 ```python
@@ -179,6 +198,13 @@ backend = BACKEND.AWQ_TORCH
 This writes the default AWQ GEMM format. Calibration is still required.
 Other AWQ layouts have different runtime and dtype restrictions; changing only
 the file's format label does not convert the packed tensors.
+
+`FORMAT.GEMV` checkpoints are packed with the native CUDA GEMV kernel on CUDA,
+with `AWQ_GEMV_TRITON` on ROCm, and with the portable Torch reader
+(`BACKEND.AWQ_TORCH`) on a CPU-only host. The CPU reader is also what
+`quantize()` re-homes the in-session model to after the packing loop leaves the
+layers on CPU, so `quantize()` -> `save()` completes on every host and still
+writes the requested GEMV checkpoint (issue #4554).
 
 ### RTN W4A16 without calibration
 

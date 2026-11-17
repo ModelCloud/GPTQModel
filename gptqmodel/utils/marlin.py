@@ -773,6 +773,11 @@ def apply_gptq_marlin_linear(
     weight = weight.contiguous()
     weight_scale = weight_scale.contiguous()
     weight_zp = weight_zp.contiguous()
+    # Marlin's GEMM requires a unit stride on the contraction axis. A
+    # transposed prefill view (for example Mamba's ``scan_output``) collapses
+    # to a 2-D view with stride(-1) > 1; copy only in that case.
+    if input.stride(-1) != 1:
+        input = input.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
@@ -860,6 +865,11 @@ def apply_awq_marlin_linear(
     weight = weight.contiguous()
     weight_scale = weight_scale.contiguous()
     weight_zp = weight_zp.contiguous()
+    # Marlin's GEMM requires a unit stride on the contraction axis. A
+    # transposed prefill view (for example Mamba's ``scan_output``) collapses
+    # to a 2-D view with stride(-1) > 1; copy only in that case.
+    if input.stride(-1) != 1:
+        input = input.contiguous()
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 

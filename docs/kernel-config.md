@@ -40,9 +40,13 @@ model = GPTQModel.load(
 
 A plain mapping with the same keys is accepted anywhere a `KernelConfig` is.
 Combining a typed backend configuration or `runtime=` with legacy `kernel=`
-raises `ValueError`; it would supply two competing policies.
-`configure_kernel(KernelConfig(...))` installs a process-wide policy directly,
-and `None` restores the documented defaults.
+raises `ValueError`; it would supply two competing policies. The rule is the
+same whether each one is a call argument or a `QuantizeConfig.kernel` /
+`QuantizeConfig.runtime` field. `configure_kernel(KernelConfig(...))` installs
+a process-wide policy directly, and `None` restores the documented defaults.
+Every `GPTQModel.load` and both quantization loopers install the policy their
+own config resolves to, so a policy installed by hand before them does not
+survive; put run settings on `QuantizeConfig.runtime` or pass them to the load.
 
 ## Legacy adapter flow
 
@@ -62,7 +66,7 @@ flowchart TD
     F --> E
     G --> E
     E --> H["_ACTIVE_CONFIG (process-wide, RLock)"]
-    H --> I["resolve_kernel_config(owner)<br/>owner.kernel wins, else _ACTIVE_CONFIG"]
+    H --> I["resolve_kernel_config(owner)<br/>owner._resolved_kernel, owner.kernel,<br/>owner.runtime, else _ACTIVE_CONFIG"]
     I --> M["BaseQuantLinear / make_quant<br/>snapshot_kernel_config"]
     M --> J["Module-owned policy: TorchLinear, MarlinLinear,<br/>GGUF, ParoQuant, bitsandbytes"]
     M --> K["Native op arguments: AWQ, block-float,<br/>Swordfish and GGUF CPU"]
@@ -73,8 +77,10 @@ flowchart TD
 Two precedence rules are worth stating explicitly, because they are the
 contract a reviewer has to check:
 
-- An explicit `owner.kernel` (a quantize config) wins over the process policy,
-  so a caller that holds the config never inherits another run's tuning.
+- A quantize config's own policy wins over the process policy: the policy its
+  last load or `quantize()` resolved, else its `kernel`, else its `runtime`. A
+  caller that holds the config never inherits another run's tuning, and the
+  resolved policy is never written back to `QuantizeConfig.kernel`.
 - `configure_kernel(None)` restores the documented defaults; it does not leave
   the previous policy in place.
 
@@ -101,7 +107,9 @@ flowchart LR
 | `env_flag("GPTQMODEL_FP32_ACCUM")` | `gemm_awq.py:30`, `gemm_awq_triton.py:32`, `quantization/awq/**/gemm.py:28`, `quantization/paroquant/**/gemm.py:32` | `KernelConfig.fp32_accum` |
 | `os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE")` at import | `quantization/awq/modules/triton/scheduler.py:27` | `KernelConfig.awq_triton_schedule` |
 | `GPTQMODEL_GGUF_FUSED_*`, `GGUF_CPP_NATIVE_MATMUL`, `GGUF_CPP_THREADS` | `qlinear/gguf.py:1197-1215`, `qlinear/gguf_cpp.py:445,1190` | `KernelConfig.gguf_*` |
+| `GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER`, `..._TORCH_LOADER`, `..._DEQUANT_DEVICE`, `..._DEQUANT_MAX_BYTES` | `models/loader.py`, `utils/hf.py:699`, `utils/internal_gguf.py:281,314` | `KernelConfig.gguf_native_quantized_loader`, `gguf_torch_dequant_loader`, `gguf_dequant_device`, `gguf_dequant_chunk_bytes` |
 | `GPTQMODEL_PAROQUANT_*` behaviour switches | `qlinear/paroquant.py:53-66`, `paroquant_triton.py:66-70`, `quantization/paroquant/**` | `KernelConfig.paroquant_*` |
+| `GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*` timing knobs | `gptqmodel_ext/paroquant/rotation.cu` | internal constants; `KernelConfig.paroquant_rotate_autotune` / `_cta_m` / `_row_pad` select behaviour |
 | `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
 | `GPTQMODEL_GSQ_DISABLE_*_RELAXATION` | `quantization/gsq_cuda_relaxation.py:400-403` | `KernelConfig.gsq_disable_*` |
 | `GPTQMODEL_EXL3_*` | `exl3_lib/quantize.py:136`, `exllamav3_processor.py:127-130`, `utils/exl3_capture_*.py` | `KernelConfig.exl3_*` |
@@ -113,6 +121,10 @@ flowchart LR
 | `GPTQMODEL_BLOCKFLOAT_NO_CUBLAS` | `gptqmodel_ext/tt_blockfloat_cuda/tt_blockfloat_cuda.cu:723` | `allow_cublas` argument on `blockfloat_linear` |
 | `APHRODITE_SWORDFISH_DENSE_M`, `APHRODITE_SWORDFISH_DETERMINISTIC` | `gptqmodel_ext/swordfish/.../swordfish_mm.cu:84,106` | `dense_m_override`, `deterministic` arguments on `swordfish_mm` |
 
+The retired variables are never read. GPT-QModel warns once for each one that
+is set: at import, and again at `GPTQModel.load` / `from_pretrained` /
+`from_quantized` for a variable exported after the import.
+
 The three names in the last rows are why this change is not purely Python: a
 native kernel cannot read a Python object, so the choice is passed as an op
 argument on every call. That keeps the value visible in the dispatch site, and
@@ -120,11 +132,50 @@ it means a test can exercise both paths in one process.
 
 ## Lifetime and serialization
 
-Quantized linear modules own a snapshot of their execution policy. Later
-loads, `configure_kernel` calls and mutations to the original legacy object do
-not change those modules. Shared quantization and host utilities still use a
-process-wide fallback installed before the loop or load starts. Concurrent
-quantization runs with different shared runtime settings are not isolated.
+Quantized linear modules and block-float embedding tables own a snapshot of
+their execution policy, because a tied output head consumes the table's policy
+through the same block-float kernel. Later loads, `configure_kernel` calls and
+mutations to the original legacy object do not change those modules. Shared
+quantization and host utilities still use a process-wide fallback installed
+before the loop or load starts. Concurrent quantization runs with different
+shared runtime settings are not isolated.
+
+Resolution snapshots the request as well: `resolve_backend_config` copies a
+caller-supplied legacy `KernelConfig`, so mutating that object after
+`resolve_quantize_backend` / `resolve_backend_config` returns does not change
+`QuantizeConfig._resolved_kernel` or any module built from it (#4615).
+
+### Forward dispatch reads the module snapshot
+
+Two inference dispatch sites used to re-read the process-wide policy on every
+forward, so a later `GPTQModel.load()` / `configure_kernel()` retuned modules
+that had already been built:
+
+- `bitsandbytes_triton.available_for` / `should_use` take the module's
+  `kernel`; `BitsAndBytesLinear.forward` passes `self.kernel`.
+- `paroquant_gemm_triton_decode` / `paroquant_gemm_triton_prefill` take an
+  `fp32_accum` argument; `ParoQuantTritonLinear` passes its resolved
+  `self.fp32_accum`.
+
+```mermaid
+flowchart TD
+    A["load A: KernelConfig P1"] --> B["BaseQuantLinear.__init__<br/>snapshot_kernel_config"]
+    B --> C["module A: self.kernel = P1"]
+    C --> D["forward A: pass self.kernel and self.fp32_accum"]
+    E["load B / configure_kernel(P2)"] --> F["process _ACTIVE_CONFIG = P2"]
+    F --> G["module B: self.kernel = P2"]
+    G --> H["forward B: pass P2"]
+    D --> I["P1 dispatch, independent of the active process policy"]
+```
+
+| Site | Before | After |
+| --- | --- | --- |
+| bitsandbytes Triton gate | `get_kernel_config().bitsandbytes_triton` at `qlinear/bitsandbytes_triton.py:109` | `kernel.bitsandbytes_triton` passed by `BitsAndBytesLinear.forward` |
+| ParoQuant Triton GEMM | `get_kernel_config().fp32_accum` at `quantization/paroquant/modules/triton/gemm.py:476,501` | `fp32_accum=self.fp32_accum` passed by `ParoQuantTritonLinear` |
+
+`kernel=None` / `fp32_accum=None` still falls back to the process policy for
+helpers called without an owning module. Regression:
+`tests/test_kernel_policy_snapshot_4555.py`.
 
 `kernel` and `runtime` are runtime-only fields. Neither is written to the checkpoint, because
 the host that loads a checkpoint is not necessarily the host that produced it.
@@ -183,11 +234,12 @@ representation, not another machine's kernel tuning.
 | `gguf_fused_cpu_min_matrix_elements` | `0` | Matrix-size floor for the fused CPU forward. |
 | `gguf_fused_chunk_blocks` | `0` | Explicit K-chunk block count. `0` uses the byte budget. |
 | `gguf_fused_chunk_bytes` | `33554432` | Transient-memory budget for one K chunk. |
-| `gguf_fused_autotune_warmup` | `1` | Warmup launches per autotune candidate. |
-| `gguf_fused_autotune_iters` | `2` | Timed launches per autotune candidate. |
-| `gguf_fused_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
 | `gguf_cpp_native_matmul` | `None` | Force the native ggml matmul on or off. `None` follows capability. |
 | `gguf_cpp_threads` | `None` | Native ggml CPU thread count. `None` follows torch. |
+| `gguf_native_quantized_loader` | `True` | Parse a single-layout GGUF checkpoint with the native reader instead of the dense Transformers import. |
+| `gguf_torch_dequant_loader` | `None` | Dense import converts GGUF tensors straight to Torch. `None` follows `gguf_dequant_device`. |
+| `gguf_dequant_device` | `None` | Torch device (`cpu` or `cuda[INDEX]`) for that conversion. `None` keeps the reference NumPy path. |
+| `gguf_dequant_chunk_bytes` | `268435456` | Transient-memory budget for one sign-only NumPy conversion chunk. |
 
 ### ParoQuant
 
@@ -210,6 +262,10 @@ representation, not another machine's kernel tuning.
 | `paroquant_rotate_cta_m` | `None` | Pin the rotation CTA-M tile to `4`, `8` or `16`. |
 | `paroquant_rotate_row_pad` | `None` | Pin the rotation row padding to `0` or `2`. |
 | `paroquant_autotune_cache` | `True` | Persist rotation autotune results. |
+
+The fused-rotation autotune measurement counts and thresholds are internal
+constants in `gptqmodel_ext/paroquant/rotation.cu`; they are not environment
+variables. Only the fields above select behaviour.
 
 ### bitsandbytes and BitBLAS
 
@@ -243,7 +299,7 @@ representation, not another machine's kernel tuning.
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. |
+| `rocm_quant_blas` | `None` | `None` keeps the reproducible `rocblas` pin; `"hipblaslt"` opts into torch's default; `""`/`0`/`off`/`default` skip the pin. Any other value raises `ValueError`. |
 | `rocm_llc` | `True` | Last-level-cache back-port for torch. |
 
 `rocm_quant_blas` selects the quantization BLAS backend. `None` keeps the
@@ -261,7 +317,10 @@ the last-level-cache back-port for torch.
 | `pool_intraop_threads` | `None` | Torch intra-op pool per device-pool worker. `None` splits the process pool across the pool's workers; `0` keeps the inherited pool. |
 
 `None` keeps the platform-derived defaults. `max_packers` is the number of
-threads that pack completed modules after quantization.
+threads that pack completed modules after quantization. All four are
+`RuntimeConfig` fields. The device pool is built once per process; a later load
+whose policy changes `cpu_workers`, `cuda_workers` or `pool_intraop_threads`
+rebuilds it before the load continues.
 `pool_intraop_threads` bounds each worker's OpenMP team, because libgomp gives
 every pthread its own team: see
 [Device thread pool intra-op budget](device-thread-pool-intraop-budget.md).
@@ -270,8 +329,9 @@ every pthread its own team: see
 
 `KernelConfig` rejects values that cannot be honoured instead of silently
 clamping them: thread counts and tile sizes must be positive, the rotation tile
-choices are fixed sets, and `awq_triton_schedule` must be one of the two
-documented modes. This keeps a typo from turning into a different numerical
+choices are fixed sets, `awq_triton_schedule` must be one of the two
+documented modes, and `rocm_quant_blas` must be one of the documented
+spellings (a typo such as `"hipblas_lt"` would otherwise pin rocBLAS). This keeps a typo from turning into a different numerical
 path.
 
 The same rule covers the kernels that used to read the environment inside

@@ -74,6 +74,10 @@ def unpack_hf_int4(
 
 
 class TorchCpuAvx512Linear(TorchAtenLinear):
+    # The AVX512 kernel consumes the ragged final group; unlike ATen's
+    # int4pack op it does not require in_features % group_size == 0.
+    CPU_INT4PACK_REQUIRES_DIVISIBLE_IN_FEATURES = False
+
     """CPU GPTQ W4A16 kernel using AVX512-BF16."""
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_CPU_AVX512]
@@ -109,6 +113,9 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
     # be restored before a checkpoint load or save.
     _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
+    # The AVX512 extension packs a different layout with no verified inverse;
+    # keep the full checkpoint snapshot.
+    _FUSED_TRAIN_STATE_REBUILD = None
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None

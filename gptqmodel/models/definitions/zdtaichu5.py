@@ -18,6 +18,7 @@ from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .qwen3_5_text import Qwen3_5TextQModel
 
 
@@ -282,6 +283,12 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         if isinstance(calibration_dataset, Mapping):
+            # Columnar mappings and single rows belong to the base text path,
+            # which unpacks them; only `messages` mappings are conversations.
+            if not self._is_conversation_sample(calibration_dataset):
+                return super().prepare_dataset(
+                    calibration_dataset, batch_size=batch_size, **kwargs
+                )
             samples = [calibration_dataset]
         elif isinstance(calibration_dataset, (str, bytes, bytearray)):
             return super().prepare_dataset(calibration_dataset, batch_size=batch_size, **kwargs)
@@ -296,17 +303,22 @@ class ZDTaichu5QModel(Qwen3_5TextQModel):
         if not conversation_input:
             return super().prepare_dataset(samples, batch_size=batch_size, **kwargs)
 
+        return prepare_vlm_calibration_dataset(
+            self,
+            self._conversation_dataset(samples),
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=self._prepare_calibration_batches,
+        )
+
+    def _prepare_calibration_batches(self, conversations):
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched_conversations(
-            self._conversation_dataset(samples),
-            1,
-        ):
+        for batch in batched_conversations(conversations, 1):
             conversation = batch[0]
             if not isinstance(conversation, (list, tuple)):
                 raise ValueError("ZDTaichu5 calibration conversation must be a message list.")
             calibration_data.append(processor.from_messages(conversation, return_tensors="pt"))
-        del processor
         return calibration_data
 
     def move_input_capture_example(self, example: Dict[str, Any], data_device):

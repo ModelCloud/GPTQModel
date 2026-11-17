@@ -22,6 +22,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Optional
 
+import torch
+
 
 _BOOL_FIELDS = (
     "gptq_fused_block_update",
@@ -52,12 +54,17 @@ _BOOL_FIELDS = (
     "bitsandbytes_cpu_int8_dense",
     "bitsandbytes_triton",
     "disable_bitblas",
+    "gguf_native_quantized_loader",
     "gsq_disable_cuda_relaxation",
     "gsq_disable_hip_relaxation",
     "rocm_llc",
 )
 
-_OPTIONAL_BOOL_FIELDS = ("torch_triton_dequant", "gguf_cpp_native_matmul")
+_OPTIONAL_BOOL_FIELDS = ("torch_triton_dequant", "gguf_cpp_native_matmul", "gguf_torch_dequant_loader")
+
+# A GGUF dequant target is a Torch execution device, not a hardware family:
+# ROCm is addressed through Torch's ``cuda`` spelling, as everywhere else.
+_GGUF_DEQUANT_DEVICE_TYPES = frozenset({"cpu", "cuda"})
 
 _MIN_INT_FIELDS = {
     "npu_cholesky_block_size": 1,
@@ -70,8 +77,7 @@ _MIN_INT_FIELDS = {
     "gguf_fused_cpu_min_matrix_elements": 0,
     "gguf_fused_chunk_blocks": 0,
     "gguf_fused_chunk_bytes": 1,
-    "gguf_fused_autotune_warmup": 0,
-    "gguf_fused_autotune_iters": 1,
+    "gguf_dequant_chunk_bytes": 1,
     "paroquant_triton_autotune_warmup": 0,
     "paroquant_triton_autotune_iters": 1,
     "paroquant_triton_decode_max_rows": 1,
@@ -92,7 +98,6 @@ _OPTIONAL_MIN_INT_FIELDS = {
 }
 
 _MIN_FLOAT_FIELDS = {
-    "gguf_fused_autotune_margin": 0.0,
     "paroquant_triton_autotune_margin": 0.0,
 }
 
@@ -102,6 +107,11 @@ _OPTIONAL_CHOICE_FIELDS = {
 }
 
 _AWQ_SCHEDULE_CHOICES = frozenset({"auto", "legacy"})
+
+# ``rocblas`` pins rocBLAS; ``hipblaslt``/``cublaslt`` opt into torch's
+# hipBLASLt default; ``""``/``0``/``off``/``default`` skip the pin. Mirrors
+# ``utils.rocm.QUANT_BLAS_BACKEND_DISABLED | _QUANT_BLAS_BACKEND_CHOICES``.
+_ROCM_QUANT_BLAS_CHOICES = frozenset({"rocblas", "hipblaslt", "cublaslt", "", "0", "off", "default"})
 
 
 @dataclass
@@ -186,11 +196,25 @@ class KernelConfig:
     gguf_fused_cpu_min_matrix_elements: int = 0
     gguf_fused_chunk_blocks: int = 0
     gguf_fused_chunk_bytes: int = 32 * 1024 * 1024
-    gguf_fused_autotune_warmup: int = 1
-    gguf_fused_autotune_iters: int = 2
-    gguf_fused_autotune_margin: float = 0.05
     gguf_cpp_native_matmul: Optional[bool] = None
     gguf_cpp_threads: Optional[int] = None
+
+    # GGUF checkpoint load strategy. These replace the retired
+    # ``GPTQMODEL_INTERNAL_GGUF_*`` process switches: the same checkpoint must be
+    # parsed by the same loader, on the same device, for the same public call
+    # options.
+    #
+    # ``gguf_native_quantized_loader`` parses a checkpoint whose tensors declare
+    # one quantized layout with the native GGUF reader. ``gguf_torch_dequant_loader``
+    # makes the dense Transformers import dequantize straight to Torch instead of
+    # the reference NumPy path; ``None`` follows ``gguf_dequant_device`` (the
+    # historical default: off unless a dequant device is requested).
+    # ``gguf_dequant_device`` is the Torch device the direct conversion targets;
+    # ``gguf_dequant_chunk_bytes`` bounds one NumPy-sign-only conversion chunk.
+    gguf_native_quantized_loader: bool = True
+    gguf_torch_dequant_loader: Optional[bool] = None
+    gguf_dequant_device: Optional[str] = None
+    gguf_dequant_chunk_bytes: int = 256 * 1024 * 1024
 
     # ParoQuant inference/optimization. Replace ``GPTQMODEL_PAROQUANT_*``.
     paroquant_cache_runtime_dtype: bool = False
@@ -260,6 +284,32 @@ class KernelConfig:
                     f"KernelConfig.{name} must be a bool or None; got {type(value).__name__}"
                 )
 
+        device = self.gguf_dequant_device
+        if device is not None:
+            if not isinstance(device, (str, torch.device)):
+                raise TypeError(
+                    "KernelConfig.gguf_dequant_device must be a device string or None; "
+                    f"got {type(device).__name__}"
+                )
+            text = str(device).strip()
+            if not text:
+                raise ValueError(
+                    "KernelConfig.gguf_dequant_device must be a device string or None; got an empty string"
+                )
+            try:
+                target = torch.device(text)
+            except (RuntimeError, TypeError) as exc:
+                raise ValueError(
+                    "KernelConfig.gguf_dequant_device must be a Torch device or None; "
+                    f"got {device!r}: {exc}"
+                ) from exc
+            if target.type not in _GGUF_DEQUANT_DEVICE_TYPES:
+                raise ValueError(
+                    "KernelConfig.gguf_dequant_device must be 'cpu' or 'cuda[:<index>]' "
+                    f"(ROCm is exposed through the cuda spelling); got {device!r}"
+                )
+            self.gguf_dequant_device = str(target)
+
         for name, minimum in _MIN_INT_FIELDS.items():
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
@@ -324,13 +374,21 @@ class KernelConfig:
 
         # An explicit empty string is a documented opt-out spelling, so it must
         # stay distinct from ``None`` (which keeps the reproducible default).
+        # Any other unknown spelling is rejected: a typo such as "hipblas_lt"
+        # must not silently pin rocBLAS.
         if self.rocm_quant_blas is not None:
             if not isinstance(self.rocm_quant_blas, str):
                 raise TypeError(
                     "KernelConfig.rocm_quant_blas should be a string or None; got "
                     f"{type(self.rocm_quant_blas).__name__}"
                 )
-            self.rocm_quant_blas = self.rocm_quant_blas.strip()
+            blas = self.rocm_quant_blas.strip().lower()
+            if blas not in _ROCM_QUANT_BLAS_CHOICES:
+                raise ValueError(
+                    "KernelConfig.rocm_quant_blas should be None or one of "
+                    f"{sorted(_ROCM_QUANT_BLAS_CHOICES)}; got {self.rocm_quant_blas!r}"
+                )
+            self.rocm_quant_blas = blas
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -407,10 +465,13 @@ def get_kernel_config() -> KernelConfig:
 def resolve_kernel_config(owner: Any = None, *, use_process_default: bool = True) -> KernelConfig:
     """Return the policy that applies to ``owner`` (a quantize config).
 
-    An explicit ``owner.kernel`` wins; otherwise the process-wide policy
-    installed by a looper or ``GPTQModel.load`` applies. Run boundaries pass
-    ``use_process_default=False`` so an unset run resets to fresh defaults
-    rather than inheriting the previous run's process fallback.
+    The policy an API boundary resolved for the config (typed backend plus its
+    runtime or legacy kernel, kept in ``owner._resolved_kernel``) wins; then an
+    explicit ``owner.kernel``, then ``owner.runtime``; otherwise the
+    process-wide policy installed by a looper or ``GPTQModel.load`` applies.
+    Run boundaries pass ``use_process_default=False`` so an unset run resets
+    to fresh defaults rather than inheriting the previous run's process
+    fallback.
     """
 
     if isinstance(owner, KernelConfig):
@@ -419,6 +480,9 @@ def resolve_kernel_config(owner: Any = None, *, use_process_default: bool = True
 
     if isinstance(owner, (BackendConfig, RuntimeConfig)):
         return owner.to_kernel_config()
+    resolved = getattr(owner, "_resolved_kernel", None) if owner is not None else None
+    if isinstance(resolved, KernelConfig):
+        return resolved
     kernel = getattr(owner, "kernel", None) if owner is not None else None
     if isinstance(kernel, KernelConfig):
         return kernel

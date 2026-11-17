@@ -58,8 +58,20 @@ def test_shared_expert_down_proj_is_its_own_subset():
         "self_attn.forget_gate.f_proj",
         "self_attn.b_proj",
     ] in blocks
-    assert ["self_attn.o_proj", "self_attn.kv_b_proj"] in blocks
-    assert ["attention.query_key_value"] in blocks
+    # `o_proj` consumes the gated attention output built from `kv_b_proj`, so
+    # it must not share the producer's subset (issue #4372).
+    assert ["self_attn.kv_b_proj"] in blocks
+    assert ["self_attn.o_proj"] in blocks
+    assert blocks.index(["self_attn.kv_b_proj"]) < blocks.index(["self_attn.o_proj"])
+    # Remote-code Ling-2.6-flash MLA branch (issue #4373): q_a/kv_a/g_proj
+    # produce the low-rank latents, q_b/kv_b consume them, and `dense` follows.
+    assert [
+        "attention.query_key_value",
+        "attention.q_a_proj",
+        "attention.kv_a_proj_with_mqa",
+        "attention.g_proj",
+    ] in blocks
+    assert ["attention.q_b_proj", "attention.kv_b_proj"] in blocks
     assert ["attention.dense"] in blocks
     assert ["mlp.gate_proj", "mlp.up_proj"] in blocks
     assert ["mlp.down_proj"] in blocks

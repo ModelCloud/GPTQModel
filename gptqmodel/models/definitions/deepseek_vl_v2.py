@@ -18,6 +18,7 @@ from ...utils.torch import as_torch_device
 from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class DeepSeekVLV2QModel(BaseQModel):
@@ -42,7 +43,14 @@ class DeepSeekVLV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0", "q_b_proj:0:in=q_a", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0:in=kv_a", "o_proj:1"),
+            # MLA split mirrors DeepSeek-V2/V3: q_a/kv_a produce the low-rank
+            # latents, q_b/kv_b consume them, and o_proj consumes the attention
+            # output. `use_mla=false` checkpoints (deepseek-vl2-tiny) instead
+            # instantiate `LlamaAttention`, so `k_proj`/`v_proj` are
+            # checkpoint-owned decoder Linears next to the dense
+            # `q_proj`/`o_proj`; MLA checkpoints keep the q_a/q_b and
+            # kv_a/kv_b low-rank path.
+            "self_attn": ("q_a_proj:0", "q_b_proj:1:in=q_a", "q_proj:0", "k_proj:0", "v_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:1:in=kv_a", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
@@ -161,11 +169,10 @@ class DeepSeekVLV2QModel(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del batch_size, kwargs
+    def _prepare_calibration_batches(self, conversations):
         processor = self.load_processor()
         calib_data = []
-        for batch in batched_conversations(calibration_dataset, 1, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(conversations, 1, process_func=self.preprocess_dataset):
             conversation = batch[0]
             inputs = processor(
                 conversations=conversation,
@@ -181,8 +188,16 @@ class DeepSeekVLV2QModel(BaseQModel):
                 "images_seq_mask": inputs.images_seq_mask,
                 "images_spatial_crop": inputs.images_spatial_crop,
             })
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=self._prepare_calibration_batches,
+        )
 
     def move_input_capture_example(self, example: Dict[str, Any], data_device: torch.device) -> Dict[str, Any]:
         example = super().move_input_capture_example(example, data_device)

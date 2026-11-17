@@ -763,6 +763,257 @@ def test_ttnn_mesh_ownership_is_single_owner():
     assert runtime.current_mesh() is None
 
 
+def _fake_ttnn_module(opened):
+    """A TTNN stand-in that records opens and rejects no request itself."""
+
+    class _FabricConfig:
+        DISABLED = "DISABLED"
+        FABRIC_1D = "FABRIC_1D"
+
+    class _MeshShape:
+        def __init__(self, *dims):
+            self.dims = tuple(dims)
+
+    class _Module:
+        FabricConfig = _FabricConfig
+        MeshShape = _MeshShape
+
+        @staticmethod
+        def open_device(**kwargs):
+            opened.append(("device", dict(kwargs)))
+            return object()
+
+        @staticmethod
+        def open_mesh_device(shape, **kwargs):
+            opened.append(("mesh", shape.dims, dict(kwargs)))
+            return object()
+
+        @staticmethod
+        def close_device(_device):
+            return None
+
+        @staticmethod
+        def close_mesh_device(_device):
+            return None
+
+        @staticmethod
+        def set_fabric_config(_cfg):
+            return None
+
+    return _Module
+
+
+def _patch_ttnn_runtime(monkeypatch, ttnn_module):
+    from gptqmodel.utils import ttnn_runtime
+
+    monkeypatch.setattr(ttnn_runtime, "import_ttnn", lambda: ttnn_module)
+    monkeypatch.setattr(ttnn_runtime, "_reject_pjrt_owner", lambda: None)
+    monkeypatch.setattr(ttnn_runtime, "before_device_open", lambda **_: None)
+    monkeypatch.setattr(ttnn_runtime, "after_device_close", lambda **_: None)
+    monkeypatch.setattr(ttnn_runtime, "park_idle_clock", lambda: None)
+    monkeypatch.setattr(ttnn_runtime, "_MESH", None)
+    return ttnn_runtime
+
+
+def test_ttnn_open_mesh_reuse_must_match_the_requested_placement(monkeypatch):
+    """A live handle may only be reused for the exact placement requested.
+
+    Reusing a one-chip open for a four-chip or chip-1 request returned the
+    original chip with no error, so the caller received different placement and
+    fabric than it asked for. Only an explicit close may change placement.
+    """
+
+    from gptqmodel.utils.ttnn_runtime import TTNNUnavailable
+
+    opened = []
+    runtime = _patch_ttnn_runtime(monkeypatch, _fake_ttnn_module(opened))
+    try:
+        first = runtime.open_mesh(device_count=1, device_id=0, owner="t")
+        assert (first.num_devices, first.device_id, first.fabric) == (1, 0, "DISABLED")
+        assert len(opened) == 1
+
+        # Different chip count, requested with a fabric: must not be served by
+        # the one-chip handle, and must not open a second runtime either.
+        with pytest.raises(TTNNUnavailable, match="device_count=4"):
+            runtime.open_mesh(device_count=4, fabric="FABRIC_1D", owner="t")
+        # Different chip ordinal on the same count.
+        with pytest.raises(TTNNUnavailable, match="device_id=1"):
+            runtime.open_mesh(device_count=1, device_id=1, owner="t")
+        # Different fabric on the same count.
+        with pytest.raises(TTNNUnavailable, match="fabric=FABRIC_1D"):
+            runtime.open_mesh(device_count=1, fabric="FABRIC_1D", owner="t")
+        # Different trace reservation on the same count.
+        with pytest.raises(TTNNUnavailable, match="trace_region_size=4096"):
+            runtime.open_mesh(device_count=1, trace_region_size=4096, owner="t")
+
+        # Nothing was opened behind the caller's back and the handle is unchanged.
+        assert len(opened) == 1
+        assert runtime.current_mesh() is first
+        assert first.num_devices == 1
+
+        # An identical request still reuses the live handle.
+        assert runtime.open_mesh(device_count=1, device_id=0, owner="t") is first
+        assert len(opened) == 1
+    finally:
+        runtime.close_mesh(owner="t")
+
+    # Control: after an explicit close the new placement is opened normally, and
+    # the previously valid two-chip -> four-chip rejection still fails closed.
+    two = runtime.open_mesh(device_count=2, owner="t")
+    try:
+        assert two.num_devices == 2
+        with pytest.raises(TTNNUnavailable, match="device_count=4"):
+            runtime.open_mesh(device_count=4, owner="t")
+    finally:
+        runtime.close_mesh(owner="t")
+    assert [entry[0] for entry in opened] == ["device", "mesh"]
+
+
+class _GridFakeTTNN:
+    """TTNN stand-in that tags every device-resident buffer with its device."""
+
+    uint32 = "uint32"
+    bfloat16 = "bfloat16"
+    TILE_LAYOUT = "tile"
+    ROW_MAJOR_LAYOUT = "row_major"
+    DRAM_MEMORY_CONFIG = "dram"
+
+    class _SourceType:
+        SOURCE_CODE = "source"
+
+    class KernelDescriptor:
+        SourceType = None  # filled below
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _Descriptor:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _Args(dict):
+        def __missing__(self, key):
+            self[key] = {}
+            return self[key]
+
+    class _CoreRangeSet:
+        def __init__(self, ranges):
+            self.ranges = tuple(ranges)
+
+    class _CoreRange:
+        def __init__(self, start, end):
+            self.start, self.end = start, end
+
+    class _CoreCoord:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    class _Shape:
+        def __init__(self, dims):
+            self.dims = tuple(int(dim) for dim in dims)
+
+        def __iter__(self):
+            return iter(self.dims)
+
+    def __init__(self):
+        self.uploads = []
+        self.submissions = []
+        self._addresses = 0
+        self.KernelDescriptor.SourceType = self._SourceType
+
+    def _next_address(self):
+        self._addresses += 1
+        return self._addresses
+
+    def from_torch(self, tensor, **_kwargs):
+        return tensor
+
+    def to_device(self, tensor, device):
+        buffer = type("DeviceTensor", (), {})()
+        buffer.device = device
+        buffer.host = tensor
+        buffer.address = self._next_address()
+        buffer.buffer_address = lambda: buffer.address
+        self.uploads.append(buffer)
+        return buffer
+
+    def allocate_tensor_on_device(self, shape, _dtype, _layout, device, _memory):
+        buffer = type("DeviceTensor", (), {})()
+        buffer.device = device
+        buffer.dims = tuple(shape)
+        buffer.address = self._next_address()
+        buffer.buffer_address = lambda: buffer.address
+        return buffer
+
+    def to_torch(self, tensor):
+        return torch.zeros(tensor.dims)
+
+    def generic_op(self, io, _program):
+        self.submissions.append([buffer.device for buffer in io])
+
+    def synchronize_device(self, _device):
+        return None
+
+    Shape = _Shape
+    CoreRangeSet = _CoreRangeSet
+    CoreRange = _CoreRange
+    CoreCoord = _CoreCoord
+    RuntimeArgs = _Args
+    CBDescriptor = _Descriptor
+    CBFormatDescriptor = _Descriptor
+    ProgramDescriptor = _Descriptor
+    ReaderConfigDescriptor = _Descriptor
+    ComputeConfigDescriptor = _Descriptor
+    WriterConfigDescriptor = _Descriptor
+
+
+def test_fused_grid_caches_are_owned_by_the_consuming_device(monkeypatch):
+    """Packed weights and the LUT must be uploaded per device, not shared.
+
+    The cache key covered the source codes and (scale, zero) only, so a second
+    live device was handed the first device's buffers next to its own
+    activations and output: a mixed-owner native submission.
+    """
+
+    from gptqmodel.utils import ttnn_runtime
+    from gptqmodel.utils.tt_int4_kernel import clear_grid_weight_cache, run_fused_gemm_grid
+
+    driver = _GridFakeTTNN()
+    monkeypatch.setattr(ttnn_runtime, "import_ttnn", lambda: driver)
+    chip0, chip1 = object(), object()
+    codes = torch.arange(1024).remainder(16).reshape(1, 1, 1024)
+    act = torch.ones(32, 32)
+
+    clear_grid_weight_cache()
+    try:
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip0, grid=(1, 1))
+        assert driver.submissions[-1] == [chip0, chip0, chip0, chip0]
+        uploads_after_first = len(driver.uploads)
+
+        # Same weights on another live device: every operand it receives must
+        # belong to that device, so the weights and LUT are uploaded again.
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip1, grid=(1, 1))
+        assert driver.submissions[-1] == [chip1, chip1, chip1, chip1]
+        assert len(driver.uploads) == uploads_after_first + 3
+
+        # The per-device entries are real caches: repeating either device's call
+        # must upload its activation only, never its weights or LUT again.
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip0, grid=(1, 1))
+        assert driver.submissions[-1] == [chip0, chip0, chip0, chip0]
+        assert len(driver.uploads) == uploads_after_first + 4
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip1, grid=(1, 1))
+        assert driver.submissions[-1] == [chip1, chip1, chip1, chip1]
+        assert len(driver.uploads) == uploads_after_first + 5
+
+        # Control: clearing the cache is still enough to force a fresh upload.
+        clear_grid_weight_cache()
+        run_fused_gemm_grid(act, codes, 0.0173, 7, device=chip1, grid=(1, 1))
+        assert driver.submissions[-1] == [chip1, chip1, chip1, chip1]
+        assert len(driver.uploads) == uploads_after_first + 8
+    finally:
+        clear_grid_weight_cache()
+
+
 class _ThermalClock:
     """Deterministic monotonic clock and sleeper for the pacing tests."""
 
@@ -2817,6 +3068,190 @@ def test_gptqmodel_load_consumes_a_blockfloat_checkpoint(tmp_path):
         GPTQModel.load(out, device="xla:0")
 
 
+def _scalar_blockfloat_oracle(block, bits):
+    """Independent double-precision oracle for one block, built from scratch.
+
+    It performs its own arithmetic: ``math.frexp`` for the exact binade index,
+    ``round`` for round-to-nearest-even and Python floats for the squared error.
+    The fp32 inputs are exactly representable in double, and every scale is a
+    power of two, so each intermediate below is exact and the answer is a
+    bit-level expectation rather than a re-run of the implementation.
+    """
+
+    import math
+
+    levels = 1 << max(bits - 2, 0)
+    limit = 2.0 - 1.0 / levels
+    smallest = float(torch.finfo(torch.float32).tiny)
+    magnitude = max(abs(float(v)) for v in block)
+    safe = max(magnitude, smallest)
+    base = math.frexp(safe)[1] - 1
+
+    def round_with(exp):
+        scale = 2.0 ** exp
+        out = []
+        for value in block:
+            unit = round(float(value) / scale * levels) / levels
+            unit = min(max(unit, -limit), limit)
+            out.append(unit * scale)
+        return out
+
+    def error(values):
+        return sum((v - float(x)) ** 2 for v, x in zip(values, block))
+
+    best = round_with(base)
+    best_error = error(best)
+    best_exp = base
+    for delta in (-1, 1):
+        candidate_exp = base + delta
+        if not -127 <= candidate_exp <= 127:
+            continue
+        candidate = round_with(candidate_exp)
+        candidate_error = error(candidate)
+        if math.isfinite(candidate_error) and candidate_error < best_error:
+            best, best_error, best_exp = candidate, candidate_error, candidate_exp
+    return best, best_exp
+
+
+def test_blockfloat_largest_finite_value_uses_the_storable_exponent():
+    """``float32.max`` must quantize inside the grid, not overflow to NaN.
+
+    The shared exponent is the binade index of the block maximum. Deriving it
+    with ``floor(torch.log2(max))`` gave 128 for ``float32.max``, because
+    ``log2`` rounds to nearest and the value sits one step below ``2**128``.
+    ``2**128`` is inf, so the ``+1`` candidate produced ``0 * inf = NaN`` and
+    that NaN error also blocked the ``-1`` candidate from replacing the base.
+
+    The invariant is on the public quantizer: every finite input produces a
+    finite grid, and the chosen exponent is a storable one. The expected values
+    come from the scalar double-precision oracle, not from the implementation.
+    """
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    fmax = torch.finfo(torch.float32).max
+    for width in (2, 4, 8):
+        block = torch.full((1, 16), fmax)
+        quantized, exponent = bq.quantize_blockfloat(block, width)
+
+        expected, expected_exp = _scalar_blockfloat_oracle(block.reshape(-1).tolist(), width)
+        assert int(exponent[0, 0]) == expected_exp == 127
+        assert torch.isfinite(quantized).all(), "an illegal exponent leaked a NaN"
+        assert torch.equal(quantized.reshape(-1), torch.tensor(expected, dtype=torch.float32))
+        assert int(exponent.max()) <= bq.BLOCKFLOAT_EXPONENT_MAX
+
+        # The result must still be a checkpoint-storable grid point.
+        codes, recovered = bq.decompose_blockfloat(quantized, width)
+        assert torch.equal(bq.recompose_blockfloat(codes, recovered, bits=width), quantized)
+        assert int(recovered.max()) <= bq.BLOCKFLOAT_EXPONENT_MAX
+
+    # The negative extreme takes the same path with the sign preserved.
+    negative = torch.full((1, 16), -fmax)
+    quantized, exponent = bq.quantize_blockfloat(negative, 4)
+    assert int(exponent[0, 0]) == 127
+    assert torch.isfinite(quantized).all()
+    assert quantized.min() < -1e38
+
+
+def test_blockfloat_binade_boundaries_derive_the_exact_exponent():
+    """The base exponent must be the binade index at every boundary.
+
+    ``torch.log2`` reads a value just below ``2**k`` as exactly ``k`` and then
+    ``floor`` yields ``k``, one too high; ``float32.max`` is the extreme case at
+    ``k = 128``. A bit-level extraction is exact, so it is the reference here.
+    Power-of-two neighbours, the smallest normal and the smallest subnormal all
+    have to agree, and every result has to stay finite and on the grid.
+    """
+
+    import importlib
+    import math
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    tiny = torch.finfo(torch.float32).tiny
+    smallest_subnormal = torch.tensor(2.0**-149, dtype=torch.float32)
+    fmax = torch.finfo(torch.float32).max
+
+    values = [
+        torch.tensor(0.0),
+        torch.tensor(tiny),
+        smallest_subnormal,
+        torch.tensor(fmax),
+    ]
+    for k in range(-126, 128):
+        boundary = torch.tensor(2.0**k, dtype=torch.float32)
+        below = torch.nextafter(boundary, torch.zeros((), dtype=torch.float32))
+        above = torch.nextafter(boundary, torch.tensor(math.inf, dtype=torch.float32))
+        for value in (below, boundary, above):
+            if bool(torch.isfinite(value)) and float(value) > 0:
+                values.append(value)
+
+    stacked = torch.stack(values).reshape(-1, 1).expand(-1, 16).contiguous()
+    blocks = stacked.reshape(-1, 1, 16)
+    got = bq._block_base_exponent(blocks).reshape(-1)
+
+    # Independent expectation: the exponent field of the float, with the same
+    # clamp-to-tiny convention the quantizer documents for a zero block.
+    safe = stacked[:, 0].abs().clamp_min(tiny)
+    want = ((safe.view(torch.int32) >> 23) & 0xFF) - 127
+    assert torch.equal(got.to(torch.int32), want), "base exponent is not the binade index"
+
+    # Independently, through frexp, except where the clamp changes a subnormal.
+    frexp_exp = (torch.frexp(safe)[1] - 1).to(torch.int32)
+    clamped = stacked[:, 0].abs() < tiny
+    assert torch.equal(got[~clamped].to(torch.int32), frexp_exp[~clamped])
+
+    for width in (4, 8):
+        quantized, exponent = bq.quantize_blockfloat(stacked, width)
+        assert torch.isfinite(quantized).all()
+        assert int(exponent.min()) >= bq.BLOCKFLOAT_EXPONENT_MIN
+        assert int(exponent.max()) <= bq.BLOCKFLOAT_EXPONENT_MAX
+
+    # Smallest normal and subnormal: the former is exactly representable, the
+    # latter flushes to zero on the -126 binade grid.
+    quantized, exponent = bq.quantize_blockfloat(torch.full((1, 16), tiny), 4)
+    assert int(exponent[0, 0]) == -126 and float(quantized[0, 0]) == float(tiny)
+    quantized, exponent = bq.quantize_blockfloat(
+        torch.full((1, 16), float(smallest_subnormal)), 4
+    )
+    assert int(exponent[0, 0]) == -126 and float(quantized[0, 0]) == 0.0
+
+
+def test_blockfloat_rejects_nonfinite_blocks():
+    """NaN and infinity have no block-float representation, so refuse them.
+
+    Deriving an exponent from a non-finite maximum used to produce a silently
+    finite-looking grid (or NaN codes); a checkpoint cannot store either. The
+    contract is a ``ValueError`` before any arithmetic, so the caller learns
+    that the weight must not be quantized rather than receiving poison.
+    """
+
+    import importlib
+    import math
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    for bad in (math.inf, -math.inf, math.nan):
+        with pytest.raises(ValueError, match="non-finite"):
+            bq.quantize_blockfloat(torch.full((1, 16), bad), 4)
+    # A single non-finite value in an otherwise ordinary block is still refused.
+    mixed = torch.zeros(1, 16)
+    mixed[0, 7] = math.inf
+    with pytest.raises(ValueError, match="non-finite"):
+        bq.quantize_blockfloat(mixed, 8)
+    with pytest.raises(ValueError, match="non-finite"):
+        bq._block_exponents(mixed)
+
+    # The fixed-exponent rounding entry point cannot be handed a scale that has
+    # no representation either.
+    with pytest.raises(ValueError, match="block-float exponents must lie in"):
+        bq._round_with_exponents(
+            torch.randn(1, 16), torch.tensor([[bq.BLOCKFLOAT_EXPONENT_MAX + 1]]), bits=4
+        )
+
+
 def test_blockfloat_exponent_search_beats_floor_log2():
     """Per-block exponent selection must lower error without leaving the grid.
 
@@ -2941,6 +3376,9 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
     assert quant_config["mixed_bits"] is True
     assert quant_config["bits_per_layer"]["model.layers.0.self_attn.q_proj"] == 8
     assert quant_config["bits_per_layer"]["model.layers.0.mlp.gate_proj"] == 4
+    # The shipped loader is declared in the quantization config so the HF
+    # refusing-quantizer guard lets this checkpoint through (#4557).
+    assert quant_config["shipped_modeling_file"] == bq.MODELING_FILE
 
     loaded, restored = bq.load_blockfloat_model(out)
     assert len(restored) == 2 * 7 + 1
@@ -2956,6 +3394,49 @@ def test_mixed_width_checkpoint_roundtrip(tmp_path):
             got = quantized.dequantize()
             want = module.weight.detach().float()
             assert torch.equal(got, want), prefix
+
+
+def test_refusing_quantizer_allows_a_shipped_blockfloat_modeling_file():
+    """#4557: a shipped ``auto_map`` loader must not be refused by transformers.
+
+    The refusing quantizer exists to stop silent random-init loads of packed
+    checkpoints that transformers cannot read. A block-float checkpoint that
+    ships its own modeling file is read by that class, so the writer records the
+    shipped file in the quantization config. A bare config without it still
+    fails closed.
+    """
+
+    from transformers.quantizers.auto import AutoHfQuantizer, AutoQuantizationConfig
+
+    shipped = AutoQuantizationConfig.from_dict(
+        {
+            "quant_method": "tt-blockfloat",
+            "bits": 4,
+            "bits_per_layer": {"model.layers.0.mlp.down_proj": 4},
+            "shipped_modeling_file": "modeling_tt_blockfloat.py",
+        }
+    )
+    quantizer = AutoHfQuantizer.from_config(shipped)
+    assert quantizer.pre_quantized is True
+    # The remote modeling class reads these back out of the config object.
+    assert dict(shipped)["bits_per_layer"] == {"model.layers.0.mlp.down_proj": 4}
+
+    # A checkpoint written before the explicit marker existed still records the
+    # format field that only ``save_blockfloat_model`` writes.
+    legacy = AutoQuantizationConfig.from_dict(
+        {
+            "quant_method": "tt-blockfloat",
+            "checkpoint_format": "tt-blockfloat",
+            "bits": 4,
+        }
+    )
+    assert AutoHfQuantizer.from_config(legacy).pre_quantized is True
+
+    bare = AutoQuantizationConfig.from_dict(
+        {"quant_method": "tt-blockfloat", "bits": 4}
+    )
+    with pytest.raises(ValueError, match="cannot be loaded by `transformers`"):
+        AutoHfQuantizer.from_config(bare)
 
 
 def test_shipped_modeling_file_makes_transformers_load_correctly(tmp_path):
@@ -3277,6 +3758,308 @@ def test_native_checkpoint_restores_a_fresh_model(tmp_path):
     restored = bq.load_native_checkpoint_into_dense_model(fresh, out)
     assert restored == {"0.proj": [32, 64]}
     assert fresh.model.decoder.layers[0].proj.weight.detach().equal(w)
+
+
+def _mixed_grid_and_dense_model(dtype=torch.float32):
+    """One decoder block with an on-grid linear and an off-grid dense linear."""
+
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=True, dtype=dtype)
+    block.dense = torch.nn.Linear(16, 2, bias=True, dtype=dtype)
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.decoder = torch.nn.Module()
+    model.model.decoder.layers = torch.nn.ModuleList([block])
+    return model
+
+
+def test_native_checkpoint_roundtrips_dense_fallback_layers(tmp_path):
+    """The dense fallback must be loadable, not only written.
+
+    A decoder linear that is not on the grid is stored as ``<layer>.weight``, but
+    it used to be left out of ``blockfloat.json``, so the reader skipped it and
+    the loader returned success with the target layer still at its initial
+    values. Its bias was never written at all. Both kinds of layer are now listed
+    in the manifest and restored weight-for-weight and bias-for-bias.
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    block = src.model.decoder.layers[0]
+    with torch.no_grad():
+        block.grid.weight.fill_(1.0)       # exactly on the bf4_b grid
+        block.grid.bias.fill_(0.5)
+        block.dense.weight.fill_(0.1)      # off-grid, so it stays dense
+        block.dense.bias.fill_(3.0)
+
+    out = str(tmp_path / "mixed")
+    info = bq.save_blockfloat_checkpoint(src, out, bits=4)
+    assert info["layers"] == 1 and info["dense_layers"] == 1
+
+    payload = bq._load_blockfloat_payload(out)
+    # Both biases are written, and the dense weight is stored at its source dtype.
+    assert payload["0.dense.weight"].dtype is torch.float32
+    assert torch.equal(payload["0.dense.weight"], block.dense.weight.detach())
+    assert torch.equal(payload["0.dense.bias"], block.dense.bias.detach())
+    assert torch.equal(payload["0.grid.bias"], block.grid.bias.detach())
+
+    meta = json.loads((tmp_path / "mixed" / "blockfloat.json").read_text())
+    assert meta["layers"]["0.grid"]["kind"] == "blockfloat"
+    assert meta["layers"]["0.dense"]["kind"] == "dense"
+    assert meta["layers"]["0.dense"]["dtype"] == "float32"
+    assert meta["layers"]["0.dense"]["has_bias"] is True
+    # Only quantized layers carry a width, so mixed-width bookkeeping is unchanged.
+    assert "bits" not in meta["layers"]["0.dense"]
+
+    read_back = bq.read_blockfloat_checkpoint(out)
+    assert set(read_back["layers"]) == {"0.grid", "0.dense"}
+    assert read_back["layers"]["0.dense"]["kind"] == "dense"
+    assert bq.expand_native_layer(read_back["layers"]["0.dense"]).equal(
+        block.dense.weight.detach()
+    )
+
+    fresh = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    restored = bq.load_native_checkpoint_into_dense_model(fresh, out)
+    assert set(restored) == {"0.grid", "0.dense"}
+    target = fresh.model.decoder.layers[0]
+    assert torch.equal(target.grid.weight.detach(), block.grid.weight.detach())
+    assert torch.equal(target.grid.bias.detach(), block.grid.bias.detach())
+    assert torch.equal(target.dense.weight.detach(), block.dense.weight.detach())
+    assert torch.equal(target.dense.bias.detach(), block.dense.bias.detach())
+
+
+def test_native_checkpoint_with_only_dense_layers(tmp_path):
+    """A checkpoint with no on-grid layer is still loadable.
+
+    ``layers`` reports the block-float count, ``dense_layers`` the fallback
+    count, and the manifest is the only list of what the payload holds.
+    """
+
+    import importlib
+    import json
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    block = torch.nn.Module()
+    block.proj = torch.nn.Linear(16, 2, bias=True)
+    with torch.no_grad():
+        block.proj.weight.fill_(0.1)
+        block.proj.bias.fill_(3.0)
+    src = torch.nn.Module()
+    src.model = torch.nn.Module()
+    src.model.decoder = torch.nn.Module()
+    src.model.decoder.layers = torch.nn.ModuleList([block])
+
+    out = str(tmp_path / "dense")
+    info = bq.save_blockfloat_checkpoint(src, out, bits=4)
+    assert info["layers"] == 0
+    assert info["dense_layers"] == 1
+    assert info["bits_per_layer"] == []
+
+    meta = json.loads((tmp_path / "dense" / "blockfloat.json").read_text())
+    assert set(meta["layers"]) == {"0.proj"}
+    assert meta["layers"]["0.proj"]["kind"] == "dense"
+    assert "bits_per_layer" not in meta
+
+    fresh_block = torch.nn.Module()
+    fresh_block.proj = torch.nn.Linear(16, 2, bias=True)
+    fresh = torch.nn.Module()
+    fresh.model = torch.nn.Module()
+    fresh.model.decoder = torch.nn.Module()
+    fresh.model.decoder.layers = torch.nn.ModuleList([fresh_block])
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    restored = bq.load_native_checkpoint_into_dense_model(fresh, out)
+    assert restored == {"0.proj": [2, 16]}
+    target = fresh.model.decoder.layers[0].proj
+    assert torch.equal(target.weight.detach(), block.proj.weight.detach())
+    assert torch.equal(target.bias.detach(), block.proj.bias.detach())
+
+
+def test_native_checkpoint_dense_fallback_keeps_source_precision(tmp_path):
+    """A dense fallback keeps bf16 exactly; it used to be narrowed to fp16."""
+
+    import importlib
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model(dtype=torch.bfloat16)
+    block = src.model.decoder.layers[0]
+    values = torch.tensor([0.1234567, -0.98765], dtype=torch.bfloat16)
+    with torch.no_grad():
+        block.grid.weight.fill_(1.0)
+        block.grid.bias.copy_(values)
+        block.dense.weight.fill_(0.1)
+        block.dense.bias.copy_(values)
+
+    out = str(tmp_path / "bf16")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    payload = bq._load_blockfloat_payload(out)
+    assert payload["0.dense.weight"].dtype is torch.bfloat16
+    assert payload["0.dense.bias"].dtype is torch.bfloat16
+    assert torch.equal(payload["0.dense.bias"], values)
+    assert torch.equal(payload["0.grid.bias"], values)
+
+    fresh = _mixed_grid_and_dense_model(dtype=torch.bfloat16)
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    bq.load_native_checkpoint_into_dense_model(fresh, out)
+    target = fresh.model.decoder.layers[0]
+    assert torch.equal(target.dense.weight.detach(), block.dense.weight.detach())
+    assert torch.equal(target.dense.bias.detach(), values)
+
+
+def test_native_checkpoint_rejects_layers_with_no_target_module(tmp_path):
+    """A manifest entry the target model cannot hold must not pass silently."""
+
+    import importlib
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "mixed")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    # Same shape of model, but the dense fallback layer is gone.
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=True)
+    other = torch.nn.Module()
+    other.model = torch.nn.Module()
+    other.model.decoder = torch.nn.Module()
+    other.model.decoder.layers = torch.nn.ModuleList([block])
+
+    with pytest.raises(ValueError, match="0.dense"):
+        bq.load_native_checkpoint_into_dense_model(other, out)
+
+
+def test_native_loader_rejects_a_bias_the_target_cannot_hold(tmp_path):
+    """A stored bias with no target module bias must not be dropped."""
+
+    import importlib
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "mixed")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=False)
+    block.dense = torch.nn.Linear(16, 2, bias=False)
+    target = torch.nn.Module()
+    target.model = torch.nn.Module()
+    target.model.decoder = torch.nn.Module()
+    target.model.decoder.layers = torch.nn.ModuleList([block])
+
+    with pytest.raises(ValueError, match="stores a bias"):
+        bq.load_native_checkpoint_into_dense_model(target, out)
+
+
+def test_native_checkpoint_reads_a_version_1_manifest(tmp_path):
+    """Version 1 checkpoints still load their quantized layers.
+
+    Version 1 listed only block-float layers and wrote the dense fallback (and no
+    bias for it) without a manifest entry. Those unreachable tensors cannot be
+    attributed to a layer afterwards -- the payload key is the only evidence --
+    so the reader keeps loading every entry the manifest does list, and a
+    cross-check now fails the load for a declared layer whose codes are missing.
+    """
+
+    import importlib
+    import json
+    import os
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "v1")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    path = os.path.join(out, "blockfloat.json")
+    with open(path) as handle:
+        meta = json.load(handle)
+    # Reconstruct the pre-change manifest: only the quantized layer is listed,
+    # with no ``kind`` and no bias record.
+    quantized = {
+        key: {k: v for k, v in entry.items() if k in (
+            "shape", "bits", "codes_bytes", "numel", "exponent_bytes"
+        )}
+        for key, entry in meta["layers"].items()
+        if entry["kind"] == "blockfloat"
+    }
+    meta["version"] = 1
+    meta["layers"] = quantized
+    with open(path, "w") as handle:
+        json.dump(meta, handle, indent=1)
+
+    payload = bq.read_blockfloat_checkpoint(out)
+    assert set(payload["layers"]) == {"0.grid"}
+    assert payload["layers"]["0.grid"]["kind"] == "blockfloat"
+
+    fresh = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        for param in fresh.parameters():
+            param.fill_(-9.0)
+    # The unlisted dense tensor is not reachable, so it is not a target layer.
+    block = torch.nn.Module()
+    block.grid = torch.nn.Linear(16, 2, bias=True)
+    target = torch.nn.Module()
+    target.model = torch.nn.Module()
+    target.model.decoder = torch.nn.Module()
+    target.model.decoder.layers = torch.nn.ModuleList([block])
+    restored = bq.load_native_checkpoint_into_dense_model(target, out)
+    assert restored == {"0.grid": [2, 16]}
+    assert target.model.decoder.layers[0].grid.weight.detach().eq(1.0).all()
+
+
+def test_native_reader_rejects_a_layer_whose_codes_are_missing(tmp_path):
+    """A listed layer with no payload tensor is a broken checkpoint, not a skip."""
+
+    import importlib
+    import os
+
+    import pytest
+
+    bq = importlib.import_module("gptqmodel.utils.tt_blockfloat_quant")
+
+    src = _mixed_grid_and_dense_model()
+    with torch.no_grad():
+        src.model.decoder.layers[0].grid.weight.fill_(1.0)
+        src.model.decoder.layers[0].dense.weight.fill_(0.1)
+    out = str(tmp_path / "broken")
+    bq.save_blockfloat_checkpoint(src, out, bits=4)
+
+    payload = bq._load_blockfloat_payload(out)
+    payload.pop("0.dense.weight")
+    from safetensors.torch import save_file
+
+    save_file(payload, os.path.join(out, bq.BLOCKFLOAT_PAYLOAD))
+
+    with pytest.raises(ValueError, match="0.dense.weight is missing"):
+        bq.read_blockfloat_checkpoint(out)
 
 
 def test_blockfloat_pack_roundtrips_exactly():

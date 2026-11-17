@@ -45,8 +45,14 @@ def test_bailing_hybrid_simple_layer_modules_cover_attention_and_mlp():
         # MLA extras.
         "self_attn.kv_a_proj_with_mqa",
         "self_attn.kv_b_proj",
-        # Remote-code `bailing_moe` attention layout (Ling 2.0).
+        # Remote-code `bailing_moe` attention layout (Ling 2.0) plus the
+        # Ling-2.6-flash MLA projections declared under the same namespace.
         "attention.query_key_value",
+        "attention.q_a_proj",
+        "attention.kv_a_proj_with_mqa",
+        "attention.g_proj",
+        "attention.q_b_proj",
+        "attention.kv_b_proj",
         "attention.dense",
         # Dense (delta/linear-attention) MLP.
         "mlp.gate_proj",

@@ -170,3 +170,144 @@ def test_gsq_weight_replays_in_inference_mode():
     hooked.weight.data = weight
     with torch.inference_mode():
         assert hooked(inputs).shape == (1, 32, 16)
+
+
+def _packed_codes(weight, scales, zeros, g_idx, bits):
+    scale = scales.float()[:, g_idx]
+    return ((weight.float() + zeros.float()[:, g_idx] * scale) / scale).round().clamp(0, 2**bits - 1)
+
+
+def _hessian_metric(weight, target, hessian):
+    factor = torch.linalg.cholesky((hessian.float() + hessian.float().T) * 0.5)
+    error = (weight.float() - target.float()) @ factor
+    teacher = target.float() @ factor
+    return (error.square().sum() / teacher.square().sum()).item()
+
+
+def test_gsq_moves_codes_away_from_a_gptq_local_optimum():
+    """#4592: the initializer is a local optimum of the same Gram.
+
+    A GPTQ weight is already optimal for its own codes, so a refiner that only
+    follows the relaxed code expectation returns it unchanged. The hard search
+    has to leave that point and lower the exported score.
+    """
+
+    torch.manual_seed(4592)
+    rows, columns, bits, group_size = 24, 32, 4, 8
+    layer = nn.Linear(columns, rows, bias=False, dtype=torch.float16)
+    with torch.no_grad():
+        layer.weight.mul_(0.5)
+    config = QuantizeConfig(bits=bits, group_size=group_size, gsq=None)
+    gptq = GPTQ(layer, qcfg=config)
+    gptq.quantizer.configure(perchannel=True)
+    samples = torch.randn(1, 96, columns, dtype=torch.float16)
+    for sample in samples:
+        gptq.add_batch(sample, None)
+    hessian = gptq.finalize_hessian().float().clone()
+    weight, scales, zeros, groups, *_ = gptq.quantize(blocksize=32)
+
+    result = refine_gptq_scalar(
+        weight, scales, zeros, groups.to(torch.int32), target=layer.weight.detach().float(),
+        bits=bits, hessian=hessian,
+        config=GSQConfig(enabled=True, steps=8, candidates=5, seed=3),
+    )
+
+    assert result.after < result.before
+    assert not torch.equal(result.weight, weight)
+    codes = _packed_codes(result.weight, result.scales, result.zeros, result.g_idx.int(), bits)
+    assert _hessian_metric(result.weight, layer.weight, hessian) <= result.after * (1 + 1e-3)
+    assert torch.equal(codes, _packed_codes(
+        result.weight, result.scales, result.zeros, result.g_idx.int(), bits))
+
+
+def test_gsq_accepts_per_row_and_keeps_worse_rows_at_the_initializer():
+    """A chunk is accepted row by row, not as one all-or-nothing block."""
+
+    torch.manual_seed(7)
+    rows, columns, bits = 12, 16, 4
+    groups = (torch.arange(columns) // 4).to(torch.int32)
+    scales = torch.full((rows, columns // 4), 0.1, dtype=torch.float16)
+    zeros = torch.full_like(scales, 8)
+    target = torch.randn(rows, columns, dtype=torch.float16) * 0.4
+    # One row is already exact at the initializer; its codes must not move.
+    target[0] = 0.0
+    weight = scales.float()[:, groups] * (
+        target.float() / scales.float()[:, groups]
+    ).round().clamp(0, 2**bits - 1)
+
+    result = refine_gptq_scalar(
+        weight, scales, zeros, groups, target=target, bits=bits,
+        hessian=torch.eye(columns),
+        config=GSQConfig(enabled=True, steps=6, candidates=5, seed=11),
+    )
+
+    assert result.after <= result.before
+    assert torch.equal(result.weight[0], weight[0])
+
+
+def test_gsq_does_not_accept_a_worse_export():
+    """The relaxed phase may never ship a worse hard export."""
+
+    torch.manual_seed(5)
+    columns, bits = 8, 4
+    groups = torch.zeros(columns, dtype=torch.int32)
+    scales = torch.full((1, 1), 0.5, dtype=torch.float16)
+    zeros = torch.full_like(scales, 8)
+    target = torch.tensor([[3.7, -3.7, 3.7, -3.7, 3.7, -3.7, 3.7, -3.7]], dtype=torch.float16)
+    weight = torch.zeros_like(target)
+
+    result = refine_gptq_scalar(
+        weight, scales, zeros, groups, target=target, bits=bits,
+        hessian=torch.eye(columns),
+        config=GSQConfig(enabled=True, steps=3, candidates=4),
+    )
+
+    assert result.after <= result.before
+
+
+def test_gsq_history_matches_the_configured_step_budget():
+    torch.manual_seed(13)
+    columns, rows, bits = 8, 3, 4
+    groups = torch.zeros(columns, dtype=torch.int32)
+    scales = torch.full((rows, 1), 0.2, dtype=torch.float16)
+    zeros = torch.full_like(scales, 8)
+    target = torch.randn(rows, columns, dtype=torch.float16)
+    weight = torch.zeros_like(target)
+    config = GSQConfig(enabled=True, steps=5, candidates=4)
+
+    result = refine_gptq_scalar(
+        weight, scales, zeros, groups, target=target, bits=bits,
+        hessian=torch.eye(columns), config=config,
+    )
+
+    assert len(result.history) == config.steps + 1
+    assert result.history[0] == pytest.approx(result.before)
+    assert result.after <= result.before
+
+
+def test_gsq_hard_search_score_matches_the_packed_export():
+    """The reported ``after`` must be measurable on the packed checkpoint."""
+
+    torch.manual_seed(21)
+    rows, columns, bits, group_size = 10, 24, 4, 6
+    layer = nn.Linear(columns, rows, bias=False, dtype=torch.float16)
+    samples = torch.randn(1, 64, columns, dtype=torch.float16)
+    gptq = GPTQ(layer, qcfg=QuantizeConfig(bits=bits, group_size=group_size))
+    gptq.quantizer.configure(perchannel=True)
+    for sample in samples:
+        gptq.add_batch(sample, None)
+    hessian = gptq.finalize_hessian().float().clone()
+    weight, scales, zeros, groups, *_ = gptq.quantize(blocksize=24)
+
+    result = refine_gptq_scalar(
+        weight, scales, zeros, groups.to(torch.int32), target=layer.weight.detach().float(),
+        bits=bits, hessian=hessian,
+        config=GSQConfig(enabled=True, steps=6, candidates=5),
+        scale_dtype=scales.dtype,
+    )
+
+    codes = ((result.weight.float() + result.zeros.float()[:, result.g_idx] * result.scales.float()[:, result.g_idx])
+             / result.scales.float()[:, result.g_idx]).round().clamp(0, 2**bits - 1)
+    decoded = result.scales.float()[:, result.g_idx] * (codes - result.zeros.float()[:, result.g_idx])
+    measured = _hessian_metric(decoded, layer.weight, hessian)
+    assert measured == pytest.approx(result.after, rel=2e-4, abs=2e-6)

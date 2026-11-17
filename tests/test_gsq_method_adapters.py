@@ -240,7 +240,11 @@ def test_qqq_packed_gsq_payload_has_reloadable_runtime_buffers(group_size):
     extra = torch.full((128,), 0.05, dtype=torch.float32) if group_size != -1 else None
     packed.pack(linear, scales, s_extra=extra)
     assert packed.workspace.numel() > 0
-    assert packed.reduce_buffer.numel() > 0
+    # The reduce scratch is shared per device, not a per-module buffer (#4387).
+    assert "reduce_buffer" not in packed._buffers
+    scratch = packed._reduce_scratch()
+    assert scratch.shape == (packed.max_par * 64, packed.out_features)
+    assert scratch.dtype == torch.int32
     assert (packed.s_group.numel() == 0) == (group_size == -1)
     saved = packed.state_dict()
     assert "workspace" not in saved and "reduce_buffer" not in saved

@@ -16,6 +16,7 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class OvisQModel(BaseQModel):
@@ -126,9 +127,9 @@ class OvisQModel(BaseQModel):
             "labels": labels,
         }
 
-    def prepare_dataset(self,calibration_dataset,batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, self.preprocess_dataset):
+        for batch in batched(conversations, batch_size, self.preprocess_dataset):
             pixel_values, input_ids, labels = tuple([instance[key] for instance in batch]
                                                     for key in ("pixel_values", "input_ids", "labels"))
             input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -153,6 +154,15 @@ class OvisQModel(BaseQModel):
             })
 
         return calib_data
+
+    def prepare_dataset(self,calibration_dataset,batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
     def generate(self, inputs=None, **kwargs):
         """shortcut for model.generate"""

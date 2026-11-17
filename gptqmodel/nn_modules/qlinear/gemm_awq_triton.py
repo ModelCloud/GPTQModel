@@ -197,6 +197,10 @@ class AwqGEMMTritonLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The biased paths add the checkpoint bias to an FP32 product, so the
+    # buffer keeps its stored width at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     QUANT_TYPE = "awq_gemm_triton"
 
     @classmethod
@@ -239,8 +243,6 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         schedule = kwargs.pop(
             "schedule", kwargs.pop("awq_triton_schedule", None)
         )
-        if schedule_mode is None and schedule is None:
-            schedule = kernel.awq_triton_schedule
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -255,7 +257,13 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
         self.fp32_accum = fp32_accum
-        self.awq_triton_schedule_mode = schedule_mode
+        # ``KernelConfig.awq_triton_schedule`` is a dispatch *mode* ("auto" or
+        # "legacy"). Resolve it from this module's own policy snapshot so a
+        # per-load ``AwqTritonConfig(schedule=...)`` is honored; only an
+        # explicit ``schedule=`` plan or mapping may occupy the plan slot.
+        self.awq_triton_schedule_mode = (
+            self.kernel.awq_triton_schedule if schedule_mode is None else schedule_mode
+        )
         self.awq_triton_schedule = schedule
 
     def post_init(self):

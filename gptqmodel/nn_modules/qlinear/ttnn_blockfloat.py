@@ -86,10 +86,12 @@ class _TTNNBlockFloatMixin:
     # -- placement --------------------------------------------------------
 
     def _mesh(self) -> TTNNMesh:
-        mesh = current_mesh()
-        if mesh is not None:
-            return mesh
-        return open_mesh(device_count=self._requested_device_count(), fabric=self._fabric_config())
+        # Routed through ``open_mesh`` even when a handle is live: the runtime is
+        # what knows whether the open placement satisfies this request.
+        return open_mesh(
+            device_count=self._requested_device_count(),
+            fabric=self._fabric_config(),
+        )
 
     def _requested_device_count(self) -> int:
         requested = getattr(self, "ttnn_device_count", None)

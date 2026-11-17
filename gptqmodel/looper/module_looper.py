@@ -71,7 +71,11 @@ from ..utils.model import (
 from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
+    ensure_version_counters,
+    materialize_remaining_meta_modules,
     offload_to_disk,
+    release_private_offload_root,
+    restore_disk_offloaded_modules,
     restore_offloaded_modules,
 )
 from ..utils.p2p import (
@@ -163,6 +167,28 @@ def _resolve_strategy_device_pool(
     return resolved
 
 
+def validate_moe_routing_support(gptq_model) -> None:
+    """Reject ``ExpertsRoutingBypass`` when the definition cannot feed all experts.
+
+    A model without ``moe_lifecycle_hooks`` cannot replay the whole calibration
+    batch through every expert. Warning per forward and continuing to calibrate
+    only the natively routed tokens while the saved config still claimed bypass
+    routing made the option a silent no-op.
+    """
+
+    if not gptq_model.quantize_config.moe_routing_bypass():
+        return
+    if getattr(gptq_model, "moe_lifecycle_hooks", None) is not None:
+        return
+    raise ValueError(
+        f"ModuleLooper: MoEConfig(routing=ExpertsRoutingBypass()) was requested but "
+        f"{type(gptq_model).__name__} does not declare `moe_lifecycle_hooks`. "
+        "The all-experts calibration path cannot run, and continuing would silently "
+        "fall back to native routed calibration. Declare `moe_lifecycle_hooks` on the "
+        "model definition, or use `ExpertsRoutingOverride` instead."
+    )
+
+
 class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
 
@@ -182,27 +208,6 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
         disk_speed = estimate_disk_io_speed()
         _IO_WRITE_SPEED_MB = disk_speed / (1024 * 1024)
     return _IO_WRITE_SPEED_MB
-
-
-def _config_declares_tied_embeddings(config) -> bool:
-    """Return whether ``config`` or its text sub-config ties embeddings."""
-
-    seen: set[int] = set()
-    current = config
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if bool(getattr(current, "tie_word_embeddings", False)):
-            return True
-        text_config = getattr(current, "text_config", None)
-        if text_config is None:
-            get_text_config = getattr(current, "get_text_config", None)
-            if callable(get_text_config):
-                try:
-                    text_config = get_text_config()
-                except TypeError:
-                    text_config = None
-        current = text_config
-    return False
 
 
 class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
@@ -413,6 +418,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
 
+        # The decoder layer (or embedding/lm_head endpoint) currently in the
+        # quantization stage, paired with the device it lived on before the
+        # stage moved it. A cancelled or failed run must return it there;
+        # otherwise the in-flight layer stays on the accelerator while the rest
+        # of the model is on CPU and the next forward raises a device mismatch
+        # (issue #4546).
+        self._inflight_layer: Optional[Tuple[torch.nn.Module, torch.device]] = None
+
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
         # `get_num_experts()` returns None when the config does not expose a
         # scalar cardinality (e.g. a per-modality list); routing override
@@ -427,6 +440,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        validate_moe_routing_support(self.gptq_model)
         self._emit_moe_parallel_quant_runtime()
 
         for processor in self.processors:
@@ -1042,15 +1056,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if not flag_enabled:
             return False
 
-        # Check if model has lifecycle hooks
+        # Check if model has lifecycle hooks. __init__ already rejects a bypass
+        # request for a model without hooks; keep this guard so a config mutated
+        # after construction cannot silently re-enable native routing.
         hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
-            log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
-                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
-                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
+            raise ValueError(
+                f"ModuleLooper: ExpertsRoutingBypass was requested but "
+                f"{self.gptq_model.__class__.__name__} does not declare `moe_lifecycle_hooks`. "
+                "The all-experts calibration path cannot run."
             )
-            return False
 
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block_for_subset(
@@ -1368,38 +1383,62 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     def _lm_head_is_tied(self) -> bool:
         """Return whether `lm_head` shares its source weight with another module.
 
+        Real storage identity is authoritative. Composite/VLM configs commonly
+        leave a nested ``text_config.tie_word_embeddings=True`` while the loaded
+        model keeps independent input and output embeddings (for example
+        Qwen3-VL), so nested config flags must not be treated as proof of tying
+        (issue #4369).
+
         `find_tied_parameters` only compares materialized parameters. A lazily
         loaded shell keeps both sides as independent META parameters until the
         loader ties them, so identity never matches and quantization continues
         until the source reload fails with a misleading "missing checkpoint
         tensors" error. Detect that shape from the checkpoint instead: a tied
         HF checkpoint omits `lm_head.weight`, so the head has no independent
-        source tensor to quantize.
+        source tensor to quantize. The declared tied key at the root config is
+        the final fallback for checkpoints that do store `lm_head.weight`
+        (Qwen3) while the loader still ties it.
         """
 
         model = self.gptq_model.model
         lm_head_name = self.gptq_model.lm_head
+
+        # 1. Actual storage identity: the input embedding and output head are
+        #    the same parameter (or share materialized storage).
+        try:
+            input_embeddings = model.get_input_embeddings()
+            output_embeddings = model.get_output_embeddings()
+        except (AttributeError, TypeError):
+            input_embeddings = output_embeddings = None
+        input_weight = getattr(input_embeddings, "weight", None)
+        output_weight = getattr(output_embeddings, "weight", None)
+        if torch.is_tensor(input_weight) and torch.is_tensor(output_weight):
+            if output_weight is input_weight:
+                return True
+            # Meta tensors all report data_ptr() == 0, so only compare storage
+            # for materialized parameters.
+            if not (
+                getattr(input_weight, "is_meta", False)
+                or getattr(output_weight, "is_meta", False)
+            ):
+                try:
+                    same_storage = (
+                        input_weight.untyped_storage().data_ptr()
+                        == output_weight.untyped_storage().data_ptr()
+                        and input_weight.data_ptr() == output_weight.data_ptr()
+                    )
+                except Exception:  # pragma: no cover - backend without untyped_storage
+                    same_storage = False
+                if same_storage:
+                    return True
+
+        # 2. Accelerate's tied-parameter report (materialized parameters only).
         if any(
             f"{lm_head_name}.weight" in names
             for names in find_tied_parameters(model)
         ):
             return True
-        if not _config_declares_tied_embeddings(getattr(model, "config", None)):
-            return False
-        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
-        # even though the head is tied). The checkpoint tensor is not evidence
-        # of an independent head: the model's declared tied-weight keys and the
-        # config decide, and the loader ties the tensors after materialization.
-        tied_keys = getattr(model, "_tied_weights_keys", None)
-        tied_head = f"{lm_head_name}.weight"
-        if isinstance(tied_keys, dict):
-            declared_tied = tied_head in tied_keys
-        elif tied_keys:
-            declared_tied = tied_head in set(tied_keys)
-        else:
-            declared_tied = False
-        if declared_tied:
-            return True
+
         lm_head_module = get_module(model, key=lm_head_name)
         if lm_head_module is None:
             return False
@@ -1411,7 +1450,23 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         checker = getattr(getattr(self.gptq_model, "turtle_model", None), "has_checkpoint_tensor", None)
         if not callable(checker):
             return False
-        return not checker(target_model=model, target_submodule=lm_head_module)
+        if not checker(target_model=model, target_submodule=lm_head_module):
+            return True
+
+        # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
+        # even though the head is tied). Only the *root* config flag is trusted
+        # here; a nested text_config flag does not describe the loaded model's
+        # actual storage (issue #4369).
+        config = getattr(model, "config", None)
+        if not bool(getattr(config, "tie_word_embeddings", False)):
+            return False
+        tied_keys = getattr(model, "_tied_weights_keys", None)
+        tied_head = f"{lm_head_name}.weight"
+        if isinstance(tied_keys, dict):
+            return tied_head in tied_keys
+        if tied_keys:
+            return tied_head in set(tied_keys)
+        return False
 
     def _prepare_layer_direct_state_for_forward(
         self,
@@ -1868,6 +1923,115 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         self._offloaded_base_modules = []
         restore_offloaded_modules(self.gptq_model.model, entries, strict=strict)
 
+    def _restore_disk_offloaded_modules(self) -> None:
+        """Bring the disk-offloaded quantized modules back into memory.
+
+        Offload bounds host memory while the loop runs. Once it returns, the
+        in-session model must not depend on the run's bundles (issue #4450).
+        """
+
+        restore_disk_offloaded_modules(self.gptq_model.model, device=CPU, strict=True)
+
+    def _materialize_remaining_meta_modules(self) -> None:
+        """Load modules the lazy shell left on meta (e.g. an untied lm_head)."""
+
+        materialize_remaining_meta_modules(self.gptq_model, device=CPU)
+
+    def _release_run_workspace(self) -> None:
+        """Release processor-owned scratch shared across the whole run."""
+
+        for processor in getattr(self, "processors", ()) or ():
+            processor.release_run_workspace()
+
+    def _track_inflight_layer(
+        self,
+        module: torch.nn.Module,
+        home_device: Optional[torch.device] = None,
+    ) -> None:
+        """Remember the layer being staged and its pre-run home device."""
+
+        if not isinstance(module, torch.nn.Module):
+            return
+        if home_device is None:
+            try:
+                home_device = get_device(module)
+            except Exception:
+                home_device = CPU
+        # A lazy shell has no usable runtime placement to return to, so the
+        # model's ordinary CPU home is the only safe destination.
+        if getattr(home_device, "type", None) == "meta":
+            home_device = CPU
+        self._inflight_layer = (module, home_device)
+
+    def _clear_inflight_layer(self) -> None:
+        """Mark the current layer as complete so failure cleanup ignores it."""
+
+        self._inflight_layer = None
+
+    def _restore_inflight_layer(self) -> None:
+        """Return a cancelled/failed in-flight layer to its pre-run device.
+
+        The stage moves the whole layer to the compute device before a subset
+        forward. The success path relies on ``post_quantize`` to move it back,
+        but a ``StopMainLoop``/exception unwinds before that step, leaving every
+        parameter and buffer of the layer on the accelerator (issue #4546).
+        """
+
+        inflight = self._inflight_layer
+        self._inflight_layer = None
+        if inflight is None:
+            return
+        module, home_device = inflight
+        try:
+            rehome_module_to_device(
+                module,
+                home_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
+        except Exception:
+            # Cleanup must never mask the cancellation/failure that got us
+            # here; ``rehome_module_to_device`` already reports per-tensor
+            # failures, so this only guards unexpected structural errors.
+            log.warning(
+                "failed to restore in-flight quantization layer to %s",
+                home_device,
+                exc_info=True,
+            )
+
+    def _fence_run_work(self) -> None:
+        """Wait for work this run already submitted before tearing its state down.
+
+        ``loop()`` drains the device pool and the watcher threads only on the
+        success path. The failure path used to restore the model and delete the
+        per-run offload directory while already-submitted submodule finalizers
+        were still executing: those finalizers re-created the run directory
+        that ``release_private_offload_root`` had just removed (leaking one
+        layer's bundles per failed run) and kept packing/replacing modules
+        after ``quantize()`` had already raised (issue #4595).
+
+        Each wait is independent. A pool that fails to drain must not skip the
+        remaining waits, and nothing here may mask the original exception.
+        """
+
+        from ..utils.stream import STREAM_DEVICE_POOL
+
+        waits = (
+            ("device thread pool", DEVICE_THREAD_POOL.wait),
+            ("finalizer watcher threads", self.wait_dangling_threads),
+            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        )
+        for label, wait in waits:
+            try:
+                wait()
+            except Exception:
+                log.warning(
+                    "failed to drain the %s while failing the quantization run",
+                    label,
+                    exc_info=True,
+                )
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
@@ -1875,10 +2039,40 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 result = self._loop_impl(fallback=fallback, **kwargs)
             except BaseException:
-                # A failed run must not leave the base modules stranded on meta.
-                self._restore_offloaded_base_modules(strict=False)
+                # Fence already-submitted work before restoring anything it may
+                # still be mutating. A finalizer that ran after the teardown
+                # re-created the deleted run directory and kept packing modules
+                # after `quantize()` had raised (issue #4595).
+                try:
+                    self._fence_run_work()
+                finally:
+                    # A cancelled or failed run must also release the layer that
+                    # was mid-stage: the success path moves it back only after
+                    # post_quantize, which the exception skipped (#4546).
+                    try:
+                        self._restore_inflight_layer()
+                    finally:
+                        # A failed run must not leave the base modules stranded on meta.
+                        try:
+                            self._restore_offloaded_base_modules(strict=False)
+                        finally:
+                            # A failed run cannot be saved, so its per-run offload
+                            # bundles are no longer reachable (issue #4368).
+                            release_private_offload_root(self.gptq_model)
                 raise
+            finally:
+                # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
+                # outlives the model unless the run releases it, and a failed
+                # run must release it too.
+                self._release_run_workspace()
             self._restore_offloaded_base_modules(strict=True)
+            self._restore_disk_offloaded_modules()
+            self._materialize_remaining_meta_modules()
+            # Unquantized layers keep the parameters `pre_quantize`
+            # materialized under inference mode, and `post_quantize`'s
+            # `param.data =` move leaves them without a version counter
+            # (issue #4572). Repair every one before the model is returned.
+            ensure_version_counters(self.gptq_model.model)
             return result
 
     def _materialize_deferred_boundary_prefix(self, checkpoint) -> None:
@@ -2013,7 +2207,9 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             offload_to_disk(
                 model=self.gptq_model.model,
                 module=base_modules,
-                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                source_root=getattr(self.gptq_model, "model_local_path", None),
+                source_checkpoint=getattr(self.gptq_model, "checkpoint_file_name", None),
             )
 
         for processor in self.processors:

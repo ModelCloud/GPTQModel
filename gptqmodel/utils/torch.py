@@ -561,12 +561,66 @@ def torch_new_stream_ctx():
         return contextlib.nullcontext()
     return contextlib.nullcontext()
 
+def cuda_primary_context_claimed(index: int) -> Optional[bool]:
+    """Report whether this process already created the primary context on ``index``.
+
+    ``torch.cuda.synchronize(index)`` implicitly creates a full CUDA/HIP primary
+    context when the process never touched that device, which reserves hundreds
+    of MiB on a GPU the run was told to stay off (issue #4653).
+
+    The query reads the driver's primary-context state without creating it, so
+    callers can decide whether a synchronize is a no-op. ``None`` means the
+    running torch build does not expose the query; callers must then fall back to
+    their historical behavior instead of assuming the context is absent. HIP
+    exposes the same primary-context model, so the CUDA-namespaced query is also
+    valid on ROCm builds.
+    """
+
+    query = getattr(torch._C, "_cuda_hasPrimaryContext", None)
+    if query is None:
+        return None
+    try:
+        return bool(query(int(index)))
+    except Exception:  # pragma: no cover - driver/runtime edge cases
+        return None
+
+
+def accelerator_context_claimed(device_type: str, index: Optional[int] = None) -> bool:
+    """Best-effort "this process already initialized that accelerator device".
+
+    CUDA/HIP answers per index through :func:`cuda_primary_context_claimed`.
+    XPU/NPU only expose a process-wide ``is_initialized()``; when that hook is
+    missing, the historical "assume initialized" answer keeps the old behavior
+    instead of silently dropping a needed barrier.
+    """
+
+    if device_type == "cuda":
+        claimed = cuda_primary_context_claimed(0 if index is None else index)
+        return True if claimed is None else claimed
+
+    runtime = getattr(torch, device_type, None)
+    is_initialized = getattr(runtime, "is_initialized", None)
+    if not callable(is_initialized):
+        return True
+    try:
+        return bool(is_initialized())
+    except Exception:  # pragma: no cover - runtime edge cases
+        return True
+
+
 def torch_sync(device: torch.device = None):
     """Synchronize accelerator queues.
 
     When no device is provided we synchronize every detected accelerator index so
     replication work staged on multiple GPUs/NPUs completes before issuing more
     kernels.
+
+    Only devices this process already initialized are synchronized. A
+    ``synchronize`` on an untouched index creates a full primary context there, so
+    a run that excluded a GPU (``compute_device_filter`` or
+    ``device=("cuda:1",)``) used to claim the excluded GPU merely to wait for work
+    it never submitted (issue #4653). Skipping such a device cannot lose a
+    barrier: enqueueing work is what creates the context.
     """
 
     if device is None:
@@ -577,11 +631,13 @@ def torch_sync(device: torch.device = None):
             if dev_count:
                 synchronized_any = True
                 for idx in range(dev_count):
+                    if not accelerator_context_claimed("cuda", idx):
+                        continue
                     torch.cuda.synchronize(idx)
 
         if HAS_XPU:
             dev_count = torch.xpu.device_count()
-            if dev_count:
+            if dev_count and accelerator_context_claimed("xpu"):
                 synchronized_any = True
                 for idx in range(dev_count):
                     torch.xpu.synchronize(idx)
@@ -592,7 +648,7 @@ def torch_sync(device: torch.device = None):
 
         if HAS_NPU:
             dev_count = torch.npu.device_count()
-            if dev_count:
+            if dev_count and accelerator_context_claimed("npu"):
                 synchronized_any = True
                 for idx in range(dev_count):
                     torch.npu.synchronize(idx)
@@ -802,6 +858,26 @@ def torch_empty_cache_any(
 
 def torch_empty_cache(device: torch.device = None, gc: bool = True, sync: bool = False) -> bool:
     return torch_empty_cache_any(device=device, gc=gc, sync=sync)
+
+
+def release_pinned_host_cache() -> bool:
+    """Return PyTorch's cached pinned-host blocks to the operating system.
+
+    ``torch.empty(..., pin_memory=True)`` (used by layer offload) and
+    accelerate's checkpoint staging allocate non-swappable host memory. Deleting
+    the tensor only returns the block to PyTorch's process-wide pinned cache, so
+    ``RssShmem`` stays resident for the life of the process. Call this after the
+    staging copies are dead; blocks still owned by live tensors are untouched.
+
+    Returns ``False`` when the Torch build exposes no host cache to empty.
+    """
+
+    empty = getattr(torch._C, "_host_emptyCache", None)
+    if empty is None:
+        return False
+    empty()
+    return True
+
 
 def resolve_torch_device(device: Union[torch.device, str, int, None] = None):
     """Resolve ``auto`` or a concrete device without assuming CUDA exists."""

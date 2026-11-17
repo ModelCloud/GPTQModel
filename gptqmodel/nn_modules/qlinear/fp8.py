@@ -461,7 +461,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.register_buffer("weight_scale_inv", weight_scale_inv)
 
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu").contiguous()
+            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
+            # buffers: a reload always builds an FP32 bias, so an in-session
+            # module must hold the same dtype or the two run different GEMMs.
+            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -494,7 +497,10 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         else:
             self.register_buffer("weight_scale_inv", packed_scale)
         if linear.bias is not None:
-            bias = linear.bias.detach().to(device="cpu").contiguous()
+            # Match ``_allocate_buffers`` and the loader's FP32 FP8 bias
+            # buffers: a reload always builds an FP32 bias, so an in-session
+            # module must hold the same dtype or the two run different GEMMs.
+            bias = linear.bias.detach().to(device="cpu", dtype=torch.float32).contiguous()
             if "bias" in self._buffers:
                 self.bias = bias
             else:
@@ -691,25 +697,64 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             )
         )
 
+    def _decoded_weight_absmax_bound(self) -> Optional[float]:
+        """Upper bound on ``|decoded weight|`` without materialising it.
+
+        Stored codes are bounded by ``finfo(fp8_dtype).max`` and the scale is
+        either multiplied in or divided in, so only the (small) scale tensor is
+        needed. ``None`` means no bound could be established, and callers keep
+        the wide path.
+        """
+        if self._decoded_weight_bound_ready:
+            return self._decoded_weight_bound
+        bound: Optional[float] = None
+        try:
+            code_max = float(torch.finfo(self.fp8_dtype).max)
+        except (TypeError, ValueError):
+            code_max = None
+        if code_max is not None and self.weight_scale_inv.numel() > 0:
+            scale = self.weight_scale_inv.detach().to(device="cpu", dtype=torch.float32).abs()
+            if self.weight_scale_semantics == "multiplier":
+                bound = code_max * float(scale.max())
+            else:
+                smallest = float(scale.min())
+                bound = float("inf") if smallest == 0.0 else code_max / smallest
+        self._decoded_weight_bound = bound
+        self._decoded_weight_bound_ready = True
+        return bound
+
+    def _weights_fit_activation_dtype(self, dtype: torch.dtype) -> bool:
+        """Whether every decoded weight stays finite in *dtype* when narrowed."""
+        if dtype == torch.bfloat16:
+            # BF16 keeps the FP32 exponent range, so an FP32-decoded weight
+            # cannot overflow it.
+            return True
+        if dtype != torch.float16:
+            return False
+        bound = self._decoded_weight_absmax_bound()
+        return bound is not None and bound <= float(torch.finfo(torch.float16).max)
+
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if (
-            bias is not None
-            and x_flat.dtype in (torch.float16, torch.bfloat16)
-            and (
-                x_flat.device.type != "cuda"
-                or bias.dtype != x_flat.dtype
-                or autocast_active(x_flat.device.type)
-            )
+        if x_flat.dtype in (torch.float16, torch.bfloat16) and (
+            x_flat.device.type != "cuda"
+            or autocast_active(x_flat.device.type)
+            or (bias is not None and bias.dtype != x_flat.dtype)
+            or not self._weights_fit_activation_dtype(x_flat.dtype)
         ):
-            # The bias and the reduction can cancel outside the activation
-            # range. Decode into temporary FP32 storage and round only after
-            # their sum; autocast must not narrow this matmul again.
+            # Decode into temporary FP32 storage only when narrowing is not
+            # range-safe: a decoded FP8 weight above the activation dtype's
+            # finite range (for example 65536 under FP16) becomes inf and turns
+            # a finite dot product into NaN, and a wide bias can cancel a sum
+            # outside that range. In-range weights take the native GEMM with an
+            # FP32 reduction below, which also keeps a same-dtype bias wide.
             with torch.autocast(device_type=x_flat.device.type, enabled=False):
                 weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
                 output = torch.matmul(x_flat.float(), weight)
-                return (output + bias.to(device=x_flat.device, dtype=torch.float32)).to(x_flat.dtype)
+                if bias is not None:
+                    output = output + bias.to(device=x_flat.device, dtype=torch.float32)
+                return output.to(x_flat.dtype)
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return matmul_fp32_reduce(x_flat, weight, bias=bias)
 
@@ -743,6 +788,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
     def _invalidate_compiled(self) -> None:
         self._compiled_forward = None
         self.optimized = False
+        # The decoded-weight range bound is derived from the loaded payload.
+        self._decoded_weight_bound_ready = False
 
     def _apply(self, fn, recurse=True):
         # Module.to()/half()/bfloat16() normally cast every floating buffer.

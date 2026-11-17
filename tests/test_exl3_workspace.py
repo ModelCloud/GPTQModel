@@ -120,3 +120,220 @@ def test_concurrent_streams_do_not_overwrite_tile_workspace(device):
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(quantize, range(4)))
+
+
+def _reset_quant_stream_cache():
+    """Clear whichever stream cache the implementation keeps."""
+
+    streams = getattr(implementation, "_quant_streams", None)
+    if streams is not None:
+        with implementation._quant_streams_lock:
+            streams.clear()
+    tls = getattr(implementation, "_quant_stream_tls", None)
+    if tls is not None:
+        tls.__dict__.clear()
+
+
+def test_quant_stream_is_shared_per_device_across_threads(monkeypatch):
+    """Every worker thread must reuse one quantization stream per device.
+
+    The caching allocator pools blocks per stream, so a stream per worker
+    stranded one cache (and one 512 MiB tile scratch) per worker for work that a
+    per-device lock serializes anyway (issue #4586).
+    """
+    created = []
+
+    class FakeCuda:
+        @staticmethod
+        def Stream(device=None):
+            created.append(device)
+            return object()
+
+    fake_torch = SimpleNamespace(device=torch.device, cuda=FakeCuda())
+    monkeypatch.setattr(implementation, "torch", fake_torch)
+    _reset_quant_stream_cache()
+
+    barrier = threading.Barrier(8)
+    results = []
+    results_lock = threading.Lock()
+
+    def resolve():
+        barrier.wait()
+        resolved = (
+            implementation.get_quant_stream("cuda:0"),
+            implementation.get_quant_stream(torch.device("cuda:0")),
+            implementation.get_quant_stream("cuda:1"),
+        )
+        with results_lock:
+            results.append(resolved)
+
+    workers = [threading.Thread(target=resolve) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(60)
+    assert not any(worker.is_alive() for worker in workers)
+
+    # One creation per device, not one per caller thread.
+    assert len(created) == 2, created
+    assert results
+    for resolved in results:
+        assert resolved[0] is resolved[1]
+        assert resolved[0] is not resolved[2]
+    assert len({id(resolved[0]) for resolved in results}) == 1
+    assert len({id(resolved[2]) for resolved in results}) == 1
+
+
+_CONCURRENT_QUANTIZE_SCRIPT = """
+import threading
+
+import torch
+
+from gptqmodel.exllamav3.ext import exllamav3_runtime_available
+from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize as implementation
+
+if not torch.cuda.is_available():
+    print("NO_CUDA")
+    raise SystemExit(4)
+if not exllamav3_runtime_available():
+    print("EXTENSION_UNAVAILABLE")
+    raise SystemExit(3)
+
+device = torch.device("cuda:0")
+streams_seen = set()
+scratch_seen = set()
+lock = threading.Lock()
+
+_original_stream = implementation.get_quant_stream
+_original_alloc = implementation._allocate_temp_buffers
+
+
+def counted_stream(target):
+    stream = _original_stream(target)
+    with lock:
+        streams_seen.add(id(stream))
+    return stream
+
+
+def counted_alloc(*args, **kwargs):
+    buffers = _original_alloc(*args, **kwargs)
+    with lock:
+        scratch_seen.add(tuple(id(tensor) for tensor in buffers))
+    return buffers
+
+
+implementation.get_quant_stream = counted_stream
+implementation._allocate_temp_buffers = counted_alloc
+
+shapes = [(256, 128), (256, 256), (384, 128), (384, 256)]
+fixtures = []
+for seed, (k, n) in enumerate(shapes):
+    weight_generator = torch.Generator().manual_seed(900 + seed)
+    activation_generator = torch.Generator().manual_seed(1900 + seed)
+    weight = torch.randn((k, n), generator=weight_generator) * 0.02
+    activations = torch.randn((256, k), generator=activation_generator)
+    fixtures.append((weight, (2.0 / 256) * activations.T @ activations))
+
+
+def run(index):
+    weight, hessian = fixtures[index]
+    args = {
+        "K": 4,
+        "devices": [device],
+        "apply_out_scales": None,
+        "sigma_reg": 0.025,
+        "seed": 787,
+        "mcg": True,
+    }
+    # quantize_exl3 regularizes the weight in place, so every call needs its own
+    # copy of the fixture; sharing one would make the comparison meaningless.
+    _, _, packed = implementation.quantize_exl3(
+        weight.to(device).clone(),
+        {"H": hessian.to(device).clone(), "count": 256, "finalized": False},
+        args,
+        return_weight_q=False,
+    )
+    torch.cuda.synchronize(device)
+    metrics = args["error_metrics"]
+    assert metrics["hessian_metric_status"] == "ok", metrics
+    assert metrics["hessian_weighted_relative_error"] < 0.05, metrics
+    return {key: value.detach().cpu() for key, value in packed.items()}
+
+
+reference = [run(index) for index in range(len(shapes))]
+
+results = [None] * len(shapes)
+errors = []
+barrier = threading.Barrier(len(shapes))
+
+
+def worker(index):
+    try:
+        barrier.wait(120)
+        results[index] = run(index)
+    except BaseException as exc:  # noqa: BLE001 - report, do not mask
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+
+threads = [threading.Thread(target=worker, args=(index,)) for index in range(len(shapes))]
+for item in threads:
+    item.start()
+for item in threads:
+    item.join(900)
+
+if errors:
+    print("ERRORS:", errors)
+    raise SystemExit(5)
+if any(result is None for result in results):
+    print("INCOMPLETE")
+    raise SystemExit(6)
+for index, result in enumerate(results):
+    for key in reference[index]:
+        if not torch.equal(result[key], reference[index][key]):
+            print("MISMATCH", index, key)
+            raise SystemExit(7)
+
+print("STREAMS", len(streams_seen))
+print("SCRATCH", len(scratch_seen))
+print("OK")
+raise SystemExit(0)
+"""
+
+
+def test_concurrent_quantize_shares_one_stream_and_scratch_per_device():
+    """Four concurrent projections must not each own a stream and a scratch set.
+
+    This is the measured defect: one quantization stream per worker means one
+    allocator pool per worker, so the tile scratch and the allocator's free
+    blocks multiply by the worker count even though one device lock serializes
+    the kernels. The subprocess also proves that sharing the stream did not
+    alias the scratch: every concurrently produced trellis matches the packed
+    result of an isolated call, and each call's Hessian-weighted error stays
+    inside the normal quantization range.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    if not torch.cuda.is_available():
+        pytest.skip("EXL3 quantization requires CUDA/HIP")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    env["PYTHON_GIL"] = "0"
+    completed = subprocess.run(
+        [sys.executable, "-c", _CONCURRENT_QUANTIZE_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=1200,
+    )
+    stdout = completed.stdout
+    if "EXTENSION_UNAVAILABLE" in stdout:
+        pytest.skip("the EXL3 extension is unavailable on this host")
+    assert completed.returncode == 0, stdout + completed.stderr
+    assert "STREAMS 1" in stdout, stdout
+    assert "SCRATCH 1" in stdout, stdout
+    assert "OK" in stdout

@@ -148,6 +148,7 @@ from tests.eval import (  # noqa: E402
     evaluate,
     format_eval_result_table,
     get_eval_task_results,
+    resolve_eval_batch_size,
     resolve_eval_metric_alias,
 )
 
@@ -186,6 +187,29 @@ def is_eval_task_metadata_key(metric_name) -> bool:
     return metric_name in EVAL_TASK_METADATA_KEYS or str(metric_name).startswith("evalution_")
 
 
+def resolve_attn_implementation(
+    preferred: str = "paged|flash_attention_2",
+    fallback: Optional[str] = None,
+) -> str:
+    """Resolve an attention implementation against the optional flash-attn package.
+
+    Per-task ``evalution_model_args`` are passed straight to Evalution and
+    therefore bypass the ``USE_FLASH_ATTN`` gate in :meth:`quantModel` and
+    :meth:`loadQuantModel`. Call sites that want FlashAttention must resolve the
+    implementation here instead of hard-coding it: keep the flash-attn variant
+    as first choice when the package is importable, and fall back to the
+    portable SDPA variant when it is not. ``fallback`` overrides the default
+    ``flash_attention_2`` -> ``sdpa`` substitution.
+    """
+    if "flash_attention_2" not in preferred:
+        return preferred
+    if is_flash_attn_2_available():
+        return preferred
+    if fallback is not None:
+        return fallback
+    return preferred.replace("flash_attention_2", "sdpa")
+
+
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
 
@@ -196,6 +220,10 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"
+    # Upper bound on OOM-driven eval batch-size reductions per `evaluate_model`
+    # call. Each retry halves the batch actually attempted, so a handful of
+    # retries is enough to reach batch 1 from the largest auto estimate.
+    EVAL_OOM_MAX_RETRIES = 6
     QUANT_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.MARLIN
     QUANT_BACKEND = BACKEND.AUTO
@@ -247,6 +275,9 @@ class ModelTest(unittest.TestCase):
     MSE = 0.0
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
+    # GPTQ-only opt-in (#4393/#4440): drop each calibration row's position-0 attention-sink token
+    # from the Hessian. Left unset by default so other methods never receive the field.
+    EXCLUDE_ATTENTION_SINKS = False
     WEIGHT_ONLY = None
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
@@ -1602,6 +1633,7 @@ class ModelTest(unittest.TestCase):
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             moe=self.MOE_CONFIG,
             offload_to_disk=self._mode_specific_test_setting("OFFLOAD_TO_DISK"),
+            **({"exclude_attention_sinks": True} if self.EXCLUDE_ATTENTION_SINKS else {}),
         )
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, reload_after_save: bool = True, **kwargs):
@@ -1855,7 +1887,15 @@ class ModelTest(unittest.TestCase):
 
         return model
 
-    def evaluate_model(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
+    def evaluate_model(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None, _oom_retries_left:Optional[int]=None):
+        if _oom_retries_left is None:
+            # Fresh top-level evaluation: clear any retry state left over from
+            # an earlier call on this instance.
+            _oom_retries_left = int(self.EVAL_OOM_MAX_RETRIES)
+            self._eval_batch_size_overrides = {}
+            self._last_eval_batch_size = None
+            self._last_eval_task_name = None
+
         try:
             task_names = self._normalize_task_list()
             aggregated_results = {}
@@ -1890,7 +1930,9 @@ class ModelTest(unittest.TestCase):
                     # into sampling or an engine backend introduces RNG-sensitive paths.
                     task_model_args.setdefault("seed", RAND_SEED)
                     task_suite_kwargs = dict(suite_kwargs_lookup.get(normalized_name, {}) or {})
-                    task_batch_size = eval_batch_size_lookup.get(normalized_name)
+                    task_batch_size = (getattr(self, "_eval_batch_size_overrides", None) or {}).get(normalized_name)
+                    if task_batch_size is None:
+                        task_batch_size = eval_batch_size_lookup.get(normalized_name)
                     if task_batch_size is None:
                         task_batch_size = self.EVAL_BATCH_SIZE
                     use_model_path = bool(use_model_path_lookup.get(normalized_name, False))
@@ -1905,6 +1947,15 @@ class ModelTest(unittest.TestCase):
                     if eval_target is None:
                         raise ValueError("Model evaluation target could not be determined.")
 
+                    resolved_batch_size = resolve_eval_batch_size(
+                        task_batch_size,
+                        model_or_id_or_path=eval_target,
+                        model_args=task_model_args,
+                        suite_kwargs=task_suite_kwargs,
+                    )
+                    self._last_eval_batch_size = resolved_batch_size
+                    self._last_eval_task_name = normalized_name
+
                     results = evaluate(
                         model_or_id_or_path=eval_target,
                         model_args=task_model_args,
@@ -1913,7 +1964,7 @@ class ModelTest(unittest.TestCase):
                         tasks=[normalized_name],
                         apply_chat_template=apply_chat_template,
                         trust_remote_code=trust_remote_code,
-                        batch_size=task_batch_size,
+                        batch_size=resolved_batch_size,
                         gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
                         suite_kwargs=task_suite_kwargs,
                     )
@@ -1936,25 +1987,57 @@ class ModelTest(unittest.TestCase):
                 return aggregated_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):
-                old_batch = self.EVAL_BATCH_SIZE
-                if self.EVAL_BATCH_SIZE == "auto":
-                    self.EVAL_BATCH_SIZE = "8"
+                # The auto chooser can already return a value below the old
+                # fixed retry size, so halve whatever was actually attempted
+                # instead of jumping to 8 and possibly increasing the batch.
+                last_batch = getattr(self, "_last_eval_batch_size", None)
+                old_batch = self.EVAL_BATCH_SIZE if last_batch is None else last_batch
+                if last_batch is not None:
+                    next_batch = int(last_batch) // 2
+                    if self.EVAL_BATCH_SIZE != "auto":
+                        self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
+                elif self.EVAL_BATCH_SIZE == "auto":
+                    next_batch = 8
                 else:
-                    self.EVAL_BATCH_SIZE = f"{int(int(self.EVAL_BATCH_SIZE) / 2)}"
+                    next_batch = int(int(self.EVAL_BATCH_SIZE) / 2)
                     self.MODEL_MAX_LEN = max(1024, self.MODEL_MAX_LEN - 1024)
+
+                # A retry must strictly shrink the batch that just OOMed. When a
+                # task pins `evalution_batch_size` to "auto", re-resolving it
+                # would return the same size and the recursion would never end
+                # (#4536). Also cap the number of retries so a task that OOMs at
+                # every size fails with a clear message instead of recursing.
+                no_progress = last_batch is not None and next_batch >= int(last_batch)
+                if next_batch <= 0 or no_progress or _oom_retries_left <= 0:
+                    self.EVAL_BATCH_SIZE = str(max(0, next_batch))
+                    print(
+                        f"batch {old_batch} OOM; eval batch size cannot be reduced further "
+                        f"(next={max(0, next_batch)}, retries_left={max(0, _oom_retries_left)}), giving up"
+                    )
+                    raise
+
+                # The halved size must win over a per-task batch config (which
+                # may be "auto") on the next attempt, so record it for the task
+                # that just failed.
+                failing_task = getattr(self, "_last_eval_task_name", None)
+                if failing_task is not None:
+                    overrides = getattr(self, "_eval_batch_size_overrides", None)
+                    if overrides is None:
+                        overrides = {}
+                        self._eval_batch_size_overrides = overrides
+                    overrides[failing_task] = next_batch
+
+                self.EVAL_BATCH_SIZE = str(next_batch)
 
                 print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
-                if int(self.EVAL_BATCH_SIZE) > 0:
-                    results = self.evaluate_model(model=model,
-                                           trust_remote_code=trust_remote_code,
-                                           delete_quantized_model=delete_quantized_model,
-                                           extra_args=extra_args)
-                    print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
-                    return results
-                else:
-                    print(f"set batch size to {self.EVAL_BATCH_SIZE}, failed")
-                    raise e
+                results = self.evaluate_model(model=model,
+                                       trust_remote_code=trust_remote_code,
+                                       delete_quantized_model=delete_quantized_model,
+                                       extra_args=extra_args,
+                                       _oom_retries_left=_oom_retries_left - 1)
+                print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
+                return results
             else:
                 raise e
 

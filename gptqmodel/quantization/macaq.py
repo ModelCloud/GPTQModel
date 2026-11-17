@@ -49,6 +49,7 @@ import transformers
 from ..looper.named_module import NamedModule
 from ..utils.arch import rocm_arch
 from ..utils.logger import setup_logger
+from ..utils.p2p import safe_move_to
 from ..utils.rocm import IS_ROCM
 
 
@@ -122,11 +123,38 @@ def balance_pre_scale_from_diag(
     ``p_j = w_std_j^alpha / act_rms_j^(1 - alpha)`` with
     ``act_rms_j = sqrt(sum_x2_j / T)``.  Folding ``p`` into the input and
     ``1/p`` into the weight cancels in the GEMM.
+
+    ``w_std_j`` is the unbiased per-input-channel weight standard deviation.
+    That estimate is undefined for a single output row, so the degenerate
+    one-row case uses the population standard deviation, which is exactly
+    zero, and then the documented positive floor.  Zero-variance columns take
+    the same floor.  Non-finite statistics are rejected here rather than
+    clamped into a plausible-looking scale.
     """
 
-    w_std = weight.float().std(dim=0).clamp_min(1e-8)
+    weight = weight.float()
+    if weight.ndim != 2:
+        raise ValueError(f"MACaQ: balance pre-scale expects a 2-D weight, got shape {tuple(weight.shape)}.")
+    if weight.shape[0] == 0:
+        raise ValueError("MACaQ: balance pre-scale needs at least one output row.")
+    if weight.shape[0] == 1:
+        # `torch.std` defaults to the unbiased estimate (correction=1), which
+        # is 0/0 for one sample.  The population standard deviation is well
+        # defined here and is exactly zero; the floor below keeps the result
+        # finite instead of clamping NaN into a plausible-looking scale.
+        w_std = weight.std(dim=0, correction=0)
+    else:
+        w_std = weight.std(dim=0)
+    if not torch.isfinite(w_std).all():
+        raise ValueError("MACaQ: weight standard deviation is non-finite; D1 balance pre-scale is undefined.")
+    w_std = w_std.clamp_min(1e-8)
     act_rms = (sum_x2.float() / max(float(n_tokens), 1.0)).clamp_min(1e-12).sqrt()
-    return (w_std.pow(alpha) / act_rms.pow(1.0 - alpha)).clamp(1e-4, 1e4)
+    if not torch.isfinite(act_rms).all():
+        raise ValueError("MACaQ: activation RMS is non-finite; D1 balance pre-scale is undefined.")
+    pre_scale = (w_std.pow(alpha) / act_rms.pow(1.0 - alpha)).clamp(1e-4, 1e4)
+    if not torch.isfinite(pre_scale).all():
+        raise ValueError("MACaQ: D1 balance pre-scale is non-finite; refusing to emit NaN artifacts.")
+    return pre_scale
 
 
 def balance_pre_scale(
@@ -552,11 +580,20 @@ def macaq_quantize_weight(
         rotated_weight = weight
         rotated_hessian = hessian
 
+    # `weight` and `hessian` are only read above: the rotated copies are what
+    # the rest of the recipe consumes. Drop the pre-scaled temporaries now so
+    # they do not overlap the flip sweep (one C^2 fp32 Hessian copy per module,
+    # with every module of a layer running concurrently).
+    del hessian, weight
+
     flip_hessian = None
     if do_flip or exp_screen:
         flip_hessian = rotated_hessian.clone()
         if ridge > 0:
             flip_hessian.diagonal().add_(ridge * flip_hessian.diagonal().mean())
+    # `rotated_hessian` only seeds the flip metric; release it after the clone
+    # so the sweep holds a single C^2 Hessian copy.
+    del rotated_hessian
 
     if exp_screen and flip_hessian is not None and len(exp_offsets) > 1:
         signed_index, log2_scale, scale_element = screen_block_exponents(
@@ -704,6 +741,13 @@ class Macaq:
             target_device = self.dev
         target_device = torch.device(target_device)
         if not self._device_hessian_partials:
+            # A repeat materialization with no new batches returns the existing
+            # Hessian unchanged.  ``adopt_hessian_from`` installs an adopted
+            # Hessian here so ``quantize`` consumes it instead of zeroes.
+            if self.H2 is not None:
+                if self.H2.device == target_device and self.H2.dtype == _HESSIAN_DTYPE:
+                    return self.H2
+                return safe_move_to(self.H2, target_device, dtype=_HESSIAN_DTYPE)
             self.H2 = torch.zeros(
                 (self.columns, self.columns), dtype=_HESSIAN_DTYPE, device=target_device
             )
@@ -719,6 +763,41 @@ class Macaq:
             del partial
         self.H2 = merged
         return self.H2
+
+    def adopt_hessian_from(self, leader: "Macaq") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Sibling projections of one ``:in=<tag>`` group see the same activation
+        tensor, so their float64 sums are bitwise identical.  The leader's
+        partials are folded into ``H2`` first; the follower's copy is
+        independent because the quantizer consumes the metric in place.
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"MACaQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=_HESSIAN_DTYPE,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H2 = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
 
     def _layer_weight(self) -> torch.Tensor:
         weight = self.layer.weight.data

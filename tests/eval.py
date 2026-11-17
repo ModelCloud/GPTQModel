@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -15,8 +17,22 @@ from gptqmodel.utils.inspect import safe_kwargs_call
 from gptqmodel.utils.logger import render_table
 
 
+_LOG = logging.getLogger(__name__)
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
+# Evalution's own `auto` heuristic scales a token budget from total VRAM and
+# has been measured picking 384-768 on a 32 GiB card, which OOMs before the
+# harness can retry at 8. Resolve `auto` here instead, from the live memory
+# profile and the checkpoint config, and only spend a quarter of the memory
+# that is actually available. The cap keeps the first attempt conservative on
+# large-memory hosts; callers that need a specific value still pass an int.
+_AUTO_EVAL_BATCH_LIMIT = 16
+_AUTO_EVAL_FALLBACK_BATCH_SIZE = 8
+_AUTO_EVAL_PROMPT_TOKENS = 512
+_AUTO_EVAL_DEFAULT_MAX_NEW_TOKENS = 256
+_AUTO_EVAL_LOGIT_BYTES = 4
+_AUTO_EVAL_MEMORY_FRACTION = 0.25
+_AUTO_EVAL_PER_REQUEST_FACTOR = 2.0
 _ENGINE_OPTION_KEYS = {
     "attn_implementation",
     "attention_backend",
@@ -193,6 +209,12 @@ def evaluate(
     gen_kwargs = args.pop("gen_kwargs", None)
     apply_chat_template = bool(args.pop("apply_chat_template", False))
     suite_kwargs = dict(args.pop("suite_kwargs", {}) or {})
+    resolved_batch_size = resolve_eval_batch_size(
+        batch_size,
+        model_or_id_or_path=model_or_id_or_path,
+        model_args=model_args,
+        suite_kwargs=suite_kwargs,
+    )
 
     if args:
         unexpected = ", ".join(sorted(args.keys()))
@@ -202,7 +224,7 @@ def evaluate(
         model_or_id_or_path=model_or_id_or_path,
         tokenizer=tokenizer,
         tasks=task_list,
-        batch_size=batch_size,
+        batch_size=resolved_batch_size,
         trust_remote_code=trust_remote_code,
         output_path=output_path,
         llm_backend=normalized_llm_backend,
@@ -828,6 +850,174 @@ def _coerce_suite_batch_size(batch_size: int | str) -> int | None:
             return None
         return int(normalized)
     return int(batch_size)
+
+
+def _config_value(config: Any, name: str) -> Any:
+    if config is None:
+        return None
+    if isinstance(config, Mapping):
+        return config.get(name)
+    return getattr(config, name, None)
+
+
+def _resolve_batch_config(model_or_id_or_path: Any) -> Any:
+    """Return a live config object or the local checkpoint's config.json."""
+    config = getattr(model_or_id_or_path, "config", None)
+    if config is not None:
+        return config
+    if isinstance(model_or_id_or_path, (str, os.PathLike)) and os.path.isdir(model_or_id_or_path):
+        config_path = Path(model_or_id_or_path) / "config.json"
+        if config_path.is_file():
+            try:
+                return json.loads(config_path.read_text())
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def _dtype_bytes(dtype: Any) -> int:
+    if dtype is None:
+        return 2
+    if isinstance(dtype, str):
+        return {
+            "float64": 8,
+            "fp64": 8,
+            "float32": 4,
+            "fp32": 4,
+            "float16": 2,
+            "fp16": 2,
+            "bfloat16": 2,
+            "bf16": 2,
+        }.get(dtype.strip().lower(), 2)
+    try:
+        import torch
+
+        if isinstance(dtype, torch.dtype):
+            return torch.empty((), dtype=dtype).element_size()
+    except Exception:
+        pass
+    return 2
+
+
+def _kv_cache_bytes_per_token(config: Any, *, dtype_bytes: int) -> Optional[int]:
+    num_layers = _config_value(config, "num_hidden_layers") or _config_value(config, "n_layer")
+    num_heads = _config_value(config, "num_attention_heads") or _config_value(config, "n_head")
+    num_kv_heads = (
+        _config_value(config, "num_key_value_heads")
+        or _config_value(config, "num_kv_heads")
+        or num_heads
+    )
+    head_dim = _config_value(config, "head_dim")
+    if head_dim is None:
+        hidden_size = _config_value(config, "hidden_size") or _config_value(config, "n_embd")
+        if hidden_size is not None and num_heads:
+            head_dim = int(hidden_size) // int(num_heads)
+    if not all(value is not None for value in (num_layers, num_kv_heads, head_dim)):
+        return None
+    return int(2 * int(num_layers) * int(num_kv_heads) * int(head_dim) * dtype_bytes)
+
+
+def _cuda_memory_bytes(device: str) -> tuple[Optional[int], Optional[int]]:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None, None
+        parsed = torch.device(device)
+        if parsed.type != "cuda":
+            return None, None
+        index = 0 if parsed.index is None else int(parsed.index)
+        total = int(torch.cuda.get_device_properties(index).total_memory)
+        free, _ = torch.cuda.mem_get_info(index)
+        return total, int(free)
+    except Exception:
+        return None, None
+
+
+def _resolve_eval_device(model_args: Mapping[str, Any]) -> str:
+    device = model_args.get("device")
+    if device:
+        return str(device)
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda:0"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def resolve_eval_batch_size(
+        batch_size: int | str,
+        *,
+        model_or_id_or_path: Any = None,
+        model_args: Optional[Mapping[str, Any]] = None,
+        suite_kwargs: Optional[Mapping[str, Any]] = None,
+        device: Optional[str] = None,
+        total_memory_bytes: Optional[int] = None,
+        free_memory_bytes: Optional[int] = None,
+) -> int | str:
+    """Resolve Evalution's ``auto`` batch size to a conservative integer.
+
+    The estimate is the smaller of total and free accelerator memory, scaled by
+    :data:`_AUTO_EVAL_MEMORY_FRACTION`, divided by a per-request estimate made
+    from the checkpoint config (logits, KV cache, and activation buffers). It
+    is capped at :data:`_AUTO_EVAL_BATCH_LIMIT`. Without a local config or
+    accelerator memory the known-safe retry size is used instead, so the first
+    attempt cannot repeat the 384-768 request OOM.
+    """
+    if not isinstance(batch_size, str) or batch_size.strip().lower() != "auto":
+        return batch_size
+
+    model_args = dict(model_args or {})
+    suite_kwargs = dict(suite_kwargs or {})
+    if device is None:
+        device = _resolve_eval_device(model_args)
+    if total_memory_bytes is None and free_memory_bytes is None:
+        total_memory_bytes, free_memory_bytes = _cuda_memory_bytes(device)
+    if total_memory_bytes is None:
+        total_memory_bytes = free_memory_bytes
+    if total_memory_bytes is None:
+        return _AUTO_EVAL_FALLBACK_BATCH_SIZE
+
+    config = _resolve_batch_config(model_or_id_or_path)
+    if config is None:
+        return _AUTO_EVAL_FALLBACK_BATCH_SIZE
+    vocab_size = _config_value(config, "vocab_size")
+    if not vocab_size:
+        return _AUTO_EVAL_FALLBACK_BATCH_SIZE
+
+    dtype_bytes = _dtype_bytes(model_args.get("dtype"))
+    max_new_tokens = suite_kwargs.get("max_new_tokens", _AUTO_EVAL_DEFAULT_MAX_NEW_TOKENS)
+    try:
+        max_new_tokens = max(0, int(max_new_tokens))
+    except (TypeError, ValueError):
+        max_new_tokens = _AUTO_EVAL_DEFAULT_MAX_NEW_TOKENS
+
+    sequence_tokens = _AUTO_EVAL_PROMPT_TOKENS + max_new_tokens
+    per_request_bytes = sequence_tokens * int(vocab_size) * _AUTO_EVAL_LOGIT_BYTES
+    kv_cache_bytes = _kv_cache_bytes_per_token(config, dtype_bytes=dtype_bytes)
+    if kv_cache_bytes:
+        per_request_bytes += sequence_tokens * kv_cache_bytes
+    hidden_size = _config_value(config, "hidden_size") or _config_value(config, "n_embd")
+    if hidden_size:
+        per_request_bytes += sequence_tokens * int(hidden_size) * dtype_bytes * 2
+    per_request_bytes = max(1, int(per_request_bytes * _AUTO_EVAL_PER_REQUEST_FACTOR))
+
+    available_bytes = int(total_memory_bytes)
+    if free_memory_bytes is not None and free_memory_bytes > 0:
+        available_bytes = min(available_bytes, int(free_memory_bytes))
+    budget_bytes = int(available_bytes * _AUTO_EVAL_MEMORY_FRACTION)
+    batch = max(1, budget_bytes // per_request_bytes)
+    batch = min(_AUTO_EVAL_BATCH_LIMIT, batch)
+    _LOG.info(
+        "Resolved Evalution auto batch size to %d (per_request=%d bytes, available=%d bytes)",
+        batch,
+        per_request_bytes,
+        available_bytes,
+    )
+    return batch
 
 
 def _normalize_backend_name(backend: BACKEND | str | None) -> str:

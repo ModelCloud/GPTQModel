@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from transformers.quantizers.auto import AutoQuantizationConfig
 
 import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 import gptqmodel.utils.paroquant as paroquant_utils_module
+import gptqmodel.utils.paroquant_benchmark as paroquant_benchmark_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import CalibrationConfig
@@ -43,7 +45,7 @@ from gptqmodel.quantization.paroquant.optimization import (
 )
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
-from gptqmodel.utils.kernel import KernelConfig, configure_kernel
+from gptqmodel.utils.kernel import KernelConfig, configure_kernel, get_kernel_config
 from gptqmodel.utils.paroquant import (
     _rotation_launch_config,
     apply_paroquant_rotation,
@@ -55,6 +57,7 @@ from gptqmodel.utils.paroquant import (
     prewarm_paroquant_rotation_extension,
 )
 from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 @pytest.fixture(autouse=True)
@@ -351,6 +354,80 @@ def test_paroquant_benchmark_config_preserves_opt_scope():
     assert cfg.quant_method == METHOD.PARO
     assert cfg.opt_scope == "compute_block"
     assert cfg.opt_gradient_checkpointing is False
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "requested", "expected_config", "expected_label"),
+    [
+        ("module", False, False, False),
+        ("module", True, True, True),
+        ("layer", True, True, False),
+    ],
+)
+def test_paroquant_benchmark_fused_opt_rotation_is_not_a_noop(
+    monkeypatch, opt_scope, requested, expected_config, expected_label
+):
+    """The benchmark toggle must reach the config and the reported result row."""
+    captured = {}
+
+    class _FakeTimer:
+        def snapshot(self):
+            return {}
+
+    class _FakeModel:
+        tokenizer = None
+        quant_region_timer = _FakeTimer()
+        model = torch.nn.Module()
+
+        def quantize(self, *args, **kwargs):
+            return {}
+
+        def save(self, _path):
+            pass
+
+        def named_modules(self):
+            return []
+
+    def fake_load(_path, quantize_config=None, **_kwargs):
+        captured["qcfg"] = quantize_config
+        return _FakeModel()
+
+    monkeypatch.setattr(paroquant_benchmark_module.GPTQModel, "load", fake_load)
+    monkeypatch.setattr(paroquant_benchmark_module, "load_nm_calibration", lambda _rows: [])
+    monkeypatch.setattr(
+        paroquant_benchmark_module,
+        "_run_evalution_path_eval",
+        lambda **_kwargs: ({}, 0.0),
+    )
+    monkeypatch.setattr(
+        paroquant_benchmark_module,
+        "_load_eval_helpers",
+        lambda: (None, lambda _result: "", lambda _result: {}),
+    )
+
+    result = paroquant_benchmark_module._run_paroquant_case(
+        model_path="unused",
+        dynamic={},
+        calibration_rows=1,
+        calibration_concat_size=1,
+        quant_batch_size=1,
+        eval_batch_size=1,
+        eval_max_rows=None,
+        eval_model_args=None,
+        eval_suite_kwargs=None,
+        sym=True,
+        fused_opt_rotation=requested,
+        opt_scope=opt_scope,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        opt_train_samples=1,
+        opt_validation_samples=1,
+        opt_batch_size=1,
+        run_kernel_bench=False,
+    )
+
+    assert captured["qcfg"].opt_fused_rotation is expected_config
+    assert result["fused_opt_rotation"] is expected_label
 
 
 def test_paroquant_quantize_config_preserves_explicit_gradient_checkpointing_override():
@@ -1739,9 +1816,9 @@ def test_paroquant_triton_affine_ste_dispatch_and_kill_switch():
     weight = weight.detach().to(device).requires_grad_(True)
     scale = scale.detach().to(device).requires_grad_(True)
     zero_point = zero_point.detach().to(device).requires_grad_(True)
-    enabled = triton_ste._AFFINE_STE_TRITON_ENABLED
+    previous_kernel_config = get_kernel_config()
     try:
-        triton_ste._AFFINE_STE_TRITON_ENABLED = False
+        configure_kernel(KernelConfig(paroquant_affine_ste_triton=False))
         assert not triton_ste.affine_quant_dequant_ste_available()
         assert (
             triton_ste.affine_quant_dequant_ste(weight, scale, zero_point, qmin=0, qmax=15, group_size=8) is None
@@ -1758,7 +1835,7 @@ def test_paroquant_triton_affine_ste_dispatch_and_kill_switch():
         )
         assert "_AffineQuantDequantSTEBackward" in type(fallback.grad_fn).__name__
     finally:
-        triton_ste._AFFINE_STE_TRITON_ENABLED = enabled
+        configure_kernel(previous_kernel_config)
 
     routed = paroquant_optimization.pseudo_quantize_dequant(
         weight,
@@ -2585,7 +2662,44 @@ def test_paroquant_clear_rotation_extension_cache_delegates_to_shared_loader(mon
     assert calls == ["clear"]
 
 
-def test_paroquant_rotation_launch_config_honors_env_overrides(monkeypatch):
+def test_paroquant_has_no_environment_variable_reads():
+    """ParoQuant runtime choices come from KernelConfig, never env vars (AGENTS.md).
+
+    The fused-rotation autotune knobs used to be read from
+    ``GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*`` in ``rotation.cu``, which made a
+    code path selectable outside the config object. They are internal constants
+    now; only ``KernelConfig.paroquant_rotate_*`` selects behaviour.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    sources = [
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.cu")),
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.cuh")),
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.cpp")),
+        *sorted((repo_root / "gptqmodel_ext" / "paroquant").glob("*.h")),
+    ]
+    read_tokens = ("getenv", "environ")
+    offenders = []
+    for path in sources:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if "GPTQMODEL_PAROQUANT_" in line and any(token in line for token in read_tokens):
+                offenders.append(f"{path.relative_to(repo_root)}:{lineno}: {line.strip()}")
+
+    assert sources, "expected ParoQuant extension sources"
+    assert not offenders, "environment-variable behaviour switches remain:\n" + "\n".join(offenders)
+
+    for name in (
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_WARMUP",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_ITERS",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_REPEATS",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_TARGET_MS",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_PCT",
+        "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_MIN_SPEEDUP_US",
+    ):
+        assert all(name not in path.read_text() for path in sources), name
+
+
+def test_paroquant_rotation_launch_config_honors_config_overrides(monkeypatch):
     """Guard manual launch-shape overrides so benchmarking can pin one kernel variant."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant launch-config path.")
@@ -6007,6 +6121,10 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     """Guard that the CUDA AWQ fast path does not silently downcast bf16 inputs."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
+    if IS_ROCM:
+        # The AWQ GEMM extension is CUDA-only; ``_cuda_awq_kernel_supported``
+        # routes HIP to the portable path, so this fast path never runs there.
+        pytest.skip("The ParoQuant AWQ CUDA fast path is not built for ROCm.")
 
     paroquant_module = sys.modules[ParoLinear.__module__]
 
@@ -6025,8 +6143,8 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
 
     seen = {}
 
-    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True):
-        del qweight, qzeros, fp32_accum
+    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True, kernel=None):
+        del qweight, qzeros, fp32_accum, kernel
         seen["input_dtype"] = input.dtype
         seen["scales_dtype"] = scales.dtype
         seen["split_k_iters"] = split_k_iters
@@ -6340,6 +6458,197 @@ def test_paroquant_pair_grad_reduce_folds_tiles_in_ascending_order():
             tile_grad = run(x[tile_slice], grad[tile_slice])
             reference = tile_grad if reference is None else reference + tile_grad
         assert torch.equal(fused, reference)
+
+
+@pytest.mark.parametrize("cta_m", [4, 8, 16])
+@pytest.mark.parametrize("row_pad", [0, 2])
+def test_paroquant_pair_grad_sweep_is_race_free(cta_m, row_pad):
+    """Guard the fused backward sweep against the shared-memory write-after-read race (#4461).
+
+    Rotation r-1 overwrites columns that other threads are still reading back for
+    rotation r's gradient unless a barrier separates the readback from the next
+    ``apply_one``. The race only surfaces with many resident blocks and only
+    corrupts the rotation gradient (the rotated operands stay exact), so repeat
+    a wide launch, require bit-identical results and check the gradient against
+    an fp64 autograd oracle.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant fused rotation backward.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 2048
+    group_size = 128
+    krot = 8
+    rows = 1024
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    rotated = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    grad_out = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    pair_grad = paroquant_utils_module._paroquant_rotation_op("rotate_pair_grad")
+
+    results = [
+        pair_grad(rotated, grad_out, pairs, theta, group_size, cta_m, row_pad) for _ in range(20)
+    ]
+    first_x, first_g, first_theta_grad = results[0]
+    for x_out, g_out, theta_grad in results[1:]:
+        assert torch.equal(x_out, first_x)
+        assert torch.equal(g_out, first_g)
+        assert torch.equal(theta_grad, first_theta_grad)
+
+    # The sweep's input-side output is the un-rotated activation, so rebuild the
+    # forward in fp64 from it and differentiate <grad_out, R(theta) x> by theta.
+    theta64 = theta.double().requires_grad_(True)
+    forward = apply_paroquant_rotation_reference(
+        first_x.double(), pairs, theta64, group_size=group_size
+    )
+    torch.testing.assert_close(forward, rotated.double(), rtol=0, atol=1e-4)
+    (forward * grad_out.double()).sum().backward()
+    torch.testing.assert_close(first_theta_grad.double(), theta64.grad, rtol=1e-4, atol=1e-2)
+
+
+@pytest.mark.parametrize("path", ["rotate_pair_grad", "grad_theta", "torch"])
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_paroquant_fused_rotation_theta_grad_matches_autograd(monkeypatch, path, with_scales):
+    """Guard the fused rotation's theta gradient against fp64 autograd.
+
+    The backward sweeps the activation and the gradient back through each
+    rotation, so it holds the rotation's input and the input-side gradient
+    ``R^T g_out``; the derivative is then ``sum(g_i x_j - g_j x_i)`` with no
+    sin/cos factor. Applying the output-side formula
+    ``A cos(theta) - B sin(theta)`` there is only right at ``theta == 0``, so
+    use angles well away from zero and check every backward path.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant fused rotation backward.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+    if path != "rotate_pair_grad":
+        monkeypatch.setattr(paroquant_utils_module, "_fused_rotate_pair_grad_op", lambda: None)
+    if path == "torch":
+        monkeypatch.setattr(paroquant_utils_module, "_fused_grad_theta_op", lambda: None)
+
+    in_features = 256
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(13)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.8, 0.8, generator=generator)
+    x = torch.randn((48, in_features), generator=generator)
+    grad_out = torch.randn((48, in_features), generator=generator)
+    scales = (torch.rand((1, in_features), generator=generator) + 0.5) if with_scales else None
+
+    theta_cuda = theta.to("cuda").requires_grad_(True)
+    x_cuda = x.to("cuda").requires_grad_(True)
+    scales_cuda = None if scales is None else scales.to("cuda").requires_grad_(True)
+    out = paroquant_utils_module._ParoQuantRotateTensorFunc.apply(
+        x_cuda, pairs, theta_cuda, scales_cuda, group_size
+    )
+    (out * grad_out.to("cuda")).sum().backward()
+
+    theta64 = theta.double().to("cuda").requires_grad_(True)
+    x64 = x.double().to("cuda").requires_grad_(True)
+    scales64 = None if scales is None else scales.double().to("cuda").requires_grad_(True)
+    reference = apply_paroquant_rotation_reference(
+        x64, pairs, theta64, scales=scales64, group_size=group_size
+    )
+    (reference * grad_out.double().to("cuda")).sum().backward()
+
+    torch.testing.assert_close(out.double(), reference, rtol=0, atol=1e-4)
+    torch.testing.assert_close(theta_cuda.grad.double(), theta64.grad, rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(x_cuda.grad.double(), x64.grad, rtol=1e-4, atol=1e-4)
+    if scales is not None:
+        torch.testing.assert_close(scales_cuda.grad.double(), scales64.grad, rtol=1e-4, atol=1e-3)
+
+
+@pytest.mark.parametrize("rows", [1, 1000, 1001])
+def test_paroquant_pair_grad_is_launch_plan_invariant(rows):
+    """Guard the rotation gradient against the autotuned launch plan (#4460).
+
+    ``cta_m``/``row_pad`` are picked by a timing-based autotune, so two runs can
+    launch the same shape with different tiles. The gradient partials use a
+    fixed row granule, so every plan must return bit-identical results; the
+    row counts cover a tail CTA with granules past the end and a partial
+    granule.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant fused rotation backward.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 256
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(11)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    rotated = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    grad_out = torch.randn((rows, in_features), generator=generator).to(device="cuda")
+    pair_grad = paroquant_utils_module._paroquant_rotation_op("rotate_pair_grad")
+
+    results = {
+        (cta_m, row_pad): pair_grad(rotated, grad_out, pairs, theta, group_size, cta_m, row_pad)
+        for cta_m in (4, 8, 16)
+        for row_pad in (0, 2)
+    }
+    reference = results[(4, 0)]
+    for plan, outputs in results.items():
+        for name, actual, expected in zip(("x", "grad", "theta_grad"), outputs, reference):
+            assert torch.equal(actual, expected), f"{name} differs for launch plan {plan}"
 
 
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):

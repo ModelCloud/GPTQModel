@@ -42,7 +42,13 @@ ITERS = 4
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Probes that must only run once, on the main thread (process-global state).
-SINGLE_SHOT = {"torch.cuda.CUDAGraph + torch.cuda.graph"}
+SINGLE_SHOT = {
+    "torch.cuda.CUDAGraph + torch.cuda.graph",
+    # Mutates libtorch's process-global num_threads and then checks a fresh
+    # caller thread; concurrent probe invocations would observe each other's
+    # scopes rather than this invocation's post-task state.
+    "torch.set_num_threads (per worker)",
+}
 
 
 def _gpu_count() -> int:
@@ -138,6 +144,28 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         finally:
             os.unlink(path)
 
+    class _CudaArrayExporter:
+        def __init__(self, owner: torch.Tensor) -> None:
+            self.owner = owner
+            self.__cuda_array_interface__ = {
+                "shape": tuple(owner.shape),
+                "typestr": "|u1",
+                "data": (owner.data_ptr(), False),
+                "strides": None,
+                "version": 3,
+            }
+
+    def cuda_array_interface_view() -> bool:
+        """``GGUFCudaKernel`` exposes its ggml weight buffer this way (#4387)."""
+        owner = torch.randint(0, 256, (257, 144), dtype=torch.uint8, device="cuda")
+        exporter = _CudaArrayExporter(owner)
+        with torch.inference_mode(False):
+            view = torch.as_tensor(exporter, device=owner.device)
+        del exporter
+        same = view.data_ptr() == owner.data_ptr() and not view.is_inference()
+        torch.cuda.current_stream().synchronize()
+        return same and torch.equal(view.cpu(), owner.cpu())
+
     def generator_roundtrip() -> bool:
         generator = torch.Generator(device="cuda")
         generator.manual_seed(1234)
@@ -146,15 +174,14 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
     def set_num_threads_thread_local() -> bool:
         """Split the intra-op budget across workers and re-enter it twice.
 
-        ``DeviceThreadPool`` calls ``torch.set_num_threads`` once per worker
-        thread so each OpenMP team is bounded (issue #4356). The probe checks
-        the two properties the fix relies on: the new value is visible to
-        threads the worker spawns (an OpenMP team is per pthread that enters
-        the region, and nested helper threads inherit the worker's value) and
-        it never leaks back to the caller.
+        ``DeviceThreadPool`` scopes ``torch.set_num_threads`` to each task so
+        each OpenMP team is bounded (issue #4356) without changing the process
+        budget for threads created afterwards (issue #4601). The probe checks
+        the new value inside the worker and a nested thread, then checks that a
+        fresh thread created by the caller sees the original budget.
         """
 
-        from gptqmodel.utils.threadx import split_intraop_threads
+        from gptqmodel.utils.threadx import _scoped_intraop_threads, split_intraop_threads
 
         caller_before = torch.get_num_threads()
         target = split_intraop_threads(8, 8)
@@ -166,22 +193,22 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         state: Dict[str, int] = {}
 
         def worker() -> None:
-            torch.set_num_threads(target)
-            state["worker"] = torch.get_num_threads()
-            matrix = torch.randn(256, 256)
-            state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+            with _scoped_intraop_threads(target):
+                state["worker"] = torch.get_num_threads()
+                matrix = torch.randn(256, 256)
+                state["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
 
-            child: Dict[str, int] = {}
+                child: Dict[str, int] = {}
 
-            def nested() -> None:
-                child["value"] = torch.get_num_threads()
-                child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
+                def nested() -> None:
+                    child["value"] = torch.get_num_threads()
+                    child["sum_finite"] = int(torch.isfinite(matrix @ matrix).all())
 
-            thread = threading.Thread(target=nested)
-            thread.start()
-            thread.join()
-            state["child"] = child["value"]
-            state["child_finite"] = child["sum_finite"]
+                thread = threading.Thread(target=nested)
+                thread.start()
+                thread.join()
+                state["child"] = child["value"]
+                state["child_finite"] = child["sum_finite"]
 
         with ThreadPoolExecutor(max_workers=THREADS) as pool:
             list(pool.map(lambda _: worker(), range(THREADS)))
@@ -190,6 +217,19 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
             raise AssertionError(f"worker saw {state['worker']}, nested thread saw {state['child']}")
         if not (state["sum_finite"] and state["child_finite"]):
             raise AssertionError("matmul produced non-finite values under a split intra-op pool")
+        fresh: Dict[str, int] = {}
+
+        def fresh_thread() -> None:
+            fresh["value"] = torch.get_num_threads()
+
+        thread = threading.Thread(target=fresh_thread)
+        thread.start()
+        thread.join()
+        if fresh["value"] != caller_before:
+            raise AssertionError(
+                f"worker set_num_threads leaked into a new caller thread: "
+                f"{caller_before} -> {fresh['value']}"
+            )
         if torch.get_num_threads() != caller_before:
             raise AssertionError(
                 f"worker set_num_threads leaked into the caller: {caller_before} -> {torch.get_num_threads()}"
@@ -1043,6 +1083,9 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.cuda.set_rng_state_all": rng_roundtrip,
         "torch.cuda.can_device_access_peer": lambda: bool(torch.cuda.can_device_access_peer(0, 1)),
         "torch.cuda.is_initialized": lambda: bool(torch.cuda.is_initialized()),
+        "torch._C._cuda_hasPrimaryContext": lambda: bool(
+            getattr(torch._C, "_cuda_hasPrimaryContext", lambda index: True)(0)
+        ),
         "torch.cuda.is_current_stream_capturing": lambda: bool(torch.cuda.is_current_stream_capturing()),
         "torch.cuda.get_arch_list": lambda: len(torch.cuda.get_arch_list()),
         "torch.cuda.CUDAGraph + torch.cuda.graph": graph_capture,
@@ -1061,6 +1104,7 @@ def build_probes() -> Dict[str, Callable[[], Any]]:
         "torch.eye": lambda: torch.eye(256, device="cuda"),
         "torch.tensor": lambda: torch.tensor([1.0, 2.0, 3.0], device="cuda"),
         "torch.as_tensor": lambda: torch.as_tensor([1.0, 2.0], device="cuda"),
+        "torch.as_tensor (__cuda_array_interface__ view)": cuda_array_interface_view,
         "torch.from_numpy": lambda: torch.from_numpy(__import__("numpy").arange(16)),
         "torch.zeros_like": lambda: torch.zeros_like(t(64)),
         "torch.ones_like": lambda: torch.ones_like(t(64)),

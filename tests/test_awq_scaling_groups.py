@@ -90,6 +90,7 @@ FAMILY_MODEL_TYPES = [
     "minimax",
     "minimax_m2",
     "deepseek_v2",
+    "lfm2_moe",
     "qwen2_moe",
     "qwen3_moe",
     "mixtral",
@@ -146,6 +147,72 @@ REMOTE_CODE_MODEL_OVERRIDES = {
 COMPOSITE_TEXT_CONFIG_FAMILIES = {"gemma4", "gemma4_unified"}
 
 
+def _kernel_fallback_implementation(func):
+    """Return the implementation a hub-kernel fallback wrapper resolved.
+
+    ``use_kernel_func_from_hub_with_fallback`` closes over the resolved
+    ``implementation`` cell, so the decorated module attribute always reports
+    ``transformers`` as its own module. The closure is the only place that says
+    whether the eager Torch reference or an external fused package is in use.
+    """
+
+    cells = dict(zip(getattr(func.__code__, "co_freevars", ()), func.__closure__ or ()))
+    implementation = cells.get("implementation")
+    if implementation is None:
+        return None
+    try:
+        return implementation.cell_contents
+    except ValueError:
+        return None
+
+
+# Modules whose Mamba-2 forward kernels ``transformers`` resolves through the
+# hub-kernel fallback decorator, paired with the attribute holding the wrapper.
+MAMBA_SSM_KERNEL_BINDINGS = (
+    ("transformers.models.mamba.modeling_mamba", ("mamba_selective_scan", "mamba_inner_fn")),
+    ("transformers.models.falcon_h1.modeling_falcon_h1", ("mamba2_chunk_scan", "mamba2_split_conv1d_scan_combined")),
+    ("transformers.models.nemotron_h.modeling_nemotron_h", ("mamba2_chunk_scan", "mamba2_split_conv1d_scan_combined")),
+)
+
+
+def _mamba_ssm_cpu_unavailable_reason():
+    """Report whether ``mamba_ssm`` would displace the eager Torch Mamba-2 path.
+
+    ``transformers`` resolves the Mamba-2 kernels through
+    ``use_kernel_func_from_hub_with_fallback``, which prefers an installed
+    ``mamba_ssm`` over its own eager reference. Those implementations are
+    CUDA-only: they raise ``Expected u.is_cuda()`` or hand a CPU pointer to
+    Triton. A host that merely happens to have the package installed therefore
+    cannot run this CPU-only fold invariant for the hybrid SSM families.
+
+    The check reads the resolved implementation out of each decorator closure
+    rather than testing whether the distribution imports, so a host without
+    ``mamba_ssm`` still runs the invariant against the Torch fallback.
+    """
+
+    displaced = []
+    for module_path, names in MAMBA_SSM_KERNEL_BINDINGS:
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:
+            continue
+        for name in names:
+            wrapper = getattr(module, name, None)
+            if wrapper is None or not hasattr(wrapper, "__closure__"):
+                continue
+            implementation = _kernel_fallback_implementation(wrapper)
+            resolved = getattr(implementation, "__module__", "") or ""
+            if not resolved.startswith("mamba_ssm"):
+                continue
+            displaced.append(f"{module_path.rsplit('.', 1)[-1]}.{name}")
+    if not displaced:
+        return None
+    return (
+        "mamba_ssm displaced the eager Torch Mamba-2 path with CUDA-only kernels "
+        f"({', '.join(sorted(displaced))}); this CPU fold invariant needs the Torch fallback"
+    )
+
+
 def _field_names(config):
     if dataclasses.is_dataclass(config):
         return {field.name for field in dataclasses.fields(config)}
@@ -164,6 +231,11 @@ def _tiny_config(model_type):
         # These families keep the first two decoder layers dense, so a third
         # layer is required to exercise the routed + shared expert group.
         kwargs["num_hidden_layers"] = 3
+    if model_type == "lfm2_moe" and "layer_types" in fields:
+        # LFM2-MoE has no default `layer_types`; without one the decoder layer
+        # indexes `None`. Exercise the short-convolution and attention mixers.
+        kwargs["layer_types"] = ["conv", "full_attention"]
+        kwargs["num_dense_layers"] = 1
     for key in ("head_dim", "rotary_dim"):
         if key in fields:
             kwargs[key] = 8
@@ -408,6 +480,11 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
 PLAIN_QUANTIZATION_FAMILIES = {"codegen", "gpt2", "minimax"}
 
+# Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
+# `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
+# `mamba_ssm` code the CPU-only fold invariant cannot execute at all.
+MAMBA_SSM_KERNEL_FAMILIES = {"falcon_h1", "falcon_mamba", "nemotron_h"}
+
 # Issue #4039 families that can be instantiated as a tiny ``AutoModelForCausalLM``.
 # ``exaone4_5`` and ``muse_glimmer`` are vision-language wrappers with no
 # ``AutoModelForCausalLM`` entry point; their flags are pinned statically by
@@ -470,6 +547,12 @@ def test_parallel_norm_group_cannot_score_only_attention(family):
 
 @pytest.mark.parametrize("family", sorted(FAMILIES))
 def test_scaling_groups_preserve_decoder_layer_output(family):
+    if family in MAMBA_SSM_KERNEL_FAMILIES:
+        # The invariant runs a real CPU forward; `mamba_ssm` would route it to
+        # CUDA-only kernels and fail on the device, not on the fold math.
+        reason = _mamba_ssm_cpu_unavailable_reason()
+        if reason is not None:
+            pytest.skip(reason)
     hf_model, qmodel, layers, tree = _tiny_model(family)
     plan = ModulePlan.from_tree(tree)
     ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
@@ -571,6 +654,143 @@ def test_declared_non_sources_never_become_prev_ops(family, forbidden):
             if prev_op is not None:
                 used.add(get_op_name(layer, prev_op))
     assert not (used & set(forbidden)), f"{family}: folded a scale into {used & set(forbidden)}"
+
+
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+def test_excluded_projection_is_never_a_fold_source(family):
+    """A `:!`/`:?` projection cannot absorb a scale: nothing compensates it (#4651).
+
+    Folding into an excluded module divides its output rows and multiplies the
+    consumer's input columns, but the plan keeps the source in the checkpoint
+    dtype and no later step multiplies it back. Jamba's
+    `['mamba.in_proj', 'mamba.conv1d:!', 'mamba.dt_proj:!']` made the excluded
+    `mamba.dt_proj` the source for `mamba.x_proj` (width 64 -> 34), silently
+    rescaling the discretization projection. A gain norm is still a valid
+    source; a projection is only valid when the plan quantizes it.
+    """
+
+    _, qmodel, layers, tree = _tiny_model(family)
+    plan = ModulePlan.from_tree(tree)
+    checked = 0
+    for layer in layers:
+        nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            weight = getattr(prev_op, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+                continue
+            checked += 1
+            name = get_op_name(layer, prev_op)
+            spec = plan.find(name)
+            assert spec is not None, (family, name)
+            assert spec.quantize, (
+                f"{family}: scaling group folded a scale into excluded `{name}`; "
+                f"layers={[get_op_name(layer, m) for m in node['layers']]}"
+            )
+    # `falcon_mamba` declares every projection `:nosrc`, so it has no Linear
+    # source at all and is quantized plainly.
+    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family == "falcon_mamba", family
+
+
+# Jamba's Mamba-2 mixer resolves its scan/conv kernels through
+# `use_kernel_func_from_hub_with_fallback`, which prefers an installed
+# `mamba_ssm` (CUDA-only) over the eager Torch reference. The CPU fold invariant
+# needs the reference math, and the decoder is attention-interleaved, so the
+# default cache cannot be used either (`get_seq_length` rejects a cache that
+# holds only linear-attention layers).
+JAMBA_TORCH_KERNELS = (
+    "causal_conv1d_fn",
+    "causal_conv1d_update",
+    "mamba_inner_fn",
+    "mamba_selective_scan",
+    "mamba_selective_state_update",
+)
+
+
+@pytest.fixture()
+def jamba_torch_mixer(monkeypatch):
+    """Build a tiny Jamba whose mixer runs the eager Torch Mamba-2 reference."""
+
+    module = importlib.import_module("transformers.models.jamba.modeling_jamba")
+    restored = []
+    for name in JAMBA_TORCH_KERNELS:
+        wrapper = getattr(module, name)
+        reference = getattr(wrapper, "__wrapped__", None)
+        if reference is None:
+            continue
+        monkeypatch.setattr(module, name, reference)
+        restored.append(name)
+    hf_model, qmodel, layers, tree = _tiny_model("jamba")
+    hf_model.config.use_cache = False
+    return hf_model, qmodel, layers, tree, restored
+
+
+def test_jamba_never_folds_x_proj_scale_into_excluded_dt_proj(jamba_torch_mixer):
+    """Issue #4651: the fold must land on `in_proj`, never on excluded `dt_proj`."""
+
+    hf_model, qmodel, layers, tree, restored = jamba_torch_mixer
+    assert restored, "jamba: no hub-kernel wrapper resolved; the Torch reference was not installed"
+    plan = ModulePlan.from_tree(tree)
+    layer = layers[0]
+    nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+    groups = _foldable_groups(layer, nodes)
+    by_source = {get_op_name(layer, node["prev_op"]): node for node in groups}
+
+    assert "mamba.dt_proj" not in by_source, "jamba: excluded `mamba.dt_proj` is still a fold source"
+    # `x_proj` reads `silu(conv1d(in_proj(x)))`: neither `in_proj`, the excluded
+    # `dt_proj`, nor the excluded `conv1d` produces its input. It must be
+    # quantized without a fold instead of borrowing a width-compatible source.
+    for node in nodes:
+        assert get_op_name(layer, node["prev_op"]) != "mamba.dt_proj"
+        assert "mamba.x_proj" not in [get_op_name(layer, module) for module in node["layers"]]
+
+    ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
+    with torch.no_grad():
+        before = hf_model(ids).logits.clone()
+    dt_proj_before = layer.mamba.dt_proj.weight.detach().clone()
+    conv1d_before = layer.mamba.conv1d.weight.detach().clone()
+    x_proj_before = layer.mamba.x_proj.weight.detach().clone()
+    for node in groups:
+        source = get_op_name(layer, node["prev_op"])
+        targets = [get_op_name(layer, module) for module in node["layers"]]
+        width = (
+            node["prev_op"].out_features
+            if isinstance(node["prev_op"], nn.Linear)
+            else node["prev_op"].weight.numel()
+        )
+        scales = torch.linspace(0.55, 1.45, width)
+        apply_scale(layer, [(source, targets, scales, None)])
+        try:
+            with torch.no_grad():
+                after = hf_model(ids).logits
+            relative = float((after - before).norm() / before.norm())
+            assert relative < 1e-5, f"jamba: folding {source} -> {targets} changed the logits by {relative:.3e}"
+            assert torch.equal(layer.mamba.dt_proj.weight, dt_proj_before), (
+                f"jamba: the excluded `mamba.dt_proj` weight changed while folding {source}"
+            )
+            assert torch.equal(layer.mamba.conv1d.weight, conv1d_before)
+            assert torch.equal(layer.mamba.x_proj.weight, x_proj_before)
+        finally:
+            apply_scale(layer, [(source, targets, 1.0 / scales, None)])
+
+
+def test_jamba_awq_scaling_groups_preserve_decoder_layer_output(jamba_torch_mixer):
+    """Full tiny-model invariant for the hybrid SSM decoder (#4651)."""
+
+    hf_model, qmodel, layers, tree, _restored = jamba_torch_mixer
+    plan = ModulePlan.from_tree(tree)
+    ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
+    worst = 0.0
+    saw_group = False
+    for layer in layers:
+        nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+        groups = _foldable_groups(layer, nodes)
+        if not groups:
+            continue
+        saw_group = True
+        worst = max(worst, _worst_relative_change(hf_model, ids, layer, groups))
+    assert saw_group, "jamba: no AWQ scaling groups were built"
+    assert worst < 1e-5, f"jamba: AWQ scaling changed the model output by {worst:.3e}"
 
 
 def test_exaone4_5_marks_post_attention_norm_as_postnorm():

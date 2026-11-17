@@ -4,7 +4,14 @@
 import os
 
 import torch
-from model_test import ModelTest, _env_choice, _env_flag, _env_int, _env_optional_flag
+from model_test import (
+    ModelTest,
+    _env_choice,
+    _env_flag,
+    _env_int,
+    _env_optional_flag,
+    resolve_attn_implementation,
+)
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
@@ -26,7 +33,7 @@ PAROQUANT_EVAL_TASKS_FAST = {
         "evalution_batch_size": "auto",
         "evalution_model_args": {
             "dtype": "bfloat16",
-            "attn_implementation": "paged|flash_attention_2",
+            "attn_implementation": resolve_attn_implementation(),
             "device": "cuda:0",
         },
         "evalution_suite_kwargs": {

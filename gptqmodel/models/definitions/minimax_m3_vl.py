@@ -14,6 +14,7 @@ from ...utils.model import MODALITY
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class MiniMaxM3VLGPTQ(BaseQModel):
@@ -111,7 +112,7 @@ class MiniMaxM3VLGPTQ(BaseQModel):
             ),
         )
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.__dict__.get("processor") or self.load_processor()
         tokenizer = getattr(processor, "tokenizer", None)
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
@@ -122,7 +123,7 @@ class MiniMaxM3VLGPTQ(BaseQModel):
         calib_data = []
         for batch_index, batch in enumerate(
             batched_conversations(
-                calibration_dataset,
+                conversations,
                 batch_size,
                 process_func=self.preprocess_dataset,
             )
@@ -160,8 +161,16 @@ class MiniMaxM3VLGPTQ(BaseQModel):
                     )
             calib_data.append(inputs)
 
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
 
 __all__ = ["MiniMaxM3VLGPTQ"]

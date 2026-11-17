@@ -71,13 +71,14 @@ def _neutralize_dead_columns(
     hessian: torch.Tensor,
     weight: torch.Tensor,
     *column_tensors: torch.Tensor,
-) -> None:
+) -> torch.Tensor:
     """Neutralize calibration-dead input channels in place.
 
     A channel with a zero Hessian diagonal carries no calibration signal. Its
     diagonal entry is replaced with one so the Cholesky inverse stays
     well-defined, and the matching weight (and optional auxiliary) columns are
-    zeroed.
+    zeroed. Returns the boolean dead-column mask so a caller can rebuild the
+    neutralized weight from its source without keeping a copy.
 
     Boolean-mask assignment (``H[dead, dead] = 1`` / ``W[:, dead] = 0``)
     performs a ``nonzero`` scan and a device-to-host synchronization per
@@ -90,6 +91,7 @@ def _neutralize_dead_columns(
     weight.masked_fill_(dead.unsqueeze(0), 0.0)
     for tensor in column_tensors:
         tensor.masked_fill_(dead.unsqueeze(0), 0.0)
+    return dead
 
 
 def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):

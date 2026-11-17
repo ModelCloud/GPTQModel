@@ -592,6 +592,9 @@ def test_optimum_gptq_quantizer_is_routed_through_the_native_bridge(monkeypatch)
             {
                 "checkpoint_files": checkpoint_files,
                 "device_map": None,
+                # A quantizer without a `backend` attribute forwards `None`,
+                # which the bridge resolves to AUTO (#4680).
+                "backend": None,
                 "dtype": torch.float16,
             },
         )
@@ -599,3 +602,200 @@ def test_optimum_gptq_quantizer_is_routed_through_the_native_bridge(monkeypatch)
 
     assert quantizer.post_init_model(model) is model
     assert post_initialized == [(model, sentinel_context)]
+
+
+def test_transformers_awq_quantizer_is_routed_through_the_native_bridge(monkeypatch):
+    """Transformers' own AWQ loader must use the bridge that GPTQ already uses.
+
+    ``quant_method: "awq"`` never reaches Optimum, so without this wrapper the
+    AWQ path only replaces ``nn.Linear`` and drops every per-expert packed
+    tensor. The bridge context must be produced before weights load and consume
+    the checkpoint manifest in ``_process_model_after_weight_loading``.
+    """
+
+    from transformers.quantizers.quantizer_awq import AwqQuantizer
+
+    import gptqmodel
+    from gptqmodel.utils import hf_load
+
+    sentinel_context = object()
+    prepared = []
+    post_initialized = []
+    original_calls = []
+
+    def fake_prepare(model, **kwargs):
+        prepared.append((model, kwargs))
+        return sentinel_context
+
+    def fake_post_init(model, context):
+        post_initialized.append((model, context))
+        return model
+
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", fake_prepare)
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_post_init_for_load", fake_post_init)
+
+    def tracking_prepare(self, model, **kwargs):
+        original_calls.append(("prepare", model))
+        return model
+
+    def tracking_post_init(self, model, **kwargs):
+        original_calls.append(("post_init", model))
+        return model
+
+    monkeypatch.setattr(AwqQuantizer, "_process_model_before_weight_loading", tracking_prepare)
+    monkeypatch.setattr(AwqQuantizer, "_process_model_after_weight_loading", tracking_post_init)
+
+    installer = getattr(gptqmodel, "_patch_transformers_awq_gptqmodel_load_bridge", None)
+    assert installer is not None, "the package does not install a bridge for transformers' AWQ loader"
+    installer()
+
+    quantizer = AwqQuantizer.__new__(AwqQuantizer)
+    model = torch.nn.Linear(4, 4)
+    checkpoint_files = ["/tmp/model.safetensors"]
+
+    returned = quantizer._process_model_before_weight_loading(
+        model, checkpoint_files=checkpoint_files, dtype=torch.float16
+    )
+
+    assert returned is model
+    assert getattr(model, "_gptqmodel_hf_load_context", None) is sentinel_context
+    assert prepared == [
+        (
+            model,
+            {
+                "checkpoint_files": checkpoint_files,
+                "device_map": None,
+                # A quantizer without a `backend` attribute forwards `None`,
+                # which the bridge resolves to AUTO (#4680).
+                "backend": None,
+                "dtype": torch.float16,
+            },
+        )
+    ]
+    assert original_calls == []
+
+    assert quantizer._process_model_after_weight_loading(model) is model
+    assert post_initialized == [(model, sentinel_context)]
+    assert original_calls == []
+
+    # An AWQ checkpoint the bridge does not own keeps transformers' own path.
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", lambda model, **kwargs: None)
+    non_native = torch.nn.Linear(4, 4)
+    quantizer._process_model_before_weight_loading(non_native)
+    assert original_calls == [("prepare", non_native)]
+    assert not hasattr(non_native, "_gptqmodel_hf_load_context")
+    quantizer._process_model_after_weight_loading(non_native)
+    assert original_calls == [("prepare", non_native), ("post_init", non_native)]
+
+
+def _install_bridge_with_quantizer(monkeypatch, quantizer_cls):
+    """Point the Optimum bridge at ``quantizer_cls`` without a real Optimum."""
+
+    import sys
+    import types
+
+    import gptqmodel
+
+    fake_optimum = types.ModuleType("optimum")
+    fake_optimum.__path__ = []
+    fake_gptq = types.ModuleType("optimum.gptq")
+    fake_gptq.GPTQQuantizer = quantizer_cls
+    monkeypatch.setitem(sys.modules, "optimum", fake_optimum)
+    monkeypatch.setitem(sys.modules, "optimum.gptq", fake_gptq)
+
+    gptqmodel._patch_optimum_gptqmodel_load_bridge()
+
+
+def test_bridge_forwards_the_quantizer_backend_to_kernel_selection(tmp_path, monkeypatch):
+    """``quantization_config["backend"]`` must reach kernel selection (#4680).
+
+    ``docs/peft.md`` tells users to set ``backend = "gptq_torch"`` to get a
+    trainable kernel. The bridge used to drop the value, so a GPT-QModel-made
+    checkpoint always resolved AUTO — a different, non-trainable kernel — while
+    an Optimum-owned checkpoint honored it. AUTO selects ``TorchAtenLinear`` for
+    this fixture, so the assertion discriminates.
+    """
+
+    _write_checkpoint(tmp_path)
+
+    class _BackendQuantizer:
+        backend = "gptq_torch"
+
+        def convert_model(self, model, **kwargs):
+            return model
+
+        def post_init_model(self, model):
+            return model
+
+    _install_bridge_with_quantizer(monkeypatch, _BackendQuantizer)
+
+    model = _Model(tmp_path)
+    _BackendQuantizer().convert_model(
+        model,
+        checkpoint_files=[tmp_path / "model.safetensors"],
+        device_map={"": "cpu"},
+        dtype=torch.float16,
+    )
+
+    q_proj = model.model.layers[0].self_attn.q_proj
+    assert isinstance(q_proj, TorchLinear), (
+        f"backend 'gptq_torch' was dropped: kernel is {type(q_proj).__name__}, "
+        "so AUTO was resolved instead"
+    )
+
+
+def test_bridge_raises_for_a_backend_the_device_cannot_run(tmp_path, monkeypatch):
+    """An impossible backend must raise, not be silently replaced by AUTO."""
+
+    _write_checkpoint(tmp_path)
+
+    class _MarlinQuantizer:
+        backend = "marlin"
+
+        def convert_model(self, model, **kwargs):
+            return model
+
+        def post_init_model(self, model):
+            return model
+
+    _install_bridge_with_quantizer(monkeypatch, _MarlinQuantizer)
+
+    model = _Model(tmp_path)
+    with pytest.raises(ValueError, match="Marlin"):
+        _MarlinQuantizer().convert_model(
+            model,
+            checkpoint_files=[tmp_path / "model.safetensors"],
+            device_map={"": "cpu"},
+            dtype=torch.float16,
+        )
+
+
+def test_awq_bridge_forwards_the_quantizer_backend(monkeypatch):
+    """The AWQ bridge has the same forwarding contract as the GPTQ one (#4680)."""
+
+    from transformers.quantizers.quantizer_awq import AwqQuantizer
+
+    from gptqmodel.utils import hf_load
+
+    seen = []
+
+    def fake_prepare(model, **kwargs):
+        seen.append(kwargs)
+        return None  # decline, so the original path runs and nothing loads
+
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", fake_prepare)
+
+    quantizer = AwqQuantizer.__new__(AwqQuantizer)
+    quantizer.backend = "awq_torch"
+
+    try:
+        quantizer._process_model_before_weight_loading(
+            torch.nn.Linear(4, 4), checkpoint_files=["/tmp/model.safetensors"]
+        )
+    except Exception:
+        # The declined bridge falls through to transformers' own path, which has
+        # no real checkpoint here. Only the forwarded kwargs matter.
+        pass
+
+    assert seen, "the AWQ bridge never called the prepare helper"
+    assert seen[0]["backend"] == "awq_torch"

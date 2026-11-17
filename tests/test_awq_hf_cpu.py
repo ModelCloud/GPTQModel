@@ -93,7 +93,18 @@ def test_real_checkpoint_awq_cpu_roundtrip(repo, revision, expected_linears, tmp
         assert torch.isfinite(actual).all()
         relative_rmse = ((actual - reference).square().mean() / reference.square().mean()).sqrt().item()
         quantized_nll = _nll(actual, batch["input_ids"])
-        assert relative_rmse < 0.20
+        # Logit RMSE is not portable across CPU microarchitectures: torch dispatches to a
+        # capability-specific kernel (SVE128 on aarch64, AVX2/AVX-512 on the x86 ubuntu-24.04
+        # runners), so identical deterministic weights round differently. Measured for
+        # SmolLM2-135M, torch 2.15.0, threads=2: 0.2073 on aarch64 (bit-identical at 842d666
+        # and 89fa9f4) and 0.2582 on x86 CI. 241087a (#4176/#4243) moved this metric when
+        # token-row replay began using the retained rows' real rotary positions instead of a
+        # synthetic arange: 0.1827 -> 0.2073 RMSE, while the NLL delta improved 0.2259 ->
+        # 0.1579. That is a documented correctness fix, not a quality regression, so the bound
+        # is realigned to the measured range instead of the pre-fix value. 0.30 keeps ~16%
+        # headroom over the worst observed value and still catches a real quality collapse;
+        # the NLL-delta bound below is the primary quality gate.
+        assert relative_rmse < 0.30
         assert quantized_nll - baseline_nll < 0.30
 
         destination = tmp_path / "quantized"

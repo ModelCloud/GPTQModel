@@ -713,7 +713,19 @@ def run_layer_stage(
             # Excluded layers have no bundles and remain skipped on resume.
             continue
 
+        # Capture the layer's pre-stage home before any stage code can move
+        # it. If the run is cancelled or fails mid-layer, the looper restores
+        # this placement instead of leaving the layer pinned on the compute
+        # device (issue #4546).
+        inflight_home = get_device(module)
+        if getattr(inflight_home, "type", None) == "meta":
+            inflight_home = CPU
+        # ``pre_quantize`` moves a CPU layer to the quantize device itself, so
+        # track the current object before that call as well as after it.
+        looper._track_inflight_layer(module, inflight_home)
+
         module = looper.gptq_model.pre_quantize(module)
+        looper._track_inflight_layer(module, inflight_home)
 
         embedding_module_name = None
         if is_input_embeddings_module:
@@ -729,6 +741,7 @@ def run_layer_stage(
             if model_type in MODULE_CONVERTER_MAP:
                 converter = MODULE_CONVERTER_MAP[model_type]
                 module = converter(module, looper.gptq_model.model.config)
+                looper._track_inflight_layer(module, inflight_home)
 
             needs_group_pristine = any(
                 callable(getattr(processor, "uses_grouped_optimization", None)) and processor.uses_grouped_optimization()
@@ -769,6 +782,7 @@ def run_layer_stage(
                     )
                     if not relative_name and prepared_native is not module:
                         module = prepared_native
+                        looper._track_inflight_layer(module, inflight_home)
 
             replace_module_with_hooked_legacy(
                 module,
@@ -930,6 +944,7 @@ def run_layer_stage(
                 layer_index=layer_index,
                 layer_name=layer_descriptor,
             )
+            looper._clear_inflight_layer()
             if durable_progress_logs:
                 log.info(
                     "StageLayer: packed catch-up boundary committed for layer=%s",
@@ -1059,6 +1074,7 @@ def run_layer_stage(
                 )
                 if live_endpoint is not None and live_endpoint is not module:
                     module = live_endpoint
+                    looper._track_inflight_layer(module, inflight_home)
                     if is_lm_head_module:
                         full = find_modules(module, name=looper.gptq_model.lm_head)
                     cur_layer_device = get_device(module)
@@ -1190,6 +1206,7 @@ def run_layer_stage(
                 )
                 if live_endpoint is not None and live_endpoint is not module:
                     module = live_endpoint
+                    looper._track_inflight_layer(module, inflight_home)
                     cur_layer_device = get_device(module)
                     if getattr(cur_layer_device, "type", None) == "meta":
                         cur_layer_device = normalize_device_like(
@@ -1345,6 +1362,9 @@ def run_layer_stage(
                     looper.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = looper.gptq_model.post_quantize(module)
+                # The success path has returned the layer to CPU; a later
+                # unrelated failure must not try to restore it again.
+                looper._clear_inflight_layer()
 
                 for finalized in processed_subset.values():
                     # Reset finalized modules to CPU to guarantee deterministic

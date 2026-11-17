@@ -34,13 +34,12 @@ flowchart TD
     B --> C["split_intraop_threads(pool_workers, torch.get_num_threads())"]
     C --> D["intraop_threads_per_worker = 206 // 22 = 9"]
     D --> E["each _DeviceWorker stores the value"]
-    E --> F["worker thread start: _apply_intraop_threads()<br/>torch.set_num_threads(9)"]
-    F --> G{"value already 9?"}
-    G -- yes --> H["no call"]
-    G -- no --> I["set it before the first task or warmup"]
-    I --> J["worker's team is 9"]
-    H --> J
-    J --> K["caller pool unchanged<br/>(thread-local)"]
+    E --> F["task start: _scoped_intraop_threads(9)"]
+    F --> G["torch.set_num_threads(9) for this task"]
+    G --> H["worker's team is 9"]
+    H --> I["task exit (finally): restore previous value"]
+    I --> J["last active scope restores the process budget"]
+    J --> K["new caller threads see the original budget"]
     style K fill:#dfd,stroke:#060
     style C fill:#dfd,stroke:#060
 ```
@@ -55,12 +54,14 @@ outside this contract.
 
 | Item | Value |
 | --- | --- |
-| Parameter | `DeviceThreadPool(intraop_threads_per_worker=...)`, set from `KernelConfig.pool_intraop_threads` by `_build_device_thread_pool()` |
+| Parameter | `DeviceThreadPool(intraop_threads_per_worker=...)`, set from `RuntimeConfig.pool_intraop_threads` (`KernelConfig.pool_intraop_threads`) by `_build_device_thread_pool()` |
 | `None` (default) | split `torch.get_num_threads()` across the pool's worker count |
 | `n > 0` | every worker uses exactly `n` |
 | `n <= 0` | workers keep the pool inherited from the spawning thread |
-| Applied at | `_DeviceWorker._apply_intraop_threads()`, before the queue loop, so before any warmup or task |
-| Scope | the worker thread and the threads it spawns; never the caller |
+| Applied at | `_scoped_intraop_threads()` around each warmup/task in `_DeviceWorker._run` |
+| Scope | the worker thread for the duration of that task; restored in `finally` |
+| Process-global value | restored on task exit; the last active scope restores the value captured before the first pool task |
+| New threads after a task | see the original process budget, not the worker budget |
 | Failure | `set_num_threads` raising is logged once and the worker keeps the inherited value |
 
 `split_intraop_threads(worker_count, total)` always returns at least `1`, so a
@@ -69,13 +70,16 @@ team instead of zero threads.
 
 The value is resolved once, when the pool is built. `DeviceThreadPool` does not
 re-resolve it after a worker restart, and it does not react to a later
-`torch.set_num_threads` by the caller.
+`torch.set_num_threads` by the caller. A later `GPTQModel.load` whose policy
+asks for a different `pool_intraop_threads`, `cpu_workers` or `cuda_workers`
+rebuilds the process pool at the load boundary (`resize_device_thread_pool`
+compares all three).
 
 ## Where it is set
 
 `gptqmodel/__init__.py` builds the process-wide pool through
 `_build_device_thread_pool()`, which passes
-`KernelConfig.pool_intraop_threads`. Its default `None` means "split across
+`RuntimeConfig.pool_intraop_threads`. Its default `None` means "split across
 that pool's workers"; set `0` to keep the inherited pool, or a positive value
 to pin one size. `gptqmodel/utils/stream.py` builds the stream-sync pool the
 same way. Command-line tools and tests that want an explicit value pass it
@@ -85,20 +89,27 @@ directly.
 
 ```bash
 python -c "
-import os, torch
+import threading, torch
 from gptqmodel.utils.threadx import DeviceThreadPool
+torch.set_num_threads(8)
 pool = DeviceThreadPool(devices=[torch.device('cpu')], include_cuda=False,
                         include_xpu=False, include_npu=False, include_mps=False,
                         workers={'cpu': 4}, empty_cache_every_n=0)
 seen = []
 pool.submit(torch.device('cpu'), lambda: seen.append(torch.get_num_threads())).result()
 print(seen)  # [8 // 4] when torch.get_num_threads() == 8
+fresh = []
+t = threading.Thread(target=lambda: fresh.append(torch.get_num_threads()))
+t.start(); t.join()
+print(fresh)  # [8]: the task-scoped budget did not leak
 pool.shutdown(wait=True)
 "
 python -m pytest tests/test_thread_caps.py -q
 ```
 
 `tests/test_thread_caps.py` pins the split arithmetic, the worker value, the
-explicit override, and the `<= 0` pass-through. The GIL=0 ledger row and probe
-(`pytorch_gil_0_compat.md`, `scripts/gil0_api_probe.py --only 'torch.set_num_threads (per worker)'`)
-pin the thread-local, non-leaking behaviour on a free-threaded build.
+explicit override, the `<= 0` pass-through, and that a fresh caller thread sees
+the original budget after both a successful and a raising task (issue #4601).
+The GIL=0 ledger row and probe (`pytorch_gil_0_compat.md`,
+`scripts/gil0_api_probe.py --only 'torch.set_num_threads (per worker)'`) cover
+the same boundary on a free-threaded build.

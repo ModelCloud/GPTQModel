@@ -352,21 +352,25 @@ def patch_triton_autotuner() -> Optional[bool]:
             if future.error is not None:
                 raise future.error
             return future.config, future.used_cached_result, future.bench_time
-        pruned_configs = self.prune_configs(kwargs)
 
-        def benchmark():
-            bench_start = time.time()
-            timings = {
-                config: self._bench(*args, config=config, **kwargs)
-                for config in pruned_configs
-            }
-            bench_duration = time.time() - bench_start
-            best_config = builtins_mod.min(timings, key=timings.get)
-            full_nargs_local = {**self.nargs, **kwargs, **best_config.all_kwargs()}
-            self.pre_hook(full_nargs_local, reset_only=True)
-            return timings, bench_duration, best_config
-
+        # Every exit after publishing the future must resolve it, including a
+        # pruning failure. Otherwise concurrent waiters and same-key retries
+        # park on an Event that is never set.
         try:
+            pruned_configs = self.prune_configs(kwargs)
+
+            def benchmark():
+                bench_start = time.time()
+                timings = {
+                    config: self._bench(*args, config=config, **kwargs)
+                    for config in pruned_configs
+                }
+                bench_duration = time.time() - bench_start
+                best_config = builtins_mod.min(timings, key=timings.get)
+                full_nargs_local = {**self.nargs, **kwargs, **best_config.all_kwargs()}
+                self.pre_hook(full_nargs_local, reset_only=True)
+                return timings, bench_duration, best_config
+
             if self.cache_results:
                 used_cached_result, bench_time, configs_timings, best_config = patched_check_disk_cache(
                     self, key, pruned_configs, benchmark

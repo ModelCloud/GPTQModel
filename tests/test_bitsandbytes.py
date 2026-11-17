@@ -5,16 +5,24 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 
 import pytest
 import torch
 import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.trainers import WordLevelTrainer
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 import gptqmodel.utils.model as model_utils
+from gptqmodel import GPTQModel
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+    _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES,
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
     _cpu_int8_dense_should_use,
@@ -427,6 +435,176 @@ def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
     assert _relative_l2(out, expected.to(torch.float16)) < 2e-3
 
 
+def _install_fake_bitsandbytes(monkeypatch) -> None:
+    """Install a rank-2-faithful fake of the optional bitsandbytes module.
+
+    Used only when bitsandbytes is absent (the CUDA venv). The stubs mirror the
+    native kernels: the vectorwise quantizer accepts rank 2 only, while
+    ``int8_linear_matmul`` broadcasts the rank-3 product exactly like Torch
+    does, which is what surfaces the missing flatten in the FP32 epilogue.
+    """
+
+    fake = types.ModuleType("bitsandbytes")
+    fake.__version__ = "0.50.2"
+    function = types.ModuleType("bitsandbytes.functional")
+
+    def int8_vectorwise_quant(x, threshold=0.0):
+        del threshold
+        assert x.dim() == 2, f"native int8_vectorwise_quant expects rank 2, got {tuple(x.shape)}"
+        # The native kernel reads data_ptr() as packed [M, K] rows and ignores
+        # the tensor's strides. as_strided reproduces that read so a row-strided
+        # view yields the same wrong codes the real kernel produces.
+        x_packed = torch.as_strided(x, (x.numel(),), (1,)).reshape(x.shape)
+        x_fp32 = x_packed.to(torch.float32)
+        row_absmax = x_fp32.abs().amax(dim=1)
+        scale = row_absmax / 127.0
+        scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+        codes = (x_fp32 / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+        return codes, row_absmax, None
+
+    def int8_linear_matmul(x_int8, weight):
+        # Exact for INT8 inputs: the products and their K-sum fit in FP32.
+        return torch.matmul(x_int8.to(torch.float32), weight.to(torch.float32).t())
+
+    def int8_mm_dequant(mm_out, row_stats, col_stats):
+        return (
+            mm_out.to(torch.float32)
+            * row_stats.to(torch.float32).reshape(-1, 1)
+            * col_stats.to(torch.float32).reshape(1, -1)
+            / (127.0 * 127.0)
+        )
+
+    function.int8_vectorwise_quant = int8_vectorwise_quant
+    function.int8_linear_matmul = int8_linear_matmul
+    function.int8_mm_dequant = int8_mm_dequant
+    fake.functional = function
+
+    monkeypatch.setitem(sys.modules, "bitsandbytes", fake)
+    monkeypatch.setitem(sys.modules, "bitsandbytes.functional", function)
+    monkeypatch.setattr(
+        sys.modules[BitsAndBytesLinear.__module__],
+        "_VALIDATED_BITSANDBYTES",
+        fake,
+    )
+    # Skip only the install probe; the shape/dtype validation still runs.
+    monkeypatch.setattr(
+        BitsAndBytesLinear,
+        "cached_validate_once",
+        classmethod(lambda cls: (True, None)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "bias"),
+    [
+        (torch.float32, False),
+        (torch.bfloat16, True),
+        (torch.float16, False),
+    ],
+)
+@pytest.mark.parametrize("leading", [(2, 3), (4, 2, 3), ()])
+def test_bitsandbytes_int8_forward_preserves_batched_activation_dims(
+    monkeypatch,
+    dtype: torch.dtype,
+    bias: bool,
+    leading: tuple[int, ...],
+):
+    if not BITSANDBYTES_AVAILABLE:
+        _install_fake_bitsandbytes(monkeypatch)
+
+    torch.manual_seed(4479)
+    linear = nn.Linear(128, 64, bias=bias).to(dtype).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=64,
+        bias=bias,
+        dtype=dtype,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    kernel.eval()
+
+    x = torch.randn(*leading, 128, dtype=dtype)
+    with torch.inference_mode():
+        flattened = kernel(x.reshape(-1, 128))
+        batched = kernel(x)
+
+    assert batched.shape == leading + (64,)
+    assert torch.equal(batched, flattened.reshape(batched.shape))
+
+    if dtype is torch.float32:
+        # Independent Torch oracle for the quantize -> INT8 matmul -> dequant
+        # arithmetic; it does not call the kernel or reuse its intermediates.
+        x_flat = x.reshape(-1, 128).float()
+        absmax = x_flat.abs().amax(dim=1)
+        x_scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
+        x_codes = (x_flat / x_scale[:, None]).round().clamp(-127, 127)
+        expected = (
+            (x_codes * x_scale[:, None]) @ kernel.dequantize_weight().float().t()
+        ).reshape(batched.shape)
+        torch.testing.assert_close(batched, expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="bitsandbytes INT8 vectorwise quant requires CUDA/HIP",
+)
+def test_bitsandbytes_int8_forward_handles_row_strided_activations(monkeypatch):
+    """A row-strided activation must be packed before the native INT8 ops."""
+
+    if not BITSANDBYTES_AVAILABLE:
+        _install_fake_bitsandbytes(monkeypatch)
+
+    torch.manual_seed(4584)
+    linear = nn.Linear(128, 64, bias=False).to(torch.float16).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    kernel.eval()
+    kernel = kernel.to("cuda")
+
+    # ``base[:, -1:, :]`` has row stride 4 * K, so ``reshape`` returns a view
+    # rather than a packed [M, K] buffer.
+    base = torch.randn(3, 4, 128, dtype=torch.float16, device="cuda")
+    x = base[:, -1:, :]
+    x_flat = x.reshape(-1, 128)
+    assert not x_flat.is_contiguous()
+
+    with torch.inference_mode():
+        actual = kernel(x)
+        contiguous = kernel(x_flat.contiguous()).reshape(actual.shape)
+
+    assert actual.shape == (3, 1, 64)
+    assert torch.equal(actual, contiguous)
+
+    # Independent FP64 oracle: quantize the logical rows, multiply by the
+    # dequantized packed weight, and dequantize without calling forward.
+    x64 = x_flat.to(torch.float64)
+    absmax = x64.abs().amax(dim=1)
+    scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float64).tiny)
+    codes = (x64 / scale[:, None]).round().clamp(-127, 127)
+    weight64 = kernel.weight.to(torch.float64) * (
+        kernel.weight_scb.to(torch.float64) / 127.0
+    ).unsqueeze(1)
+    expected = ((codes * scale[:, None]) @ weight64.t()).reshape(actual.shape)
+    torch.testing.assert_close(
+        actual.to(torch.float64), expected, rtol=2e-3, atol=2e-3
+    )
+
+
 @pytest.mark.skipif(
     _cpu_packed_kernels() is None,
     reason="bitsandbytes CPU packed kernel unavailable",
@@ -699,3 +877,142 @@ def test_detect_and_dequantize_bitsandbytes_checkpoint(tmp_path, bits: int):
         rtol=1e-5,
         atol=1e-5,
     )
+
+
+def _save_tiny_tokenizer(directory) -> None:
+    tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.train_from_iterator(
+        ["the quick brown fox", "a tiny llama checkpoint"],
+        WordLevelTrainer(special_tokens=["[PAD]", "[UNK]", "[BOS]", "[EOS]"]),
+    )
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+    ).save_pretrained(directory)
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+def test_gptqmodel_load_reloads_bitsandbytes_4bit_checkpoint(tmp_path):
+    """A GPTQModel-saved BnB checkpoint must reload through ``GPTQModel.load``.
+
+    The state buffers are checkpoint data, not activations: ``weight_quant_state``
+    is variable-length JSON bytes and the float state tables must stay FP32.
+    Accelerate sizes/casts them during the real load path, which is why the
+    module-level ``load_state_dict`` round trip never exercised this.
+    """
+
+    torch.manual_seed(0)
+    vocab_size = 32
+    hidden_size = 32
+    intermediate_size = 64
+    block_size = 64
+    config = LlamaConfig(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    source = LlamaForCausalLM(config).eval().half()
+
+    quantized_names = []
+    for name, linear in list(source.named_modules()):
+        if not isinstance(linear, nn.Linear) or name == "lm_head":
+            continue
+        quant = BitsAndBytesLinear(
+            bits=4,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=linear.bias is not None,
+            register_buffers=True,
+            format="nf4",
+            block_size=block_size,
+            compress_statistics=True,
+            dtype=torch.float16,
+        )
+        quant.pack_original(linear=linear, scales=None, zeros=None)
+        quant.post_init()
+        source.set_submodule(name, quant)
+        quantized_names.append(name)
+
+    state = source.state_dict()
+    model_dir = tmp_path / "bnb4"
+    model_dir.mkdir()
+    save_file(
+        {name: value.contiguous() for name, value in state.items()},
+        str(model_dir / "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+
+    # The module's template-sized slot must be smaller than the stored JSON,
+    # otherwise the shape-mismatch regression is not exercised.
+    probe_name = quantized_names[0]
+    probe = source.get_submodule(probe_name)
+    template = BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=probe.in_features,
+        out_features=probe.out_features,
+        bias=probe.bias is not None,
+        register_buffers=True,
+        format="nf4",
+        block_size=block_size,
+        compress_statistics=True,
+        dtype=torch.float16,
+    )
+    assert tuple(state[f"{probe_name}.weight_quant_state"].shape) != tuple(
+        template.state_dict()["weight_quant_state"].shape
+    )
+
+    quant_config = BitsAndBytesConfig(
+        bits=4,
+        format="nf4",
+        block_size=block_size,
+        compress_statistics=True,
+    )
+    quant_config.save_pretrained(str(model_dir))
+    config.architectures = ["LlamaForCausalLM"]
+    config.quantization_config = quant_config.to_dict()
+    config.save_pretrained(str(model_dir))
+    _save_tiny_tokenizer(str(model_dir))
+
+    loaded = GPTQModel.load(
+        str(model_dir),
+        backend=BACKEND.BITSANDBYTES,
+        device="cpu",
+        dtype=torch.float16,
+        local_files_only=True,
+    )
+
+    for name in quantized_names:
+        module = loaded.model.get_submodule(name)
+        assert isinstance(module, BitsAndBytesLinear)
+        for buffer_name in _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES:
+            expected = state[f"{name}.{buffer_name}"]
+            actual = getattr(module, buffer_name)
+            assert tuple(actual.shape) == tuple(expected.shape), (
+                f"{name}.{buffer_name} shape changed across GPTQModel.load"
+            )
+            assert actual.dtype == expected.dtype, (
+                f"{name}.{buffer_name} dtype changed across GPTQModel.load"
+            )
+
+    # First decode step (M=1) is the path that rejects a narrowed absmax.
+    with torch.inference_mode():
+        logits = loaded.model(torch.tensor([[1]], dtype=torch.long)).logits
+    assert logits.shape == (1, 1, vocab_size)
+    assert torch.isfinite(logits).all()

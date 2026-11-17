@@ -27,7 +27,7 @@ from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
-from ..utils.marlin import replace_parameter
+from ..utils.marlin import marlin_pad_dim, replace_parameter
 from ..utils.model import get_layers_with_prefixes
 from ._const import DEVICE, normalize_device
 from .fusable import require_fusable_config
@@ -449,11 +449,18 @@ class _FusionGroup:
             sizes = [getattr(module, name).shape[dim] for module in self.modules]
             for module, view in zip(self.modules, tensor.split(sizes, dim=dim)):
                 _set_operand(module, name, view)
+                if name == "bias" and hasattr(module, "_marlin_bias_padding"):
+                    # Fused views are already padded and permuted.
+                    module._marlin_bias_padding = (view.numel(), view.numel())
         suppress_restore = self.kernel.layout in ("cpu_aten", "cpu_legacy", "cpu_avx512")
         try:
             if suppress_restore:
                 for module in self.modules:
                     module._suspend_fused_train_restore = True
+                    # The source operands are now views of the fused
+                    # allocation. Its cache rebuild must not re-point
+                    # ``qzeros`` at a private ``scales_and_zeros`` copy.
+                    module._fused_operands_shared = True
             if self.kernel.layout != "exllamav2":
                 for clear in self.original_clears:
                     if clear is not None:
@@ -464,6 +471,7 @@ class _FusionGroup:
             if suppress_restore:
                 for module in self.modules:
                     module.__dict__.pop("_suspend_fused_train_restore", None)
+                    module.__dict__.pop("_fused_operands_shared", None)
         # Sources and the executor now consume the fused views. A native
         # descriptor's per-call operand snapshot would still own the replaced
         # standalone allocations; keep the descriptors, release the snapshots.
@@ -502,7 +510,20 @@ class _FusionGroup:
             if first.qzeros.numel():
                 replace_parameter(fused, "qzeros", torch.cat([m.qzeros for m in self.modules], dim=1))
             if first.bias is not None:
-                fused.bias = torch.cat([m.bias for m in self.modules])
+                # Every source bias is stored in checkpoint order and padded to
+                # its own aligned N width when its launch operand is derived.
+                # Pad each term before concatenating so the fused executor
+                # permutes one already-padded vector; ``_kernel_bias`` then sees
+                # ``numel() == padded`` and does not pad a second time.
+                fused.bias = torch.cat([
+                    marlin_pad_dim(
+                        m.bias.reshape(-1),
+                        m.out_features,
+                        getattr(m, "_marlin_bias_padding", (m.out_features, m.out_features))[1],
+                    )
+                    for m in self.modules
+                ])
+                fused._marlin_bias_padding = (fused.bias.numel(), fused.bias.numel())
             # Marlin's reduction barriers require zero-initialized scratch.
             fused.workspace = torch.zeros_like(first.workspace)
             self._share_operands(fused)
@@ -668,6 +689,11 @@ class _FusionGroup:
                     tensor = getattr(module, name)
                     if tensor is not None and tensor.numel():
                         _set_operand(module, name, tensor.clone(memory_format=torch.contiguous_format))
+                if hasattr(module, "_marlin_bias_padding"):
+                    # The fused split view is already padded; report it so the
+                    # standalone derivation reuses the padding instead of
+                    # doubling it. The permutation is re-applied either way.
+                    module._marlin_bias_padding = (module.bias.numel(), module.bias.numel())
                 # An export may have restored the checkpoint layout while the
                 # group was still installed. Rebuilding a CPU runtime descriptor
                 # from checkpoint-shaped operands would reinterpret GPTQ codes as

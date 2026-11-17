@@ -12,6 +12,21 @@ release titles/notes. Keep `gptqmodel` for the package/import name and
 `GPTQModel` for the Python API class. Preserve actual identifiers, filenames,
 repository names, and URLs when editing display text.
 
+## Regression-test design
+
+Before a bug fix or behavior-changing refactor, read and follow
+`.agents/skills/gptqmodel-regression-test-design/SKILL.md`. Use it alongside
+the applicable domain skills below; do not replace their qualification gates.
+
+Each fix needs a regression that fails on the broken behavior for the intended
+reason and passes with the fix. Test the public consumer and the affected state
+transition, not just a helper or a fresh object's happy path. Exercise relevant
+sibling implementations and failure/retry paths with non-degenerate fixtures.
+Record exact test nodes, commands, red/green evidence, and skips in the PR;
+collection failures, mocked native kernels, and skipped tests are not proof.
+Documentation-only changes validate their guidance and links instead of claiming
+runtime coverage.
+
 ## No environment-variable behaviour switches
 
 Runtime behaviour is selected by the config object or an explicit API argument.

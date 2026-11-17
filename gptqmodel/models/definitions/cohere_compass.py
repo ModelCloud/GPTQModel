@@ -9,13 +9,13 @@ import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
-from ...utils.calibration import batched_conversations
 from ...utils.device import get_device
 from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 _RAW_ATTENTION_MASK = "__gptqmodel_cohere_compass_attention_mask"
@@ -369,16 +369,17 @@ class CohereCompassQModel(BaseQModel):
             add_generation_prompt=True,
             return_tensors="pt",
             return_dict=True,
+            padding=True,
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        processor = self.load_processor()
-        calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
-        del processor
-        return calib_data
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            preprocess_func=self.preprocess_dataset,
+        )
 
 
 __all__ = ["CohereCompassQModel"]

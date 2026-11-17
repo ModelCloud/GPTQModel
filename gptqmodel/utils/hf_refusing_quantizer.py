@@ -13,7 +13,7 @@ from __future__ import annotations
 from transformers.quantizers import HfQuantizer
 from transformers.utils.quantization_config import QuantizationConfigMixin
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS
+from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
 
 
 class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
@@ -22,9 +22,13 @@ class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
     def __init__(self, **kwargs):
         self.quant_method = kwargs.get("quant_method")
         self.bits = kwargs.get("bits")
-
-    def to_dict(self):
-        return {"quant_method": self.quant_method, "bits": self.bits}
+        # Preserve every other field: when the refusal is bypassed for a
+        # checkpoint that ships its own modeling file, the remote class reads
+        # ``bits_per_layer``, ``embed_bits``, ``block`` and ``block_axis`` back
+        # out of this object.
+        for key, value in kwargs.items():
+            if key not in ("quant_method", "bits"):
+                setattr(self, key, value)
 
     @classmethod
     def from_dict(cls, config_dict, **kwargs):
@@ -38,10 +42,35 @@ class GPTQModelRefusingHfQuantizer(HfQuantizer):
 
     def __init__(self, quantization_config, **kwargs):
         method = getattr(quantization_config, "quant_method", None)
+        # A Tenstorrent block-float checkpoint that ships its own modeling file
+        # is loaded by that class through ``auto_map`` + ``trust_remote_code``,
+        # not by a stock transformers model. The writer records the shipped file
+        # in the quantization config, so let this documented path through.
+        # Everything else (including a bare ``tt-blockfloat`` config with no
+        # shipped loader) still fails closed instead of random-initializing.
+        shipped = getattr(quantization_config, "shipped_modeling_file", None)
+        # ``checkpoint_format`` is the marker older writer versions emitted; it
+        # is only written by ``save_blockfloat_model``, which also wrote the
+        # modeling file and ``auto_map``.
+        legacy_shipped = (
+            getattr(quantization_config, "checkpoint_format", None) == "tt-blockfloat"
+        )
+        if method == "tt-blockfloat" and (shipped or legacy_shipped):
+            super().__init__(quantization_config, **kwargs)
+            return
+        if method == "tt-blockfloat":
+            # vLLM has no tt-blockfloat loader, so do not point at it.
+            raise ValueError(
+                "GPT-QModel Tenstorrent block-float checkpoints cannot be loaded "
+                "by `transformers` without the `modeling_tt_blockfloat.py` file "
+                "written by `save_blockfloat_model`; load them with "
+                "`GPTQModel.load` or re-save the checkpoint. "
+                f"(quant_method: {method!r})"
+            )
         label = REFUSED_HF_QUANT_METHODS.get(method, method)
         raise ValueError(
             f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
-            "load them with `GPTQModel.load` or vLLM. "
+            f"load them with {refused_hf_load_remedy(method)}. "
             f"(quant_method: {method!r})"
         )
 

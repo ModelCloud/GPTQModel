@@ -169,15 +169,16 @@ def _checkpoint_key_converter(cls, model, *, to_runtime: bool):
     return convert
 
 
-_GGUF_QUANTIZED_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER"
+def _native_quantized_loader_enabled(policy: Optional[KernelConfig] = None) -> bool:
+    """Resolve the GGUF parser selection from the load policy.
 
+    ``policy`` is the ``KernelConfig`` the public call resolved; ``None`` uses the
+    policy installed for the current load. Nothing here reads the environment:
+    the same call options must select the same parser in every process.
+    """
+    from ..utils.kernel import resolve_kernel_config
 
-def _native_quantized_loader_enabled() -> bool:
-    """Mirror internal_gguf's env check without importing its NumPy-backed module."""
-    raw = os.getenv(_GGUF_QUANTIZED_LOADER_ENV)
-    if raw is None:
-        return True
-    return str(raw).strip().lower() not in {"", "0", "false", "off", "no"}
+    return bool(resolve_kernel_config(policy).gguf_native_quantized_loader)
 
 
 def _ggml_quantization_type():
@@ -587,6 +588,29 @@ def _module_tensor_bytes(module: torch.nn.Module) -> int:
     return total
 
 
+def _default_accelerator_family() -> DEVICE:
+    """Return the accelerator an integer ``max_memory`` key refers to.
+
+    Accelerate treats integer keys as accelerator ordinals. When the caller
+    passed no ``device`` the family has to come from the runtime instead of
+    defaulting to CPU, otherwise ``{1: "20GiB"}`` would name ``cpu:1`` and the
+    budget would look accelerator-free (#4632).
+    """
+
+    if torch.cuda.is_available():
+        return DEVICE.ROCM if IS_ROCM else DEVICE.CUDA
+    for candidate in (DEVICE.XPU, DEVICE.NPU):
+        runtime = getattr(torch, candidate.type, None)
+        is_available = getattr(runtime, "is_available", None)
+        if is_available is not None:
+            try:
+                if is_available():
+                    return candidate
+            except Exception:
+                continue
+    return DEVICE.CPU
+
+
 def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
     """Normalize an Accelerate-style ``max_memory`` map into ordered budgets.
 
@@ -600,11 +624,21 @@ def _normalize_max_memory(max_memory, device) -> List[tuple[str, int]]:
 
     from accelerate.utils import convert_file_size_to_int
 
-    family = selector_device_family(device) or DEVICE.CPU
+    family = selector_device_family(device) or _default_accelerator_family()
     budgets: List[tuple[str, int]] = []
     seen = set()
     for key, value in max_memory.items():
         if isinstance(key, int):
+            # An integer key is an accelerator ordinal. Without an explicit
+            # `device` the family must come from the active accelerator, not
+            # from CPU: `max_memory={1: "20GiB"}` names `cuda:1` on a CUDA host
+            # (#4632).
+            if family == DEVICE.CPU:
+                raise ValueError(
+                    f"`max_memory` names the accelerator ordinal `{key}` but no "
+                    "accelerator is available; use the `\"cpu\"` key for a CPU-only "
+                    "budget."
+                )
             name = f"{family.type}:{key}"
         else:
             name = str(key).strip().lower()
@@ -748,7 +782,33 @@ def _normalize_requested_device_map(device, device_map):
 
 
 def _indexed_device_request(device) -> Optional[str]:
-    """Return an indexed ``device`` request as a placement string, if any."""
+    """Return an indexed ``device`` request as a placement string, if any.
+
+    A bare integer is an accelerator ordinal, matching the documented
+    ``device=(0, 1)`` sequence and ``device_map={"": N}`` semantics. Resolve
+    it to the active accelerator's concrete ``<family>:N`` target here so it
+    becomes a full-model map instead of a family selector that the layer-wise
+    resolver would spread across every visible GPU (#4384). A host without an
+    active accelerator cannot interpret the ordinal, so the selector
+    conversion raises rather than silently treating it as CPU.
+    """
+
+    if isinstance(device, int) and not isinstance(device, bool):
+        if device < 0:
+            raise ValueError(f"device={device} is not an accelerator ordinal; ordinals start at 0.")
+        targets = _selector_devices(device)
+        assert targets is not None
+        target = targets[0]
+        # Fail here with the visible range rather than later with the
+        # runtime's "invalid device ordinal".
+        runtime = getattr(torch, target.type, None)
+        count = runtime.device_count() if hasattr(runtime, "device_count") else None
+        if count is not None and device >= count:
+            raise ValueError(
+                f"device={device} is not a visible {target.type} ordinal; this process sees "
+                f"{count} {target.type} device(s)."
+            )
+        return str(target)
 
     if isinstance(device, str) and ":" in device:
         return device
@@ -781,33 +841,80 @@ def _normalize_explicit_placement(device, device_map, max_memory):
     return requested_device_map, explicit_device_map
 
 
-def _resolve_max_memory_device(max_memory, device) -> Optional[DEVICE]:
-    """Validate ``device`` against the devices a ``max_memory`` budget names.
+def _max_memory_device_name_is_cpu(name: str) -> bool:
+    """Whether a normalized ``max_memory`` key is the CPU budget."""
+
+    if name == "cpu":
+        return True
+    try:
+        return torch.device(name).type == "cpu"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def _resolve_max_memory_device(max_memory, device) -> Optional[Union[DEVICE, tuple]]:
+    """Resolve the devices a ``max_memory`` budget may place weights on.
 
     ``max_memory`` is the authoritative list of devices that may hold weights
-    (#4082). When every entry is ``cpu`` the budget can only place layers on
-    CPU, so kernel selection must use CPU too; otherwise a CUDA kernel is
-    selected for a CPU-resident model and the first forward raises
-    ``Expected a cuda device, but got: cpu`` (#4091 item 7).
+    (#4082), so kernel selection must see exactly the accelerator devices the
+    budget names. Expanding the CUDA family to every visible GPU made the
+    mixed-capability check reject budgets that never touched the other card: on
+    a 4090 + 5090 host even ``max_memory={0: "20GiB"}`` failed with
+    ``cuda:0=12.0, cuda:1=8.9`` (#4632).
 
-    Returns ``DEVICE.CPU`` for a CPU-only budget and ``None`` when the budget
-    admits an accelerator. An explicit accelerator ``device`` that contradicts
-    a CPU-only budget is rejected rather than silently ignored.
+    Returns ``DEVICE.CPU`` for a CPU-only budget, the tuple of concrete
+    accelerator devices for an accelerator budget, and ``None`` without a
+    budget. An explicit ``device`` that contradicts the budget is rejected
+    rather than silently ignored.
     """
 
     if max_memory is None:
         return None
-    if any(name != "cpu" for name, _ in _normalize_max_memory(max_memory, device)):
-        return None
+    budgets = _normalize_max_memory(max_memory, device)
+    accelerators: List[torch.device] = []
+    for name, _ in budgets:
+        if _max_memory_device_name_is_cpu(name):
+            continue
+        try:
+            target = torch.device(name)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f"`max_memory` has an unsupported device key `{name}`."
+            ) from exc
+        if target not in accelerators:
+            accelerators.append(target)
+
     requested_family = selector_device_family(device) if device is not None else None
+    if not accelerators:
+        if requested_family is not None and requested_family != DEVICE.CPU:
+            raise ValueError(
+                "`max_memory` has no accelerator entry, so it can only place layers "
+                f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
+                "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
+                "CPU-only placement."
+            )
+        return DEVICE.CPU
+
     if requested_family is not None and requested_family != DEVICE.CPU:
-        raise ValueError(
-            "`max_memory` has no accelerator entry, so it can only place layers "
-            f"on CPU; that contradicts `device={device!r}`. Add an accelerator "
-            "entry to `max_memory`, or omit `device`/pass `device='cpu'` for "
-            "CPU-only placement."
+        budget_family = selector_device_family(tuple(accelerators))
+        if requested_family != budget_family:
+            raise ValueError(
+                f"`device={device!r}` selects {requested_family.value} but `max_memory` "
+                f"funds {budget_family.value} devices ({', '.join(str(d) for d in accelerators)}). "
+                "Pass one placement argument, or make them agree."
+            )
+        explicit = _explicit_requested_devices(
+            device if isinstance(device, (tuple, list)) else (device,)
         )
-    return DEVICE.CPU
+        if explicit is not None:
+            missing = [target for target in explicit if target not in accelerators]
+            if missing:
+                raise ValueError(
+                    f"`device={device!r}` names {', '.join(str(d) for d in missing)} but "
+                    "`max_memory` does not fund it. Add that device to `max_memory`, or "
+                    "drop it from `device`."
+                )
+    return tuple(accelerators)
 
 
 def _external_runtime_device_kwargs(
@@ -990,6 +1097,87 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
         after_conversion(model)
 
     return converted
+
+
+# Fused expert projections that Defuser splits from one 3-D tensor into a
+# per-expert ``nn.Linear``. These names match
+# ``defuser.modeling.moe_experts_interface.KNOWN_PROJECTION_PATTERNS``.
+_FUSED_EXPERT_PROJECTION_NAMES = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
+
+
+def _meta_fused_expert_params(model) -> int:
+    """Park fused 3-D expert projections on meta before Defuser splits them.
+
+    Defuser's tensor defusion copies the whole fused projection to the host and
+    materializes one dense bf16 ``nn.Linear`` per expert. On the quantized-load
+    path those linears are replaced by quantized kernels and filled from the
+    checkpoint right afterwards, so the copies only inflate host memory: an
+    OLMoE-1B-7B 4-bit reload peaked at 12.17 GiB RssAnon for a 3.66 GiB
+    checkpoint (issue #4400).
+
+    Defuser skips tensors that already live on meta, so move the fused
+    projections (and their fused biases) there first; the checkpoint loader
+    then materializes the packed weights straight from disk. Only call this
+    from the quantized-load path: quantization needs the fused values in host
+    memory so Defuser can produce real per-expert linears to quantize.
+
+    Returns the number of parameters/buffers moved.
+    """
+
+    moved = 0
+    for module in model.modules():
+        for projection in _FUSED_EXPERT_PROJECTION_NAMES:
+            weight = module._parameters.get(projection)
+            if weight is None:
+                weight = module._buffers.get(projection)
+            if not isinstance(weight, torch.Tensor) or weight.dim() != 3:
+                continue
+            # The fused bias is a 2-D (num_experts, out_features) sibling.
+            for attr in (projection, f"{projection}_bias"):
+                parameter = module._parameters.get(attr)
+                buffer = module._buffers.get(attr)
+                tensor = parameter if parameter is not None else buffer
+                if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta":
+                    continue
+                empty = torch.empty_like(tensor, device="meta")
+                if parameter is not None:
+                    module._parameters[attr] = torch.nn.Parameter(
+                        empty, requires_grad=parameter.requires_grad
+                    )
+                else:
+                    module._buffers[attr] = empty
+                moved += 1
+    return moved
+
+
+def _materialize_meta_expert_linears(model) -> int:
+    """Restore real CPU storage for the linears Defuser built on meta.
+
+    Defuser materializes meta expert projections as meta ``nn.Linear`` shells
+    (see :func:`_meta_fused_expert_params`). ``to_empty`` allocates their
+    uninitialized storage without touching pages, so the host RSS stays flat;
+    ``make_quant`` then replaces them with kernels whose own buffers are
+    created on a real device. Without this step those kernels would inherit a
+    meta shell, leaving non-checkpoint buffers (``qzeros_format``, ``input_perm``,
+    ...) on meta and breaking the later ``model.to(device)`` dispatch.
+
+    Only fully-meta modules are touched, so the real CPU weights built by
+    ``from_config`` are never discarded.
+
+    Returns the number of modules materialized.
+    """
+
+    moved = 0
+    for module in model.modules():
+        tensors = [*module._parameters.values(), *module._buffers.values()]
+        tensors = [tensor for tensor in tensors if isinstance(tensor, torch.Tensor)]
+        if not tensors or not any(tensor.device.type == "meta" for tensor in tensors):
+            continue
+        if any(tensor.device.type != "meta" for tensor in tensors):
+            continue
+        module.to_empty(device="cpu")
+        moved += 1
+    return moved
 
 
 def _supports_flash_attn_2(config: PretrainedConfig) -> bool:
@@ -1381,24 +1569,56 @@ def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend=No
     raise NotImplementedError(AWQ_GEMV_ROCM_UNSUPPORTED)
 
 
-def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
+# The GEMV/GEMV_FAST/LLM_AWQ layouts are read by kernels that declare
+# ``SUPPORTS_DTYPES = [torch.float16]``. AUTO has not resolved a concrete kernel
+# at load time, but every kernel AUTO can select for these layouts is fp16-only,
+# so the format alone decides the dtype.
+_AWQ_FP16_ONLY_FORMATS = (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ)
+
+
+def _coerce_quantized_awq_dtype(
+    *, backend: BACKEND, qcfg: QuantizeConfig, dtype, explicit_dtype: bool = False
+):
+    """Return a dtype the selected AWQ kernel can actually execute.
+
+    An unsupported explicit ``dtype=`` is a configuration conflict, so raise
+    here instead of letting layer-0 finalize fail after calibration has already
+    run. An auto-selected dtype is fixed to fp16 and logged, and the loader then
+    materializes the whole model in that dtype so the forward cannot mix dtypes.
+    """
     if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
-        return dtype
-    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
     if not isinstance(dtype, torch.dtype):
         return dtype
 
-    try:
-        qlinear = get_kernel_for_backend(backend, qcfg.quant_method, qcfg.format)
-    except ValueError:
-        return dtype
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        if format_code not in _AWQ_FP16_ONLY_FORMATS:
+            return dtype
+        supported_dtypes = [torch.float16]
+        kernel_name = f"FORMAT.{format_code.name} AWQ GEMV"
+    else:
+        try:
+            qlinear = get_kernel_for_backend(backend, qcfg.quant_method, format_code)
+        except ValueError:
+            return dtype
+        supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
+        kernel_name = qlinear.__name__
 
-    supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
     if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
         return dtype
 
-    log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
+    if explicit_dtype:
+        raise ValueError(
+            f"`dtype={dtype}` is not supported by {kernel_name}: it only supports "
+            f"{supported_dtypes}. Pass `dtype=torch.float16`, or use a GEMM format "
+            "(for example `FORMAT.GEMM`) that supports bfloat16."
+        )
+
+    log.info(
+        f"Loader: Auto fix `dtype` from `{dtype}` to `torch.float16` for "
+        f"`{kernel_name}`"
+    )
     return torch.float16
 
 
@@ -1476,8 +1696,10 @@ def _resolve_local_gguf_checkpoint_path(model_local_path: str, hf_gguf_load_kwar
 def _resolve_native_quantized_gguf_checkpoint(
     model_local_path: str,
     hf_gguf_load_kwargs: Dict[str, str],
+    *,
+    policy: Optional[KernelConfig] = None,
 ) -> tuple[Optional[str], Optional[internal_gguf.GGUFQuantizedCheckpointSpec]]:
-    if not _native_quantized_loader_enabled():
+    if not _native_quantized_loader_enabled(policy):
         return None, None
 
     gguf_checkpoint_path = _resolve_local_gguf_checkpoint_path(model_local_path, hf_gguf_load_kwargs)
@@ -1715,11 +1937,6 @@ def ModelLoader(cls):
         if p2p is not None and quantize_config is not None:
             # The loopers read this field and install it before enabling peers.
             quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
-        if kernel is not None and quantize_config is not None:
-            # The loopers read this field and install it before kernel selection.
-            quantize_config.kernel = (
-                KernelConfig(**kernel) if isinstance(kernel, dict) else kernel
-            )
 
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
@@ -1784,6 +2001,18 @@ def ModelLoader(cls):
                 quant_inference=False,
             )
 
+        # Resolve fp16-only AWQ kernels (the GEMV layouts) before the shell
+        # model is materialized, so every module -- including the non-quantized
+        # ones -- loads in one dtype and the failure cannot surface in layer-0
+        # finalize after calibration.
+        if isinstance(quantize_config, BaseQuantizeConfig):
+            dtype = _coerce_quantized_awq_dtype(
+                backend=backend,
+                qcfg=quantize_config,
+                dtype=dtype,
+                explicit_dtype=requested_dtype is not None,
+            )
+
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
             set_hf_config_dtype(config, dtype)
@@ -1814,6 +2043,7 @@ def ModelLoader(cls):
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
             hf_gguf_load_kwargs,
+            policy=kernel,
         )
         effective_profile = _resolve_native_gguf_profile(
             native_gguf_qspec=native_gguf_qspec,
@@ -1855,6 +2085,12 @@ def ModelLoader(cls):
                         **redirect_kwargs,
                     )
 
+            if hf_gguf_load_kwargs:
+                # The dense GGUF import runs inside transformers, whose checkpoint
+                # hook is process-wide. Install this call's policy first (we hold
+                # the model-load lock) so the dequant device and loader choice
+                # come from these arguments rather than the previous load.
+                configure_kernel(kernel)
             hf_model_init_kwargs = dict(model_init_kwargs_without_internal)
             hf_model_init_kwargs["device_map"] = device_map if device_map else "auto"
             set_dtype_compat(hf_model_init_kwargs, dtype)
@@ -2177,6 +2413,7 @@ def ModelLoader(cls):
             api_name=f"{cls.__name__}.from_quantized",
             explicit_dtype=dtype,
         )
+        requested_dtype = dtype if isinstance(dtype, torch.dtype) else None
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(kwargs)
         kwargs_without_internal = dict(kwargs)
         kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
@@ -2328,6 +2565,7 @@ def ModelLoader(cls):
         gguf_checkpoint_path, native_gguf_qspec = _resolve_native_quantized_gguf_checkpoint(
             model_local_path,
             hf_gguf_load_kwargs,
+            policy=kernel,
         )
         if native_gguf_qspec is not None:
             qcfg = QuantizeConfig(
@@ -2339,8 +2577,9 @@ def ModelLoader(cls):
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
 
         # Runtime policy belongs to this checkpoint's modules, not whichever
-        # model most recently installed a process policy.
-        qcfg.kernel = kernel
+        # model most recently installed a process policy. It is a resolved
+        # policy, not a caller-supplied `kernel=`, so keep it out of qcfg.kernel.
+        qcfg._resolved_kernel = kernel
 
         if adapter is None:
             if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
@@ -2415,14 +2654,14 @@ def ModelLoader(cls):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.BITSANDBYTES
 
-        if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-            # GEMV_FAST and LLM_AWQ only supports torch.float16
-            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
-            dtype = torch.float16
-
         _reject_native_awq_gemv_on_rocm(export_quant_method, format_code, backend)
 
-        dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        dtype = _coerce_quantized_awq_dtype(
+            backend=backend,
+            qcfg=qcfg,
+            dtype=dtype,
+            explicit_dtype=requested_dtype is not None,
+        )
 
         qcfg.calculate_bits_per_weight()
 
@@ -2654,7 +2893,15 @@ def ModelLoader(cls):
                     )
                 else:
                     raise
+            # This path replaces the fused experts with quantized kernels and
+            # fills them from the checkpoint, so keep Defuser's per-expert
+            # copies off the host (issue #4400).
+            _meta_fused_expert_params(model)
             _convert_model_with_defuser(cls, model, cleanup_original=True)
+            # Defuser built the split experts on meta; give them real (but
+            # uninitialized) host storage so the quantized kernels start on a
+            # materialized device.
+            _materialize_meta_expert_linears(model)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)

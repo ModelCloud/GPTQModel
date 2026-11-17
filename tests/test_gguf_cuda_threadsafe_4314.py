@@ -72,6 +72,13 @@ class _FakeWeight:
     def close(self) -> None:
         self.closed = True
 
+    # The layer's qweight stays on the CPU while the input claims CUDA, so the
+    # kernel keeps this weight as a cache and never adopts it as storage.
+    device = torch.device("cuda:0")
+
+    def backs(self, tensor) -> bool:
+        return False
+
 
 def _make_layer(in_features: int, out_features: int) -> GGUFCudaKernel:
     layer = object.__new__(GGUFCudaKernel)
@@ -83,6 +90,7 @@ def _make_layer(in_features: int, out_features: int) -> GGUFCudaKernel:
     object.__setattr__(layer, "_ggml_cuda_plans", OrderedDict())
     object.__setattr__(layer, "_ggml_cuda_weight", None)
     object.__setattr__(layer, "_ggml_cuda_weight_key", None)
+    object.__setattr__(layer, "_ggml_cuda_plan_generation", -1)
     return layer
 
 
@@ -102,8 +110,8 @@ def _install_bridge(
     build_delay: float = 0.0,
 ) -> _GGMLBridge:
     bridge = object.__new__(_GGMLBridge)
-    bridge._cuda_backend_locks = {}
-    bridge._cuda_backend_locks_guard = threading.Lock()
+    bridge._cuda_backend_lock = threading.RLock()
+    bridge.cuda_scratch_generation = lambda device_index: 0
 
     def fake_run(*, x, gguf_tensor_qtype, padded_in_features, out_features, plan=None, weight=None):
         with tracker.track():

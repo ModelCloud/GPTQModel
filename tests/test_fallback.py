@@ -261,8 +261,10 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     )
     processor_fallback = Fallback(strategy="rtn", threshold="5%")
 
+    # QQQ rejects module shapes its tiled kernels cannot pack at preprocess
+    # time, so the fixture uses a 64x256 shape both methods can pack.
     overridden = NamedModule(
-        nn.Linear(32, 32, bias=False), name="proj", full_name="model.proj", layer_index=0
+        nn.Linear(64, 256, bias=False), name="proj", full_name="model.proj", layer_index=0
     )
     processor.preprocess(overridden, fallback=processor_fallback)
     resolved = processor.tasks["proj"].fallback
@@ -270,7 +272,7 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     assert resolved.threshold == "2%"
 
     sibling = NamedModule(
-        nn.Linear(32, 32, bias=False), name="other", full_name="model.other", layer_index=0
+        nn.Linear(64, 256, bias=False), name="other", full_name="model.other", layer_index=0
     )
     processor.preprocess(sibling, fallback=processor_fallback)
     inherited = processor.tasks["other"].fallback

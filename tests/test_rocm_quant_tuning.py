@@ -54,12 +54,20 @@ def test_quantize_tuning_preserves_disabled_backend_tokens(monkeypatch, value):
     assert tuning["blas_backend"] in rocm.QUANT_BLAS_BACKEND_DISABLED
 
 
-@pytest.mark.parametrize("value", ["bogus", "ROCBLASX"])
-def test_quantize_tuning_falls_back_to_rocblas_for_unknown_values(monkeypatch, value):
-    monkeypatch.setattr(rocm, "IS_ROCM", True)
-    configure_kernel(KernelConfig(rocm_quant_blas=value))
+@pytest.mark.parametrize("value", ["bogus", "ROCBLASX", "hipblas_lt"])
+def test_unknown_blas_spellings_are_rejected_instead_of_pinning_rocblas(value):
+    """#4448: a typo must not silently select the rocBLAS pin."""
 
-    assert rocm.quantize_tuning("gfx1201")["blas_backend"] == "rocblas"
+    with pytest.raises(ValueError, match="rocm_quant_blas"):
+        KernelConfig(rocm_quant_blas=value)
+
+
+def test_kernel_config_blas_choices_match_the_rocm_resolver():
+    from gptqmodel.utils import kernel
+
+    assert kernel._ROCM_QUANT_BLAS_CHOICES == (
+        rocm.QUANT_BLAS_BACKEND_DISABLED | rocm._QUANT_BLAS_BACKEND_CHOICES
+    )
 
 
 @pytest.mark.parametrize("value", ["", "0", "off", "default"])
@@ -238,13 +246,3 @@ def test_opt_out_spellings_warn_about_reproducibility(monkeypatch, value):
     assert tuning["blas_backend"] == value
     assert len(warnings) == 1
     assert "will not pin rocBLAS" in warnings[0][0]
-
-
-def test_unknown_spelling_still_falls_back_to_rocblas_without_warning(monkeypatch):
-    warnings = _capture_warnings(monkeypatch)
-    monkeypatch.setattr(rocm, "IS_ROCM", True)
-    configure_kernel(KernelConfig(rocm_quant_blas="bogus"))
-    monkeypatch.setenv("ROCBLAS_USE_HIPBLASLT", "0")
-
-    assert rocm.quantize_tuning("gfx1201")["blas_backend"] == "rocblas"
-    assert warnings == []

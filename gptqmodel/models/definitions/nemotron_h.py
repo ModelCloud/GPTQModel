@@ -23,7 +23,10 @@ NEMOTRON_H_LAYER_MODULES = {
     # the default activation is `relu2`. `relu(x)^2` is not positively
     # homogeneous, so `up_proj`'s output is not `down_proj`'s input
     # scale source (fold error 2.2e-2).
-    "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:2", "gate_proj:3", "up_proj:3:nosrc", "down_proj:4"),
+    # `out_proj` consumes the SSM output produced from `in_proj`, so it must be
+    # a later subset. A layer has one mixer type, so sharing index 3 with the
+    # dense MLP gate/up (which never coexist with `out_proj`) is free.
+    "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:3", "gate_proj:3", "up_proj:3:nosrc", "down_proj:4"),
     # The SSM conv is checkpoint-owned but is not a quantizable Linear.
     "mixer.conv1d": ("conv1d:!",),
     # Routed top-k router keeps its checkpoint dtype.
@@ -34,11 +37,18 @@ NEMOTRON_H_LAYER_MODULES = {
     # expert MLP is `down_proj(relu2(up_proj(x)))`, the same non-homogeneous
     # activation that makes the dense `mixer.up_proj` unsafe.
     "mixer.shared_experts": ("up_proj:0:nosrc", "down_proj:1"),
+    # Latent-MoE layouts (`moe_latent_size` set) own a low-rank pair around the
+    # routed experts. The native forward is `experts(fc1_latent_proj(x))`
+    # followed by `fc2_latent_proj`, so the declarations must keep that order
+    # for sequential quantization. Distinct group ids avoid merging these
+    # blocks into the Mamba/attention groups above.
+    "mixer.fc1_latent_proj:5": ("fc1_latent_proj:0",),
     # Routed experts are the same `relu2` MLP, so `up_proj` is not a source
     # here either.
     "mixer.experts:moe": {
         "#": ("up_proj:0:nosrc", "down_proj:1"),
     },
+    "mixer.fc2_latent_proj:6": ("fc2_latent_proj:0",),
 }
 
 

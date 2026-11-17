@@ -203,13 +203,17 @@ class TTNNLinear(GPTQQuantLinear):
     # -- placement --------------------------------------------------------
 
     def _mesh(self) -> TTNNMesh:
-        """Return the mesh this layer is placed on, opening it if needed."""
+        """Return the mesh this layer is placed on, opening it if needed.
 
-        mesh = current_mesh()
-        if mesh is not None:
-            return mesh
-        count = self._requested_device_count()
-        return open_mesh(device_count=count, fabric=self._fabric_config())
+        This goes through ``open_mesh`` even when a handle is already live so the
+        runtime can reject a mesh whose chip count, ordinal, fabric or trace
+        reservation does not match this layer's request.
+        """
+
+        return open_mesh(
+            device_count=self._requested_device_count(),
+            fabric=self._fabric_config(),
+        )
 
     def _requested_device_count(self) -> int:
         requested = getattr(self, "ttnn_device_count", None)

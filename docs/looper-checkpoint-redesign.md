@@ -144,8 +144,11 @@ Its round-robin device-assignment cursor and module-device map are checkpointed,
 so skipping completed layers does not restart GPU assignment from device zero.
 Continuation tensors and device-valued metadata retain explicit device indices;
 CPU tensors stay on CPU and active CUDA tensors return to their recorded GPUs.
-Completed packed modules intentionally remain offloaded/meta until saving,
-except EXL3, whose ordinary completed state uses CPU buffers read by its writer.
+Completed packed modules are restored into memory at loop exit with the same
+hook a freshly offloaded module carries, so they do not remain offloaded/meta
+until saving ([in-session model after offload](in-session-model-after-offload.md)).
+EXL3 is the exception: its ordinary completed state uses CPU buffers read by its
+writer.
 The composed adapter schema is version 4; topology and tensor codec schemas
 remain version 2. Older adapter checkpoints are rejected rather than guessed
 or migrated.

@@ -97,8 +97,27 @@ def _quantizer_parameters(weight, *, bits: int, group_size: int, symmetric: bool
     qmax = (1 << bits) - 1
     minimum = mx.min(grouped, axis=1, keepdims=True)
     maximum = mx.max(grouped, axis=1, keepdims=True)
-    scale = mx.maximum(maximum - minimum, 1e-5) / qmax
-    return scale, minimum / scale
+    zeros = mx.zeros_like(minimum)
+    # Mirror `_calc_affine_qparams` in the Torch reference: fit a zero-inclusive
+    # range, round the zero point onto that grid, then re-fit the scale per side.
+    # A one-sided group has no representable zero point otherwise, so its values
+    # would clip to 0 or qmax instead of quantizing.
+    low = mx.minimum(minimum, zeros)
+    high = mx.maximum(maximum, zeros)
+    span = mx.maximum(high - low, 1e-5)
+    zero_point = mx.clip(mx.round(-low / span * qmax), 0, qmax)
+    negative_scale = mx.where(
+        zero_point > 0,
+        -low / mx.maximum(zero_point, 1),
+        zeros,
+    )
+    positive_scale = mx.where(
+        zero_point < qmax,
+        high / mx.maximum(qmax - zero_point, 1),
+        zeros,
+    )
+    scale = mx.clip(mx.maximum(negative_scale, positive_scale), 1e-5, 1e5)
+    return scale, -zero_point
 
 
 def _pseudo_quantize(

@@ -19,6 +19,7 @@ import torch
 from torch import nn
 from torch.nn import Module
 
+from .._alloc_conf import clamp_budget_below_allocator_split
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
@@ -298,6 +299,51 @@ def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
     return len(positional) >= 2
 
 
+def _is_recurrent_attention_layer_type(layer_type: Optional[str]) -> bool:
+    """Whether ``layer_type`` is a recurrent / convolution mixer, not attention.
+
+    ``transformers`` 5 maps each declared layer type to the function that builds
+    its mask (``LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING``). The ``linear_attention``
+    and ``conv`` entries build the mask with ``create_recurrent_attention_mask``,
+    which returns ``None`` for an unpadded batch and a planar ``[batch, seq]``
+    keep mask otherwise. Those mixers apply it with
+    ``hidden * attention_mask[:, :, None]``, so they can never consume the
+    additive ``[1, 1, T, T]`` grid an attention layer takes (issue #4671).
+    """
+
+    if not layer_type:
+        return False
+    try:
+        from transformers.masking_utils import (
+            LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING,
+            create_recurrent_attention_mask,
+        )
+    except ImportError:  # pragma: no cover - older transformers
+        return False
+    builder = LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING.get(layer_type)
+    return builder is create_recurrent_attention_mask
+
+
+def _kernel_shape_supported(kernel, in_features: int, out_features: int) -> bool:
+    """Return whether ``kernel`` declares it can pack this module shape.
+
+    Uses the kernel's own static shape contract
+    (``SUPPORTS_{IN,OUT}_FEATURES_DIVISIBLE_BY`` through
+    ``_validate_shape_constraints``) rather than the full ``validate``: the full
+    check also probes runtime availability, and a shape decision must not depend
+    on whether a JIT extension happens to be built.
+    """
+
+    check = getattr(kernel, "_validate_shape_constraints", None)
+    if not callable(check):
+        return True
+    try:
+        ok, _ = check(in_features=in_features, out_features=out_features)
+    except Exception:
+        return False
+    return bool(ok)
+
+
 def _resolve_module_sym(qcfg, module_name: Optional[str], resolved_cfg=None) -> bool:
     """Resolve one module's symmetry mode from its dynamic rule.
 
@@ -566,8 +612,22 @@ class AWQProcessor(LoopProcessor):
         #     return AwqMarlinLinear
         raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
 
-    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None, *, resolved_cfg=None):
-        """Resolves the AWQ kernel after applying any dynamic format override."""
+    def _resolve_qlinear_kernel(
+        self,
+        module_name: Optional[str] = None,
+        *,
+        resolved_cfg=None,
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+    ):
+        """Resolves the AWQ kernel after applying any dynamic format override.
+
+        ``in_features``/``out_features`` are optional because a few callers only
+        know the module name. When they are given, the candidate is checked
+        against the kernel's own packing contract and a kernel that cannot pack
+        the shape falls back to the portable torch kernel of the same checkpoint
+        format (issue #4567).
+        """
 
         target_format = self._module_format(module_name, resolved_cfg=resolved_cfg)
         # RCO can allocate a different width per module. The CUDA GEMM/GEMV
@@ -583,8 +643,59 @@ class AWQProcessor(LoopProcessor):
         if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
-                return model_kernel
+                return self._portable_kernel_for_shape(
+                    model_kernel,
+                    module_name,
+                    in_features=in_features,
+                    out_features=out_features,
+                    resolved_cfg=resolved_cfg,
+                )
         return self._select_qlinear_kernel_for_format(target_format)
+
+    def _portable_kernel_for_shape(
+        self,
+        kernel,
+        module_name: Optional[str],
+        *,
+        in_features: Optional[int],
+        out_features: Optional[int],
+        resolved_cfg=None,
+    ):
+        """Fall back to ``AwqTorchLinear`` when ``kernel`` rejects the shape.
+
+        A model-wide kernel is selected once, before any module shape is known,
+        but the CUDA GEMM/GEMV kernels only pack some output widths
+        (``AwqGEMMLinear`` needs ``out_features % 64 == 0``). Without this check
+        a shape the format itself supports (FalconMamba/Mamba ``x_proj``
+        8192->288) fails inside ``create_quant_module`` after the whole
+        calibration has run. ``AwqTorchLinear`` packs the same ``FORMAT.GEMM``
+        checkpoint layout for every shape the format admits, and AUTO already
+        selects a compatible kernel per layer at load, so the saved checkpoint
+        stays loadable.
+
+        Only the portable kernel is used as a fallback: when it also rejects the
+        shape the original kernel is returned so the real, module-specific
+        error still surfaces.
+        """
+
+        if kernel is AwqTorchLinear or in_features is None or out_features is None:
+            return kernel
+        if _kernel_shape_supported(kernel, in_features, out_features):
+            return kernel
+        if not _kernel_shape_supported(AwqTorchLinear, in_features, out_features):
+            # Neither kernel packs the shape: keep the requested one so the
+            # module-specific error still names it.
+            return kernel
+        log.warning(
+            "AWQ: `%s` cannot pack `%s` (%d->%d); using the portable `%s` kernel "
+            "for this module instead of failing at pack time.",
+            getattr(kernel, "__name__", kernel),
+            module_name or "<model-wide>",
+            in_features,
+            out_features,
+            AwqTorchLinear.__name__,
+        )
+        return AwqTorchLinear
 
     def _module_bits(self, module_name: Optional[str], *, resolved_cfg=None) -> int:
         """Resolve the AWQ width this module is staged and packed at.
@@ -663,11 +774,23 @@ class AWQProcessor(LoopProcessor):
             self._full_module_name(layer_module, module)
         )
 
-    def _resolve_module_kernel(self, module_name: Optional[str], resolved_cfg=None):
+    def _resolve_module_kernel(
+        self,
+        module_name: Optional[str],
+        resolved_cfg=None,
+        *,
+        in_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+    ):
         """Resolve the packing kernel for one module, falling back to the default."""
 
         try:
-            return self._resolve_qlinear_kernel(module_name, resolved_cfg=resolved_cfg)
+            return self._resolve_qlinear_kernel(
+                module_name,
+                resolved_cfg=resolved_cfg,
+                in_features=in_features,
+                out_features=out_features,
+            )
         except Exception:
             return self.qlinear_kernel
 
@@ -735,7 +858,12 @@ class AWQProcessor(LoopProcessor):
         example a non-quantized MoE router).
         """
 
-        kernel = self._resolve_module_kernel(module_name, resolved_cfg=resolved_cfg)
+        kernel = self._resolve_module_kernel(
+            module_name,
+            resolved_cfg=resolved_cfg,
+            in_features=in_features,
+            out_features=out_features,
+        )
         supported = {
             int(size)
             for size in getattr(kernel, "SUPPORTS_GROUP_SIZE", ()) or ()
@@ -807,7 +935,12 @@ class AWQProcessor(LoopProcessor):
                 continue
             weight = getattr(module, "weight", None)
             dtype = weight.dtype if isinstance(weight, torch.Tensor) else None
-            kernel = self._resolve_module_kernel(name, resolved_cfg=resolved_cfg)
+            kernel = self._resolve_module_kernel(
+                name,
+                resolved_cfg=resolved_cfg,
+                in_features=in_features,
+                out_features=out_features,
+            )
             if self._kernel_group_size_supported(
                 kernel,
                 name,
@@ -1617,7 +1750,7 @@ class AWQProcessor(LoopProcessor):
         cache,
         batch_indices: List[Optional[int]],
         layer: Optional[nn.Module],
-    ) -> Dict[int, Optional[torch.Tensor]]:
+    ) -> Tuple[Dict[int, Optional[torch.Tensor]], Optional[str]]:
         """Return each capture batch's mask for ``layer``'s attention type.
 
         ``transformers`` 5 builds one mask per declared layer type and the
@@ -1625,17 +1758,22 @@ class AWQProcessor(LoopProcessor):
         ``_gptqmodel_layer_type_replay_kwargs``. Replay must select the entry
         that matches the layer being quantized; reusing layer 0's sliding mask
         for a full-attention layer hides every long-range pair.
+
+        Also returns the resolved layer type so the replay can tell a recurrent
+        mixer from an attention block: the former never accepts an attention
+        grid (issue #4671).
         """
 
         if layer is None:
-            return {}
+            return {}, None
         from ..models.base import _LAYER_TYPE_REPLAY_KWARGS_KEY
 
         resolver = getattr(self.gptq_model, "_resolve_layer_replay_type", None)
         if not callable(resolver):
-            return {}
+            return {}, None
         layer_input_kwargs = getattr(cache, "layer_input_kwargs", None) or []
         masks: Dict[int, Optional[torch.Tensor]] = {}
+        resolved_type: Optional[str] = None
         for batch_index in batch_indices:
             if batch_index is None:
                 continue
@@ -1651,10 +1789,12 @@ class AWQProcessor(LoopProcessor):
             layer_type = resolver(layer, layer_types)
             if layer_type is None:
                 continue
+            if resolved_type is None:
+                resolved_type = layer_type
             type_entry = by_type.get(layer_type) or {}
             if "attention_mask" in type_entry:
                 masks[batch_index] = type_entry["attention_mask"]
-        return masks
+        return masks, resolved_type
 
     def _token_row_replay_kwargs(
         self,
@@ -1663,6 +1803,7 @@ class AWQProcessor(LoopProcessor):
         provenance: List[Tuple[int, int]],
         dtype: torch.dtype,
         mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
+        recurrent: bool = False,
     ) -> Dict[str, Any]:
         """Rebuild the attention mask and positions for packed ``token_rows``.
 
@@ -1764,7 +1905,19 @@ class AWQProcessor(LoopProcessor):
 
             positions[packed_indices] = row_positions.to(dtype=torch.long)
 
-        if not grid_mask and form is not None:
+        if recurrent:
+            # A recurrent / convolution mixer consumes a planar [batch, seq]
+            # keep mask (`apply_mask_to_padding_states` multiplies
+            # `hidden * attention_mask[:, :, None]`). The additive
+            # [1, 1, T, T] grid is an attention-only contract and raises on the
+            # first replay: `tensor a (768) must match tensor b (366)`. The
+            # mixer applies its own causal convolution/scan, so the packed rows
+            # need no explicit causal structure. `_pack_token_rows` emits rows
+            # in source order, so each document stays contiguous and the
+            # recurrent state crosses only at a document boundary -- the same
+            # limitation the padded multi-row batch path already has.
+            attention_mask = torch.ones((1, packed_count), dtype=torch.bool)
+        elif not grid_mask and form is not None:
             # A captured planar [batch, seq] mask means the attention
             # implementation (for example FlashAttention) expects a keep mask
             # of that rank. Keep that form; every packed row is a kept token,
@@ -2019,16 +2172,18 @@ class AWQProcessor(LoopProcessor):
                     cache_key = tuple(id(tensor) for tensor in tensors)
                     replay_kwargs = token_row_kwargs_cache.get(cache_key)
                     if replay_kwargs is None:
+                        type_masks, replay_layer_type = self._token_row_layer_type_masks(
+                            getattr(self, "inputs_cache", None),
+                            batch_indices,
+                            state.layer_module,
+                        )
                         replay_kwargs = self._token_row_replay_kwargs(
                             tensors,
                             batch_indices,
                             provenance,
                             features[name].dtype,
-                            mask_overrides=self._token_row_layer_type_masks(
-                                getattr(self, "inputs_cache", None),
-                                batch_indices,
-                                state.layer_module,
-                            ),
+                            mask_overrides=type_masks,
+                            recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
                         )
                         token_row_kwargs_cache[cache_key] = replay_kwargs
                 feature_kwargs[name] = replay_kwargs
@@ -3014,6 +3169,18 @@ class AWQProcessor(LoopProcessor):
             if any(_ in name for _ in avoid_clipping):
                 continue
 
+            features = input_feat[name]
+            if features.numel() == 0:
+                # No calibration sample reached this projection (a subset
+                # early-stop used to starve a sibling, #4679). Clip search needs
+                # at least one token row; leave the module unclipped instead of
+                # reshaping an empty tensor.
+                log.warn(
+                    "AWQ: module `%s` received no calibration samples; skipping clip search.",
+                    name,
+                )
+                continue
+
             linear = named_linears[name]
             original_device = get_device(linear)
             target_device = _resolve_module_exec_device(linear)
@@ -3021,7 +3188,7 @@ class AWQProcessor(LoopProcessor):
 
             max_val = self._compute_best_clip(
                 linear.weight,
-                input_feat[name],
+                features,
                 bits=self._bits_for(layer, linear),
                 group_size=self._group_size_for(layer, linear),
                 format=self._format_for(layer, linear),
@@ -3051,7 +3218,16 @@ class AWQProcessor(LoopProcessor):
         minimise the error of *that* quantizer, not of the global default.
         """
 
-        assert w.dim() == 2
+        if w.dim() != 2:
+            raise ValueError(
+                "AWQ clipping expects a 2-D weight tensor, "
+                f"got shape {tuple(w.shape)}"
+            )
+        if input_feat.numel() == 0:
+            raise ValueError(
+                "AWQ clipping needs at least one calibration token row; "
+                "this module received no calibration samples."
+            )
         org_w_shape = w.shape
         # w           [co, ci]      -> [co, 1, n_group, group size]
         # input_feat  [n_token, ci] -> [1, n_token, n_group, group size]
@@ -3073,8 +3249,11 @@ class AWQProcessor(LoopProcessor):
 
         w = w.reshape(org_w_shape[0], 1, -1, group_size)
 
+        # Clip search owns a tile size, not a second module-shape predicate. The
+        # packer admits any width divisible by its own packing factor, so a
+        # partial final tile must be searched instead of rejected (#4474).
         oc_batch_size = 256 if org_w_shape[0] % 256 == 0 else 64  # prevent OOM
-        assert org_w_shape[0] % oc_batch_size == 0
+        oc_batch_size = min(oc_batch_size, org_w_shape[0])
         w_all = w
         best_max_val_all = []
         device = w_all.device
@@ -3104,6 +3283,15 @@ class AWQProcessor(LoopProcessor):
             mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
             device,
         )
+        # The caching allocator refuses to serve a sub-cap request from a free
+        # block at or above `max_split_size`, so a workspace sized just under
+        # the cap (the 256 MiB GPU default) maps one new segment per module:
+        # MoE layers grew reserved VRAM by ~256 MiB per expert projection while
+        # allocated memory stayed flat. Staying below the cap keeps every
+        # segment splittable, so the next module reuses it. This only changes
+        # chunk sizes; each candidate is still reduced over the same axes, so
+        # the clip search results are bitwise unchanged.
+        budget = clamp_budget_below_allocator_split(budget)
         row_elems = oc_batch_size * n_group * group_w
         out_elems = oc_batch_size * n_tokens * n_group
         cand_chunk = max(
@@ -3118,25 +3306,58 @@ class AWQProcessor(LoopProcessor):
             1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
         )
 
-        # Pre-allocate scratch buffers so the inner loops never allocate large temporaries.
-        scratch_clamp = torch.empty(
-            (cand_chunk, oc_batch_size, 1, n_group, group_w), dtype=w_all.dtype, device=device
-        )
-        scratch_quant = torch.empty_like(scratch_clamp)
-        scratch_out = torch.empty(
-            (cand_chunk, oc_batch_size, n_tokens, n_group),
-            dtype=torch.result_type(input_feat, w_all),
-            device=device,
-        )
-        org_out = torch.empty_like(scratch_out[0])
-        scratch_prod = torch.empty(
+        out_dtype = torch.result_type(input_feat, w_all)
+
+        def alloc_scratch(rows):
+            clamp = torch.empty(
+                (cand_chunk, rows, 1, n_group, group_w), dtype=w_all.dtype, device=device
+            )
+            return (
+                clamp,
+                torch.empty_like(clamp),
+                torch.empty(
+                    (cand_chunk, rows, n_tokens, n_group),
+                    dtype=out_dtype,
+                    device=device,
+                ),
+            )
+
+        # One workspace set serves every full tile. Allocating inside the loop
+        # left the previous tile's buffers alive through the `prod`/`clamp`/
+        # `quant`/`cur_out` views while the next set was created, so the peak
+        # carried two sets and every AWQ run paid +52-62% (#4682).
+        full_scratch_clamp, full_scratch_quant, full_scratch_out = alloc_scratch(oc_batch_size)
+        full_org_out = torch.empty_like(full_scratch_out[0])
+        full_scratch_prod = torch.empty(
             (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
-            dtype=scratch_out.dtype,
+            dtype=full_scratch_out.dtype,
             device=device,
         )
 
-        for i_b in range(org_w_shape[0] // oc_batch_size):
-            w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
+        for i_b in range(0, org_w_shape[0], oc_batch_size):
+            # The final tile may be shorter than `oc_batch_size`. It gets its
+            # own exact-size set: cropping a full-size buffer to `co` rows
+            # leaves a non-contiguous slice whose `reshape` is a copy, so
+            # `_pseudo_quantize_tensor_into` wrote the quantized candidates
+            # into that copy and the error reduction read stale rows (#4540).
+            # A full tile takes the shared set, where `[:co]` is the whole
+            # extent and therefore still contiguous.
+            w = w_all[i_b: i_b + oc_batch_size]
+            co = w.shape[0]
+            if co == oc_batch_size:
+                scratch_clamp = full_scratch_clamp
+                scratch_quant = full_scratch_quant
+                scratch_out = full_scratch_out
+                org_out = full_org_out
+                scratch_prod = full_scratch_prod
+            else:
+                scratch_clamp, scratch_quant, scratch_out = alloc_scratch(co)
+                org_out = torch.empty_like(scratch_out[0])
+                scratch_prod = torch.empty(
+                    (cand_chunk, co, token_chunk, n_group, group_w),
+                    dtype=scratch_out.dtype,
+                    device=device,
+                )
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
@@ -3156,15 +3377,15 @@ class AWQProcessor(LoopProcessor):
 
             for t0 in range(0, n_tokens, token_chunk):
                 t1 = min(t0 + token_chunk, n_tokens)
-                prod = scratch_prod[0, :, : t1 - t0]
+                prod = scratch_prod[0, :co, : t1 - t0]
                 torch.mul(input_feat[:, t0:t1], w, out=prod)
-                torch.sum(prod, dim=-1, out=org_out[:, t0:t1])
+                torch.sum(prod, dim=-1, out=org_out[:co, t0:t1])
 
             for s0 in range(0, steps, cand_chunk):
                 tc = min(cand_chunk, steps - s0)
                 max_val = cand_max_val[s0:s0 + tc]  # [tc, co_batch, 1, n_group, 1]
-                clamp_slice = scratch_clamp[:tc]
-                quant_slice = scratch_quant[:tc]
+                clamp_slice = scratch_clamp[:tc, :co]
+                quant_slice = scratch_quant[:tc, :co]
                 torch.clamp(w.unsqueeze(0), -max_val, max_val, out=clamp_slice)
                 # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
                 # symmetric magnitude the quantizer needs is `min(|w|.amax(), max_val)`.
@@ -3194,22 +3415,22 @@ class AWQProcessor(LoopProcessor):
                 # so the product stays under the workspace cap. Slicing the
                 # token axis does not change any element's sum over `group_w`,
                 # and the mean below still reduces the same full token axis.
-                cur_out = scratch_out[:tc]
+                cur_out = scratch_out[:tc, :co]
                 for t0 in range(0, n_tokens, token_chunk):
                     t1 = min(t0 + token_chunk, n_tokens)
                     torch.mul(
                         input_feat[:, t0:t1],
                         quant_slice,
-                        out=scratch_prod[:tc, :, : t1 - t0],
+                        out=scratch_prod[:tc, :co, : t1 - t0],
                     )
                     torch.sum(
-                        scratch_prod[:tc, :, : t1 - t0],
+                        scratch_prod[:tc, :co, : t1 - t0],
                         dim=-1,
                         out=cur_out[:, :, t0:t1],
                     )
 
                 # `cur_out` is scratch, so the difference and square happen in place.
-                cur_out.sub_(org_out.unsqueeze(0)).pow_(2)
+                cur_out.sub_(org_out[:co].unsqueeze(0)).pow_(2)
                 err_chunks.append(cur_out.mean(dim=2).view(tc, *org_max_val.shape))
                 max_val_chunks.append(max_val)
 
@@ -3229,6 +3450,12 @@ class AWQProcessor(LoopProcessor):
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
+        # Every output row must get a bound before the caller mutates the weight.
+        if best_max_val.shape[0] != org_w_shape[0]:
+            raise RuntimeError(
+                "AWQ clip search covered "
+                f"{best_max_val.shape[0]} of {org_w_shape[0]} output rows."
+            )
         del input_feat
         del org_out
 
@@ -3263,7 +3490,11 @@ class AWQProcessor(LoopProcessor):
                 f"group_size ({configured_group_size})!"
             )
             w = w.reshape(-1, configured_group_size)
-        assert w.dim() == 2
+        if w.dim() != 2:
+            raise ValueError(
+                "AWQ clipping expects a 2-D weight tensor, "
+                f"got shape {tuple(w.shape)}"
+            )
 
         if not sym:
             max_int = 2**bits - 1
@@ -4342,6 +4573,29 @@ class AWQProcessor(LoopProcessor):
             else:
                 entry.setdefault("inputs", [])
 
+    def prune_uncovered_module(self, module: NamedModule) -> None:
+        """Remove a coverage-pruned module from its AWQ layer state.
+
+        ``preprocess`` registered the module in ``_AWQLayerState.modules`` and
+        ``pending_modules``. Left there, it kept ``pending_in_scope`` non-empty,
+        so ``_quantize_layer`` never ran and every module of the layer reached
+        ``pack_module`` without zero points (#4456). Dropping it from the layer
+        state also keeps it out of ``_layer_input_features``: a scaling group
+        that contains it loses its missing member and is skipped like any other
+        group with missing features, so the dense module is never folded or
+        quantized while the rest of the layer is.
+        """
+
+        with self.lock:
+            super().prune_uncovered_module(module)
+        layer_index = getattr(module, "layer_index", None)
+        if layer_index is None:
+            return
+        state = self._get_layer_state(layer_index)
+        with state.lock:
+            state.modules.pop(module.name, None)
+            state.pending_modules.discard(module.name)
+
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing excluded this module from AWQ work."""
 
@@ -4454,8 +4708,17 @@ class AWQProcessor(LoopProcessor):
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
         resolved_cfg = get_resolved_module_config(module)
-        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name, resolved_cfg=resolved_cfg)
         layers = {module.full_name: self.gptq_model.model.get_submodule(module.full_name)}
+        packed_source = layers[module.full_name]
+        # Resolve against the real module geometry so a kernel that cannot pack
+        # this width falls back here instead of raising inside
+        # `create_quant_module` after every layer was calibrated (#4567).
+        quant_linear_cls = self._resolve_qlinear_kernel(
+            module.full_name,
+            resolved_cfg=resolved_cfg,
+            in_features=int(getattr(packed_source, "in_features", 0) or 0) or None,
+            out_features=int(getattr(packed_source, "out_features", 0) or 0) or None,
+        )
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         # replace module with quantized module

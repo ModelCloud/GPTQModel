@@ -58,10 +58,13 @@ An explicitly selected index must pass the same shard and tensor-name checks
 as a standard index. If it is invalid, resharding fails before publishing the
 destination. An unrelated invalid standard index does not override a named
 standalone file.
-`_index_containing_file()` now compares the complete resolved weight maps for
-every standard index that lists the selected shard. It raises on conflicting
-maps and accepts equivalent paths such as `shard.safetensors` and
-`./shard.safetensors`. An explicit index path bypasses this choice.
+`_index_containing_file()` searches the selected file's directory and its
+ancestors, comparing the complete resolved weight maps for every standard index
+that lists the selected shard. This keeps a shard nested below a resharded
+checkpoint attached to the root index and copies root auxiliary files. It
+raises on conflicting maps and accepts equivalent paths such as
+`shard.safetensors` and `./shard.safetensors`. An explicit index path bypasses
+this choice.
 See [PR #3589](https://github.com/ModelCloud/GPTQModel/pull/3589) for the
 reproducer and rationale.
 The indexed-shard compatibility rule is covered by

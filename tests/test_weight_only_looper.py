@@ -326,9 +326,14 @@ def test_weight_only_looper_quantizes_input_and_lm_head_embeddings_only(monkeypa
     assert processor.memory_calls == []
     assert model._module_replacement_prefixes == {"embed_tokens", "lm_head"}
     assert model._model_free_weight_only_replacements_only is True
-    assert qcfg.offload_to_disk is False
-    assert qcfg.dynamic["embed_tokens"] == {"bits": 8, "group_size": 32}
-    assert qcfg.dynamic["lm_head"] == {"bits": 8, "group_size": 32}
+    # ``offload_to_disk=True`` binds a private per-run config copy (#4368), so
+    # the embed-only overrides land on the run's config, not the caller's.
+    run_config = model.quantize_config
+    assert run_config is not qcfg
+    assert qcfg.offload_to_disk is True
+    assert run_config.offload_to_disk is False
+    assert run_config.dynamic["embed_tokens"] == {"bits": 8, "group_size": 32}
+    assert run_config.dynamic["lm_head"] == {"bits": 8, "group_size": 32}
 
 
 @pytest.mark.parametrize(

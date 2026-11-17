@@ -99,11 +99,10 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+_TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
-_INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
-_FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
 
 _QWEN_DRIVE_MODEL_TYPE = "qwen_drive"
 _QWEN_DRIVE_INSTALL_HINT = (
@@ -695,11 +694,15 @@ def _transformers_has_native_prism_gguf_support() -> bool:
     return hasattr(gguf_utils, "_dequantize_prism_q1_0_g128")
 
 
-def _internal_gguf_torch_loader_enabled() -> bool:
-    raw = os.getenv(_INTERNAL_GGUF_TORCH_LOADER_ENV)
-    if raw is not None:
-        return str(raw).strip().lower() not in _FALSEY_ENV_VALUES
-    return bool(os.getenv("GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE", "").strip())
+def _internal_gguf_torch_loader_enabled(policy=None) -> bool:
+    """Read the load policy, never the process environment.
+
+    ``None`` resolves the policy this load installed; a direct caller may pass
+    the explicit ``KernelConfig`` it wants the dense import to honour.
+    """
+    from . import internal_gguf
+
+    return internal_gguf.torch_dequant_loader_enabled(policy)
 
 
 def _load_gguf_checkpoint_torch_direct(
@@ -710,10 +713,11 @@ def _load_gguf_checkpoint_torch_direct(
     return_tensors: bool = False,
     model_to_load=None,
     torch_dtype=None,
+    policy=None,
 ):
     from ..utils import internal_gguf
 
-    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled():
+    if not return_tensors or model_to_load is None or not _internal_gguf_torch_loader_enabled(policy):
         return original_load_gguf_checkpoint(
             gguf_checkpoint_path,
             return_tensors=return_tensors,
@@ -748,7 +752,7 @@ def _load_gguf_checkpoint_torch_direct(
 
     processor = processor_cls(config=config)
     tensor_key_mapping = gguf_utils.get_gguf_hf_weights_map(model_to_load, processor)
-    target_device = internal_gguf._resolve_torch_dequant_device()
+    target_device = internal_gguf._resolve_torch_dequant_device(policy)
     dequantize_kwargs = {"device": target_device}
     if torch_dtype is not None:
         dequantize_kwargs["dtype"] = torch_dtype
@@ -795,7 +799,7 @@ def _load_gguf_checkpoint_torch_direct(
 
 def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
     with _MONKEY_PATCH_LOCK:
-        if getattr(gguf_utils, "_GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED", False):
+        if getattr(gguf_utils, "_GPTQMODEL_GGUF_TORCH_LOADER_PATCHED", False):
             return
 
         original_load_gguf_checkpoint = gguf_utils.load_gguf_checkpoint
@@ -825,7 +829,7 @@ def _patch_transformers_internal_gguf_torch_loader(gguf_utils) -> None:
 
         gguf_utils._gptqmodel_original_load_gguf_checkpoint = original_load_gguf_checkpoint
         gguf_utils.load_gguf_checkpoint = _wrapped_load_gguf_checkpoint
-        gguf_utils._GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER_PATCHED = True
+        gguf_utils._GPTQMODEL_GGUF_TORCH_LOADER_PATCHED = True
 
 
 def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
@@ -936,6 +940,77 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
     return True, model_type, getattr(model_cls, "__name__", str(model_cls))
 
 
+@lru_cache(maxsize=None)
+def _checkpoint_config_payload(model_id_or_path: str) -> Optional[dict]:
+    """Read the checkpoint's raw ``config.json`` without executing its code.
+
+    ``resolve_trust_remote_code`` already loaded this file through
+    ``AutoConfig``, so the read is served from the same cache. Reading the raw
+    payload keeps the layout probe independent of the installed native config
+    class and never imports a snapshot module.
+    """
+
+    try:
+        config_path = cached_file(model_id_or_path, "config.json")
+    except Exception:
+        return None
+
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+# Config fields that select a model layout the installed native Transformers
+# class cannot represent, keyed by checkpoint ``model_type``. A remote
+# ``auto_map`` class name is not a layout signal: remote and native classes for
+# the same architecture are routinely spelled differently (``PhiMoEForCausalLM``
+# vs ``PhimoeForCausalLM``, ``MPTForCausalLM`` vs ``MptForCausalLM``,
+# ``MiniMaxM2ForCausalLM`` vs ``MiniMaxForCausalLM``) and native conversion
+# mappings rename checkpoint keys such as ``attention.*`` -> ``self_attn.*``.
+_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS: dict[str, tuple[str, ...]] = {
+    # Ling-2.6-flash (#4373): the remote MLA branch owns `q_a_proj` /
+    # `q_a_layernorm` / `q_b_proj`. Native `BailingHybridAttention` only has a
+    # dense `q_proj`, and `BailingHybridConfig` deletes `q_lora_rank`.
+    "bailing_hybrid": ("q_lora_rank",),
+}
+
+
+@lru_cache(maxsize=None)
+def _checkpoint_remote_layout_marker(model_id_or_path: str) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(marker, remote_class_name)`` for a checkpoint's remote model code.
+
+    ``marker`` is the ``config.json`` field from
+    ``_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS`` that the checkpoint sets, or ``None``
+    when the installed native class can load the checkpoint. A marker counts
+    only when the checkpoint also ships ``auto_map.AutoModelForCausalLM``;
+    without remote model code there is nothing to keep trust for.
+    """
+
+    payload = _checkpoint_config_payload(model_id_or_path)
+    if payload is None:
+        return None, None
+
+    auto_map = payload.get("auto_map")
+    if not isinstance(auto_map, dict):
+        return None, None
+
+    remote_class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(remote_class_ref, str) or not remote_class_ref:
+        return None, None
+
+    remote_class_name = remote_class_ref.rsplit(".", 1)[-1]
+    model_type = str(payload.get("model_type") or "").lower()
+    for marker in _REMOTE_ONLY_LAYOUT_CONFIG_MARKERS.get(model_type, ()):
+        if payload.get(marker):
+            return marker, remote_class_name
+
+    return None, remote_class_name
+
+
 def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
     # Keep registration ahead of the trust-remote-code probe as well as the
     # main loader's AutoConfig call.  The probe runs very early in every public
@@ -946,6 +1021,20 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
 
     native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
     if not native_supported:
+        return True
+
+    remote_layout_marker, remote_model_cls_name = _checkpoint_remote_layout_marker(str(model_id_or_path))
+    if remote_layout_marker is not None:
+        log_key = (str(model_id_or_path), remote_model_cls_name or "unknown", model_cls_name or "unknown")
+        if log_key not in _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED:
+            log.info(
+                "HF: keeping trust_remote_code=True for `%s` because config field `%s` selects a layout of remote model code `%s` that native `%s` cannot load.",
+                model_id_or_path,
+                remote_layout_marker,
+                remote_model_cls_name or "unknown",
+                model_cls_name or "unknown",
+            )
+            _TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED.add(log_key)
         return True
 
     warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")

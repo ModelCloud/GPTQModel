@@ -30,7 +30,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
-from .gptq import GPTQ, _device_reduction_key
+from .gptq import GPTQ, _device_reduction_key, _move_static_groups
 from .quantizer import _neutralize_dead_columns
 
 
@@ -381,6 +381,75 @@ class FOEM(GPTQ):
         if self.dXXT.device != self.H.device:
             self.dXXT = safe_move_to(self.dXXT, self.H.device, dtype=torch.float32)
 
+    def adopt_hessian_from(self, leader: "FOEM") -> None:
+        """Copy a sibling leader's ``H`` and ``dXXT`` instead of recomputing both.
+
+        ``FOEM.add_batch`` depends only on the module input and the paired
+        native input; both are bitwise identical for the members of one
+        explicit ``:in=<tag>`` group (``NativeProcessor`` shares the sibling
+        native entry storage).  The per-device partials are reduced on the
+        leader first, so the follower holds exactly one private ``H`` and one
+        private ``dXXT`` — the same two matrices it would have accumulated.
+        """
+
+        if leader is self:
+            return
+        if type(leader) is not type(self):
+            raise TypeError(
+                f"FOEM: cannot share Hessian with `{type(leader).__name__}` task `{leader.name}`."
+            )
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"FOEM: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+        if leader.gptaq != self.gptaq:
+            raise ValueError(
+                f"FOEM: cannot share Hessian from `{leader.name}` (native delta="
+                f"{leader.gptaq}) with `{self.name}` (native delta={self.gptaq})."
+            )
+
+        leader._finalize_foem_hessian()
+        with leader.lock:
+            hessian = leader.H
+            dxxT = leader.dXXT
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            if hessian is None:
+                target_device = torch.device(getattr(self, "dev", "cpu"))
+                hessian_copy = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=target_device,
+                )
+                dxxT_copy = None
+            else:
+                target_device = hessian.device
+                hessian_copy = safe_move_to(
+                    hessian.detach(), target_device, dtype=torch.float32, copy=True
+                )
+                dxxT_copy = (
+                    None
+                    if dxxT is None
+                    else safe_move_to(
+                        dxxT.detach(), target_device, dtype=torch.float32, copy=True
+                    )
+                )
+
+        with self.lock:
+            self.H = hessian_copy
+            self.dXXT = dxxT_copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._foem_device_hessian.clear()
+            self._foem_device_dxxT.clear()
+            self._foem_device_counts.clear()
+            self._foem_active_device = None
+            self._foem_active_count = 0
+            # The follower no longer replays batches, so its native inputs are
+            # dead references to the shared sibling storage.
+            self.native_inps = []
+
     @torch.inference_mode()
     def quantize(
             self,
@@ -480,22 +549,80 @@ class FOEM(GPTQ):
             elif self.qcfg.act_group_aware:
                 static_group_perm = final_perm
 
+        if self.qcfg.foem is None:
+            raise ValueError("FOEM requires `foem` configuration.")
+        result_device = torch.device(self.module.weight.data.device)
+
         W_raw = W.detach().clone()
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        Hinv, damp = self.hessian_inverse(H)
+        def _inverse_and_delta():
+            inverse, used_damp = self.hessian_inverse(H)
+            if inverse is None or not self.gptaq:
+                return inverse, used_damp, None
+            # The native-delta product is another ``columns ** 2`` allocation,
+            # so a solver workspace failure can surface here as well.
+            return (
+                inverse,
+                used_damp,
+                self.qcfg.foem.alpha
+                * ((self.dXXT @ inverse.T).triu(diagonal=1))
+                @ inverse,
+            )
+
+        def _prepare_cpu(cdu_device):
+            nonlocal H, W, W_raw, Q, Losses, perm, invperm, final_perm, global_perm
+            nonlocal static_group_perm, scale, zero
+            H = H.to(device=cdu_device)
+            W = W.to(device=cdu_device)
+            # FOEM's beta correction reads the pre-pass weight, and
+            # ``Q``/``Losses`` were sized from the accelerator weight.
+            W_raw = W_raw.to(device=cdu_device)
+            Q = torch.zeros_like(W)
+            Losses = torch.zeros_like(W)
+            if self.gptaq:
+                self.dXXT = self.dXXT.to(device=cdu_device)
+            if self.qcfg.desc_act:
+                # ``perm``/``invperm`` were built from the accelerator Hessian;
+                # the epilogue indexes the host ``Q`` with them (issue #4538).
+                perm = perm.to(device=cdu_device)
+                invperm = invperm.to(device=cdu_device)
+            elif self.qcfg.act_group_aware and not self.qcfg.static_groups:
+                # The epilogue inverts ``global_perm`` on ``Q.device``.
+                global_perm = global_perm.to(device=cdu_device)
+            if self.qcfg.act_group_aware:
+                final_perm = final_perm.to(device=cdu_device)
+            if self.qcfg.static_groups:
+                if self.qcfg.desc_act:
+                    static_group_perm = perm
+                elif self.qcfg.act_group_aware:
+                    static_group_perm = final_perm
+            if self.qcfg.group_size == -1 and self.qcfg.desc_act:
+                # An ungrouped ``desc_act`` module never refits the quantizer in
+                # the block loop, so rebuild the pre-reorder measurement from
+                # the natural column order to match a run that never left the
+                # host.
+                self.quantizer.find_params(W[:, invperm], weight=True)
+            else:
+                self.quantizer.find_params(W, weight=True)
+            if self.qcfg.static_groups:
+                scale, zero = _move_static_groups(groups, cdu_device)
+
+        (Hinv, damp, P), cpu_fallback_used = self._run_with_accelerator_oom_cpu_fallback(
+            _inverse_and_delta,
+            source_device=H.device,
+            stage="Hessian inverse",
+            prepare_cpu=_prepare_cpu,
+        )
         if Hinv is None:
             # Share GPTQ's data-independent RTN fallback instead of
             # dereferencing the missing inverse.
             self.H = None
             self.dXXT = None
             return self._rtn_fallback_after_hessian_failure(blocksize)
-        if self.qcfg.foem is None:
-            raise ValueError("FOEM requires `foem` configuration.")
         if self.gptaq:
-            P = self.qcfg.foem.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
             del self.dXXT
 
         if not self._tp_pad_cols and _should_use_mlx_foem_quantization(
@@ -669,6 +796,14 @@ class FOEM(GPTQ):
             zero = self.truncate_last_dim(zero, valid_cols)
 
         scale, zero = self._sanitize_scale_and_log(scale, zero)
+
+        if cpu_fallback_used:
+            log.info(
+                "Quantization: Module `%s` -> CPU fallback complete; moving final quantized weights back to %s.",
+                self.name,
+                result_device,
+            )
+        Q = safe_move_to(Q, result_device)
 
         duration = time.time() - start
 

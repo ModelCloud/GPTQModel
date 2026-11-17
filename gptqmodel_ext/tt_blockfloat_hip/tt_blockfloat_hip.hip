@@ -143,6 +143,21 @@ struct Grid {
     static constexpr float kInvLevels = 1.0f / static_cast<float>(kLevels);
 };
 
+// Shared exponents the int8 field can store.  One step beyond either end is an
+// infinity (``2**128``) or a non-normal scale, so it is not a grid point.
+constexpr int kExponentMin = -127;
+constexpr int kExponentMax = 127;
+
+// ``floor(log2(x))`` for a positive normal float, exactly, from the bit
+// pattern.  ``log2f`` rounds to nearest, so it reads ``FLT_MAX`` as ``2**128``
+// and ``2**k`` from below as ``k + 1``; the field never rounds.
+__device__ __forceinline__
+int ttbf_floor_log2_exact(float x) {
+    const int e = static_cast<int>((__float_as_uint(x) >> 23) & 0xFFu) - 127;
+    // Callers clamp to FLT_MIN first, so subnormals cannot reach this path.
+    return e < -126 ? -126 : e;
+}
+
 // Decode one packed code, given a pre-computed ``2**exponent``.
 __device__ __forceinline__
 float ttbf_value(int code, int offset, float inv_levels, float scale) {
@@ -294,36 +309,59 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
         magnitude = fmaxf(magnitude, fabsf(xp[i]));
     }
     const float safe = fmaxf(magnitude, 1.17549435e-38f);  // FLT_MIN
-    const int base = static_cast<int>(floorf(log2f(safe)));
+    const int base = ttbf_floor_log2_exact(safe);
 
-    float best_error = INFINITY;
+    // Every candidate is compared on the block normalised by 2**base, exactly
+    // as the reference does.  Scaling by a power of two is exact, so the grid
+    // is unchanged, but the error stays O(1): the raw squared error overflows
+    // to inf for large blocks (no candidate can then win) and underflows to 0
+    // for tiny ones (a strict `<` never replaces the base candidate).
+    // Dividing by the scale (rather than multiplying by its reciprocal) stays
+    // exact for every exponent: ``2**-127`` is subnormal and would be flushed.
+    const float base_scale = ttbf_exp2i(base);
+    float unit[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        unit[i] = xp[i] / base_scale;
+    }
+
+    float best_error = 0.0f;
     int best_exponent = base;
     int best_code[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        best_code[i] = 0;
+    }
 
 #pragma unroll
     for (int candidate = 0; candidate < 3; ++candidate) {
         const int exponent = base + (candidate == 0 ? 0 : (candidate == 1 ? -1 : 1));
-        const float scale = ttbf_exp2i(exponent);
+        // A neighbour outside the storable exponent range has no representable
+        // scale -- ``2**128`` is inf, and ``0 * inf`` is NaN -- so it cannot be
+        // a grid point.  Skip it before its error is computed or compared.
+        const bool usable = exponent >= kExponentMin && exponent <= kExponentMax;
+        // Candidates are scored relative to the base block scale; scaling by a
+        // power of two is exact, so this is the same grid as ``2**exponent``.
+        const float step = (candidate == 0 ? 1.0f : (candidate == 1 ? 0.5f : 2.0f));
         float error = 0.0f;
         int code[16];
 #pragma unroll
         for (int i = 0; i < 16; ++i) {
-            // Divide first: the reference does ``x / scale * levels``, and a
-            // reciprocal would overflow for the tiny exponent of a zero block.
-            float q = rintf((xp[i] / scale) * static_cast<float>(G::kLevels));
+            // Divide first: a reciprocal of ``step`` is exact (power of two),
+            // and the reference does ``x / step * levels`` on the normalised
+            // block.
+            float q = rintf((unit[i] / step) * static_cast<float>(G::kLevels));
             q = fminf(fmaxf(q, -static_cast<float>(G::kOffset)),
                       static_cast<float>(G::kOffset));
             code[i] = static_cast<int>(q);
-            const float reconstructed = (q * G::kInvLevels) * scale;
-            const float diff = reconstructed - xp[i];
+            const float reconstructed = (q * G::kInvLevels) * step;
+            const float diff = reconstructed - unit[i];
             error = error + diff * diff;
         }
         // The base candidate is taken unconditionally, matching the reference
-        // (``best = _round_with(base_exponent)`` then compare the neighbours).
-        // A strict comparison against INFINITY would leave ``best_code``
-        // uninitialised whenever every candidate's error overflows -- which
-        // happens for inputs near FLT_MAX, where the squared error is inf.
-        if (candidate == 0 || error < best_error) {
+        // (``best_unit = _round_unit(0.0)``). That initialises ``best_code``
+        // and fixes the tie order; the neighbours must beat it strictly.
+        if (usable && (candidate == 0 || error < best_error)) {
             best_error = error;
             best_exponent = exponent;
 #pragma unroll
@@ -432,7 +470,7 @@ __global__ void decompose_kernel(const float* __restrict__ x,
             magnitude = fmaxf(magnitude, fabsf(xp[i]));
         }
         const float safe = fmaxf(magnitude, 1.17549435e-38f);
-        const int base = static_cast<int>(floorf(log2f(safe)));
+        const int base = ttbf_floor_log2_exact(safe);
 
         int chosen_code[16] = {0};
         int chosen_exponent = base;
@@ -441,6 +479,9 @@ __global__ void decompose_kernel(const float* __restrict__ x,
         for (int t = 0; t < 4 && !found; ++t) {
             const int shift = (t == 0) ? 0 : (t == 1 ? 1 : (t == 2 ? -1 : 2));
             const int exponent = base + shift;
+            // A shift past the storable exponent range has no representable
+            // scale, so it cannot reproduce the block exactly.  Skip it.
+            if (exponent < kExponentMin || exponent > kExponentMax) continue;
             const float scale = ttbf_exp2i(exponent);
             int code[16];
             bool ok = true;

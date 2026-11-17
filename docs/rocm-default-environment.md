@@ -12,9 +12,13 @@ call and both defer to a value the caller already set:
 | `PYTORCH_ALLOC_CONF` / `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:256,garbage_collection_threshold:0.7` | `expandable_segments:True` plus `torch.cuda.empty_cache()` corrupts ordinary Torch results on ROCm 10.1 / gfx1201 |
 | `ROCBLAS_USE_HIPBLASLT` | `0` | rocBLAS forwards GEMMs to hipBLASLt, which selects a different kernel per process for the same shape; identical quantization runs then save different checkpoints |
 
-CUDA keeps the historical allocator default
-(`expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7`)
-and never has `ROCBLAS_USE_HIPBLASLT` set by GPT-QModel.
+CUDA installs `expandable_segments:True` only, and never has
+`ROCBLAS_USE_HIPBLASLT` set by GPT-QModel. `max_split_size_mb` is deliberately
+left unset on CUDA: pinning it to 256 MiB stops the allocator from splitting and
+reusing 256 MiB blocks, so GPTQ's per-layer churn grows reserved VRAM while
+active memory stays flat (#4389). `garbage_collection_threshold` is omitted too:
+without a memory fraction it only fires above a fraction of the whole device,
+which a quantization run never reaches.
 
 ## The import-time flow
 
@@ -69,9 +73,12 @@ calibration activations (`_needs_deterministic_hessian` in
 | MACaQ | `X^T X` | `quantization/macaq.py:668` |
 | EXL3 | reuses GPTQ's capture | `looper/exllamav3_processor.py:192` |
 | FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
+| EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
 
 AWQ, ParoQuant and weight-only (RTN) accumulate none of these and keep
-hipBLASLt.
+hipBLASLt. EoRA is included even though it is a secondary processor: an
+AWQ + EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the
+saved adapter differed in 39/42 LoRA tensors between identical runs (#4614).
 
 #4105 scoped the pin to `ProcessorStep.GPTQ in run_plan.processors`, which was
 too narrow: QQQ also builds a Hessian, so it accumulated on hipBLASLt and lost
@@ -107,8 +114,8 @@ same-target runs share the refcount and different-target runs serialize.
 ```mermaid
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
-    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ" --> C["want rocBLAS"]
-    B -- "no: AWQ, ParoQuant, RTN" --> D["want hipBLASLt"]
+    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, ParoQuant, EoRA" --> C["want rocBLAS"]
+    B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
     E -- "yes" --> F["wait for it to finish"]
@@ -123,11 +130,13 @@ flowchart TD
     class D fast
 ```
 
-| Mechanism | Before (#4079) | After (#4105 + #4123) |
+| Mechanism | Before (#4079) | After (#4105 + #4123 + #4460) |
 |---|---|---|
 | Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:158`) |
-| AWQ / RTN / ParoQuant | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
+| AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
+| ParoQuant | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
 | QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
+| EoRA | forced rocBLAS | pinned rocBLAS (fp32 input Gram + `eigh`; #4614) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
 | Hessian `X^T X` and inversion | rocBLAS | rocBLAS, plus a nested per-call context |
 | Nested scopes | not reference counted | reentrant refcount, restores only after the last worker exits |
@@ -147,9 +156,11 @@ is torch's hipBLASLt backend, which methods without a Hessian now keep:
 | 8192x4096 `X^T X` | fp32 | 20.5 | 16.3 | 0.8x (rocBLAS wins) |
 
 The fp32 Hessian GEMM is faster on rocBLAS, which is why the Hessian builders
-keep the pin there. The fp16/bf16 rows are the AWQ/ParoQuant/RTN paths that no
-longer pay it. GPTQ's end-to-end time is unchanged by design (it keeps the old
-whole-run pin): 58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the
+keep the pin there. The fp16/bf16 rows are the AWQ/RTN paths that no longer pay
+it. ParoQuant pays the pin deliberately: hipBLASLt chose GEMM kernels per
+process and made identically seeded checkpoints differ (issue #4460). GPTQ's
+end-to-end time is unchanged by design (it keeps the old whole-run pin):
+58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the
 issue's 61 s / 56 s. AWQ's 128-sample run measured 50.7 s / 45.5 s, against the
 issue's 128 s / 124 s with the whole-run pin.
 
@@ -226,12 +237,12 @@ pin is skipped — either opt-in, or any opt-out spelling of
 `KernelConfig.rocm_quant_blas` (`gptqmodel/utils/rocm.py:151`, called from
 `quantize_tuning`).
 
-```bash
+```python
 # Reproducible (default)
-python quantize.py
+qcfg = QuantizeConfig(bits=4)
 
 # Faster, not reproducible across processes: the warning is intentional
-KernelConfig(rocm_quant_blas="hipblaslt") python quantize.py
+qcfg = QuantizeConfig(bits=4, runtime=RuntimeConfig(rocm_quant_blas="hipblaslt"))
 ```
 
 ## Failure and ambiguity paths
@@ -242,7 +253,7 @@ KernelConfig(rocm_quant_blas="hipblaslt") python quantize.py
 | Caller sets `ROCBLAS_USE_HIPBLASLT` (including `1` or an empty string) | GPT-QModel writes nothing; rocBLAS sees the caller's value, and `1` warns that checkpoints may differ across processes |
 | Caller sets `KernelConfig(rocm_quant_blas="hipblaslt")` | the run keeps hipBLASLt; `quantize_tuning` warns once that checkpoints may differ across processes |
 | Caller sets `KernelConfig.rocm_quant_blas` to `""`, `0`, `off` or `default` | the pin is skipped, so the run stays on hipBLASLt; `quantize_tuning` warns once, the same as for the explicit opt-in |
-| Caller sets an unrecognised `KernelConfig.rocm_quant_blas` value | it is ignored: the reproducible rocBLAS default is used and nothing is logged |
+| Caller sets an unrecognised `KernelConfig.rocm_quant_blas` value (for example `"hipblas_lt"`) | `KernelConfig` raises `ValueError` at construction; a typo never silently selects rocBLAS |
 | Non-ROCm host | CUDA allocator default is installed; `ROCBLAS_USE_HIPBLASLT` is never written; the override is a no-op |
 | BLAS call before `import gptqmodel` | rocBLAS has already fixed its kernel choice; the variable cannot change that process. Import GPT-QModel before the first BLAS call. |
 

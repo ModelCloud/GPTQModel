@@ -22,6 +22,7 @@ The tests below use the issue repro (a synthetic Q4_K_M tensor) and assert:
 import pytest
 import torch
 
+from gptqmodel.backend import GGUFCPPConfig
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import (
     GGML_NATIVE_MATMUL_ERROR_BOUND,
@@ -45,7 +46,7 @@ def _require_cpu_bridge() -> None:
         pytest.skip(f"GGML CPU bridge unavailable: {error}")
 
 
-def _build_pair(*, exact_matmul=None):
+def _build_pair(*, exact_matmul=None, backend=None):
     """Build a native kernel and an exact GGUFTorchLinear on the same Q4_K_M bytes."""
 
     generator = torch.Generator().manual_seed(0)
@@ -58,6 +59,7 @@ def _build_pair(*, exact_matmul=None):
         out_features=OUT_FEATURES,
         bias=False,
         exact_matmul=exact_matmul,
+        **({} if backend is None else {"backend": backend}),
     )
     exact = GGUFTorchLinear(
         bits="q4_k_m",
@@ -97,9 +99,8 @@ def _run(module, x):
         return module(x.clone())
 
 
-def test_gaussian_activations_stay_within_the_documented_envelope(monkeypatch):
+def test_gaussian_activations_stay_within_the_documented_envelope():
     _require_cpu_bridge()
-    monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
     cpp, exact, generator = _build_pair()
     x, _ = _activations(generator)
 
@@ -113,11 +114,10 @@ def test_gaussian_activations_stay_within_the_documented_envelope(monkeypatch):
     )
 
 
-def test_outlier_channels_exceed_the_documented_envelope_on_the_native_path(monkeypatch):
+def test_outlier_channels_exceed_the_documented_envelope_on_the_native_path():
     """The issue repro: 16/4096 channels x100 breaks the 2e-2 claim."""
 
     _require_cpu_bridge()
-    monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
     cpp, exact, generator = _build_pair()
     _, xo = _activations(generator)
 
@@ -136,11 +136,10 @@ def test_outlier_channels_exceed_the_documented_envelope_on_the_native_path(monk
     )
 
 
-def test_exact_matmul_selector_takes_the_exact_path(monkeypatch):
+def test_exact_matmul_selector_takes_the_exact_path():
     """`exact_matmul=True` must be the GGUF_TORCH path, not the native kernel."""
 
     _require_cpu_bridge()
-    monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
     cpp, exact, generator = _build_pair(exact_matmul=True)
     x, xo = _activations(generator)
 
@@ -149,16 +148,15 @@ def test_exact_matmul_selector_takes_the_exact_path(monkeypatch):
     assert torch.equal(_run(cpp, x), _run(exact, x))
     assert torch.equal(_run(cpp, xo), _run(exact, xo))
 
-    # An explicit constructor argument wins over the process-wide override.
-    monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "1")
-    assert cpp._use_ggml_cpu_matmul(x) is False
+    # An explicit constructor argument wins over the backend setting.
+    forced, _, _ = _build_pair(exact_matmul=True, backend=GGUFCPPConfig(native_matmul=True))
+    assert forced._use_ggml_cpu_matmul(x) is False
 
 
-def test_default_path_is_unchanged(monkeypatch):
+def test_default_path_is_unchanged():
     """Callers that pass nothing keep the capability-based native choice."""
 
     _require_cpu_bridge()
-    monkeypatch.delenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", raising=False)
     cpp, exact, generator = _build_pair()
     x, xo = _activations(generator)
 
@@ -168,8 +166,8 @@ def test_default_path_is_unchanged(monkeypatch):
     # on the outlier input.
     assert not torch.equal(_run(cpp, xo), _run(exact, xo))
 
-    # `exact_matmul=False` is an explicit request for the native path, and the
-    # environment variable still overrides the default in both directions.
+    # `exact_matmul=False` is an explicit request for the native path, and
+    # `GGUFCPPConfig.native_matmul` overrides the default in both directions.
     native = GGUFCppKernel(
         bits="q4_k_m",
         group_size=-1,
@@ -181,5 +179,7 @@ def test_default_path_is_unchanged(monkeypatch):
         exact_matmul=False,
     )
     assert native._use_ggml_cpu_matmul(x) is True
-    monkeypatch.setenv("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL", "0")
-    assert cpp._use_ggml_cpu_matmul(x) is False
+    exact_policy, _, _ = _build_pair(backend=GGUFCPPConfig(native_matmul=False))
+    assert exact_policy._use_ggml_cpu_matmul(x) is False
+    native_policy, _, _ = _build_pair(backend=GGUFCPPConfig(native_matmul=True))
+    assert native_policy._use_ggml_cpu_matmul(x) is True

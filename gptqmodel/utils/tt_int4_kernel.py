@@ -342,23 +342,40 @@ def verify_on_device(nwords: int, scale: float, zero: int, *, device, seed: int 
 #     the program does not track.
 
 #: Device-resident packed weights for :func:`run_fused_gemm_grid`, keyed by the
-#: source tensor identity. Bounded so a benchmark loop cannot grow it without end;
-#: the oldest entry is dropped first.
+#: source tensor identity *and* the device that owns the uploaded buffers.
+#: Bounded so a benchmark loop cannot grow it without end; the oldest entry is
+#: dropped first.
 _GRID_WEIGHT_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 _GRID_WEIGHT_CACHE_MAX = 8
 
 
-def _GRID_WEIGHT_CACHE_KEY(codes, nk, gw, gh):
+def _grid_device_key(device):
+    """Identify the live device that owns a cached grid operand.
+
+    The packed weights and the LUT are uploaded to one concrete device, so a
+    cache entry may only serve that device. ``id`` is the identity of the live
+    device object: a second chip is a different object and must miss, while a
+    reopened chip is a new object whose predecessor's buffers were released by
+    :func:`gptqmodel.utils.ttnn_runtime.close_mesh` (which also clears this
+    cache). Without this component the second device received the first
+    device's buffers alongside its own activations and output.
+    """
+
+    return ("device", id(device))
+
+
+def _GRID_WEIGHT_CACHE_KEY(codes, nk, gw, gh, device):
     """Cache key for the packed/uploaded grid weights.
 
     Reuses :func:`tensor_cache_key`, which handles inference tensors (no version
     counter) by falling back to storage identity -- model weights are normally
     packed inside ``InferenceMode``, so a naive ``_version`` read would never hit.
+    The owning device is part of the key because the value is device-resident.
     """
 
     from ..nn_modules.qlinear._runtime_cache import tensor_cache_key
 
-    return (tensor_cache_key(codes), nk, gw, gh)
+    return (_grid_device_key(device), tensor_cache_key(codes), nk, gw, gh)
 
 
 def clear_grid_weight_cache() -> None:
@@ -491,7 +508,7 @@ def run_fused_gemm_grid(act, codes, scale, zero, *, device, grid=(8, 8)):
     # Packing and uploading the weights is ~57 ms at 64 cores, far more than the
     # ~0.24 ms kernel, so it is cached on the weight tensor's identity. Without
     # this the public function is unusable in a model loop.
-    cache_key = (_GRID_WEIGHT_CACHE_KEY(codes, nk, gw, gh))
+    cache_key = (_GRID_WEIGHT_CACHE_KEY(codes, nk, gw, gh, device))
     cached = _GRID_WEIGHT_CACHE.get(cache_key)
     if cached is not None:
         wd = list(cached)
@@ -512,8 +529,9 @@ def run_fused_gemm_grid(act, codes, scale, zero, *, device, grid=(8, 8)):
                                           dtype=ttnn.bfloat16,
                                           layout=ttnn.TILE_LAYOUT), device)
     # The LUT is 1 KiB and depends only on (scale, zero); uploading it per call
-    # was measurable. Cache it alongside the weights.
-    lut_key = ("lut", float(scale), int(zero))
+    # was measurable. Cache it alongside the weights -- on the same device, since
+    # a LUT resident on another chip cannot be read by this kernel.
+    lut_key = ("lut", _grid_device_key(device), float(scale), int(zero))
     lutd = _GRID_WEIGHT_CACHE.get(lut_key)
     if lutd is None:
         lutd = ttnn.to_device(ttnn.from_torch(build_dequant_pair_lut(scale, zero),

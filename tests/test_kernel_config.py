@@ -110,7 +110,7 @@ def test_rocm_quant_blas_keeps_an_explicit_empty_opt_out():
 
     assert KernelConfig().rocm_quant_blas is None
     assert KernelConfig(rocm_quant_blas="").rocm_quant_blas == ""
-    assert KernelConfig(rocm_quant_blas="  HIPBLASLT ").rocm_quant_blas == "HIPBLASLT"
+    assert KernelConfig(rocm_quant_blas="  HIPBLASLT ").rocm_quant_blas == "hipblaslt"
 
 
 def test_kernel_field_is_runtime_only():

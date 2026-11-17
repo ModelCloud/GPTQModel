@@ -10,6 +10,7 @@ per-device buffer that every plan's graph references.
 """
 
 import ctypes
+import threading
 
 import numpy as np
 import pytest
@@ -88,7 +89,9 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
     try:
         assert weight.nbytes == qweight.numel() * qweight.element_size()
 
-        for rows in (1, 2, 4, 8):
+        # Build largest first: the shared arena only grows, and a grow would
+        # invalidate plans bound to the previous buffer.
+        for rows in (8, 4, 2, 1):
             plan = bridge.build_quantized_matmul_cuda_plan(
                 backend=cpu_backend,
                 weight=weight,
@@ -100,13 +103,16 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
             )
             plans.append((rows, plan))
 
+        scratch = bridge._cuda_scratch[0]
+        assert scratch.size >= max(plan.scratch_nbytes for _, plan in plans)
         for rows, plan in plans:
-            plan_bytes = _buffer_size(bridge, plan.buffer)
-            # A pre-fix plan buffer contained the packed weight (weight.nbytes);
-            # now it holds only this plan's activation and output tensors.
-            assert plan_bytes < weight.nbytes
-            assert plan_bytes >= rows * (in_features + out_features) * 4
-            assert plan_bytes <= rows * (in_features + out_features) * 4 + 8192
+            # A pre-fix plan owned a buffer that also held the packed weight.
+            # Now every plan is a slice of the single device arena.
+            assert plan.scratch is scratch
+            assert plan.scratch_generation == scratch.generation
+            assert not hasattr(plan, "buffer")
+            assert plan.scratch_nbytes >= rows * (in_features + out_features) * 4
+            assert plan.scratch_nbytes <= rows * (in_features + out_features) * 4 + 8192
 
         # The shared weight tensor is usable from a plan built in another ctx.
         # Compare against the single-shot CPU path, which runs the same ggml
@@ -115,7 +121,7 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
         x = torch.from_numpy(
             np.random.default_rng(1).standard_normal((2, in_features)).astype(np.float32)
         )
-        rows, plan = plans[1]
+        rows, plan = next(item for item in plans if item[0] == 2)
         assert rows == x.shape[0]
         actual = _compute_plan_on_cpu(bridge, cpu_backend, plan, x)
         expected = bridge.quantized_matmul_cpu(
@@ -130,6 +136,7 @@ def test_cuda_plans_share_one_weight_buffer_and_compute(monkeypatch):
         for _, plan in plans:
             plan.close()
         weight.close()
+        bridge._cuda_scratch.pop(0, None).close()
 
 
 class _FakePlan:
@@ -142,8 +149,18 @@ class _FakePlan:
 
 
 class _FakeWeight:
-    def __init__(self) -> None:
+    """Stands in for the ggml buffer: a separate device copy of ``qweight``."""
+
+    def __init__(self, qweight: torch.Tensor) -> None:
+        self.storage = qweight.detach().clone()
+        self.device = qweight.device
         self.closed = False
+
+    def as_tensor(self) -> torch.Tensor:
+        return self.storage
+
+    def backs(self, tensor) -> bool:
+        return tensor.data_ptr() == self.storage.data_ptr()
 
     def close(self) -> None:
         self.closed = True
@@ -154,12 +171,21 @@ class _FakeBridge:
         self.weight_builds = []
         self.plan_weights = []
         self.plans = []
+        # The kernel serializes every ggml-cuda entry through the bridge's
+        # process-wide lock (#4378), so the fake must expose it.
+        self._cuda_backend_lock = threading.RLock()
+
+    def cuda_backend_lock(self, device_index):
+        return self._cuda_backend_lock
 
     def cuda_available(self):
         return True, None
 
+    def cuda_scratch_generation(self, device_index):
+        return 0
+
     def build_cuda_weight(self, **kwargs):
-        weight = _FakeWeight()
+        weight = _FakeWeight(kwargs["qweight"])
         self.weight_builds.append(kwargs)
         return weight
 
@@ -204,8 +230,17 @@ def test_kernel_builds_the_weight_once_for_many_batch_sizes(monkeypatch):
     # Evicted plans release their own activation/output buffers.
     assert sum(plan.closed for plan in fake.plans) == 10 - gguf_cpp._MAX_GGML_CUDA_PLANS
 
+    # The upload became the storage of `qweight` (#4387): clearing caches
+    # closes the plans but keeps the weight, and needs no second upload.
     weight = module._ggml_cuda_weight
+    assert weight.backs(module.qweight)
     module.clear_weight_cache()
     assert not module._ggml_cuda_plans
+    assert module._ggml_cuda_weight is weight
+    module(torch.randn(3, 64, device="cuda", dtype=torch.float16))
+    assert len(fake.weight_builds) == 1
+
+    # Moving `qweight` off the device drops the upload.
+    module.cpu()
+    assert not module._ggml_cuda_plans
     assert module._ggml_cuda_weight is None
-    assert weight.closed

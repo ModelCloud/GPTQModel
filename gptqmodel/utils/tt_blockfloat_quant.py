@@ -150,6 +150,13 @@ def resolve_blockfloat_dtype(dtype, config=None) -> torch.dtype:
 #: Values per shared exponent.
 BLOCKFLOAT_BLOCK = 16
 
+#: Shared exponents the 8-bit field can store. The field holds ``e + 127`` with
+#: the usual bias, so a candidate beyond either end has no representable
+#: ``2**e``: ``+128`` overflows to infinity and ``-128`` is not a normal scale.
+#: Neither is a grid point, so neither may take part in the per-block search.
+BLOCKFLOAT_EXPONENT_MIN = -127
+BLOCKFLOAT_EXPONENT_MAX = 127
+
 
 #: Buffer names transformers deliberately keeps in float32 inside a bf16 model.
 #: ``from_pretrained`` never casts them -- they are built with an explicit
@@ -221,6 +228,34 @@ def stored_mantissa_bits(total_bits: int) -> int:
     return max(total_bits - 2, 0)
 
 
+def _block_base_exponent(blocks: torch.Tensor) -> torch.Tensor:
+    """Exact binade index of each block maximum, shaped like the block axis.
+
+    ``floor(log2(m))`` is the binade index, but ``torch.log2`` rounds to nearest
+    and is therefore not exact at a power of two: ``log2(float32.max)`` returns
+    ``128.0`` although the value lies in binade 127, and the same one-step-high
+    reading happens just below every ``2**k``. The IEEE-754 exponent field is
+    exact, so decoding it cannot inherit that rounding.
+
+    A zero block keeps the existing convention of being scaled by
+    ``float32.tiny`` (binade -126) so all of its codes stay zero. A non-finite
+    block maximum is rejected: the storage format has no NaN or infinity.
+    """
+
+    magnitude = blocks.abs().amax(dim=-1, keepdim=True)
+    if not bool(torch.isfinite(magnitude).all()):
+        raise ValueError(
+            "block-float storage cannot represent a non-finite value; "
+            "every block maximum must be finite"
+        )
+    # Clamping to ``tiny`` first keeps the historical zero-block convention (all
+    # codes zero) and guarantees a normal value, whose exponent field is exactly
+    # the binade index.
+    safe = magnitude.clamp_min(torch.finfo(torch.float32).tiny).contiguous()
+    fields = (safe.view(torch.int32) >> 23) & 0xFF
+    return (fields - 127).to(torch.float32)
+
+
 def quantize_blockfloat(
     weight: torch.Tensor, total_bits: int, *, block: int = BLOCKFLOAT_BLOCK
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -249,11 +284,10 @@ def quantize_blockfloat(
         x = torch.nn.functional.pad(x, (0, pad))
     blocks = x.reshape(*shape[:-1], x.shape[-1] // block, block)
 
-    magnitude = blocks.abs().amax(dim=-1, keepdim=True)
-    # Shared exponent from the block maximum; floor(log2) keeps the largest
+    # Shared exponent from the block maximum; the binade index keeps the largest
     # value inside the mantissa range rather than scaling it out.
-    safe = magnitude.clamp_min(torch.finfo(torch.float32).tiny)
-    base_exponent = torch.floor(torch.log2(safe))
+    base_exponent = _block_base_exponent(blocks)
+    base_scale = torch.pow(2.0, base_exponent)
 
     mant_bits = stored_mantissa_bits(total_bits)
     # ``mant_bits`` explicit bits plus one implicit leading bit.
@@ -261,30 +295,56 @@ def quantize_blockfloat(
     # Clamp to the representable range for an exponent: [0, 2) in normalised
     # space with one implicit bit, i.e. below 2x the shared scale.
     limit = 2.0 - 1.0 / levels
+    # Rank the candidates inside the block's own binade: scale the block by its
+    # base scale once and measure each candidate on that normalised grid.
+    # Dividing and multiplying by a power of two is exact, so the grid and the
+    # codes are unchanged, but every squared error is now O(1) instead of
+    # O(2**(2*exponent)). Comparing the raw errors instead pins the base
+    # candidate at both extremes -- they overflow to ``inf`` for large blocks
+    # (no candidate is ``< inf``) and underflow to ``0`` for tiny ones (a strict
+    # ``<`` never replaces the incumbent) -- even when another exponent is the
+    # closer one by a wide margin.
+    unit = blocks / base_scale
 
-    def _round_with(exp: torch.Tensor) -> torch.Tensor:
-        scale = torch.pow(2.0, exp)
-        rounded = torch.round(blocks / scale * levels) / levels
-        return rounded.clamp(min=-limit, max=limit) * scale
+    def _round_unit(delta: float) -> torch.Tensor:
+        step = 2.0**delta
+        rounded = torch.round(unit / step * levels) / levels
+        return rounded.clamp(min=-limit, max=limit) * step
 
-    # ``floor(log2(block_max))`` is not always the exponent with the lowest
-    # error: the grid only reaches ``limit * 2**exp``, so a block whose maximum
-    # sits in the top quarter of a binade clips by up to ``2 - limit`` of its
-    # largest value. Neighbouring exponents trade that clipping against a
+    def _error(candidate: torch.Tensor) -> torch.Tensor:
+        return (candidate - unit).pow(2).sum(dim=-1, keepdim=True)
+
+    # The binade index of the block maximum is not always the exponent with the
+    # lowest error: the grid only reaches ``limit * 2**exp``, so a block whose
+    # maximum sits in the top quarter of a binade clips by up to ``2 - limit``
+    # of its largest value. Neighbouring exponents trade that clipping against a
     # coarser step, and the winner differs per block. Pick it per block by
     # measured squared error; the grid itself is unchanged.
-    best = _round_with(base_exponent)
-    best_err = (best - blocks).pow(2).sum(dim=-1, keepdim=True)
+    best_unit = _round_unit(0.0)
+    best_err = _error(best_unit)
     best_exp = base_exponent
     for delta in (-1, 1):
-        cand = _round_with(base_exponent + delta)
-        err = (cand - blocks).pow(2).sum(dim=-1, keepdim=True)
-        take = err < best_err
-        best = torch.where(take.expand_as(best), cand, best)
-        best_exp = torch.where(take, base_exponent + delta, best_exp)
+        candidate_exp = base_exponent + delta
+        # A neighbour past the stored range has no representable scale: on the
+        # largest binade ``+1`` is ``2**128``, which is inf, and ``0 * inf``
+        # makes the rounded block NaN. Reject the candidate outright -- its
+        # NaN/inf error must never be compared, because it cannot win and a
+        # later candidate would then be compared against the poisoned value.
+        usable = (candidate_exp >= BLOCKFLOAT_EXPONENT_MIN) & (
+            candidate_exp <= BLOCKFLOAT_EXPONENT_MAX
+        )
+        cand_unit = _round_unit(delta)
+        err = _error(cand_unit)
+        # ``unit`` is O(1) by construction, so a usable candidate's error is
+        # finite; a non-finite one could only come from a non-finite input,
+        # which ``_block_base_exponent`` has already rejected.
+        take = usable & (err < best_err)
+        best_unit = torch.where(take.expand_as(best_unit), cand_unit, best_unit)
+        best_exp = torch.where(take, candidate_exp, best_exp)
         best_err = torch.where(take, err, best_err)
 
     exponent = best_exp
+    best = best_unit * base_scale
     out = best.reshape(*shape[:-1], x.shape[-1])
     if pad:
         out = out[..., :last]
@@ -356,6 +416,8 @@ def _entropy_bits(weight: torch.Tensor, *, group_size: int = 128) -> float:
 __all__ = [
     "BLOCKFLOAT_BITS",
     "BLOCKFLOAT_BLOCK",
+    "BLOCKFLOAT_EXPONENT_MAX",
+    "BLOCKFLOAT_EXPONENT_MIN",
     "TT_BLOCKFLOAT_DTYPES",
     "TT_BLOCKFLOAT_VENDOR_ATTRS",
     "quantize_bfloat2_b",
@@ -386,15 +448,28 @@ def _block_exponents(weight: torch.Tensor, block: int = BLOCKFLOAT_BLOCK) -> tor
     if pad:
         w = torch.nn.functional.pad(w, (0, pad))
     blocks = w.reshape(*w.shape[:-1], -1, block)
-    safe = blocks.abs().amax(dim=-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
-    return torch.floor(torch.log2(safe)).squeeze(-1)
+    return _block_base_exponent(blocks).squeeze(-1)
 
 
 def _round_with_exponents(
     x: torch.Tensor, exponents: torch.Tensor, bits: int, block: int = BLOCKFLOAT_BLOCK
 ) -> torch.Tensor:
-    """Round ``x`` onto a *fixed* set of block exponents."""
+    """Round ``x`` onto a *fixed* set of block exponents.
 
+    The exponents must be storable ones. An out-of-range value has no
+    representable scale -- ``2**128`` is inf -- so rounding through it would
+    turn the block into NaN instead of failing.
+    """
+
+    exponents = exponents.to(torch.float32)
+    if bool(
+        ((exponents < BLOCKFLOAT_EXPONENT_MIN) | (exponents > BLOCKFLOAT_EXPONENT_MAX)).any()
+    ):
+        raise ValueError(
+            "block-float exponents must lie in "
+            f"[{BLOCKFLOAT_EXPONENT_MIN}, {BLOCKFLOAT_EXPONENT_MAX}], got "
+            f"{sorted({int(v) for v in exponents.reshape(-1).tolist()})[:8]}"
+        )
     w = x.to(torch.float32)
     last = w.shape[-1]
     pad = (-last) % block
@@ -1124,7 +1199,11 @@ def _quantize_embedding_on_grid(
 # the hardware grid, the loader can either expand them to floats or feed them
 # straight to a TT kernel, with no host-side re-quantisation.
 
-BLOCKFLOAT_SAVE_FORMAT_VERSION = 1
+#: Version 2 lists every decoder layer in the manifest, including the ones stored
+#: dense because they are not on the grid, and records each layer's kind, shape,
+#: dtype and whether it has a bias. Version 1 listed only the quantized layers,
+#: so the dense tensors it wrote to the payload could not be found again.
+BLOCKFLOAT_SAVE_FORMAT_VERSION = 2
 
 #: Tensor payload file. safetensors is the format: no pickle, memory-mappable, and
 #: it is what the rest of the repo already ships. ``blockfloat.pt`` is still read
@@ -1159,6 +1238,12 @@ def decompose_blockfloat(
     base = _block_exponents(w, block)
     for shift in (0, 1, -1, 2):
         candidate = (base + shift).to(torch.float32)
+        if bool(
+            ((candidate < BLOCKFLOAT_EXPONENT_MIN) | (candidate > BLOCKFLOAT_EXPONENT_MAX)).any()
+        ):
+            # No storable scale exists at that shift for every block, so it cannot
+            # describe the whole tensor; skip before any overflowing arithmetic.
+            continue
         scale = torch.pow(2.0, candidate).repeat_interleave(block, dim=1)
         codes = torch.round(w / scale * levels)
         if codes.abs().max() > offset:
@@ -1254,12 +1339,18 @@ def save_blockfloat_checkpoint(
     bits=4,
     metadata: "Optional[dict]" = None,
 ) -> dict:
-    """Write grid-quantized decoder linears as a bf4_b/bf8_b-native checkpoint.
+    """Write decoder linears as a bf4_b/bf8_b-native checkpoint.
 
     Weights become ``<layer>.blockfloat_codes`` (uint8) plus
     ``<layer>.blockfloat_exponents`` (int8), so the stored payload is 1 byte per
     element for bf4_b -- the same order as int4 packing without a second quantisation
     step at load. Returns a summary of what was written.
+
+    A decoder linear that is not exactly on the block-float grid cannot be stored
+    as codes. It is written as a dense ``<layer>.weight`` at its source dtype and
+    listed in the manifest with ``kind: "dense"``, so the matching reader and
+    loader can find and restore it. Both kinds record their bias when they have
+    one: a layer that is saved must be loadable, or the save has to fail.
 
     ``bits`` may be a single width, or a mapping of layer-name pattern to width
     with an optional ``"*"`` default. Mixed widths are what a real checkpoint
@@ -1277,8 +1368,13 @@ def save_blockfloat_checkpoint(
     log = setup_logger()
     blocks = _decoder_blocks(model)
     tensors: dict = {}
+    #: Per-layer manifest. Quantized *and* dense layers are listed: the reader
+    #: dispatches on ``kind``, so nothing the writer emits is unreachable.
     summary: dict = {}
     default_bits = _default_bits(bits)
+
+    def _dtype_name(tensor) -> str:
+        return str(tensor.dtype).replace("torch.", "")
 
     for index, block in enumerate(blocks):
         for name, module in block.named_modules():
@@ -1288,26 +1384,54 @@ def save_blockfloat_checkpoint(
                 continue
             key = f"{index}.{name}"
             layer_bits = _layer_bits(bits, key)
-            w = module.weight.detach().to(torch.float32)
+            source_weight = module.weight.detach()
+            bias = getattr(module, "bias", None)
+            bias = bias.detach() if isinstance(bias, torch.Tensor) else None
+            # The grid check needs float32 arithmetic, but that cast is only for
+            # the encoder. Anything stored as a dense float keeps the module's
+            # own dtype: narrowing a bf16/fp32 weight or bias to float16 turns
+            # values above 65504 into inf and rounds every other value.
+            w = source_weight.to(torch.float32)
             try:
                 codes, exponents = decompose_blockfloat(w, bits=layer_bits)
             except ValueError:
-                # Not quantized (or not on the grid): keep it as dense float.
-                tensors[f"{key}.weight"] = w.to(torch.float16)
+                # Not quantized (or not on the grid): keep it as a dense float at
+                # the source precision, bias included, and record it in the
+                # manifest. A saved tensor the reader cannot find is a checkpoint
+                # that loads with that layer still at its initial values.
+                dense = source_weight.contiguous()
+                tensors[f"{key}.weight"] = dense
+                summary[key] = {
+                    "kind": "dense",
+                    "shape": list(dense.shape),
+                    "dtype": _dtype_name(dense),
+                    "has_bias": bias is not None,
+                }
+                if bias is not None:
+                    stored_bias = bias.contiguous()
+                    tensors[f"{key}.bias"] = stored_bias
+                    summary[key]["bias_dtype"] = _dtype_name(stored_bias)
                 continue
             tensors[f"{key}.blockfloat_codes"] = _pack_codes(codes, layer_bits)
             tensors[f"{key}.blockfloat_code_shape"] = torch.tensor(codes.shape)
             tensors[f"{key}.blockfloat_exponents"] = exponents
-            if getattr(module, "bias", None) is not None:
-                tensors[f"{key}.bias"] = module.bias.detach().float().to(torch.float16)
             packed = tensors[f"{key}.blockfloat_codes"]
             summary[key] = {
+                "kind": "blockfloat",
                 "shape": list(w.shape),
                 "bits": layer_bits,
                 "codes_bytes": int(packed.numel()),
                 "numel": int(codes.numel()),
                 "exponent_bytes": int(exponents.numel()),
+                "has_bias": bias is not None,
             }
+            if bias is not None:
+                # The bias is dense state, not part of the grid, and the source
+                # dtype is what inference loads. Narrowing it to float16 here made
+                # the round trip lossy for an fp32 or bf16 model.
+                stored_bias = bias.contiguous()
+                tensors[f"{key}.bias"] = stored_bias
+                summary[key]["bias_dtype"] = _dtype_name(stored_bias)
 
     os.makedirs(output_dir, exist_ok=True)
     from safetensors.torch import save_file
@@ -1334,20 +1458,30 @@ def save_blockfloat_checkpoint(
         "stored_mantissa_bits": stored_mantissa_bits(default_bits),
         "layers": summary,
     })
-    widths = sorted({entry["bits"] for entry in summary.values()})
+    quantized = {
+        key: entry for key, entry in summary.items() if entry["kind"] == "blockfloat"
+    }
+    widths = sorted({entry["bits"] for entry in quantized.values()})
     if len(widths) > 1:
         meta["mixed_bits"] = True
-        meta["bits_per_layer"] = {key: entry["bits"] for key, entry in summary.items()}
+        meta["bits_per_layer"] = {
+            key: entry["bits"] for key, entry in quantized.items()
+        }
     with open(os.path.join(output_dir, "blockfloat.json"), "w") as handle:
         json.dump(meta, handle, indent=1)
-    total = sum(v["codes_bytes"] + v["exponent_bytes"] for v in summary.values())
+    # Count what actually reaches disk: packed codes and exponents, the dense
+    # fallback weights, and every bias.
+    total = sum(t.numel() * t.element_size() for t in tensors.values())
+    dense_layers = len(summary) - len(quantized)
     log.info(
         f"TTBlockFloat: wrote {len(summary)} layers to {output_dir} "
-        f"({total / 1024 / 1024:.2f} MiB payload, "
-        f"{'/'.join(str(w) for w in widths)}-bit)"
+        f"({len(quantized)} block-float, {dense_layers} dense; "
+        f"{total / 1024 / 1024:.2f} MiB payload, "
+        f"{'/'.join(str(w) for w in widths) or 'none'}-bit)"
     )
     return {
-        "layers": len(summary),
+        "layers": len(quantized),
+        "dense_layers": dense_layers,
         "payload_bytes": total,
         "bits": default_bits,
         "bits_per_layer": widths,
@@ -1396,10 +1530,12 @@ def load_blockfloat_into_model(model, checkpoint_dir: str) -> dict:
 # with ordinary PyTorch where a TT kernel is not appropriate.
 
 def read_blockfloat_checkpoint(checkpoint_dir: str) -> dict:
-    """Read a native checkpoint into ``{layer_name: (codes, exponents, bias)}``.
+    """Read a native checkpoint into ``{layer_name: entry}``.
 
-    Codes stay packed exactly as stored; use :func:`recompose_blockfloat` (or the
-    un-packed helper) to expand one layer.
+    Every layer the manifest lists is returned, including the ones stored dense
+    because they were not on the grid; ``entry["kind"]`` is ``"blockfloat"`` or
+    ``"dense"``. Quantized codes stay packed exactly as stored; use
+    :func:`expand_native_layer` to reconstruct either kind as floats.
     """
 
     import json
@@ -1412,32 +1548,64 @@ def read_blockfloat_checkpoint(checkpoint_dir: str) -> dict:
         raise ValueError(f"{meta_path} is not a tt-blockfloat checkpoint")
     bits = int(meta["bits"])
     tensors = _load_blockfloat_payload(checkpoint_dir)
+    declared = meta.get("layers", {})
 
     layers = {}
-    for key in meta.get("layers", {}):
+    for key, record in declared.items():
+        record = dict(record or {})
+        # Version 1 stored no ``kind``: every entry it listed was block-float, and
+        # any dense tensor it wrote was unreachable. Treat a missing kind as
+        # quantized so old checkpoints keep loading.
+        kind = str(record.get("kind", "blockfloat"))
+        bias = tensors.get(f"{key}.bias")
+        if kind == "dense":
+            weight = tensors.get(f"{key}.weight")
+            if weight is None:
+                raise ValueError(
+                    f"{meta_path}: layer {key!r} is declared dense but "
+                    f"{key}.weight is missing from the payload"
+                )
+            layers[key] = {
+                "kind": "dense",
+                "weight": weight,
+                "bias": bias,
+                "shape": tuple(int(v) for v in weight.shape),
+                "dtype": str(weight.dtype).replace("torch.", ""),
+            }
+            continue
+        if kind != "blockfloat":
+            raise ValueError(f"{meta_path}: layer {key!r} has unknown kind {kind!r}")
         # A mixed-width checkpoint records the width per layer; older ones only
         # have the global value.
-        layer_bits = int(meta["layers"][key].get("bits", bits))
+        layer_bits = int(record.get("bits", bits))
         codes = tensors.get(f"{key}.blockfloat_codes")
         exponents = tensors.get(f"{key}.blockfloat_exponents")
         if codes is None or exponents is None:
-            continue
+            # A manifest entry whose codes vanished would leave the caller with a
+            # silently partially restored model.
+            raise ValueError(
+                f"{meta_path}: layer {key!r} is declared block-float but its "
+                "codes or exponents are missing from the payload"
+            )
         shape = tensors.get(f"{key}.blockfloat_code_shape")
         if shape is not None:
             codes = _unpack_codes(codes, layer_bits, tuple(int(v) for v in shape))
         layers[key] = {
+            "kind": "blockfloat",
             "codes": codes,
             "exponents": exponents,
-            "bias": tensors.get(f"{key}.bias"),
-            "shape": tuple(meta["layers"][key]["shape"]),
+            "bias": bias,
+            "shape": tuple(record["shape"]),
             "bits": layer_bits,
         }
     return {"bits": bits, "block": int(meta["block"]), "layers": layers, "meta": meta}
 
 
 def expand_native_layer(entry: dict) -> torch.Tensor:
-    """Expand one native layer's codes to float weights (exact, no rounding)."""
+    """Expand one native layer to its stored float weights (exact, no rounding)."""
 
+    if entry.get("kind") == "dense":
+        return entry["weight"].reshape(entry["shape"])
     return recompose_blockfloat(
         entry["codes"], entry["exponents"], bits=entry["bits"]
     ).reshape(entry["shape"])
@@ -1450,6 +1618,9 @@ def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
     the exact grid weights with no quantisation, so the result matches
     :func:`load_blockfloat_into_model` bit-for-bit while allowing callers to build
     the model however they like (for example on `meta` to skip a float allocation).
+
+    Layers the manifest lists but the target model does not have are an error:
+    a caller that gets a result back must not be left with un-restored weights.
     """
 
     payload = read_blockfloat_checkpoint(checkpoint_dir)
@@ -1463,14 +1634,30 @@ def load_native_checkpoint_into_dense_model(model, checkpoint_dir: str) -> dict:
                 entry = tensors.get(key)
                 if entry is None or getattr(module, "weight", None) is None:
                     continue
-                weights = recompose_blockfloat(
-                    entry["codes"], entry["exponents"], bits=entry["bits"]
-                ).reshape(entry["shape"])
+                weights = expand_native_layer(entry)
                 module.weight.copy_(weights.to(module.weight.dtype))
-                if entry["bias"] is not None and getattr(module, "bias", None) is not None:
+                if entry["bias"] is not None:
+                    if getattr(module, "bias", None) is None:
+                        # The checkpoint holds a bias this module cannot receive,
+                        # so keeping the weight alone would drop saved state.
+                        raise ValueError(
+                            f"{checkpoint_dir}: layer {key!r} stores a bias but the "
+                            "target module has none"
+                        )
                     module.bias.copy_(entry["bias"].to(module.bias.dtype))
                 restored[key] = list(entry["shape"])
+    unreachable = sorted(set(tensors) - set(restored))
+    if unreachable:
+        # The target model does not own everything the checkpoint stores, so the
+        # caller would get a success while those weights stayed at their initial
+        # values.
+        raise ValueError(
+            f"{checkpoint_dir}: {len(unreachable)} checkpoint layer(s) have no "
+            f"target module in this model, e.g. {unreachable[:3]}"
+        )
     return restored
+
+
 # --- standard Hugging Face checkpoint layout -------------------------------
 #
 # A published checkpoint is an ordinary HF model directory: ``model.safetensors``
@@ -1963,6 +2150,10 @@ def save_blockfloat_model(
         .replace("{BASE_CLASS}", base_class)
     )
     config["auto_map"] = {"AutoModelForCausalLM": f"{MODELING_FILE[:-3]}.TTBlockfloatForCausalLM"}
+    # Tell the HF refusing-quantizer guard that this checkpoint carries the
+    # loader named by ``auto_map``, so the documented transformers entry point
+    # is not refused along with bare packed checkpoints that have no loader.
+    quantization_config["shipped_modeling_file"] = MODELING_FILE
     with open(os.path.join(output_dir, "config.json"), "w") as handle:
         json.dump(config, handle, indent=2)
     with open(os.path.join(output_dir, MODELING_FILE), "w") as handle:

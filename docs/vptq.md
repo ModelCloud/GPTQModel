@@ -243,15 +243,48 @@ and trade extra quantization time for accuracy.
 
 ## Inference and checkpoint compatibility
 
-Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. Use
-`GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for CUDA inference;
-`BACKEND.VPTQ_TORCH` remains available as the reference implementation.
+Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. `BACKEND.AUTO`, the
+default for `GPTQModel.load`, HF/optimum loading, and the evaluation harnesses,
+selects `BACKEND.VPTQ_CUDA` on an NVIDIA host where the extension builds;
+`BACKEND.VPTQ_TORCH` is the reference implementation and the fallback.
 For matching activation and codebook dtypes, the fused CUDA kernel is used
 through four activation rows across vector lengths and outlier configurations.
 Larger batches reconstruct the dense weight once with the CUDA dequantization
 op, then use Torch/cuBLAS GEMM. Dtype mismatches use the same dequantization plus
 GEMM path. FP16, BF16, and FP32 are supported when stored in the checkpoint.
 Torch inference also runs on CPU and other Torch devices.
+
+Selection is by declared `SUPPORTS_FORMATS` rank, then the kernel's
+`validate_once` probe. `VPTQCudaLinear` declares `FORMAT.VPTQ: 110` against the
+portable kernel's `100`, so AUTO orders the native kernel first. `validate_once`
+then has the final say: it rejects ROCm (CUDA-only sources), a host without a
+CUDA device, and a host where the VPTQ JIT extension cannot build. Any of those
+leaves AUTO on `VPTQLinear`, and `BACKEND.VPTQ_TORCH` always stays explicitly
+selectable.
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| AUTO rank for `FORMAT.VPTQ` | [`vptq_cuda.py:33`](https://github.com/ModelCloud/GPTQModel/blob/50a5b9fe0/gptqmodel/nn_modules/qlinear/vptq_cuda.py#L33) and [`vptq_torch.py:49`](https://github.com/ModelCloud/GPTQModel/blob/50a5b9fe0/gptqmodel/nn_modules/qlinear/vptq_torch.py#L49) both declared `100`, so the selector's stable sort kept registry order and `VPTQ_TORCH` won. | `VPTQCudaLinear` declares `110`; the tie is gone and the native kernel is tried first. |
+| Availability check | `validate_once` only rejected ROCm and a missing CUDA device, so a raised rank would have selected a kernel whose JIT extension never built | `validate_once` also probes `vptq_cuda_runtime_available()` and returns that build error, so AUTO falls back to `VPTQLinear`. |
+| Benchmark script bias | `scripts/benchmark_vptq_cuda.py` passed the stored FP32 `module.bias` straight to the native op, which `RuntimeError`s on the dtype mismatch | The script narrows an exactly representable bias the way `VPTQCudaLinear.forward` does. |
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load(backend=BACKEND.AUTO or unset)"] --> B["select_quant_linear()<br/>METHOD.VPTQ / FORMAT.VPTQ"]
+    B --> C["Rank AUTO candidates by SUPPORTS_FORMATS<br/>VPTQCudaLinear 110, VPTQLinear 100"]
+    C --> D["VPTQCudaLinear.cached_validate_once()"]
+    D --> E{"IS_ROCM?"}
+    E -->|Yes| T["VPTQLinear<br/>portable Torch kernel"]
+    E -->|No| F{"torch.cuda.is_available()?"}
+    F -->|No| T
+    F -->|Yes| G{"vptq_cuda_runtime_available()<br/>JIT extension loaded?"}
+    G -->|No| T
+    G -->|Yes| H["VPTQCudaLinear<br/>fused native kernel"]
+    T --> I["Forward on CPU / HIP / no toolchain"]
+    H --> J["Fused GEMV up to 4 rows,<br/>native dequantize + GEMM above"]
+    classDef fallback fill:#ffe0e0,stroke:#b91c1c,color:#111;
+    class T fallback;
+```
 
 To compare `VPTQ_CUDA` directly with `VPTQ_TORCH` on a CUDA host, run
 `python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.

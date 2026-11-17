@@ -24,6 +24,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_NUMERICAL_CONTRACT,
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
+    clear_tile_workspace,
     quantize_exl3,
     reconstruct_exl3_tensors,
     validate_exl3_quantization_geometry,
@@ -34,10 +35,10 @@ from ..looper.loop_processor import (
     CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -693,7 +694,7 @@ def clone_exllamav3_config_for_module(
     return qcfg_clone
 
 
-class EXL3Processor(LoopProcessor):
+class EXL3Processor(SharedInputCaptureProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
 
     lifecycle = ProcessorLifecycleConfig(
@@ -721,6 +722,7 @@ class EXL3Processor(LoopProcessor):
             calibration=calibration,
             forward=forward,
         )
+        self._init_shared_input_capture()
 
         self.avg_losses = []
         self.lm_head_name = lm_head_name
@@ -2257,6 +2259,18 @@ class EXL3Processor(LoopProcessor):
     ) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the EXL3 task."""
 
+        if self.shared_input_leader(name) is not None:
+            def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this Hessian."""
+
+                active_batch_capture = getattr(
+                    self, "_active_natural_route_capture", None
+                )
+                if active_batch_capture is not None:
+                    active_batch_capture.capture_expert_input(name, inp[0].data)
+                del module, inp, out
+            return skip
+
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for the EXL3 capture task."""
 
@@ -2271,6 +2285,35 @@ class EXL3Processor(LoopProcessor):
             del inp, out
 
         return tmp
+
+    # -- shared-input Hessian dedup ----------------------------------------
+
+    def _shared_input_task(self, name: str):
+        entry = self.tasks.get(name)
+        if not isinstance(entry, dict):
+            return None
+        return entry.get("capture")
+
+    def _shared_input_task_enabled(self, capture: GPTQ) -> bool:
+        # `w3` aliases an already-shared `w1` accumulator and captures nothing;
+        # a shared state is already deduplicated by `share_hessian_state_from`.
+        if capture is None:
+            return False
+        if not getattr(capture, "_hessian_capture_enabled", True):
+            return False
+        return not capture.hessian_is_shared
+
+    def _shared_input_task_signature(self, capture: GPTQ):
+        if type(capture) is not GPTQ:
+            return None
+        hessian = capture.qcfg.hessian
+        return (
+            "gptq",
+            int(capture.columns),
+            str(hessian.staging_dtype),
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+        )
 
     def _is_lm_head(self, module: NamedModule) -> bool:
         """Returns whether the named module corresponds to the model lm_head."""
@@ -4054,6 +4097,11 @@ class EXL3Processor(LoopProcessor):
         model.quantize_config.format = FORMAT.EXL3
         model.qlinear_kernel = ExllamaV3Linear
         super().finalize(model=model, **kwargs)
+
+    def release_run_workspace(self) -> None:
+        """Drop the per-stream EXL3 tile scratch cached for this run."""
+
+        clear_tile_workspace()
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Ensures EXL3 received calibration data before the quantization loop starts."""

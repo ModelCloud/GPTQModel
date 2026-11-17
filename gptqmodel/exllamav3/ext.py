@@ -23,7 +23,7 @@ from ..utils.cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
-from .util.arch_list import maybe_set_arch_list_env
+from .util.arch_list import scoped_arch_list_env
 
 
 extension_name = "gptqmodel_exllamav3_ops"
@@ -149,7 +149,6 @@ def _extra_ldflags() -> list[str]:
 
 def _prepare_build_env() -> None:
     _ensure_windows_compiler()
-    maybe_set_arch_list_env()
 
 
 # Shared singleton so EXL3 quantization and inference both reuse the same
@@ -180,6 +179,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_EXLLAMAV3_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    build_env_scope=scoped_arch_list_env,
     python_abi_dependent=False,
     stage_hip_sources=True,
 )
@@ -229,7 +229,6 @@ class _BCLinearEXL3:
         bias: Optional[torch.Tensor],
         mcg: bool,
         mul1: bool,
-        xh: torch.Tensor,
     ):
         if not exllamav3_runtime_available():
             raise ModuleNotFoundError("ExLlamaV3 torch.ops kernels are not properly installed. Error: " + exllamav3_runtime_error())
@@ -240,7 +239,6 @@ class _BCLinearEXL3:
         self.bias = bias
         self.mcg = bool(mcg)
         self.mul1 = bool(mul1)
-        self.xh = xh
 
     def run(self, x: torch.Tensor, y: torch.Tensor) -> None:
         _runtime_op("bc_linear_exl3_run")(
@@ -251,7 +249,6 @@ class _BCLinearEXL3:
             self.bias,
             self.mcg,
             self.mul1,
-            self.xh,
             x,
             y,
         )

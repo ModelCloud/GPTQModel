@@ -22,7 +22,9 @@ from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
 from . import AWQuantLinear
 from ._fused_train_state import (
+    bind_runtime_qzeros,
     capture_fused_train_state,
+    finalize_fused_train_state,
     refinalize_fused_state_after_apply,
     restore_fused_train_state,
 )
@@ -173,6 +175,23 @@ class TorchFusedAwqLinear(AWQuantLinear):
         super().post_init()
         self.optimize()
 
+    # The CPU ATen int4pack permutation has a verified inverse, so the
+    # checkpoint qweight is rebuilt on save instead of kept resident.
+    _FUSED_TRAIN_STATE_REBUILD = "awq"
+
+    def _fused_train_state_names(self):
+        """Checkpoint operands the current fused transform rewrites.
+
+        ``transform_cpu_awq`` keeps ``scales`` in the checkpoint dtype and
+        layout, so the live buffer is the checkpoint tensor and a snapshot
+        clone would only be a byte-identical second copy. The XPU transform
+        narrows ``scales`` in place, so it still needs the snapshot.
+        """
+
+        if getattr(self, "qweight", None) is not None and self.qweight.device.type == "cpu":
+            return ("qweight", "qzeros")
+        return ("qweight", "qzeros", "scales")
+
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         if self.optimized:
             return
@@ -260,7 +279,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
         zeros = (zero_offset - izeros.reshape_as(compute_scales).float()) * compute_scales.float()
         self.qzeros = zeros.to(device=self.qweight.device, dtype=compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(compute_scales, self.qzeros)
+        bind_runtime_qzeros(self)
         self._cpu_transform_dtype = dtype
+        # ``qweight`` now holds int4pack words: drop the checkpoint clone if
+        # the inverse reproduces exactly the bytes captured before the pack.
+        finalize_fused_train_state(self)
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form
@@ -353,6 +376,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
         dtype = current.dtype if isinstance(current, torch.Tensor) else scales.dtype
         dtype = torch.promote_types(dtype, torch.promote_types(scales.dtype, qzeros.dtype))
         self.scales_and_zeros = pack_scales_and_zeros(scales.to(dtype), qzeros.to(dtype))
+        # ``qzeros`` is byte-identical to the packed metadata's zero column.
+        # Keep it as a view instead of a second allocation, then key the cache
+        # on the view that is actually installed.
+        if bind_runtime_qzeros(self):
+            key = tuple(tensor_cache_key(tensor) for tensor in (qweight, scales, self.qzeros))
         self.torch_fused_op = Int4PackedOp(
             self.qweight, self.scales_and_zeros, self.group_size
         ).eval()
@@ -398,29 +426,30 @@ class TorchFusedAwqLinear(AWQuantLinear):
         self.assert_supported_dtype(input_dtype)
         if input_dtype == torch.float32:
             x_flat = x_flat.to(torch.bfloat16)
-        if (
-            not self.training
-            and not x_flat.requires_grad
-            and self.linear_mode is None
-            and TORCH_HAS_FUSED_OPS
-            # FP16 can overflow before a cancelling bias. BF16 has FP32's
-            # range, so it can use the fused op and add the bias once. The CPU
-            # fused op returns an FP32 product for a biased FP16 layer, so it
-            # can add the bias before the single visible cast too.
-            and (
-                self.bias is None
-                or x_flat.dtype in (torch.bfloat16, torch.float16)
-            )
-        ):
-            capture_fused_train_state(self)
-            self.transform(x_flat.dtype, x_flat.device.type)
-            self.linear_mode = LinearMode.INFERENCE
-            if x_flat.device.type == "cpu":
-                self.torch_fused_op = Int4PackedOp(
-                    self.qweight, self.scales_and_zeros, self.group_size
-                ).eval()
-        elif self.linear_mode is None:
-            self.linear_mode = LinearMode.TRAIN
+        with self._cpu_transform_lock:
+            if (
+                not self.training
+                and not x_flat.requires_grad
+                and self.linear_mode is None
+                and TORCH_HAS_FUSED_OPS
+                # FP16 can overflow before a cancelling bias. BF16 has FP32's
+                # range, so it can use the fused op and add the bias once. The
+                # CPU fused op returns an FP32 product for a biased FP16 layer,
+                # so it can add the bias before the single visible cast too.
+                and (
+                    self.bias is None
+                    or x_flat.dtype in (torch.bfloat16, torch.float16)
+                )
+            ):
+                capture_fused_train_state(self)
+                self.transform(x_flat.dtype, x_flat.device.type)
+                self.linear_mode = LinearMode.INFERENCE
+                if x_flat.device.type == "cpu":
+                    self.torch_fused_op = Int4PackedOp(
+                        self.qweight, self.scales_and_zeros, self.group_size
+                    ).eval()
+            elif self.linear_mode is None:
+                self.linear_mode = LinearMode.TRAIN
 
         if self.linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
