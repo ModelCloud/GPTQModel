@@ -139,6 +139,38 @@ quantization and host utilities still use a process-wide fallback installed
 before the loop or load starts. Concurrent quantization runs with different
 shared runtime settings are not isolated.
 
+### Forward dispatch reads the module snapshot
+
+Two inference dispatch sites used to re-read the process-wide policy on every
+forward, so a later `GPTQModel.load()` / `configure_kernel()` retuned modules
+that had already been built:
+
+- `bitsandbytes_triton.available_for` / `should_use` take the module's
+  `kernel`; `BitsAndBytesLinear.forward` passes `self.kernel`.
+- `paroquant_gemm_triton_decode` / `paroquant_gemm_triton_prefill` take an
+  `fp32_accum` argument; `ParoQuantTritonLinear` passes its resolved
+  `self.fp32_accum`.
+
+```mermaid
+flowchart TD
+    A["load A: KernelConfig P1"] --> B["BaseQuantLinear.__init__<br/>snapshot_kernel_config"]
+    B --> C["module A: self.kernel = P1"]
+    C --> D["forward A: pass self.kernel and self.fp32_accum"]
+    E["load B / configure_kernel(P2)"] --> F["process _ACTIVE_CONFIG = P2"]
+    F --> G["module B: self.kernel = P2"]
+    G --> H["forward B: pass P2"]
+    D --> I["P1 dispatch, independent of the active process policy"]
+```
+
+| Site | Before | After |
+| --- | --- | --- |
+| bitsandbytes Triton gate | `get_kernel_config().bitsandbytes_triton` at `qlinear/bitsandbytes_triton.py:109` | `kernel.bitsandbytes_triton` passed by `BitsAndBytesLinear.forward` |
+| ParoQuant Triton GEMM | `get_kernel_config().fp32_accum` at `quantization/paroquant/modules/triton/gemm.py:476,501` | `fp32_accum=self.fp32_accum` passed by `ParoQuantTritonLinear` |
+
+`kernel=None` / `fp32_accum=None` still falls back to the process policy for
+helpers called without an owning module. Regression:
+`tests/test_kernel_policy_snapshot_4555.py`.
+
 `kernel` and `runtime` are runtime-only fields. Neither is written to the checkpoint, because
 the host that loads a checkpoint is not necessarily the host that produced it.
 The same applies to `compile`: a saved checkpoint carries the numerical

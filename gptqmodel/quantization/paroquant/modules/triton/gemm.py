@@ -458,6 +458,8 @@ def paroquant_gemm_triton_decode(
     scales: torch.Tensor,
     qzeros: torch.Tensor,
     bias: torch.Tensor | None = None,
+    *,
+    fp32_accum: bool | None = None,
 ) -> torch.Tensor:
     block_size_m, block_size_n, block_size_k, num_warps, num_stages = (
         paroquant_gemm_launch_config("decode", input.device, rows=input.shape[0])
@@ -473,7 +475,7 @@ def paroquant_gemm_triton_decode(
         block_size_k=block_size_k,
         num_warps=num_warps,
         num_stages=num_stages,
-        fp32_accum=get_kernel_config().fp32_accum,
+        fp32_accum=fp32_accum,
     )
 
 
@@ -483,6 +485,8 @@ def paroquant_gemm_triton_prefill(
     scales: torch.Tensor,
     qzeros: torch.Tensor,
     bias: torch.Tensor | None = None,
+    *,
+    fp32_accum: bool | None = None,
 ) -> torch.Tensor:
     block_size_m, block_size_n, block_size_k, num_warps, num_stages = (
         paroquant_gemm_launch_config("prefill", input.device, rows=input.shape[0])
@@ -498,7 +502,7 @@ def paroquant_gemm_triton_prefill(
         block_size_k=block_size_k,
         num_warps=num_warps,
         num_stages=num_stages,
-        fp32_accum=get_kernel_config().fp32_accum,
+        fp32_accum=fp32_accum,
     )
 
 
