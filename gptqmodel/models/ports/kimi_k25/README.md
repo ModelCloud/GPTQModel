@@ -51,6 +51,15 @@ tool dictionaries, and TypeScript `tools_ts_str`. Compatibility changes are
 the explicit Transformers `PythonBackend` base, local canonical byte-alphabet
 helper, import/whitespace cleanup, and an asset-content hash passed to
 `load_tiktoken_bpe` so a repaired local file cannot reuse stale cached bytes.
+The helper lives in the separately Apache-2.0 licensed `tokenization_utils.py`.
+It adapts Hugging Face Transformers `bytes_to_unicode`, pinned at
+[`47b0e478f324b54f177ea7998a0791870fdd0324`](https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/gpt2/tokenization_gpt2.py)
+(v4.57.3). Source SHA256 is
+`ddb2e0c5a6a9fba6297a1cd923e0d1e6cd0553c3ccd2b8898ec99a8aa287ff74`;
+copyright, attribution and modifications are recorded in `NOTICE`, and the full
+upstream [Apache-2.0 license](LICENSE-APACHE-2.0) ships alongside the Moonshot
+Modified MIT `LICENSE`. Moving this helper does not change its byte mapping.
+The pinned mapping does not introduce a Transformers 4 runtime dependency.
 The K2 and K3 tokenizer sources/chat semantics differ, despite sharing the same
 vocabulary asset; neither class substitutes for K2.5. Requires `tiktoken>=0.12.0`
 and Tokenicer's published owned-instance normalization (`0.0.17` tested).
@@ -98,7 +107,7 @@ flowchart TD
   B --> C["Kimi_K25Config: nested kimi_k2 to deepseek_v3"]
   C --> D["Package Kimi_K25ForConditionalGeneration"]
   D --> E["Native checkpoint conversion and decoder/cache"]
-  B --> F["Package TikTokenTokenizer"]
+  B --> F["Package TikTokenTokenizer: caller checkpoint assets"]
   F --> G["Tokenicer.load: normalize owned instance"]
   G --> H["Package Kimi_K25Processor"]
   H --> I{"media_proc_cfg present?"}
@@ -170,10 +179,37 @@ The owned and shared suite also passes at the dependency floor `0.12.0`:
 | Shared registered-model consumer contract with proposed case supplied in memory | Passed; no shared-file edits |
 | Owned suites after shared-tokenizer lifecycle regression, tiktoken 0.12.0 | 41 passed in 39.68s |
 | Public plain-AWQ dense/split-Q, two save/reload cycles each | 2 passed in 21.08s |
+| Final owned + shared loaders/tokenizer/processor/AWQ after fixture relocation, tiktoken 0.12.0 | 198 passed in 41.51s; 42 owned cases included |
+| Shared AWQ onboarding + registry/subset baseline | 574 passed, 3 skipped in 13.05s |
+
+The three baseline skips are absent local DeciLM, EXAONE and Nanbeige remote-family
+fixtures, not Kimi-K2.5 cases. No Kimi-K2.5 case is skipped in the final suite.
 
 All tokenizer fixtures are pinned, local, non-weight data; the tests run offline.
-The template retains upstream whitespace byte-for-byte; the port's attributes
-exempt only that fixture's blank-at-eol check and hide the large vocabulary diff.
+The three test assets total **2,803,907 bytes**, now under
+[`tests/fixtures/kimi_k25`](../../../../tests/fixtures/kimi_k25/README.md), not
+the runtime port. Their exact bytes/hashes and Moonshot Modified MIT license
+remain unchanged. That directory has its own license and notice; its scoped
+attributes retain upstream template whitespace and suppress the vocabulary
+diff. Tests copy only the vocabulary, template and tokenizer config to their
+temporary checkpoints. Runtime code reads caller checkpoint assets, never the
+fixtures. Existing `setup.py` package exclusions and `MANIFEST.in`'s `prune
+tests/` keep test data out of distributions without a shared packaging edit.
+
+| Before (`def4a3804`) | After |
+| --- | --- |
+| Three qualification assets under `gptqmodel/models/ports/kimi_k25/qualification_assets/` matched runtime package-data patterns | Identical licensed data under `tests/fixtures/kimi_k25/`; excluded by existing test-package and manifest rules |
+| `tokenization_kimi.py:24-35`: local byte helper without its upstream Apache attribution | Package-relative import of separately attributed `tokenization_utils.py`, pinned source notice and complete upstream Apache license |
+
+A locally built wheel contains neither `tests/` nor any Kimi-K2.5 vocabulary,
+template or tokenizer-config fixture. Its runtime `LICENSE`, `LICENSE-APACHE-2.0`,
+`NOTICE`, `README.md` and `tokenization_utils.py` are present and byte-identical
+to the source. All **256** byte-alphabet entries match the inspected pinned
+Transformers function; moving the helper changes attribution, not tokenization.
+An unpacked-wheel smoke check, run outside the checkout with imports verified
+under the extracted wheel, also loads the public quantized checkpoint, preserves
+shared processor/tokenizer identity, all 17 special IDs and skip-special decoding,
+and produces finite logits with all 26 dense-Q Torch-AWQ projections loaded.
 
 ```bash
 PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \
@@ -186,6 +222,18 @@ PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \
   tests/test_local_model_loading.py tests/test_local_model_paths.py \
   tests/test_local_processor_loading.py tests/test_local_tokenizer_loading.py \
   tests/test_awq_empty_groups.py tests/test_awq_scale_search_safety.py -q
+
+PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest -q \
+  tests/test_awq_scale_search_safety.py tests/test_awq_moe_router_scaling.py \
+  tests/test_awq_empty_groups.py tests/test_awq_position_kwargs.py \
+  tests/test_awq_scale_search_memory.py tests/test_bloom_awq_replay.py \
+  tests/module_tree/test_awq_relationships.py \
+  tests/module_tree/test_bloom_awq_relationships.py \
+  tests/module_tree/test_registered_module_plans.py \
+  tests/module_tree/test_definition_subset_ordering.py
+
+/home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s setup.py bdist_wheel \
+  --dist-dir /home/ubuntu/kimi-k25-review-dist
 ```
 
 Coverage includes public default-deny loading with all four API trust/bypass

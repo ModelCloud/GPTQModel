@@ -14,24 +14,12 @@ from tiktoken.load import load_tiktoken_bpe
 from tokenizers import AddedToken
 from transformers.tokenization_python import PythonBackend as PreTrainedTokenizer
 
+from .tokenization_utils import bytes_to_unicode
 from .tool_declaration_ts import encode_tools_to_typescript_style
 
 
 logger = getLogger(__name__)
 VOCAB_FILES_NAMES = {"vocab_file": "tiktoken.model"}
-
-
-def bytes_to_unicode():
-    values = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1))
-    values += list(range(ord("®"), ord("ÿ") + 1))
-    alphabet = values.copy()
-    offset = 0
-    for value in range(256):
-        if value not in values:
-            values.append(value)
-            alphabet.append(256 + offset)
-            offset += 1
-    return dict(zip(values, map(chr, alphabet)))
 
 
 class TikTokenTokenizer(PreTrainedTokenizer):

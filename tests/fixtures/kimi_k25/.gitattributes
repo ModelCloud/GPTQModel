@@ -1,0 +1,3 @@
+# Preserve the exact pinned third-party template bytes, including its blank line.
+chat_template.jinja whitespace=-blank-at-eol
+tiktoken.model -diff
