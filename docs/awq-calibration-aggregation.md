@@ -181,10 +181,16 @@ needs:
   the same limitation the padded `batch_size>1` path already has.
 - Sibling projections (`q/k/v`, `gate/up`) share one captured input list, so
   the quadratic mask is built once per unique capture list per layer.
-- **Token-aligned kwargs travel with the same provenance** (#4880).
+- **Token-aligned kwargs travel with the same provenance** (#4880, #5015).
   `AWQProcessor._pack_token_aligned_kwargs` selects `input_ids` (every entry of
   `_AWQ_TOKEN_ALIGNED_KWARGS`) with the retained rows' provenance and returns it
-  as `[1, retained]`. DeepSeek-V4 `hash_moe` layers route with
+  as `[1, retained]`. The provenance `row_index` counts *kept* rows, not grid
+  positions: the capture hook strips padding and excluded attention sinks before
+  storing a feature, so `AWQProcessor._kept_row_grid_positions` maps each index
+  back through `_token_row_source_structure` (the same structure the mask and
+  position replay uses) before the id is read. Without that mapping a padded
+  `batch_size > 1` batch handed the router another document's id, and the row
+  count still matched, so the guard could not catch it. DeepSeek-V4 `hash_moe` layers route with
   `gate.tid2eid[input_ids.reshape(-1)]`, so forwarding the current calibration
   batch's ids instead handed the router a different number of index rows than
   the replayed hidden states and raised `IndexError` in the first decoder layer.

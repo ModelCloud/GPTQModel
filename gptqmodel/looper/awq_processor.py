@@ -1833,10 +1833,49 @@ class AWQProcessor(LoopProcessor):
                 masks[batch_index] = type_entry["attention_mask"]
         return masks, resolved_type
 
+    def _kept_row_grid_positions(
+        self,
+        batch_index: int,
+        row_count: int,
+        mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Map one capture batch's kept rows onto its ``[batch, seq]`` grid.
+
+        The capture hook removes padding (and excluded attention-sink) rows
+        before storing a feature, so a provenance ``row_index`` counts *kept*
+        rows. Returns ``(documents, positions)`` per kept row, or ``None`` when
+        the cached mask does not describe exactly these rows.
+        """
+
+        cache = getattr(self, "inputs_cache", None)
+        if cache is None:
+            return None
+        masks = getattr(cache, "attention_masks", None) or []
+        mask_overrides = mask_overrides or {}
+        mask = None
+        if int(batch_index) in mask_overrides:
+            mask = mask_overrides[int(batch_index)]
+        elif 0 <= int(batch_index) < len(masks):
+            mask = masks[int(batch_index)]
+        structure = self._token_row_source_structure(
+            mask,
+            row_count,
+            self.attention_sink_positions_for_batch(batch_index),
+            exclude_sinks=bool(
+                getattr(getattr(self, "calibration", None), "exclude_attention_sinks", False)
+            ),
+        )
+        if structure is None:
+            return None
+        documents, positions, _allowed, _form = structure
+        return documents, positions
+
     def _pack_token_aligned_kwargs(
         self,
         provenance: List[Tuple[int, int]],
         batch_indices: List[Optional[int]],
+        tensors: Optional[List[torch.Tensor]] = None,
+        mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
     ) -> Dict[str, Any]:
         """Pack per-token kwargs (for example ``input_ids``) with the replayed rows.
 
@@ -1845,6 +1884,14 @@ class AWQProcessor(LoopProcessor):
         or the module receives metadata for a different token count: DeepSeek-V4
         ``hash_moe`` routes with ``tid2eid[input_ids.reshape(-1)]`` and indexed
         the hidden states with a stale batch's ids (#4880).
+
+        A provenance ``row_index`` counts *kept* rows, not grid positions: the
+        capture hook strips padding (and excluded sinks) before storing the
+        feature. Each index is therefore mapped back through the same
+        ``_token_row_source_structure`` the mask and position replay uses, so a
+        padded ``batch_size > 1`` calibration batch does not hand the router
+        another document's id (#5015). The identity is used only when the
+        capture kept every grid row.
 
         Values that cannot be aligned are skipped here; the replay guard in
         :meth:`_prepare_module_forward` turns the remaining mismatch into an
@@ -1861,6 +1908,7 @@ class AWQProcessor(LoopProcessor):
         for key in _AWQ_TOKEN_ALIGNED_KWARGS:
             rows: List[torch.Tensor] = []
             usable = True
+            structures: Dict[int, Optional[Tuple[torch.Tensor, torch.Tensor]]] = {}
             for source_index, row_index in provenance:
                 batch_index = (
                     batch_indices[source_index]
@@ -1875,11 +1923,46 @@ class AWQProcessor(LoopProcessor):
                 if not torch.is_tensor(value) or value.numel() == 0:
                     usable = False
                     break
-                flat = value.detach().reshape(-1)
-                if not 0 <= int(row_index) < int(flat.numel()):
+                grid = value.detach().reshape(-1)
+                if not 0 <= int(row_index) < int(grid.numel()):
                     usable = False
                     break
-                rows.append(flat[int(row_index)].reshape(1))
+                if source_index not in structures:
+                    row_count = None
+                    if tensors is not None and source_index < len(tensors):
+                        source = tensors[source_index]
+                        hidden = max(int(source.shape[-1]), 1)
+                        row_count = int(source.numel() // hidden)
+                    mapping = None
+                    if row_count is not None:
+                        mapping = self._kept_row_grid_positions(
+                            int(batch_index), row_count, mask_overrides,
+                        )
+                    structures[source_index] = mapping
+                mapping = structures[source_index]
+                if mapping is None:
+                    # No structure: safe only when the capture kept every grid
+                    # row, so the kept index is the grid index.
+                    if int(row_index) >= int(grid.numel()):
+                        usable = False
+                        break
+                    rows.append(grid[int(row_index)].reshape(1))
+                    continue
+                documents, positions = mapping
+                if not 0 <= int(row_index) < int(documents.numel()):
+                    usable = False
+                    break
+                document = int(documents[int(row_index)])
+                position = int(positions[int(row_index)])
+                seq_len = int(value.shape[-1]) if value.dim() >= 2 else int(grid.numel())
+                if seq_len <= 0:
+                    usable = False
+                    break
+                flat_index = document * seq_len + position
+                if not 0 <= flat_index < int(grid.numel()):
+                    usable = False
+                    break
+                rows.append(grid[flat_index].reshape(1))
             if not usable or len(rows) != len(provenance):
                 continue
             packed[key] = torch.cat(rows, dim=0).unsqueeze(0)
@@ -1915,7 +1998,9 @@ class AWQProcessor(LoopProcessor):
         cache = getattr(self, "inputs_cache", None)
         masks = getattr(cache, "attention_masks", None) or []
         mask_overrides = mask_overrides or {}
-        token_aligned = self._pack_token_aligned_kwargs(provenance, batch_indices)
+        token_aligned = self._pack_token_aligned_kwargs(
+            provenance, batch_indices, tensors, mask_overrides,
+        )
         if cache is None or not provenance or (not masks and not mask_overrides):
             # Without a captured mask there is no document structure to replay;
             # keep the previous kwargs rather than invent one. Token-aligned
