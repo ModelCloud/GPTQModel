@@ -383,6 +383,13 @@ class TorchAtenLinear(PackableQuantLinear):
             self.scales_and_zeros = None
             self._cpu_transformed = False
             self._cpu_transform_dtype = None
+        elif not mode and self.linear_mode == "train":
+            # The dense-dequant path holds no derived state, so clearing the
+            # latch lets the next forward choose the int4pack layout again.
+            # Without this a forward taken while the module was in training
+            # mode pinned it to dense dequantization for the rest of its life,
+            # so a later `eval()` could never recover (#4907).
+            self.linear_mode = None
 
         if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
             if mode:
