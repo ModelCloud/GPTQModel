@@ -851,6 +851,44 @@ def test_config_owned_chunked_mlp_is_bit_identical():
     assert torch.equal(mlp(x[:, :10]), reference[:, :10])
 
 
+@pytest.mark.parametrize("chunk_size", [0, 3, 2048])
+def test_legacy_chunk_helper_uses_explicit_config(chunk_size):
+    from gptqmodel.utils.ricursive_patch import _MLP_CHUNK_PATCH_FLAG, _patch_chunked_mlp
+
+    class LegacyMLP(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.projection = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return torch.nn.functional.silu(self.projection(x))
+
+    mlp = LegacyMLP()
+    holder = SimpleNamespace(config=SimpleNamespace(mlp_chunk_size=chunk_size),
+                             model=SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)]))
+    inputs = torch.randn(2, 5, 8)
+    expected = torch.nn.functional.silu(inputs @ mlp.projection.weight.T)
+    assert _patch_chunked_mlp(holder) is (chunk_size > 0)
+    assert bool(getattr(type(mlp), _MLP_CHUNK_PATCH_FLAG, False)) is (chunk_size > 0)
+    assert not _patch_chunked_mlp(holder)
+    rows = []
+    hook = mlp.projection.register_forward_pre_hook(lambda module, args: rows.append(args[0].numel() // 8))
+    try:
+        torch.testing.assert_close(mlp(inputs), expected)
+    finally:
+        hook.remove()
+    assert rows == ([3, 3, 3, 1] if chunk_size == 3 else [10])
+
+
+@pytest.mark.parametrize("chunk_size", [-1, "3", None])
+def test_legacy_chunk_helper_rejects_invalid_config(chunk_size):
+    from gptqmodel.utils.ricursive_patch import _patch_chunked_mlp
+
+    holder = SimpleNamespace(config=SimpleNamespace(mlp_chunk_size=chunk_size))
+    with pytest.raises(ValueError, match="mlp_chunk_size"):
+        _patch_chunked_mlp(holder)
+
+
 def test_gqa_attention_is_bit_identical_to_repeat_kv(tmp_path: Path):
     """``enable_gqa`` must reproduce the expanded-KV path exactly."""
     from gptqmodel.utils.ricursive_patch import apply_ricursive_generate_patch

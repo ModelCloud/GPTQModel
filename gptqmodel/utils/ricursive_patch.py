@@ -566,10 +566,8 @@ def _patch_chunked_mlp(model) -> bool:
     """Bound the prefill activation peak of ``RicursiveMLP`` by chunking rows.
 
     ``[upstream-eligible: memory usage]``
-    Pure row-wise split of an exact computation -- the arithmetic and the
-    reduction order are unchanged, only the peak transient is smaller. Safe to
-    propose upstream, and worth it: this is the difference between OOM and
-    not-OOM on a 48 GiB card at long prompts.
+    A row-wise split preserves the equations and bounds transient memory;
+    backend GEMM selection can still introduce low-precision rounding.
 
     Ripple's MLP expands 5120 -> 40960, so a prefill of ``batch x prompt`` tokens
     materialises three intermediate tensors of ``tokens x 40960`` at once
@@ -577,19 +575,15 @@ def _patch_chunked_mlp(model) -> bool:
     long-prompt benchmark uses that is several GiB of transient memory, and it is
     what pushes a 33 GiB 4-bit model over a 48 GiB card.
 
-    Every operation in the MLP is row-wise, so splitting the token dimension is
-    exact: each row is still projected by the same kernels with the same
-    reduction order, and the pieces are concatenated back. Only the peak is
-    reduced. ``RIPPLE_MLP_CHUNK`` overrides the row budget; set it to
-    ``0`` to disable.
+    The explicit ``model.config.mlp_chunk_size`` owns the row budget, matching
+    the package-owned model. It defaults to 2048 for historical configs without
+    that field; zero disables chunking. This isolated compatibility helper does
+    not select behavior from the process environment.
     """
-    import os
-
-    try:
-        chunk = int(os.environ.get("RIPPLE_MLP_CHUNK", "2048"))
-    except ValueError:
-        chunk = 2048
-    if chunk <= 0:
+    chunk = getattr(getattr(model, "config", None), "mlp_chunk_size", 2048)
+    if not isinstance(chunk, int) or chunk < 0:
+        raise ValueError("mlp_chunk_size must be a non-negative integer")
+    if chunk == 0:
         return False
 
     layers = getattr(getattr(model, "model", None), "layers", None)
