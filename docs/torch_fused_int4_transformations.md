@@ -276,6 +276,47 @@ live runtime layout. If those values changed, checkpoint export fails instead
 of writing the old snapshot. A dict with no local operands leaves the layout
 untouched.
 
+### Which layouts keep a resident `qweight` clone
+
+`capture_fused_train_state` clones `qweight` only as a `RebuildCandidate`: the
+CPU int4pack transform then calls `finalize_fused_train_state`, which rebuilds
+the checkpoint words from the live runtime tensor and compares them **bitwise**
+with that clone. Only an exact match replaces the clone with a
+`RebuiltCheckpointTensor` descriptor and releases the duplicate; any mismatch
+keeps the clone, so an inverse this build cannot reproduce never reaches a saved
+checkpoint (fail closed). A layout whose inverse was already proven in this
+process skips the per-module rebuild, because the inverse is a deterministic
+function of the layout.
+
+Every CPU int4 family now has a verified inverse:
+
+| `_FUSED_TRAIN_STATE_REBUILD` | Kernel | Inverse |
+| --- | --- | --- |
+| `"gptq"` | `TorchAtenLinear`, `TorchFusedLinear` | `rebuild_gptq_qweight`: `int4pack_to_codes` plus, for `desc_act`, the `ret_idx` scatter |
+| `"awq"` | `TorchAtenAwqLinear`, `TorchFusedAwqLinear` | `rebuild_awq_qweight` |
+| `"avx512_gptq"` | `TorchCpuAvx512Linear` | `rebuild_avx512_qweight` (`unpack_hf_int4`) |
+| `"avx512_awq"` | `TorchCpuAvx512AwqLinear` | `rebuild_avx512_awq_qweight` (nibble inverse of the extension's `pack_awq_int4`) |
+
+Two of them used to keep the full clone (#5013):
+
+* **`desc_act` GPTQ with a non-identity `ret_idx`.** The transform packs
+  `weight.index_select(0, ret_idx)`, so the runtime codes are in *group* order
+  while the checkpoint keeps source order. `ret_idx` is a permutation of
+  `[0, in_features)` (`argsort(g_idx)`) and the module keeps it, so
+  `index_copy_` with the same index is the exact inverse. The earlier code
+  refused every non-identity order because the ATen op does not keep the gather
+  itself, which cost a full checkpoint copy on every `desc_act` layer; `AUTO`
+  with `dtype=torch.float16` on CPU selects this kernel.
+* **`TorchCpuAvx512AwqLinear`.** `pack_awq_int4` is a pure nibble permutation:
+  each runtime byte pairs output column `group * 32 + row` (low nibble) with
+  `group * 32 + row + 16` (high nibble) for one input feature, reading the
+  checkpoint word through the AWQ reverse order. Undoing it needs only the
+  reverse read plus `pack_awq_columns(..., order=AWQ_ORDER)`, so the inverse is
+  pure Torch and does not need the extension or AVX512-BF16 at save time.
+
+`TorchCpuAvx512AwqLinear.transform_cpu` therefore ends with
+`finalize_fused_train_state`, like the other CPU int4 transforms.
+
 ### Cache invalidation is not a checkpoint restore
 
 `clear_weight_cache()` is called from three different lifecycle events:
