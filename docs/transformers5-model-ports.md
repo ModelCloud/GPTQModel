@@ -473,6 +473,44 @@ released-checkpoint inventory or tokenizer qualification. The MiniCPM-o port is
 boundary spanning codec and repetition/generation helpers with historical
 noncommercial/AGPL licensing. Including notices does not resolve that boundary.
 
+### MobileLLM cache failure recovery
+
+`MobileLLMModel.forward` and `MobileLLMForCausalLM.forward` protect ordinary
+Transformers 5 `DynamicCache` updates through decoder, output projection and
+loss execution. A failed call restores every original layer object, KV tensor
+reference and initialization field, removes newly appended cache slots, and
+restores dynamic NTK frequencies/base before re-raising. The snapshots retain
+references to tensors replaced by `DynamicLayer.update`; no full KV clone is
+kept. A caller may remove the cause of the error and retry with the same cache.
+Original KV storage remains referenced until success or rollback, increasing
+transient cache storage while preserving exact recovery.
+Foreign/in-place-mutating caches and concurrent forwards sharing mutable model
+or cache state remain unqualified.
+
+```mermaid
+flowchart TD
+    A["MobileLLMForCausalLM.forward"] --> B["_restore_forward_state_on_error: retain caller cache and rotary state"]
+    B --> C["MobileLLMModel.forward: protect decoder updates and final norm"]
+    C --> D["Embedding projection or lm_head; loss_function"]
+    D --> E["Success: retain updated DynamicCache and NTK state"]
+    C -->|Exception| F["Restore original layers, KV references and NTK state; re-raise"]
+    D -->|Exception| F
+    F --> G["Repair error cause; retry with the original cache"]
+    style F fill:#ffcdd2,stroke:#b71c1c
+```
+
+| Failure boundary | Before | Current behavior |
+| --- | --- | --- |
+| Decoder layer after a completed cache write | Earlier slots could retain new tokens while later slots kept the prefix | Restore every slot, including bare `MobileLLMModel` calls |
+| Head or loss after all decoder writes | Caller cache silently retained the failed continuation | Restore the original cache through the causal-LM boundary |
+| Failed extension beyond original NTK context | A shorter retry could retain the failed request's rotary base | Restore original base and frequencies with the cache |
+
+The follow-up on parent `b24eaa479` plus this repair passed **212 tests without
+skips in 36.25 s**, including the existing public plain-AWQ and generation cases,
+using Python 3.14.6t/GIL disabled, Torch 2.15 CPU, Transformers 5.23.0 and
+released Tokenicer 0.0.19. Before the repair, all 16 post-write cache regressions
+and all four dynamic-NTK recovery cases failed for the intended state mismatch.
+
 [Checkpoint ownership during placement and materialization](checkpoint-owned-materialization.md)
 documents the shared alias-map completion and native FP32 destination policy.
 An earlier integration batch on Python 3.14.6t with `PYTHON_GIL=0`, Torch 2.15.0 CPU, Transformers 5.23.0,

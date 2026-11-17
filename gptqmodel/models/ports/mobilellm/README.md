@@ -36,7 +36,7 @@ Tokenizer normalization remains in Tokenicer; this port adds no tokenizer shim.
 | Serialized RoPE | Compatibility normalization without a model | Default/linear/dynamic source equations |
 | Embedding head | Checkpoint implementation | Optional source `share_embedding`, no extra head owner |
 | Layer sharing | Checkpoint implementation | Each physical layer runs twice; weights remain single-owned |
-| Cache | Legacy cache APIs and repeated physical indices | Transformers 5 DynamicCache slot per executed use |
+| Cache | Legacy cache APIs and repeated physical indices | Transformers 5 DynamicCache slot per executed use; failed decoder/head/loss restores caller state |
 | AWQ | Inherited Llama scaling assumptions | Explicit empty folding/search groups, plain INT4 quantization |
 | TP slicing | Checkpoint implementation | Source dense split/sum projection arithmetic; TP quantization rejects |
 | Published payload | Loader-dependent | Safetensors-only tested save/reload paths |
@@ -59,7 +59,7 @@ flowchart TD
 flowchart TD
     A["MobileLLMModel.forward"] --> B{"Mask and DynamicCache valid?"}
     B -->|No| C["Fail before cache mutation; caller may repair and retry"]
-    B -->|Yes| D["Mask causal positions; retain source RoPE scaling"]
+    B -->|Yes| D["Snapshot cache references and rotary state; mask causal positions"]
     D --> E["Physical decoder layer i"]
     E --> F["First use: cache slot i times repetitions"]
     F --> G{"layer_sharing?"}
@@ -67,8 +67,11 @@ flowchart TD
     G -->|No| I["Next physical layer"]
     H --> I
     I --> J["Final RMSNorm; shared embedding projection or lm_head"]
-    J --> K["DynamicCache returned for continuation or beam reorder"]
+    J --> K["Successful head/loss: DynamicCache returned for continuation or beam reorder"]
+    E -->|Exception| X["Restore original cache layers, KV references and dynamic NTK state; re-raise"]
+    J -->|Exception| X
     style C fill:#fdd,stroke:#a00
+    style X fill:#fdd,stroke:#a00
 ```
 
 The public training source repeats the same decoder layer and its physical
@@ -77,6 +80,18 @@ the second use independently. The port repairs this API incompatibility with
 separate per-use slots, verified against independently unrolled source
 equations and cached rotated keys/values; it does not duplicate parameters.
 A fixed cache sized only for physical layers is rejected before mutation.
+
+For ordinary Transformers 5 `DynamicCache` layers, a decoder, output-head or
+loss exception restores the caller's original layer list, layer objects, tensor
+references and initialization metadata. Newly appended slots are removed.
+Both the bare decoder and the full causal-LM forward protect their mutation
+boundaries. Snapshots retain references because `DynamicLayer.update` replaces
+tensors by concatenation; they do not clone KV storage. A failed context
+extension also restores dynamic NTK frequencies and base so a shorter retry
+cannot inherit frequencies from the failed request. Successful calls retain
+the source's existing NTK semantics. Sharing one mutable cache or model between
+concurrent forwards and foreign/in-place-mutating cache implementations remain
+unqualified.
 
 Dynamic NTK uses the source's rotated-key cache, not raw-key rerotation. When
 positions exceed the original context, each new step uses its own NTK base;
@@ -118,7 +133,7 @@ Tests live in `tests/test_mobilellm_local_port.py` and
 | Cache, NTK and shared execution | Independent rotated-K/V cache oracle, chunks 1+4+1+1, left padding |
 | FP32/FP16/BF16 eager/SDPA | Causality, greedy generation, beam/cache continuation, two safetensors cycles |
 | Trust boundary | Actual public hostile auto_map, both trust flags and bypass unset/0/1 |
-| Failure/retry and ownership | Invalid mask/cache, broken/restored safetensors, fresh/warm state assignment |
+| Failure/retry and ownership | Invalid mask/cache, post-write decoder/head/loss failures, exact cache/NTK restoration and independent retry logits; broken/restored safetensors |
 | Plain AWQ | Actual public CPU quantizer, exact packed/dense tensors across two reloads |
 
 ```bash
@@ -135,7 +150,18 @@ PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -m pytest -q \
 ```
 
 Measured with Python 3.14.6t, `PYTHON_GIL=0`, Transformers 5.23.0,
-Torch 2.15.0+cpu. Final combined runs passed with both released Tokenicer
+Torch 2.15.0+cpu. The cache-recovery follow-up on released Tokenicer 0.0.19
+passed **212 tests, no skips, two warnings in 36.25 s** using the first command
+above. The 16 post-write decoder/head/loss cases failed on the old code in
+3.48 s; all four failed-extension NTK cases independently failed in 3.45 s.
+After the repair, those 20 cases plus the existing pre-mutation failure/retry
+case passed in 3.45 s. Retry logits use the independent source-equation oracle;
+cache assertions cover exact original objects, tensor contents and references.
+The full run also retains the existing dtype, generation, public loading and
+24 actual public plain-AWQ cases. Warnings are existing SentencePiece SWIG
+deprecations.
+
+Earlier combined runs passed with both released Tokenicer
 0.0.14 and 0.0.17; earlier focused runs below used 0.0.14:
 
 | Command scope | Result |

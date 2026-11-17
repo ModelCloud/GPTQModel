@@ -247,6 +247,99 @@ def test_public_malicious_checkpoint_never_selects_python(tiny_config, tmp_path,
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("failure", ["decoder", "base_decoder", "head", "loss"])
+@pytest.mark.parametrize("sharing", [False, True])
+@pytest.mark.parametrize("warm", [False, True])
+def test_failure_after_cache_write_restores_state_and_retry(tiny_config, failure, sharing, warm):
+    model = _model(tiny_config, layer_sharing=sharing, share_embedding=False)
+    ids = torch.tensor([[1, 3, 4, 6]])
+    cache = model(ids[:, :2]).past_key_values if warm else DynamicCache()
+    prefix_length = 2 if warm else 0
+    layer_list = cache.layers
+    original_layers = list(cache.layers)
+    original_state = [vars(layer).copy() for layer in cache.layers]
+    original_tensors = [(layer.keys.clone(), layer.values.clone()) for layer in cache.layers]
+    observed_lengths = []
+
+    def after_write(module, args, output):
+        observed_lengths.append([layer.get_seq_length() for layer in cache.layers])
+        if failure != "loss":
+            raise RuntimeError("injected after cache write")
+
+    target = model.model if failure == "base_decoder" else model
+    module = (model.model.norm if failure == "loss" else model.lm_head if failure == "head"
+              else model.model.layers[0])
+    handle = module.register_forward_hook(after_write)
+    try:
+        with pytest.raises(IndexError if failure == "loss" else RuntimeError,
+                           match="out of bounds" if failure == "loss" else "injected after cache write"):
+            target(ids[:, 2:], past_key_values=cache,
+                   **({"labels": torch.tensor([[4, 99]])} if failure == "loss" else {}))
+    finally:
+        handle.remove()
+    uses = tiny_config.num_hidden_layers * (2 if sharing else 1)
+    expected_lengths = ([prefix_length + 2] * uses if failure in {"head", "loss"}
+                        else [prefix_length + 2] + ([prefix_length] * (uses - 1) if warm else []))
+    assert observed_lengths == [expected_lengths], "Failure must follow a completed cache write"
+    assert cache.layers is layer_list
+    assert len(cache.layers) == len(original_layers)
+    for layer, original, state, (keys, values) in zip(
+            cache.layers, original_layers, original_state, original_tensors):
+        assert layer is original
+        assert vars(layer).keys() == state.keys()
+        assert all(vars(layer)[name] is value for name, value in state.items())
+        torch.testing.assert_close(layer.keys, keys, atol=0, rtol=0)
+        torch.testing.assert_close(layer.values, values, atol=0, rtol=0)
+    retry = model(ids[:, 2:], past_key_values=cache)
+    expected_ids = ids if warm else ids[:, 2:]
+    expected, _ = _reference(model, expected_ids)
+    torch.testing.assert_close(retry.logits, expected[:, -2:], atol=2e-6, rtol=1e-5)
+    assert retry.past_key_values is cache
+    assert [layer.get_seq_length() for layer in cache.layers] == [prefix_length + 2] * uses
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("failure", ["decoder", "loss"])
+@pytest.mark.parametrize("sharing", [False, True])
+def test_failed_cache_extension_restores_dynamic_ntk_before_short_retry(tiny_config, failure, sharing):
+    from gptqmodel.models.ports.mobilellm import MobileLLMConfig
+
+    data = tiny_config.to_dict()
+    data.pop("rope_parameters", None)
+    data.update(rope_scaling={"type": "dynamic", "factor": 2.0}, max_position_embeddings=3,
+                layer_sharing=sharing)
+    model = _model(MobileLLMConfig(**data))
+    ids = torch.tensor([[1, 3, 4, 6, 7, 8]])
+    cache = model(ids[:, :2]).past_key_values
+    rotary_state = [(layer.self_attn.rotary_emb._base, layer.self_attn.rotary_emb.inv_freq.clone())
+                    for layer in model.model.layers]
+    observed_bases = []
+
+    def after_write(module, args, output):
+        observed_bases.append(model.model.layers[0].self_attn.rotary_emb._base)
+        if failure == "decoder":
+            raise RuntimeError("injected after NTK cache write")
+
+    module = model.model.layers[0] if failure == "decoder" else model.model.norm
+    handle = module.register_forward_hook(after_write)
+    try:
+        with pytest.raises(IndexError if failure == "loss" else RuntimeError,
+                           match="out of bounds" if failure == "loss" else "injected after NTK cache write"):
+            model(ids[:, 2:], past_key_values=cache,
+                  **({"labels": torch.tensor([[4, 99, 7, 8]])} if failure == "loss" else {}))
+    finally:
+        handle.remove()
+    assert len(observed_bases) == 1 and observed_bases[0] > tiny_config.rope_theta
+    for layer, (base, frequencies) in zip(model.model.layers, rotary_state):
+        assert layer.self_attn.rotary_emb._base == base
+        torch.testing.assert_close(layer.self_attn.rotary_emb.inv_freq, frequencies, atol=0, rtol=0)
+    assert [layer.get_seq_length() for layer in cache.layers] == [2] * len(cache.layers)
+    expected, _ = _reference(model, ids[:, :3])
+    actual = model(ids[:, 2:3], past_key_values=cache)
+    torch.testing.assert_close(actual.logits, expected[:, -1:], atol=2e-6, rtol=1e-5)
+
+
+@torch.inference_mode()
 def test_failure_before_cache_mutation_then_repair_retry(tiny_config, tmp_path):
     from gptqmodel.models.ports.mobilellm import MobileLLMForCausalLM
 
