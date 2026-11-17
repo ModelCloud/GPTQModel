@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import ClassVar, Optional, Union
 
 from .backend import BACKEND, normalize_backend
@@ -245,7 +245,12 @@ def resolve_backend_config(
         return normalize_backend(backend.backend), KernelConfig(**options)
     resolved = normalize_backend(backend)
     if runtime is None:
-        return resolved, _coerce_kernel_config(kernel) if kernel is not None else None
+        if kernel is None:
+            return resolved, None
+        # The legacy kernel object is caller-owned and mutable. Resolution
+        # returns an independent value snapshot, so an in-place edit after the
+        # API boundary cannot retune execution (#4615).
+        return resolved, replace(_coerce_kernel_config(kernel))
     if kernel is not None:
         raise ValueError("runtime= and legacy kernel= cannot be supplied together")
     return resolved, runtime.to_kernel_config()
