@@ -75,7 +75,7 @@ calibration activations (`_needs_deterministic_hessian` in
 | FP8 GSQ | fp32 input Gram | `quantization/gsq_calibration.py:56` |
 | EoRA | fp32 input Gram + `eigh` | `eora/eora.py:44` |
 
-AWQ, ParoQuant and weight-only (RTN) accumulate none of these and keep
+AWQ, Paro and weight-only (RTN) accumulate none of these and keep
 hipBLASLt. EoRA is included even though it is a secondary processor: an
 AWQ + EoRA plan would otherwise keep the adapter Gram on hipBLASLt, and the
 saved adapter differed in 39/42 LoRA tensors between identical runs (#4614).
@@ -114,7 +114,7 @@ same-target runs share the refcount and different-target runs serialize.
 ```mermaid
 flowchart TD
     A["GPTQModel.quantize"] --> B{"_needs_deterministic_hessian"}
-    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, ParoQuant, EoRA" --> C["want rocBLAS"]
+    B -- "yes: GPTQ, QQQ, VPTQ, MACaQ, EXL3, FP8 GSQ, Paro, EoRA" --> C["want rocBLAS"]
     B -- "no: AWQ, RTN" --> D["want hipBLASLt"]
     C --> E{"another run holds the other backend?"}
     D --> E
@@ -134,7 +134,7 @@ flowchart TD
 |---|---|---|
 | Override scope | unconditional around the whole calibrated run (`gptqmodel/models/base.py:2128`) | only when `_needs_deterministic_hessian(run_plan)` (`gptqmodel/models/base.py:158`) |
 | AWQ / RTN | forced rocBLAS for the whole run | pinned hipBLASLt for the whole run |
-| ParoQuant | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
+| Paro | forced rocBLAS for the whole run | pinned rocBLAS (no Hessian, but hipBLASLt kernel choice made seeded runs differ) |
 | QQQ / VPTQ / MACaQ / EXL3 / FP8 GSQ | forced rocBLAS | pinned rocBLAS (they build a Hessian) |
 | EoRA | forced rocBLAS | pinned rocBLAS (fp32 input Gram + `eigh`; #4614) |
 | GPTQ calibration forward and replay | forced rocBLAS | pinned rocBLAS (their activations feed the Hessian) |
@@ -157,7 +157,7 @@ is torch's hipBLASLt backend, which methods without a Hessian now keep:
 
 The fp32 Hessian GEMM is faster on rocBLAS, which is why the Hessian builders
 keep the pin there. The fp16/bf16 rows are the AWQ/RTN paths that no longer pay
-it. ParoQuant pays the pin deliberately: hipBLASLt chose GEMM kernels per
+it. Paro pays the pin deliberately: hipBLASLt chose GEMM kernels per
 process and made identically seeded checkpoints differ (issue #4460). GPTQ's
 end-to-end time is unchanged by design (it keeps the old whole-run pin):
 58.1 s / 61.4 s for Llama-3.2-1B, 128 samples, against the

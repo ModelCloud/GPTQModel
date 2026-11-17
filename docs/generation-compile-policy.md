@@ -47,7 +47,7 @@ claims:
 
 | Kernel | `SUPPORTS_COMPILE` | Evidence |
 | --- | --- | --- |
-| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, QQQ, FP8, EXL3, ParoQuant | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
+| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, QQQ, FP8, EXL3, Paro | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
 | `AwqTorchLinear` | `True` | pure-torch reference path; 1.36 s -> 0.76 s on Llama-1B/4090 (#4669), parity on the tiny fixture here. Its subclass `ParoLinear` re-declares `False` because its rotation/GEMM path branches on host row counts |
 
 A dense model has no quantized linear to break the graph, so it keeps whatever

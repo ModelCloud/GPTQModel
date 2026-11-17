@@ -11,12 +11,12 @@ from torch import nn
 from gptqmodel.looper import (
     awq_processor,
     gptq_processor,
-    paroquant_processor,
+    paro_processor,
     qqq_processor,
     weight_only_processor,
 )
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -57,8 +57,8 @@ class _UnrelatedSubtree(nn.Module):
         (qqq_processor, qqq_processor.QQQProcessor, QQQConfig, QQQTorchLinear, False),
         (awq_processor, awq_processor.AWQProcessor, AWQConfig, AwqTorchLinear, False),
         (
-            paroquant_processor,
-            paroquant_processor.ParoQuantProcessor,
+            paro_processor,
+            paro_processor.ParoProcessor,
             ParoConfig,
             ParoLinear,
             False,

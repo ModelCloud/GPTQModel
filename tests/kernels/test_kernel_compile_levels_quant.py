@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Measured compile/graph levels for the QQQ/FP8/BnB/GGUF/NF12/ParoQuant/
+"""Measured compile/graph levels for the QQQ/FP8/BnB/GGUF/NF12/Paro/
 MACaQ/VPTQ/W4A kernels.
 
 Each case builds a real packed module with the family's own ``pack`` /
@@ -30,8 +30,8 @@ from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.macaq import MacaqLinear, MacaqTritonLinear
 from gptqmodel.nn_modules.qlinear.nf12 import NF12Linear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
@@ -233,7 +233,7 @@ CASES = [
     Case(GGUFTritonKernel, _build_gguf_triton, lambda: _unavailable(GGUFTritonKernel)),
     Case(NF12Linear, _build_nf12, lambda: None),
     Case(ParoLinear, None, _paro_unavailable),
-    Case(ParoQuantTritonLinear, lambda: _build_paro(ParoQuantTritonLinear), lambda: None),
+    Case(ParoTritonLinear, lambda: _build_paro(ParoTritonLinear), lambda: None),
     Case(MacaqLinear, lambda: _build_macaq(MacaqLinear), lambda: None),
     Case(MacaqTritonLinear, lambda: _build_macaq(MacaqTritonLinear), lambda: None),
     Case(VPTQLinear, lambda: _build_vptq(VPTQLinear), lambda: None),

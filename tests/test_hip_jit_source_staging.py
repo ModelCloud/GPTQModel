@@ -74,7 +74,7 @@ def test_staging_is_disabled_off_rocm(monkeypatch, tmp_path):
         "gptqmodel.quantization.gptq_cuda",
         "gptqmodel.utils.allspark_hip",
         "gptqmodel.utils.hadamard",
-        "gptqmodel.utils.paroquant",
+        "gptqmodel.utils.paro",
         "gptqmodel.exllamav3.ext",
     ],
 )

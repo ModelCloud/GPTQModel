@@ -487,9 +487,9 @@
         {
           "family": "cpu",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -502,7 +502,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -512,10 +512,10 @@
         },
         {
           "family": "cpu",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",
@@ -1593,9 +1593,9 @@
         {
           "family": "cuda",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -1608,7 +1608,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -1618,10 +1618,10 @@
         },
         {
           "family": "cuda",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",
@@ -2512,9 +2512,9 @@
         {
           "family": "cpu",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -2527,7 +2527,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -2537,10 +2537,10 @@
         },
         {
           "family": "cpu",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",
@@ -3449,9 +3449,9 @@
         {
           "family": "rocm",
           "kernel": "ParoLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant",
+          "module": "gptqmodel.nn_modules.qlinear.paro",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "all"
@@ -3464,7 +3464,7 @@
           "kernel": "ParoMlxQuantLinear",
           "module": "gptqmodel.nn_modules.qlinear.mlx",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "mps"
@@ -3474,10 +3474,10 @@
         },
         {
           "family": "rocm",
-          "kernel": "ParoQuantTritonLinear",
-          "module": "gptqmodel.nn_modules.qlinear.paroquant_triton",
+          "kernel": "ParoTritonLinear",
+          "module": "gptqmodel.nn_modules.qlinear.paro_triton",
           "methods": [
-            "paroquant"
+            "paro"
           ],
           "declared_devices": [
             "cuda",

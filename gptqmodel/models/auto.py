@@ -1293,7 +1293,7 @@ class GPTQModel:
         elif normalized_method == METHOD.AWQ.value:
             backend = BACKEND.AWQ_TORCH
         elif normalized_method == METHOD.PARO.value:
-            backend = BACKEND.PAROQUANT_CUDA
+            backend = BACKEND.PARO_CUDA
         elif normalized_method == METHOD.FP8.value:
             backend = BACKEND.FP8_TORCH
         elif normalized_method == METHOD.NF12.value:

@@ -80,7 +80,7 @@ _NVCC_VERSION_LOCK = threading.Lock()
 _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 # Default NVCC internal threading for JIT builds. This is based on clean-build
 # timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
-# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
+# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and Paro.
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"

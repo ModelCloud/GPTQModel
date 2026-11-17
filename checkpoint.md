@@ -202,9 +202,9 @@ override is accepted.
 The current checkpoint adapter supports:
 
 - model `model_type` values `llama` and `qwen3_moe`;
-- GPTQ, RTN, AWQ, QQQ, ParoQuant, EXL3, FP8, GGUF, and bitsandbytes
+- GPTQ, RTN, AWQ, QQQ, Paro, EXL3, FP8, GGUF, and bitsandbytes
   quantization paths;
-- EoRA continuation with GPTQ, AWQ, QQQ, and ParoQuant;
+- EoRA continuation with GPTQ, AWQ, QQQ, and Paro;
 - the same normally supported export formats and packing kernels as ordinary
   quantization.
 

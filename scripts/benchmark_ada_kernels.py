@@ -67,7 +67,7 @@ GGUF_CASES = (
     ("Q6_K", 4096, 11008),
 )
 GGUF_ROWS = (1, 8, 64)
-SECTIONS = ("gemv", "gemm", "dequant", "gguf", "paroquant", "awq_gemv")
+SECTIONS = ("gemv", "gemm", "dequant", "gguf", "paro", "awq_gemv")
 L2_FLUSH_BYTES = 256 * 1024 * 1024
 
 
@@ -615,18 +615,18 @@ def _gguf_row(qtype, in_features, out_features, rows, device, l2, args):
 
 
 # --------------------------------------------------------------------------- #
-# ParoQuant / portable AWQ GEMV helpers
+# Paro / portable AWQ GEMV helpers
 # --------------------------------------------------------------------------- #
 
-PAROQUANT_SHAPES = ((2048, 2048), (4096, 4096), (5120, 8192), (14336, 4096), (4096, 11008))
-PAROQUANT_ROWS = (1, 8, 16, 64, 128, 1024)
+PARO_SHAPES = ((2048, 2048), (4096, 4096), (5120, 8192), (14336, 4096), (4096, 11008))
+PARO_ROWS = (1, 8, 16, 64, 128, 1024)
 AWQ_GEMV_SHAPES = (
     (2048, 2048), (4096, 4096), (5120, 8192), (14336, 4096), (4096, 11008), (896, 128),
 )
 
 
 def _awq_nibble_pack(codes: torch.Tensor) -> torch.Tensor:
-    """AWQ [0,2,4,6,1,3,5,7] fast-axis pack, for the ParoQuant buffers only."""
+    """AWQ [0,2,4,6,1,3,5,7] fast-axis pack, for the Paro buffers only."""
 
     packed = torch.zeros((codes.shape[0], codes.shape[1] // 8), dtype=torch.int32, device=codes.device)
     for i, order in enumerate([0, 2, 4, 6, 1, 3, 5, 7]):
@@ -641,7 +641,7 @@ def _awq_nibble_unpack(packed: torch.Tensor) -> torch.Tensor:
     return codes.index_select(-1, order).flatten(-2)
 
 
-def _paroquant_buffers(k, n, group_size, device, seed=0):
+def _paro_buffers(k, n, group_size, device, seed=0):
     torch.manual_seed(seed)
     codes = torch.randint(0, 16, (k, n), dtype=torch.int32, device=device)
     zeros = torch.randint(0, 16, (k // group_size, n), dtype=torch.int32, device=device)
@@ -649,15 +649,15 @@ def _paroquant_buffers(k, n, group_size, device, seed=0):
     return codes, zeros, scales, _awq_nibble_pack(codes), _awq_nibble_pack(zeros)
 
 
-def _paroquant_launch(tile, x, qweight, scales, qzeros, group_size):
-    from gptqmodel.quantization.paroquant.modules.triton import gemm as pg
+def _paro_launch(tile, x, qweight, scales, qzeros, group_size):
+    from gptqmodel.quantization.paro.modules.triton import gemm as pg
 
     rows, k = x.shape
     n = scales.shape[1]
     bm, bn, bk, warps, stages = tile
     out = torch.empty((rows, n), dtype=x.dtype, device=x.device)
     grid = (((rows + bm - 1) // bm) * ((n + bn - 1) // bn),)
-    pg.paroquant_gemm_kernel[grid](
+    pg.paro_gemm_kernel[grid](
         x, qweight, out, qzeros, scales, rows, n, k, group_size,
         BLOCK_SIZE_M=bm, BLOCK_SIZE_N=bn, BLOCK_SIZE_K=min(bk, group_size),
         USE_FP32_ACCUM=True, num_warps=warps, num_stages=stages,
@@ -665,15 +665,15 @@ def _paroquant_launch(tile, x, qweight, scales, qzeros, group_size):
     return out
 
 
-def _paroquant_row(in_features, out_features, rows, device, l2, args):
-    from gptqmodel.quantization.paroquant.modules.triton import gemm as pg
+def _paro_row(in_features, out_features, rows, device, l2, args):
+    from gptqmodel.quantization.paro.modules.triton import gemm as pg
 
-    codes, zeros, scales, qweight, qzeros = _paroquant_buffers(
+    codes, zeros, scales, qweight, qzeros = _paro_buffers(
         in_features, out_features, args.group_size, device,
     )
     kind = "decode" if rows <= 8 else "prefill"
-    tuned = pg.paroquant_gemm_launch_config(kind, device, rows=rows)
-    reference = pg._PAROQUANT_GEMM_DEFAULT_CONFIGS[kind]
+    tuned = pg.paro_gemm_launch_config(kind, device, rows=rows)
+    reference = pg._PARO_GEMM_DEFAULT_CONFIGS[kind]
     x = torch.randn(rows, in_features, device=device, dtype=torch.float16)
     group = torch.arange(in_features, device=device) // args.group_size
     dense = (
@@ -681,16 +681,16 @@ def _paroquant_row(in_features, out_features, rows, device, l2, args):
     ).to(torch.float64)
     truth = x.to(torch.float64) @ dense
 
-    tuned_fn = lambda: _paroquant_launch(tuned, x, qweight, scales, qzeros, args.group_size)
-    ref_fn = lambda: _paroquant_launch(reference, x, qweight, scales, qzeros, args.group_size)
+    tuned_fn = lambda: _paro_launch(tuned, x, qweight, scales, qzeros, args.group_size)
+    ref_fn = lambda: _paro_launch(reference, x, qweight, scales, qzeros, args.group_size)
     tuned_hot, tuned_flushed = _timed_us(device, tuned_fn, warmup=args.warmup, iters=args.iters, l2=l2)
     ref_hot, ref_flushed = _timed_us(device, ref_fn, warmup=args.warmup, iters=args.iters, l2=l2)
     with torch.inference_mode():
         out = tuned_fn()
     err = (out.to(torch.float64) - truth).abs().max().item()
     return {
-        "section": "paroquant", "in_features": in_features, "out_features": out_features,
-        "rows": rows, "band": pg.paroquant_gemm_launch_config(kind, device, rows=rows),
+        "section": "paro", "in_features": in_features, "out_features": out_features,
+        "rows": rows, "band": pg.paro_gemm_launch_config(kind, device, rows=rows),
         "tuned_cfg": list(tuned), "reference_cfg": list(reference),
         "tuned_hot_us": tuned_hot, "tuned_flushed_us": tuned_flushed,
         "reference_hot_us": ref_hot, "reference_flushed_us": ref_flushed,
@@ -774,12 +774,12 @@ def _awq_gemv_row(in_features, out_features, device, l2, args):
     }
 
 
-    if "paroquant" in sections:
-        from gptqmodel.quantization.paroquant.modules.triton import gemm as pg
+    if "paro" in sections:
+        from gptqmodel.quantization.paro.modules.triton import gemm as pg
 
-        for in_features, out_features in PAROQUANT_SHAPES:
-            for n_rows in PAROQUANT_ROWS:
-                row = _paroquant_row(in_features, out_features, n_rows, device, l2, args)
+        for in_features, out_features in PARO_SHAPES:
+            for n_rows in PARO_ROWS:
+                row = _paro_row(in_features, out_features, n_rows, device, l2, args)
                 rows.append(row)
                 _print_row(row)
             torch.cuda.empty_cache()
@@ -825,10 +825,10 @@ def run(args: argparse.Namespace) -> int:
             del module
             torch.cuda.empty_cache()
 
-    if "paroquant" in sections:
-        for in_features, out_features in PAROQUANT_SHAPES:
-            for n_rows in PAROQUANT_ROWS:
-                row = _paroquant_row(in_features, out_features, n_rows, device, l2, args)
+    if "paro" in sections:
+        for in_features, out_features in PARO_SHAPES:
+            for n_rows in PARO_ROWS:
+                row = _paro_row(in_features, out_features, n_rows, device, l2, args)
                 rows.append(row)
                 _print_row(row)
             torch.cuda.empty_cache()
@@ -891,7 +891,7 @@ def _print_row(row: dict[str, Any]) -> None:
               f"fused {row['fused_hot_us']:.1f}/{row['fused_flushed_us']:.1f} split "
               f"{row['split_hot_us']:.1f}/{row['split_flushed_us']:.1f} us -> "
               f"{row['speedup_hot']:.2f}x hot, dispatch={row['dispatch_gemm']}", flush=True)
-    elif kind in ("paroquant", "awq_gemv"):
+    elif kind in ("paro", "awq_gemv"):
         print(f"  [{kind} K={row['in_features']} N={row['out_features']}"
               f"{'' if kind == 'awq_gemv' else ' M=' + str(row['rows'])}] "
               f"tuned {row['tuned_hot_us']:.1f}/{row['tuned_flushed_us']:.1f} ref "

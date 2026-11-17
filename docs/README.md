@@ -63,7 +63,7 @@ pages below document specific features, compatibility boundaries, and implementa
 - [MoE padding ownership and calibration capture lifetimes](moe-padding-and-awq-dedup.md)
 - [Multimodal calibration replay](multimodal-calibration.md)
 - [NumPy-free core: optional dependency, not a hard one](numpy-free-core.md)
-- [ParoQuant](paroquant.md)
+- [Paro](paro.md)
 - [Prism Bonsai GGUF compatibility](prism-bonsai-gguf.md)
 - [Protocol actions](protocol-actions.md)
 - [QQQ default Hessian damping](qqq-default-damp.md)

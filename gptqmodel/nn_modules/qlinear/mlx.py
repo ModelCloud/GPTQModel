@@ -6,7 +6,7 @@
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
 # BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
-# Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
+# Format references: Paro (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
 # in the source implementations and method-specific runtime modules.
 """Validated GPT-QModel checkpoint holders for MLX native linear inference."""
@@ -38,7 +38,7 @@ from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from .gguf import GGUFTorchLinear
 from .macaq import MacaqLinear
 from .nf12 import NF12Linear
-from .paroquant import ParoLinear
+from .paro import ParoLinear
 from .qqq import QQQTorchLinear
 from .torch import TorchLinear
 from .torch_awq import AwqTorchLinear
@@ -745,7 +745,7 @@ class LLMAwqMlxQuantLinear(_MlxGemvFastTransfer, LLMAwqLinear):
 
 
 class ParoMlxQuantLinear(_MlxLinearContract, ParoLinear):
-    """ParoQuant holder with the source AWQ codes and learned rotation state."""
+    """Paro holder with the source AWQ codes and learned rotation state."""
 
     # MLX arrays; mx.compile owns the graph
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.NOT_APPLICABLE
@@ -753,7 +753,7 @@ class ParoMlxQuantLinear(_MlxLinearContract, ParoLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.PARO]
-    SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 0}
+    SUPPORTS_FORMATS = {FORMAT.PARO: 0}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

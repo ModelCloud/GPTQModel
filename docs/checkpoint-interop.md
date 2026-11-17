@@ -460,7 +460,7 @@ back to GPTQ.
 Packed GGUF is different: `transformers` owns the `gguf` name and routes it to
 `GgufHfQuantizer`, which expects a `.gguf` file. GPT-QModel publishes
 `gptqmodel_gguf` instead and registers a refusing quantizer for that name.
-Every other GPT-QModel-only layout (`exl3`, `qqq`, `paroquant`, `macaq`,
+Every other GPT-QModel-only layout (`exl3`, `qqq`, `paro`, `macaq`,
 `nf12`, `tt-blockfloat`) is registered from
 `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`.
 
@@ -596,7 +596,7 @@ longer matches the snapshot has no inverse, so export raises instead of writing
 | `PeftModel.from_pretrained()` on a Marlin base | `RuntimeError` from `state_dict()` | adapter loads; only checkpoint writes refuse |
 | RTN `format="gemm"` config | `quant_method: gptq` with `format: gemm` | `quant_method: awq` |
 | New packed GGUF checkpoint in plain HF | `gguf` routed to `GgufHfQuantizer`, random weights | `gptqmodel_gguf` raises an actionable `ValueError` once `gptqmodel` is imported; otherwise HF only warns |
-| `exl3` / `qqq` / `paroquant` / `macaq` / `nf12` / `tt-blockfloat` checkpoint in plain HF | `Unknown quantization type ... skip the quantization`, random weights | refusing quantizer raises once `gptqmodel` is imported; save-time warning otherwise |
+| `exl3` / `qqq` / `paro` / `macaq` / `nf12` / `tt-blockfloat` checkpoint in plain HF | `Unknown quantization type ... skip the quantization`, random weights | refusing quantizer raises once `gptqmodel` is imported; save-time warning otherwise |
 | `torch.save(model)` after `optimize()` | `PicklingError` on the compiled bound method (FP8, EXL3 Torch, VPTQ) | round-trips; unpickled module runs eager |
 
 ### Save, Marlin, export, and mixed-bit dequantization (items 4-8)
