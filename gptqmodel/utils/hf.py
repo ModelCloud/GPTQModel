@@ -74,7 +74,7 @@ except ImportError:
     from transformers import PretrainedConfig as PreTrainedConfig
 
 from ..utils.logger import setup_logger
-from ..utils.security import RemoteCodeSecurityError, require_remote_code_permission, safety_checks_bypassed
+from ..utils.security import require_remote_code_permission, safety_checks_bypassed
 
 
 __all__ = [
@@ -101,7 +101,6 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
-_TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED: set[tuple[str, str, str]] = set()
 _MISSING = object()
 INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
@@ -951,77 +950,6 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str, **config
     return True, model_type, getattr(model_cls, "__name__", str(model_cls))
 
 
-@lru_cache(maxsize=None)
-def _checkpoint_config_payload(model_id_or_path: str) -> Optional[dict]:
-    """Read the checkpoint's raw ``config.json`` without executing its code.
-
-    ``resolve_trust_remote_code`` already loaded this file through
-    ``AutoConfig``, so the read is served from the same cache. Reading the raw
-    payload keeps the layout probe independent of the installed native config
-    class and never imports a snapshot module.
-    """
-
-    try:
-        config_path = cached_file(model_id_or_path, "config.json")
-    except Exception:
-        return None
-
-    try:
-        with open(config_path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, TypeError, ValueError):
-        return None
-
-    return payload if isinstance(payload, dict) else None
-
-
-# Config fields that select a model layout the installed native Transformers
-# class cannot represent, keyed by checkpoint ``model_type``. A remote
-# ``auto_map`` class name is not a layout signal: remote and native classes for
-# the same architecture are routinely spelled differently (``PhiMoEForCausalLM``
-# vs ``PhimoeForCausalLM``, ``MPTForCausalLM`` vs ``MptForCausalLM``,
-# ``MiniMaxM2ForCausalLM`` vs ``MiniMaxForCausalLM``) and native conversion
-# mappings rename checkpoint keys such as ``attention.*`` -> ``self_attn.*``.
-_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS: dict[str, tuple[str, ...]] = {
-    # Ling-2.6-flash (#4373): the remote MLA branch owns `q_a_proj` /
-    # `q_a_layernorm` / `q_b_proj`. Native `BailingHybridAttention` only has a
-    # dense `q_proj`, and `BailingHybridConfig` deletes `q_lora_rank`.
-    "bailing_hybrid": ("q_lora_rank",),
-}
-
-
-@lru_cache(maxsize=None)
-def _checkpoint_remote_layout_marker(model_id_or_path: str) -> tuple[Optional[str], Optional[str]]:
-    """Return ``(marker, remote_class_name)`` for a checkpoint's remote model code.
-
-    ``marker`` is the ``config.json`` field from
-    ``_REMOTE_ONLY_LAYOUT_CONFIG_MARKERS`` that the checkpoint sets, or ``None``
-    when the installed native class can load the checkpoint. A marker counts
-    only when the checkpoint also ships ``auto_map.AutoModelForCausalLM``;
-    without remote model code there is nothing to keep trust for.
-    """
-
-    payload = _checkpoint_config_payload(model_id_or_path)
-    if payload is None:
-        return None, None
-
-    auto_map = payload.get("auto_map")
-    if not isinstance(auto_map, dict):
-        return None, None
-
-    remote_class_ref = auto_map.get("AutoModelForCausalLM")
-    if not isinstance(remote_class_ref, str) or not remote_class_ref:
-        return None, None
-
-    remote_class_name = remote_class_ref.rsplit(".", 1)[-1]
-    model_type = str(payload.get("model_type") or "").lower()
-    for marker in _REMOTE_ONLY_LAYOUT_CONFIG_MARKERS.get(model_type, ()):
-        if payload.get(marker):
-            return marker, remote_class_name
-
-    return None, remote_class_name
-
-
 def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kwargs):
     """Read config data first, then select package-owned or native config code.
 
@@ -1055,26 +983,9 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
     from ..models.local import local_model_loader_for_config
 
     if model_id_or_path:
-        try:
-            payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **config_load_kwargs)
-        except OSError:
-            # With trust disabled no code can run; leave a missing-path error
-            # to the model loader, which owns local-path diagnostics.
-            if not trust_remote_code:
-                return False
-            raise
+        payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **config_load_kwargs)
         if local_model_loader_for_config(payload) is not None:
             return False
-        # A native model_type can still advertise a remote-only layout. Never
-        # silently load the incompatible native architecture when trust is off.
-        markers = _REMOTE_ONLY_LAYOUT_CONFIG_MARKERS.get(str(payload.get("model_type", "")).lower(), ())
-        if any(payload.get(marker) for marker in markers):
-            if not trust_remote_code:
-                raise RemoteCodeSecurityError(
-                    "This checkpoint layout requires a GPT-QModel local model port; "
-                    "the native Transformers implementation cannot represent it."
-                )
-            return require_remote_code_permission(trust_remote_code)
     if not model_id_or_path:
         return require_remote_code_permission(trust_remote_code)
 

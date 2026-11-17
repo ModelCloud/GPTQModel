@@ -329,6 +329,9 @@ decoders and plain AWQ; native Ovis2 keeps its separate definition.
 [Ovis2.5 and Ovis2.6 decoder selection](docs/transformers5-model-ports.md#ovis25-and-ovis26-decoder-selection)
 binds their NaViT visual vocabulary to exact native Qwen3, Qwen3 MoE or Qwen3
 Next text decoders, with explicit ownership and image-calibrated plain AWQ.
+[Qwen3 and Marin selection](docs/transformers5-model-ports.md#qwen3-and-marin-native-selection)
+uses exact native Qwen3 classes and tokenizers for the verified release layouts;
+unqualified raw `marin` metadata fails explicitly.
 [Shared checkpoint ownership](docs/checkpoint-owned-materialization.md)
 explains generated device maps for tied aliases and native FP32 destinations
 during lazy offload, including the exclusions for packed weights.

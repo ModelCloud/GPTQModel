@@ -64,6 +64,7 @@ probe and writer callers.
 | --- | --- | --- |
 | Disabled trust | `resolve_trust_remote_code:1044-1068` registered optional packages and read config despite denying Python | Immediate `False`; config construction reports errors and permits repair/retry |
 | Owned config | `load_model_config:1028` registered Qwen-Drive before selected config ownership | Selected raw config and `LocalModelLoader` first; owned definitions bypass optional registration |
+| Legacy Ling marker | `3c177fbe7:gptqmodel/utils/hf.py:955-1022` maintained a second payload reader and `q_lora_rank` marker test | The package-owned Bailing config owns dense/MLA selection; no duplicate remote-layout marker reader |
 
 The new `tests/test_local_model_loading.py` nodes
 `test_disabled_trust_defers_config_errors_and_allows_repair` and
@@ -97,7 +98,7 @@ flowchart TD
 For GGUF checkpoints, the explicitly selected `gguf_file` remains the config
 source through the data read, trust preflight and final construction, including
 when a subfolder is selected. An unrelated `config.json` cannot veto that
-selection or introduce a remote-only layout marker. This also allows a
+selection or change its implementation policy. This also allows a
 GGUF-only subfolder to load without a JSON config.
 
 ```mermaid
@@ -217,7 +218,7 @@ the responsibility of those engines.
 | Mechanism | Previous behavior (base revision `bb36e7fb2`) | Current behavior |
 | --- | --- | --- |
 | Remote-only implementation | Explicit trust alone allowed checkpoint Python (`gptqmodel/utils/hf.py:1011-1052`) | Explicit trust and the existing security bypass are both required |
-| Native model with a remote-only layout marker | Kept remote trust (`gptqmodel/utils/hf.py:1024-1038`) | Local port, explicit bypass, or a clear failure; no incompatible native fallback |
+| Legacy Bailing Hybrid layout | A `q_lora_rank` marker kept remote trust (`gptqmodel/utils/hf.py:1024-1038`) | Package-owned config selects dense/MLA; checkpoint Python cannot override it |
 | Config selection | `AutoConfig.from_pretrained` selected checkpoint config classes (`gptqmodel/models/auto.py:643`, `gptqmodel/models/loader.py:1887,2440`) | Definition-owned config class first, then gated AutoConfig |
 | Missing legacy `model_type` | Only `payload.get("model_type")` could select package code (`9ebb28f07:gptqmodel/utils/hf.py:1030,1060`) | Explicit opt-in architecture metadata in the package; unique complete match or clear conflict error |
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |

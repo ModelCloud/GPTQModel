@@ -38,10 +38,7 @@ def _write_config(directory: Path, payload: dict) -> str:
 @pytest.fixture(autouse=True)
 def _clear_layout_caches():
     def clear():
-        hf_utils._checkpoint_config_payload.cache_clear()
-        hf_utils._checkpoint_remote_layout_marker.cache_clear()
         hf_utils._TRUST_REMOTE_CODE_OVERRIDE_WARNED.clear()
-        hf_utils._TRUST_REMOTE_CODE_REMOTE_LAYOUT_LOGGED.clear()
 
     clear()
     yield
@@ -97,7 +94,6 @@ def test_remote_class_name_difference_keeps_native_layout(tmp_path, model_type, 
     assert native_cls_name == native_name
     assert native_cls_name != remote_ref.rsplit(".", 1)[-1]
 
-    assert hf_utils._checkpoint_remote_layout_marker(checkpoint) == (None, remote_ref.rsplit(".", 1)[-1])
     assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
 
 
@@ -116,7 +112,6 @@ def test_ling_mla_marker_uses_package_code_with_or_without_bypass(tmp_path, monk
         },
     )
 
-    assert hf_utils._checkpoint_remote_layout_marker(checkpoint) == ("q_lora_rank", "BailingMoeV2_5ForCausalLM")
     assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
     monkeypatch.setenv(BYPASS_ENV, "1")
     assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
@@ -146,13 +141,12 @@ def test_layout_marker_without_remote_model_code_selects_local_port(tmp_path, mo
         {"model_type": "bailing_hybrid", "q_lora_rank": 1536},
     )
 
-    assert hf_utils._checkpoint_remote_layout_marker(checkpoint) == (None, None)
     assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
 
 
 def test_layout_marker_is_scoped_to_its_model_type(tmp_path):
-    # `q_lora_rank` is native layout for DeepSeek-V3; only `bailing_hybrid`
-    # declares it as a remote-only marker.
+    # `q_lora_rank` belongs to native DeepSeek-V3 metadata as well as Ling's
+    # package-owned MLA config. It never grants permission for checkpoint code.
     checkpoint = _write_config(
         tmp_path / "deepseek_v3",
         {

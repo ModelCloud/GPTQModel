@@ -27,8 +27,12 @@ The earlier batches below used runtime candidate
 | InternVL and InternLM2 model/module plans, shared model/processor/tokenizer/options, registry/AWQ, Baichuan tokenizer and original MiniCPM | 1,143 passed, five fixture skips, 20 warnings; 179.91s |
 | Ovis2.5 model/module plan | 58 passed, no skips, six warnings; 8.80s |
 | Ovis2.6 MoE/Next model/module plans | 110 passed, no skips, nine warnings; 39.46s |
+| Ovis2.6 MoE/Next saved generation policy, caller overrides and expanded owned/module-plan suite | 127 passed, no skips, 21 warnings; 48.30s |
 | Updated Ovis central plans, fusion admission, ordering and generic AWQ policy | 707 passed, 465 skipped, six warnings; 29.83s |
 | AWQ fold-safety and norm guard/teacher lifecycle | 44 passed, no skips, two warnings; 10.70s |
+| Native Qwen3 and released Marin layouts, hostile tokenizer/model maps and public plain-AWQ cycles | 102 passed, no skips, two warnings; 60.33s |
+| Loader/tokenizer/options, Ling/Bailing, config, export/dequant boundary and real nested-config module plans | 590 passed, one optional-PEFT skip, 146 warnings; 10.61s |
+| Native Qwen3 with norm-teacher lifecycle, registry/fusion admission, ordering and AWQ fold safety | 685 passed, 460 NVIDIA-only skips, four warnings; 78.62s |
 
 The five release-run skips are three unavailable Pangu checkpoints and the
 non-buildable `opt350` and `muse_glimmer` CausalLM fixtures.
@@ -54,6 +58,7 @@ quality coverage on this checkout.
 | `Ovis2_5QModel` / `ovis2_5` | [Owned Qwen3/SigLIP2 NaViT soft-visual-vocabulary binding and Apache notices](../gptqmodel/models/ports/ovis2_5/README.md) | Both released header inventories, independent vision/merge equations, saved generation policy, hostile metadata, native decoder cache/generation and two safetensors cycles | Six public image-calibrated plain-AWQ cases, all 14 decoder linears and dense vision exclusions; no scale groups | Native Ovis2 remains separate; no trained-payload quality, GPU, fusion, concurrency or foreign-cache qualification |
 | `Ovis2_6_MoeQModel`, `Ovis2_6_NextQModel` | [Owned NaViT/visual-vocabulary wrapper and native Qwen3 MoE/Next decoders](../gptqmodel/models/ports/ovis2_6_moe/README.md) | Independent checkpoint inventories and media equations, hostile metadata, tokenizer/processor, dtype/cache/generation and repeated safetensors reloads | Public image-calibrated plain AWQ, native expert ownership and dense exclusions; linear-attention containers and routers excluded | No trained-payload quality, GPU, optimized FLA, fusion, concurrency or foreign-cache qualification |
 | `OvisQModel` / `ovis` | [Package-owned Ovis 1.0/1.5/1.6 visual vocabulary and pinned Apache notices](../gptqmodel/models/ports/ovis/README.md) | Eight release indexes and four full header inventories, independent vision/media merge equations, native Llama/Qwen2/Gemma2 decoders, released generation policy, hostile metadata, cache and safetensors reload | Eight public image-calibrated plain-AWQ cases, all 14 decoder linears, dense exclusions and two exact reloads; no scale groups | Native Ovis2 is separate; no trained weights, GPU, fusion, concurrent execution, foreign cache or AWQ fold/search qualification |
+| `Qwen3QModel` / `qwen3`, released Marin-32B | [Exact native Qwen3 and pinned Qwen/Marin assets and licenses](../gptqmodel/models/ports/qwen3/README.md) | All 1,018 released key/shapes, exact native tokenizer IDs, hostile model/tokenizer/custom-generation maps, independent Q/K norm/RoPE equations, cache/generation and repeated safetensors cycles | Twelve public plain-AWQ cases, all 14 decoder linears and dense exclusions, offload false/true and two exact reloads; existing Qwen3 fusion contract retained | Raw `marin` fails explicitly; no trained weights, GPU, new fusion, foreign cache, parallel or full-context qualification |
 | `KlearQModel` / `klear` | [Package-owned dense/MoE port, pinned Base/Instruct sources and Apache notices](../gptqmodel/models/ports/klear/README.md) | Full 25,059-key meta inventory, independent attention/routing equations, requested-dtype loading, cache/generation, hostile metadata and safetensors reload | Real public plain AWQ dense/MoE/mixed packing and two save/reload cycles; no scale groups | No trained-weight, GPU, FlashAttention, fusion, parallel or compiler qualification |
 | `KimiK3QModel`, `KimiLinearQModel` / AttnRes variants | [Package-owned MLA/KDA, vision and K3 TikToken/XTML; exact native delegation for ordinary KimiLinear](../gptqmodel/models/ports/kimi_k3/README.md) | Independent float64 MLA/KDA and MoE oracles, CPU/meta owners, exact tokenizer IDs, image-conditioned logits, cache/generation, failure/retry and public loads | AttnRes rejects ordinary GPTQ/AWQ before mutation; existing bounded runner retained | No trained-weight, GPU, fused FLA, FlashAttention, MTP, video, parallel or compiler qualification |
 | `DeepSeekV2QModel` / `deepseek_v2` | [Native-derived compatibility and pinned legacy source](../gptqmodel/models/ports/deepseek_v2/README.md) | Lite/full MLA, dense/periodic/shared MoE, top-k normalization, native expert conversion, cache/generation and safetensors round trips, malicious metadata matrix | Actual CPU plain quantization and packing; no scale groups | No GPU/trained-checkpoint quality, FlashAttention, distributed experts or full packed-checkpoint round trip; expert parallelism rejected |
@@ -1145,4 +1150,54 @@ OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
   tests/module_tree/test_registered_module_plans.py tests/module_tree/test_definition_subset_ordering.py \
   tests/module_tree/test_fusable_models.py tests/test_internlm_local_port.py \
   tests/module_tree/test_internlm_local_port.py -x --tb=short --disable-warnings -rs
+```
+
+## Qwen3 and Marin native selection
+
+`Qwen3Loader.__get__` binds only `Qwen3QModel`; derived Qwen3.5 definitions
+retain their own AutoModel selection. `NativeQwen3Config.from_pretrained`
+reads configuration data and returns exact native `Qwen3Config`, paired with
+native `Qwen3ForCausalLM` and `TokenizersBackend`. Published Marin-32B declares
+`model_type=qwen3`; raw `marin` has no verified checkpoint schema and raises
+before permission handling. The [port reference](../gptqmodel/models/ports/qwen3/README.md)
+preserves both release pins, source hashes, tokenizer fixtures and licenses.
+
+```mermaid
+flowchart TD
+    A["Qwen3QModel.loader: Qwen3Loader.__get__"] --> B["LocalModelLoader: NativeQwen3Config.from_pretrained"]
+    B --> C{"Selected model_type is qwen3?"}
+    C -- yes --> D["Exact native Qwen3Config / Qwen3ForCausalLM / TokenizersBackend"]
+    C -- no --> E["ValueError: raw marin has no verified layout"]
+    D --> F["Public forward, cache, generation and safetensors lifecycle"]
+    D --> G["Explicit plain AWQ; no inferred fold/search safety"]
+    style E fill:#ffcdd2,stroke:#b71c1c
+```
+
+```mermaid
+flowchart LR
+    A["Previous inherited Llama loader"] --> B["Generic AutoModel / tokenizer metadata selection"]
+    C["Current definition-owned Qwen3Loader"] --> D["Exact native classes; checkpoint auto_map ignored"]
+    C --> E["Raw marin: explicit failure"]
+    F["Derived Qwen3.5 definition"] --> G["AutoModel selection retained"]
+    style E fill:#ffcdd2,stroke:#b71c1c
+```
+
+| Mechanism | Before | Current source |
+| --- | --- | --- |
+| Definition binding | Inherited Llama AutoModel selection | `gptqmodel/models/definitions/qwen3.py:20`; `ports/qwen3/__init__.py:13-21` |
+| Marin schema | Registry alias alone did not establish checkpoint layout | `ports/qwen3/native.py:18-26`: exact `qwen3` required; native config returned |
+| AWQ policy | Inherited scaling relationships | `definitions/qwen3.py:22-30`: exact Qwen3 uses plain quantization; derived policies preserved |
+
+Parent qualification on released Tokenicer 0.0.19 passes **102 tests, zero
+skips**, with two warnings in 60.33 seconds. It includes all 1,018 released
+key/shapes, actual pinned token IDs/chat, hostile checkpoint maps, independent
+float64 equations, dtype/cache/generation/failure-retry, twelve public plain-AWQ
+cases and two exact packed/dense reloads. No new fusion qualification is claimed;
+Qwen3's existing fusion contract remains unchanged. GPU, trained weights,
+full-context, parallel execution and foreign caches remain unqualified.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -m pytest -q \
+  tests/test_qwen3_local_port.py tests/module_tree/test_qwen3_local_port.py \
+  --tb=short -ra -o addopts= -o log_cli=false
 ```

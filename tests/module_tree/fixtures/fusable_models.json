@@ -3181,7 +3181,7 @@
     },
     "marin": {
       "definition": "Qwen3QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Raw marin metadata is unqualified; supported Marin-32B releases serialize native qwen3 and use its existing fusion contract."
     },
     "mimo": {
       "definition": "MimoQModel",

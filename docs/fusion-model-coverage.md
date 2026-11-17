@@ -260,7 +260,7 @@ layout alone does not authorize it.
 | `locateanything` | `LocateAnythingQModel` | Package-owned LocateAnything block-diffusion/MoonViT/localization wrapper; fusion executor has not been qualified. |
 | `longllama` | `LlamaQModel` | Package-owned LongLLaMA memory/cache port; fusion executor has not been qualified. |
 | `mage_vl` | `MageVLQModel` | Package-owned Mage-VL custom vision/Qwen3 multimodal binding; fusion executor has not been qualified. |
-| `marin` | `Qwen3QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `marin` | `Qwen3QModel` | Raw marin metadata is unqualified; supported Marin-32B releases serialize native qwen3 and use its existing fusion contract. |
 | `mimo` | `MimoQModel` | Package-owned MiMo-7B Qwen2 extension with full-precision auxiliary MTP; fusion executor has not been qualified. |
 | `mimo_v2` | `MimoV2QModel` | Package-owned MiMo-V2 hybrid attention; fusion executor has not been qualified. |
 | `minicpm` | `MiniCPMGPTQ` | Package-owned original MiniCPM scaled decoder and w1/w3/w2 MoE; fusion executor has not been qualified. |
