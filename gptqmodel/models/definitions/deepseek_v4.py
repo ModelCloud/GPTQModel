@@ -1408,6 +1408,8 @@ def deepseek_v4_mtp_source_projection_prefix(runtime_prefix: str) -> str:
 
 
 class DeepSeekV4QModel(DeepSeekV3QModel):
+    require_trust_remote_code = False
+
     dynamic_expert_index = "n_routed_experts"
     rotary_embedding = "model.rotary_emb"
     # Transformers intentionally ignores the integrated dSpark/MTP checkpoint
@@ -1473,6 +1475,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
             },
         },
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Hyper-connections, compressed attention and shared/routed MoE branches
+        # are not jointly qualified for folding/search. Quantize without folds.
+        return []
 
     def exllamav3_checkpoint_module_candidates(
         self,
