@@ -276,6 +276,7 @@ def _patch_transformers_refusing_quantizers():
     from .utils.hf_refusing_quantizer import (
         GPTQModelRefusingHfQuantizer,
         GPTQModelRefusingQuantizationConfig,
+        refusal_message,
     )
 
     with _MONKEY_PATCH_LOCK:
@@ -286,6 +287,32 @@ def _patch_transformers_refusing_quantizers():
             hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
                 method, GPTQModelRefusingHfQuantizer
             )
+
+        # transformers special-cases `quant_method == "bitsandbytes"` in
+        # `AutoHfQuantizer.from_config`: it demands an instance of its own
+        # `BitsAndBytesConfig` and only then appends the `_4bit`/`_8bit`
+        # suffix. That branch runs before the mapping lookup, so the refusing
+        # quantizer registered above is never constructed and GPT-QModel's
+        # layout raises a generic TypeError instead of the actionable error
+        # (#4664). Intercept the plain name only: `bitsandbytes_4bit` /
+        # `bitsandbytes_8bit` are genuine transformers names and must keep
+        # loading real HF bnb checkpoints.
+        original_from_config = hf_quant_auto.AutoHfQuantizer.__dict__["from_config"]
+        if not getattr(original_from_config, "_gptqmodel_refusal_guard", False):
+
+            @classmethod
+            def _refusing_from_config(cls, quantization_config, **kwargs):
+                method = (
+                    quantization_config.get("quant_method")
+                    if isinstance(quantization_config, dict)
+                    else getattr(quantization_config, "quant_method", None)
+                )
+                if method == "bitsandbytes":
+                    raise ValueError(refusal_message(method))
+                return original_from_config.__func__(cls, quantization_config, **kwargs)
+
+            _refusing_from_config._gptqmodel_refusal_guard = True
+            hf_quant_auto.AutoHfQuantizer.from_config = _refusing_from_config
 
 
 def _patch_transformers_save_pretrained_runtime_layout_guard():
