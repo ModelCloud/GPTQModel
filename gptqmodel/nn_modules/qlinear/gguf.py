@@ -1096,6 +1096,10 @@ def _dequantize_q5_0_numpy(data: np.ndarray) -> np.ndarray:
 
 
 def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
+    # ``data`` may be a strided view (the Triton backend keeps its packed weight
+    # in a transposed storage, #4811) and the block decoders reinterpret the
+    # last axis, which needs a contiguous buffer.
+    data = np.ascontiguousarray(data)
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
 
     if resolved_qtype == "F32":
@@ -1495,7 +1499,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
         weight = _dequantize_sign_only_torch(
-            self.qweight,
+            # ``qweight`` may be a permuted-storage view (#4811); the torch
+            # helper reshapes it, which needs the canonical contiguous order.
+            self.qweight.contiguous(),
             block_size=self.gguf_block_size,
             type_size=self.gguf_type_size,
             device=target_device,
