@@ -5,11 +5,12 @@
 
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import BatchFeature, ProcessorMixin
 
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..local import LocalModelLoader
 from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .lfm3 import LFM3QModel
 
@@ -18,16 +19,20 @@ class LFM3VLQModel(LFM3QModel):
     """LiquidAI LFM3-VL: LFM3 text decoder + LFM3 vision tower.
 
     Only the text decoder's linear projections are quantized.  The vision tower
-    (patchifier, gated depthwise convolutions, attention/MLP projections) and
+    (patch embedding, gated depthwise convolutions, attention/MLP projections) and
     the multimodal projector stay in their checkpoint dtype, matching the way
     other VL definitions keep their vision encoders unquantized.
 
-    Checkpoint layout matches the runtime shell exactly
-    (`model.vision_tower.*`, `model.language_model.*`, `model.multi_modal_projector.*`),
-    so no HF conversion map is needed.
+    Native Transformers converts the checkpoint's attention gate and vision
+    patch/norm names. Definition-owned aliases select those exact native
+    classes, independently of checkpoint auto_map and caller trust flags.
     """
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.lfm3_vl.native.Lfm3VlConfig",
+        model_class="gptqmodel.models.ports.lfm3_vl.native.Lfm3VlForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.lfm3_vl.native.Lfm3VlNativeProcessor",
+    )
 
     pre_lm_head_norm_module = "model.language_model.embedding_norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -42,8 +47,8 @@ class LFM3VLQModel(LFM3QModel):
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
             "conv": {
                 "in_proj": ("in_proj:0",),
-                "conv": ("conv:!",),
                 "out_proj": ("out_proj:1",),
+                "conv:!": (),
             },
             "self_attn": (
                 "q_proj:0",
@@ -52,7 +57,6 @@ class LFM3VLQModel(LFM3QModel):
                 "k_norm:0:!",
                 "v_proj:0",
                 "g_proj:!",
-                "gate_proj:!",
                 "o_proj:1",
             ),
             "ffn_norm": ("ffn_norm:!",),
@@ -63,7 +67,7 @@ class LFM3VLQModel(LFM3QModel):
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
-    require_trust_remote_code = True
+    require_trust_remote_code = False
     layer_modules_strict = False
 
     def _language_model(self):
@@ -126,7 +130,17 @@ class LFM3VLQModel(LFM3QModel):
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Native hybrid conv/attention has sigmoid gates, Q/K head norms and
+        # sandwich norms. Its complete source/consumer folds are unqualified;
+        # keep every declared linear on the existing plain AWQ path.
+        return []
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
@@ -147,13 +161,19 @@ class LFM3VLQModel(LFM3QModel):
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        return prepare_vlm_calibration_dataset(
+        calib_data = prepare_vlm_calibration_dataset(
             self,
             calibration_dataset,
             batch_size=batch_size,
             options=kwargs,
             preprocess_func=self.preprocess_dataset,
         )
+        for batch in calib_data:
+            if isinstance(batch, BatchFeature):
+                # Native patch embeddings consume the model dtype. BatchFeature
+                # casts floating media tensors while preserving integer IDs.
+                batch.to(dtype=self.model.dtype)
+        return calib_data
 
 
 __all__ = ["LFM3VLQModel"]
