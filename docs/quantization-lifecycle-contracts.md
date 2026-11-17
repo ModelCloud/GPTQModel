@@ -151,6 +151,8 @@ processor = ExampleProcessor(
 
 `ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationConfig` contains the dataset and its preparation policy. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy; a pruned module is handed to `LoopProcessor.prune_uncovered_module`, which a processor that tracks per-layer state beyond `tasks` (AWQ) must extend so the module neither gates layer completion nor reaches `submodule_finalize` ([uncovered-module prune](quantizer-moe.md#5-uncovered-module-prune-with-fallbacknone)). `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
 
+`subset_early_stop` is a per-forward control, not a per-subset-stage one. The pending-member set and the `forward_hook_last` flag describe one calibration batch: the stage refills the set and clears the flag on every batch, because routing and module call order change from batch to batch. A flag left over from the previous batch stops the next forward at the first member that fires, so only one module of the subset captures that batch ([#4738](https://github.com/ModelCloud/GPTQModel/issues/4738)).
+
 The checkpoint adapter accepts `(PRIMARY,)` and `(PRIMARY, SECONDARY)`. Other chains raise `NotImplementedError` before the quantization loop starts.
 
 ## Per-module settings API
