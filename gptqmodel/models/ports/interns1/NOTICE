@@ -6,6 +6,7 @@ Adaptations: Copyright 2026 ModelCloud.ai.
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 Source: https://huggingface.co/internlm/Intern-S1-mini/tree/0f25c8f60f4190a18dd6620c94bdccedbebc208d
+MoE layout reference: https://huggingface.co/internlm/Intern-S1/tree/4ecad381e28293c4825793f113327cc016cdcbda
 Tokenizer source SHA256: 0695012185b0e257b9352b333121d95e4e2336fc9331c56ec6d06dea54e60af5
 The checkpoint's source headers are retained in the derived files.
 No remote Python imports or dynamic downloads of implementation code are used.
