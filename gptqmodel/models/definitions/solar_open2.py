@@ -17,9 +17,11 @@ except ImportError:
             "create_recurrent_attention_mask is unavailable in this Transformers version."
         )
 
+
 from ...utils.attn_mask import normalize_seq_mask
 from ...utils.model import move_to
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -29,6 +31,15 @@ _CAPTURE_PADDING_MASK_ATTR = "_solar_open2_capture_padding_mask"
 
 class SolarOpen2QModel(BaseQModel):
     """GPTQ definition for Solar Open 2's hybrid-attention MoE decoder."""
+
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.solar_open2.configuration_solar_open2.SolarOpen2Config",
+        model_class="gptqmodel.models.ports.solar_open2.modeling_solar_open2.SolarOpen2ForCausalLM",
+    )
+    fusable = None
+
+    def awq_get_modules_for_scaling(self, *args, **kwargs):
+        return []
 
     layer_modules_strict = False
     dynamic_expert_index = "n_routed_experts"
@@ -63,12 +74,23 @@ class SolarOpen2QModel(BaseQModel):
                 "g_proj:0",
                 "o_norm:!",
                 "o_proj:1",
+                "A_log:!",
+                "dt_bias:!",
+                "b_proj:!",
+                "f_proj:!",
+                "f_a_proj:!",
+                "f_b_proj:!",
+                "g_a_proj:!",
+                "g_b_proj:!",
+                "q_conv1d:!",
+                "k_conv1d:!",
+                "v_conv1d:!",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 # Dense fallback for configurations with leading dense layers.
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "gate": ("gate:!",),
+                "gate": ("gate:!", "e_score_correction_bias:!"),
                 # Match SolarOpen2MoE.forward(): routed experts run before the
                 # shared expert contribution is added.
                 "experts": {
