@@ -253,6 +253,11 @@ def test_exllamav3_torch_chunked_forward_matches_independent_oracle(bits, dtype)
 def test_exllamav3_bridge_wide_noncontiguous_input_matches_independent_oracle(device, dtype, rows):
     if device == "cuda" and (not torch.cuda.is_available() or torch.version.hip is not None):
         pytest.skip("requires NVIDIA CUDA")
+    if dtype == torch.bfloat16 and device == "cuda":
+        # BF16 now takes the native FP16 kernels on CUDA (#4767); this test
+        # covers the wide Torch reconstruction path, which BF16 still uses on
+        # CPU. The native BF16 dispatch is covered by test_exl3_wide_input.py.
+        pytest.skip("BF16 uses the native EXL3 path on CUDA")
 
     bits = 4
     in_features = out_features = 128
