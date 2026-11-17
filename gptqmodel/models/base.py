@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import types
+import weakref
 from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
@@ -410,6 +411,51 @@ def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
     except Exception:  # pragma: no cover - exotic module trees
         return None
     return None
+
+
+class _CompiledModelForward:
+    """Call a compiled unbound ``forward`` without pinning the model (#4937).
+
+    ``torch.compile(model.forward)`` stores the bound method inside the
+    compiled wrapper, so installing that wrapper as an instance attribute
+    closes a ``model -> forward -> model`` cycle: the model, and its VRAM,
+    then survives until a full cyclic GC. Compiling the class function and
+    resolving the instance through a weak reference keeps the compiled fast
+    path cycle-free, like ``TorchLinear.optimize()`` does for
+    ``dequantize_weight`` (#4871).
+    """
+
+    __slots__ = ("_compiled", "_unbound", "_module_ref")
+
+    def __init__(self, compiled, unbound, module):
+        self._compiled = compiled
+        self._unbound = unbound
+        self._module_ref = weakref.ref(module)
+
+    def __call__(self, *args, **kwargs):
+        module = self._module_ref()
+        if module is None:
+            raise RuntimeError(
+                "compiled model `forward` called after its model was released"
+            )
+        return self._compiled(module, *args, **kwargs)
+
+    @property
+    def _torchdynamo_orig_callable(self):
+        """The eager bound ``forward`` this proxy wraps.
+
+        Returned on demand, never stored: a stored bound method would recreate
+        the cycle. ``optimize()`` recompiles ``type(model).forward`` instead,
+        so this is only what an unwrapping caller sees.
+        """
+
+        module = self._module_ref()
+        if module is None:
+            return self._unbound
+        return self._unbound.__get__(module, type(module))
+
+    def __repr__(self):
+        return f"<compiled model forward {self._compiled!r}>"
 
 
 class _QuantizedCheckpointSource:
@@ -4026,17 +4072,26 @@ class BaseQModel(nn.Module):
         # both a direct ``model(...)`` call and ``generate()`` enter the compiled
         # path, and keep the compile fallback for a deferred backend failure.
         model = getattr(self.model, "_orig_mod", self.model)
-        # A repeated ``optimize()`` must not stack compile wrappers: the
-        # fallback proxy records the eager callable it wraps, so compile that
-        # one again and let dynamo reuse its cache.
-        eager_forward = getattr(
-            model.forward, "_torchdynamo_orig_callable", model.forward
-        )
+        # Compiling the bound method would store it (and therefore the model)
+        # inside the compiled wrapper, and installing that wrapper on the
+        # instance closes a model -> forward -> model cycle that keeps the
+        # whole model and its VRAM alive until a cyclic GC (#4937). Compile the
+        # unbound class function and reach the instance through a weak
+        # reference instead. A repeated ``optimize()`` recompiles the same
+        # unbound function, so wrappers do not stack.
+        unbound_forward = type(model).forward
         compiled_forward = torch_compile(
-            eager_forward, fullgraph=fullgraph, backend=backend, mode=mode
+            unbound_forward, fullgraph=fullgraph, backend=backend, mode=mode
         )
-        if compiled_forward is not eager_forward:
-            model.forward = compiled_forward
+        if compiled_forward is unbound_forward:
+            # Compilation unavailable or disabled: drop a proxy from an earlier
+            # call so the class method is used again (no instance attribute,
+            # no cycle).
+            model.__dict__.pop("forward", None)
+        else:
+            model.forward = _CompiledModelForward(
+                compiled_forward, unbound_forward, model
+            )
         self.model = model
 
         #trigger kernel compilation hooks
