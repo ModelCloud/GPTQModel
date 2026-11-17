@@ -30,15 +30,24 @@ def test_awq_gemv_packed_transfer_matches_codes_and_torch(variant, group_size, d
     from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from gptqmodel.utils import mlx as mlx_utils
 
-    input_dims, output_dims = 256, 64
+    # GEMV_FAST and LLM_AWQ Torch sources require group_size 128 and
+    # 128-aligned out_features (#3717). Their MLX holders accept more group
+    # sizes, so use the holder itself as the packed source when the Torch
+    # contract rejects the combination; the buffer layout is identical.
+    input_dims = 256
+    output_dims = 128 if variant in {"fast", "llm"} else 64
     group = input_dims if group_size == -1 else group_size
     groups = input_dims // group
     rng = np.random.default_rng(2100 + group_size + {"gemv": 0, "fast": 10, "llm": 20}[variant])
-    source_class = ({"gemv": AwqGEMVLinear, "fast": AwqGEMVFastLinear,
-                     "llm": LLMAwqLinear}[variant] if not (variant == "gemv" and group_size == -1)
-                    else AwqGemvMlxQuantLinear)
     holder_class = {"gemv": AwqGemvMlxQuantLinear, "fast": AwqGemvFastMlxQuantLinear,
                     "llm": LLMAwqMlxQuantLinear}[variant]
+    torch_source_ok = (variant == "gemv" and group_size != -1) or (
+        variant in {"fast", "llm"} and group_size == 128
+    )
+    source_class = (
+        {"gemv": AwqGEMVLinear, "fast": AwqGEMVFastLinear, "llm": LLMAwqLinear}[variant]
+        if torch_source_ok else holder_class
+    )
     source = torch.nn.Module()
     source.linear = source_class(
         bits=4, group_size=group_size, sym=True, desc_act=False,
@@ -94,7 +103,16 @@ def test_awq_gemv_packed_transfer_matches_codes_and_torch(variant, group_size, d
     expected = (torch_inputs @ torch.from_numpy(decoded).T).to(
         torch.float16 if dtype == mx.float16 else torch.bfloat16,
     ).float().numpy()
-    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=0.002, atol=0.002)
+    # One bf16 ULP is 2**-7 (~7.8e-3) relative; fp16 is 2**-10. The MLX
+    # kernel accumulates in FP32 and only the final output cast differs, so
+    # allow one ULP of the activation dtype.
+    tolerance = 8e-3 if dtype == mx.bfloat16 else 2e-3
+    np.testing.assert_allclose(
+        np.asarray(actual.astype(mx.float32)),
+        expected,
+        rtol=tolerance,
+        atol=tolerance,
+    )
 
 
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))

@@ -133,7 +133,7 @@ class MacaqProcessor(SharedInputCaptureProcessor):
             return skip
 
         def hook(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-            self.tasks[name].add_batch(inp[0].data, out.data)
+            self.tasks[name].add_batch(self.calibration_rows(inp[0].data), out.data)
 
         return hook
 

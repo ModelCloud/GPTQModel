@@ -721,7 +721,9 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
         # chip. The native TTNN backend opens its own mesh and never consumes an
         # ``xla:N`` ordinal, so keep the abstract family unexpanded here.
         return selected
-    return expand_selector_device_family(selected)
+    # The default placement stays inside one compute-capability group so a host
+    # that mixes GPU generations still loads with no placement arguments (#4705).
+    return expand_selector_device_family(selected, single_capability_group=True)
 
 
 _ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})

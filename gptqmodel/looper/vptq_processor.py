@@ -68,6 +68,13 @@ class VPTQProcessor(SharedInputCaptureProcessor):
     ):
         """Initializes VPTQ processing and optional weight-delta tracking."""
 
+        if calibration is not None and calibration.exclude_attention_sinks:
+            # Dropping the sink rows from the VPTQ Hessian made wikitext-2 PPL
+            # 4.5-4.7x worse on Llama-3.2-1B and Llama-3.2-1B-Instruct, so
+            # refuse instead of producing a much worse checkpoint.
+            raise ValueError(
+                "VPTQ does not support `calibration_exclude_attention_sinks`; leave it False."
+            )
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,

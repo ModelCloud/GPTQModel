@@ -218,10 +218,11 @@ def test_qwen38_projection_qqq_dynamic_input_accuracy(
     source = (torch.randn(1, input_dims) * 0.05).half()
     mlx_input = mx.array(source.numpy()).astype(dtype)
     actual = layer(mlx_input)
-    half = mlx_input.astype(mx.float16)
-    quantized_mlx, input_scale_mlx = _dynamic_quant(half)
+    # #4537/#4534 keep the quantizer input and the scaled epilogue wide and
+    # narrow once, so the unfused reference must use the same dtypes: no FP16
+    # narrowing of a BF16 activation and no intermediate FP16 epilogue cast.
+    quantized_mlx, input_scale_mlx = _dynamic_quant(mlx_input)
     previous = native(quantized_mlx) * input_scale_mlx * layer.channel_scale
-    previous = previous.astype(mx.float16)
     if use_bias:
         previous = previous + layer.bias
     previous = previous.astype(dtype)
@@ -232,25 +233,30 @@ def test_qwen38_projection_qqq_dynamic_input_accuracy(
         np.asarray(previous.astype(mx.float32)),
     )
 
-    x = torch.from_numpy(np.asarray(half)).half()
+    # The quantizer reads the activation values it was handed, so the oracle
+    # consumes the resident (FP16/BF16-rounded) inputs and casts once.
+    x = torch.from_numpy(np.asarray(mlx_input.astype(mx.float32)))
     input_scale = (x.abs().amax(dim=-1, keepdim=True) / 127).float()
     quantized = (x / input_scale).round().clamp(-128, 127).float()
     pattern = (torch.arange(input_dims)[None, :] + torch.arange(16)[:, None]).remainder(16).float() - 8
     expected_by_phase = (
         (quantized @ pattern.T) * (16 if bits == 4 else 1)
         * input_scale * 0.001
-    ).half()
+    )
     expected = expected_by_phase[:, np.arange(output_dims) % 16]
     if use_bias:
         expected = expected + torch.from_numpy(bias)
-    if dtype == mx.bfloat16:
-        expected = expected.bfloat16()
+    target = torch.bfloat16 if dtype == mx.bfloat16 else torch.float16
+    expected = expected.to(target).float()
     visible = np.asarray(actual.astype(mx.float32))
-    expected = expected.float().numpy()
+    expected = expected.numpy()
     max_abs = float(np.max(np.abs(visible - expected)))
     record_property("max_abs_vs_rounded_torch", max_abs)
+    # One output ULP of the activation dtype: the oracle's FP32 reduction order
+    # differs from the Metal kernel, which can flip the final cast.
+    tolerance = 8e-3 if dtype == mx.bfloat16 else 2e-3
     np.testing.assert_allclose(
-        visible, expected, rtol=0.002, atol=0.002, err_msg=name,
+        visible, expected, rtol=tolerance, atol=tolerance, err_msg=name,
     )
 
 

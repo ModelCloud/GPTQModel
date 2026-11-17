@@ -276,6 +276,7 @@ def _patch_transformers_refusing_quantizers():
     from .utils.hf_refusing_quantizer import (
         GPTQModelRefusingHfQuantizer,
         GPTQModelRefusingQuantizationConfig,
+        refusal_message,
     )
 
     with _MONKEY_PATCH_LOCK:
@@ -286,6 +287,32 @@ def _patch_transformers_refusing_quantizers():
             hf_quant_auto.AUTO_QUANTIZER_MAPPING.setdefault(
                 method, GPTQModelRefusingHfQuantizer
             )
+
+        # transformers special-cases `quant_method == "bitsandbytes"` in
+        # `AutoHfQuantizer.from_config`: it demands an instance of its own
+        # `BitsAndBytesConfig` and only then appends the `_4bit`/`_8bit`
+        # suffix. That branch runs before the mapping lookup, so the refusing
+        # quantizer registered above is never constructed and GPT-QModel's
+        # layout raises a generic TypeError instead of the actionable error
+        # (#4664). Intercept the plain name only: `bitsandbytes_4bit` /
+        # `bitsandbytes_8bit` are genuine transformers names and must keep
+        # loading real HF bnb checkpoints.
+        original_from_config = hf_quant_auto.AutoHfQuantizer.__dict__["from_config"]
+        if not getattr(original_from_config, "_gptqmodel_refusal_guard", False):
+
+            @classmethod
+            def _refusing_from_config(cls, quantization_config, **kwargs):
+                method = (
+                    quantization_config.get("quant_method")
+                    if isinstance(quantization_config, dict)
+                    else getattr(quantization_config, "quant_method", None)
+                )
+                if method == "bitsandbytes":
+                    raise ValueError(refusal_message(method))
+                return original_from_config.__func__(cls, quantization_config, **kwargs)
+
+            _refusing_from_config._gptqmodel_refusal_guard = True
+            hf_quant_auto.AutoHfQuantizer.from_config = _refusing_from_config
 
 
 def _patch_transformers_save_pretrained_runtime_layout_guard():
@@ -452,6 +479,12 @@ def _patch_optimum_gptqmodel_load_bridge():
                 model,
                 checkpoint_files=kwargs.get("checkpoint_files"),
                 device_map=kwargs.get("device_map"),
+                # Forward the caller's `quantization_config["backend"]`. Without
+                # it `_resolve_backend_for_checkpoint` always sees `None` and
+                # resolves AUTO, so a documented PEFT/trainable-kernel choice (or
+                # a deliberately incompatible one, e.g. marlin on CPU) was
+                # silently ignored for native checkpoints (#4680).
+                backend=getattr(self, "backend", None),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:
@@ -472,6 +505,81 @@ def _patch_optimum_gptqmodel_load_bridge():
         _post_init_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         GPTQQuantizer.convert_model = _convert_model_with_gptqmodel_bridge
         GPTQQuantizer.post_init_model = _post_init_model_with_gptqmodel_bridge
+
+
+def _patch_transformers_awq_gptqmodel_load_bridge():
+    """Route Transformers' own AWQ loader through GPTQModel's native bridge.
+
+    Optimum's GPTQ path is patched above, but Transformers loads
+    ``quant_method: "awq"`` through ``transformers.quantizers.quantizer_awq``
+    with no Optimum involvement. That path calls
+    ``integrations/awq.py::replace_with_awq_linear``, which only swaps
+    ``nn.Linear`` modules. A GPT-QModel AWQ checkpoint can store per-expert
+    ``experts.<n>.*.qweight`` tensors for fused 3-D expert parameters, so the
+    experts stay dense and every packed expert tensor is reported UNEXPECTED:
+    the model loads without error and the routed experts are randomly
+    initialized.
+
+    Wrapping the AWQ quantizer's pre/post weight-loading hooks lets
+    ``hf_gptqmodel_prepare_model_for_load`` rebuild the checkpoint's real module
+    manifest first. Checkpoints Transformers' AWQ path owns keep that path
+    because the bridge returns ``None`` for them.
+    """
+
+    try:
+        from functools import wraps
+
+        from transformers.quantizers.quantizer_awq import AwqQuantizer
+    except ImportError:
+        # Transformers is a hard dependency; a missing symbol means the upstream
+        # AWQ API moved and this compatibility shim is now inert.
+        log.warning(
+            "transformers AWQ load-bridge is inactive: AwqQuantizer API changed",
+            exc_info=True,
+        )
+        return
+    except Exception:
+        log.warning("transformers AWQ load-bridge compat probe failed", exc_info=True)
+        return
+
+    with _MONKEY_PATCH_LOCK:
+        original_prepare = AwqQuantizer._process_model_before_weight_loading
+        if getattr(original_prepare, "_gptqmodel_load_bridge", False):
+            return
+        original_post_init = AwqQuantizer._process_model_after_weight_loading
+
+        @wraps(original_prepare)
+        def _prepare_with_gptqmodel_bridge(self, model, **kwargs):
+            from .utils.hf_load import hf_gptqmodel_prepare_model_for_load
+
+            context = hf_gptqmodel_prepare_model_for_load(
+                model,
+                checkpoint_files=kwargs.get("checkpoint_files"),
+                device_map=kwargs.get("device_map"),
+                # Same forwarding as the GPTQ bridge: an explicit
+                # `quantization_config["backend"]` must not be replaced by AUTO
+                # (#4680).
+                backend=getattr(self, "backend", None),
+                dtype=kwargs.get("dtype"),
+            )
+            if context is None:
+                return original_prepare(self, model, **kwargs)
+            model._gptqmodel_hf_load_context = context
+            return model
+
+        @wraps(original_post_init)
+        def _post_init_with_gptqmodel_bridge(self, model, **kwargs):
+            context = getattr(model, "_gptqmodel_hf_load_context", None)
+            if context is None:
+                return original_post_init(self, model, **kwargs)
+            from .utils.hf_load import hf_gptqmodel_post_init_for_load
+
+            return hf_gptqmodel_post_init_for_load(model, context)
+
+        _prepare_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        _post_init_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        AwqQuantizer._process_model_before_weight_loading = _prepare_with_gptqmodel_bridge
+        AwqQuantizer._process_model_after_weight_loading = _post_init_with_gptqmodel_bridge
 
 
 from .utils import has_gil_disabled
@@ -789,3 +897,4 @@ if ensure_modelscope_available():
 # while it loads, so the bridge can only be wrapped once this package has
 # finished defining its public names.
 _patch_optimum_gptqmodel_load_bridge()
+_patch_transformers_awq_gptqmodel_load_bridge()

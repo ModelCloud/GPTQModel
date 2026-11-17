@@ -40,7 +40,7 @@ class GPTQModelGGUFHfQuantizer(HfQuantizer):
     def __init__(self, quantization_config, **kwargs):
         raise ValueError(
             "GPT-QModel packed GGUF checkpoints cannot be loaded by `transformers`; "
-            "load them with `GPTQModel.load` or vLLM. "
+            "load them with `GPTQModel.load`. "
             f"(quant_method: {GGUF_EXPORT_QUANT_METHOD!r})"
         )
 

@@ -2646,7 +2646,10 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             if pending_ffn_input is not None:
                 raise RuntimeError("DeepSeek V4 recovery router input was not consumed")
             expert_input = ffn_input.reshape(-1, ffn_input.shape[-1])
-            keep_mask = getattr(getattr(processor, "_mask_tls", None), "value", None)
+            # Router rows include the BOS sinks, so align with padding only.
+            from ...looper.loop_processor import active_padding_mask
+
+            keep_mask = active_padding_mask(processor)
             if keep_mask is not None:
                 keep_mask = keep_mask.reshape(-1).to(
                     device=expert_input.device,

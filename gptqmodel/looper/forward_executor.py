@@ -25,6 +25,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import move_to, nested_move_to
 from ..utils.torch import torch_sync
+from .loop_processor import resolve_calibration_keep_mask
 
 
 if TYPE_CHECKING:  # pragma: no cover - imports for typing only
@@ -466,7 +467,15 @@ class ForwardExecutor:
                     keep_mask=keep_mask,
                     target_device=exec_device,
                 )
-                self.looper._set_processor_mask(processor, keep_mask)
+                calibration_keep_mask = resolve_calibration_keep_mask(
+                    processor,
+                    keep_mask,
+                    batch_index=batch_idx,
+                    layer_input=layer_input,
+                )
+                self.looper._set_processor_mask(
+                    processor, calibration_keep_mask, padding_mask=keep_mask
+                )
 
                 if not preserve_module_devices:
                     rehome_module_to_device(
@@ -499,6 +508,7 @@ class ForwardExecutor:
                 del layer_input
                 del attn_tensor
                 del keep_mask
+                del calibration_keep_mask
                 del additional_inputs
 
                 if (

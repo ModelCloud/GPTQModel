@@ -296,6 +296,18 @@ def test_normalization_is_idempotent_and_serializable():
     json.dumps(twice)
 
 
+def test_gemma3_normalization_is_idempotent():
+    """A re-export must not accumulate scaling or drop the local base."""
+
+    once = _mlx_model_config(_gemma3_4b())
+    twice = normalize_mlx_rope_config(dict(once))
+
+    assert twice == once
+    assert twice["rope_local_base_freq"] == 10000.0
+    assert twice["rope_scaling"] == {"rope_type": "linear", "factor": 8.0}
+    json.dumps(twice)
+
+
 def test_both_mlx_config_builders_use_the_translation():
     """Export and the Apple-Silicon runtime share one config builder."""
 

@@ -278,6 +278,7 @@ class RTN:
             self.gsq_diagnostics = {
                 "objective": "weight_mse", "before": fitted.before,
                 "after": fitted.after, "learn_scales": self.qcfg.gsq.learn_scales,
+                "skipped": fitted.skipped,
             }
 
         if isinstance(self.module, transformers.Conv1D):

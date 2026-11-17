@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Regression Tests"
+  short_description: "Design regressions that catch the bug"
+  default_prompt: "Use $gptqmodel-regression-test-design to build a regression that fails before this fix and passes after it."

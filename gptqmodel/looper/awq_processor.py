@@ -52,7 +52,7 @@ from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
 from ..quantization.config import FORMAT, METHOD, MSEConfig, QuantizeConfig, resolve_quant_format
-from ..utils.attn_mask import normalize_seq_mask
+from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -297,6 +297,31 @@ def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
         in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
     ]
     return len(positional) >= 2
+
+
+def _is_recurrent_attention_layer_type(layer_type: Optional[str]) -> bool:
+    """Whether ``layer_type`` is a recurrent / convolution mixer, not attention.
+
+    ``transformers`` 5 maps each declared layer type to the function that builds
+    its mask (``LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING``). The ``linear_attention``
+    and ``conv`` entries build the mask with ``create_recurrent_attention_mask``,
+    which returns ``None`` for an unpadded batch and a planar ``[batch, seq]``
+    keep mask otherwise. Those mixers apply it with
+    ``hidden * attention_mask[:, :, None]``, so they can never consume the
+    additive ``[1, 1, T, T]`` grid an attention layer takes (issue #4671).
+    """
+
+    if not layer_type:
+        return False
+    try:
+        from transformers.masking_utils import (
+            LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING,
+            create_recurrent_attention_mask,
+        )
+    except ImportError:  # pragma: no cover - older transformers
+        return False
+    builder = LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING.get(layer_type)
+    return builder is create_recurrent_attention_mask
 
 
 def _kernel_shape_supported(kernel, in_features: int, out_features: int) -> bool:
@@ -1107,8 +1132,13 @@ class AWQProcessor(LoopProcessor):
     def _capture_share_key(self, feature: torch.Tensor) -> Optional[Tuple[Any, ...]]:
         """Identity of one captured source tensor, or ``None`` when it cannot be shared.
 
-        Masked captures build a fresh masked tensor per sibling, so they never
-        share. Calibration runs under ``inference_mode``, so the captured tensor
+        A masked capture is shared too: the cached host copy is the masked
+        result, and the key carries the identity of the active keep-mask, which
+        the looper binds once per calibration batch. Before
+        ``CalibrationConfig.exclude_attention_sinks`` only padded batches had a
+        mask; with it every batch does, and refusing to share would copy each
+        q/k/v and gate/up activation once per sibling. Calibration runs under
+        ``inference_mode``, so the captured tensor
         is usually an inference tensor and ``_version`` raises. Keying on the
         version alone therefore disabled sharing for every real calibration
         capture. Use the storage pointer plus shape/stride/dtype instead; the
@@ -1117,8 +1147,7 @@ class AWQProcessor(LoopProcessor):
         when one exists so an in-place mutation still invalidates the host copy.
         """
 
-        if getattr(getattr(self, "_mask_tls", None), "value", None) is not None:
-            return None
+        keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
         if not torch.is_tensor(feature):
             return None
         try:
@@ -1138,6 +1167,7 @@ class AWQProcessor(LoopProcessor):
             tuple(feature.stride()),
             feature.dtype,
             version,
+            None if keep_mask is None else id(keep_mask),
         )
 
     def _materialize_host_feature(self, feature: torch.Tensor) -> torch.Tensor:
@@ -1653,7 +1683,9 @@ class AWQProcessor(LoopProcessor):
     def _token_row_source_structure(
         mask: Optional[torch.Tensor],
         row_count: int,
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]]:
+        sink_positions: Optional[torch.Tensor] = None,
+        exclude_sinks: bool = False,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]]:
         """Map one capture batch's kept rows back onto its document grid.
 
         ``row_count`` is the number of kept rows the capture hook stored for
@@ -1663,9 +1695,30 @@ class AWQProcessor(LoopProcessor):
         ``[row_count, row_count]`` attention relation among those rows (True =
         attended), and ``form`` is the captured mask's form. ``None`` means the
         cached mask does not describe exactly these rows.
+
+        ``sink_positions`` turns on ``CalibrationConfig.exclude_attention_sinks``
+        handling: it is the batch's ``[B, S]`` BOS positions, and the kept set
+        loses the same sink positions the capture hook dropped. Without a
+        captured mask the batch is an unpadded ``[B, S]`` grid; it is rebuilt
+        from that shape so retained rows keep their true positions, and
+        ``form`` is ``None`` because there was no captured mask form to keep.
         """
 
-        if mask is None or row_count <= 0 or not torch.is_tensor(mask):
+        if row_count <= 0:
+            return None
+        if mask is None and exclude_sinks:
+            if not torch.is_tensor(sink_positions) or sink_positions.dim() != 2:
+                return None
+            batch, seq_len = int(sink_positions.shape[0]), int(sink_positions.shape[1])
+            keep = exclude_attention_sinks(None, sink_positions, batch=batch, seq_len=seq_len, device="cpu")
+            if keep is None or int(keep.sum().item()) != row_count:
+                return None
+            flat_index = torch.nonzero(keep.reshape(-1), as_tuple=False).reshape(-1)
+            documents = torch.div(flat_index, seq_len, rounding_mode="floor")
+            positions = flat_index % seq_len
+            allowed = positions.unsqueeze(1) >= positions.unsqueeze(0)
+            return documents, positions, allowed, None
+        if mask is None or not torch.is_tensor(mask):
             return None
 
         form = AWQProcessor._captured_mask_form(mask)
@@ -1703,6 +1756,8 @@ class AWQProcessor(LoopProcessor):
 
         if keep is None or keep.dim() != 2:
             return None
+        if exclude_sinks:
+            keep = exclude_attention_sinks(keep, sink_positions)
 
         seq_len = int(keep.shape[-1])
         if seq_len <= 0:
@@ -1725,7 +1780,7 @@ class AWQProcessor(LoopProcessor):
         cache,
         batch_indices: List[Optional[int]],
         layer: Optional[nn.Module],
-    ) -> Dict[int, Optional[torch.Tensor]]:
+    ) -> Tuple[Dict[int, Optional[torch.Tensor]], Optional[str]]:
         """Return each capture batch's mask for ``layer``'s attention type.
 
         ``transformers`` 5 builds one mask per declared layer type and the
@@ -1733,17 +1788,22 @@ class AWQProcessor(LoopProcessor):
         ``_gptqmodel_layer_type_replay_kwargs``. Replay must select the entry
         that matches the layer being quantized; reusing layer 0's sliding mask
         for a full-attention layer hides every long-range pair.
+
+        Also returns the resolved layer type so the replay can tell a recurrent
+        mixer from an attention block: the former never accepts an attention
+        grid (issue #4671).
         """
 
         if layer is None:
-            return {}
+            return {}, None
         from ..models.base import _LAYER_TYPE_REPLAY_KWARGS_KEY
 
         resolver = getattr(self.gptq_model, "_resolve_layer_replay_type", None)
         if not callable(resolver):
-            return {}
+            return {}, None
         layer_input_kwargs = getattr(cache, "layer_input_kwargs", None) or []
         masks: Dict[int, Optional[torch.Tensor]] = {}
+        resolved_type: Optional[str] = None
         for batch_index in batch_indices:
             if batch_index is None:
                 continue
@@ -1759,10 +1819,12 @@ class AWQProcessor(LoopProcessor):
             layer_type = resolver(layer, layer_types)
             if layer_type is None:
                 continue
+            if resolved_type is None:
+                resolved_type = layer_type
             type_entry = by_type.get(layer_type) or {}
             if "attention_mask" in type_entry:
                 masks[batch_index] = type_entry["attention_mask"]
-        return masks
+        return masks, resolved_type
 
     def _token_row_replay_kwargs(
         self,
@@ -1771,6 +1833,7 @@ class AWQProcessor(LoopProcessor):
         provenance: List[Tuple[int, int]],
         dtype: torch.dtype,
         mask_overrides: Optional[Dict[int, Optional[torch.Tensor]]] = None,
+        recurrent: bool = False,
     ) -> Dict[str, Any]:
         """Rebuild the attention mask and positions for packed ``token_rows``.
 
@@ -1836,7 +1899,14 @@ class AWQProcessor(LoopProcessor):
 
             packed_indices = torch.tensor([item[0] for item in entries], dtype=torch.long)
             local_rows = torch.tensor([item[1] for item in entries], dtype=torch.long)
-            structure = self._token_row_source_structure(mask, row_count)
+            structure = self._token_row_source_structure(
+                mask,
+                row_count,
+                self.attention_sink_positions_for_batch(batch_index),
+                exclude_sinks=bool(
+                    getattr(getattr(self, "calibration", None), "exclude_attention_sinks", False)
+                ),
+            )
             if structure is None:
                 documents = torch.zeros_like(local_rows)
                 source_positions = local_rows.clone()
@@ -1872,7 +1942,19 @@ class AWQProcessor(LoopProcessor):
 
             positions[packed_indices] = row_positions.to(dtype=torch.long)
 
-        if not grid_mask and form is not None:
+        if recurrent:
+            # A recurrent / convolution mixer consumes a planar [batch, seq]
+            # keep mask (`apply_mask_to_padding_states` multiplies
+            # `hidden * attention_mask[:, :, None]`). The additive
+            # [1, 1, T, T] grid is an attention-only contract and raises on the
+            # first replay: `tensor a (768) must match tensor b (366)`. The
+            # mixer applies its own causal convolution/scan, so the packed rows
+            # need no explicit causal structure. `_pack_token_rows` emits rows
+            # in source order, so each document stays contiguous and the
+            # recurrent state crosses only at a document boundary -- the same
+            # limitation the padded multi-row batch path already has.
+            attention_mask = torch.ones((1, packed_count), dtype=torch.bool)
+        elif not grid_mask and form is not None:
             # A captured planar [batch, seq] mask means the attention
             # implementation (for example FlashAttention) expects a keep mask
             # of that rank. Keep that form; every packed row is a kept token,
@@ -2127,16 +2209,18 @@ class AWQProcessor(LoopProcessor):
                     cache_key = tuple(id(tensor) for tensor in tensors)
                     replay_kwargs = token_row_kwargs_cache.get(cache_key)
                     if replay_kwargs is None:
+                        type_masks, replay_layer_type = self._token_row_layer_type_masks(
+                            getattr(self, "inputs_cache", None),
+                            batch_indices,
+                            state.layer_module,
+                        )
                         replay_kwargs = self._token_row_replay_kwargs(
                             tensors,
                             batch_indices,
                             provenance,
                             features[name].dtype,
-                            mask_overrides=self._token_row_layer_type_masks(
-                                getattr(self, "inputs_cache", None),
-                                batch_indices,
-                                state.layer_module,
-                            ),
+                            mask_overrides=type_masks,
+                            recurrent=_is_recurrent_attention_layer_type(replay_layer_type),
                         )
                         token_row_kwargs_cache[cache_key] = replay_kwargs
                 feature_kwargs[name] = replay_kwargs
@@ -3122,6 +3206,18 @@ class AWQProcessor(LoopProcessor):
             if any(_ in name for _ in avoid_clipping):
                 continue
 
+            features = input_feat[name]
+            if features.numel() == 0:
+                # No calibration sample reached this projection (a subset
+                # early-stop used to starve a sibling, #4679). Clip search needs
+                # at least one token row; leave the module unclipped instead of
+                # reshaping an empty tensor.
+                log.warn(
+                    "AWQ: module `%s` received no calibration samples; skipping clip search.",
+                    name,
+                )
+                continue
+
             linear = named_linears[name]
             original_device = get_device(linear)
             target_device = _resolve_module_exec_device(linear)
@@ -3129,7 +3225,7 @@ class AWQProcessor(LoopProcessor):
 
             max_val = self._compute_best_clip(
                 linear.weight,
-                input_feat[name],
+                features,
                 bits=self._bits_for(layer, linear),
                 group_size=self._group_size_for(layer, linear),
                 format=self._format_for(layer, linear),
@@ -3163,6 +3259,11 @@ class AWQProcessor(LoopProcessor):
             raise ValueError(
                 "AWQ clipping expects a 2-D weight tensor, "
                 f"got shape {tuple(w.shape)}"
+            )
+        if input_feat.numel() == 0:
+            raise ValueError(
+                "AWQ clipping needs at least one calibration token row; "
+                "this module received no calibration samples."
             )
         org_w_shape = w.shape
         # w           [co, ci]      -> [co, 1, n_group, group size]
@@ -3242,33 +3343,58 @@ class AWQProcessor(LoopProcessor):
             1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
         )
 
+        out_dtype = torch.result_type(input_feat, w_all)
+
+        def alloc_scratch(rows):
+            clamp = torch.empty(
+                (cand_chunk, rows, 1, n_group, group_w), dtype=w_all.dtype, device=device
+            )
+            return (
+                clamp,
+                torch.empty_like(clamp),
+                torch.empty(
+                    (cand_chunk, rows, n_tokens, n_group),
+                    dtype=out_dtype,
+                    device=device,
+                ),
+            )
+
+        # One workspace set serves every full tile. Allocating inside the loop
+        # left the previous tile's buffers alive through the `prod`/`clamp`/
+        # `quant`/`cur_out` views while the next set was created, so the peak
+        # carried two sets and every AWQ run paid +52-62% (#4682).
+        full_scratch_clamp, full_scratch_quant, full_scratch_out = alloc_scratch(oc_batch_size)
+        full_org_out = torch.empty_like(full_scratch_out[0])
+        full_scratch_prod = torch.empty(
+            (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
+            dtype=full_scratch_out.dtype,
+            device=device,
+        )
+
         for i_b in range(0, org_w_shape[0], oc_batch_size):
-            # The final tile may be shorter than `oc_batch_size`. Size the
-            # scratch to this tile's real row count: cropping a padded buffer to
-            # `co` rows leaves a non-contiguous slice whose `reshape` is a copy,
-            # so `_pseudo_quantize_tensor_into` wrote the quantized candidates
+            # The final tile may be shorter than `oc_batch_size`. It gets its
+            # own exact-size set: cropping a full-size buffer to `co` rows
+            # leaves a non-contiguous slice whose `reshape` is a copy, so
+            # `_pseudo_quantize_tensor_into` wrote the quantized candidates
             # into that copy and the error reduction read stale rows (#4540).
-            # Per-tile allocation keeps every slice below a contiguous view and
-            # never materializes padded rows, so the reduction only sees real
-            # tile rows. Each tile allocates once, outside the inner loops.
+            # A full tile takes the shared set, where `[:co]` is the whole
+            # extent and therefore still contiguous.
             w = w_all[i_b: i_b + oc_batch_size]
             co = w.shape[0]
-
-            scratch_clamp = torch.empty(
-                (cand_chunk, co, 1, n_group, group_w), dtype=w_all.dtype, device=device
-            )
-            scratch_quant = torch.empty_like(scratch_clamp)
-            scratch_out = torch.empty(
-                (cand_chunk, co, n_tokens, n_group),
-                dtype=torch.result_type(input_feat, w_all),
-                device=device,
-            )
-            org_out = torch.empty_like(scratch_out[0])
-            scratch_prod = torch.empty(
-                (cand_chunk, co, token_chunk, n_group, group_w),
-                dtype=scratch_out.dtype,
-                device=device,
-            )
+            if co == oc_batch_size:
+                scratch_clamp = full_scratch_clamp
+                scratch_quant = full_scratch_quant
+                scratch_out = full_scratch_out
+                org_out = full_org_out
+                scratch_prod = full_scratch_prod
+            else:
+                scratch_clamp, scratch_quant, scratch_out = alloc_scratch(co)
+                org_out = torch.empty_like(scratch_out[0])
+                scratch_prod = torch.empty(
+                    (cand_chunk, co, token_chunk, n_group, group_w),
+                    dtype=scratch_out.dtype,
+                    device=device,
+                )
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
@@ -4322,6 +4448,7 @@ class AWQProcessor(LoopProcessor):
                 named_module.state["gsq_diagnostics"] = {
                     "objective": "weight_mse", "before": fitted.before,
                     "after": fitted.after, "learn_scales": gsq.learn_scales,
+                    "skipped": fitted.skipped,
                 }
 
             if pad_cols:

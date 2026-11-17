@@ -2275,6 +2275,15 @@ class PackableQuantLinear(GPTQQuantLinear):
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             W = W.T
         W = W.to("cpu", copy=False)
+        try:
+            # A loader can hand us a weight whose storage was created under
+            # ``inference_mode()`` (so it has no version counter) while the
+            # tensor itself is not flagged as an inference tensor. Slicing such
+            # a tensor raises "Inference tensors do not track version counter"
+            # on recent Torch, so materialize one that follows the active mode.
+            W._version
+        except RuntimeError:
+            W = W.clone()
         out_features, in_features = W.shape
 
         # ---------- g_idx buffer ----------

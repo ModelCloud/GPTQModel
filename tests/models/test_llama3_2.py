@@ -25,14 +25,15 @@ class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    # Llama-3.2-1B-Instruct's BOS row is an attention sink that holds ~99% of the
-    # calibration Hessian; excluding it (#4393/#4440) lifts both eval metrics.
+    # Every calibration document's BOS token is an attention sink (#4393); exclude them from the
+    # calibration statistics via `quantize(calibration_exclude_attention_sinks=True)`. Most
+    # concatenated windows start mid-document, so only the document-boundary BOS tokens go.
     EXCLUDE_ATTENTION_SINKS = True
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
             "acc,num": {
-                "value": 0.4127,  # native bf16 0.4797; sinks kept 0.4078
+                "value": 0.3871,  # native bf16 0.4797; sinks kept 0.3871
                 "floor_pct": 0.04,
             },
         },
@@ -46,11 +47,11 @@ class TestLlama3_2(ModelTest):
         "arc_challenge": {
             "chat_template": True,
             "acc": {
-                "value": 0.3063,  # native bf16 0.3183; sinks kept 0.3038
+                "value": 0.3114,  # native bf16 0.3183; sinks kept 0.3183
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3456,  # native bf16 0.3456; sinks kept 0.3456
+                "value": 0.3498,  # native bf16 0.3456; sinks kept 0.3524
                 "floor_pct": 0.04,
             },
         },

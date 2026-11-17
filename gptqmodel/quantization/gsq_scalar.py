@@ -23,8 +23,12 @@ import pcre
 import torch
 
 from ..utils.gemv import awq_gemv_codes
+from ..utils.logger import setup_logger
 from ..utils.packing_math import awq_packed_codes, awq_storage_dtype
 from .config import normalize_gsq_config
+
+
+log = setup_logger()
 
 
 # Sweep cap for the hard code search. Real layers converge within a handful of
@@ -58,6 +62,9 @@ class ScalarGSQResult:
     before: float | None
     after: float | None
     history: list[float]
+    #: True when the search was provably unable to beat the baseline and was
+    #: skipped (calibration-free weight MSE with fixed scales, #4691).
+    skipped: bool = False
 
 
 def asymmetric_error_term(weight_error, teacher, cross_moment, alpha=1.0):
@@ -453,6 +460,8 @@ def refine_affine_scalar(
     Hard checkpoints are scored after weight casting, code reconstruction by the
     selected packer convention, and scale casting to the checkpoint dtype.
     The original baseline tensors are returned unchanged unless that score improves.
+    A calibration-free objective with fixed scales is skipped outright: nearest
+    rounding already minimizes it, so the search could only reproduce the baseline.
     An optional native-minus-current cross moment adds the asymmetric linear
     term. Scores then omit a candidate-independent constant and can be negative;
     they are not absolute normalized reconstruction errors.
@@ -533,7 +542,8 @@ def refine_affine_scalar(
                 sum(part.before * norm for part, norm in zip(results, normalizers)) / total,
                 sum(part.after * norm for part, norm in zip(results, normalizers)) / total,
                 [sum(part.history[step] * norm for part, norm in zip(results, normalizers)) / total
-                 for step in range(config.steps + 1)],
+                 for step in range(len(results[0].history))],
+                skipped=results[0].skipped,
             )
 
     with torch.inference_mode(False), torch.enable_grad():
@@ -623,6 +633,22 @@ def refine_affine_scalar(
             raise ValueError("non-finite scalar GSQ baseline objective")
         best, best_weight, best_scales = before, baseline, scales.detach().clone()
         history = [before]
+        if hessian is None and inputs is None and cross_moment is None and not config.learn_scales:
+            # The objective is plain weight MSE and the scales are fixed, so it
+            # is separable per element: the nearest-rounding code RTN/AWQ
+            # already produced is the exact minimizer, and no candidate this
+            # loop can export scores strictly better. Skipping keeps the
+            # checkpoint bit-identical while dropping the whole step budget
+            # (RTN+GSQ was 6.7x slower for 0 changed tensors, #4691).
+            log.info(
+                "GSQ: weight-MSE objective with fixed scales cannot improve nearest "
+                "rounding; skipping the code search for this module."
+            )
+            return ScalarGSQResult(
+                best_weight.detach().to(weight.dtype), best_scales.detach().to(scales.dtype),
+                zeros.detach().clone(), g_idx.detach().clone(), before, best, history,
+                skipped=True,
+            )
         for step in range(config.steps):
             tau = config.temperature_start * (config.temperature_end / config.temperature_start) ** (
                 step / max(config.steps-1, 1))
