@@ -670,9 +670,11 @@ def test_native_ttnn_device_resolution_never_initializes_pjrt(monkeypatch):
         raise AssertionError("the native TTNN path must not initialize PJRT")
 
     calls = []
+    options = []
 
-    def _record(device):
+    def _record(device, **kwargs):
         calls.append(device)
+        options.append(kwargs)
         return device
 
     monkeypatch.setattr(loader_module, "expand_selector_device_family", _record)
@@ -687,6 +689,8 @@ def test_native_ttnn_device_resolution_never_initializes_pjrt(monkeypatch):
     expanded = loader_module._resolve_default_layerwise_device(DEVICE.XLA, BACKEND.GPTQ_TT_XLA)
     assert calls == [DEVICE.XLA], calls
     assert expanded == DEVICE.XLA, expanded
+    # The default placement keeps one compute-capability group (#4705/#4734).
+    assert options == [{"single_capability_group": True}], options
 
 
 def test_native_ttnn_auto_device_selection_skips_the_xla_probe(monkeypatch):
