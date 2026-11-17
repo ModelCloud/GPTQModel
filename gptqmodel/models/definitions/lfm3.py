@@ -35,14 +35,12 @@ class LFM3QModel(BaseQModel):
     (`prepare_layer_replay_kwargs`) has to rebuild them from the captured
     `position_ids` and raw `attention_mask`.
 
-    The checkpoint is a remote-code (`auto_map`) Transformers model, therefore
-    the loader requires `trust_remote_code=True`.
+    Transformers 5 owns the native implementation, including conversion of
+    checkpoint `self_attn.gate_proj` weights to native `self_attn.g_proj`.
     """
 
     pre_lm_head_norm_module = "model.embedding_norm"
     rotary_embedding = "model.rotary_emb"
-
-    require_trust_remote_code = True
 
     # Conv layers have no `self_attn`, and attention layers have no `conv`;
     # the per-layer module sets therefore differ.
