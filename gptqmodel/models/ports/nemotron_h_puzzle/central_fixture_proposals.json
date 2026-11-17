@@ -1,0 +1,30 @@
+{
+  "registered_module_plans": {
+    "cases": {
+      "NemotronHPuzzleQModel/gptq": {
+        "layers": ["model.layers"],
+        "blocks": [
+          ["norm:!"],
+          ["mixer.q_proj", "mixer.k_proj", "mixer.v_proj", "mixer.in_proj", "mixer.A_log:!", "mixer.D:!", "mixer.dt_bias:!"],
+          ["mixer.o_proj", "mixer.out_proj"],
+          ["mixer.conv1d:!"],
+          ["mixer.norm:!"],
+          ["mixer.gate:!"],
+          ["mixer.fc1_latent_proj"],
+          ["mixer.experts.{expert_index}.up_proj"],
+          ["mixer.experts.{expert_index}.down_proj"],
+          ["mixer.fc2_latent_proj"],
+          ["mixer.shared_experts.up_proj"],
+          ["mixer.shared_experts.down_proj"]
+        ]
+      }
+    }
+  },
+  "fusable_models": {
+    "models": {
+      "nemotron_h_puzzle": {
+        "reason": "Package-owned Nemotron-Labs-3 Puzzle heterogeneous Mamba/attention/latent-MoE decoder; fusion executor has not been qualified."
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+Nemotron-Labs-3 Puzzle Transformers 5 port for GPT-QModel
+
+Puzzle configuration and heterogeneous construction adapted from:
+  nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16
+  revision 8fe5546888e9bd03fdbf52d808adebdfca901b52
+  Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: OpenMDW-1.1
+  The complete, unchanged model LICENSE is included as LICENSE.
+
+Decoder attention, routing, MLP and residual equations adapted from the
+checkpoint's modeling_nemotron_h.py:
+  Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+  Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+  Licensed under Apache License, Version 2.0.
+  See LICENSE-APACHE-2.0 for the complete license text.
+
+Native Transformers 5.23.0 NemotronHMamba2Mixer, NemotronHRMSNorm and weight
+initialization are imported from the installed Apache-2.0 Transformers package.
+They are not downloaded from, registered by or imported through the checkpoint.
+
+This adaptation replaces temporary process-global block monkey-patching with
+package-owned per-layer construction and Transformers 5 cache/mask APIs.
+Source checksums and the exact modification boundary are recorded in README.md
+and source_manifest.json. Original checkpoint Python is never executed.
