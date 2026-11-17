@@ -198,9 +198,9 @@ through `AUTO_QUANTIZATION_CONFIG_MAPPING` / `AUTO_QUANTIZER_MAPPING`. For an
 unknown name, `supports_quant_method` only warns
 `Unknown quantization type, got <name> ... skip the quantization` and
 `from_pretrained` then random-initializes every linear layer. GPT-QModel
-publishes several layouts transformers does not implement (`exl3`, `qqq`,
-`paroquant`, `macaq`, `nf12`, `tt-blockfloat`) plus the deliberate
-`gptqmodel_gguf` alias.
+publishes several layouts transformers does not implement (`bitsandbytes`,
+`exl3`, `qqq`, `paroquant`, `macaq`, `nf12`, `tt-blockfloat`) plus the
+deliberate `gptqmodel_gguf` alias.
 
 `gptqmodel/__init__.py` registers a refusing quantizer for each name from the
 single table `REFUSED_HF_QUANT_METHODS` in `gptqmodel/_quant_methods.py`, using
@@ -223,8 +223,10 @@ flowchart TD
 ```
 
 `setdefault` keeps any quantizer transformers already owns (`gptq`, `awq`,
-`fp8`, `bitsandbytes`, and its own `vptq`), so this table only covers names
-transformers does not implement. The registration runs on package import, so
+`fp8`, and its own `vptq`), so this table only covers names transformers does
+not implement. In particular transformers 5 registers `bitsandbytes_4bit` and
+`bitsandbytes_8bit`, not the plain `bitsandbytes` that GPT-QModel writes, so
+that name is refused like the other GPT-QModel-only layouts. The registration runs on package import, so
 a process that never imports `gptqmodel` still only sees transformers'
 warning. The writer emits `hf_compat_warnings` at save time for the same
 table, so a checkpoint is labelled before anyone tries to load it. The
