@@ -118,6 +118,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   decode dtype from the stored scale range, so a wide or tiny checkpoint scale
   no longer becomes `inf`/`0` before the product; see
   [AWQ Torch forward decode range](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-torch-decode-range.md).
+- **Keep the AWQ bias out of the scale dtype.** A non-quantized bias is added
+  after the reduction, so packing keeps its source precision instead of casting
+  it to FP16; see
+  [AWQ pack-time bias storage](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-bias-representability.md).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.

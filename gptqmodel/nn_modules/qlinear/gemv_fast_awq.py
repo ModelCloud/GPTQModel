@@ -92,6 +92,10 @@ class AwqGEMVFastLinear(AWQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16]
 
+    # The bias is added after the kernel's FP16 result by a wide epilogue when
+    # the stored width differs, so it keeps its checkpoint dtype.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
 
@@ -244,9 +248,12 @@ class AwqGEMVFastLinear(AWQuantLinear):
             self.scales = self.scales.to(device=device, dtype=dtype).contiguous()
 
         if self.bias is not None and (
-            self.bias.device != device or self.bias.dtype != dtype or not self.bias.is_contiguous()
+            self.bias.device != device or not self.bias.is_contiguous()
         ):
-            self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
+            # Move the bias, never narrow it: the forward epilogue adds a bias
+            # stored at another width in FP32, and rewriting the buffer here
+            # would silently turn a finite FP32 value into FP16 ``inf``.
+            self.bias = self.bias.to(device=device).contiguous()
 
     def _runtime_zeros(self) -> torch.Tensor:
         if self.zeros_name == "qzeros":
@@ -274,9 +281,13 @@ class AwqGEMVFastLinear(AWQuantLinear):
         # GEMV_FAST/LLM_AWQ store FP16 offsets in the checkpoint. Reject an
         # unrepresentable offset before replacing any packed module state.
         offsets = scaled_zero_offset(qscales[:, : scales.shape[1]], zeros)
+        # The bias is not a quantization operand. Store it at the source width:
+        # ``forward`` adds it in a wide FP32 epilogue, so narrowing it to the
+        # FP16 scale dtype here could only turn a finite value into ``inf``.
+        stored_bias = None if linear.bias is None else linear.bias.detach().clone()
         self.register_buffer("scales", qscales.transpose(1, 0).contiguous())
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.clone().half())
+        if stored_bias is not None:
+            self.register_buffer("bias", stored_bias)
         else:
             self.bias = None
 
