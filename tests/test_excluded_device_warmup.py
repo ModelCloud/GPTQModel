@@ -453,7 +453,7 @@ mode = sys.argv[2]
 
 from transformers import AutoTokenizer
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, GPTQModel, CalibrationConfig
 from gptqmodel.quantization import GPTQConfig
 
 tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -488,10 +488,8 @@ else:
 query = getattr(torch._C, "_cuda_hasPrimaryContext", None)
 before = bool(query(0)) if query is not None else None
 model.quantize(
-    calibration,
-    batch_size=1,
+    CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
     backend=BACKEND.TORCH,
-    calibration_data_min_length=1,
 )
 print(
     "RESULT="
