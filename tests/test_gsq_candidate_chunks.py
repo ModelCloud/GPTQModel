@@ -84,6 +84,51 @@ def test_fp8_block_candidate_chunks_can_split_a_scale_block():
     torch.testing.assert_close(torch.tensor(result['after']), expected, rtol=1e-6, atol=1e-6)
 
 
+def test_fp8_hessian_accepts_gemm_reduction_asymmetry():
+    """#4579: a real ``X.T @ X`` has fp32 reduction-order skew, not bitwise symmetry.
+
+    rocBLAS/hipBLASLt reduce the two triangles of a GEMM in different orders and
+    leave ~2e-7 relative to max|G| of skew on gfx1201. The old absolute
+    ``atol=1e-7`` rejected that valid Gram.
+    """
+
+    torch.manual_seed(0)
+    width, tokens = 16, 512
+    inputs = torch.randn(tokens, width) * 3
+    gram = inputs.T @ inputs
+    # The old check combined rtol with a huge diagonal, so it only failed when
+    # the asymmetric entry sat on a near-zero off-diagonal. Pick the smallest
+    # off-diagonal pair and add the measured reduction-order skew there.
+    magnitudes = gram.abs().clone()
+    magnitudes.fill_diagonal_(float('inf'))
+    row, column = divmod(int(magnitudes.argmin()), width)
+    hessian = gram.clone()
+    hessian[row, column] += 2e-7 * gram.abs().max()
+    weight = torch.zeros((4, width)).to(torch.float8_e4m3fn)
+    config = GSQConfig(enabled=True, steps=1, candidates=4)
+
+    target = torch.randn(4, width)
+    result = refine_fp8_weight(weight, torch.ones(4), target=target,
+                               config=config, hessian=hessian)
+
+    assert result['weight'].shape == weight.shape
+    assert len(result['history']) == config.steps + 1
+
+
+def test_fp8_hessian_still_rejects_a_grossly_asymmetric_matrix():
+    """The scale-aware guard must still catch a genuinely asymmetric Hessian."""
+
+    width = 8
+    hessian = torch.eye(width)
+    hessian[0, 1] = 0.5
+    weight = torch.zeros((2, width)).to(torch.float8_e4m3fn)
+    config = GSQConfig(enabled=True, steps=1, candidates=4)
+
+    with pytest.raises(ValueError, match='must be symmetric'):
+        refine_fp8_weight(weight, torch.ones(2), target=torch.zeros(2, width),
+                          config=config, hessian=hessian)
+
+
 @pytest.mark.parametrize('method', ['affine', 'qqq', 'fp8'])
 def test_candidate_budget_still_rejects_one_row(method):
     config = GSQConfig(enabled=True, steps=1, candidates=4, max_candidate_bytes=63)

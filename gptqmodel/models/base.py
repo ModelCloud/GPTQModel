@@ -689,8 +689,8 @@ def rehome_quantized_kernel(model) -> None:
         raise RuntimeError(
             "Quantize: quantized layers use kernels that cannot run on the final "
             f"device `{device}` ({kernels}). The in-session model cannot run "
-            "inference; reload the saved checkpoint on this device (or use the "
-            "portable Torch backend) before using it."
+            "inference; save the quantized model and reload the saved checkpoint "
+            "on this device (or use the portable Torch backend) before using it."
         ) from selection_error
 
     model.qlinear_kernel = target
@@ -2251,8 +2251,12 @@ class BaseQModel(nn.Module):
                 elif format_code == FORMAT.GEMV:
                     # The native GEMV extension is CUDA-only. ROCm packs the
                     # identical GEMV layout with the portable Triton kernel
-                    # instead of selecting a class its runtime cannot build.
-                    preferred_backend = awq_gemv_pack_backend(is_rocm=IS_ROCM)
+                    # instead of selecting a class its runtime cannot build; a
+                    # CPU-only host has neither accelerator kernel and packs
+                    # with the portable Torch GEMV reader (issue #4554).
+                    preferred_backend = awq_gemv_pack_backend(
+                        device_type=quant_device_type, is_rocm=IS_ROCM
+                    )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                     preferred_backend = BACKEND.AWQ_GEMV_FAST
                 else:

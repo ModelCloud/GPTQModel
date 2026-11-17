@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import ctypes
+import functools
+import mmap
+import struct
+import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -27,6 +31,94 @@ log = setup_logger()
 
 # ggml's CPU buffer-from-pointer requires this alignment.
 _GGML_CPU_WEIGHT_ALIGNMENT = 32
+
+# Linux ``madvise`` advice. On a file mapping it only unmaps the range: the
+# pages stay in the page cache and re-fault from it. It would discard a private
+# copy-on-write page, so ``_reclaim_file_pages`` checks for those first.
+_MADV_DONTNEED = 4
+# ``/proc/self/pagemap`` entry bits.
+_PAGEMAP_PRESENT = 1 << 63
+_PAGEMAP_SWAPPED = 1 << 62
+_PAGEMAP_FILE_OR_SHARED = 1 << 61
+
+
+@functools.lru_cache(maxsize=1)
+def _libc_madvise():
+    madvise = ctypes.CDLL(None, use_errno=True).madvise
+    madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    madvise.restype = ctypes.c_int
+    return madvise
+
+
+def _file_backed_range(start: int, end: int) -> bool:
+    """Whether ``[start, end)`` lies inside one file mapping of this process."""
+
+    try:
+        with open("/proc/self/maps", encoding="ascii", errors="replace") as maps:
+            for line in maps:
+                fields = line.split(maxsplit=5)
+                low, _, high = fields[0].partition("-")
+                if int(high, 16) <= start:
+                    continue
+                if int(low, 16) > start or int(high, 16) < end:
+                    return False
+                # ``inode`` is 0 for anonymous memory, the heap and the stack.
+                return len(fields) == 6 and fields[4] != "0" and not fields[5].startswith("[")
+    except (OSError, ValueError, IndexError):
+        return False
+    return False
+
+
+def _only_file_pages(start: int, end: int) -> bool:
+    """Whether every page in ``[start, end)`` is unmapped or a page-cache page.
+
+    A present anonymous page (or a swapped one) inside a file mapping is a
+    private copy-on-write page: somebody wrote to the mapping, and dropping
+    it would revert their bytes to the file contents.
+    """
+
+    page = mmap.PAGESIZE
+    try:
+        with open("/proc/self/pagemap", "rb") as pagemap:
+            pagemap.seek(start // page * 8)
+            entries = pagemap.read((end - start) // page * 8)
+    except OSError:
+        return False
+    if len(entries) != (end - start) // page * 8:
+        return False
+    for (entry,) in struct.iter_unpack("<Q", entries):
+        if entry & _PAGEMAP_SWAPPED:
+            return False
+        if entry & _PAGEMAP_PRESENT and not entry & _PAGEMAP_FILE_OR_SHARED:
+            return False
+    return True
+
+
+def _reclaim_file_pages(tensor: torch.Tensor) -> int:
+    """Unmap the file pages that only ``tensor`` occupies.
+
+    A safetensors checkpoint is loaded as an mmap of the whole file. Once a
+    tensor's bytes have been copied elsewhere, the pages it faulted in stay
+    mapped (counted in ``RssFile``) next to the copy for the life of the
+    model. Only whole pages inside the tensor are advised, so a neighbouring
+    tensor that is still read in place is untouched, and the view itself stays
+    valid (it re-faults from the page cache). Returns the advised byte count:
+    0 when the tensor is not file backed, holds copy-on-write pages, or the
+    platform has no ``madvise``.
+    """
+
+    if not sys.platform.startswith("linux") or tensor.device.type != "cpu":
+        return 0
+    start = tensor.data_ptr()
+    end = start + tensor.numel() * tensor.element_size()
+    page = mmap.PAGESIZE
+    low = -(-start // page) * page
+    high = end // page * page
+    if high <= low or not _file_backed_range(low, high) or not _only_file_pages(low, high):
+        return 0
+    if _libc_madvise()(ctypes.c_void_p(low), ctypes.c_size_t(high - low), _MADV_DONTNEED) != 0:
+        return 0
+    return high - low
 
 
 # Imported lazily by ``_require_llama_cpp``: importing llama-cpp-python costs
@@ -87,6 +179,25 @@ class _GGMLInitParams(ctypes.Structure):
     ]
 
 
+class _GGMLWeightView:
+    """``__cuda_array_interface__`` exporter for a :class:`_GGMLSharedWeight`.
+
+    ``torch.as_tensor`` keeps the exporter alive for as long as any tensor (or
+    view of one) shares the memory, and the exporter keeps the ggml weight
+    alive, so the ggml buffer cannot be freed under a live ``qweight``.
+    """
+
+    def __init__(self, weight: "_GGMLSharedWeight") -> None:
+        self.weight = weight
+        self.__cuda_array_interface__ = {
+            "shape": tuple(weight.shape),
+            "typestr": "|u1",
+            "data": (int(weight.data_ptr), False),
+            "strides": None,
+            "version": 3,
+        }
+
+
 class _GGMLSharedWeight:
     """One ggml weight tensor per device, referenced by every plan on it.
 
@@ -94,6 +205,15 @@ class _GGMLSharedWeight:
     batch-size plan, so a layer with up to ``_MAX_GGML_CUDA_PLANS`` plans kept
     that many device copies of it (#4216). A plan's graph now references this
     tensor, and only its activation/output tensors live in the plan's buffer.
+
+    The ggml buffer is also the storage of the layer's ``qweight`` once the
+    kernel adopts :meth:`as_tensor` (#4387): Torch and ggml then read the same
+    device bytes instead of keeping one copy each. ggml cannot read Torch's
+    allocation instead: when a row is not a multiple of 512 columns, the CUDA
+    buffer type reserves zero-filled padding past ``ggml_nbytes``
+    (``ggml_backend_buft_get_alloc_size``) for the kernels' row over-read. The
+    buffer is freed when the last reference goes away: the kernel, a plan, or
+    any Torch tensor sharing the memory.
     """
 
     def __init__(
@@ -105,16 +225,65 @@ class _GGMLSharedWeight:
         nbytes: int,
         backend_buffer_free,
         ctx_free,
+        data_ptr: int,
+        shape: tuple[int, ...],
+        device: torch.device,
+        lock: threading.RLock | None,
     ) -> None:
         self.ctx = ctx
         self.buffer = buffer
         self.tensor = tensor
         self.nbytes = nbytes
+        self.data_ptr = int(data_ptr)
+        self.shape = tuple(int(dim) for dim in shape)
+        self.device = device
+        self._lock = lock
+        self._exported = False
         self._backend_buffer_free = backend_buffer_free
         self._ctx_free = ctx_free
 
+    def as_tensor(self) -> torch.Tensor:
+        """Return a zero-copy Torch ``uint8`` tensor over the ggml weight bytes."""
+
+        if self.device.type != "cuda" or not self.buffer:
+            raise RuntimeError("only a live CUDA ggml weight can back a Torch tensor.")
+        # A view created inside ``inference_mode`` would be an inference
+        # tensor, and a later ``load_state_dict`` outside it could not copy
+        # into the buffer.
+        with torch.inference_mode(False):
+            view = torch.as_tensor(_GGMLWeightView(self), device=self.device)
+        if view.data_ptr() != self.data_ptr or tuple(view.shape) != self.shape:
+            raise RuntimeError("ggml weight view does not alias the ggml buffer.")
+        self._exported = True
+        return view
+
+    def backs(self, tensor: torch.Tensor | None) -> bool:
+        """Whether ``tensor`` is the Torch view of this weight's bytes."""
+
+        return (
+            isinstance(tensor, torch.Tensor)
+            and self.buffer is not None
+            and tensor.device == self.device
+            and tensor.dtype == torch.uint8
+            and tensor.data_ptr() == self.data_ptr
+            and tuple(tensor.shape) == self.shape
+        )
+
     def close(self) -> None:
+        """Free the ggml buffer; only valid once no Torch view of it is alive."""
+
+        lock = self._lock
+        if lock is None:
+            self._close()
+            return
+        with lock:
+            self._close()
+
+    def _close(self) -> None:
         if self.buffer:
+            if self._exported:
+                # Torch may still have kernels in flight that read the view.
+                torch.cuda.synchronize(self.device)
             self._backend_buffer_free(self.buffer)
             self.buffer = None
         if self.ctx:
@@ -203,7 +372,7 @@ class _GGMLMatmulPlan:
         self,
         *,
         ctx,
-        weight_tensor,
+        weight: _GGMLSharedWeight,
         input_tensor,
         output_tensor,
         graph,
@@ -219,7 +388,9 @@ class _GGMLMatmulPlan:
         ctx_free,
     ) -> None:
         self.ctx = ctx
-        self.weight_tensor = weight_tensor
+        # The graph points at ``weight.tensor``; holding the owner keeps its
+        # buffer alive for as long as this plan can run.
+        self.weight = weight
         self.input_tensor = input_tensor
         self.output_tensor = output_tensor
         self.graph = graph
@@ -241,6 +412,7 @@ class _GGMLMatmulPlan:
             self._ctx_free(self.ctx)
             self.ctx = None
         self.tensors = None
+        self.weight = None
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:
@@ -345,6 +517,7 @@ class _GGMLBridge:
         self._bind(self._ggml_base, "ggml_new_graph", [ctypes.c_void_p], ctypes.c_void_p)
         self._bind(self._ggml_base, "ggml_build_forward_expand", [ctypes.c_void_p, ctypes.c_void_p], None)
         self._bind(self._ggml_base, "ggml_nbytes", [ctypes.c_void_p], ctypes.c_size_t)
+        self._bind(self._ggml_base, "ggml_get_data", [ctypes.c_void_p], ctypes.c_void_p)
         self._bind(self._ggml_base, "ggml_element_size", [ctypes.c_void_p], ctypes.c_size_t)
         self._bind(self._ggml_base, "ggml_backend_alloc_ctx_tensors", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_void_p)
         self._bind(self._ggml_base, "ggml_backend_get_default_buffer_type", [ctypes.c_void_p], ctypes.c_void_p)
@@ -898,6 +1071,10 @@ class _GGMLBridge:
                     nbytes=weight_nbytes,
                     backend_buffer_free=self._ggml_base.ggml_backend_buffer_free,
                     ctx_free=self._ggml_base.ggml_free,
+                    data_ptr=int(self._ggml_base.ggml_get_data(weight_tensor) or 0),
+                    shape=tuple(qweight_device.shape),
+                    device=qweight_device.device,
+                    lock=self.cuda_backend_lock(device_index),
                 )
             except Exception:
                 if buffer:
@@ -1033,7 +1210,7 @@ class _GGMLBridge:
             )
             plan = _GGMLMatmulPlan(
                 ctx=ctx,
-                weight_tensor=weight_tensor,
+                weight=weight,
                 input_tensor=input_tensor,
                 output_tensor=output_tensor,
                 graph=graph,
@@ -1417,6 +1594,12 @@ class GGUFCppKernel(GGUFTorchLinear):
         is arbitrary, so the packed buffer can start on any byte. Copy it once
         into a padded allocation during initialization; the forward path then
         reads it in place instead of copying it every call.
+
+        The mmap view's pages would otherwise stay resident next to the copy
+        (+522 MiB ``RssFile`` on Llama-3.2-1B q4_k_m), so they are reclaimed
+        once the copy exists. A mapping cannot be moved onto a 32-byte
+        boundary instead: ``mmap`` keeps a page offset, and the safetensors
+        header fixes the data offset modulo 32.
         """
 
         qweight = getattr(self, "qweight", None)
@@ -1440,6 +1623,7 @@ class GGUFCppKernel(GGUFTorchLinear):
         # ``aligned`` keeps ``storage`` alive, and the extra <32 bytes are not
         # part of the buffer shape or the checkpoint payload.
         self.qweight = aligned
+        _reclaim_file_pages(qweight)
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -1589,7 +1773,8 @@ class GGUFCudaKernel(GGUFTorchLinear):
         ] = OrderedDict()
         # One device copy of the packed weight, shared by every plan. Plans hold
         # pointers into its buffer, so it may only be replaced after they are
-        # closed.
+        # closed. Once uploaded from a same-device ``qweight`` it is also the
+        # storage of ``qweight`` (see ``_cuda_weight``).
         self._ggml_cuda_weight: _GGMLSharedWeight | None = None
         self._ggml_cuda_weight_key: tuple | None = None
         # Generation of the shared per-device scratch arena the cached plans
@@ -1619,9 +1804,10 @@ class GGUFCudaKernel(GGUFTorchLinear):
         self._ggml_cuda_plan_generation = -1
 
     def _release_cuda_weight(self) -> None:
-        if self._ggml_cuda_weight is not None:
-            self._ggml_cuda_weight.close()
-            self._ggml_cuda_weight = None
+        # Drop the reference instead of closing: a Torch tensor that still
+        # shares the buffer (``qweight`` itself, or a ``state_dict()`` entry)
+        # keeps it alive, and the last reference frees it.
+        self._ggml_cuda_weight = None
         self._ggml_cuda_weight_key = None
 
     @staticmethod
@@ -1638,35 +1824,65 @@ class GGUFCudaKernel(GGUFTorchLinear):
         if self._ggml_cuda_weight_key is not None:
             with self._cuda_weight_lock():
                 self._close_cuda_plans()
-                self._release_cuda_weight()
+                weight = self._ggml_cuda_weight
+                # A weight that backs ``qweight`` is its storage, not a cache:
+                # in-place writes (``load_state_dict``) already landed in it.
+                if weight is None or not weight.backs(self.qweight):
+                    self._release_cuda_weight()
         return super().clear_weight_cache()
 
     def _cuda_weight(self, x_flat: torch.Tensor) -> _GGMLSharedWeight:
         device_index = 0 if x_flat.device.index is None else x_flat.device.index
-        key = (device_index, tensor_cache_key(self.qweight))
         # Closing plans and freeing the shared weight is only safe while no
         # other thread is computing with it; every forward takes the same
         # process-wide (re-entrant) lock, because ggml-cuda state is shared
         # across devices (#4378).
         with self._cuda_lock_for_device(device_index):
+            qweight = self.qweight
             weight = self._ggml_cuda_weight
-            if weight is not None and self._ggml_cuda_weight_key == key:
-                return weight
+            if weight is not None and weight.device == x_flat.device:
+                if weight.backs(qweight):
+                    return weight
+                if self._ggml_cuda_weight_key == (device_index, tensor_cache_key(qweight)):
+                    return weight
             # A new weight (or device) invalidates every plan built against the
-            # old buffer, so drop them before freeing it.
+            # old buffer, so drop them before releasing it.
             self._close_cuda_plans()
             self._release_cuda_weight()
             weight = _get_ggml_bridge().build_cuda_weight(
                 device=x_flat.device,
-                qweight=self.qweight,
+                qweight=qweight,
                 gguf_tensor_qtype=self.gguf_tensor_qtype,
                 padded_in_features=self.padded_in_features,
                 out_features=self.out_features,
                 kernel_name=self.__class__.__name__,
             )
+            if qweight.device == x_flat.device:
+                # The Torch ``qweight`` on this device would duplicate the
+                # upload (#4387). Make the ggml buffer its storage: state_dict,
+                # save, ``.to()`` and the exact FP32 epilogue keep reading the
+                # same bytes through the zero-copy view, and the Torch
+                # allocation is released.
+                qweight = weight.as_tensor()
+                self.qweight = qweight
             self._ggml_cuda_weight = weight
-            self._ggml_cuda_weight_key = key
+            self._ggml_cuda_weight_key = (device_index, tensor_cache_key(qweight))
             return weight
+
+    def __getstate__(self):
+        """Leave the ggml weight and plans out of a copy or pickle.
+
+        They are raw process-local handles owned by this instance; a copy that
+        shared them would free them twice. The copied ``qweight`` holds the
+        bytes, and the copy uploads its own weight on its first forward.
+        """
+
+        state = super().__getstate__()
+        state["_ggml_cuda_plans"] = OrderedDict()
+        state["_ggml_cuda_weight"] = None
+        state["_ggml_cuda_weight_key"] = None
+        state["_ggml_cuda_plan_generation"] = -1
+        return state
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:
@@ -1714,7 +1930,6 @@ class GGUFCudaKernel(GGUFTorchLinear):
                 "Load GGUF models on CUDA or use BACKEND.GGUF_CPP_CPU or BACKEND.GGUF_TORCH for CPU inference."
             )
 
-        plan_key = self._cuda_plan_key(x_flat)
         device_index = 0 if x_flat.device.index is None else x_flat.device.index
         # ggml-cuda keeps cuBLAS handles and memory pools in process-global
         # state shared by every device, so weight/plan cache mutation and the
@@ -1724,9 +1939,10 @@ class GGUFCudaKernel(GGUFTorchLinear):
         with self._cuda_lock_for_device(device_index):
             bridge = _get_ggml_bridge()
             # Resolve the shared weight first: it may drop plans built against
-            # a stale weight buffer, so the plan lookup below must happen after
-            # it.
+            # a stale weight buffer and replace ``qweight`` with its view, so
+            # the plan key and lookup below must happen after it.
             weight = self._cuda_weight(x_flat)
+            plan_key = self._cuda_plan_key(x_flat)
             generation = bridge.cuda_scratch_generation(device_index)
             if self._ggml_cuda_plan_generation != generation:
                 # The device arena grew since these plans were bound; their
