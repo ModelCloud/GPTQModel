@@ -133,18 +133,38 @@ inline const float *scale_table(ttbfp_fmt fmt) {
                               : scales().bf2;
 }
 
+// Runtime SIMD dispatch levels.  Each is computed once, lazily, and published
+// through a function-local static: the C++11 guard variable gives every later
+// reader a happens-before edge with the initializing thread.  A plain
+// `static int cached = -1; if (cached < 0) cached = ...;` instead races when
+// two host threads make the first call concurrently -- the Python ctypes
+// wrapper releases the GIL around these entry points, so nothing above
+// serializes them.
+#if TTBFP_X86 && (defined(__GNUC__) || defined(__clang__))
+inline int detect_avx2_fma() {
+    const char *force = std::getenv("TTBFP_FORCE_SCALAR");
+    if (force && *force && *force != '0') return 0;
+    return (__builtin_cpu_supports("avx2") &&
+            __builtin_cpu_supports("fma")) ? 1 : 0;
+}
+
+inline int detect_avx512() {
+    const char *force_scalar = std::getenv("TTBFP_FORCE_SCALAR");
+    const char *force_avx2 = std::getenv("TTBFP_FORCE_AVX2");
+    if ((force_scalar && *force_scalar && *force_scalar != '0') ||
+        (force_avx2 && *force_avx2 && *force_avx2 != '0')) {
+        return 0;
+    }
+    return (__builtin_cpu_supports("avx512f") &&
+            __builtin_cpu_supports("avx512bw") &&
+            __builtin_cpu_supports("avx512dq") &&
+            __builtin_cpu_supports("avx512vl")) ? 1 : 0;
+}
+#endif
+
 inline int have_avx2_fma() {
 #if TTBFP_X86 && (defined(__GNUC__) || defined(__clang__))
-    static int cached = -1;
-    if (cached < 0) {
-        const char *force = std::getenv("TTBFP_FORCE_SCALAR");
-        if (force && *force && *force != '0') {
-            cached = 0;
-        } else {
-            cached = (__builtin_cpu_supports("avx2") &&
-                      __builtin_cpu_supports("fma")) ? 1 : 0;
-        }
-    }
+    static const int cached = detect_avx2_fma();
     return cached;
 #else
     return 0;
@@ -153,20 +173,7 @@ inline int have_avx2_fma() {
 
 inline int have_avx512() {
 #if TTBFP_X86 && (defined(__GNUC__) || defined(__clang__))
-    static int cached = -1;
-    if (cached < 0) {
-        const char *force_scalar = std::getenv("TTBFP_FORCE_SCALAR");
-        const char *force_avx2 = std::getenv("TTBFP_FORCE_AVX2");
-        if ((force_scalar && *force_scalar && *force_scalar != '0') ||
-            (force_avx2 && *force_avx2 && *force_avx2 != '0')) {
-            cached = 0;
-        } else {
-            cached = (__builtin_cpu_supports("avx512f") &&
-                      __builtin_cpu_supports("avx512bw") &&
-                      __builtin_cpu_supports("avx512dq") &&
-                      __builtin_cpu_supports("avx512vl")) ? 1 : 0;
-        }
-    }
+    static const int cached = detect_avx512();
     return cached;
 #else
     return 0;

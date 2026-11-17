@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -612,3 +613,89 @@ def test_zero_length_reduction_s8_returns_zeros():
     c_bf = ttbfp.matmul_prepacked_s8_bf16(a_bf, et, s8, ttbfp.BF8_B, cols=16)
     assert c.shape == (2, 16) and np.all(c == 0.0)
     assert c_bf.shape == (2, 16) and np.all(c_bf == 0.0)
+
+
+# Eight host threads enter the public capability API together, before the
+# process-wide dispatch level has been initialized.  The ctypes wrapper
+# releases the GIL around the call, so only the C++ side can serialize them.
+_TSAN_HARNESS = r"""
+// SPDX-FileCopyrightText: 2026 ModelCloud.ai
+// SPDX-License-Identifier: Apache-2.0
+#include <atomic>
+#include <cstdio>
+#include <thread>
+#include <vector>
+
+#include "ttbfp.h"
+
+int main() {
+    constexpr int kThreads = 8;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            (void)ttbfp_cpu_features();
+        });
+    }
+    while (ready.load(std::memory_order_acquire) < kThreads) {
+    }
+    go.store(true, std::memory_order_release);
+    for (auto &t : threads) t.join();
+    std::printf("features=%s\n", ttbfp_cpu_features());
+    return 0;
+}
+"""
+
+
+def _tsan_run(tmp_path, cxx, sources, name):
+    """Build *sources* with ThreadSanitizer, run the binary, return the run."""
+    exe = tmp_path / name
+    cmd = [cxx, "-O1", "-g", "-std=c++17", "-fopenmp", "-fsanitize=thread",
+           "-pthread", f"-I{ROOT / 'include'}"]
+    cmd += [str(s) for s in sources]
+    cmd += ["-o", str(exe)]
+    build = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if build.returncode != 0:
+        pytest.skip("ThreadSanitizer build unavailable:\n" + build.stderr[-2000:])
+    env = dict(os.environ)
+    # Exercise the default dispatch path, not a forced one.
+    env.pop("TTBFP_FORCE_SCALAR", None)
+    env.pop("TTBFP_FORCE_AVX2", None)
+    env["OMP_NUM_THREADS"] = "1"
+    return subprocess.run([str(exe)], capture_output=True, text=True,
+                          timeout=300, env=env)
+
+
+def test_cpu_capability_cache_is_thread_safe_on_first_use(tmp_path):
+    """Concurrent first use of the capability cache must not data-race.
+
+    Before the fix ``have_avx512()``/``have_avx2_fma()`` used a non-atomic
+    ``static int cached = -1`` sentinel, so two threads making the first call
+    concurrently produced an unsynchronized read/write pair.  The sanitizer
+    reports that race; a process-local static initialization is clean.
+    """
+    cxx = shutil.which("g++") or shutil.which("clang++")
+    if cxx is None:
+        pytest.skip("no C++ compiler for the ThreadSanitizer check")
+
+    # Some containers cannot start the sanitizer at all (it aborts before
+    # main with "unexpected memory mapping"); skip instead of failing there.
+    probe_src = tmp_path / "probe.cpp"
+    probe_src.write_text("int main() { return 0; }\n")
+    probe = _tsan_run(tmp_path, cxx, [probe_src], "probe")
+    if probe.returncode != 0 or "ThreadSanitizer" in probe.stderr:
+        pytest.skip("ThreadSanitizer cannot run on this host:\n"
+                    + (probe.stdout + probe.stderr)[-2000:])
+
+    harness = tmp_path / "harness.cpp"
+    harness.write_text(_TSAN_HARNESS)
+    run = _tsan_run(tmp_path, cxx,
+                    [harness, ROOT / "src" / "ttbfp_cpu.cpp"], "harness")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "WARNING: ThreadSanitizer" not in run.stderr, run.stderr
+    assert "features=" in run.stdout, run.stdout + run.stderr
