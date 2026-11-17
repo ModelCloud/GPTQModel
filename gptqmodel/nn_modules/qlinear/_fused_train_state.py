@@ -192,8 +192,12 @@ def finalize_fused_train_state(module: nn.Module) -> bool:
             continue
         if rebuilt is None or not torch.equal(rebuilt, expected):
             continue
-        module._buffers.pop(entry.buffer_name, None)
+        # Publish the descriptor before dropping the clone so a reader that
+        # resolves the snapshot entry never sees a name whose buffer is gone
+        # (issue #4788). `state_dict()` also holds `_cpu_transform_lock`, which
+        # is what makes the pair atomic.
         snapshot[name] = descriptor
+        module._buffers.pop(entry.buffer_name, None)
         dropped = True
     return dropped
 
