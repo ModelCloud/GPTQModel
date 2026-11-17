@@ -3052,7 +3052,11 @@ class AWQProcessor(LoopProcessor):
         minimise the error of *that* quantizer, not of the global default.
         """
 
-        assert w.dim() == 2
+        if w.dim() != 2:
+            raise ValueError(
+                "AWQ clipping expects a 2-D weight tensor, "
+                f"got shape {tuple(w.shape)}"
+            )
         org_w_shape = w.shape
         # w           [co, ci]      -> [co, 1, n_group, group size]
         # input_feat  [n_token, ci] -> [1, n_token, n_group, group size]
@@ -3285,7 +3289,11 @@ class AWQProcessor(LoopProcessor):
                 f"group_size ({configured_group_size})!"
             )
             w = w.reshape(-1, configured_group_size)
-        assert w.dim() == 2
+        if w.dim() != 2:
+            raise ValueError(
+                "AWQ clipping expects a 2-D weight tensor, "
+                f"got shape {tuple(w.shape)}"
+            )
 
         if not sym:
             max_int = 2**bits - 1
