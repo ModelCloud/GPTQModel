@@ -2145,6 +2145,7 @@ def ModelLoader(cls):
                 tokenizer=tokenizer,
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
+                processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2346,6 +2347,7 @@ def ModelLoader(cls):
             tokenizer=tokenizer,
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
+            processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2541,6 +2543,7 @@ def ModelLoader(cls):
             "_commit_hash": commit_hash,
             "attn_implementation": attn_implementation,
         }
+        processor_load_kwargs = get_config_selection_kwargs({**kwargs_without_internal, **cached_file_kwargs})
 
         # == step1: prepare configs and file names == #
         config: PretrainedConfig = load_model_config(
@@ -2756,6 +2759,7 @@ def ModelLoader(cls):
                 load_quantized_model=True,
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
+                processor_load_kwargs=processor_load_kwargs,
             )
             instance._runtime_generate = runtime_generate
             _set_paged_attention_safe_cuda_graphs(instance.model)
@@ -3581,6 +3585,7 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
+            processor_load_kwargs=processor_load_kwargs,
         )
         if backend == BACKEND.MLX:
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)

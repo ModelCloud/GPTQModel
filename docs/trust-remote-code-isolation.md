@@ -121,9 +121,9 @@ flowchart TD
     A["BaseQModel.__init__"] --> B{"require_load_processor?"}
     B -- no --> C["No processor load"]
     B -- yes --> D{"LocalModelLoader declares processor_class?"}
-    D -- yes --> E["LocalModelLoader.load_processor: selected config and tokenizer"]
+    D -- yes --> E["LocalModelLoader.load_processor: selected config, tokenizer and asset kwargs"]
     E --> F["Direct package processor; strip checkpoint code options"]
-    D -- no --> G["AutoProcessor.from_pretrained: resolved model trust"]
+    D -- no --> G["AutoProcessor.from_pretrained: resolved trust and same asset kwargs"]
     G --> H["Native processor or explicitly permitted checkpoint code"]
     G --> I["Unsupported processor: load error"]
     style I fill:#ffcdd2,stroke:#b71c1c
@@ -187,6 +187,7 @@ the responsibility of those engines.
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 | Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
 | Processor selection | Always entered `AutoProcessor.from_pretrained` (`464cfb05f:gptqmodel/models/base.py:1071`) | Optional definition-owned processor class receives selected config/tokenizer directly |
+| Processor asset selection | Lost subfolder/revision/cache options at wrapper construction (`8f472e139:gptqmodel/models/base.py:1080-1090`) | All four dense/quantized wrapper construction paths pass filtered HF selection kwargs to the automatic processor loader |
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
 actual checkpoint config and model imports under explicit bypass, permission
@@ -194,3 +195,14 @@ revocation, native/local precedence, all three public dispatchers, lazy local
 meta construction, native multimodal mappings and subfolder selection.
 They establish dispatch and security behavior, not numerical qualification of
 the separate model ports.
+
+Automatic processor initialization preserves the model/tokenizer asset selection,
+including `subfolder`, `revision`, cache and authentication options. Both package
+and native processors receive `get_config_selection_kwargs`; checkpoint code
+options cannot enter through that argument. Invalid or absent processor assets
+raise normally. `tests/test_local_processor_loading.py` exercises root/nested
+public loads, hostile trust/bypass combinations, removal and repair of the actual
+selected asset, and exact model-logit parity after retry. Before propagation all
+eight public selection cases fail (missing forwarded options or the root asset);
+the focused suite passes all 13 cases after the fix. Its processor is a boundary
+fixture reading a real asset, rather than a model/media numerical oracle.
