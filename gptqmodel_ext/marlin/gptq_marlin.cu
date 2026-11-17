@@ -358,15 +358,21 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
   int sh_a_size = stages * (tb_m * tb_k) * 2;
   int sh_b_size = stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
-  int sh_bias_size = tb_n * 2;
-  int tmp_size =
-      (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
-  tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
+  // marlin_template.h stages the bias as FP32 (four columns per int4), so its
+  // extent is ``thread_n_blocks * 16 / 4`` int4 = ``tb_n * 4`` bytes. The
+  // host-side model must use the same size: a config the host accepts with the
+  // old ``tb_n * 2`` term can need more dynamic shared memory than the launch
+  // reserves, and the bias stage must not be counted as the 16-bit region.
+  int sh_bias_size = tb_n * 4;
+  int tmp_size = (sh_b_size > sh_red_size ? sh_b_size : sh_red_size) +
+                 sh_bias_size;
 
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full, stages);
-  int sh_g_idx_size = has_act_order && !is_k_full ? stages * tb_k / 4 : 0;
+  // ``g_idx_stage`` is ``tb_k / 4`` int4 in the kernel, i.e. ``tb_k * 4``
+  // bytes per stage. The previous byte count dropped that 16-byte factor.
+  int sh_g_idx_size = has_act_order && !is_k_full ? stages * tb_k * 4 : 0;
   int sh_zp_size = 0;
   if (has_zp) {
     if (is_zp_float)
