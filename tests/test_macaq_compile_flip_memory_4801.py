@@ -1,21 +1,23 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for #4801.
+"""Regression tests for #4801 / #4900.
 
-`macaq_quantize_weight(..., compile_flip=True)` runs the flip sweep through
-`torch.compile`. Each compiled call leaves a cycle of dead frames (Dynamo
-resume frames, the wrapper, `_flip_sweep`) that still holds the sweep's
-intermediate tensors, so a run kept 0.4-1.4 GiB resident per Linear after
-`quantize()` and peaked higher until Python's cyclic GC happened to run.
+#4801: a compiled flip sweep used to leave Dynamo resume frames holding the
+sweep's working set, so a run kept 0.4-1.4 GiB resident until a cyclic GC.
+#4833 fixed that with a full ``gc.collect()`` per Linear; #4854 then removed
+the graph break, so the per-Linear collection only cost time (#4900: MACaQ
+quantize 1.3-4x slower on 0.5B-1B models).
 
-The cycle is only collectible once the sweep's frames have returned, so the
-collection runs at the call site. `MacaqProcessor.finalize()` collects once
-more so the #4747/#4757 "quantize() returns with nothing resident" contract
-holds even if something else in the processor keeps a frame alive.
+The hot path therefore no longer collects. ``MacaqProcessor.finalize()`` keeps
+one full collection as the backstop that holds the #4747/#4757 "``quantize()``
+returns with nothing resident" contract. ``test_macaq_compile_flip_residency_4801``
+pins the no-residue contract itself: the sweep's operands die with no
+``gc.collect()``.
 """
 
 import gc
+from types import SimpleNamespace
 
 import torch
 
@@ -31,14 +33,18 @@ def _weight_and_hessian(out_features: int, in_features: int, device: torch.devic
     return weight, hessian, float(x.shape[0])
 
 
-def _count_collects(monkeypatch):
+def _record_collects(monkeypatch):
+    """Record every ``gc.collect(...)`` call, with its arguments."""
+
     collected = []
-    monkeypatch.setattr(gc, "collect", lambda: collected.append(1))
+    monkeypatch.setattr(gc, "collect", lambda *args: collected.append(args))
     return collected
 
 
-def test_compiled_flip_collects_once_per_weight(monkeypatch):
-    collected = _count_collects(monkeypatch)
+def test_compiled_flip_does_not_collect_per_weight(monkeypatch):
+    """#4900: no full (or generation-limited) collection in the hot path."""
+
+    collected = _record_collects(monkeypatch)
     monkeypatch.setattr(macaq, "_compiled_flip_supported", lambda device: True)
     monkeypatch.setattr(macaq, "_compiled_flip_sweep", macaq._flip_sweep)
 
@@ -47,11 +53,11 @@ def test_compiled_flip_collects_once_per_weight(monkeypatch):
         weight, hessian, n_tokens, n_flip_iters=2, compile_flip=True
     )
 
-    assert collected
+    assert collected == []
 
 
 def test_eager_flip_does_not_collect(monkeypatch):
-    collected = _count_collects(monkeypatch)
+    collected = _record_collects(monkeypatch)
     monkeypatch.setattr(macaq, "_compiled_flip_supported", lambda device: True)
     monkeypatch.setattr(macaq, "_compiled_flip_sweep", macaq._flip_sweep)
 
@@ -64,7 +70,7 @@ def test_eager_flip_does_not_collect(monkeypatch):
 
 
 def test_unsupported_device_does_not_collect(monkeypatch):
-    collected = _count_collects(monkeypatch)
+    collected = _record_collects(monkeypatch)
     # The compiled sweep is only qualified on NVIDIA CUDA with the GIL and on
     # ROCm gfx1201; elsewhere the eager sweep runs and nothing to collect.
     monkeypatch.setattr(macaq, "_compiled_flip_supported", lambda device: False)
@@ -75,3 +81,29 @@ def test_unsupported_device_does_not_collect(monkeypatch):
     )
 
     assert collected == []
+
+
+def test_finalize_keeps_the_collection_backstop(monkeypatch):
+    """Removing the finalize collection must fail this test (#4801 contract)."""
+
+    from gptqmodel.looper import macaq_processor
+    from gptqmodel.looper.loop_processor import LoopProcessor
+
+    # The base finalize releases process-wide resources; the backstop is the
+    # only thing this test is about.
+    monkeypatch.setattr(LoopProcessor, "finalize", lambda self, model, **kwargs: None)
+    collected = _record_collects(monkeypatch)
+
+    model = SimpleNamespace(
+        quantized=False,
+        quantize_config=SimpleNamespace(
+            method=None,
+            format=None,
+            checkpoint_format_for_settings=lambda: "mxfp4",
+        ),
+    )
+    processor = object.__new__(macaq_processor.MacaqProcessor)
+    processor.finalize(model)
+
+    assert collected, "MacaqProcessor.finalize() lost the gc backstop"
+    assert model.quantized is True
