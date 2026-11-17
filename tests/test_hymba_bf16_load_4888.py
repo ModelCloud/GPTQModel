@@ -117,6 +117,32 @@ def test_dtype_guard_still_rejects_corrupted_fp32():
         )
 
 
+class _AllFp32ConstructedModel(PreTrainedModel):
+    """Constructed outside transformers' dtype context: the record is uninformative."""
+
+    config_class = _GuardConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.weight = nn.Parameter(torch.ones(8, dtype=torch.float32))
+        self.post_init()
+
+
+def test_dtype_guard_ignores_an_all_fp32_construction_record():
+    """A record taken without a dtype context must not exempt a wrong dtype."""
+
+    model = _AllFp32ConstructedModel(_GuardConfig())
+
+    assert getattr(model, "_gptqmodel_construction_parameter_dtypes", None) is None
+    with pytest.raises(RuntimeError, match="floating parameters are not all torch.bfloat16"):
+        assert_loaded_model_state(
+            model,
+            api_name="test",
+            expected_dtype=torch.bfloat16,
+            require_uniform_dtype=True,
+        )
+
+
 class _TinyConfig(LlamaConfig):
     model_type = "tiny_hymba_4888"
 

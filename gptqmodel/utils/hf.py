@@ -454,8 +454,8 @@ def _record_construction_dtypes(model) -> None:
     named_parameters = getattr(model, "named_parameters", None)
     if not callable(named_parameters):
         return
-    keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
     try:
+        keep_in_fp32 = _compile_keep_in_fp32_matcher(model)
         dtypes = {
             name: parameter.dtype
             for name, parameter in named_parameters()
@@ -463,6 +463,12 @@ def _record_construction_dtypes(model) -> None:
             and not (keep_in_fp32 is not None and keep_in_fp32(name))
         }
     except Exception:  # pragma: no cover - defensive: exotic parameter proxies
+        return
+    if not dtypes or all(dtype is torch.float32 for dtype in dtypes.values()):
+        # Constructed entirely in fp32: transformers' dtype context was not
+        # active, so the record says nothing about intent and must not be used
+        # to exempt anything. Keeping the strict check here is what stops a
+        # broken cast from being masked.
         return
     object.__setattr__(model, CONSTRUCTION_DTYPES_ATTR, dtypes)
 
