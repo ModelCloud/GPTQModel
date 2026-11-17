@@ -68,7 +68,7 @@ flowchart TD
     E --> H["_ACTIVE_CONFIG (process-wide, RLock)"]
     H --> I["resolve_kernel_config(owner)<br/>owner._resolved_kernel, owner.kernel,<br/>owner.runtime, else _ACTIVE_CONFIG"]
     I --> M["BaseQuantLinear / make_quant<br/>snapshot_kernel_config"]
-    M --> J["Module-owned policy: TorchLinear, MarlinLinear,<br/>GGUF, ParoQuant, bitsandbytes"]
+    M --> J["Module-owned policy: TorchLinear, MarlinLinear,<br/>GGUF, Paro, bitsandbytes"]
     M --> K["Native op arguments: AWQ, block-float,<br/>Swordfish and GGUF CPU"]
     J --> L["run"]
     K --> L
@@ -104,12 +104,12 @@ flowchart LR
 | `os.getenv("GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE")` at import | `quantization/npu_linalg.py:9` | `KernelConfig.npu_cholesky_block_size` passed per call |
 | `os.environ.get("GPTQ_TORCH_*")` | `nn_modules/qlinear/torch.py:245-276` | `KernelConfig.torch_*` |
 | `env_flag("GPTQMODEL_MARLIN_USE_FP32")` | `nn_modules/qlinear/marlin.py:158` | `KernelConfig.marlin_fp32` |
-| `env_flag("GPTQMODEL_FP32_ACCUM")` | `gemm_awq.py:30`, `gemm_awq_triton.py:32`, `quantization/awq/**/gemm.py:28`, `quantization/paroquant/**/gemm.py:32` | `KernelConfig.fp32_accum` |
+| `env_flag("GPTQMODEL_FP32_ACCUM")` | `gemm_awq.py:30`, `gemm_awq_triton.py:32`, `quantization/awq/**/gemm.py:28`, `quantization/paro/**/gemm.py:32` | `KernelConfig.fp32_accum` |
 | `os.getenv("GPTQMODEL_AWQ_TRITON_SCHEDULE")` at import | `quantization/awq/modules/triton/scheduler.py:27` | `KernelConfig.awq_triton_schedule` |
 | `GPTQMODEL_GGUF_FUSED_*`, `GGUF_CPP_NATIVE_MATMUL`, `GGUF_CPP_THREADS` | `qlinear/gguf.py:1197-1215`, `qlinear/gguf_cpp.py:445,1190` | `KernelConfig.gguf_*` |
 | `GPTQMODEL_INTERNAL_GGUF_QUANTIZED_LOADER`, `..._TORCH_LOADER`, `..._DEQUANT_DEVICE`, `..._DEQUANT_MAX_BYTES` | `models/loader.py`, `utils/hf.py:699`, `utils/internal_gguf.py:281,314` | `KernelConfig.gguf_native_quantized_loader`, `gguf_torch_dequant_loader`, `gguf_dequant_device`, `gguf_dequant_chunk_bytes` |
-| `GPTQMODEL_PAROQUANT_*` behaviour switches | `qlinear/paroquant.py:53-66`, `paroquant_triton.py:66-70`, `quantization/paroquant/**` | `KernelConfig.paroquant_*` |
-| `GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE_*` timing knobs | `gptqmodel_ext/paroquant/rotation.cu` | internal constants; `KernelConfig.paroquant_rotate_autotune` / `_cta_m` / `_row_pad` select behaviour |
+| `GPTQMODEL_PARO_*` behaviour switches | `qlinear/paro.py:53-66`, `paro_triton.py:66-70`, `quantization/paro/**` | `KernelConfig.paro_*` |
+| `GPTQMODEL_PARO_ROTATE_AUTOTUNE_*` timing knobs | `gptqmodel_ext/paro/rotation.cu` | internal constants; `KernelConfig.paro_rotate_autotune` / `_cta_m` / `_row_pad` select behaviour |
 | `GPTQMODEL_BITSANDBYTES_*`, `GPTQMODEL_BNB_TRITON`, `GPTQMODEL_DISABLE_BITBLAS` | `qlinear/bitsandbytes.py:49,57`, `bitsandbytes_triton.py:109`, `bitblas.py:115` | `KernelConfig.bitsandbytes_*`, `disable_bitblas` |
 | `GPTQMODEL_GSQ_DISABLE_*_RELAXATION` | `quantization/gsq_cuda_relaxation.py:400-403` | `KernelConfig.gsq_disable_*` |
 | `GPTQMODEL_EXL3_*` | `exl3_lib/quantize.py:136`, `exllamav3_processor.py:127-130`, `utils/exl3_capture_*.py` | `KernelConfig.exl3_*` |
@@ -153,8 +153,8 @@ that had already been built:
 
 - `bitsandbytes_triton.available_for` / `should_use` take the module's
   `kernel`; `BitsAndBytesLinear.forward` passes `self.kernel`.
-- `paroquant_gemm_triton_decode` / `paroquant_gemm_triton_prefill` take an
-  `fp32_accum` argument; `ParoQuantTritonLinear` passes its resolved
+- `paro_gemm_triton_decode` / `paro_gemm_triton_prefill` take an
+  `fp32_accum` argument; `ParoTritonLinear` passes its resolved
   `self.fp32_accum`.
 
 ```mermaid
@@ -171,7 +171,7 @@ flowchart TD
 | Site | Before | After |
 | --- | --- | --- |
 | bitsandbytes Triton gate | `get_kernel_config().bitsandbytes_triton` at `qlinear/bitsandbytes_triton.py:109` | `kernel.bitsandbytes_triton` passed by `BitsAndBytesLinear.forward` |
-| ParoQuant Triton GEMM | `get_kernel_config().fp32_accum` at `quantization/paroquant/modules/triton/gemm.py:476,501` | `fp32_accum=self.fp32_accum` passed by `ParoQuantTritonLinear` |
+| Paro Triton GEMM | `get_kernel_config().fp32_accum` at `quantization/paro/modules/triton/gemm.py:476,501` | `fp32_accum=self.fp32_accum` passed by `ParoTritonLinear` |
 
 `kernel=None` / `fp32_accum=None` still falls back to the process policy for
 helpers called without an owning module. Regression:
@@ -220,7 +220,7 @@ representation, not another machine's kernel tuning.
 | Field | Default | Effect |
 | --- | --- | --- |
 | `marlin_fp32` | `True` | FP32 Marlin reduction. `False` uses the reduced-precision reduction. |
-| `fp32_accum` | `True` | FP32 accumulation in the Triton AWQ/ParoQuant GEMMs. |
+| `fp32_accum` | `True` | FP32 accumulation in the Triton AWQ/Paro GEMMs. |
 | `awq_triton_schedule` | `"auto"` | AWQ Triton dispatch mode: `"auto"` or `"legacy"`. |
 | `awq_fused_splitk_reduce` | `True` | Use the fused split-K reduce. `False` reduces through the eager `sum(0)`. |
 
@@ -241,30 +241,30 @@ representation, not another machine's kernel tuning.
 | `gguf_dequant_device` | `None` | Torch device (`cpu` or `cuda[INDEX]`) for that conversion. `None` keeps the reference NumPy path. |
 | `gguf_dequant_chunk_bytes` | `268435456` | Transient-memory budget for one sign-only NumPy conversion chunk. |
 
-### ParoQuant
+### Paro
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `paroquant_cache_runtime_dtype` | `False` | Cache the typed runtime rotation state. |
-| `paroquant_auto_cache_bf16_runtime_dtype` | `True` | Enable that cache automatically for BF16. |
-| `paroquant_cache_rotation_dtype` | `False` | Cache typed rotation metadata. |
-| `paroquant_auto_cache_bf16_rotation_dtype` | `True` | Enable that cache automatically for BF16. |
-| `paroquant_cpu_avx512` | `True` | Allow the AVX512 BF16 CPU GEMM. |
-| `paroquant_triton_autotune` | `True` | Autotune the Triton GEMM tiles. |
-| `paroquant_triton_autotune_warmup` | `2` | Warmup launches per candidate. |
-| `paroquant_triton_autotune_iters` | `4` | Timed launches per candidate. |
-| `paroquant_triton_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
-| `paroquant_triton_decode_max_rows` | `8` | Largest row count that uses the decode tile. |
-| `paroquant_sym_ste_triton` | `True` | Allow the symmetric Triton STE. |
-| `paroquant_affine_ste_triton` | `True` | Allow the affine Triton STE. |
-| `paroquant_affine_ste_triton_backward` | `False` | Use the Triton affine backward instead of the hybrid. |
-| `paroquant_rotate_autotune` | `True` | Autotune the fused-rotation launch shape. |
-| `paroquant_rotate_cta_m` | `None` | Pin the rotation CTA-M tile to `4`, `8` or `16`. |
-| `paroquant_rotate_row_pad` | `None` | Pin the rotation row padding to `0` or `2`. |
-| `paroquant_autotune_cache` | `True` | Persist rotation autotune results. |
+| `paro_cache_runtime_dtype` | `False` | Cache the typed runtime rotation state. |
+| `paro_auto_cache_bf16_runtime_dtype` | `True` | Enable that cache automatically for BF16. |
+| `paro_cache_rotation_dtype` | `False` | Cache typed rotation metadata. |
+| `paro_auto_cache_bf16_rotation_dtype` | `True` | Enable that cache automatically for BF16. |
+| `paro_cpu_avx512` | `True` | Allow the AVX512 BF16 CPU GEMM. |
+| `paro_triton_autotune` | `True` | Autotune the Triton GEMM tiles. |
+| `paro_triton_autotune_warmup` | `2` | Warmup launches per candidate. |
+| `paro_triton_autotune_iters` | `4` | Timed launches per candidate. |
+| `paro_triton_autotune_margin` | `0.05` | Relative margin a candidate must win by. |
+| `paro_triton_decode_max_rows` | `8` | Largest row count that uses the decode tile. |
+| `paro_sym_ste_triton` | `True` | Allow the symmetric Triton STE. |
+| `paro_affine_ste_triton` | `True` | Allow the affine Triton STE. |
+| `paro_affine_ste_triton_backward` | `False` | Use the Triton affine backward instead of the hybrid. |
+| `paro_rotate_autotune` | `True` | Autotune the fused-rotation launch shape. |
+| `paro_rotate_cta_m` | `None` | Pin the rotation CTA-M tile to `4`, `8` or `16`. |
+| `paro_rotate_row_pad` | `None` | Pin the rotation row padding to `0` or `2`. |
+| `paro_autotune_cache` | `True` | Persist rotation autotune results. |
 
 The fused-rotation autotune measurement counts and thresholds are internal
-constants in `gptqmodel_ext/paroquant/rotation.cu`; they are not environment
+constants in `gptqmodel_ext/paro/rotation.cu`; they are not environment
 variables. Only the fields above select behaviour.
 
 ### bitsandbytes and BitBLAS

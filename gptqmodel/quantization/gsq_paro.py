@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Frozen exported ParoQuant coordinate system for a GSQ candidate adapter.
+"""Frozen exported Paro coordinate system for a GSQ candidate adapter.
 
 This module prepares the reconstruction problem; lifecycle integration and
 native validation are separate. It does not enable GSQ in ParoConfig.
@@ -11,7 +11,7 @@ native validation are separate. It does not enable GSQ in ParoConfig.
 
 import torch
 
-from .paroquant.optimization import _apply_rotation
+from .paro.optimization import _apply_rotation
 
 
 def paro_gsq_basis(weight, inputs, pairs, theta, channel_scales, *, group_size, storage_dtype=torch.float16):
@@ -75,7 +75,7 @@ def refine_paro_export(result, *, teacher, inputs, group_size, config=None, stor
     """
     from .config import normalize_gsq_config
     from .gsq_scalar import affine_codes, refine_affine_scalar
-    from .paroquant.optimization import _apply_inverse_rotation
+    from .paro.optimization import _apply_inverse_rotation
 
     config = normalize_gsq_config(config)
 

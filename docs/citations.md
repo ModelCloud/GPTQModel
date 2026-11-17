@@ -79,7 +79,7 @@
   year={2023}
 }
 
-# ParoQuant
+# Paro
 @inproceedings{liang2026paroquant,
   title     = {{ParoQuant: Pairwise Rotation Quantization for Efficient Reasoning LLM Inference}},
   author    = {Liang, Yesheng and Chen, Haisheng and Han, Song and Liu, Zhijian},

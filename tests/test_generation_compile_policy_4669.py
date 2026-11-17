@@ -27,7 +27,7 @@ from transformers import CompileConfig, GenerationConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 

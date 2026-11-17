@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """#4555: forward dispatch reads the module's snapshotted kernel policy.
 
-A quantized linear owns ``self.kernel`` (and, for ParoQuant, the resolved
+A quantized linear owns ``self.kernel`` (and, for Paro, the resolved
 ``self.fp32_accum``). Later ``configure_kernel`` calls must not change the
 path or the accumulation mode of a module that was already built.
 """
@@ -17,8 +17,8 @@ import torch
 from gptqmodel.nn_modules.qlinear import bitsandbytes as bnb_module
 from gptqmodel.nn_modules.qlinear import bitsandbytes_triton as bt
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
-from gptqmodel.quantization.paroquant.modules.triton import gemm as paro_gemm
+from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
+from gptqmodel.quantization.paro.modules.triton import gemm as paro_gemm
 from gptqmodel.utils.kernel import KernelConfig, configure_kernel, reset_kernel_config
 
 
@@ -110,8 +110,8 @@ def test_bitsandbytes_forward_passes_the_module_kernel(monkeypatch):
     assert second.kernel.bitsandbytes_triton is False
 
 
-def _build_paroquant(kernel: KernelConfig | None) -> ParoQuantTritonLinear:
-    return ParoQuantTritonLinear(
+def _build_paro(kernel: KernelConfig | None) -> ParoTritonLinear:
+    return ParoTritonLinear(
         bits=4,
         group_size=128,
         sym=True,
@@ -124,9 +124,9 @@ def _build_paroquant(kernel: KernelConfig | None) -> ParoQuantTritonLinear:
     )
 
 
-def test_paroquant_triton_forward_uses_the_module_fp32_accum(monkeypatch):
+def test_paro_triton_forward_uses_the_module_fp32_accum(monkeypatch):
     monkeypatch.setattr(
-        ParoQuantTritonLinear,
+        ParoTritonLinear,
         "cached_validate_once",
         classmethod(lambda cls: (True, None)),
     )
@@ -136,10 +136,10 @@ def test_paroquant_triton_forward_uses_the_module_fp32_accum(monkeypatch):
         seen.append(kwargs.get("fp32_accum"))
         return torch.zeros(1, dtype=torch.float16)
 
-    monkeypatch.setattr(paro_gemm, "_paroquant_gemm_triton", fake_gemm)
+    monkeypatch.setattr(paro_gemm, "_paro_gemm_triton", fake_gemm)
 
     configure_kernel(KernelConfig(fp32_accum=False))
-    first = _build_paroquant(KernelConfig(fp32_accum=False))
+    first = _build_paro(KernelConfig(fp32_accum=False))
     assert first.kernel.fp32_accum is False
     assert first.fp32_accum is False
 
@@ -149,7 +149,7 @@ def test_paroquant_triton_forward_uses_the_module_fp32_accum(monkeypatch):
     first._forward_triton_decode(x[:1])
     assert seen == [False, False]
 
-    second = _build_paroquant(None)  # snapshots the current process policy
+    second = _build_paro(None)  # snapshots the current process policy
     assert second.kernel.fp32_accum is True
     assert second.fp32_accum is True
     seen.clear()
@@ -158,14 +158,14 @@ def test_paroquant_triton_forward_uses_the_module_fp32_accum(monkeypatch):
     assert seen == [True, True]
 
 
-def test_paroquant_gemm_helpers_forward_explicit_fp32_accum(monkeypatch):
+def test_paro_gemm_helpers_forward_explicit_fp32_accum(monkeypatch):
     seen = []
 
     def fake_gemm(*args, **kwargs):
         seen.append(kwargs.get("fp32_accum"))
         return torch.zeros(1, dtype=torch.float16)
 
-    monkeypatch.setattr(paro_gemm, "_paroquant_gemm_triton", fake_gemm)
+    monkeypatch.setattr(paro_gemm, "_paro_gemm_triton", fake_gemm)
     configure_kernel(KernelConfig(fp32_accum=True))
 
     x = torch.randn(2, 256, dtype=torch.float16)
@@ -173,10 +173,10 @@ def test_paroquant_gemm_helpers_forward_explicit_fp32_accum(monkeypatch):
     scales = torch.zeros(256, 2, dtype=torch.float16)
     qzeros = torch.zeros(256, 2, dtype=torch.int32)
 
-    paro_gemm.paroquant_gemm_triton_decode(
+    paro_gemm.paro_gemm_triton_decode(
         x, qweight, scales, qzeros, fp32_accum=False
     )
-    paro_gemm.paroquant_gemm_triton_prefill(
+    paro_gemm.paro_gemm_triton_prefill(
         x, qweight, scales, qzeros, fp32_accum=False
     )
 

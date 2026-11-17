@@ -1254,7 +1254,7 @@ def test_macaq_dynamic_false_excludes_modules():
     assert restored.dynamic_get("model.layers.0.mlp.up_proj") == {"do_flip": False}
 
 
-@pytest.mark.parametrize("method", ["macaq", "paroquant", "qqq", "nf12", "tt-blockfloat"])
+@pytest.mark.parametrize("method", ["macaq", "paro", "qqq", "nf12", "tt-blockfloat"])
 def test_transformers_refuses_gptqmodel_only_quant_methods(method):
     """An unknown HF quant method only warns and random-inits (#4090 item 2)."""
 

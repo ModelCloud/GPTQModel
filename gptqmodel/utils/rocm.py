@@ -115,7 +115,7 @@ def warn_unsupported_rocm(logger=None) -> bool:
 # hipBLASLt loads one Tensile library per (dtype, layout) pair on first use. On
 # gfx950 (MI350X) each of those loads spends ~0.8-1.2 s finalizing a code object
 # that carries thousands of kernel entries, and a single calibration pass
-# touches four combinations, so most of a cold GPTQ/QQQ/ParoQuant quantize is
+# touches four combinations, so most of a cold GPTQ/QQQ/Paro quantize is
 # library loading rather than math. rocBLAS covers the same work with roughly
 # 0.15 s of loading and the same steady-state throughput.
 QUANT_BLAS_BACKEND_DEFAULT = "rocblas"
@@ -214,7 +214,7 @@ def quantize_tuning(device=None) -> dict:
         path but not reproducible across processes, so it logs a warning once.
 
     ``amp``
-        Whether the ParoQuant stage optimizer may use AMP.  ROCm keeps AMP off
+        Whether the Paro stage optimizer may use AMP.  ROCm keeps AMP off
         (measured slower and no more accurate on gfx950; RDNA4 was not measured
         separately, so it inherits the same conservative choice).  Non-ROCm
         keeps the historical CUDA default of enabling it.
@@ -243,7 +243,7 @@ def _rocm_quantize_tuning(device=None) -> dict:
 
 
 def rocm_amp_disabled(device=None, *, is_rocm: bool | None = None) -> bool:
-    """True when AMP must stay off for the ParoQuant stage optimizer.
+    """True when AMP must stay off for the Paro stage optimizer.
 
     Every ROCm target currently disables AMP: the autocast overhead was
     measured slower (and no more accurate) than the plain path on MI355X

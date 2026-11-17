@@ -5,13 +5,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 
 
 @pytest.mark.parametrize("method", ["qqq", "paro"])
 def test_eora_handoff_preserves_independent_reconstruction(method):
-    cls = QQQProcessor if method == "qqq" else ParoQuantProcessor
+    cls = QQQProcessor if method == "qqq" else ParoProcessor
     processor = object.__new__(cls)
     processor.lock = threading.Lock()
     processor.calculate_w_wq_diff = True

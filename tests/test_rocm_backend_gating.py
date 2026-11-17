@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
-"""ROCm backend gating for AWQ scheduling, GGUF, VPTQ, and ParoQuant.
+"""ROCm backend gating for AWQ scheduling, GGUF, VPTQ, and Paro.
 
 These tests are pure CPU: HIP/CUDA runtimes are simulated with monkeypatched
 ``torch`` symbols so the architecture-dispatch decisions can be asserted on a
@@ -24,7 +24,7 @@ from gptqmodel.nn_modules.qlinear import qqq as qqq_module
 from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
-from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonLinear
+from gptqmodel.nn_modules.qlinear.paro_triton import ParoTritonLinear
 from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 from gptqmodel.utils import arch as arch_utils
 
@@ -168,10 +168,10 @@ def test_vptq_cuda_rejects_rocm_with_actionable_error(monkeypatch):
     assert ok_validate is False
     assert isinstance(error_validate, NotImplementedError)
 
-def test_paroquant_triton_supports_rocm_explicitly():
-    assert DEVICE.ROCM in ParoQuantTritonLinear.SUPPORTS_DEVICES
+def test_paro_triton_supports_rocm_explicitly():
+    assert DEVICE.ROCM in ParoTritonLinear.SUPPORTS_DEVICES
     # Priority 0 keeps this kernel out of AUTO selection on every device.
-    assert ParoQuantTritonLinear.SUPPORTS_FORMATS[fp8_module.FORMAT.PAROQUANT] == 0
+    assert ParoTritonLinear.SUPPORTS_FORMATS[fp8_module.FORMAT.PARO] == 0
 
 
 def test_qqq_marlin_kernel_declares_cuda_only():

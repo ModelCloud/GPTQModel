@@ -92,9 +92,9 @@ python -m tests.kernels.gen_compile_matrix
 | `MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `NF12Linear` | `nf12` | `EAGER` | no | no |
 | `NF12MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
-| `ParoLinear` | `paroquant` | `EAGER` | no | no |
+| `ParoLinear` | `paro` | `EAGER` | no | no |
 | `ParoMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
-| `ParoQuantTritonLinear` | `paroquant_triton` | `CUDAGRAPH` | yes | no |
+| `ParoTritonLinear` | `paro_triton` | `CUDAGRAPH` | yes | no |
 | `QQQLinear` | `qqq` | `EAGER` | no | no |
 | `QQQMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `QQQTorchLinear` | `qqq` | `CUDAGRAPH` | no | no |

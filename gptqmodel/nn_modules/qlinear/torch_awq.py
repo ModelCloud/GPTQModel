@@ -280,7 +280,7 @@ class AwqTorchLinear(AWQuantLinear):
     ) -> torch.Tensor:
         # `dequantize_gemm` multiplies the integer codes by the scales, so the
         # weight follows the temporary scale dtype. The Torch AWQ forward uses
-        # a half compute dtype, while ParoQuant's dense fallback can use FP32.
+        # a half compute dtype, while Paro's dense fallback can use FP32.
         # Keep FP32 scales in FP32 there: a half intermediate could underflow
         # or overflow before the finished weight is widened again.
         weight = dequantize_gemm(
@@ -408,7 +408,7 @@ class AwqTorchLinear(AWQuantLinear):
         # This is the portable/reference AWQ implementation.  Its arithmetic
         # must remain the dense dequantize + matmul oracle; the BF16-only
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
-        # Subclasses such as ParoQuant use the shared dequantize helper.
+        # Subclasses such as Paro use the shared dequantize helper.
         # The decode dtype follows the stored checkpoint range, not only the
         # activation dtype: narrowing an overflowing or underflowing weight
         # first produces `inf`/`0`, which no later FP32 reduction recovers.

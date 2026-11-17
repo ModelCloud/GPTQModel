@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# ParoQuant reference: z-lab, https://github.com/z-lab/paroquant
-"""Synchronized ParoQuant MPS fallback versus packed MLX at Qwen3.8-27B shapes.
+# Paro reference: z-lab, https://github.com/z-lab/paroquant
+"""Synchronized Paro MPS fallback versus packed MLX at Qwen3.8-27B shapes.
 
 Run with the repository environment's Python. The Torch fallback is the same
 ParoLinear implementation in origin/main; only the packed MLX path is new.
@@ -22,7 +22,7 @@ from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 from gptqmodel.nn_modules.qlinear.mlx import ParoMlxQuantLinear
 from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.quantization import FORMAT
 
 
@@ -40,7 +40,7 @@ def benchmark(name, output_dims, input_dims, rows, repeats, krot, rotate):
     source = ParoLinear(
         bits=4, group_size=128, sym=True, desc_act=False,
         in_features=input_dims, out_features=output_dims, bias=False,
-        register_buffers=True, dtype=torch.float16, format=FORMAT.PAROQUANT,
+        register_buffers=True, dtype=torch.float16, format=FORMAT.PARO,
         krot=krot,
     )
     source.qweight.fill_(np.array(0x98765432, dtype=np.uint32).view(np.int32).item())
