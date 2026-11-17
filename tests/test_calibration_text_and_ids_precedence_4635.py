@@ -62,8 +62,10 @@ def test_a_row_with_text_and_input_ids_uses_the_provided_ids():
     )
 
     assert tokenizer.calls == []
-    assert prepared[0]["input_ids"].tolist() == [[11, 12, 13, 14]]
-    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1, 0]]
+    # The trailing mask-0 slot is tokenizer padding and is stripped (#4889);
+    # the ids still come from the caller, not from re-tokenizing `text`.
+    assert prepared[0]["input_ids"].tolist() == [[11, 12, 13]]
+    assert prepared[0]["attention_mask"].tolist() == [[1, 1, 1]]
 
 
 def test_a_columnar_mapping_with_text_and_input_ids_uses_the_provided_ids():
@@ -81,7 +83,7 @@ def test_a_columnar_mapping_with_text_and_input_ids_uses_the_provided_ids():
     assert tokenizer.calls == []
     assert [row["input_ids"].tolist() for row in prepared] == [
         [[1, 2, 3]],
-        [[4, 5, 6]],
+        [[4, 5]],
     ]
 
 

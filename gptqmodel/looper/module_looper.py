@@ -32,6 +32,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import (
     LoopProcessor,
     record_quant_log,
+    rehome_failed_run_kernels,
     release_failed_run_processors,
 )
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
@@ -2122,6 +2123,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                             # cancel point; fill them before the next forward
                             # (#4860).
                             self._materialize_unreached_meta_modules()
+                            # Layers that finished before the cancel keep the
+                            # calibration-time kernel, which can be
+                            # accelerator-only (AWQ GEMM, QQQ, GGUF). Switch
+                            # them to a kernel this device can run before the
+                            # next forward (#4947).
+                            rehome_failed_run_kernels(self.gptq_model)
                             # Layers that finished before the cancel stay as
                             # disk-offloaded meta shells pointing into this run's
                             # private offload root. Deleting that root now would

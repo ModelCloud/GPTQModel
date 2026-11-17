@@ -7,10 +7,26 @@
 import math
 
 import torch
+import transformers
 
 
 AWQ_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def source_weight_out_in(linear: torch.nn.Module) -> torch.Tensor:
+    """Return ``linear``'s weight in the Linear ``[out_features, in_features]`` layout.
+
+    ``transformers.Conv1D`` (GPT-2 and friends) stores ``[in_features,
+    out_features]``. AWQ pads and groups along the input-channel axis, so every
+    AWQ packer must transpose a Conv1D before packing, exactly like the GPTQ
+    packer does (#4887). A Linear weight is returned unchanged.
+    """
+
+    weight = linear.weight.detach()
+    if isinstance(linear, transformers.pytorch_utils.Conv1D):
+        weight = weight.t()
+    return weight
 
 
 def _pack_contiguous(values: torch.Tensor, bits: int) -> torch.Tensor:

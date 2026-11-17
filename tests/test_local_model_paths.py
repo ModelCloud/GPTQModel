@@ -317,9 +317,14 @@ def test_gptqmodel_from_pretrained_allows_supported_floatx_source_with_auto_deco
     assert GPTQModel.from_pretrained("native-floatx-source", quantize_config=target_config) is sentinel
 
 
-def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quantized(
+def test_gptqmodel_load_rejects_a_quantize_config_for_a_quantized_source(
     monkeypatch, tmp_path
 ):
+    """A quantized source cannot take a different target config (#4945).
+
+    ``load()`` used to route to ``from_quantized`` and drop the caller's
+    config, so the checkpoint's own settings were used without a word.
+    """
     model_dir = tmp_path / "gptq-source"
     model_dir.mkdir()
     fake_config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
@@ -327,8 +332,6 @@ def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quanti
         bits=2.0,
         preprocessors=[AutoModuleDecoderConfig(target_dtype=torch.bfloat16)],
     )
-    sentinel = _loaded_model_stub()
-    captured = {}
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
     monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
@@ -341,20 +344,11 @@ def test_gptqmodel_load_routes_quantized_source_with_auto_decoder_to_from_quanti
     monkeypatch.setattr(
         GPTQModel,
         "from_quantized",
-        classmethod(
-            lambda cls, model_id_or_path, **kwargs: captured.update(
-                path=model_id_or_path,
-                kwargs=kwargs,
-            )
-            or sentinel
-        ),
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected inference load"))),
     )
 
-    result = GPTQModel.load(str(model_dir), quantize_config=target_config)
-
-    assert result is sentinel
-    assert captured["path"] == str(model_dir)
-    assert captured["kwargs"]["trust_remote_code"] is False
+    with pytest.raises(ValueError, match="quantize_config.*quantized checkpoint"):
+        GPTQModel.load(str(model_dir), quantize_config=target_config)
 
 
 def test_gptqmodel_from_pretrained_routes_quantized_source_with_auto_decoder_to_from_quantized(
@@ -613,6 +607,8 @@ def test_model_loader_requires_lazy_turtle_for_offload_to_disk(monkeypatch):
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = True
         config_class = None
@@ -711,6 +707,8 @@ def test_model_loader_uses_lazy_turtle_for_local_safetensors(monkeypatch, tmp_pa
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = True
         HF_CONVERSION_MAP_REVERSED = (
@@ -792,6 +790,8 @@ def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -862,6 +862,8 @@ def test_model_loader_from_pretrained_normalizes_direct_gguf_path(monkeypatch):
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -947,6 +949,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_profiles_use_dense_path
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1057,6 +1061,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_auto_enables_fa2_on_cud
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1159,6 +1165,8 @@ def test_model_loader_from_pretrained_native_bonsai_fast_keeps_explicit_attn_imp
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1262,6 +1270,8 @@ def test_model_loader_from_pretrained_native_bonsai_low_memory_redirects_with_ba
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = False
         config_class = None
@@ -1357,6 +1367,8 @@ def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(mon
         require_fast_init = False
         require_trust_remote_code = False
         require_pkgs = []
+        # BaseQModel's default; the double must not lose the text path.
+        require_load_tokenizer = True
         supports_desc_act = [True, False]
         support_offload_to_disk = True
         config_class = None

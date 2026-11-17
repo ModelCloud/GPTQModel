@@ -1409,6 +1409,80 @@ def _normalize_bitsandbytes_block_size(value: Optional[int]) -> int:
         )
     return normalized
 
+
+def _validate_smooth_number(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+    include_minimum: bool = True,
+    include_maximum: bool = True,
+    range_text: str,
+) -> float:
+    """Validate one numeric smoother parameter and return it as a float."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{owner}: `{field}` must be a number, got {value!r}.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{owner}: `{field}` must be a finite number, got {value!r}.")
+    if minimum is not None and (
+        number < minimum or (not include_minimum and number == minimum)
+    ):
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    if maximum is not None and (
+        number > maximum or (not include_maximum and number == maximum)
+    ):
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return number
+
+
+def _validate_smooth_int(
+    owner: str,
+    field: str,
+    value: Any,
+    *,
+    minimum: Optional[int] = None,
+    range_text: str,
+) -> int:
+    """Validate one integer smoother parameter."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{owner}: `{field}` must be an integer, got {value!r}.")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{owner}: `{field}` must be {range_text}, got {value!r}.")
+    return value
+
+
+def _validate_smooth_percentile(owner: str, field: str, value: Any) -> float:
+    """Validate a percentile on the 0-100 scale used by ``_quantile``.
+
+    Values at or below 1 are rejected explicitly: the public examples use
+    ``99`` for the 99th percentile, so ``0.99`` is a fraction passed by mistake
+    and clamps nearly every weight to the row minimum (#4953).
+    """
+
+    number = _validate_smooth_number(
+        owner,
+        field,
+        value,
+        minimum=0.0,
+        maximum=100.0,
+        include_minimum=False,
+        include_maximum=True,
+        range_text="on a 0-100 scale with 1 < value <= 100",
+    )
+    if number <= 1.0:
+        raise ValueError(
+            f"{owner}: `{field}` is on a 0-100 scale (99 = 99th percentile), "
+            f"got {value!r}; a value <= 1 looks like a fraction and clamps almost "
+            "every weight. Valid range is (1, 100]."
+        )
+    return number
+
+
 @dataclass
 class SmoothMethod:
     """Base smoother descriptor shared by all smoothing strategies."""
@@ -1416,6 +1490,20 @@ class SmoothMethod:
     name: str
     # Apply the smoother only when group size >= this threshold.
     group_size_threshold: int = 128
+
+    def __post_init__(self) -> None:
+        """Reject a threshold that would silently disable or always apply."""
+
+        owner = type(self).__name__
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError(f"{owner}: `name` must be a non-empty string, got {self.name!r}.")
+        self.group_size_threshold = _validate_smooth_int(
+            owner,
+            "group_size_threshold",
+            self.group_size_threshold,
+            minimum=0,
+            range_text=">= 0",
+        )
 
 
 @dataclass
@@ -1436,7 +1524,9 @@ class SmoothPercentile(SmoothMethod):
         """Configure percentile clipping with an optional group-size floor."""
 
         super().__init__(name="percentile", group_size_threshold=group_size_threshold)
-        self.percentile = percentile
+        self.percentile = _validate_smooth_percentile(
+            type(self).__name__, "percentile", percentile
+        )
 
 
 @dataclass
@@ -1458,8 +1548,17 @@ class SmoothPercentileAsymmetric(SmoothMethod):
         """Configure asymmetric percentile clipping bounds."""
 
         super().__init__(name="percentile_asym", group_size_threshold=group_size_threshold)
-        self.low = low
-        self.high = high
+        owner = type(self).__name__
+        self.low = _validate_smooth_number(
+            owner, "low", low, minimum=0.0, maximum=100.0, range_text="0 <= value <= 100"
+        )
+        self.high = _validate_smooth_number(
+            owner, "high", high, minimum=0.0, maximum=100.0, range_text="0 <= value <= 100"
+        )
+        if self.low >= self.high:
+            raise ValueError(
+                f"{owner}: `low` must be < `high`, got low={low!r}, high={high!r}."
+            )
 
 
 @dataclass
@@ -1480,7 +1579,9 @@ class SmoothMAD(SmoothMethod):
         """Configure MAD-based clipping width and activation threshold."""
 
         super().__init__(name="mad", group_size_threshold=group_size_threshold)
-        self.k = k
+        self.k = _validate_smooth_number(
+            type(self).__name__, "k", k, minimum=0.0, include_minimum=False, range_text="> 0"
+        )
 
 
 @dataclass
@@ -1503,8 +1604,20 @@ class SmoothMSE(SmoothMethod):
         """Configure search granularity for MSE-based shrinking."""
 
         super().__init__(name="mse", group_size_threshold=group_size_threshold)
-        self.steps = steps
-        self.maxshrink = maxshrink
+        owner = type(self).__name__
+        self.steps = _validate_smooth_int(
+            owner, "steps", steps, minimum=1, range_text=">= 1"
+        )
+        self.maxshrink = _validate_smooth_number(
+            owner,
+            "maxshrink",
+            maxshrink,
+            minimum=0.0,
+            maximum=1.0,
+            include_minimum=False,
+            include_maximum=True,
+            range_text="0 < value <= 1",
+        )
 
 
 @dataclass
@@ -1525,7 +1638,16 @@ class SmoothOutlier(SmoothMethod):
         """Configure top-percent outlier clipping behavior."""
 
         super().__init__(name="outlier", group_size_threshold=group_size_threshold)
-        self.pct = pct
+        self.pct = _validate_smooth_number(
+            type(self).__name__,
+            "pct",
+            pct,
+            minimum=0.0,
+            maximum=100.0,
+            include_minimum=True,
+            include_maximum=False,
+            range_text="0 <= value < 100",
+        )
 
 
 @dataclass
@@ -1546,7 +1668,9 @@ class SmoothSoftNorm(SmoothMethod):
         """Configure z-score clipping strength for soft normalization."""
 
         super().__init__(name="softnorm", group_size_threshold=group_size_threshold)
-        self.k = k
+        self.k = _validate_smooth_number(
+            type(self).__name__, "k", k, minimum=0.0, include_minimum=False, range_text="> 0"
+        )
 
 
 @dataclass
@@ -1569,8 +1693,11 @@ class SmoothLog(SmoothMethod):
         """Configure log-domain smoothing with percentile and companding strength."""
 
         super().__init__(name="log", group_size_threshold=group_size_threshold)
-        self.percentile = percentile
-        self.mu = mu
+        owner = type(self).__name__
+        self.percentile = _validate_smooth_percentile(owner, "percentile", percentile)
+        self.mu = _validate_smooth_number(
+            owner, "mu", mu, minimum=0.0, include_minimum=False, range_text="> 0"
+        )
 
 
 @dataclass
@@ -1591,7 +1718,12 @@ class SmoothRowCol(SmoothMethod):
         """Configure RMS normalization over rows or columns."""
 
         super().__init__(name="rowcol", group_size_threshold=group_size_threshold)
-        self.axis = axis
+        normalized = str(axis).strip().lower()
+        if normalized not in ("row", "col"):
+            raise ValueError(
+                f"{type(self).__name__}: `axis` must be 'row' or 'col', got {axis!r}."
+            )
+        self.axis = normalized
 
 
 class GcMode(str, Enum):
@@ -1614,6 +1746,11 @@ class Fallback:
     # Smoothers can help some low-sample fallback cases, but a static default can
     # hurt whole-model RTN quality. Leave smoothing opt-in.
     smooth: Optional[SmoothMethod] = None
+
+    def __post_init__(self) -> None:
+        """Validate a directly constructed smoother payload."""
+
+        self.smooth = _parse_smooth_method(self.smooth)
 
 
 @dataclass

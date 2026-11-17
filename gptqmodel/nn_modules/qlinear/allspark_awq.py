@@ -222,7 +222,7 @@ class AllSparkAwqLinear(AWQuantLinear):
         along N. Uses the shared ``pack_awq`` helper so a checkpoint written
         here is byte-compatible with the other AWQ backends.
         """
-        from ...quantization.awq.utils.packing_utils import pack_awq
+        from ...quantization.awq.utils.packing_utils import pack_awq, source_weight_out_in
 
         del g_idx
         assert scales is not None and zeros is not None
@@ -248,7 +248,7 @@ class AllSparkAwqLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        weight = linear.weight.data
+        weight = source_weight_out_in(linear)
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.t() + scale_zeros.index_select(0, group_index))

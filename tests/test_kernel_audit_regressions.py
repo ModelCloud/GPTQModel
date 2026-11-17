@@ -591,6 +591,9 @@ def test_exllamav3_wide_inputs_route_to_torch_reconstruction():
             return torch.ones(x.shape[:-1] + (4,), dtype=out_dtype or x.dtype)
 
     layer = SimpleNamespace(
+        # #4835: ``forward`` asks the module whether it must reconstruct through
+        # the portable kernel before it looks at the input width.
+        _needs_torch_fallback=lambda: False,
         _ensure_torch_inner=lambda: TorchInner(),
         _ensure_inner=lambda: pytest.fail("wide inputs must not use the native kernel"),
         out_features=4,

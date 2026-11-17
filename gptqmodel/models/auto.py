@@ -728,7 +728,8 @@ def _quantize_warmup_devices(quantize_config, device) -> Optional[List[torch.dev
     describes inference placement rather than the quantization pool.
     """
 
-    explicit_devices = _explicit_requested_devices(device)
+    # The quantization pool may span compute capabilities (#4875).
+    explicit_devices = _explicit_requested_devices(device, validate_families=False)
     compute_device_filter = getattr(quantize_config, "compute_device_filter", None)
     if explicit_devices is None and compute_device_filter is None:
         return None
@@ -746,19 +747,19 @@ def _quantize_warmup_devices(quantize_config, device) -> Optional[List[torch.dev
             auto_select_device(None, None)
         )
 
-    candidates = select_forward_devices(base_device)
+    if explicit_devices is not None:
+        # The caller named the exact pool, which may span compute capabilities
+        # for a quantization run (#4875). ``select_forward_devices`` would keep
+        # only the first capability group.
+        candidates = list(explicit_devices)
+    else:
+        candidates = select_forward_devices(base_device)
     if compute_device_filter is not None:
         filtered = compute_device_filter(candidates)
         # The loopers keep the full pool when the filter rejects everything.
         if not filtered:
             return None
         candidates = list(filtered)
-    elif explicit_devices is not None:
-        wanted = {str(target) for target in explicit_devices}
-        subsets = [target for target in candidates if str(target) in wanted]
-        if not subsets:
-            return None
-        candidates = subsets
 
     devices: List[torch.device] = []
     for candidate in candidates:
@@ -994,6 +995,17 @@ class GPTQModel:
                             break
 
         if is_gptqmodel_quantized:
+            if quantize_config is not None:
+                # A quantized checkpoint's bits/group_size/method/format come
+                # from the checkpoint itself. Forwarding a caller config into
+                # `from_quantized` would either be ignored (the old behavior)
+                # or silently disagree with the tensors on disk (#4945).
+                raise ValueError(
+                    "GPTQModel.load: `quantize_config` cannot be applied to a "
+                    "quantized checkpoint; its quantization settings are read "
+                    "from the checkpoint. Load without `quantize_config` to use "
+                    "them, or pass an unquantized model to quantize."
+                )
             m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,

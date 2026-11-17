@@ -15,7 +15,7 @@ import torch.nn as nn
 
 from gptqmodel.models import loader as loader_module
 from gptqmodel.models.definitions.llama import LlamaQModel
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD
 
 
 class _StopLoad(Exception):
@@ -79,13 +79,11 @@ def test_loader_does_not_pass_offload_state_dict_by_default(tmp_path, monkeypatc
     monkeypatch.setattr(loader_module, "validate_checkpoint_qweights", lambda *args, **kw: None)
     monkeypatch.setattr(LlamaQModel.loader, "from_config", lambda cfg, **kw: _MockModel())
 
-    qcfg = QuantizeConfig(bits=4, group_size=128, format=FORMAT.GPTQ)
     loader_cls = loader_module.ModelLoader(LlamaQModel)
 
     with pytest.raises(_StopLoad):
         loader_cls.from_quantized(
             str(ckpt_dir),
-            quantize_config=qcfg,
             device="cpu",
         )
 
@@ -129,14 +127,12 @@ def test_loader_forwards_explicit_offload_kwargs(tmp_path, monkeypatch):
     monkeypatch.setattr(loader_module, "validate_checkpoint_qweights", lambda *args, **kw: None)
     monkeypatch.setattr(LlamaQModel.loader, "from_config", lambda cfg, **kw: _MockModel())
 
-    qcfg = QuantizeConfig(bits=4, group_size=128, format=FORMAT.GPTQ)
     loader_cls = loader_module.ModelLoader(LlamaQModel)
 
     custom_offload_dir = str(tmp_path / "custom_offload")
     with pytest.raises(_StopLoad):
         loader_cls.from_quantized(
             str(ckpt_dir),
-            quantize_config=qcfg,
             device="cpu",
             offload_state_dict=True,
             offload_buffers=True,

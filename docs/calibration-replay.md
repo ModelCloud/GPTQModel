@@ -104,8 +104,8 @@ Before-lines are from `origin/main`; after-lines are this change.
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| Captured mask | layer 0's mask only; `capture_first_layer_input_kwargs` returned the caller's kwargs unchanged (`gptqmodel/models/base.py:3284`) | one mask per declared layer type in `capture_layer_type_replay_kwargs` (`gptqmodel/models/base.py:4022`), built by `_build_layer_type_attention_mask` (`:3409`) |
-| Captured RoPE | layer 0's tuple only | one tuple per declared type when the rotary takes a layer type (`_build_layer_type_position_embeddings`, `gptqmodel/models/base.py:4005`) |
+| Captured mask | layer 0's mask only; `capture_first_layer_input_kwargs` returned the caller's kwargs unchanged (`gptqmodel/models/base.py:3284`) | one mask per declared layer type in `gptqmodel/models/base.py::capture_layer_type_replay_kwargs`, built by `_build_layer_type_attention_mask` (`:3409`) |
+| Captured RoPE | layer 0's tuple only | one tuple per declared type when the rotary takes a layer type (`gptqmodel/models/base.py::_build_layer_type_position_embeddings`) |
 | Replay selection | none; `prepare_layer_replay_kwargs` was a no-op (`gptqmodel/models/base.py:3334`) | layer's declared type or `self_attn.layer_idx` (`_apply_layer_type_replay_kwargs`, `gptqmodel/models/base.py:4274`, called from `prepare_layer_replay_kwargs` at `:3623`) |
 | Raw 2-D padding mask | discarded (`gptqmodel/models/base.py:3272`) | retained for one example (`gptqmodel/models/base.py:3285`) |
 | Capture stage | `gptqmodel/looper/stage_inputs_capture.py:296` | same call, plus the optional `capture_layer_type_replay_kwargs` hook at `gptqmodel/looper/stage_inputs_capture.py:306` |

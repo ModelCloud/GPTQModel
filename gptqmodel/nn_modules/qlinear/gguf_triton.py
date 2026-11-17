@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -1762,39 +1763,83 @@ def _is_current_stream_capturing() -> bool:
         return False
 
 
+_RAW_CURRENT_STREAM = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+
+
+def _current_stream_key(device: torch.device) -> int | None:
+    """Identity of the active CUDA stream, without building a Python wrapper.
+
+    ``torch.cuda.current_stream()`` allocates a ``Stream`` object on every call
+    (~2 us on the hosts we measure), which is a large fraction of a decode-sized
+    launch; the raw handle is the same identity the kernel sees.  Mirrors
+    ``gptqmodel.utils.marlin.marlin_stream_key`` (#4956).
+    """
+
+    try:
+        index = device.index
+        if index is None:
+            index = torch.cuda.current_device()
+        if _RAW_CURRENT_STREAM is not None:
+            return int(_RAW_CURRENT_STREAM(index))
+        return int(torch.cuda.current_stream(index).cuda_stream)
+    except Exception:
+        return None
+
+
+def _retire_triton_cache_ready(cache: dict[str, Any]) -> None:
+    """Drop the build handshake: nothing is left to order."""
+
+    cache.pop("ready_event", None)
+    cache.pop("ready_stream", None)
+
+
 def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> None:
     """Make the caller's stream wait for the cache builder, when they differ."""
 
     event = cache.get("ready_event")
-    try:
-        current = torch.cuda.current_stream(device)
-    except Exception:
+    if event is None:
+        # Retired: the build is complete and the cache is immutable from then
+        # on, so every later forward is a plain kernel launch.  Return before
+        # touching any stream API; this is the steady-state path (#4956).
         return
-    builder = cache.get("ready_stream")
-    same_stream = builder is not None and current == builder
-    if event is not None and not same_stream:
+    if _is_current_stream_capturing():
         # A captured stream may only wait on an event recorded inside the same
         # capture, so an explicit ``torch.cuda.graph`` can never consume this
         # one: the driver fails the capture with
         # ``CUDA_ERROR_STREAM_CAPTURE_ISOLATION`` (#4867). Even ``Event.query()``
         # is rejected while capturing, and ``torch.cuda.graph`` synchronizes the
-        # device before capture starts, so a cache built on another stream is
-        # already complete here: skip both the wait and the retirement.
-        if _is_current_stream_capturing():
-            return
-        if event.query():
-            # The build finished: nothing is left to order, so retire the event
-            # and every later forward -- captured ones included -- is a plain
-            # kernel launch.
-            cache.pop("ready_event", None)
-        else:
-            current.wait_event(event)
-    if not same_stream:
-        # The cached tensors outlive every forward, but the allocator still has to
-        # know this stream reads them.
-        for value in cache.values():
-            if isinstance(value, torch.Tensor):
-                value.record_stream(current)
+        # device before capture starts, so the build is already complete here:
+        # retire instead of waiting or querying.
+        _retire_triton_cache_ready(cache)
+        return
+    if event.query():
+        # The build finished, whichever stream is asking.  Retire the handshake
+        # so this stream - the builder included - pays nothing from now on
+        # (#4956).
+        _retire_triton_cache_ready(cache)
+        return
+    builder = cache.get("ready_stream")
+    if builder is not None and _current_stream_key(device) == builder.cuda_stream:
+        # Same stream: the build is already ordered before this forward, so the
+        # common single-stream path stays free of any bookkeeping.
+        return
+    try:
+        current = torch.cuda.current_stream(device)
+    except Exception:
+        return
+    current.wait_event(event)
+    # The cached tensors outlive every forward, but the allocator still has to
+    # know this stream reads them.
+    for value in cache.values():
+        if isinstance(value, torch.Tensor):
+            value.record_stream(current)
+
+
+# One lock for every module's first-forward re-layout. The permute itself is a
+# single enqueue plus a short stream wait, so serializing it across modules is
+# cheap, and it makes "already permuted" a decision no two threads can race on
+# (#4879).
+_PACKED_WEIGHT_PERMUTE_LOCK = threading.Lock()
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
@@ -1924,20 +1969,34 @@ class GGUFTritonKernel(GGUFTorchLinear):
         buffer is one module, not the whole model, and is released as soon as
         the copy completes.
         """
-        qweight = self.qweight
-        if qweight.numel() == 0 or self._packed_weight_is_permuted():
-            return
-        # The first cache build runs under the caller's ``inference_mode``.
-        # ``qweight`` is a public buffer that callers may still mutate in place,
-        # so keep its storage a normal (non-inference) tensor.
-        with torch.inference_mode(False):
-            storage = torch.empty(
-                (qweight.shape[1], qweight.shape[0]),
-                dtype=qweight.dtype,
-                device=qweight.device,
-            )
-        storage.copy_(qweight.t())
-        self.qweight = storage.t()
+        # Two cold builds of the same module can run concurrently on different
+        # streams (multi-threaded serving), so the re-layout is serialized and
+        # published only once the copy has actually run (#4879).
+        with _PACKED_WEIGHT_PERMUTE_LOCK:
+            qweight = self.qweight
+            if qweight.numel() == 0 or self._packed_weight_is_permuted():
+                return
+            # The first cache build runs under the caller's ``inference_mode``.
+            # ``qweight`` is a public buffer that callers may still mutate in place,
+            # so keep its storage a normal (non-inference) tensor.
+            with torch.inference_mode(False):
+                storage = torch.empty(
+                    (qweight.shape[1], qweight.shape[0]),
+                    dtype=qweight.dtype,
+                    device=qweight.device,
+                )
+            storage.copy_(qweight.t())
+            # ``copy_`` only *enqueues* the transpose on the calling stream. The
+            # permuted view is published below, and a second cold build on another
+            # stream would otherwise read bytes this copy has not written yet and
+            # bake them into its own cache -- silently wrong output (including
+            # NaN) for the rest of the session (#4879). Wait for this stream, so
+            # publishing ``self.qweight`` is the point of visibility. A cold build
+            # cannot happen inside a capture (allocations are not capturable), but
+            # ``synchronize`` would be illegal there, so keep the guard.
+            if storage.device.type == "cuda" and not _is_current_stream_capturing():
+                torch.cuda.current_stream(storage.device).synchronize()
+            self.qweight = storage.t()
 
     def _reshape_blocks(
         self,

@@ -591,6 +591,7 @@ def prepare_calibration_dataset(
 
     message_examples = 0
     message_template_name = None
+    dropped_template_inputs = False
     message_text_fallback_examples = 0
     ignored_source_examples = 0
 
@@ -752,20 +753,48 @@ def prepare_calibration_dataset(
         attention_mask = tokenized.get("attention_mask")
         return _pack_ids(input_ids, attention_mask, idx)
 
-    def _tokenize_messages_value(messages_value: Any, idx: int) -> Dict[str, torch.Tensor]:
-        nonlocal message_examples, message_template_name
+    def _tokenize_messages_value(
+        messages_value: Any, idx: int, row: Any = None
+    ) -> Dict[str, torch.Tensor]:
+        nonlocal message_examples, message_template_name, dropped_template_inputs
         _require_tokenizer("calibration data uses the `messages` feature")
         apply_fn, template_name = _get_message_template()
         if apply_fn is None:
             raise ValueError(
                 "tokenizer must expose `apply_template` or `apply_chat_template` to handle `messages` calibration data."
             )
+        # A chat row carries more than `messages`: the standard HF layout puts
+        # the tool schemas in `tools` (and RAG templates read `documents`).
+        # Dropping them rendered the row as if no tools were declared, so the
+        # schema block the model sees at inference never reached the Hessian
+        # (#4858).
+        template_inputs = {}
+        if isinstance(row, Mapping):
+            for key in ("tools", "documents"):
+                value = row.get(key)
+                if value is not None:
+                    template_inputs[key] = value
         try:
             if template_name == "apply_chat_template":
-                templated = apply_fn(messages_value, tokenize=False, add_generation_prompt=False)
+                templated = apply_fn(
+                    messages_value, tokenize=False, add_generation_prompt=False, **template_inputs
+                )
             else:
-                templated = apply_fn(messages_value, tokenize=False)
+                templated = apply_fn(messages_value, tokenize=False, **template_inputs)
         except TypeError:
+            templated = apply_fn(messages_value)
+        except Exception as exc:
+            # A tokenizer whose template does not use `tools`/`documents`
+            # rejects them (Jinja raises). Keep the row rather than failing the
+            # run, but say so once: the schema is then missing from the tokens.
+            if not template_inputs:
+                raise
+            if not dropped_template_inputs:
+                dropped_template_inputs = True
+                log.warn(
+                    "Quantize: this tokenizer's chat template rejected the calibration row's "
+                    f"{sorted(template_inputs)}; rendering without them: {type(exc).__name__}: {exc}"
+                )
             templated = apply_fn(messages_value)
 
         if templated is None:
@@ -832,7 +861,7 @@ def prepare_calibration_dataset(
                         "tokenizer must expose `apply_template` or `apply_chat_template`, or calibration data must "
                         "provide `text` when using `messages`."
                     )
-                processed_examples.append(_tokenize_messages_value(example["messages"], idx))
+                processed_examples.append(_tokenize_messages_value(example["messages"], idx, example))
                 continue
             if "text" in example:
                 processed_examples.append(_tokenize_text_value(example["text"], idx))
@@ -996,6 +1025,30 @@ def prepare_calibration_dataset(
                 else:
                     row_ids = row_ids[:max_positions]
                     row_mask = row_mask[:max_positions]
+            else:
+                # Padding is not part of the sample. A row below the position
+                # budget may still be pre-padded by `tokenizer(texts,
+                # padding=True)` / `padding="max_length"`; keeping the pads
+                # makes every capture and per-layer replay forward run at the
+                # padded width and turns the length sort into a no-op (#4889).
+                # Strip the contiguous pad positions at either edge so the sort
+                # and `collate_data` see real lengths and re-pad per batch.
+                # Interior mask zeros describe a caller-built mask rather than
+                # tokenizer padding, so such a row is left untouched.
+                first_real = None
+                last_real = None
+                real_count = 0
+                for pos, keep in enumerate(row_mask):
+                    if keep:
+                        if first_real is None:
+                            first_real = pos
+                        last_real = pos
+                        real_count += 1
+                if first_real is not None and real_count == last_real - first_real + 1:
+                    if first_real != 0 or last_real != row_len - 1:
+                        row_ids = row_ids[first_real : last_real + 1]
+                        row_mask = row_mask[first_real : last_real + 1]
+                        rows_changed = True
 
             # An all-padding row carries no activation statistics: keeping it
             # would only feed the Hessian zeros, so drop it whether or not the

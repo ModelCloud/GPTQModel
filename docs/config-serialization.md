@@ -134,8 +134,32 @@ Measured with the commands in the pull request:
   both an RTX 4090 and an R9700; before the fix the same run quantized and then
   raised `AttributeError` inside `writer.py`.
 
+## Quantized load keyword validation (#4945)
+
+`from_quantized` consumes its options with `pop`. A keyword that no `pop`
+touched used to reach `QuantizeConfig.from_pretrained`, which ignored it, so a
+typo of a real option changed nothing. The loader now records every consumed
+key and rejects the rest, deriving the accepted set from the function's own
+signature and pops instead of a hand-written allow-list.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load(path, **kwargs)"] --> B{"checkpoint has a GPTQModel<br/>quantization config?"}
+    B -- yes --> C{"quantize_config= also passed?"}
+    C -- yes --> D["ValueError: config comes<br/>from the checkpoint"]
+    C -- no --> E["ModelLoader.from_quantized<br/>(_TrackedKwargs records every pop)"]
+    E --> F{"backend is VLLM or SGLang?"}
+    F -- yes --> G["pass through: engine owns<br/>its runtime options"]
+    F -- no --> H{"kwargs left after<br/>normalisation?"}
+    H -- no --> I["continue the load"]
+    H -- yes --> J["TypeError naming each key,<br/>difflib hint when close"]
+    B -- no --> K["from_pretrained: HF constructor<br/>already raises for unknown keys"]
+```
+
 ## Not in scope
 
 `QuantizeConfig(method="gptq", format="gemm")` still auto-selects AWQ with a
-warning, and `GPTQModel.load(quantized_path, quantize_config=X)` still ignores
-`X` (as `from_pretrained` warns). Those are separate dispatch contracts.
+warning. That is a separate dispatch contract. `GPTQModel.load(quantized_path,
+quantize_config=X)` now raises instead of ignoring `X`: a quantized
+checkpoint's bits/group_size/method/format come from the checkpoint itself
+(#4945).

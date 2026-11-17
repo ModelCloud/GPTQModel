@@ -13,7 +13,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
+from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns, source_weight_out_in
 from ...utils.awq import (
     awq_dequantize_weights,
     awq_gemm_forward,
@@ -414,7 +414,7 @@ class AwqGEMMLinear(AWQuantLinear):
 
         # Gather each input column's group scale/zero in a single pass instead
         # of launching one tiny kernel per input column.
-        weight = linear.weight.data
+        weight = source_weight_out_in(linear)
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
             (weight.t().float() + scale_zeros.index_select(0, group_index))

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
@@ -1073,7 +1074,7 @@ def _run_single_subset_pass(
     if execute_forward and (
         forward.replay_after_process or forward.subset_early_stop
     ):
-        pending_members = set(subset_names)
+        pending_members = _SubsetEarlyStopState(subset_names)
         # The pending set and the stop flag describe one forward pass, not the
         # whole subset stage. The member that completes the subset keeps
         # ``forward_hook_last`` set until the stage ends, and the set stays
@@ -1081,11 +1082,21 @@ def _run_single_subset_pass(
         # fire stopped the forward and every sibling lost that batch (#4738).
         # Refill both at the start of each batch: the layer module is forwarded
         # once per batch before any of its subset members.
+        #
+        # ``run_parallel`` forwards one replica per device on its own worker
+        # thread. The replicas are deep copies, but a deep copy keeps this
+        # closure and the modules it captures, so one shared pending set lets
+        # one replica drain another's and flip the stop flag on a module the
+        # other replica is still forwarding (#4904). Keep the pending set in
+        # thread-local storage, and clear the flag on the member of the
+        # replica that is about to forward, not on the subset's original.
         def _reset_subset_early_stop(_module, _inputs):
-            pending_members.clear()
-            pending_members.update(subset_names)
+            pending_members.reset()
             for member_name in subset_names:
-                subset[member_name].forward_hook_last = False
+                member = _subset_member_for_replica(
+                    _module, subset[member_name], member_name
+                )
+                member.forward_hook_last = False
 
         handle.append(module.register_forward_pre_hook(_reset_subset_early_stop))
 
@@ -1116,11 +1127,13 @@ def _run_single_subset_pass(
                 inline_processors,
             )
 
+            # #3859 composes the producer hook once for both registration
+            # paths; main wraps it with the subset early-stop marker in each.
+            # Keep one composition and one wrap (#4904 semantics preserved).
+            if pending_members is not None:
+                original_hook = _mark_subset_member(original_hook, name, pending_members)
+
             if hasattr(subset[name], "forward_hook"):
-                if pending_members is not None:
-                    original_hook = _mark_subset_member(
-                        original_hook, name, subset[name], pending_members
-                    )
                 # Use pre-hook for MoE modules to fire before StopForward
                 if is_moe_module:
                     subset[name].forward_hook = looper._masked_pre_hook_wrapper(
@@ -1760,7 +1773,55 @@ def _run_single_subset_pass(
     return processed_subset, returned_outputs, used_data_parallel
 
 
-def _mark_subset_member(hook, member_name, module, pending):
+class _SubsetEarlyStopState:
+    """Per-thread pending-member set for the subset early-stop handshake.
+
+    ``ForwardExecutor.run_parallel`` forwards the replicas of one layer
+    concurrently, each on a device-dedicated worker thread. A single set
+    shared by every replica lets one replica drain the other's pending members
+    and stop its forward early (#4904). ``threading.local`` gives every worker
+    its own set; the layer pre-hook rebuilds it once per batch on the replica
+    that is about to run.
+    """
+
+    def __init__(self, member_names):
+        self._members = tuple(member_names)
+        self._local = threading.local()
+
+    def _pending(self):
+        pending = getattr(self._local, "pending", None)
+        if pending is None:
+            pending = set(self._members)
+            self._local.pending = pending
+        return pending
+
+    def reset(self):
+        self._local.pending = set(self._members)
+
+    def discard(self, member_name):
+        pending = self._pending()
+        pending.discard(member_name)
+        return not pending
+
+
+def _subset_member_for_replica(layer_module, named_module, member_name):
+    """Resolve a subset member on the replica that is forwarding the layer.
+
+    ``run_parallel`` deep-copies the layer for each device. The subset dict
+    keeps the original members, so clearing their flags would leave a replica's
+    flag set from the previous batch (#4904). Member names are layer-relative,
+    so the same path on the executing replica names its copy. Fall back to the
+    original member for subsets whose keys are not relative paths.
+    """
+
+    try:
+        member = layer_module.get_submodule(member_name)
+    except (AttributeError, TypeError):
+        return named_module
+    return member if isinstance(member, torch.nn.Module) else named_module
+
+
+def _mark_subset_member(hook, member_name, pending):
     """Mark one subset member as captured and stop once the subset is complete.
 
     ``HookedLinear`` raises ``StopForward`` after its hook when
@@ -1771,9 +1832,11 @@ def _mark_subset_member(hook, member_name, module, pending):
 
     def marked(_module, inputs, output):
         hook(_module, inputs, output)
-        pending.discard(member_name)
-        if not pending:
-            module.forward_hook_last = True
+        if pending.discard(member_name):
+            # Flag the module that actually ran. A data-parallel replica is a
+            # deep copy, so flagging the subset's original module stops a
+            # different replica mid-forward (#4904).
+            _module.forward_hook_last = True
 
     return marked
 
