@@ -3,7 +3,7 @@
 """Portable paths must keep finite reductions wide until the visible cast (#4471).
 
 These tests compare against an independent float64 oracle, never against the
-implementation under test. They cover the Torch portable paths: the ParoQuant
+implementation under test. They cover the Torch portable paths: the Paro
 CPU ATen child whose product feeds an outer bias epilogue, and the local Mamba
 incremental state update whose half products feed an FP32 recurrent state.
 """
@@ -16,7 +16,7 @@ from types import ModuleType
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import _has_local_int4pack_cpu_ops
 from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
 from gptqmodel.utils.backend import BACKEND
@@ -86,7 +86,7 @@ def test_paro_cpu_aten_child_keeps_wide_product_for_outer_bias():
         out_features=out_features,
         bias=True,
         register_buffers=True,
-        backend=BACKEND.PAROQUANT_CUDA,
+        backend=BACKEND.PARO_CUDA,
     )
     layer.qweight.copy_(qweight)
     layer.qzeros.copy_(qzeros)

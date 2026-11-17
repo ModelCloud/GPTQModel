@@ -51,7 +51,7 @@ table instead of a single module-level constant set.
 | AWQ Triton GEMM (`FORMAT.GEMM` → `AwqGEMMTritonLinear`) | ✅ | ✅ measured (per-device plan table) | ✅ (family table) | portable Triton; capability-based dispatch removed for ROCm. A HIP host reports a seven-field `device_identity` (the HIP arch is appended, `capability` is `None`), and the scheduler now has an exact-match RDNA4 rule set instead of always falling back to the generic tile. Measured 1.67x-10.01x faster than that generic policy at the 4090 rule shapes (`(M,N,K,G)` in the M<=128 band), FP16 only. See *AWQ GEMM scheduler on RDNA4* below |
 | AWQ `FORMAT.GEMV` / `GEMV_FAST` / `LLM_AWQ` | ❌ native / ✅ `AWQ_GEMV_TRITON` (AUTO quantize, explicit load) | ❌ native / ✅ `AWQ_GEMV_TRITON` measured | ❌ native / ✅ `AWQ_GEMV_TRITON` (family table) | The native CUDA extension (`gemv_forward`/`gemmv2_forward`/`gemv_fast_forward_decode`) is still CUDA-only and hipcc rejects it (`cuda_fp16.h`, CUDA inline asm, 64-bit-only warp mask); `AwqGEMVLinear` keeps `SUPPORTS_DEVICES=[DEVICE.CUDA]` and loading it on ROCm raises `NotImplementedError` naming `AWQ_GEMM_TRITON`. **`BACKEND.AWQ_GEMV_TRITON`** now runs the same packed `FORMAT.GEMV` layout portably: a Triton kernel (`quantization/awq/modules/triton/gemv.py`) with FP32 accumulation, weights staying packed, output dtype == input dtype. `FORMAT.GEMV` quantize with `backend=AUTO` resolves to it on ROCm (`awq_gemv_pack_backend`), while the generic AUTO load order keeps its `SUPPORTS_FORMATS` priority `0` and still refuses an AUTO load of the native layout, so reload a GEMV checkpoint with `BACKEND.AWQ_GEMV_TRITON`. Measured 6.6-30.7x faster than the split dequantize+matmul path it replaces, and at parity (0.81-1.38x) with the shipped `FORMAT.GEMM` Triton GEMM at M==1 (see the AWQ table below); it is a portability fix, not a decode speedup over `FORMAT.GEMM`. Single-token / decode only; `FORMAT.GEMM` stays the prefill path. A CPU-only host has neither accelerator reader: `awq_gemv_pack_backend` returns `BACKEND.AWQ_TORCH`, whose `AwqGEMVTorchLinear` dequantizes the same packed GEMV words in FP32, so quantize -> save -> AUTO reload completes on CPU too |
 | QQQ | ✅ `QQQ_TORCH` only | ✅ | ✅ | `QQQLinear` (Marlin-derived W4A8) is CUDA-only and there is **no** Triton port (see *QQQ* below); AUTO selects `QQQTorchLinear` |
-| ParoQuant Triton | ✅ explicit `PAROQUANT_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *ParoQuant Triton* below) |
+| Paro Triton | ✅ explicit `PARO_TRITON` only | ✅ measured (per-family tiles) | ✅ (family table) | portable Triton ops; AUTO keeps the Torch `ParoLinear` kernel. Per-family, row-banded launch table; the RDNA4 tiles are 1.31-1.72x faster than the historical CUDA tile (see *Paro Triton* below) |
 | GGUF | ✅ `GGUF_TRITON` (AUTO) or `GGUF_TORCH` | ✅ measured | ✅ (family table) | `GGUF_TRITON` now declares `DEVICE.ROCM` and validates there; on ROCm `_cuda_device_capability()` returns `None`, so only the generic launch configs run (no SM80/SM89 specialization). Measured 5.0-13.1x faster than `GGUF_TORCH` at decode **and** prefill, so AUTO (priority 45) selects it; `GGUF_TORCH` stays available via `BACKEND.GGUF_TORCH` |
 | FP8 Torch | ✅ (family table) | ✅ measured | ✅ (family table) | `_scaled_mm` accepts `float8_e4m3fn`/`e5m2` and rejects the `fnuz` encodings on gfx1201; a rejected dtype is logged once and falls back to dequantize + matmul |
 | VPTQ | ✅ via `VPTQ_TORCH` (`vptq_cuda` is CUDA-only and rejects ROCm explicitly) | ✅ | ✅ | `VPTQCudaLinear` ranks above `VPTQLinear` (110 vs 100) so AUTO loads the fused kernel on NVIDIA; `validate_once` rejects ROCm before any build, so AUTO still lands on `VPTQ_TORCH` here |
@@ -165,17 +165,17 @@ caller-provided value. See
 [ROCm default process environment](rocm-default-environment.md) for the flow,
 the precedence rules and the before/after numbers.
 
-### ParoQuant Triton
+### Paro Triton
 
-`ParoQuantTritonLinear` now declares `DEVICE.ROCM` alongside `DEVICE.CUDA`,
+`ParoTritonLinear` now declares `DEVICE.ROCM` alongside `DEVICE.CUDA`,
 which resolves the contradiction with the HIP `libdevice` branch in
-`quantization/paroquant/modules/triton/sym_ste.py`. The decision is based on
+`quantization/paro/modules/triton/sym_ste.py`. The decision is based on
 inspection, not hardware: the runtime GEMM/GEMV kernels use only portable
 Triton (`tl.load`/`tl.store`, shifts, `tl.interleave`, `tl.dot`) with no
 CUDA-only intrinsic, inline PTX, or libdevice call, and the launch path uses
 `torch.cuda.device`, which HIP also provides.
 
-`SUPPORTS_FORMATS[FORMAT.PAROQUANT] = 0` means `PAROQUANT_TRITON` is never
+`SUPPORTS_FORMATS[FORMAT.PARO] = 0` means `PARO_TRITON` is never
 chosen by `AUTO`; selecting it explicitly is required on every platform.
 
 **Verified on gfx1201.** Both Triton kernels (`decode` and `prefill` launch
@@ -186,21 +186,21 @@ and BF16 activations:
 
 | Check | Result |
 |---|---|
-| `paroquant_dequantize_triton` vs FP64 oracle | max abs err 7.5e-09, max rel err 6.0e-08 (FP32 output = exact) |
+| `paro_dequantize_triton` vs FP64 oracle | max abs err 7.5e-09, max rel err 6.0e-08 (FP32 output = exact) |
 | `decode` / `prefill` GEMM, FP16 | arithmetic error 2.8e-04 to 3.1e-04 relative to an FP64 truth; output dtype == input dtype |
 | `decode` / `prefill` GEMM, BF16 | arithmetic error 2.2e-03 to 2.4e-03 relative; output dtype == input dtype |
 
 The BF16 relative error is dominated by the BF16 output rounding, not the
 kernel: against the output rounded once to BF16 the max absolute error is
 4.8e-02 for a value range whose half-ULP is 5.8e-02 (< 1 ULP), and the FP16 case
-is 5.4e-03 against a 7.2e-03 half-ULP (0.75 ULP). The fused ParoQuant rotation
-(`gptqmodel_ext/paroquant`) also loads and runs on gfx1201; its error versus an
+is 5.4e-03 against a 7.2e-03 half-ULP (0.75 ULP). The fused Paro rotation
+(`gptqmodel_ext/paro`) also loads and runs on gfx1201; its error versus an
 FP64 no-rounding oracle is smaller than the pure-Torch reference path's
 (FP16 3.7e-04 vs 4.4e-04 at K=1024, BF16 3.4e-03 vs 3.6e-03).
 
-### ParoQuant per-family launch table
+### Paro per-family launch table
 
-`quantization/paroquant/modules/triton/gemm.py` used to hardcode the CUDA tiles
+`quantization/paro/modules/triton/gemm.py` used to hardcode the CUDA tiles
 for every GPU: decode `(BLOCK_M=4, BLOCK_N=128, BLOCK_K=32, warps=4, stages=2)`
 and prefill `(32, 128, 32, warps=8, stages=4)`. Those are wave64/CDNA shapes;
 `num_warps=8` is 256 threads with a wave32 mapping on RDNA4, which is not the
@@ -321,9 +321,9 @@ BLAS backend `rocblas` throughout; single process, one R9700):
 | GPTQ | 0.47 | 32.39 | 0.31 | 33.62 | 413.8 |
 | AWQ | 0.41 | 47.84 | 0.35 | 48.90 | 354.2 |
 | QQQ | 0.41 | 17.58 | 0.46 | 18.82 | 88.0 |
-| ParoQuant | 0.53 | 194.61 | 0.41 | 195.84 | 298.1 |
+| Paro | 0.53 | 194.61 | 0.41 | 195.84 | 298.1 |
 
-ParoQuant's quantize stage includes the JIT build/load of the fused rotation
+Paro's quantize stage includes the JIT build/load of the fused rotation
 extension, so it is a cold-cache number. These are wall-clock measurements of a
 single run, not a tuned or repeated benchmark.
 

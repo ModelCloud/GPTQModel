@@ -117,7 +117,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method, monkeypatch):
                                   opt_finetune_epochs=1, opt_train_samples=8,
                                   opt_validation_samples=4, opt_batch_size=4,
                                   opt_stage_cudagraph=False, gsq=gsq)
-        backend = BACKEND.PAROQUANT_CUDA
+        backend = BACKEND.PARO_CUDA
     else:
         quant_config = RTNConfig(bits=4, group_size=32, device=DEVICE.CPU,
                                  offload_to_disk=False, gsq=gsq)

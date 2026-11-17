@@ -4,16 +4,22 @@
 """``SUPPORTS_COMPILE`` must mean trace-clean *and* measured faster (#4739).
 
 #4727 (the #4669 fix) opted `AwqTorchLinear` in and left `TorchFP8Linear` out.
-Both halves were wrong on hardware other than the single 4090 timing it used:
+The FP8 half was wrong on every architecture: `TorchFP8Linear.forward` branches
+only on host-visible constants and its lazy decoded-weight bound is a load-time
+cache, so `torch.compile(fullgraph=True)` traces it with zero graph breaks and
+the compiled static-cache decode is 3x faster than eager. Leaving it out made
+FP8 static-cache generation silently eager, the exact 4x regression #4669 was
+supposed to remove.
 
-* `AwqTorchLinear.forward` calls `tensor_cache_key()`, whose
-  `tensor.is_inference()` is a hard dynamo graph break, so `fullgraph=True`
-  fails and the compiled static cache is slower than eager.
-* `TorchFP8Linear.forward` branches only on host-visible constants, so it
-  traces clean and the compiled static cache is the format's biggest win.
+The declaration now requires both halves -- a zero-graph-break `fullgraph=True`
+trace *and* a measured win on the hardware it claims. These tests pin the trace
+half at the module level (cheap, deterministic) and the full-model behaviour for
+FP8.
 
-The declaration now requires both halves. These tests pin the trace half at the
-module level (cheap, deterministic) and the full-model behaviour for FP8.
+`AwqTorchLinear` keeps its opt-in: since #4737 the decode-range guard checks
+`torch.compiler.is_compiling()` before the `tensor_cache_key()` call, so the
+forward traces clean, and a full-model static-cache decode measured 0.174 s
+eager -> 0.047 s compiled (1 graph, 0 breaks) on sm_121.
 """
 
 from __future__ import annotations
@@ -154,15 +160,33 @@ def test_fp8_is_trace_clean_and_compiled_decode_is_faster():
     )
 
 
-def test_awq_torch_is_not_trace_clean():
-    """The reason `AwqTorchLinear` no longer opts in: `fullgraph=True` fails."""
+def test_awq_torch_is_trace_clean():
+    """`AwqTorchLinear`'s opt-in rests on a zero-graph-break full graph.
+
+    #4737's decode-range guard returns early under `torch.compiler.is_compiling()`
+    before `tensor_cache_key()` can read `.is_inference()` on the host, so the
+    break that #4739 first measured is gone. A full-model static-cache decode
+    measured 0.174 s eager -> 0.047 s compiled (1 graph, 0 breaks) on sm_121, so
+    the kernel keeps its policy opt-in.
+    """
 
     module = _awq_module()
     x = torch.randn(M, K, dtype=torch.float16, device=DEVICE)
 
-    with pytest.raises(Exception, match="is_inference"):
-        with torch.inference_mode():
-            torch.compile(module, fullgraph=True)(x)
+    with torch.inference_mode():
+        module(x)
+
+    explained = torch._dynamo.explain(module)(x)
+    assert explained.graph_break_count == 0, [
+        reason.reason for reason in explained.break_reasons
+    ]
+
+    compiled = torch.compile(module, fullgraph=True)
+    with torch.inference_mode():
+        output = compiled(x)
+    with torch.inference_mode():
+        eager = module(x)
+    torch.testing.assert_close(output, eager, rtol=0, atol=2e-2)
 
 
 def _build_fp8_model(root, out):

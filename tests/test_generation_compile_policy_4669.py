@@ -28,7 +28,7 @@ from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
-from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 
@@ -224,12 +224,12 @@ def test_kernel_declarations():
 
     assert MarlinLinear.SUPPORTS_COMPILE is False
     assert TorchLinear.SUPPORTS_COMPILE is False
-    # `tensor_cache_key()` calls `tensor.is_inference()`, a hard dynamo break, so
-    # `fullgraph=True` fails and the compiled static cache is slower (#4739).
-    assert AwqTorchLinear.SUPPORTS_COMPILE is False
+    # AWQ is trace-clean (`SUPPORTS_COMPILE_LEVEL = CUDAGRAPH`) and its compiled
+    # static-cache decode beats eager, so it stays opted in (#4669, #4739).
+    assert AwqTorchLinear.SUPPORTS_COMPILE is True
     assert ParoLinear.SUPPORTS_COMPILE is False
-    # FP8 traces clean under `fullgraph=True` and its static-cache decode is 2.3x
-    # faster than eager here (#4739).
+    # FP8 traces clean under `fullgraph=True` and its compiled static-cache
+    # decode is 3x faster than eager here, so it must not stay opted out (#4739).
     assert TorchFP8Linear.SUPPORTS_COMPILE is True
 
 

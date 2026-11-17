@@ -27,7 +27,7 @@ class ProcessorStep(str, Enum):
     VPTQ = "vptq"
     MACAQ = "macaq"
     AWQ = "awq"
-    PARO = "paroquant"
+    PARO = "paro"
     EXL3 = "exl3"
     FP8_GSQ = "fp8_gsq"
     WEIGHT_ONLY = "weight_only"
@@ -65,7 +65,7 @@ _PROCESSOR_TYPES = {
     ProcessorStep.VPTQ: ("vptq_processor", "VPTQProcessor"),
     ProcessorStep.MACAQ: ("macaq_processor", "MacaqProcessor"),
     ProcessorStep.AWQ: ("awq_processor", "AWQProcessor"),
-    ProcessorStep.PARO: ("paroquant_processor", "ParoQuantProcessor"),
+    ProcessorStep.PARO: ("paro_processor", "ParoProcessor"),
     ProcessorStep.EXL3: ("exllamav3_processor", "EXL3Processor"),
     ProcessorStep.FP8_GSQ: ("fp8_gsq_processor", "FP8GSQProcessor"),
     ProcessorStep.WEIGHT_ONLY: ("weight_only_processor", "WeightOnlyProcessor"),

@@ -36,6 +36,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from . import BaseQuantLinear
+from ._compile_support import COMPILE_LEVEL
 
 
 #: Values per shared exponent. The hardware format fixes this; a checkpoint
@@ -308,6 +309,12 @@ class _BlockfloatStorage(nn.Module):
 
 class TTBlockfloatLinear(_BlockfloatStorage, BaseQuantLinear):
     """Linear over Tenstorrent block-float weights."""
+
+    # Conservative: the native block-float CUDA kernel is a custom op without
+    # fake/meta support, and the dense fallback's dequantize reads code_shape
+    # with int() (host sync), so no level above eager and no CUDA-graph capture.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     SUPPORTS_BACKENDS = [BACKEND.TT_BLOCKFLOAT]
     SUPPORTS_METHODS = [METHOD.TT_BLOCKFLOAT]

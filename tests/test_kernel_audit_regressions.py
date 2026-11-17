@@ -385,8 +385,8 @@ def test_native_pack_block_rejects_partial_output_words():
         pack_block_cpu(weight, scales, zeros, g_idx, 4, 32, 32, 1)
 
 
-def test_paroquant_runtime_dtype_does_not_mutate_checkpoint_metadata():
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+def test_paro_runtime_dtype_does_not_mutate_checkpoint_metadata():
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 
     module = SimpleNamespace(
         scales=torch.tensor([1.001, 1.003], dtype=torch.float16),

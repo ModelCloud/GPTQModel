@@ -85,7 +85,7 @@ drift, and the path the shipped gates select.
 | Retired env vars | mapped to the three autotune fields | mapped to "removed; GGUF fused dispatch is static" |
 
 `BaseQuantLinear` still owns `AUTOTUNE`/`autotune_enabled` for kernels that use
-it (`ParoQuantTriton`'s tile tuning, for example, is a timing search between
+it (`ParoTriton`'s tile tuning, for example, is a timing search between
 numerically identical layouts). GGUF Torch no longer participates.
 
 ## Numerics

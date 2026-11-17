@@ -34,6 +34,7 @@ from ...utils.planar_packing import (
 )
 from ...utils.safe import threadpool_limits
 from ..compiled_state import compiled_module_getstate
+from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
@@ -348,6 +349,20 @@ class BaseQuantLinear(nn.Module):
     # architecture does not qualify a kernel (#4739). The default is False: no
     # measurement, no opt-in.
     SUPPORTS_COMPILE: bool = False
+
+    # Highest `torch.compile` level this kernel's `forward` reaches, measured
+    # with the probes in `_compile_support.LEVEL_PROBES`. Every concrete kernel
+    # must declare it explicitly (no silent inheritance), because the answer
+    # differs per kernel and a wrong `CUDAGRAPH` claim turns a decode loop into
+    # a capture failure. See docs/kernel-compile-matrix.md.
+    SUPPORTS_COMPILE_LEVEL: COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+
+    # Whether the eager `forward` may run inside `torch.cuda.graph(...)`:
+    # no host sync, no tensor->host transfer, no Python allocation or device
+    # decision, no data-dependent branch. Independent of dynamo tracing: a
+    # custom op without a fake implementation can be capture-safe and still
+    # fail to trace. Every concrete kernel declares it explicitly.
+    SUPPORTS_GRAPH_CAPTURE: bool = False
 
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None

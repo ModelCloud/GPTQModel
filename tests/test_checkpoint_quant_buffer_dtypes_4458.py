@@ -97,8 +97,8 @@ def _exl3():
     )
 
 
-def _paroquant():
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+def _paro():
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 
     return ParoLinear(
         bits=4, group_size=32, desc_act=False, sym=True, in_features=128,
@@ -149,7 +149,7 @@ FACTORIES = {
     "fp8": _fp8,
     "gguf": _gguf,
     "exl3": _exl3,
-    "paroquant": _paroquant,
+    "paro": _paro,
     "macaq": _macaq,
     "vptq": _vptq,
     "bitsandbytes_4bit": lambda: _bitsandbytes(4),

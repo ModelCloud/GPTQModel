@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# ParoQuant rotation reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-"""ParoQuant MLX packed transfer and independent Torch accuracy checks."""
+# Paro rotation reference: Z Lab, MIT, https://github.com/z-lab/paroquant
+"""Paro MLX packed transfer and independent Torch accuracy checks."""
 
 import gc
 from types import SimpleNamespace
@@ -30,7 +30,7 @@ def _packed_awq(values):
 def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot, desc_act, dtype):
     from gptqmodel.nn_modules.qlinear.mlx import ParoMlxQuantLinear
     from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
     from gptqmodel.quantization.config import FORMAT
     from gptqmodel.utils import mlx as mlx_utils
 
@@ -43,7 +43,7 @@ def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot
         bits=4, group_size=group_size, sym=True, desc_act=desc_act,
         in_features=input_dims, out_features=output_dims, bias=True,
         pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
-        format=FORMAT.PAROQUANT, krot=krot,
+        format=FORMAT.PARO, krot=krot,
     )
     codes = rng.integers(0, 16, (input_dims, output_dims), dtype=np.uint32)
     zeros = rng.integers(0, 16, (groups, output_dims), dtype=np.uint32)
@@ -114,12 +114,12 @@ def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot
 
 def test_invalid_paro_matching_is_rejected():
     from gptqmodel.nn_modules.qlinear.mlx import AwqMlxQuantLinear, ParoMlxQuantLinear
-    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+    from gptqmodel.nn_modules.qlinear.paro import ParoLinear
     from gptqmodel.quantization.config import FORMAT
 
     layer = ParoLinear(
         bits=4, group_size=32, sym=True, desc_act=False, in_features=128, out_features=64,
-        register_buffers=True, dtype=torch.float16, format=FORMAT.PAROQUANT, krot=1,
+        register_buffers=True, dtype=torch.float16, format=FORMAT.PARO, krot=1,
     )
     assert not AwqMlxQuantLinear.source_compatible(layer)
     layer.pairs[0, 1] = layer.pairs[0, 0]

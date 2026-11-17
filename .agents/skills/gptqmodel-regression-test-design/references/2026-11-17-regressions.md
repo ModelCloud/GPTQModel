@@ -51,7 +51,7 @@ a claim that every stronger requirement in the skill is already implemented.
 | Warm typed-leaf cache and immutable snapshots | `tests/test_dynamic_config_invalidation_4475.py::test_mse_config_leaf_edit_invalidates_fresh_resolution` |
 | Policy at the consumer | `tests/test_backend_config_reuse_4446.py`; `tests/test_kernel_policy_snapshot_4555.py`; `tests/kernels/test_awq_triton_default_schedule.py` |
 | One-shot multi-pass calibration | `tests/test_generator_calibration_4307.py`; `tests/test_calibration_input_gaps_4311.py`; `tests/test_vlm_mapping_calibration_4308.py` |
-| Wide arithmetic and stride boundaries | `tests/test_int8_bias_cancellation.py`; `tests/test_paroquant_single_rounding_4317.py`; `tests/kernels/test_marlin_strided_activation_4563.py` |
+| Wide arithmetic and stride boundaries | `tests/test_int8_bias_cancellation.py`; `tests/test_paro_single_rounding_4317.py`; `tests/kernels/test_marlin_strided_activation_4563.py` |
 | Test-harness retry termination | `tests/test_model_test_eval_oom_retry_4536.py` |
 
 Existing AWQ/model-plan and numerical skills already require native oracles,

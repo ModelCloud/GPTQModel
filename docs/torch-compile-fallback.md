@@ -3,6 +3,10 @@
 
 # Torch compile fallback
 
+Kernel-level compile and graph-capture capability is declared per kernel and
+tabulated in [the kernel compile matrix](kernel-compile-matrix.md); this page
+covers what happens when a compile fails at runtime.
+
 `TorchLinear.optimize()` compiles its dequantize path by default, and
 `BaseQModel.optimize()` compiles the whole model wrapper. Both go through
 `gptqmodel.utils.torch.torch_compile`. That helper used to guard only the

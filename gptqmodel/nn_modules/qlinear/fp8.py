@@ -31,6 +31,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, matmul_fp32_reduce
 
 
@@ -215,6 +216,12 @@ def quantize_fp8_weight(
 
 
 class TorchFP8Linear(WeightOnlyQuantLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
+    # capture succeeds with output matching eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
     SUPPORTS_FORMATS = {FORMAT.FP8: 15}

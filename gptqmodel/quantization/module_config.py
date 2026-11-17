@@ -260,7 +260,7 @@ def module_constructor_config(
     kind: Optional[str] = None
     quant_type = getattr(module, "QUANT_TYPE", None)
 
-    if quant_type == "awq_paroquant":
+    if quant_type == "awq_paro":
         kind = "paro"
         options = {
             key: getattr(module, key)

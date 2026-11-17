@@ -37,7 +37,7 @@ from gptqmodel.looper.macaq_processor import MacaqProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NativeProcessor
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.looper.vptq_processor import VPTQProcessor
 from gptqmodel.quantization.config import (
@@ -620,10 +620,10 @@ def test_gptq_config_no_longer_accepts_the_option():
         GPTQConfig(bits=4, group_size=128, exclude_attention_sinks=True)
 
 
-@pytest.mark.parametrize("cls", [VPTQProcessor, ParoQuantProcessor], ids=["vptq", "paroquant"])
+@pytest.mark.parametrize("cls", [VPTQProcessor, ParoProcessor], ids=["vptq", "paro"])
 def test_methods_that_cannot_use_the_option_reject_it(cls):
-    kwargs = {"gptq_model": None, "model": None} if cls is ParoQuantProcessor else {}
-    qcfg = VPTQConfig() if cls is VPTQProcessor else QuantizeConfig(method="paroquant", bits=4, group_size=128)
+    kwargs = {"gptq_model": None, "model": None} if cls is ParoProcessor else {}
+    qcfg = VPTQConfig() if cls is VPTQProcessor else QuantizeConfig(method="paro", bits=4, group_size=128)
     with pytest.raises(ValueError, match=r"CalibrationConfig\.exclude_attention_sinks"):
         cls(
             tokenizer=SimpleNamespace(bos_token_id=BOS),
