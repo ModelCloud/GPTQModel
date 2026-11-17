@@ -23,12 +23,6 @@ from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import (
     EXL3_HESSIAN_SYMMETRY_CONTRACT,
     finalize_capture_H,
 )
-from gptqmodel.looper.exllamav3_processor import (
-    EXL3Processor,
-    exl3_hessian_count,
-    prepare_exl3_hessian,
-    resolve_exl3_hessian_fallback,
-)
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import EXL3Config, Fallback, FallbackStrategy
 from gptqmodel.quantization.gptq import GPTQ
@@ -101,7 +95,7 @@ class TestResolver:
         capture, _ = _starved_capture()
 
         assert (
-            resolve_exl3_hessian_fallback(
+            processor_module.resolve_exl3_hessian_fallback(
                 capture,
                 fallback=Fallback(),
                 expected_nsamples=EXPECTED_TOKENS,
@@ -111,7 +105,7 @@ class TestResolver:
         # GPTQ forces RTN for a zero-sample capture even when the threshold
         # fallback is disabled: a zero Hessian has no usable curvature.
         assert (
-            resolve_exl3_hessian_fallback(
+            processor_module.resolve_exl3_hessian_fallback(
                 capture,
                 fallback=None,
                 expected_nsamples=EXPECTED_TOKENS,
@@ -123,7 +117,7 @@ class TestResolver:
         capture, _ = _capture(rows=4)
 
         assert (
-            resolve_exl3_hessian_fallback(
+            processor_module.resolve_exl3_hessian_fallback(
                 capture,
                 fallback=Fallback(threshold="0.5%"),
                 expected_nsamples=EXPECTED_TOKENS,
@@ -135,7 +129,7 @@ class TestResolver:
         capture, _ = _capture(rows=8, expected_nsamples=8)
 
         assert (
-            resolve_exl3_hessian_fallback(
+            processor_module.resolve_exl3_hessian_fallback(
                 capture,
                 fallback=Fallback(threshold="0.5%"),
                 expected_nsamples=8,
@@ -146,14 +140,14 @@ class TestResolver:
     def test_disabled_fallback_keeps_a_calibrated_capture(self):
         capture, _ = _capture(rows=8)
 
-        assert resolve_exl3_hessian_fallback(capture, fallback=None) is None
+        assert processor_module.resolve_exl3_hessian_fallback(capture, fallback=None) is None
 
 
 class TestPrepareHessian:
     def test_zero_sample_capture_gets_identity_proxy(self):
         capture, module = _starved_capture()
 
-        hessian = prepare_exl3_hessian(
+        hessian = processor_module.prepare_exl3_hessian(
             capture,
             target_device=torch.device("cpu"),
             module_full_name=module.full_name,
@@ -168,7 +162,7 @@ class TestPrepareHessian:
         capture, module = _capture(rows=4)
         assert len(capture._device_hessian_partials) == 1
 
-        hessian = prepare_exl3_hessian(
+        hessian = processor_module.prepare_exl3_hessian(
             capture,
             target_device=torch.device("cpu"),
             module_full_name=module.full_name,
@@ -190,7 +184,7 @@ class TestPrepareHessian:
         capture.quantizer.configure(perchannel=True)
         capture.add_batch(rows, None)
 
-        hessian = prepare_exl3_hessian(
+        hessian = processor_module.prepare_exl3_hessian(
             capture,
             target_device=torch.device("cpu"),
             module_full_name=module.full_name,
@@ -229,7 +223,7 @@ class TestPrepareHessian:
 
 class TestProcessorWiring:
     def test_preprocess_keeps_the_configured_fallback(self):
-        processor = EXL3Processor.__new__(EXL3Processor)
+        processor = processor_module.EXL3Processor.__new__(processor_module.EXL3Processor)
         processor.qcfg = EXL3Config(
             bits=4,
             fallback=Fallback(strategy=FallbackStrategy.RTN, threshold="2%"),
@@ -245,7 +239,7 @@ class TestProcessorWiring:
         assert stored.threshold == "2%"
 
     def test_preprocess_explicit_fallback_wins(self):
-        processor = EXL3Processor.__new__(EXL3Processor)
+        processor = processor_module.EXL3Processor.__new__(processor_module.EXL3Processor)
         processor.qcfg = EXL3Config(bits=4)
         processor.tasks = {}
         module = _named("model.layers.0.mlp.down_proj")
@@ -256,7 +250,7 @@ class TestProcessorWiring:
         assert processor.tasks[module.name]["fallback"] is override
 
     def test_starved_module_uses_identity_proxy_and_zero_count(self, monkeypatch):
-        processor = EXL3Processor.__new__(EXL3Processor)
+        processor = processor_module.EXL3Processor.__new__(processor_module.EXL3Processor)
         capture, module = _starved_capture()
         warnings: list[str] = []
         monkeypatch.setattr(
@@ -275,11 +269,11 @@ class TestProcessorWiring:
 
         assert reason == "zero_samples"
         assert torch.equal(hessian, torch.eye(WIDTH))
-        assert exl3_hessian_count(capture, reason) == 0
+        assert processor_module.exl3_hessian_count(capture, reason) == 0
         assert any("no calibration samples reached this module" in line for line in warnings)
 
     def test_calibrated_module_keeps_its_count_and_logs_nothing(self, monkeypatch):
-        processor = EXL3Processor.__new__(EXL3Processor)
+        processor = processor_module.EXL3Processor.__new__(processor_module.EXL3Processor)
         capture, module = _capture(rows=8, expected_nsamples=8)
         warnings: list[str] = []
         monkeypatch.setattr(
@@ -298,13 +292,13 @@ class TestProcessorWiring:
 
         assert reason is None
         assert hessian.data_ptr() == capture.H.data_ptr()
-        assert exl3_hessian_count(capture, reason) == 8
+        assert processor_module.exl3_hessian_count(capture, reason) == 8
         assert warnings == []
 
     def test_tiny_moe_one_unrouted_expert_is_quantized_data_free(self):
         # Three routed experts of one MoE layer; the calibration router never
         # selects expert 0, which is exactly the Qwen3-30B-A3B failure (#4995).
-        processor = EXL3Processor.__new__(EXL3Processor)
+        processor = processor_module.EXL3Processor.__new__(processor_module.EXL3Processor)
         fallback = Fallback(strategy=FallbackStrategy.RTN, threshold="0.5%")
         outcomes = {}
         for expert in range(3):
@@ -320,7 +314,7 @@ class TestProcessorWiring:
                 _task_entry(capture, fallback=fallback),
                 torch.device("cpu"),
             )
-            outcomes[expert] = (reason, exl3_hessian_count(capture, reason), hessian)
+            outcomes[expert] = (reason, processor_module.exl3_hessian_count(capture, reason), hessian)
 
         assert outcomes[0][0] == "zero_samples"
         assert outcomes[0][1] == 0
@@ -400,8 +394,8 @@ def _packed_tensors(weight: torch.Tensor, bits: int) -> dict[str, torch.Tensor]:
     }
 
 
-def _process_processor(journal_path) -> EXL3Processor:
-    processor = EXL3Processor.__new__(EXL3Processor)
+def _process_processor(journal_path) -> processor_module.EXL3Processor:
+    processor = processor_module.EXL3Processor.__new__(processor_module.EXL3Processor)
     processor.qcfg = EXL3Config(bits=4)
     processor.tasks = {}
     processor.lm_head_name = "lm_head"
