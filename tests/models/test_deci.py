@@ -7,7 +7,7 @@ from model_test import ModelTest
 
 
 class TestDeci(ModelTest):
-    """Compat coverage for Deci remote code through quantize, save, reload, and eval."""
+    """Package-owned Transformers 5 quantize, save, reload, and eval coverage."""
 
     NATIVE_MODEL_ID = "/monster/data/model/DeciLM-7B-instruct" # "Deci/DeciLM-7B-instruct"
     EVAL_TASKS_SLOW = {
@@ -17,9 +17,9 @@ class TestDeci(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_VLLM = False
-    USE_FLASH_ATTN = False  # Deci remote code rejects flash_attention_2 during model init.
+    USE_FLASH_ATTN = False  # The local implementation supports eager/SDPA.
     ASSERT_INFERENCE = True
     EVAL_BATCH_SIZE = 6
 
