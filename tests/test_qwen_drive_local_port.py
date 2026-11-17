@@ -16,7 +16,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import GenerationConfig, PreTrainedTokenizerFast, Qwen3_5ForConditionalGeneration
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.models.definitions.qwen_drive import QwenDriveQModel
 from gptqmodel.models.local import LocalModelLoader
@@ -263,7 +263,9 @@ def test_public_hostile_maps_never_import_official_or_checkpoint_python(tmp_path
     with torch.inference_mode():
         torch.testing.assert_close(loaded(**inputs, use_cache=False).logits, expected(**inputs, use_cache=False).logits,
                                    rtol=0, atol=0)
-        assert loaded.generate(**inputs, max_new_tokens=2, do_sample=False).shape == (1, 7)
+        # The random tiny model can select EOS immediately; this security check
+        # requests a fixed continuation budget independently of that token.
+        assert loaded.generate(**inputs, max_new_tokens=2, min_new_tokens=2, do_sample=False).shape == (1, 7)
     assert not marker.exists()
 
 
@@ -304,7 +306,10 @@ def test_public_image_plain_awq_all_linears_and_two_exact_reloads(tmp_path, monk
         return cache
 
     monkeypatch.setattr(StageInputsCapture, "cache_inputs", check_capture)
-    loaded.quantize([inputs], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=[inputs], batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert len(captured) == 1
     expected = {
         f"vlm.model.language_model.layers.{index}.{projection}"

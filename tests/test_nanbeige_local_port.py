@@ -12,7 +12,7 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import StaticCache
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.nanbeige import NanbeigeQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.nanbeige.configuration_nanbeige import NanbeigeConfig
@@ -612,7 +612,10 @@ def test_public_plain_awq_all_physical_owners_capture_pack_two_safetensors_cycle
         {"input_ids": IDS[i : i + 1], "attention_mask": torch.ones(1, 6, dtype=torch.long)} for i in range(2)
     ]
     try:
-        wrapped.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapped.quantize(
+            CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     finally:
         for handle in handles:
             handle.remove()

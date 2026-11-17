@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.quantization.config import AWQConfig
@@ -472,10 +472,8 @@ def test_public_plain_awq_pack_infer_and_two_reloads(tmp_path, model_type, share
     config = AWQConfig(bits=4, group_size=16, device="cpu", offload_to_disk=offload, fallback=None)
     wrapper = GPTQModel.load(str(path), quantize_config=config, dtype=torch.float16, backend=BACKEND.TORCH)
     wrapper.quantize(
-        [{"input_ids": row[None], "attention_mask": torch.ones_like(row)[None]} for row in IDS],
-        batch_size=1,
+        CalibrationConfig(dataset=[{"input_ids": row[None], "attention_mask": torch.ones_like(row)[None]} for row in IDS], batch_size=1, min_length=1),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     packed = {name for name, m in wrapper.model.named_modules() if isinstance(m, BaseQuantLinear)}
     assert packed

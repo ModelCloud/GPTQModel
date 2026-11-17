@@ -15,7 +15,7 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import DynamicCache
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.locateanything.configuration_locateanything import LocateAnythingConfig
@@ -480,7 +480,10 @@ def test_public_plain_awq_media_replay_pack_infer_and_reload(tmp_path, architect
     calibration = [[{"role": "user", "content": [{"type": "image", "image": image},
                      {"type": "text", "text": "Locate object"}]},
                     {"role": "assistant", "content": "<box>1 2 3 4</box>"}]] * 2
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 14
     for key, value in dense.items():
         torch.testing.assert_close(wrapper.model.state_dict()[key], value, atol=0, rtol=0)

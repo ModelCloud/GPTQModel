@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.ports.ovis.configuration_ovis import OvisConfig
 from gptqmodel.models.ports.ovis.modeling_ovis import Ovis
@@ -481,7 +481,10 @@ def test_public_image_calibrated_plain_awq_pack_infer_and_two_exact_reload_cycle
     for layer in wrapper.model.llm.model.layers:
         assert wrapper.awq_get_modules_for_scaling(layer, {}, {}) == []
     try:
-        wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(
+            CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     finally:
         handle.remove()
     assert captures

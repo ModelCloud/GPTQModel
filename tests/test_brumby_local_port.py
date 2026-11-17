@@ -13,7 +13,7 @@ from torch.nn import functional as F
 from transformers import PreTrainedTokenizerFast
 from transformers.cache_utils import DynamicCache
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.definitions.brumby import BrumbyQModel
 from gptqmodel.models.ports.brumby.configuration_brumby import BrumbyConfig
@@ -465,7 +465,10 @@ def test_awq_plain_policy_quantizes_and_packs_every_supported_linear(tmp_path, h
         {"input_ids": torch.tensor([[3, 4, 6, 5, 7, 3, 4, 5]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
         for _ in range(2)
     ]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     expected = {
         "self_attn.q_proj",
         "self_attn.k_proj",

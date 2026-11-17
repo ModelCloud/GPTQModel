@@ -13,6 +13,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import GenerationConfig, LogitsProcessor, PreTrainedTokenizerFast, SiglipImageProcessor
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel, Ovis2_6_NextQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.ports.ovis2_6_moe.configuration_ovis2_6 import Ovis2_6_Moe_Config, Ovis2_6_Next_Config
@@ -329,7 +330,10 @@ def test_public_missing_post_ln_corrupt_payload_repair_retry(definition, config_
     loaded = GPTQModel.load(str(tmp_path), quantize_config=qcfg, **options)
     if offload:
         loaded.pre_quantize_generate_hook_start()
-        loaded.quantize([media_inputs()], backend=BACKEND.TORCH, batch_size=1, calibration_data_min_length=1)
+        loaded.quantize(
+            CalibrationConfig(dataset=[media_inputs()], batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     with torch.inference_mode():
         output = loaded.model(**media_inputs()).logits
         assert output.isfinite().all()
@@ -378,7 +382,10 @@ def test_public_image_calibrated_plain_awq_pack_infer_two_reloads(definition, co
             captures.append((args[0] if args else kwargs["hidden_states"]).detach().clone())
 
     handle = loaded.model.llm.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
-    loaded.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     handle.remove()
     torch.testing.assert_close(captures[0], expected_capture, atol=0, rtol=0)
     modules = {name: module for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)}

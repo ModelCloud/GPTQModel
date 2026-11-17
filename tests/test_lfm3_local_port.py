@@ -12,7 +12,7 @@ from tokenizers.models import WordLevel
 from torch import nn
 from transformers import AutoModelForCausalLM, Lfm3Config, Lfm3ForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.lfm3 import LFM3QModel
 from gptqmodel.models.module_plan import ModulePlan
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
@@ -244,7 +244,10 @@ def test_public_plain_awq_quantizes_every_linear_and_roundtrips(tmp_path, kv_hea
                 if any(name in key for name in (".g_proj.", ".conv.conv.", "norm.weight"))}
     rows = [torch.tensor([[4, 5, 6, 7, 4, 5, 7, 6, 4]]), torch.tensor([[5, 7, 4, 6, 5, 4, 6, 7, 5]])]
     calibration = [{"input_ids": row, "attention_mask": torch.ones_like(row)} for row in rows]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     quantized = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected = {f"model.layers.{i}.{name}" for i in range(3) for name in (
         ["conv.in_proj", "conv.out_proj"] if i == 0 else

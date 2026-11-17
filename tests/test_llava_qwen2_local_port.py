@@ -12,6 +12,7 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.llava_qwen2 import LlavaQwen2QModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.llava_qwen2.configuration_llava_qwen2 import LlavaConfig
@@ -490,7 +491,10 @@ def test_public_plain_awq_image_calibration_pack_infer_and_safetensors_reload(tm
         lambda module, args, kwargs: lengths.append((kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]).shape[1]),
         with_kwargs=True)
     try:
-        wrapper.quantize([conversation, conversation], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(
+            CalibrationConfig(dataset=[conversation, conversation], batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     finally:
         handle.remove()
     expected_length = batch.input_ids.shape[1] - 1 + (4 if merge == "flat" else 10)

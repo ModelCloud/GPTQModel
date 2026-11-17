@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.definitions.klear import KlearQModel
 from gptqmodel.models.ports.klear.configuration_klear import KlearConfig
@@ -352,7 +353,10 @@ def test_public_awq_plain_quantize_pack_save_reload(tmp_path, layout):
                  if not name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
                                        "gate_proj.weight", "up_proj.weight", "down_proj.weight"))}
     assert all(model.awq_get_modules_for_scaling(layer, {}, {}) == [] for layer in model.model.model.layers)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected = sum(4 + (3 * config.num_experts + 3 if hasattr(layer.mlp, "experts") else 3)
                    for layer in source.model.layers)

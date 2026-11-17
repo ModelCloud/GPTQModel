@@ -15,6 +15,7 @@ from transformers import (
 )
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 
 
@@ -379,7 +380,10 @@ def test_public_plain_awq_packs_all_linears_and_reloads_twice(tmp_path, offload,
     }
     del dense
     assert wrapped.extract_layers_node() == ["layers"]
-    wrapped.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapped.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name for name, module in wrapped.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert packed == {
         f"layers.{index}.{projection}"

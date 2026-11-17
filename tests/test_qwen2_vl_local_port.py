@@ -24,7 +24,7 @@ from transformers import (
     Qwen2VLVideoProcessor,
 )
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.ports import qwen2_vl
 from gptqmodel.utils.hf import load_model_config
@@ -559,7 +559,10 @@ def test_public_plain_awq_pack_and_two_reloads(tmp_path, text, legacy, offload):
                 handle.remove()
 
         wrapper.run_input_capture = capture
-    wrapper.quantize(quantization_dataset, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=quantization_dataset, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     if not text:
         assert actual_capture
         for actual in actual_capture:

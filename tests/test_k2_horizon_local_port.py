@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.k2_horizon import K2HorizonQModel
 from gptqmodel.utils.hf import load_model_config
 
@@ -379,7 +380,10 @@ def test_public_plain_awq_native_pack_save_reload(tmp_path, variant):
                              backend=BACKEND.TORCH, dtype=torch.float16)
     calibration = [{"input_ids": torch.tensor([[1, 5, 8, 13, 20, 9, 25, 6]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     quantized_names = {name for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(quantized_names) == (14 if variant == "dense" else 28)
     if variant == "mova":

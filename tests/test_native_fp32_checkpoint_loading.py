@@ -10,6 +10,7 @@ from accelerate.utils.offload import load_offloaded_weight
 from safetensors.torch import load_file, save_file
 from torch import nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.utils.model import load_checkpoint_in_model_then_tie_weights
@@ -218,8 +219,10 @@ def test_public_awq_reload_preserves_nonzero_native_router_bias_after_failure(tm
         backend=BACKEND.TORCH, dtype=dtype, attn_implementation="eager",
     )
     ids = torch.tensor([[1, 4, 5, 6, 7, 8, 9, 10]])
-    model.quantize([{"input_ids": ids, "attention_mask": torch.ones_like(ids)}],
-                   batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=[{"input_ids": ids, "attention_mask": torch.ones_like(ids)}], batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     torch.testing.assert_close(model.model.state_dict()[bias_name], bias, rtol=0, atol=0)
     expected = {name: value.clone() for name, value in model.model.state_dict().items()}
     with torch.inference_mode():

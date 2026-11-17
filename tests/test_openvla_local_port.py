@@ -14,6 +14,7 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.ports.openvla.configuration_prismatic import (
     VISION_BACKBONE_TO_TIMM_ID,
@@ -606,7 +607,10 @@ def test_openvla_public_image_plain_awq_pack_and_two_exact_reloads(tmp_path, mon
 
     monkeypatch.setattr(StageInputsCapture, "cache_inputs", observe_capture)
     assert wrapper.awq_get_modules_for_scaling(wrapper.model.language_model.model.layers[0], {}, {}) == []
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert len(captures) == 2
     for actual, expected in zip(captures, expected_capture):
         assert actual.shape == (1, len(TOKEN_IDS) + 4, 32)

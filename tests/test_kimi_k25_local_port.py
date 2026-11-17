@@ -21,7 +21,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models.auto import MODEL_MAP, check_and_get_model_definition
 from gptqmodel.models.definitions.kimi_k25 import KimiK25QModel
 from gptqmodel.models.loader import _convert_model_with_defuser
@@ -335,7 +335,10 @@ def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp
     with torch.inference_mode():
         dense_logits = wrapper.model(**calibration[0], use_cache=False).logits
         assert torch.isfinite(dense_logits).all() and dense_logits.std() > .01
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed_count = 26 if q_lora_rank is None else 28
     assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == packed_count
     with torch.inference_mode():

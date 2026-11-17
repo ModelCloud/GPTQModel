@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache, StaticCache
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel as Definition
 from gptqmodel.models.ports.nemotron_labs_diffusion import NemotronLabsDiffusionConfig as Config
 from gptqmodel.models.ports.nemotron_labs_diffusion import NemotronLabsDiffusionModel as Model
@@ -470,7 +470,10 @@ def test_public_plain_awq_pack_infer_two_safetensors_cycles(tmp_path, paradigm, 
                            dtype=torch.float16, attn_implementation="eager")
     rows = [{"input_ids": torch.tensor([[1, 4, 7, 9, 10, 12, 15, 2]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)},
             {"input_ids": torch.tensor([[1, 3, 6, 8, 11, 13, 16, 2]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}]
-    loaded.quantize(rows, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=rows, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert loaded.quantize_config.fallback is None
     packed = {name: module for name, module in loaded.model.named_modules() if isinstance(module, AwqTorchLinear)}
     expected = {f"encoder.layers.{i}.{projection}" for i in range(2) for projection in (

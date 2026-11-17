@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from safetensors.torch import load_file
 from transformers import DynamicCache, StaticCache
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.internvl_chat.configuration_internvl_chat import InternVLChatConfig
@@ -363,7 +364,10 @@ def test_public_plain_awq_packs_and_reloads_actual_decoder_weights(tmp_path, arc
                             offload_to_disk=False), backend=BACKEND.TORCH, dtype=torch.float16)
     calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
-    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     expected_count = {"InternLM2ForCausalLM": 10, "Phi3ForCausalLM": 10, "Qwen3MoeForCausalLM": 20}.get(architecture, 14)
     packed = {name: module for name, module in wrapper.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == expected_count

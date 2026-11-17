@@ -12,6 +12,7 @@ from PIL import Image
 from torch.nn import functional as F
 from transformers import Qwen3ForCausalLM, SiglipImageProcessorPil
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.ports.ovis2_5.configuration_ovis2_5 import Ovis2_5_Config
 from gptqmodel.models.ports.ovis2_5.modeling_ovis2_5 import Ovis2_5
@@ -422,7 +423,10 @@ def test_public_image_awq_capture_all_linears_and_two_exact_roundtrips(tmp_path,
 
     handle = wrapper.model.llm.model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
     try:
-        wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(
+            CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     finally:
         handle.remove()
     assert len(captured) >= 2

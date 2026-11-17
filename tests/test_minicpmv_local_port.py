@@ -12,6 +12,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.ports.minicpmv.configuration_minicpm import MiniCPMVConfig
 from gptqmodel.models.ports.minicpmv.image_processing_minicpmv import MiniCPMVImageProcessor
@@ -445,7 +446,10 @@ def test_public_image_awq_plain_quantize_pack_infer_and_reload(tmp_path, version
     dense = {name: tensor.clone() for name, tensor in source.state_dict().items()
              if not name.startswith("llm.model.layers.0.") or not name.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight",
                                                                                "o_proj.weight", "gate_proj.weight", "up_proj.weight", "down_proj.weight"))}
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name: module for name, module in model.model.named_modules() if isinstance(module, AwqTorchLinear)}
     assert len(packed) == 7
     assert all(name.startswith("llm.model.layers.0.") for name in packed)

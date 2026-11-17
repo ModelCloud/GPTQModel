@@ -12,6 +12,7 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.mage_vl import MageVLQModel
 from gptqmodel.models.ports.mage_vl.configuration_mage_vl import MageVLConfig
 from gptqmodel.models.ports.mage_vl.modeling_mage_vl import MageVLForConditionalGeneration
@@ -487,7 +488,10 @@ def test_plain_awq_all_decoder_linears_pack_and_two_safetensors_roundtrips(tmp_p
 
     handle = wrapper.model.model.language_model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
     try:
-        wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+        wrapper.quantize(
+            CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+            backend=BACKEND.TORCH,
+        )
     finally:
         handle.remove()
     assert len(captured) >= 2

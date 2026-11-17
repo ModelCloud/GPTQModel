@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.phi4 import Phi4MMGPTQ
 from gptqmodel.models.local import LocalModelLoader
 from gptqmodel.models.ports.phi4.configuration_phi4 import Phi4MMConfig
@@ -632,7 +633,10 @@ def test_public_plain_awq_pack_infer_two_reloads_preserve_loras_and_media(tmp_pa
         source(**inputs, logits_to_keep=1)
     handle.remove()
     handle = model.model.model.layers[0].register_forward_pre_hook(record(captured), with_kwargs=True)
-    model.quantize([dict(inputs), dict(inputs)], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(
+        CalibrationConfig(dataset=[dict(inputs), dict(inputs)], batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     handle.remove()
     assert captured, "Actual first-decoder calibration input must be captured"
     torch.testing.assert_close(captured[0], expected_inputs[0], atol=0, rtol=0)

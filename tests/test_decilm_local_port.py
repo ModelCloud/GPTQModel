@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.decilm import DeciLMQModel
 from gptqmodel.utils.hf import load_model_config
 from gptqmodel.utils.security import BYPASS_ENV
@@ -538,7 +539,10 @@ def test_awq_plain_policy_quantizes_and_packs_every_linear(tmp_path, alias, fall
     calibration = [{"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 3]]),
                     "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
     norms = {name: tensor.half().clone() for name, tensor in model.state_dict().items() if "layernorm" in name}
-    loaded.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    loaded.quantize(
+        CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     assert sum(isinstance(module, AwqTorchLinear) for module in loaded.model.modules()) == expected
     for name, tensor in norms.items():
         torch.testing.assert_close(tensor, loaded.model.state_dict()[name], rtol=0, atol=0)

@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.utils.hf import load_model_config, resolve_trust_remote_code
 
@@ -512,7 +513,10 @@ def test_public_plain_awq_quantizes_every_linear_save_reload(tmp_path, model_typ
         {"input_ids": torch.tensor([[4, 5, 6, 7, 5, 4, 7, 6]]), "attention_mask": torch.ones(1, 8, dtype=torch.long)}
         for _ in range(2)
     ]
-    wrapper.quantize(samples, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    wrapper.quantize(
+        CalibrationConfig(dataset=samples, batch_size=1, min_length=1),
+        backend=BACKEND.TORCH,
+    )
     packed = {name: module for name, module in layer.named_modules() if isinstance(module, AwqTorchLinear)}
     assert set(packed) == {
         "self_attn.q_proj",
