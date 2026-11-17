@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real legacy wrapper qualification; no checkpoint Python is imported."""
 
+import hashlib
 import json
+import re
+import shutil
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -18,6 +22,66 @@ from gptqmodel.models.ports.internvl_chat.modeling_internvl_chat import InternVL
 
 ARCHITECTURES = ["LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "Phi3ForCausalLM", "InternLM2ForCausalLM"]
 
+TOKENIZER_ASSETS = json.loads((Path(__file__).parents[1] / "gptqmodel/models/ports/internvl_chat/tokenizer_assets.json").read_text())
+SOURCE_FAST_REFERENCE = json.loads((Path(__file__).parents[1] / "gptqmodel/models/ports/internvl_chat/tokenizer_source_reference.json").read_text())
+
+
+@lru_cache(maxsize=None)
+def tokenizer_asset_dir(architecture):
+    """Download data only, at exact released revisions, and verify every byte."""
+    from huggingface_hub import hf_hub_download
+
+    spec = TOKENIZER_ASSETS[architecture]
+    for name, digest in spec["files"].items():
+        resolved = Path(hf_hub_download(spec["repo"], name, revision=spec["revision"]))
+        assert hashlib.sha256(resolved.read_bytes()).hexdigest() == digest, name
+    return resolved.parent
+
+
+@lru_cache(maxsize=None)
+def source_token_ids(architecture, text):
+    """Independent source SentencePiece or Qwen byte-BPE equations."""
+    path = tokenizer_asset_dir(architecture)
+    metadata = json.loads((path / "tokenizer_config.json").read_text())
+    if (path / "tokenizer.model").exists():
+        import sentencepiece as spm
+
+        sp = spm.SentencePieceProcessor(model_file=str(path / "tokenizer.model"))
+        encode = sp.encode
+        if architecture == "LlamaForCausalLM":
+            # Source Llama fast converter prepends a dummy whitespace even
+            # though this Yi SentencePiece model has add_dummy_prefix=False.
+            def encode(value):
+                return sp.encode(" " + value) if value else []
+    else:
+        import tiktoken
+
+        codes = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+        extras = [i for i in range(256) if i not in codes]
+        decoder = {chr(c): c for c in codes} | {chr(256 + i): c for i, c in enumerate(extras)}
+        vocab = json.loads((path / "vocab.json").read_text())
+        ranks = {bytes(decoder[c] for c in word): rank for word, rank in vocab.items()}
+        reference = tiktoken.Encoding(name="independent-qwen2", mergeable_ranks=ranks,
+            pat_str=r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+", special_tokens={})
+        encode = reference.encode
+    special = {value["content"]: int(key) for key, value in metadata["added_tokens_decoder"].items()}
+    fragments = re.split("(" + "|".join(map(re.escape, sorted(special, key=len, reverse=True))) + ")", text)
+    for index in range(1, len(fragments), 2):
+        token = metadata["added_tokens_decoder"][str(special[fragments[index]])]
+        if token.get("lstrip"):
+            fragments[index - 1] = fragments[index - 1].rstrip()
+        if token.get("rstrip"):
+            fragments[index + 1] = fragments[index + 1].lstrip()
+    ids = []
+    for fragment in fragments:
+        ids.extend([special[fragment]] if fragment in special else encode(fragment))
+    default_bos = architecture == "InternLM2ForCausalLM"
+    if metadata.get("add_bos_token", default_bos):
+        ids.insert(0, special[metadata["bos_token"]])
+    if metadata.get("add_eos_token", False):
+        ids.append(special[metadata["eos_token"]])
+    return ids
+
 
 def tiny_config(architecture="Qwen3ForCausalLM", **kwargs):
     llm = {"architectures": [architecture], "vocab_size": 48, "hidden_size": 16, "intermediate_size": 24,
@@ -33,19 +97,235 @@ def tiny_config(architecture="Qwen3ForCausalLM", **kwargs):
 
 
 def save_tiny_checkpoint(path, architecture="Qwen3ForCausalLM", **kwargs):
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from transformers import PreTrainedTokenizerFast
+    assets = tokenizer_asset_dir(architecture)
+    metadata = json.loads((assets / "tokenizer_config.json").read_text())
+    if (assets / "tokenizer.model").exists():
+        import sentencepiece as spm
 
+        vocab_size = spm.SentencePieceProcessor(model_file=str(assets / "tokenizer.model")).get_piece_size()
+    else:
+        vocab_size = len(json.loads((assets / "vocab.json").read_text()))
+    vocab_size = max(vocab_size, max(map(int, metadata["added_tokens_decoder"])) + 1)
+    llm = kwargs.pop("llm", {})
+    llm.update(vocab_size=vocab_size)
+    kwargs["llm"] = llm
+    kwargs.setdefault("template", json.loads((assets / "config.json").read_text())["template"])
     model = InternVLChatModel(tiny_config(architecture, **kwargs)).eval()
     model.save_pretrained(path, safe_serialization=True)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(WordLevel({"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "hello": 3, "[UNK]": 4}, unk_token="[UNK]")),
-        pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]",
-    )
-    tokenizer.add_special_tokens({"additional_special_tokens": ["<img>", "</img>", "<IMG_CONTEXT>", "<|im_end|>", "<|im_start|>"]})
-    tokenizer.save_pretrained(path)
+    for name in TOKENIZER_ASSETS[architecture]["files"]:
+        if name != "config.json":
+            shutil.copyfile(assets / name, path / name)
     return model
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+@pytest.mark.parametrize("text", ["Hello 世界!", "  spaces\n中文 café 🐍 123",
+    "<|im_start|>user\n<img><IMG_CONTEXT></img>\nDescribe 世界.<|im_end|>\n<|im_start|>assistant\n"])
+def test_pinned_real_tokenizer_source_ids_and_roundtrip(architecture, text, tmp_path):
+    from gptqmodel.utils.hf import load_hf_tokenizer
+
+    assets = tokenizer_asset_dir(architecture)
+    config = InternVLChatConfig.from_pretrained(assets)
+    tokenizer = load_hf_tokenizer(str(assets), model_config=config, local_files_only=True)
+    expected = source_token_ids(architecture, text)
+    assert tokenizer(text)["input_ids"] == expected
+    assert tokenizer.__class__.__module__.startswith("gptqmodel.models.ports.internlm2" if architecture == "InternLM2ForCausalLM" else "transformers.")
+    metadata = json.loads((assets / "tokenizer_config.json").read_text())
+    chat_specials = ("<|user|>", "<|end|>") if architecture == "Phi3ForCausalLM" else ("<|im_start|>", "<|im_end|>")
+    for name in ("<img>", "</img>", "<IMG_CONTEXT>", *chat_specials):
+        expected_id = next(int(i) for i, value in metadata["added_tokens_decoder"].items() if value["content"] == name)
+        assert tokenizer.convert_tokens_to_ids(name) == expected_id
+    decoded = tokenizer.decode(expected, skip_special_tokens=False)
+    tokenizer.save_pretrained(tmp_path)
+    config.save_pretrained(tmp_path)
+    reloaded = load_hf_tokenizer(str(tmp_path), model_config=config, local_files_only=True)
+    assert reloaded(text)["input_ids"] == expected
+    assert reloaded.decode(expected, skip_special_tokens=False) == decoded
+    assert not list(tmp_path.glob("*.py"))
+
+
+@pytest.mark.parametrize("architecture", SOURCE_FAST_REFERENCE)
+@pytest.mark.parametrize("text", ["Hello 世界!", "  spaces\n中文 café 🐍 123", "x\n\n世界", " café 🐍", "", "\n", " spaces", "nospace"])
+def test_source_fast_sentencepiece_whitespace_and_serialized_pipeline(architecture, text, tmp_path):
+    from gptqmodel.utils.hf import load_hf_tokenizer
+
+    reference = SOURCE_FAST_REFERENCE[architecture]
+    assert reference["repo"] == TOKENIZER_ASSETS[architecture]["repo"]
+    assert reference["revision"] == TOKENIZER_ASSETS[architecture]["revision"]
+    # Captured from inspected source Transformers 4.37.2 LlamaTokenizerFast,
+    # independently reproduced with SentencePiece prefix/whitespace equations.
+    expected = reference["source_fast_ids"][text]
+    assert source_token_ids(architecture, text) == expected
+    assets = tokenizer_asset_dir(architecture)
+    config = InternVLChatConfig.from_pretrained(assets)
+    tokenizer = load_hf_tokenizer(str(assets), model_config=config, local_files_only=True)
+    assert tokenizer(text)["input_ids"] == expected
+    tokenizer.save_pretrained(tmp_path)
+    config.save_pretrained(tmp_path)
+    restored = load_hf_tokenizer(str(tmp_path), model_config=config, local_files_only=True)
+    assert restored(text)["input_ids"] == expected
+
+
+@pytest.mark.parametrize("architecture", SOURCE_FAST_REFERENCE)
+def test_historical_sentencepiece_profile_explicit_caller_optout(architecture, tmp_path):
+    from transformers import LlamaTokenizer
+
+    from gptqmodel.utils.hf import load_hf_tokenizer
+
+    assets = tokenizer_asset_dir(architecture)
+    config = InternVLChatConfig.from_pretrained(assets)
+    text = "  spaces\n中文 café 🐍 123"
+    native = LlamaTokenizer.from_pretrained(str(assets), local_files_only=True)
+    native_ids = native(text)["input_ids"]
+    historical_ids = SOURCE_FAST_REFERENCE[architecture]["source_fast_ids"][text]
+    assert native_ids != historical_ids
+    opted_out = load_hf_tokenizer(str(assets), model_config=config, local_files_only=True, normalize_sentencepiece=False)
+    assert opted_out(text)["input_ids"] == native_ids
+    default = load_hf_tokenizer(str(assets), model_config=config, local_files_only=True)
+    assert default(text)["input_ids"] == historical_ids
+    # A pipeline deliberately authored with the opt-out remains authoritative,
+    # including when reloaded under this definition's default opt-in profile.
+    opted_out.save_pretrained(tmp_path)
+    config.save_pretrained(tmp_path)
+    restored = load_hf_tokenizer(str(tmp_path), model_config=config, local_files_only=True)
+    assert restored(text)["input_ids"] == native_ids
+
+
+@pytest.mark.parametrize("architecture", [name for name in ARCHITECTURES if name not in SOURCE_FAST_REFERENCE])
+def test_historical_profile_leaves_internlm_and_native_qwen_unchanged(architecture):
+    from gptqmodel.utils.hf import load_hf_tokenizer
+
+    assets = tokenizer_asset_dir(architecture)
+    config = InternVLChatConfig.from_pretrained(assets)
+    for enabled in (False, True):
+        tokenizer = load_hf_tokenizer(str(assets), model_config=config, local_files_only=True, normalize_sentencepiece=enabled)
+        for text in ("Hello 世界!", "  spaces\n中文 café 🐍 123", "<img><IMG_CONTEXT></img>"):
+            assert tokenizer(text)["input_ids"] == source_token_ids(architecture, text)
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [None, "0", "1"])
+def test_real_tokenizer_public_security_and_model_image_reload(architecture, trust, bypass, tmp_path, monkeypatch):
+    from PIL import Image
+    from tokenicer import Tokenicer
+
+    from gptqmodel import GPTQModel
+
+    if bypass is None:
+        monkeypatch.delenv("GPTQ_BYPASS_SAFETY_CHECKS", raising=False)
+    else:
+        monkeypatch.setenv("GPTQ_BYPASS_SAFETY_CHECKS", bypass)
+    original = save_tiny_checkpoint(tmp_path, architecture, max_dynamic_patch=2, use_thumbnail=True)
+    for name in ("config.json", "tokenizer_config.json"):
+        file = tmp_path / name
+        payload = json.loads(file.read_text())
+        payload["auto_map"] = {"AutoConfig": "evil.Config", "AutoModel": "evil.Model", "AutoTokenizer": ["evil.Tokenizer", None],
+            "AutoProcessor": "evil.Processor", "AutoImageProcessor": "evil.ImageProcessor"}
+        if "llm_config" in payload:
+            payload["llm_config"]["auto_map"] = payload["auto_map"]
+            payload["vision_config"]["auto_map"] = payload["auto_map"]
+        file.write_text(json.dumps(payload))
+    (tmp_path / "evil.py").write_text("raise AssertionError('checkpoint Python executed')\n")
+    normalized = []
+    original_load = Tokenicer.load.__func__
+
+    def record_normalization(cls, value, *args, **kwargs):
+        result = original_load(cls, value, *args, **kwargs)
+        normalized.append((result, kwargs))
+        return result
+
+    monkeypatch.setattr(Tokenicer, "load", classmethod(record_normalization))
+    wrapper = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    assert len(normalized) == 1 and wrapper.tokenizer is normalized[0][0]
+    assert normalized[0][1]["normalize_sentencepiece"] is True
+    text = "Hello 世界!"
+    expected_ids = source_token_ids(architecture, text)
+    assert wrapper.tokenizer(text)["input_ids"] == expected_ids
+    ids = torch.tensor([expected_ids])
+    with torch.no_grad():
+        torch.testing.assert_close(wrapper.model(input_ids=ids).logits, original(input_ids=ids).logits, atol=0, rtol=0)
+    # The released wrapper uses this definition-owned PIL processor, not AutoProcessor.
+    batch = wrapper.prepare_inputs_for_conversation([{"role": "user", "content": [Image.new("RGB", (16, 8), (35, 71, 143)),
+        {"type": "text", "text": "Describe 世界."}]}])
+    assert batch["pixel_values"].shape == (3, 3, 8, 8)
+    assert (batch["input_ids"] == batch["img_context_token_id"]).sum().item() == 12
+    wrapper.model.img_context_token_id = int(batch["img_context_token_id"])
+    with torch.no_grad():
+        expected = wrapper.model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], pixel_values=batch["pixel_values"]).logits
+    saved = tmp_path / "saved"
+    wrapper.model.save_pretrained(saved, safe_serialization=True)
+    wrapper.tokenizer.save_pretrained(saved)
+    reloaded = GPTQModel.load(str(saved), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    assert len(normalized) == 2 and reloaded.tokenizer is normalized[1][0]
+    assert normalized[1][1]["normalize_sentencepiece"] is True
+    actual_batch = reloaded.prepare_inputs_for_conversation([{"role": "user", "content": [Image.new("RGB", (16, 8), (35, 71, 143)),
+        {"type": "text", "text": "Describe 世界."}]}])
+    assert torch.equal(actual_batch["input_ids"], batch["input_ids"])
+    assert torch.equal(actual_batch["pixel_values"], batch["pixel_values"])
+    reloaded.model.img_context_token_id = int(actual_batch["img_context_token_id"])
+    with torch.no_grad():
+        actual = reloaded.model(input_ids=actual_batch["input_ids"], attention_mask=actual_batch["attention_mask"], pixel_values=actual_batch["pixel_values"]).logits
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert list(saved.glob("*.safetensors")) and not list(saved.glob("*.bin"))
+    assert not list(saved.glob("*.py"))
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_real_tokenizer_missing_asset_and_foreign_metadata_repair_retry(architecture, tmp_path):
+    from gptqmodel import GPTQModel
+
+    save_tiny_checkpoint(tmp_path, architecture)
+    required = "tokenizer.model" if (tmp_path / "tokenizer.model").exists() else (
+        "tokenizer.json" if (tmp_path / "tokenizer.json").exists() else "vocab.json")
+    # Remove the complete available representation, not merely an optional fallback.
+    moved = {}
+    for name in ("tokenizer.model", "tokenizer.json", "vocab.json"):
+        file = tmp_path / name
+        if file.exists():
+            moved[name] = file.read_bytes()
+            file.unlink()
+    with pytest.raises((FileNotFoundError, OSError), match="tokenizer.model|vocab.json"):
+        GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32)
+    assert required in moved
+    for name, data in moved.items():
+        (tmp_path / name).write_bytes(data)
+    metadata_path = tmp_path / "tokenizer_config.json"
+    metadata = json.loads(metadata_path.read_text())
+    original_class = metadata["tokenizer_class"]
+    other_family = "Qwen2Tokenizer" if architecture == "InternLM2ForCausalLM" else "InternLM2Tokenizer"
+    for invalid_class in ("ForeignTokenizer", other_family, [original_class]):
+        metadata["tokenizer_class"] = invalid_class
+        metadata_path.write_text(json.dumps(metadata))
+        with pytest.raises(ValueError, match="does not support tokenizer_class"):
+            GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=True)
+    if architecture == "InternLM2ForCausalLM":
+        metadata["tokenizer_class"] = "InternLM2TokenizerFast"
+        metadata_path.write_text(json.dumps(metadata))
+        with pytest.raises(ValueError, match="does not support tokenizer_class"):
+            GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=True)
+    metadata["tokenizer_class"] = original_class
+    metadata_path.write_text(json.dumps(metadata))
+    repaired = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32)
+    assert repaired.tokenizer("Hello 世界!")["input_ids"] == source_token_ids(architecture, "Hello 世界!")
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_real_tokenizer_public_selected_subfolder_and_root_decoy(architecture, tmp_path):
+    from gptqmodel import GPTQModel
+
+    selected = tmp_path / "selected"
+    save_tiny_checkpoint(selected, architecture)
+    # Root discovery would choose unselected config and a forbidden tokenizer;
+    # only the selected folder contains the actual tiny checkpoint tensors.
+    tiny_config("Qwen3ForCausalLM").save_pretrained(tmp_path)
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"tokenizer_class": "ForeignTokenizer"}))
+    wrapper = GPTQModel.load(str(tmp_path), subfolder="selected", local_files_only=True, device="cpu", dtype=torch.float32)
+    assert wrapper.model.config.llm_config.architectures == [architecture]
+    expected_module = "gptqmodel.models.ports.internlm2" if architecture == "InternLM2ForCausalLM" else "transformers."
+    assert wrapper.tokenizer.tokenizer.__class__.__module__.startswith(expected_module)
+    text = "  spaces\n中文 café 🐍 123"
+    assert wrapper.tokenizer(text)["input_ids"] == source_token_ids(architecture, text)
 
 
 @pytest.mark.parametrize("trust", [False, True])

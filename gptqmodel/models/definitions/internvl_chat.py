@@ -35,6 +35,8 @@ class InternVLChatQModel(BaseQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.internvl_chat.configuration_internvl_chat.InternVLChatConfig",
         model_class="gptqmodel.models.ports.internvl_chat.modeling_internvl_chat.InternVLChatModel",
+        tokenizer_class="gptqmodel.models.ports.internvl_chat.tokenization_internvl_chat.InternVLTokenizerFactory",
+        tokenicer_options=(("normalize_sentencepiece", True),),
     )
     dynamic_expert_index = "num_experts"
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
