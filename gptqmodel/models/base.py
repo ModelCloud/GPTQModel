@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import types
+import weakref
 from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
@@ -417,6 +418,51 @@ def _module_weight_dtype(module: object) -> Optional[torch.dtype]:
     except Exception:  # pragma: no cover - exotic module trees
         return None
     return None
+
+
+class _CompiledModelForward:
+    """Call a compiled unbound ``forward`` without pinning the model (#4937).
+
+    ``torch.compile(model.forward)`` stores the bound method inside the
+    compiled wrapper, so installing that wrapper as an instance attribute
+    closes a ``model -> forward -> model`` cycle: the model, and its VRAM,
+    then survives until a full cyclic GC. Compiling the class function and
+    resolving the instance through a weak reference keeps the compiled fast
+    path cycle-free, like ``TorchLinear.optimize()`` does for
+    ``dequantize_weight`` (#4871).
+    """
+
+    __slots__ = ("_compiled", "_unbound", "_module_ref")
+
+    def __init__(self, compiled, unbound, module):
+        self._compiled = compiled
+        self._unbound = unbound
+        self._module_ref = weakref.ref(module)
+
+    def __call__(self, *args, **kwargs):
+        module = self._module_ref()
+        if module is None:
+            raise RuntimeError(
+                "compiled model `forward` called after its model was released"
+            )
+        return self._compiled(module, *args, **kwargs)
+
+    @property
+    def _torchdynamo_orig_callable(self):
+        """The eager bound ``forward`` this proxy wraps.
+
+        Returned on demand, never stored: a stored bound method would recreate
+        the cycle. ``optimize()`` recompiles ``type(model).forward`` instead,
+        so this is only what an unwrapping caller sees.
+        """
+
+        module = self._module_ref()
+        if module is None:
+            return self._unbound
+        return self._unbound.__get__(module, type(module))
+
+    def __repr__(self):
+        return f"<compiled model forward {self._compiled!r}>"
 
 
 class _QuantizedCheckpointSource:
@@ -878,6 +924,19 @@ def _with_capture_position_ids(
     derived = dict(example)
     derived["position_ids"] = position_ids
     return derived
+
+
+def _already_prepared_calibration_dataset(calibration_dataset, **_kwargs):
+    """Return calibration batches that were prepared before the model mutation.
+
+    ``quantize()`` prepares a rotation run's calibration input before it fuses
+    the layer norms and rotates the weights (#4935). The loop processors call
+    ``CalibrationConfig.prepare_dataset`` in their constructor, so a rotation
+    run binds this no-op preparer to hand them the exact batches already
+    validated, instead of tokenizing the corpus a second time.
+    """
+
+    return calibration_dataset
 
 
 class BaseQModel(nn.Module):
@@ -2572,7 +2631,8 @@ class BaseQModel(nn.Module):
         # Validate rotation before any weight is touched. The old order fused
         # norms and rotated the weights first and only then rejected the
         # backend, so a refused run left an unusable in-session model (#4666).
-        if resolve_model_rotation(self.quantize_config):
+        rotation = resolve_model_rotation(self.quantize_config)
+        if rotation:
             validate_rotation_format(self.quantize_config, format_code=format_code)
             validate_rotation_model_support(self)
 
@@ -2581,9 +2641,7 @@ class BaseQModel(nn.Module):
             # exact Hadamard factor otherwise fails inside `rotate_mlp_output`
             # only after embeddings, head, norms and attention have already
             # been rotated and fused.
-            validate_rotation_dimensions(
-                self.model.config, resolve_model_rotation(self.quantize_config)
-            )
+            validate_rotation_dimensions(self.model.config, rotation)
 
             backend = normalize_backend(backend, quant_method=self.quantize_config.method)
             if backend == BACKEND.AUTO:
@@ -2599,8 +2657,47 @@ class BaseQModel(nn.Module):
                     f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                 )
 
+        # Resolve the run plan before the mutation below: a config the chain
+        # cannot run (an unsupported checkpoint state, for example) is user
+        # input too and must not leave a rotated model behind.
+        run_plan = QuantizationRunPlan.build(
+            self.quantize_config,
+            format_code=format_code,
+            pack_backend=preferred_backend,
+            loop_backend=backend,
+            batch_size=batch_size,
+            needs_lora=isinstance(self.quantize_config.adapter, Lora),
+        )
+        if checkpoint is not None and not run_plan.checkpoint_supported:
+            raise NotImplementedError("checkpoint has no state adapter for this processor chain")
+        self.quantization_run_plan = run_plan
+
+        # The rotation below mutates the model in place: it unties the
+        # embeddings, fuses the layer norms and rotates the weights. Every
+        # calibration-data error must be raised before that, or a refused run
+        # leaves the in-session model rotated without the online Hadamard a
+        # rotated `down_proj` needs; a retry on the same object then rotates
+        # (and fuses) it a second time and silently quantizes from that broken
+        # state (#4935). Prepare the input once here and hand the exact batches
+        # to the processors below. Weight-only configs (for example RTN) need
+        # no calibration rows and are unaffected.
+        prepared_calibration_dataset = None
+        prepared_adapter_dataset = None
+        if rotation and not run_plan.weight_only:
+            prepared_calibration_dataset = self._prepare_calibration_before_rotation(
+                calibration=calibration,
+                batch_size=batch_size,
+                field="dataset",
+            )
+            if calibration.adapter_dataset is not None:
+                prepared_adapter_dataset = self._prepare_calibration_before_rotation(
+                    calibration=calibration,
+                    batch_size=batch_size,
+                    field="adapter_dataset",
+                )
+
         # rotate model
-        if resolve_model_rotation(self.quantize_config):
+        if rotation:
             if self.model.config.tie_word_embeddings:
                 log.info("Rotation requires word embeddings to be untied. Untying.")
                 self.model.config.tie_word_embeddings = False
@@ -2624,23 +2721,10 @@ class BaseQModel(nn.Module):
             )
             if rotation_device is not None and rotation_device.type == "mps":
                 rotation_device = CPU
-            self.model, _ = rotate_model(model=self.model, rotate_mode=resolve_model_rotation(self.quantize_config),
+            self.model, _ = rotate_model(model=self.model, rotate_mode=rotation,
                                             device=rotation_device, plan=self.module_plan(),
                                             embedding_name=self.get_input_embeddings_name(),
                                             **module_name_args)
-
-
-        run_plan = QuantizationRunPlan.build(
-            self.quantize_config,
-            format_code=format_code,
-            pack_backend=preferred_backend,
-            loop_backend=backend,
-            batch_size=batch_size,
-            needs_lora=isinstance(self.quantize_config.adapter, Lora),
-        )
-        if checkpoint is not None and not run_plan.checkpoint_supported:
-            raise NotImplementedError("checkpoint has no state adapter for this processor chain")
-        self.quantization_run_plan = run_plan
 
         # Warn before the (possibly long) quantization run: inference engines
         # (vLLM, SGLang) fuse these modules and resolve `dynamic` from the fused
@@ -2701,6 +2785,8 @@ class BaseQModel(nn.Module):
                     backend=backend,
                     embed_quant_config=embed_quant_config,
                     checkpoint=checkpoint,
+                    prepared_dataset=prepared_calibration_dataset,
+                    prepared_adapter_dataset=prepared_adapter_dataset,
                 )
 
         # Some definitions need the complete layer stack before they can
@@ -2969,6 +3055,57 @@ class BaseQModel(nn.Module):
 
         return result
 
+    def _prepare_calibration_before_rotation(
+        self,
+        *,
+        calibration: CalibrationConfig,
+        batch_size: int,
+        field: str,
+    ):
+        """Validate and prepare one calibration input before the model rotates.
+
+        Mirrors the checks ``LoopProcessor.__init__`` applies, but runs before
+        ``fuse_layer_norms``/``rotate_model`` so a calibration-data error cannot
+        leave the in-session model rotated (#4935). The returned batches are the
+        exact ones the processors would have prepared, so ``quantize()`` reuses
+        them instead of tokenizing the corpus twice.
+        """
+
+        from ..looper.loop_processor import (
+            _calibration_dataset_length,
+            _sized_calibration_dataset,
+        )
+
+        dataset = getattr(calibration, field)
+        if dataset is None:
+            if field == "dataset":
+                raise ValueError(
+                    "CalibrationConfig.dataset is required unless a weight-only quantize config is configured."
+                )
+            return None
+        # Match the processor's own empty-input error instead of the lower-level
+        # ``prepare_calibration_dataset`` message.
+        if _calibration_dataset_length(dataset) == 0:
+            raise ValueError("Calibration dataset must not be empty.")
+
+        prepared = self.prepare_dataset(
+            calibration_dataset=dataset,
+            calibration_dataset_concat_size=calibration.concat_size,
+            calibration_dataset_sort=calibration.sort,
+            batch_size=batch_size,
+            calibration_data_min_length=calibration.min_length,
+            calibration_concat_separator=calibration.concat_separator,
+        )
+        prepared = _sized_calibration_dataset(prepared)
+        if len(prepared) == 0:
+            raise ValueError(
+                "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
+                "all samples (for example, every input_ids was shorter than "
+                "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
+                "or provide longer calibration samples."
+            )
+        return prepared
+
     def _quantize_with_calibration(
         self,
         *,
@@ -2977,18 +3114,29 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[QuantizeEmbedConfig],
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
+        prepared_dataset=None,
+        prepared_adapter_dataset=None,
     ):
         from ..looper.loop_processor import (
             _reusable_calibration_dataset,
+            prepare_calibration_dataset_once,
             release_failed_run_processors,
         )
         from ..looper.module_looper import ModuleLooper
 
-        # The native and EoRA steps each prepare their calibration input, so a
-        # one-shot iterator must be materialised once here or the second
-        # processor sees an exhausted dataset (issue #4307).
-        dataset = _reusable_calibration_dataset(calibration.dataset)
-        adapter_dataset = _reusable_calibration_dataset(calibration.adapter_dataset)
+        # A one-shot iterator must be materialised once here or a later
+        # traversal sees an exhausted dataset (issue #4307); the batches
+        # themselves are prepared once below and shared by every processor
+        # (#4869). A rotation run already prepared (and validated) its input
+        # before the model was mutated, so reuse those batches instead (#4935).
+        if prepared_dataset is not None:
+            dataset = prepared_dataset
+        else:
+            dataset = _reusable_calibration_dataset(calibration.dataset)
+        if prepared_adapter_dataset is not None:
+            adapter_dataset = prepared_adapter_dataset
+        else:
+            adapter_dataset = _reusable_calibration_dataset(calibration.adapter_dataset)
 
         if run_plan is None:
             from ..adapter.adapter import Lora
@@ -3008,9 +3156,37 @@ class BaseQModel(nn.Module):
 
         # The run plan owns the effective batch size (a model can disable
         # batched calibration); the adapter samples are consumed only by EoRA.
+        # Rotation runs hand the processors batches that were already prepared
+        # before the mutation; anything else keeps the model's preparer.
+        prepare_dataset = (
+            _already_prepared_calibration_dataset
+            if prepared_dataset is not None
+            else self.prepare_dataset
+        )
         calibration_config = calibration.bind(
-            self.prepare_dataset,
+            prepare_dataset,
             dataset=dataset,
+            adapter_dataset=None,
+            batch_size=run_plan.batch_size,
+        )
+        # Prepare the calibration batches once for the whole run: GPTAQ/FOEM
+        # pair the native and quantized captures by batch index, so two
+        # independent preparations of `sort="shuffle"` would pair unrelated
+        # sequences (#4869). Every calibrated processor replays this list, and
+        # a rotation run keeps the batches it already prepared (#4935).
+        if prepared_dataset is None:
+            prepared_dataset = prepare_calibration_dataset_once(calibration_config)
+        if (
+            prepared_adapter_dataset is None
+            and adapter_dataset is not None
+            and ProcessorStep.EORA in run_plan.processors
+        ):
+            prepared_adapter_dataset = prepare_calibration_dataset_once(
+                calibration_config.bind(self.prepare_dataset, dataset=adapter_dataset)
+            )
+        calibration_config = calibration.bind(
+            _already_prepared_calibration_dataset,
+            dataset=prepared_dataset,
             adapter_dataset=None,
             batch_size=run_plan.batch_size,
         )
@@ -3050,12 +3226,16 @@ class BaseQModel(nn.Module):
                         )
                     )
                 elif step is ProcessorStep.EORA:
-                    # EoRA prepares its samples with the same policy; its rows are
-                    # not quantizer statistics, so the attention-sink row policy
-                    # does not apply to them.
+                    # EoRA replays the same prepared batches (or its own prepared
+                    # adapter samples). Its rows are not quantizer statistics, so
+                    # the attention-sink row policy does not apply to them.
                     eora_calibration = calibration_config.bind(
-                        self.prepare_dataset,
-                        dataset=adapter_dataset if adapter_dataset is not None else dataset,
+                        _already_prepared_calibration_dataset,
+                        dataset=(
+                            prepared_adapter_dataset
+                            if prepared_adapter_dataset is not None
+                            else prepared_dataset
+                        ),
                         exclude_attention_sinks=False,
                     )
                     processors.append(factory(
@@ -3947,17 +4127,26 @@ class BaseQModel(nn.Module):
         # both a direct ``model(...)`` call and ``generate()`` enter the compiled
         # path, and keep the compile fallback for a deferred backend failure.
         model = getattr(self.model, "_orig_mod", self.model)
-        # A repeated ``optimize()`` must not stack compile wrappers: the
-        # fallback proxy records the eager callable it wraps, so compile that
-        # one again and let dynamo reuse its cache.
-        eager_forward = getattr(
-            model.forward, "_torchdynamo_orig_callable", model.forward
-        )
+        # Compiling the bound method would store it (and therefore the model)
+        # inside the compiled wrapper, and installing that wrapper on the
+        # instance closes a model -> forward -> model cycle that keeps the
+        # whole model and its VRAM alive until a cyclic GC (#4937). Compile the
+        # unbound class function and reach the instance through a weak
+        # reference instead. A repeated ``optimize()`` recompiles the same
+        # unbound function, so wrappers do not stack.
+        unbound_forward = type(model).forward
         compiled_forward = torch_compile(
-            eager_forward, fullgraph=fullgraph, backend=backend, mode=mode
+            unbound_forward, fullgraph=fullgraph, backend=backend, mode=mode
         )
-        if compiled_forward is not eager_forward:
-            model.forward = compiled_forward
+        if compiled_forward is unbound_forward:
+            # Compilation unavailable or disabled: drop a proxy from an earlier
+            # call so the class method is used again (no instance attribute,
+            # no cycle).
+            model.__dict__.pop("forward", None)
+        else:
+            model.forward = _CompiledModelForward(
+                compiled_forward, unbound_forward, model
+            )
         self.model = model
 
         #trigger kernel compilation hooks

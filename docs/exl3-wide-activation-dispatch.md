@@ -70,13 +70,22 @@ the kernel output row is multiplied back:
   scales, so the output row stays finite before it is rescaled.
 - The native kernels add the bias to the scaled accumulator. The bridge removes
   the bias, rescales, and restores it in FP32, so the bias is never scaled.
-- The decision needs one tensor-wide `amax` reduction and a host read of that
-  scalar per BF16 forward, plus a per-row reduction only when it triggers. That
-  is a couple of small kernels and one synchronization, against the hundreds of
-  launches the Torch reconstruction performs.
+- The decision stays on the device (#4955). A per-row `inf`-norm reduction,
+  `frexp`, and a `where` give every row its own scale, and a row that needs no
+  scale gets exactly 1.0, which is the identity. Nothing is read back to the
+  host, so a BF16 forward no longer drains the CUDA stream once per linear:
+  that `float(amax)` read was 112 synchronizations per decoded token on a 1B
+  model, 4-8x slower than the same math without it, and it also prevented CUDA
+  graph capture of the BF16 path. That is a couple of small kernels, against
+  the hundreds of launches the Torch reconstruction performs.
 
 Non-finite BF16 activations (`inf`/`nan`) keep the FP32 Torch path: there is no
-power of two that would make them finite.
+power of two that would make them finite. `isfinite` is checked once per
+module, on its first BF16 forward, instead of on every forward - a per-forward
+`isfinite` is the same device-to-host sync the device-side decision removed. A
+module whose first BF16 activation is non-finite keeps the FP32 reconstruction
+and probes again on its next forward; once an activation is finite the module
+stays on the native path.
 
 ## Dispatch contract
 

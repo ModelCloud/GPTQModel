@@ -23,9 +23,6 @@ from gptqmodel.utils.kernel import KernelConfig, configure_kernel
 
 
 FAMILY_JOIN = {"source": {"revision": "test"}, "corpus": {"sha256": "a" * 64}}
-_processor_wiring_pending = pytest.mark.skip(
-    reason="EXL3Processor capture-frontier wiring lands in a later stack layer"
-)
 
 
 def _subset():
@@ -361,7 +358,6 @@ def _processor(subset, *, captured: bool, inline_mixed: bool = False) -> EXL3Pro
     return processor
 
 
-@_processor_wiring_pending
 def test_processor_commits_and_restores_before_replay(tmp_path, monkeypatch) -> None:
     subset = _subset()
     root = tmp_path / "frontier"
@@ -416,7 +412,6 @@ def test_processor_commits_and_restores_before_replay(tmp_path, monkeypatch) -> 
     assert load_devices == ["cpu", "cpu"]
 
 
-@_processor_wiring_pending
 def test_inline_commit_demotes_live_hessians_to_lazy_frontier(
     tmp_path, monkeypatch
 ) -> None:
