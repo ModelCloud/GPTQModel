@@ -2287,7 +2287,13 @@ class BaseQModel(nn.Module):
                         device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    preferred_backend = BACKEND.AWQ_GEMV_FAST
+                    # The native GEMV_FAST extension is CUDA-only; a CPU-only
+                    # host packs with the portable Torch reader (issue #4736).
+                    preferred_backend = (
+                        BACKEND.AWQ_TORCH
+                        if quant_device_type == "cpu"
+                        else BACKEND.AWQ_GEMV_FAST
+                    )
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
@@ -3264,8 +3270,9 @@ class BaseQModel(nn.Module):
         so CUDA-graph capture never covers a layer and each decode step pays
         for the fragments and guard checks: the static cache then runs 2-4x
         slower than eager (#4669). Kernels declare the answer with
-        ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False until a
-        capture is measured.
+        ``BaseQuantLinear.SUPPORTS_COMPILE``, which defaults to False and
+        requires both a ``fullgraph=True`` trace with no graph breaks and a
+        measured win on the hardware it claims (#4739).
 
         A model with no quantized linear (dense) has nothing that breaks the
         graph, so it keeps whatever compile policy the caller chose.

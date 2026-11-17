@@ -18,6 +18,7 @@ from ...utils.awq import (
 )
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
+from ...utils.model_dequant import _dequantize_awq_gemv_fast
 from ...utils.packing_math import scale_to_storage_dtype, scaled_zero_offset
 from ._compile_support import COMPILE_LEVEL
 
@@ -100,11 +101,12 @@ class AwqGEMVFastLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
 
-    # Calls the native GEMV_FAST custom ops (gemv_fast_forward_decode /
-    # gemm_fast_forward_prefill), which have no fake/meta kernel, so dynamo
-    # breaks. The JIT extension could not build here (no CUDA_HOME/nvcc).
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native
+    # GEMV_FAST ops (gemv_fast_forward_decode / gemm_fast_forward_prefill) have
+    # no fake/meta kernel, so ``torch.compile`` stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     zeros_name = "qzeros"
 
@@ -352,12 +354,132 @@ class LLMAwqLinear(AwqGEMVFastLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "llm-awq"
 
-    # Same native GEMV_FAST custom ops as AwqGEMVFastLinear: no fake/meta
-    # kernel, so dynamo breaks; the extension could not build on this host.
+    # Same native GEMV_FAST ops as AwqGEMVFastLinear. Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130):
+    # eager and an explicit ``torch.cuda.graph`` capture both run with matching
+    # output; the missing fake/meta kernel keeps ``torch.compile`` at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
+    zeros_name = "scaled_zeros"
+
+
+class AwqGEMVFastTorchLinear(AwqGEMVFastLinear):
+    """Portable CPU reader for the packed ``FORMAT.GEMV_FAST`` layout (issue #4736).
+
+    The native GEMV_FAST extension is CUDA-only, so a quantize run that finishes
+    on CPU had no in-session kernel for a GEMV_FAST checkpoint and
+    ``quantize()`` raised after the whole calibration. This kernel reads the
+    exact same interleaved INT16 ``qweight`` and FP16 ``scales``/offset buffers
+    and dequantizes them to a dense FP32 tile per forward, which keeps the
+    checkpoint format unchanged and makes the in-session model runnable.
+
+    It is a documented fallback, not an AUTO replacement: the priority-0
+    ``SUPPORTS_FORMATS`` entry keeps the accelerator AUTO order untouched, and
+    ``select_quant_linear`` only reaches it for a CPU-only target through
+    ``PORTABLE_CPU_FALLBACK``.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    # 0 => supported for this layout, never auto-selected on an accelerator.
+    SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 0}
+    SUPPORTS_BITS = [4]
+    # Same packed layout contract as the native GEMV_FAST kernel, so a
+    # CPU-packed checkpoint stays loadable by the CUDA extension.
+    SUPPORTS_GROUP_SIZE = [128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int16]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16]
+    QUANT_TYPE = "awq_gemv_fast_torch"
+    # Consumed by select_quant_linear() when AUTO has no CPU kernel for the layout.
+    PORTABLE_CPU_FALLBACK = True
+
+    # Measured on CPU, torch 2.15.0+cpu: torch.compile(fullgraph=True) traces
+    # the forward with backend="eager" and "aot_eager", bit-identical to eager.
+    # Inductor was not measured (no host C++ compiler). CPU-only, so no CUDA
+    # graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.AOT_EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("backend", BACKEND.AWQ_TORCH)
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x: torch.Tensor):
+        out_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
+        inputs = x.reshape(-1, x.shape[-1])
+        input_dtype = inputs.dtype
+
+        # Bounded temporary dequantization: the dense tile lives only for this
+        # matmul and is never cached on the module.
+        weight = _dequantize_awq_gemv_fast(
+            self.qweight,
+            self._runtime_zeros(),
+            self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
+        )
+        if weight.device != inputs.device:
+            weight = weight.to(device=inputs.device)
+
+        # FP32 accumulation with a single rounding at the end, matching the
+        # accelerator GEMV_FAST kernels' accumulator width.
+        output = torch.matmul(inputs.to(torch.float32), weight.t())
+        if self.bias is not None:
+            output = output + self.bias.to(device=output.device, dtype=torch.float32)
+        output = output.to(dtype=input_dtype)
+
+        if self.adapter:
+            output = self.adapter.apply(x=inputs, out=output)
+
+        return output.reshape(out_shape)
+
+
+class LLMAwqTorchLinear(AwqGEMVFastTorchLinear, LLMAwqLinear):
+    """Portable CPU reader for ``FORMAT.LLM_AWQ`` (GEMV_FAST layout, ``scaled_zeros``).
+
+    It stays an ``LLMAwqLinear`` so layout-keyed consumers (MLX transfer) keep
+    treating it as an LLM_AWQ module; the Torch ``forward`` comes first in MRO.
+    """
+
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 0}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int16]
+    SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DTYPES = [torch.float16]
+    # Must keep the `awq_` prefix: pack dispatch keys AWQ packers on it.
+    QUANT_TYPE = "awq_llm_awq_torch"
+    PORTABLE_CPU_FALLBACK = True
+
+    # Same forward and measurement as AwqGEMVFastTorchLinear.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.AOT_EAGER
     SUPPORTS_GRAPH_CAPTURE = False
 
     zeros_name = "scaled_zeros"
 
 
-__all__ = ["AwqGEMVFastLinear", "LLMAwqLinear"]
+__all__ = ["AwqGEMVFastLinear", "LLMAwqLinear", "AwqGEMVFastTorchLinear", "LLMAwqTorchLinear"]

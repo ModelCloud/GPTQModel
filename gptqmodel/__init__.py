@@ -464,6 +464,24 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
 
 
+def _hf_quantizer_backend(quantizer):
+    """Return the caller's backend from an HF quantizer, wherever it lives.
+
+    Optimum's ``GPTQQuantizer`` stores it on the quantizer itself
+    (``.backend``). transformers' ``AwqQuantizer`` is a plain ``HfQuantizer``
+    with no such attribute: the choice lives on
+    ``quantization_config.backend``. Reading only ``.backend`` therefore
+    dropped every explicit AWQ backend and resolved AUTO (#4729). Prefer the
+    quantizer's own value, then the config's, so both bridges forward the
+    caller's choice and an impossible one (e.g. marlin on CPU) still raises.
+    """
+
+    backend = getattr(quantizer, "backend", None)
+    if backend is not None:
+        return backend
+    return getattr(getattr(quantizer, "quantization_config", None), "backend", None)
+
+
 def _patch_optimum_gptqmodel_load_bridge():
     """Route Optimum's GPTQ loading through GPTQModel's native bridge.
 
@@ -507,8 +525,10 @@ def _patch_optimum_gptqmodel_load_bridge():
                 # it `_resolve_backend_for_checkpoint` always sees `None` and
                 # resolves AUTO, so a documented PEFT/trainable-kernel choice (or
                 # a deliberately incompatible one, e.g. marlin on CPU) was
-                # silently ignored for native checkpoints (#4680).
-                backend=getattr(self, "backend", None),
+                # silently ignored for native checkpoints (#4680). Optimum keeps
+                # it on the quantizer; fall back to the config so a bridge that
+                # loses `.backend` still forwards it (#4729).
+                backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:
@@ -582,8 +602,10 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 device_map=kwargs.get("device_map"),
                 # Same forwarding as the GPTQ bridge: an explicit
                 # `quantization_config["backend"]` must not be replaced by AUTO
-                # (#4680).
-                backend=getattr(self, "backend", None),
+                # (#4680). transformers' `AwqQuantizer` has no `.backend`; the
+                # choice is on its `quantization_config`, so reading only the
+                # quantizer dropped every AWQ backend (#4729).
+                backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:

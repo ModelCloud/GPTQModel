@@ -339,16 +339,15 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
 
     # Whether a compiled generation path (transformers' static-cache
-    # auto-compile, a CUDA-graph decode loop) is not a pessimization for this
-    # kernel. False does not mean the forward is untraceable: most kernels
-    # here break the graph on every linear because they call a custom op
-    # without a fake implementation or branch on host values (`data_ptr()`,
-    # `id()`, `._version`) inside `forward`. When capture fails, each decode
-    # step pays for dozens of graph fragments and the guard checks, so the
-    # static cache ends up 2-4x slower than eager (#4669). A kernel opts in
-    # only with a measurement on the hardware it claims; an opt-in on a
-    # graph-breaking kernel whose eager path is already fast is strictly
-    # slower than eager.
+    # auto-compile, a CUDA-graph decode loop) beats this kernel's eager
+    # forward. The bar is *trace-clean*: ``torch.compile(fullgraph=True)`` must
+    # trace the forward with zero graph breaks **and** a compiled decode must
+    # measure faster on the hardware the declaration claims. Either half alone
+    # is not enough: a graph-breaking kernel pays for dozens of graph fragments
+    # and guard checks per decode step (#4669), and a clean trace of a forward
+    # whose eager path is already fast is a wash. A single timing on one
+    # architecture does not qualify a kernel (#4739). The default is False: no
+    # measurement, no opt-in.
     SUPPORTS_COMPILE: bool = False
 
     # Highest `torch.compile` level this kernel's `forward` reaches, measured

@@ -26,6 +26,7 @@ from transformers import CompileConfig, GenerationConfig
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.paro import ParoLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -219,9 +220,23 @@ def test_optimize_wrapper_is_unwrapped():
 
 
 def test_kernel_declarations():
-    """Only a measured non-pessimization opts in; subclasses do not inherit it."""
+    """Only a trace-clean, measured win opts in; subclasses do not inherit it."""
 
     assert MarlinLinear.SUPPORTS_COMPILE is False
     assert TorchLinear.SUPPORTS_COMPILE is False
+    # AWQ is trace-clean (`SUPPORTS_COMPILE_LEVEL = CUDAGRAPH`) and its compiled
+    # static-cache decode beats eager, so it stays opted in (#4669, #4739).
     assert AwqTorchLinear.SUPPORTS_COMPILE is True
     assert ParoLinear.SUPPORTS_COMPILE is False
+    # FP8 traces clean under `fullgraph=True` and its compiled static-cache
+    # decode is 3x faster than eager here, so it must not stay opted out (#4739).
+    assert TorchFP8Linear.SUPPORTS_COMPILE is True
+
+
+def test_mlx_fp8_does_not_inherit_the_torch_fp8_opt_in():
+    """The MPS holder runs native Metal kernels that were never traced (#4739)."""
+
+    from gptqmodel.nn_modules.qlinear.mlx import FP8MlxQuantLinear
+
+    assert issubclass(FP8MlxQuantLinear, TorchFP8Linear)
+    assert FP8MlxQuantLinear.SUPPORTS_COMPILE is False

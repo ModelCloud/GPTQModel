@@ -600,6 +600,62 @@ def detected_cuda_wheel_include_paths() -> list[str]:
     return _dedupe_path_strings(include_paths)
 
 
+def detected_cuda_wheel_library_paths() -> list[str]:
+    """Discover CUDA runtime libraries shipped via NVIDIA Python wheels.
+
+    CUDA 13 moved the math libraries out of the toolkit into per-component
+    wheels (``nvidia/cu13/lib/libcublas.so.13``). A host that installs CUDA
+    that way has the library but not the unversioned ``libcublas.so``
+    development symlink, so ``-lcublas`` fails to link even though the kernel
+    is buildable.
+    """
+
+    if IS_ROCM:
+        return []
+
+    try:
+        import nvidia  # type: ignore
+    except Exception:
+        return []
+
+    library_paths: list[str] = []
+    for base_text in getattr(nvidia, "__path__", []):
+        base_path = Path(base_text)
+        candidate_paths = list(base_path.glob("cu*/lib"))
+        candidate_paths.extend(base_path.glob("*/lib"))
+        for candidate in sorted(candidate_paths):
+            if candidate.is_dir():
+                library_paths.append(str(candidate))
+    return _dedupe_path_strings(library_paths)
+
+
+def resolve_cuda_library(name: str) -> Optional[str]:
+    """Absolute path of a CUDA math library, or ``None`` when it is not found.
+
+    ``-l<name>`` only links when the development symlink (``libcublas.so``)
+    exists. Prefer the toolkit copy when it is complete, then the NVIDIA wheel
+    copy, and accept the versioned ``lib<name>.so.<major>`` when that is all
+    the host installed.
+    """
+
+    search_roots: list[Path] = []
+    if CUDA_HOME:
+        search_roots.extend(
+            [Path(CUDA_HOME) / "lib64", Path(CUDA_HOME) / "lib"]
+        )
+    search_roots.extend(Path(path) for path in detected_cuda_wheel_library_paths())
+
+    for root in search_roots:
+        candidate = root / f"lib{name}.so"
+        if candidate.is_file():
+            return str(candidate)
+    for root in search_roots:
+        for candidate in sorted(root.glob(f"lib{name}.so.*")):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def _resolve_local_include_path(
     include_name: str,
     *,

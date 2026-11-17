@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import textwrap
 import types
 
 import pytest
@@ -222,6 +224,71 @@ def test_bitsandbytes_forward_matches_dequantized_reference(bits: int):
     atol = 1e-3 if bits == 4 else 1e-2
     rtol = 1e-3 if bits == 4 else 5e-2
     torch.testing.assert_close(out.to(torch.float32), expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 M=0 abort is CUDA-only; the CPU path already returns empty",
+)
+def test_bitsandbytes_zero_row_input_does_not_terminate_process():
+    """#4745: a zero-row activation must not reach the native M=0 launch.
+
+    ``int8_vectorwise_quant``/``int8_linear_matmul`` answer an M=0 problem with
+    ``Error invalid argument ... ops.cu`` and terminate the interpreter, so a
+    regression cannot be observed from inside this process. Run the forward in
+    a child and require it to exit cleanly for both bit widths and ranks.
+    """
+
+    script = textwrap.dedent(
+        """
+        import json
+        import torch
+        from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+
+        in_features = out_features = 256
+        linear = torch.nn.Linear(in_features, out_features, bias=False)
+        results = {}
+        for bits in (4, 8):
+            kernel = BitsAndBytesLinear(
+                bits=bits,
+                group_size=-1,
+                sym=True,
+                desc_act=False,
+                in_features=in_features,
+                out_features=out_features,
+                bias=False,
+                dtype=torch.float16,
+            )
+            kernel.pack_original(linear=linear, scales=None, zeros=None)
+            kernel = kernel.eval().cuda()
+            for shape in ((0, in_features), (2, 0, in_features)):
+                x = torch.randn(*shape, device="cuda", dtype=torch.float16)
+                with torch.inference_mode():
+                    out = kernel(x)
+                results[f"{bits}:{shape}"] = [list(out.shape), str(out.dtype), out.numel()]
+        print("ZERO_ROW_JSON:" + json.dumps(results))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+
+    markers = [
+        line for line in completed.stdout.splitlines() if line.startswith("ZERO_ROW_JSON:")
+    ]
+    assert markers, completed.stdout[-4000:]
+    results = json.loads(markers[-1].split("ZERO_ROW_JSON:", 1)[1])
+
+    for bits in (4, 8):
+        for leading in ((0,), (2, 0)):
+            shape = [*leading, 256]
+            key = f"{bits}:{tuple(shape)}"
+            assert results[key] == [shape, "torch.float16", 0], (key, results[key])
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")

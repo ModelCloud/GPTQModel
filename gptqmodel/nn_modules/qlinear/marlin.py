@@ -109,11 +109,12 @@ class MarlinLinear(GPTQQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
-    # Not buildable here: the Marlin torch.ops JIT extension needs CUDA_HOME/nvcc
-    # (both absent), and apply_gptq_marlin_linear has no fake/meta impl, so
-    # dynamo would break. Conservative EAGER; no capture measured.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the eager forward and an explicit
+    # ``torch.cuda.graph`` capture both run, and the replayed output matches
+    # eager. ``apply_gptq_marlin_linear`` has no fake/meta implementation, so
+    # ``torch.compile`` still stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # The Marlin evaluator adds the bias to its FP32 accumulator before the
     # visible cast, so the buffer keeps its checkpoint width instead of

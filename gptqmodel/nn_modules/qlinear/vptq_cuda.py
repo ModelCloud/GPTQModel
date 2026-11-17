@@ -30,11 +30,11 @@ def _vptq_cuda_fused_max_rows(module: VPTQLinear) -> int:
 class VPTQCudaLinear(VPTQLinear):
     """VPTQ layer using native CUDA ops, following upstream quant_gemm dispatch."""
 
-    # The VPTQ CUDA JIT extension cannot build on this host (no CUDA toolkit),
-    # and the forward calls the `vptq_cuda_linear` custom op after host-side
-    # shape/bias branches. Static: EAGER, no capture.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. Dynamo stops
+    # at EAGER on the lazy ``import_module`` in the op loader.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_CUDA]
     SUPPORTS_METHODS = [METHOD.VPTQ]

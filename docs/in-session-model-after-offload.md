@@ -128,6 +128,37 @@ rebound to the same replacement.
 | EXL3 reference-offloaded packed modules (`offload_to_safetensors_reference`) | Not hooked, so not restored; they remain an export-only path ([reference offload](safetensors-reference-offload.md)) |
 | `rehome_quantized_kernel` finds no CPU kernel for the format | Unchanged: `RuntimeError` with reload guidance |
 
+## AWQ CPU readers for the GEMV layouts
+
+The native GEMV, GEMV_FAST and LLM_AWQ kernels are CUDA-only, so AUTO finds no
+CPU kernel for those layouts. `select_quant_linear()` then picks the layout's
+`PORTABLE_CPU_FALLBACK` reader. These readers are explicit-only
+(`SUPPORTS_FORMATS` priority `0`), so the accelerator AUTO order does not
+change.
+
+```mermaid
+flowchart TD
+    A["quantize() finishes<br/>packed AWQ layers on cpu"] --> B["rehome_quantized_kernel"]
+    B --> C["select_in_session_quant_linear(qcfg, cpu)"]
+    C --> D{"AUTO CPU kernel<br/>for the format?"}
+    D -- "GEMM" --> E["AwqTorchLinear"]
+    D -- "no" --> F{"PORTABLE_CPU_FALLBACK<br/>reader for the format?"}
+    F -- "GEMV" --> G["AwqGEMVTorchLinear (#4554)"]
+    F -- "GEMV_FAST" --> H["AwqGEMVFastTorchLinear (#4736)"]
+    F -- "LLM_AWQ" --> I["LLMAwqTorchLinear (#4736)"]
+    F -- "none" --> X["RuntimeError: reload guidance"]
+    E & G & H & I --> S["_switch_quant_linear_class<br/>packed buffers unchanged"]
+    S --> T["in-session forward, save(), AUTO reload on cpu"]
+    style X fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+```
+
+| Format | Before | After |
+| --- | --- | --- |
+| `FORMAT.GEMV` | `AwqGEMVTorchLinear` (#4554) | Unchanged |
+| `FORMAT.GEMV_FAST` | `ValueError: No valid quant linear` -> `RuntimeError` after calibration; nothing saved | `AwqGEMVFastTorchLinear`; quantize -> save -> reload completes |
+| `FORMAT.LLM_AWQ` | Same `RuntimeError` (`LLMAwqLinear`) | `LLMAwqTorchLinear`; quantize -> save -> reload completes |
+| GEMV_FAST / LLM_AWQ quantize on a CPU-only host | Refused before calibration (`AwqGEMVFastLinear does not support device: DEVICE.CPU`) | Packs with `BACKEND.AWQ_TORCH`; the checkpoint keeps the requested format |
+
 [#4368]: https://github.com/ModelCloud/GPTQModel/issues/4368
 [#4380]: https://github.com/ModelCloud/GPTQModel/issues/4380
 [#4450]: https://github.com/ModelCloud/GPTQModel/issues/4450

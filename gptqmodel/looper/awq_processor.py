@@ -5012,6 +5012,12 @@ class AWQProcessor(LoopProcessor):
         # these locks in the opposite order during EoRA finalization.
         if self.calculate_w_wq_diff:
             module.weight.data = module.state.pop("wq").to(CPU)
+        else:
+            # The dense fake-quantized weight only feeds the diff above. Dropping
+            # it here keeps the last layer's projection out of the
+            # ``ModuleLooper -> processors`` cycle, where it waited for a cyclic
+            # GC after ``quantize()`` returned (#4747).
+            module.state.pop("wq", None)
 
         with self.lock:
             module.state.pop("w", None)  #
