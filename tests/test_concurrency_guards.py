@@ -42,7 +42,7 @@ def _run_two_threads(enter):
                 entered.set()
                 if not release.wait(timeout=10):
                     raise TimeoutError("guard was never released")
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             errors.append(exc)
 
     thread_a = threading.Thread(target=worker, args=(entered_a, release_a))
@@ -305,7 +305,7 @@ def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
     def probe():
         try:
             results["supported"] = cpu_features.has_cpu_bf16x3_precision()
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             results["probe_error"] = exc
         finally:
             probe_done.set()
@@ -320,7 +320,7 @@ def test_cpu_bf16x3_capability_probe_respects_an_active_scope(monkeypatch):
                 assert probe_done.wait(timeout=10)
                 results["precision_in_scope"] = real_getter()
                 results["depth_in_scope"] = cpu_features._CPU_BF16X3_DEPTH
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except Exception as exc:  # noqa: BLE001 - re-raised below
             results["forward_error"] = exc
 
     probe_thread = threading.Thread(target=probe, name="capability-probe")
