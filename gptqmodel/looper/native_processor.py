@@ -283,10 +283,22 @@ class NativeProcessor(LoopProcessor):
         module.state.pop(NATIVE_INPUTS_STATE_KEY, None)
 
     def finalize(self, model: BaseQModel, **kwargs):
-        """Releases processor-level caches once the full loop has completed."""
+        """Releases processor-level caches once the full loop has completed.
+
+        This override must chain to ``LoopProcessor.finalize``: the base drops
+        ``inputs_cache``/``_results``, closes the device-smi handles, releases
+        the shared Hessian workspace and removes the processor log. Skipping it
+        kept the last layer's captured native inputs alive in the
+        ``ModuleLooper -> processors`` reference cycle, so ``quantize()``
+        returned with hundreds of MiB still allocated on the GPU until a cyclic
+        GC ran (#4747).
+        """
 
         self._release_native_share_cache()
-        del self.native_inp_caches
+        # Capture may never have run (a plan without a native step, a failure
+        # before the first layer), so do not require the cache to exist.
+        self.native_inp_caches = {}
+        super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         """Ensures a calibration dataset was provided before running capture."""
