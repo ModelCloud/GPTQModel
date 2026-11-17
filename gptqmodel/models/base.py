@@ -619,6 +619,12 @@ def _switch_quant_linear_class(module: BaseQuantLinear, target_cls) -> None:
     """
 
     module.__class__ = target_cls
+    # ``__class__`` assignment never runs the target kernel's ``__init__``, so a
+    # kernel that keeps runtime state on the instance has to install it here
+    # (#4940; this path previously broke on #4451 and #4856).
+    init_runtime_state = getattr(target_cls, "_init_runtime_state", None)
+    if callable(init_runtime_state):
+        init_runtime_state(module)
     backends = getattr(target_cls, "SUPPORTS_BACKENDS", None) or ()
     if backends:
         module.backend = backends[0]

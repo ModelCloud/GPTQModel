@@ -351,6 +351,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
             self.scales_and_zeros = None
             self._cpu_transformed = False
             self._cpu_transform_dtype = None
+        elif not mode and self.linear_mode == "train":
+            # The dense-dequant path holds no derived state, so clearing the
+            # latch lets the next forward choose the int4pack layout again.
+            # Without this a forward taken while the module was in training
+            # mode pinned it to dense dequantization for the rest of its life,
+            # so a later `eval()` could never recover (#4907).
+            self.linear_mode = None
         return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
