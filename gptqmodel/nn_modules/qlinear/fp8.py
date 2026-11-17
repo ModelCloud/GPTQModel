@@ -373,6 +373,32 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             buffers.append(self.bias)
         return buffers
 
+    @property
+    def qweight(self) -> torch.Tensor:
+        """The packed FP8 weight, under the name PEFT's GPTQ dispatcher reads.
+
+        ``TorchFP8Linear`` stores its codes in ``weight`` (the name the FP8
+        checkpoint and ``WeightOnlyQuantLinear`` use), while every other
+        trainable GPT-QModel kernel keeps them in ``qweight``. PEFT routes each
+        ``BaseQuantLinear`` through ``peft.tuners.lora.gptq.dispatch_gptq``,
+        which does ``target.qweight = target_base_layer.qweight`` and therefore
+        raised ``AttributeError`` before any LoRA training could start (#4948).
+        The setter exists because the dispatcher then writes that same tensor
+        back: ``target`` is this module when it is not already a
+        ``BaseTunerLayer``, so ``target.qweight = ...`` lands here. It rebinds
+        ``weight`` and keeps the slot's kind, so a rebind cannot silently turn a
+        parameter into a plain tensor.
+        """
+
+        return self.weight
+
+    @qweight.setter
+    def qweight(self, value: torch.Tensor) -> None:
+        if "weight" in self._parameters:
+            self.weight = torch.nn.Parameter(value, requires_grad=value.requires_grad)
+        else:
+            self.weight = value
+
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "

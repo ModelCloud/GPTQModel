@@ -1742,6 +1742,14 @@ def _publish_triton_cache_ready(cache: dict[str, Any], device: torch.device) -> 
     lets a consumer on a different stream wait for exactly that work.
     """
 
+    # Snapshot the tensors a consumer stream must keep alive.  The forward path
+    # must never iterate the cache dict itself: a peer thread may retire the
+    # handshake (a ``dict.pop``) while this thread is iterating it, which raises
+    # "dictionary changed size during iteration" (#4962).  The cache is not
+    # visible to other threads until this returns, so the snapshot is safe here.
+    cache["tensors"] = tuple(
+        value for value in cache.values() if isinstance(value, torch.Tensor)
+    )
     try:
         stream = torch.cuda.current_stream(device)
         event = torch.cuda.Event()
@@ -1829,10 +1837,10 @@ def _wait_for_triton_cache_ready(cache: dict[str, Any], device: torch.device) ->
         return
     current.wait_event(event)
     # The cached tensors outlive every forward, but the allocator still has to
-    # know this stream reads them.
-    for value in cache.values():
-        if isinstance(value, torch.Tensor):
-            value.record_stream(current)
+    # know this stream reads them.  Iterate the publish-time snapshot, never the
+    # dict: a peer thread may retire the handshake concurrently (#4962).
+    for value in cache.get("tensors", ()):
+        value.record_stream(current)
 
 
 # One lock for every module's first-forward re-layout. The permute itself is a
