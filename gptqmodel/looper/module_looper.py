@@ -86,6 +86,7 @@ from ..utils.p2p import (
     safe_move_to,
 )
 from ..utils.python import has_gil_control, has_gil_disabled
+from ..utils.tied_weights import lm_head_is_tied
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .execution_state import DeviceAssignmentState
@@ -1456,9 +1457,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             return True
 
         # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
-        # even though the head is tied). Only the *root* config flag is trusted
-        # here; a nested text_config flag does not describe the loaded model's
-        # actual storage (issue #4369).
+        # even though the head is tied). The load-time snapshot resolved this
+        # from the decoder config and the checkpoint, so prefer it over the
+        # wrapper's config flag (#4799, #4369).
+        snapshot = lm_head_is_tied(model, lm_head_name)
+        if snapshot is not None:
+            return snapshot
+
         config = getattr(model, "config", None)
         if not bool(getattr(config, "tie_word_embeddings", False)):
             return False

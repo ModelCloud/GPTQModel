@@ -122,6 +122,7 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
+from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
@@ -6743,7 +6744,13 @@ class BaseQModel(nn.Module):
         return node
 
     def tied_word_embedding(self) -> bool:
-        return getattr(self.model.config, "tie_word_embeddings", False)
+        # The load-time snapshot resolves tying from the decoder config and the
+        # checkpoint, so a composite wrapper's default flag cannot claim a tie
+        # the checkpoint does not have (#4799).
+        resolved = lm_head_is_tied(self.model, self.lm_head)
+        if resolved is not None:
+            return resolved
+        return word_embeddings_tied(getattr(self.model, "config", None))
 
     # Direct children that carry the token embedding or the language head. The
     # structural `nn.Module` check is the real guard; these names only break
