@@ -985,7 +985,7 @@ def test_configure_modelopt_runtime_rejects_modelopt_input_activation_quantizati
     )
     harness.turtle_model = None
 
-    with pytest.raises(ValueError, match="activation quantization"):
+    with pytest.raises(ValueError, match="activation quantized|activation scales"):
         base_module.BaseQModel._configure_modelopt_runtime(harness)
 
 
@@ -1021,7 +1021,7 @@ def test_configure_modelopt_runtime_rejects_checkpoint_activation_scale_metadata
     harness.turtle_model = base_module.LazyTurtle.__new__(base_module.LazyTurtle)
     harness.turtle_model._weight_map = {"model.layers.0.self_attn.q_proj.input_scale": "model.safetensors"}
 
-    with pytest.raises(ValueError, match="activation quantization"):
+    with pytest.raises(ValueError, match="activation quantized|activation scales"):
         base_module.BaseQModel._configure_modelopt_runtime(harness)
 
 

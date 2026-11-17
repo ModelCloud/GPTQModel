@@ -1,8 +1,8 @@
 # Dense (`hf`) export: which decoder runs
 
-`GPTQModel.export(path, out, "hf")` converts a quantized checkpoint into dense
-weights through `utils/model_dequant.dequantize_model()`. The decoder is chosen
-by `detect_format()`, and the checkpoint's **declared** `quant_method` decides:
+`gptqmodel.utils.model_dequant.dequantize_model(path, out)` converts a
+quantized checkpoint into dense weights. The decoder is chosen by
+`detect_format()`, and the checkpoint's **declared** `quant_method` decides:
 a method with no dense decoder is refused, instead of being decoded with a
 different layout's decoder.
 
@@ -50,7 +50,7 @@ drop the rotation.
 `detect_format()` (`gptqmodel/utils/model_dequant.py`) and
 `dequantize_model()` (same file) before this change:
 
-| checkpoint | `detect_format()` before | `export(..., "hf")` before | after |
+| checkpoint | `detect_format()` before | `dequantize_model()` before | after |
 | --- | --- | --- | --- |
 | Paro (`method: "paro"`) | `awq` — `.qweight` and no `.g_idx` | wrote dense weights, rotation dropped (nll 1.49 -> 13.28) | `NotImplementedError` |
 | MACaQ (`method: "macaq"`) | `mxfp4` — substring of `mxfp4_macaq` | wrote dense weights, `BH`/`pre_scale` dropped (nll 1.73 -> 12.64) | `NotImplementedError` |
@@ -62,7 +62,7 @@ decoder (GPTQ, AWQ, FP8, NVFP4/MXFP4, BitsAndBytes, compressed-tensors).
 
 ## Scope
 
-This is a refusal, not a decoder. Paro and MACaQ still have no dense export path;
+This is a refusal, not a decoder. Paro and MACaQ still have no dense dequantization path;
 `GPTQModel.load()` and the quantized checkpoint itself are unaffected. Adding a
 dense decoder later means deleting the method from `_UNDECODABLE_METHODS` and
 giving `dequantize_model()` a matching branch.
