@@ -970,25 +970,44 @@ def hf_convert_gptq_v1_to_v2_format(
         source_format = resolve_quant_format(checkpoint_format, METHOD.GPTQ)
     except (TypeError, ValueError):
         source_format = None
+    converted = False
     if source_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
         # Optimum calls this before `save_pretrained()` can run. Record the
-        # on-disk layout here so the state-dict hook can undo the runtime v2
-        # conversion for a v1 checkpoint.
+        # on-disk layout here so the state-dict hook emits the checkpoint
+        # convention instead of the kernel's runtime one.
         for module in model.modules():
-            if isinstance(module, GPTQQuantLinear):
-                module._checkpoint_format_on_disk = source_format
+            if not isinstance(module, GPTQQuantLinear):
+                continue
+            module._checkpoint_format_on_disk = source_format
+            if source_format == FORMAT.GPTQ_V2:
+                # A v2 file already stores logical zero points and the kernel
+                # decodes v2, so no word conversion runs. Mark the runtime
+                # layout anyway: without it the module keeps the constructor's
+                # v1 placeholder, `checkpoint_layout_qzeros` mistakes the live
+                # v2 words for v1, and the next save adds one to every zero
+                # point (issue #4952). The call also initializes the persistent
+                # `qzeros_format` marker, which an HF-loaded module otherwise
+                # leaves as uninitialized memory.
+                module.qzero_format(format=2)
 
-    if source_format == FORMAT.GPTQ:
-        # Skip v1 to v2 conversion when no loaded quant module requires v2.
-        if not any(
-            isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
-            for m in model.modules()
-        ):
-            return model, False
-
-        cfg = QuantizeConfig(bits=bits)
-        return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
-    return model, False
+        if source_format == FORMAT.GPTQ:
+            # Skip v1 to v2 conversion when no loaded quant module requires v2.
+            if any(
+                isinstance(m, BaseQuantLinear) and getattr(m, "REQUIRES_FORMAT_V2", False)
+                for m in model.modules()
+            ):
+                cfg = QuantizeConfig(bits=bits)
+                model = convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel)
+                converted = True
+            # A v1 checkpoint that no kernel converted still holds v1 words.
+            # Initialize its marker too; a converted module was marked by the
+            # conversion itself.
+            for module in model.modules():
+                if isinstance(module, GPTQQuantLinear) and not getattr(
+                    module, "_qzeros_format_established", False
+                ):
+                    module.qzero_format(format=module._runtime_qzeros_format())
+    return model, converted
 
 def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack_dtype: torch.dtype) -> nn.Module:
     assert isinstance(module, BaseQuantLinear)
@@ -3613,6 +3632,37 @@ def _checkpoint_runtime_to_source_keys(
     return mapping
 
 
+def _device_map_target(device_map, name: str) -> Optional[torch.device]:
+    """Resolve the device a ``device_map`` entry assigns to one tensor name.
+
+    Returns ``None`` when the map says nothing about ``name`` or names an
+    offload target (``disk``/``meta``), so the caller keeps the slot's device.
+
+    The result is always a ``torch.device``, never the raw map value: #4915
+    spells ``cuda:0`` as the int ordinal ``0`` for Accelerate, and ``0`` is
+    falsy, so a truthiness test at the call site silently fell back to the
+    CPU slot and left every packed FP8 weight on the host (#4964).
+    """
+
+    if not isinstance(device_map, dict):
+        return None
+    module_name = name
+    while module_name and module_name not in device_map:
+        module_name = ".".join(module_name.split(".")[:-1])
+    if module_name == "" and "" not in device_map:
+        return None
+    target = device_map[module_name]
+    if isinstance(target, str) and target in ("disk", "meta"):
+        return None
+    if isinstance(target, int) and not isinstance(target, bool):
+        # Accelerate accepts a bare ordinal; it always means this accelerator.
+        return torch.device("cuda", target)
+    try:
+        return torch.device(target)
+    except (TypeError, RuntimeError, ValueError):
+        return None
+
+
 def _restore_checkpoint_buffers(
     model, checkpoint, dtypes: dict[str, torch.dtype | None],
     *, exact_source_names: set[str] | frozenset[str] = frozenset(),
@@ -3636,17 +3686,7 @@ def _restore_checkpoint_buffers(
     source_name = (lambda name: name_map.get(name, name)) if name_map else (lambda name: name)
 
     def mapped_device(name: str):
-        if not isinstance(device_map, dict):
-            return None
-        module_name = name
-        while module_name and module_name not in device_map:
-            module_name = ".".join(module_name.split(".")[:-1])
-        if module_name == "" and "" not in device_map:
-            return None
-        target = device_map[module_name]
-        if target in ("disk", "meta"):
-            return None
-        return target
+        return _device_map_target(device_map, name)
 
     checkpoint = os.fspath(checkpoint)
     if os.path.isdir(checkpoint):
@@ -3698,7 +3738,9 @@ def _restore_checkpoint_buffers(
         target_dtype = dtypes[name]
         target_device = slot.device
         if name in exact_source_names:
-            target_device = mapped_device(name) or target_device
+            mapped = mapped_device(name)
+            if mapped is not None:
+                target_device = mapped
         restored_value = value.to(
             device=target_device, dtype=value.dtype if target_dtype is None else target_dtype
         )

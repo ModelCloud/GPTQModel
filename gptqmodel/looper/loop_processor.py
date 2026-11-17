@@ -91,6 +91,49 @@ def _sized_calibration_dataset(dataset):
     return dataset
 
 
+def prepare_calibration_dataset_once(calibration: CalibrationConfig):
+    """Return the prepared calibration batches of one run.
+
+    Every calibrated processor of a run must replay the same batch order:
+    GPTAQ/FOEM pair the native capture with the quantized capture by batch
+    index, so preparing the same ``sort="shuffle"`` dataset once per processor
+    would pair unrelated sequences (#4869). ``quantize()`` calls this once and
+    hands the result to every processor in the chain.
+    """
+
+    dataset = calibration.dataset
+    if dataset is None:
+        return None
+
+    prepare_dataset = calibration.prepare_dataset
+    if prepare_dataset is None:
+        raise ValueError(
+            "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
+            "when calibration data is supplied."
+        )
+
+    prepared = prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=calibration.concat_size,
+        calibration_dataset_sort=calibration.sort,
+        batch_size=calibration.batch_size,
+        calibration_data_min_length=calibration.min_length,
+        calibration_concat_separator=calibration.concat_separator,
+    )
+    # A model-specific ``prepare_dataset`` override may return a one-shot
+    # iterable; normalise it before the checks below and before the per-layer
+    # replay, which needs a reusable dataset.
+    prepared = _sized_calibration_dataset(prepared)
+    if len(prepared) == 0:
+        raise ValueError(
+            "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
+            "all samples (for example, every input_ids was shorter than "
+            "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
+            "or provide longer calibration samples."
+        )
+    return prepared
+
+
 def _reusable_calibration_dataset(dataset):
     """Return a calibration input that more than one processor can prepare.
 
@@ -556,7 +599,8 @@ class LoopProcessor:
             # ``datasets.IterableDataset`` and plain generators are valid
             # calibration inputs but do not implement ``__len__``. Only run the
             # pre-prepare checks when the caller supplied a sized container;
-            # emptiness is verified again on the prepared result below.
+            # emptiness is verified again on the prepared result by
+            # ``prepare_calibration_dataset_once``.
             raw_calibration_size = _calibration_dataset_length(calibration_dataset)
             if raw_calibration_size == 0:
                 raise ValueError("Calibration dataset must not be empty.")
@@ -565,34 +609,11 @@ class LoopProcessor:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                                f"Current: {raw_calibration_size}.")
 
-            if self.calibration.prepare_dataset is None:
-                raise ValueError(
-                    "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
-                    "when calibration data is supplied."
-                )
-
-            calibration_dataset = self.calibration.prepare_dataset(
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=self.calibration.concat_size,
-                calibration_dataset_sort=self.calibration.sort,
-                batch_size=self.calibration.batch_size,
-                calibration_data_min_length=self.calibration.min_length,
-                calibration_concat_separator=self.calibration.concat_separator,
-            )
-
-            # A model-specific ``prepare_dataset`` override may return a
-            # one-shot iterable; normalise it before the checks below and
-            # before the per-layer replay, which needs a reusable dataset.
-            calibration_dataset = _sized_calibration_dataset(calibration_dataset)
+            # ``quantize()`` prepares the batches once per run and hands the
+            # same list to every processor, so processors that pair their
+            # captures by batch index (GPTAQ/FOEM) see one order (#4869).
+            calibration_dataset = prepare_calibration_dataset_once(self.calibration)
             prepared_calibration_size = len(calibration_dataset)
-
-            if prepared_calibration_size == 0:
-                raise ValueError(
-                    "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
-                    "all samples (for example, every input_ids was shorter than "
-                    "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
-                    "or provide longer calibration samples."
-                )
 
             # The size is only knowable after preparation for unsized inputs.
             if raw_calibration_size is None and prepared_calibration_size < min_calibration_dataset_size:
@@ -1687,6 +1708,58 @@ class LoopProcessor:
         """Override point for the processor name shown in logs and reports."""
 
         pass
+
+
+def rehome_failed_run_kernels(gptq_model) -> None:
+    """Best-effort switch of a failed run's packed layers to a runnable kernel.
+
+    The loop packs every finished layer with the calibration-time kernel, which
+    may be accelerator-only (AWQ GEMM, QQQ, GGUF Triton). The success path
+    rehomes them after the loop; a cancelled or failed run must do the same or
+    the next in-session forward raises ``Could not run ... with arguments from
+    the 'CPU' backend`` (#4947). Finished layers of a disk-offloaded run are
+    meta shells, so resolve the device from the rest of the model instead of
+    from their own tensors. Cleanup never masks the cancellation: a rehome
+    failure (for example the save-and-reload guidance) is logged and ignored.
+    """
+
+    from ..models.base import rehome_quantized_kernel
+
+    model = getattr(gptq_model, "model", None)
+    if model is None:
+        return
+
+    device = None
+    for module in model.modules():
+        runtime_device = getattr(module, "runtime_device", None)
+        if not callable(runtime_device):
+            continue
+        try:
+            candidate = runtime_device()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if candidate is not None and candidate.type != "meta":
+            device = candidate
+            break
+
+    if device is None:
+        for tensor in model.parameters():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+    if device is None:
+        for tensor in model.buffers():
+            if tensor.device.type != "meta":
+                device = tensor.device
+                break
+
+    try:
+        rehome_quantized_kernel(gptq_model, device=device)
+    except Exception:
+        log.warn(
+            "failed to rehome the quantized kernels of a cancelled/failed run",
+            exc_info=True,
+        )
 
 
 def release_failed_run_processors(processors) -> None:

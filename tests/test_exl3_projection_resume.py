@@ -54,6 +54,11 @@ class _Capture:
     def free(self):
         self.H = None
 
+    def _release_deferred_hessian_sources(self):
+        # #4837: the processor drains the deferred per-device Hessian partials
+        # after finalization.  This double keeps no partials.
+        pass
+
 
 def test_base_inline_policy_leaves_mtp_projection_uniform_k3(tmp_path) -> None:
     policy = InlineMixedPolicy(
