@@ -23,12 +23,9 @@ network access) are skipped with a precise reason. The focused model tests in
 
 from __future__ import annotations
 
-from importlib import metadata
-
 import pytest
 import torch
 import transformers
-from packaging.version import InvalidVersion, Version
 from torch import nn
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
@@ -169,16 +166,6 @@ KNOWN_UNDECLARED = {
     "granitemoehybrid": "mamba.conv1d is checkpoint-owned but the definition is owned outside issue #4174",
 }
 
-_DEFUSER_SPLITS_GATE_UP = Version("0.0.31")
-
-
-def _defuser_version():
-    try:
-        return Version(metadata.version("defuser"))
-    except (metadata.PackageNotFoundError, InvalidVersion):
-        return None
-
-
 def _definition_for(model_type, config):
     definition = MODEL_MAP[model_type]
     if model_type == "kimi_linear" and not is_kimi_k3_config(config):
@@ -257,15 +244,6 @@ def _undeclared_leaves(definition, layers):
     return undeclared
 
 
-def _gate_up_is_defuser_gated(model_type, undeclared) -> bool:
-    if model_type != "glm4v":
-        return False
-    installed = _defuser_version()
-    if installed is not None and installed >= _DEFUSER_SPLITS_GATE_UP:
-        return False
-    return any(path.endswith(".gate_up_proj") for path in undeclared)
-
-
 @pytest.mark.parametrize("model_type", sorted(set(MODEL_MAP) & set(CONFIG_MAPPING)))
 def test_every_decoder_leaf_is_declared_or_explicitly_excluded(model_type):
     try:
@@ -297,12 +275,6 @@ def test_every_decoder_leaf_is_declared_or_explicitly_excluded(model_type):
     reason = KNOWN_UNDECLARED.get(model_type)
     if reason is not None:
         pytest.xfail(f"{model_type}: {reason}: {summary}")
-    if _gate_up_is_defuser_gated(model_type, undeclared):
-        pytest.xfail(
-            f"{model_type}: installed defuser {_defuser_version()} does not split "
-            f"the fused gate_up_proj; >= {_DEFUSER_SPLITS_GATE_UP} is required: {summary}"
-        )
-
     pytest.fail(
         f"{model_type}: {len(undeclared)} decoder leaf(s) are neither declared "
         f"nor tagged :!/:? and stay in the source dtype: {summary}"
