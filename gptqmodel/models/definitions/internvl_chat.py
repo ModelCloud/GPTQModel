@@ -70,7 +70,9 @@ class InternVLChatQModel(BaseQModel):
     @classmethod
     def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
         tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
-        architecture = model.config.llm_config.architectures[0]
+        config = getattr(model, "config", None)
+        architectures = getattr(getattr(config, "llm_config", None), "architectures", None)
+        architecture = architectures[0] if architectures else None
         blocks = tree[-1]
         if architecture == "InternLM2ForCausalLM":
             tree[-1] = {
@@ -404,9 +406,16 @@ class InternVLChatQModel(BaseQModel):
 
     def pre_quantize_generate_hook_start(self):
         self.model.set_input_embeddings(self.pre_quantize(self.model.get_input_embeddings()))
-        self.model.language_model.model.rotary_emb = self.pre_quantize(self.model.language_model.model.rotary_emb)
+        for path in self._decoder_rotary_paths():
+            self.model.set_submodule(path, self.pre_quantize(self.model.get_submodule(path)))
         self.model.vision_model = self.pre_quantize(self.model.vision_model)
         self.model.mlp1 = self.pre_quantize(self.model.mlp1)
+
+    def _decoder_rotary_paths(self):
+        core = self.model.language_model.model
+        if hasattr(core, "rotary_emb"):
+            return ["language_model.model.rotary_emb"]
+        return [f"language_model.model.layers.{index}.attention.rotary_emb" for index in range(len(core.layers))]
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
@@ -415,11 +424,12 @@ class InternVLChatQModel(BaseQModel):
                 module=self.model.get_input_embeddings(),
                 disk_path=self.quantize_config.offload_to_disk_path,
             )
-            offload_to_disk(
-                model=self.model.language_model.model,
-                module=self.model.language_model.model.rotary_emb,
-                disk_path=self.quantize_config.offload_to_disk_path,
-            )
+            for path in self._decoder_rotary_paths():
+                offload_to_disk(
+                    model=self.model.language_model.model,
+                    module=self.model.get_submodule(path),
+                    disk_path=self.quantize_config.offload_to_disk_path,
+                )
             offload_to_disk(
                 model=self.model,
                 module=self.model.vision_model,
@@ -433,10 +443,8 @@ class InternVLChatQModel(BaseQModel):
             return
 
         self.model.set_input_embeddings(move_to(self.model.get_input_embeddings(), device=CPU))
-        self.model.language_model.model.rotary_emb = move_to(
-            self.model.language_model.model.rotary_emb,
-            device=CPU,
-        )
+        for path in self._decoder_rotary_paths():
+            self.model.set_submodule(path, move_to(self.model.get_submodule(path), device=CPU))
         self.model.vision_model = move_to(self.model.vision_model, device=CPU)
         self.model.mlp1 = move_to(self.model.mlp1, device=CPU)
 
@@ -465,7 +473,9 @@ class InternVLChatQModel(BaseQModel):
         return example
 
     def run_input_capture(self, example, use_cache: bool, data_device):
-        del use_cache, data_device
+        del data_device
+        if "img_context_token_id" not in example:
+            return self.model(**example, use_cache=use_cache)
         self.model.img_context_token_id = int(example["img_context_token_id"])
 
         tokenizer = self._get_tokenizer()
