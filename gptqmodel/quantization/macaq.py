@@ -399,9 +399,13 @@ def _flip_sweep(
     delta = torch.where(up_better, delta_up, delta_down)
     best_delta, best_column = delta.min(dim=1)
     improving = best_delta < -1e-12
-    if not improving.any():
-        return torch.empty(0, dtype=torch.long, device=signed_index.device)
-
+    # No data-dependent early return here: ``if not improving.any(): return``
+    # is a Dynamo graph break, and the resume frames of a broken graph keep
+    # this sweep's whole working set (the masks, ``best_column`` and the
+    # Hessian operands) in an unreachable reference cycle that only a cyclic
+    # GC pass reclaims (issue #4801). A converged iteration instead runs one
+    # wasted update whose empty masks make every index_put a no-op, so the
+    # refined codes are bit-identical.
     local_rows = torch.arange(rows.shape[0], device=signed_index.device)
     up_selected = up_better[local_rows, best_column]
     up_mask = up_selected & improving
@@ -435,7 +439,15 @@ def _compiled_flip_sweep(*args, **kwargs):
     global _COMPILED_FLIP_SWEEP
     with _COMPILED_FLIP_LOCK:
         if _COMPILED_FLIP_SWEEP is None:
-            _COMPILED_FLIP_SWEEP = torch.compile(_flip_sweep, dynamic=True)
+            # ``fullgraph=True`` is load-bearing, not a debugging aid: a graph
+            # break leaves the sweep's working set in Dynamo resume frames
+            # that only a cyclic GC pass reclaims (issue #4801). The sweep is
+            # written without data-dependent control flow so the whole call
+            # traces into one graph, and a future break fails loudly here
+            # instead of silently pinning the Hessian until ``gc.collect()``.
+            _COMPILED_FLIP_SWEEP = torch.compile(
+                _flip_sweep, dynamic=True, fullgraph=True
+            )
         return _COMPILED_FLIP_SWEEP(*args, **kwargs)
 
 
