@@ -206,7 +206,7 @@ layout alone does not authorize it.
 
 | Model type | Definition | Reason |
 | --- | --- | --- |
-| `agnes` | `AgnesQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `agnes` | `AgnesQModel` | Package-owned hybrid multimodal implementation; fusion executor and recurrent replay remain unqualified. |
 | `apertus1p5` | `Apertus1p5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `apertus1p5_text` | `Apertus1p5TextQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `axk2` | `AXK2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |

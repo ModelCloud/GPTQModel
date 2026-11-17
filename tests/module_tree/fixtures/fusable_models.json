@@ -48,7 +48,7 @@
     },
     "agnes": {
       "definition": "AgnesQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned hybrid multimodal implementation; fusion executor and recurrent replay remain unqualified."
     },
     "apertus": {
       "definition": "ApertusQModel",

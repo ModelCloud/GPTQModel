@@ -227,6 +227,7 @@
       "layers": ["model.language_model.layers"],
       "blocks": [
         ["input_layernorm:!"],
+        ["delta_attn:!"],
         ["delta_attn.norm:!", "delta_attn.conv1d:!", "delta_attn.in_proj_qkv"],
         ["delta_attn.in_proj_z", "delta_attn.in_proj_b:!", "delta_attn.in_proj_a:!"],
         ["delta_attn.out_proj"],

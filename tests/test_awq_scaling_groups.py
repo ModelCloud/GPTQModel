@@ -31,6 +31,7 @@ from gptqmodel.quantization.awq.utils.module import get_op_name
 # module and class are resolved from MODEL_MAP, so adding a model type here
 # automatically tracks its registered definition.
 FAMILY_MODEL_TYPES = [
+    "agnes",
     # Dense decoder families.
     "llama",
     "mistral",
@@ -220,6 +221,10 @@ def _field_names(config):
 
 
 def _tiny_config(model_type):
+    if model_type == "agnes":
+        from tests.test_agnes_local_port import tiny_config
+
+        return tiny_config()
     if model_type in REMOTE_CODE_MODEL_PATHS:
         return _tiny_remote_config(model_type)
     if model_type in COMPOSITE_TEXT_CONFIG_FAMILIES:
@@ -410,9 +415,12 @@ def _features(layer, plan):
 def _tiny_model(model_type):
     qmodel_cls = MODEL_MAP[model_type]
     torch.manual_seed(0)
-    hf_model = AutoModelForCausalLM.from_config(
-        _tiny_config(model_type), trust_remote_code=True
-    ).eval()
+    if model_type == "agnes":
+        hf_model = qmodel_cls.loader.from_config(_tiny_config(model_type)).eval()
+    else:
+        hf_model = AutoModelForCausalLM.from_config(
+            _tiny_config(model_type), trust_remote_code=True
+        ).eval()
     try:
         from gptqmodel.models.loader import _convert_model_with_defuser
 
@@ -478,7 +486,7 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
-PLAIN_QUANTIZATION_FAMILIES = {"afmoe", "codegen", "gpt2", "minimax"}
+PLAIN_QUANTIZATION_FAMILIES = {"afmoe", "agnes", "codegen", "gpt2", "minimax"}
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
 # `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
