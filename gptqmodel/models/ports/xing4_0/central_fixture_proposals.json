@@ -1,0 +1,15 @@
+{
+  "registered_module_plans": "Xing4_0QModel/gptq is unchanged; the owned test asserts its exact existing blocks.",
+  "fusable_models": {
+    "models": {
+      "xing4_0": {
+        "definition": "Xing4_0QModel",
+        "reason": "Package-owned Xing4.0 MLA/hyperconnection dense and routed/shared MoE decoder; fusion executor has not been qualified."
+      }
+    }
+  },
+  "generic_awq_plain_families": "No change required: xing4_0 is not in the generic FAMILIES inventory. Owned tests qualify actual public plain quantization.",
+  "dependencies": "Released Tokenicer>=0.0.19 and SentencePiece>=0.2.1; no model-specific dependency beyond the parent tokenization policy.",
+  "packaging": "Preserve the port LICENSE, NOTICE, JSON, Jinja and gzip files; parent owns shared MANIFEST/setup integration.",
+  "central_docs": "Parent integrates the README before/after table, two flow diagrams and truthful coverage/limitations into central docs and existing PR. No separate PR or lifecycle change."
+}
