@@ -1,0 +1,12 @@
+GPT-QModel LFM3-VL native Transformers bridge
+
+No checkpoint modeling or processor Python is vendored here. The bridge selects
+Transformers' Lfm3VlConfig, Lfm3VlForConditionalGeneration and Lfm3VlProcessor,
+and its native Qwen2VLImageProcessor / Qwen3VLVideoProcessor media components.
+Transformers is distributed under Apache-2.0; see its installed source notices.
+
+checkpoint_config.json, checkpoint_processor_config.json and the tensor names
+and shapes in checkpoint_shapes.json originate from LiquidAI/LFM3-VL-2B,
+revision 23387beda43c60310348e83e25f78f33c3140d3a. The accompanying LICENSE
+is the upstream LFM Open License v1.0. The metadata fixtures are for structural
+and preprocessing regression tests; trained checkpoint tensors are not included.

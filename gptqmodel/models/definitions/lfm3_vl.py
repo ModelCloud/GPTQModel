@@ -5,12 +5,13 @@
 
 from typing import Dict
 
-from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
+from ..local import LocalModelLoader
 from .lfm3 import LFM3QModel
 
 
@@ -18,16 +19,20 @@ class LFM3VLQModel(LFM3QModel):
     """LiquidAI LFM3-VL: LFM3 text decoder + LFM3 vision tower.
 
     Only the text decoder's linear projections are quantized.  The vision tower
-    (patchifier, gated depthwise convolutions, attention/MLP projections) and
+    (patch embedding, gated depthwise convolutions, attention/MLP projections) and
     the multimodal projector stay in their checkpoint dtype, matching the way
     other VL definitions keep their vision encoders unquantized.
 
-    Checkpoint layout matches the runtime shell exactly
-    (`model.vision_tower.*`, `model.language_model.*`, `model.multi_modal_projector.*`),
-    so no HF conversion map is needed.
+    Native Transformers converts the checkpoint's attention gate and vision
+    patch/norm names. Definition-owned aliases select those exact native
+    classes, independently of checkpoint auto_map and caller trust flags.
     """
 
-    loader = AutoModelForImageTextToText
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.lfm3_vl.native.Lfm3VlConfig",
+        model_class="gptqmodel.models.ports.lfm3_vl.native.Lfm3VlForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.lfm3_vl.native.Lfm3VlNativeProcessor",
+    )
 
     pre_lm_head_norm_module = "model.language_model.embedding_norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -40,14 +45,18 @@ class LFM3VLQModel(LFM3QModel):
         {
             "operator_norm": ("operator_norm:!",),
             "post_operator_norm": ("post_operator_norm:!:postnorm",),
-            "conv": ("in_proj:0", "out_proj:1"),
+            "conv": {
+                "in_proj": ("in_proj:0",),
+                "out_proj": ("out_proj:1",),
+                "conv:!": (),
+            },
             "self_attn": (
                 "q_proj:0",
                 "q_norm:0:!",
                 "k_proj:0",
                 "k_norm:0:!",
                 "v_proj:0",
-                "gate_proj:!",
+                "g_proj:!",
                 "o_proj:1",
             ),
             "ffn_norm": ("ffn_norm:!",),
@@ -58,7 +67,7 @@ class LFM3VLQModel(LFM3QModel):
 
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
-    require_trust_remote_code = True
+    require_trust_remote_code = False
     layer_modules_strict = False
 
     def _language_model(self):
@@ -121,7 +130,17 @@ class LFM3VLQModel(LFM3QModel):
             setattr(parent, name, move_to(getattr(parent, name), device=CPU))
 
     def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
+        return self.loader.load_processor(
+            self.model_local_path,
+            config=self.model.config,
+            tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+        )
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Native hybrid conv/attention has sigmoid gates, Q/K head norms and
+        # sandwich norms. Its complete source/consumer folds are unqualified;
+        # keep every declared linear on the existing plain AWQ path.
+        return []
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
@@ -144,7 +163,9 @@ class LFM3VLQModel(LFM3QModel):
         processor = self.load_processor()
         calib_data = []
         for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
+            # Native LFM3-VL's patch embedding consumes the model dtype;
+            # media processors emit FP32 pixels even for an FP16 checkpoint.
+            calib_data.append(self.prepare_inputs_for_conversations(processor, batch).to(dtype=self.model.dtype))
         del processor
         return calib_data
 
