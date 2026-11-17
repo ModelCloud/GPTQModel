@@ -16,9 +16,20 @@ and explicit caller overrides. Reusable repairs belong in Tokenicer;
 source vocabularies, BOS/EOS behavior and source-specific serialization belong
 in their packaged tokenizer classes.
 
+`LocalModelLoader.tokenicer_options` declares immutable normalization defaults
+as option pairs. `load_hf_tokenizer` merges them with `setdefault`: an explicit
+caller value, including `False` or `None`, wins. These options reach
+`Tokenicer.load` for owned, native and already-constructed tokenizers; they do
+not enter an owned tokenizer constructor. Options cannot replace the selected
+config or checkpoint-code permission. Historical SentencePiece conversion is
+an explicit provider profile, never inferred here from a model name or asset
+hash. Tokenicer owns the conversion and its native-provider eligibility gate.
+
 ```mermaid
 flowchart TD
     A["load_hf_tokenizer: selected model_config"] --> B{"Definition declares tokenizer_class?"}
+    A --> O["Merge tokenicer_options defaults; explicit caller values win"]
+    O --> G
     B -->|Yes| C["LocalModelLoader.load_tokenizer: strip checkpoint code selectors"]
     C --> D["Tokenicer.prepare_load_kwargs: selected JSON metadata only"]
     D --> E["Owned class from_pretrained"]
@@ -50,7 +61,22 @@ this dependency floor is a release prerequisite, not a claim of a PyPI release.
 
 ## Validation
 
-The combined suite passes **296 tests, no skips** in 24.34 seconds (15 warnings).
+An earlier combined suite passed **296 tests, no skips** in 24.34 seconds
+(15 warnings). The current consumer/config/InternLM/norm-teacher and guard
+batch passes **288 tests, one optional PEFT skip** in 31.90 seconds. The
+profile-forwarding and tokenizer-consumer batch passes **48 tests, no skips**
+in 3.62 seconds. These batches overlap and are not additive.
+Restoring the prior `load_hf_tokenizer` implementation in memory produces
+**six intended failures and six controls passing in 0.19s**: package defaults
+are missing, or the profile option leaks into the owned constructor. The
+profile cases also pin native/owned/instance identity, explicit False/None,
+exact IDs/decode, once-only wrapping and rejection of security/config keys.
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHON_GIL=0 \
+  /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest -q --tb=short -ra -o addopts= \
+  tests/test_local_tokenicer_options.py tests/test_local_tokenizer_loading.py
+```
 The public suite checks owned class selection, hostile checkpoint metadata,
 legacy special-token flags and decode, input-asset immutability, subfolders,
 missing/corrupt asset repair/retry, native return types and one normalization
@@ -61,6 +87,12 @@ failure. Restoring the old native-tokenizer return reproduces duplicate
 normalization in dense and quantized public loads (five failing cases in
 0.45 seconds). Removing preloading fails at the intended native
 `List[Union[str, AddedToken]]` check in 0.47 seconds.
+
+The full real-release tokenizer matrix is not yet green on candidate
+`c14e1c8`: three Baichuan2-7B public cases expose special-token-map precedence
+in Tokenicer's preloader. They expect source IDs `[1, 46955, 2, 0]`; the
+candidate splits the embedded EOS. The source assertions remain intact; this
+requires an upstream repair before the dependency is releasable.
 
 ```bash
 PYTHON_GIL=0 /home/ubuntu/.venvs/gptqmodel-tf5/bin/python -s -m pytest \

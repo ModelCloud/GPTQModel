@@ -2809,12 +2809,17 @@ def load_hf_tokenizer(
 ):
     from tokenicer import Tokenicer
 
-    trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
-    if isinstance(tokenizer_or_path, (str, os.PathLike)):
-        from ..models.local import local_model_loader
+    from ..models.local import local_model_loader
 
+    trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
+    loader = local_model_loader(getattr(model_config, "model_type", None))
+    tokenicer_option_names = {"normalize_sentencepiece"}
+    if loader is not None:
+        for key, value in loader.tokenicer_options:
+            kwargs.setdefault(key, value)
+            tokenicer_option_names.add(key)
+    if isinstance(tokenizer_or_path, (str, os.PathLike)):
         tokenizer_or_path = os.fspath(tokenizer_or_path)
-        loader = local_model_loader(getattr(model_config, "model_type", None))
         if loader is not None:
             # A package-owned model never delegates tokenizer Python to its
             # checkpoint, including when it uses an ordinary native tokenizer.
@@ -2826,6 +2831,7 @@ def load_hf_tokenizer(
             tokenizer_kwargs = {
                 key: value for key, value in kwargs.items()
                 if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
+                and key not in tokenicer_option_names
             }
             tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
     if isinstance(model_config, PreTrainedConfig):
