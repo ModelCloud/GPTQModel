@@ -383,6 +383,14 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
 
+        # The decoder layer (or embedding/lm_head endpoint) currently in the
+        # quantization stage, paired with the device it lived on before the
+        # stage moved it. A cancelled or failed run must return it there;
+        # otherwise the in-flight layer stays on the accelerator while the rest
+        # of the model is on CPU and the next forward raises a device mismatch
+        # (issue #4546).
+        self._inflight_layer: Optional[Tuple[torch.nn.Module, torch.device]] = None
+
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
         # `get_num_experts()` returns None when the config does not expose a
         # scalar cardinality (e.g. a per-modality list); routing override
@@ -1898,6 +1906,63 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         for processor in getattr(self, "processors", ()) or ():
             processor.release_run_workspace()
 
+    def _track_inflight_layer(
+        self,
+        module: torch.nn.Module,
+        home_device: Optional[torch.device] = None,
+    ) -> None:
+        """Remember the layer being staged and its pre-run home device."""
+
+        if not isinstance(module, torch.nn.Module):
+            return
+        if home_device is None:
+            try:
+                home_device = get_device(module)
+            except Exception:
+                home_device = CPU
+        # A lazy shell has no usable runtime placement to return to, so the
+        # model's ordinary CPU home is the only safe destination.
+        if getattr(home_device, "type", None) == "meta":
+            home_device = CPU
+        self._inflight_layer = (module, home_device)
+
+    def _clear_inflight_layer(self) -> None:
+        """Mark the current layer as complete so failure cleanup ignores it."""
+
+        self._inflight_layer = None
+
+    def _restore_inflight_layer(self) -> None:
+        """Return a cancelled/failed in-flight layer to its pre-run device.
+
+        The stage moves the whole layer to the compute device before a subset
+        forward. The success path relies on ``post_quantize`` to move it back,
+        but a ``StopMainLoop``/exception unwinds before that step, leaving every
+        parameter and buffer of the layer on the accelerator (issue #4546).
+        """
+
+        inflight = self._inflight_layer
+        self._inflight_layer = None
+        if inflight is None:
+            return
+        module, home_device = inflight
+        try:
+            rehome_module_to_device(
+                module,
+                home_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
+        except Exception:
+            # Cleanup must never mask the cancellation/failure that got us
+            # here; ``rehome_module_to_device`` already reports per-tensor
+            # failures, so this only guards unexpected structural errors.
+            log.warning(
+                "failed to restore in-flight quantization layer to %s",
+                home_device,
+                exc_info=True,
+            )
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
@@ -1905,13 +1970,19 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 result = self._loop_impl(fallback=fallback, **kwargs)
             except BaseException:
-                # A failed run must not leave the base modules stranded on meta.
+                # A cancelled or failed run must also release the layer that
+                # was mid-stage: the success path moves it back only after
+                # post_quantize, which the exception skipped (#4546).
                 try:
-                    self._restore_offloaded_base_modules(strict=False)
+                    self._restore_inflight_layer()
                 finally:
-                    # A failed run cannot be saved, so its per-run offload
-                    # bundles are no longer reachable (issue #4368).
-                    release_private_offload_root(self.gptq_model)
+                    # A failed run must not leave the base modules stranded on meta.
+                    try:
+                        self._restore_offloaded_base_modules(strict=False)
+                    finally:
+                        # A failed run cannot be saved, so its per-run offload
+                        # bundles are no longer reachable (issue #4368).
+                        release_private_offload_root(self.gptq_model)
                 raise
             finally:
                 # Process-wide scratch (e.g. EXL3's per-stream tile buffers)
