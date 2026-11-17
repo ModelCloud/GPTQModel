@@ -306,3 +306,44 @@ def test_quantization_is_reproducible_across_processes(tmp_path, method):
     assert not differing, (
         f"{len(differing)}/{len(first)} saved tensors differ across processes: {differing[:8]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The test harness must not pin the allocator itself (#4821)
+# ---------------------------------------------------------------------------
+
+
+_HARNESS_IMPORT_PROBE = """
+    import json, os
+    from tests.models.model_test import ModelTest  # noqa: F401
+    print(json.dumps({
+        "alloc": os.environ.get("PYTORCH_ALLOC_CONF"),
+        "cuda_alloc": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    }))
+"""
+
+
+def test_harness_import_preserves_the_caller_alloc_conf():
+    """A caller value survives importing the model-test harness.
+
+    ``tests/models/model_test.py`` is imported by roughly 250 test modules and
+    used to assign ``PYTORCH_ALLOC_CONF`` unconditionally, so a caller (or the
+    project default installed by ``gptqmodel``) never got a say (#4821).
+    """
+
+    caller_value = "max_split_size_mb:512"
+    payload = _last_json(
+        _run_child(_HARNESS_IMPORT_PROBE, env=_child_env(PYTORCH_ALLOC_CONF=caller_value)).stdout
+    )
+
+    assert payload["alloc"] == caller_value
+
+
+@pytest.mark.skipif(not IS_ROCM, reason="ROCm-only allocator default")
+def test_harness_import_keeps_the_rocm_safe_default():
+    """Importing the harness must not re-enable ``expandable_segments`` on ROCm."""
+
+    payload = _last_json(_run_child(_HARNESS_IMPORT_PROBE, timeout=900).stdout)
+
+    assert payload["alloc"] == _alloc_conf.ROCM_DEFAULT_ALLOC_CONF
+    assert "expandable_segments" not in (payload["alloc"] or "")
