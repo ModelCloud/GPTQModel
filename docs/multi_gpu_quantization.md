@@ -182,7 +182,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| `torch_sync()` (`gptqmodel/utils/torch.py:564`) | `torch.cuda.synchronize(idx)` for every visible index | Skips indices whose primary context this process never created |
+| `torch_sync()` (`gptqmodel/utils/torch.py:611`) | `torch.cuda.synchronize(idx)` for every visible index | Skips indices whose primary context this process never created |
 | Warmup pool (`gptqmodel/models/auto.py:_prebuild_device_thread_pool`) | Derived only from the `device=` kwarg | Derived from `compute_device_filter` too, via `_quantize_warmup_devices` |
 | Prewarm target (`gptqmodel/models/auto.py:_resolve_prewarm_device`) | Same `device=`-only resolution | First device of the filtered pool |
 | Janitor sweep (`gptqmodel/utils/threadx.py:_janitor_loop`) | `empty_cache` on every pool device | Only devices with a live context |

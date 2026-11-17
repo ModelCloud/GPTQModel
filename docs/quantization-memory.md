@@ -107,7 +107,7 @@ flowchart LR
     style NEWREF fill:#f6ffed,stroke:#389e0d
 ```
 
-`_build_chunked_reference_outputs` (`gptqmodel/looper/awq_processor.py:2370`)
+`_build_chunked_reference_outputs` (`gptqmodel/looper/awq_processor.py:3834`)
 still streams the replay batch by batch, so the reference is materialized once
 rather than once per grid step. Peak device memory is unchanged, because the full
 reference is resident during the grid either way.

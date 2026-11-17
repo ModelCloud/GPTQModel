@@ -92,8 +92,8 @@ only for the fp32 `X^T X` GEMM: those forward GEMMs produce the activations that
 are accumulated into the Hessian. Pinning only `compute_hessian_xtx` regressed
 Qwen2.5-0.5B-Instruct to **332/795** differing tensors across processes (the
 #4075 no-pin baseline), because the captured inputs themselves differed. The
-per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:971,983`)
-and `hessian_inverse` (`gptqmodel/quantization/gptq.py:1802`) remain as
+per-call contexts in `compute_hessian_xtx` (`gptqmodel/quantization/gptq.py:1077,1094,1106`)
+and `hessian_inverse` (`gptqmodel/quantization/gptq.py:1954`) remain as
 defense-in-depth for direct Hessian calls; the outer method-scoped context is
 what keeps the forward reproducible.
 

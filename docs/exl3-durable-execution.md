@@ -31,9 +31,9 @@ flowchart TD
 
 | Before this extraction layer | Carried implementation |
 |---|---|
-| Previous stack layer: `gptqmodel/looper/exllamav3_processor.py:91` | `gptqmodel/looper/exllamav3_processor.py:704`: `EXL3Processor` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/looper/exllamav3_processor.py:268`: `_EXL3NaturalRouteCapture` |
-| Previous stack layer: `gptqmodel/looper/exllamav3_processor.py:57` | `gptqmodel/looper/exllamav3_processor.py:668`: `clone_exllamav3_config_for_module` |
+| Previous stack layer: `gptqmodel/looper/exllamav3_processor.py:91` | `gptqmodel/looper/exllamav3_processor.py:719`: `EXL3Processor` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/looper/exllamav3_processor.py:282`: `_EXL3NaturalRouteCapture` |
+| Previous stack layer: `gptqmodel/looper/exllamav3_processor.py:57` | `gptqmodel/looper/exllamav3_processor.py:684`: `clone_exllamav3_config_for_module` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

@@ -40,9 +40,9 @@ Previously, `_resolve_source_dir` discarded an explicit filename at
 `gptqmodel/reshard.py:279-285`, and `_scan_checkpoint` then preferred a
 standard index or discovered every safetensors file in that directory at
 `gptqmodel/reshard.py:436-443`. The current `_resolve_source_input` keeps the
-selected path at `gptqmodel/reshard.py:279-293`. `_index_containing_file` keeps
+selected path at `gptqmodel/reshard.py:448-293`. `_index_containing_file` keeps
 a selected shard attached to its full checkpoint at
-`gptqmodel/reshard.py:439-468`; `_scan_checkpoint` branches at
+`gptqmodel/reshard.py:488-468`; `_scan_checkpoint` branches at
 `gptqmodel/reshard.py:471-492`, called from `gptqmodel/reshard.py:827`.
 
 | `from_model` | Previous selection | Current selection |

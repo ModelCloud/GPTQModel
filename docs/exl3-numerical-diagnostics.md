@@ -20,10 +20,10 @@ flowchart TD
 
 | Before this extraction layer | Carried implementation |
 |---|---|
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:688`: `regularize_and_transform_hessian_` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:666`: `restore_hessian_symmetry_` |
-| Previous stack layer: `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:1014` | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:1266`: `quantize_exl3` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:1053`: `reconstruction_error_metrics` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:777`: `regularize_and_transform_hessian_` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:755`: `restore_hessian_symmetry_` |
+| Previous stack layer: `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:1014` | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:1358`: `quantize_exl3` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/exllamav3/modules/quant/exl3_lib/quantize.py:1145`: `reconstruction_error_metrics` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

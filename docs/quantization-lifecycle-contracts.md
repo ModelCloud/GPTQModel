@@ -59,6 +59,7 @@ flowchart TD
 The run plan is immutable after preflight. `BaseQModel.quantization_run_plan` exposes it for diagnostics:
 
 ```python
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.models import ProcessorStep, QuantizationRunPlan
 
 model.quantize(CalibrationConfig(dataset=calibration), backend=BACKEND.AUTO)
@@ -90,8 +91,8 @@ Exact backend values depend on the method and device. The plan reports the value
 Processors declare lifecycle behavior instead of being recognized through class lists:
 
 ```python
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.loop_processor import (
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -130,12 +131,11 @@ Processor constructors accept one complete `ForwardConfig` and one complete `Cal
 ```python
 calibration = CalibrationConfig(
     dataset=dataset,
-    prepare_dataset=model.prepare_dataset,
     concat_size=2048,
     sort="desc",
     concat_separator=None,
     batch_size=1,
-)
+).bind(model.prepare_dataset)
 
 processor = ExampleProcessor(
     tokenizer=model.tokenizer,
@@ -242,6 +242,9 @@ flowchart TD
 `ModuleLooper` builds one `LoopPlan` and passes it, with the extension cursor, into `run_layer_stage()`. The stage iterates the planned steps, maps each step to its display index, and publishes that exact step object to extensions. The plan therefore decides which layers run and where observers see boundaries; the stage no longer recomputes its own stopping condition. The resume cursor is a plan position, distinct from the model-layer index used by layer-boundary recovery.
 
 ```python
+from gptqmodel.looper.extension import LoopContext, LoopPlan, LoopStep
+from gptqmodel.looper.stage_layer import run_layer_stage
+
 plan = LoopPlan((
     LoopStep("input_embeddings", -1, "input_embeddings"),
     LoopStep("layer", 0, "model.layers.0"),
@@ -257,7 +260,7 @@ run_layer_stage(..., plan=plan, cursor=cursor)
 | Decision | Before | After |
 | --- | --- | --- |
 | Processor selection | `_quantize_with_calibration` branched over methods and imported processors inline (`base.py:2161-2260` in the parent revision). | `QuantizationRunPlan.build` returns an ordered `ProcessorStep` tuple; `processor_class` loads only the selected processor. |
-| Calibration input requirement | `stage_subset.py:233-235` matched a hard-coded processor class tuple. | `stage_subset.py:222` reads `ProcessorLifecycleConfig.calibration`. |
+| Calibration input requirement | `stage_subset.py:233-235` matched a hard-coded processor class tuple. | `stage_subset.py:271` reads `ProcessorLifecycleConfig.calibration`. |
 | Checkpoint admission | `gptq_checkpoint.py:249-265` matched a hard-coded processor-type set. | `gptq_checkpoint.py:244` validates declared `checkpointing` values. |
 | Per-module settings | GPTQ repeated `dynamic_get` for each field (`gptq_processor.py:129-164` in the parent revision). | `resolve_module_config` caches the first ordered match and returns one immutable snapshot (`config.py:3238`). |
 | Pack settings | Packing called `create_quant_module` with the base dynamic mapping and re-resolved rules. | `create_quant_module(..., resolved_module_config=snapshot)` uses the quantization snapshot (`utils/model.py:609`). |
