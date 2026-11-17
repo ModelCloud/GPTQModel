@@ -275,6 +275,10 @@ in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
 dropped quantization payloads; see
 [`docs/quantized-moe-resave-defuse.md`](docs/quantized-moe-resave-defuse.md).
+`export(..., "hf")` picks its dense decoder from the checkpoint's declared
+`quant_method` and refuses methods that have none (Paro, MACaQ, GGUF, QQQ, NF12,
+VPTQ, EXL3) instead of decoding them with another layout's decoder; see
+[`docs/export-hf-format-detection.md`](docs/export-hf-format-detection.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
 QQQ's shared-memory staging of the per-group scales and the reduction-scratch
