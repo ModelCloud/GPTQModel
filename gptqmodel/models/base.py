@@ -841,6 +841,19 @@ class BaseQModel(nn.Module):
     # some models require Processor? For example, Qwen2VLImageProcessor.
     require_load_processor = False
 
+    # Some checkpoints ship no tokenizer at all (Decision Transformer offline-RL
+    # models). A definition that sets this to False is loaded without one; the
+    # text models keep the default so a missing tokenizer still fails loudly.
+    require_load_tokenizer: bool = True
+
+    # How prepared calibration rows reach the model forward:
+    #   "token_ids"     - normalise every row to `input_ids`/`attention_mask`
+    #                     and collate by token length (default, text models).
+    #   "tensor_kwargs" - pass a row whose values are all tensors straight
+    #                     through as keyword arguments (Decision Transformer's
+    #                     `states`/`actions`/`returns_to_go`/`timesteps`).
+    calibration_inputs: str = "token_ids"
+
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
     # so moe model defs do not need to write out 64 layers if expert size is 64 (Qwen2Moe)

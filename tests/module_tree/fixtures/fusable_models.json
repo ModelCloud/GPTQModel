@@ -369,6 +369,10 @@
       "definition": "DeciLMQModel",
       "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
     },
+    "decision_transformer": {
+      "definition": "DecisionTransformerQModel",
+      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+    },
     "deepseek_ocr2": {
       "definition": "DeepSeekOCR2QModel",
       "profiles": {
