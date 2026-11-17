@@ -39,7 +39,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, BaseModelOutp
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging, torch_compilable_check
+from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from transformers.utils.generic import (
     accepts_precomputed_kwargs,
     is_flash_attention_requested,
@@ -55,8 +55,6 @@ from transformers.vision_utils import (
 
 from .configuration_agnes import LAYER_DELTA, LAYER_GLOBAL, AgnesConfig, AgnesTextConfig, AgnesVisionConfig
 
-
-logger = logging.get_logger(__name__)
 
 class AgnesDynamicCache(Cache):
     """Own the hybrid cache without modifying Transformers' global registries.

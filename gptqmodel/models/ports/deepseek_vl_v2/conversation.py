@@ -70,8 +70,6 @@ class Conversation:
                         )  # <｜sft▁begin｜>User Input<｜sft▁end｜>\nResponse<｜end▁of▁sentence｜>
                     else:
                         ret += message + self.sep2
-                else:
-                    ret = ret
             return ret
 
         elif self.sep_style == SeparatorStyle.PLAIN:

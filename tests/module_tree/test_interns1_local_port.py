@@ -21,7 +21,7 @@ from gptqmodel.models.ports.interns1.configuration_interns1 import InternS1Confi
 from gptqmodel.models.ports.interns1.modeling_interns1 import InternS1ForConditionalGeneration
 from gptqmodel.quantization.config import AWQConfig
 from tests.test_interns1_local_port import tiny_config
-from tests.test_interns1_local_port import tokenizer_assets as tokenizer_assets
+from tests.test_interns1_local_port import tokenizer_assets as _tokenizer_assets  # noqa: F401
 
 
 # Independently observed from the pinned published safetensors indexes, not the planner.

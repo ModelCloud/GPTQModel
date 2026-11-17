@@ -238,7 +238,7 @@ def test_image_features_match_manual_patch_shuffle_and_native_text(moe, attentio
         torch.testing.assert_close(generated, static)
 
 
-@pytest.fixture
+@pytest.fixture(name="tokenizer_assets")
 def tokenizer_assets(tmp_path):
     buffer = io.BytesIO()
     spm.SentencePieceTrainer.train(sentence_iterator=iter(["CCO carbon acid MTEYKLVVVGAGGVGKSALTIQLIQNHFVDEYDPTIEDSY"] * 4),
