@@ -257,13 +257,13 @@ layout alone does not authorize it.
 | `lfm3` | `LFM3QModel` | Native Transformers 5 LFM3 hybrid short-convolution/gated-attention; fusion executor has not been qualified. |
 | `lfm3_omni` | `LFM3OmniQModel` | Package-owned LFM3 Omni hybrid multimodal wrapper; fusion executor has not been qualified. |
 | `lfm3_vl` | `LFM3VLQModel` | Native Transformers LFM3-VL hybrid conv/attention decoder; fusion executor has not been qualified. |
-| `llada2_moe` | `LLaDA2MoeQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
-| `llava_qwen2` | `LlavaQwen2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `llada2_moe` | `LLaDA2MoeQModel` | Package-owned LLaDA2 packed-QKV diffusion MoE with versioned block masking, routing and edit decoding; fusion executor has not been qualified. |
+| `llava_qwen2` | `LlavaQwen2QModel` | Package-owned flat LLaVA-Qwen2 multimodal decoder with MobileCLIP/CLIP vision tower; fusion executor has not been qualified. |
 | `locateanything` | `LocateAnythingQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `longllama` | `LlamaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `longllama` | `LlamaQModel` | Package-owned LongLLaMA memory/cache port; fusion executor has not been qualified. |
 | `mage_vl` | `MageVLQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `marin` | `Qwen3QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `mimo` | `MimoQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `mimo` | `MimoQModel` | Package-owned MiMo-7B Qwen2 extension with full-precision auxiliary MTP; fusion executor has not been qualified. |
 | `mimo_v2` | `MimoV2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `minicpm` | `MiniCPMGPTQ` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `minicpmo` | `MiniCPMOQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
@@ -295,13 +295,13 @@ layout alone does not authorize it.
 | `ricursive` | `RicursiveQModel` | Remote Ripple forward preprocesses value residuals and chunks MLP calls through helpers; direct-forward executor is not applicable. |
 | `solar_open2` | `SolarOpen2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `spark2_5` | `Spark2_5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `stablelm_epoch` | `LlamaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `stablelm_epoch` | `LlamaQModel` | Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified. |
 | `telechat` | `TeleChat2QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `unlimited-ocr` | `UnlimitedOCRQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
 | `voxtral` | `VoxtralGPTQ` | Installed native layout does not resolve the definition decoder prefix; needs separate layout validation. |
 | `xing4_0` | `Xing4_0QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `xverse` | `XverseQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
-| `yi` | `LlamaQModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |
+| `yi` | `LlamaQModel` | Native Transformers 5 Llama-backed Yi legacy alias; fusion executor has not been qualified. |
 | `zamba` | `ZambaQModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `zamba2` | `Zamba2QModel` | No separate, non-expert QKV or gate/up role group in the declared module tree. |
 | `zdtaichu5_0` | `ZDTaichu5QModel` | Custom/remote implementation: no installed native config; executor has not been qualified. |

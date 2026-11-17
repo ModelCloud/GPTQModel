@@ -46,10 +46,15 @@ definition ownership corrections alongside the package-owned ports.
 | `LFM3VLQModel` / `lfm3_vl` | [Native model and fixed native media components](../gptqmodel/models/ports/lfm3_vl/README.md) | 424-key metadata audit, image/video/cache/generation, selected tokenizer and FP16 image calibration with integer IDs preserved | Six public MHA/GQA/MQA × bias plain-AWQ pack/infer/safetensors reloads; no scale groups | No trained weights, GPU, FlashAttention, concurrent execution or fusion qualification |
 | `LFM3OmniQModel` / `lfm3_omni` | [Pinned package-owned model, processor and codec](../gptqmodel/models/ports/lfm3_omni/README.md) | 665 model and 203 codec checkpoint inventories; independent text oracles, image/video/audio inputs and text/audio/interleaved generation | Six public plain-AWQ decoder pack/infer/safetensors reloads; all nontext tensors preserved | Dynamic text/codec cache only; beams/multiple returns rejected; no trained weights, GPU, live transcription quality, concurrent execution or fusion qualification |
 | `KimiK25QModel` / `kimi_k25` | [Native multimodal model, distinct TikToken/tool renderer and media adapters](../gptqmodel/models/ports/kimi_k25/README.md) | Exact 208550-key source-index inventory, ragged temporal pooling and spatial splits, real tokenizer IDs/tools, image/video/mixed generation and native-format saving | Four real public plain-AWQ dense/split-Q pack/infer/reload cases, including unsampled experts and `fallback=None` | Extended legacy media budgets/custom timestamps rejected; no trained weights, GPU, concurrent execution, compiler or fusion qualification |
+| `LLaDA2MoeQModel` / `llada2_moe` | [Pinned packed-QKV diffusion MoE and six released decoder policies](../gptqmodel/models/ports/llada2/README.md); Apache-2.0 | Eight exact source checkpoint inventories, independent forward/decoding oracles, explicit version persistence, block visibility, cache and hostile metadata | Twelve public plain-AWQ pack/infer/two-reload cases across six policies and both disk-offload modes; strict FP32 routing state preserved | Ambiguous versions require explicit `llada_version`; no trained weights, GPU/FlashAttention, concurrent execution, compile, non-dynamic caches, scale folding or fusion qualification |
 | `InternVLChatQModel` / `internvl_chat` | [Package-owned legacy wrapper/vision port and pinned licenses](../gptqmodel/models/ports/internvl_chat/README.md); native decoders and package-owned InternLM2 | Six decoder layouts, actual tiled PIL inputs, 657-key checkpoint inventory, cache/generation, safetensors and hostile nested metadata | Public CPU plain-AWQ quantize/pack/infer/save/reload for all six decoder layouts, preserving vision weights | Eager vision only; unmerged LoRA requires adapter merge; no trained weights, GPU/FlashAttention, distributed or fusion qualification |
 | `K2HorizonQModel` / `k2_horizon` | [Pinned IFM dense/MoVA/sparse-MoE sources, Apache license and notice](../gptqmodel/models/ports/k2_horizon/README.md) | Exact 255/16998/34076-key meta inventories, independent eager/SDPA routing/attention oracles, cache/generation, dtype preservation and hostile metadata | Real processor coverage across variants; public dense/MoVA CPU plain-AWQ packing and safetensors reload with `fallback=None` | DynamicCache only; no trained weights, GPU/FlashAttention/FlexAttention, sliding-window, distributed or fusion qualification |
 | `InternS2PreviewQModel` / `intern_s2_preview` | [Pinned hybrid model, processor and distinct scientific tokenizer](../gptqmodel/models/ports/intern_s2_preview/README.md), [Apache-2.0 provenance](../gptqmodel/models/ports/intern_s2_preview/PROVENANCE.md) | Exact 1313-key non-MTP schema, independent DeltaNet oracle, four attention orders/bias variants, cache continuations, image/video generation and FP32/FP16/BF16 time series | Public plain AWQ packs all 31 tiny hybrid decoder linears; exact packed/dense state and time-series save/reload parity | PROT/XNA semantics differ from S1; no trained weights, GPU/fused FLA/FlashAttention, concurrent execution, static/offloaded/arbitrary-beam caches or MTP qualification |
 | `InternS1QModel` / `interns1` | [Pinned dense/MoE model, vision, media processor and scientific tokenizer](../gptqmodel/models/ports/interns1/README.md); Apache-2.0 | Actual 841/37630-key dense/MoE meta schemas; native Qwen3/Qwen3-MoE numerics, image/video/cache/generation, hostile metadata and repeated exact safetensors | Four public plain-AWQ pack/infer/media/save/reload layouts with `fallback=None`; every packed and dense tensor preserved | IUPAC/FASTA semantics differ from S2; no trained weights, GPU/FlashAttention/FlexAttention, concurrent execution, training, RDKit chemistry or video-file decoding qualification |
+
+| `LlamaQModel` legacy aliases / `longllama`, `stablelm_epoch`, `yi` | [Pinned source, license and native-class selection](../gptqmodel/models/ports/llama/README.md) | Exact LongLLaMA/Epoch/Yi checkpoint schemas; independent memory/attention and Epoch equations; eleven native aliases and derived native loaders preserved | Nine public plain-AWQ cases, exact packed/dense state and strict FP32 rotary buffers through two safetensors reloads | No trained weights, GPU, concurrent execution, compiler or fusion qualification; memory eviction prevents speculative cache cropping |
+| `MimoQModel` / `mimo` | [Pinned XiaomiMiMo source and original MIT/repository notices](../gptqmodel/models/ports/mimo/README.md) | Five exact 451-key source inventories; native Qwen2 extension with all auxiliary MTP owners, cache/generation and independent decoder/MTP equations | Six public plain-AWQ pack/infer/generation/reload cases; MTP stays dense | Distinct from native MiMo-V2-Flash; no speculative MTP decoding, trained-weight, GPU, concurrent execution or fusion qualification |
+| `LlavaQwen2QModel` / `llava_qwen2` | [Pinned Apple/S2 sources, licenses and acknowledgements](../gptqmodel/models/ports/llava_qwen2/README.md) | Exact flat 924-key FastVLM-0.5B and 629-key vision inventories; independent vision/projector/Qwen2 equations, image/cache/beam generation | Four public image-conversation plain-AWQ pack/infer/reload cases; only image sentinel survives invalid-ID sanitization; excluded vision/projector/newline retained | No video, trained weights, GPU, concurrent execution or fusion qualification; 103 port-wide static diagnostics remain documented |
 
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
@@ -695,7 +700,7 @@ flowchart TD
 | --- | --- | --- |
 | LFM3-VL processor | `definitions/lfm3_vl.py:128-129`: AutoProcessor discovery | `definitions/lfm3_vl.py:132-137`, `ports/lfm3_vl/native.py:18-49`: selected tokenizer, explicit image/video classes; checkpoint-selected components rejected |
 | FP16 image calibration | `definitions/lfm3_vl.py:149-156`: shared helper returned FP32 media | `definitions/lfm3_vl.py:163-177`: shared preparation retained, floating BatchFeature media cast to model dtype, integer IDs preserved |
-| LFM3-Omni architecture | `definitions/lfm3_omni.py:18`: no owned model/processor selector | `definitions/lfm3_omni.py:30-34`: pinned local config/model/processor; [SHA provenance and licenses](../gptqmodel/models/ports/lfm3_omni/PROVENANCE.json) |
+| LFM3-Omni architecture | `definitions/lfm3_omni.py:29,65,124-125`: native AutoModel selector, required remote trust and AutoProcessor discovery | `definitions/lfm3_omni.py:30-34`: pinned local config/model/processor; [SHA provenance and licenses](../gptqmodel/models/ports/lfm3_omni/PROVENANCE.json) |
 | Kimi-K2.5 selection | `definitions/kimi_k25.py:14,18,26-33`: remote trust and legacy decoder prefix | `definitions/kimi_k25.py:16-22,33-58`: native-backed owned loader and exact native decoder owners; [source, licenses and native failure probes](../gptqmodel/models/ports/kimi_k25/README.md) |
 | Partial video chunks | Native rectangular temporal gather and repeated temporal split counts | `ports/kimi_k25/native.py:29-72`: native temporal merger followed by spatial-only split; independent full/partial clip oracles |
 
@@ -728,4 +733,133 @@ OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
   tests/test_vlm_mapping_calibration_4308.py tests/test_vlm_calibration_metadata_columns_4455.py \
   tests/test_vlm_pretokenized_calibration.py tests/test_vlm_multimodal_calibration_4371.py \
   -x --disable-warnings
+```
+
+## LLaDA2 version selection and routing precision
+
+The [LLaDA2 port](../gptqmodel/models/ports/llada2/README.md) preserves six
+released decoder policies: `2.0`, `2.0-mini-preview`, `2.0-flash-preview`,
+`2.0-cap`, `2.1` and `2.2`. Their packed-QKV checkpoint layout does not identify
+the decoding policy. In particular, mini-preview returns the prompt and uses
+greedy sampling at temperature zero; flash-preview follows CAP's multinomial
+sampling and continuation-only return. Ambiguous metadata, including the old
+`2.0-preview` spelling, fails with instructions to set `llada_version`.
+Only the complete 2.2 block-routing/edit-token signature permits inference of
+that version. Explicit selection persists through public loading and reload.
+
+```mermaid
+flowchart TD
+    A["LLaDA2MoeQModel.loader: LocalModelLoader"] --> B["LLaDA2MoeConfig: llada_version and checkpoint metadata"]
+    B --> C{"validate_local_architecture"}
+    C -- explicit supported version or complete 2.2 signature --> D["LLaDA2MoeModelLM: owned packed-QKV and MoE"]
+    C -- ambiguous, incomplete or conflicting metadata --> X["ValueError before model execution; correct metadata then retry"]
+    D --> E["generate: version-specific LLaDA20/Preview/CAP/21/22Generation"]
+    D --> F["LLaDA2MoeGate.expert_bias: explicitly constructed FP32"]
+    F --> G["Plain AWQ; gate and expert_bias excluded"]
+    G --> H["Both offload modes: packed inference and two safetensors reloads"]
+    A -. checkpoint auto_map / trust / bypass cannot replace .-> D
+    E -- unsupported mutable-block cache or input mode --> X
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X failure
+```
+
+| Mechanism | Before at `fecb30425` | Shipped behavior and evidence |
+| --- | --- | --- |
+| Model selection | `definitions/llada2.py:34-53`: process-global attention-class patching | `definitions/llada2.py:8-11`: direct owned config/model; `ports/llada2/modeling_llada2_moe.py:764`: explicit generation dispatch |
+| Decoder policy | Shared `llada2_moe` spelling could not distinguish released generation implementations | `ports/llada2/configuration_llada2_moe.py:138`: validated version and complete edit/routing signature; eight pinned checkpoint inventories in the port README |
+| Routing precision | An implicit `torch.zeros` buffer follows the low-precision shell's default dtype | `ports/llada2/modeling_llada2_moe.py:201,506`: explicit FP32 construction plus strict checkpoint loading; independent Klear control preserves exact nonzero values through public AWQ |
+
+The constructor defect was reproduced by removing only Klear's explicit FP32
+buffer dtype: `test_public_awq_native_fp32_pack_and_two_reloads[lazy-fp16]`
+then failed immediately after quantization with rounded FP16 routing values,
+despite an independently exact FP32 source checkpoint. Restoring the explicit
+dtype makes the four FP16/BF16 by disk-offload controls pass. LLaDA2 applies the
+same constructor discipline. No shared LazyTurtle precision change was needed.
+The conversion-cache test now mocks `load_model_config` at its current API
+boundary and still checks the offload directory and final lease cleanup;
+its focused rerun passed in 3.39 seconds.
+
+## Llama aliases, MiMo and flat LLaVA-Qwen2 selection
+
+These units use native code only when the pinned source has the same equations
+and checkpoint owners. [Llama alias selection](../gptqmodel/models/ports/llama/README.md)
+retains eleven exact native classes, owns LongLLaMA's memory implementation,
+and adapts StableLM Epoch/Yi metadata to matching native classes.
+[MiMo](../gptqmodel/models/ports/mimo/README.md) extends native Qwen2 with all
+auxiliary MTP weights; ordinary generation follows the inspected decoder-only
+forward. [Flat LLaVA-Qwen2](../gptqmodel/models/ports/llava_qwen2/README.md)
+owns its flat wrapper, image insertion, FastViTHD and CLIP/S2 adapters. Native
+`mimo_v2_flash` and composite `fast_vlm` are distinct architectures.
+
+```mermaid
+flowchart TD
+    A["Definition loader"] --> B{"LlamaQModel itself?"}
+    B -- yes --> C["_LlamaAliasLoader: allowlisted LlamaAliasConfig / LlamaAliasForCausalLM"]
+    B -- derived native definition --> D["AutoModelForCausalLM unless explicitly overridden"]
+    C --> E{"model_type"}
+    E -- eleven native aliases --> F["Exact installed native config and causal class"]
+    E -- longllama --> G["LongLlamaForCausalLM: local and memory attention; owned six-tensor Cache"]
+    E -- stablelm_epoch or yi --> H["Source-matched native class plus metadata adapter"]
+    E -- unknown --> X["ValueError; no checkpoint Python discovery"]
+    A --> I["MimoQModel: MiMoConfig / MiMoForCausalLM"]
+    I --> J["Native Qwen2 decoder plus dense MiMoMTPLayers owners"]
+    A --> K["LlavaQwen2QModel: LlavaConfig / model / processor"]
+    K --> L["Preserve only image sentinel -200 during capture"]
+    L --> M["FastViTHD or CLIP/S2; mm_projector; image-expanded native Qwen2 inputs"]
+    M -- malformed image or unknown vision config --> X
+    J --> N["Plain AWQ; auxiliary MTP remains dense; safetensors round trips"]
+    M --> O["Plain AWQ of decoder linears; vision/projector/newline remain dense"]
+    classDef failure fill:#ffcdd2,stroke:#b71c1c
+    class X failure
+```
+
+| Mechanism | Before | Shipped behavior and evidence |
+| --- | --- | --- |
+| Llama aliases at `990088bdb` | `definitions/llama.py:10-20`: inherited generic loading for missing legacy architectures | `definitions/llama.py:13-23`, `ports/llama/dispatch.py`: definition-scoped descriptor; derived native definitions retain their loader |
+| LongLLaMA context | Remote Transformers 4 cache and memory implementation | `ports/llama/modeling_longllama.py`: explicit local K/V/positions and memory K/V/masks, eviction, continuation and cache immutability; unsupported speculative cropping fails |
+| MiMo at `990088bdb` | `definitions/mimo.py`: inherited Qwen2-like tree omitted an owned model implementation | `definitions/mimo.py`: direct local classes; `ports/mimo/modeling_mimo.py:39-77`: auxiliary rotary pair adapted to native `position_embeddings` |
+| LLaVA-Qwen2 at `990088bdb` | `definitions/llava_qwen2.py`: generic causal model and no image-aware capture policy | `definitions/llava_qwen2.py:15-33`: owned loader, explicit direct-meta newline owner and preservation of image sentinel only |
+
+Pinned checkpoint inventories cover 263 LongLLaMA, 356 Epoch, 219 Yi-Coder,
+451 MiMo and 924 FastVLM-0.5B keys; all three inspected FastVLM configurations
+share the exact 629-key vision inventory. These are metadata and tiny-model
+checks, without trained tensor payload qualification. The port READMEs retain
+source revisions, original-file hashes and licenses/notices. FastViTHD lazily
+uses `timm>=1.0.22`; the Apple acknowledgements ship with the package.
+
+Fusion remains explicitly unqualified for all newly owned legacy layouts.
+There is no trained-weight quality, GPU/FlashAttention, fused-kernel,
+multi-GPU, concurrent model execution, compilation, training or additional
+cache qualification. MiMo speculative MTP decoding and LLaVA video are not
+implemented. LLaVA's port-wide Pyright run reports 103 diagnostics, described
+in its README; no clean type-check claim is made. Its separate optional
+Triton-dependent AWQ rank/empty suite was not collected successfully and is
+outside the measured passing commands.
+
+The combined Llama/MiMo/LLaVA/LLaDA2, precision/offload, loader/security,
+registry/fusion and AWQ baseline run passed **1747 tests, with 471 skips**, in
+69.86 seconds on Python 3.14.6t with `PYTHON_GIL=0`, Transformers 5.23.0,
+Torch 2.15.0 CPU, released Tokenicer 0.0.17 and timm 1.0.22. Exactly 468 skips
+require NVIDIA Marlin hardware; the other three require absent DeciLM,
+EXAONE and Nanbeige checkpoint fixtures. Counts are for this combined checkout,
+not the sum of independently reported port totals.
+
+```bash
+OMP_NUM_THREADS=1 PYTHON_GIL=0 python -s -m pytest -q \
+  tests/test_mimo_local_port.py tests/module_tree/test_mimo_local_port.py \
+  tests/test_llama_local_port.py tests/module_tree/test_llama_local_port.py \
+  tests/test_llava_qwen2_local_port.py tests/module_tree/test_llava_qwen2_local_port.py \
+  tests/test_llada2_local_port.py tests/module_tree/test_llada2_local_port.py \
+  tests/test_lazy_native_fp32_materialization.py tests/test_native_fp32_checkpoint_loading.py \
+  tests/test_lazy_turtle_conversion_cache.py tests/test_lazy_turtle_materialize_map.py \
+  tests/test_lazy_turtle_conversion_mapping.py tests/test_lazy_sync_packed_modules.py \
+  tests/test_stage_inputs_capture.py tests/test_local_model_loading.py tests/test_local_model_paths.py \
+  tests/test_local_processor_loading.py tests/test_local_tokenizer_loading.py \
+  tests/test_trust_remote_code_isolation.py tests/test_awq_empty_groups.py \
+  tests/test_awq_scale_search_safety.py tests/test_awq_moe_router_scaling.py \
+  tests/test_awq_position_kwargs.py tests/test_awq_scale_search_memory.py tests/test_bloom_awq_replay.py \
+  tests/module_tree/test_awq_relationships.py tests/module_tree/test_bloom_awq_relationships.py \
+  tests/module_tree/test_registered_module_plans.py tests/module_tree/test_definition_subset_ordering.py \
+  tests/module_tree/test_fusable_models.py tests/test_internlm_local_port.py \
+  tests/module_tree/test_internlm_local_port.py -x --tb=short --disable-warnings -rs
 ```

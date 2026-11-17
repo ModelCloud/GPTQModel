@@ -1566,7 +1566,7 @@
         ["attention.dense"],
         ["post_attention_layernorm:!"],
         ["mlp:?"],
-        ["mlp.gate:!"],
+        ["mlp.gate:!", "mlp.gate.expert_bias:!"],
         ["mlp.gate_proj", "mlp.up_proj"],
         ["mlp.down_proj"],
         ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],

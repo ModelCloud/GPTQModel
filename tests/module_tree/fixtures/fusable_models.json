@@ -2882,7 +2882,7 @@
     },
     "llada2_moe": {
       "definition": "LLaDA2MoeQModel",
-      "reason": "No separate, non-expert QKV or gate/up role group in the declared module tree."
+      "reason": "Package-owned LLaDA2 packed-QKV diffusion MoE with versioned block masking, routing and edit decoding; fusion executor has not been qualified."
     },
     "llama": {
       "definition": "LlamaQModel",
@@ -3112,7 +3112,7 @@
     },
     "llava_qwen2": {
       "definition": "LlavaQwen2QModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned flat LLaVA-Qwen2 multimodal decoder with MobileCLIP/CLIP vision tower; fusion executor has not been qualified."
     },
     "locateanything": {
       "definition": "LocateAnythingQModel",
@@ -3173,7 +3173,7 @@
     },
     "longllama": {
       "definition": "LlamaQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned LongLLaMA memory/cache port; fusion executor has not been qualified."
     },
     "mage_vl": {
       "definition": "MageVLQModel",
@@ -3185,7 +3185,7 @@
     },
     "mimo": {
       "definition": "MimoQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Package-owned MiMo-7B Qwen2 extension with full-precision auxiliary MTP; fusion executor has not been qualified."
     },
     "mimo_v2": {
       "definition": "MimoV2QModel",
@@ -5874,7 +5874,7 @@
     },
     "stablelm_epoch": {
       "definition": "LlamaQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Source-matched native Transformers 5 StableLM Epoch adapter; fusion executor has not been qualified."
     },
     "starcoder2": {
       "definition": "Starcoder2QModel",
@@ -5938,7 +5938,7 @@
     },
     "yi": {
       "definition": "LlamaQModel",
-      "reason": "Custom/remote implementation: no installed native config; executor has not been qualified."
+      "reason": "Native Transformers 5 Llama-backed Yi legacy alias; fusion executor has not been qualified."
     },
     "zamba": {
       "definition": "ZambaQModel",

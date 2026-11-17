@@ -291,6 +291,12 @@ AttnRes quantization boundary. Packaged TikToken implementations require
 [LFM3 media and Kimi-K2.5 loading](docs/transformers5-model-ports.md#lfm3-media-and-kimi-k25-loading)
 documents native versus package-owned media components, FP16 image calibration,
 ragged video pooling and checkpoint round trips.
+[LLaDA2 version selection and routing precision](docs/transformers5-model-ports.md#llada2-version-selection-and-routing-precision)
+explains explicit decoder versions, ambiguous checkpoint metadata and FP32
+routing state through lazy AWQ and repeated safetensors reloads.
+[Llama aliases, MiMo and flat LLaVA-Qwen2 selection](docs/transformers5-model-ports.md#llama-aliases-mimo-and-flat-llava-qwen2-selection)
+covers LongLLaMA memory, source-matched native aliases, dense auxiliary MTP
+and image-aware calibration through package-owned model selection.
 [InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
 documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
 decoder selection, pinned licenses and CPU plain-AWQ validation.
