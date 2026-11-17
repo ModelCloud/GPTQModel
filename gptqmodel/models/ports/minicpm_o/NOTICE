@@ -1,0 +1,67 @@
+MiniCPM-o Transformers 5 local port for GPT-QModel
+
+INTEGRATION HOLD: inherited TTS third-party licensing needs review.
+The Apache-2.0 headers and model-card metadata in the OpenBMB snapshots do
+not establish an Apache-only grant for code borrowed from other projects.
+The licenses retained here are historical evidence, not a new license grant
+or a representation that the combined distribution is cleared.
+
+Primary snapshots:
+  openbmb/MiniCPM-o-4_5
+  fb09628e98b1f55d8d5b863e0eccfcdd11bff499
+  Copyright 2026 The OpenBMB Team. All rights reserved.
+
+  openbmb/MiniCPM-o-2_6
+  cf0b69a6118cd3b2c90bb37f3f4366e2fba802ab
+  Copyright 2025 The OpenBMB Team. All rights reserved.
+
+The OpenBMB Apache-2.0 license is retained as LICENSE. Original file
+headers, source attributions and borrowed-code comments are preserved.
+Adaptations for Transformers 5 and GPT-QModel are documented in README.md.
+Source hashes and independently read checkpoint-header hashes are recorded
+in source_manifest.json. No trained tensor payload is included.
+
+Inherited ChatTTS boundary:
+  https://github.com/2noise/ChatTTS
+  The OpenBMB 2.6 source explicitly attributes GFSQ, DVAEDecoder, DVAE,
+  repetition-penalty processing, audio-code generation and mel decoding to
+  ChatTTS/model/dvae.py, ChatTTS/model/processors.py,
+  ChatTTS/model/gpt.py and ChatTTS/core.py.
+  The 4.5 repetition processor is also AST-identical to ChatTTS's historical
+  processor; gen_logits is substantially identical. These functions remain
+  inherited code, not independently implemented replacements.
+
+  The source comments name unversioned main URLs. The exact borrowing
+  revision and any separate OpenBMB grant have not been established.
+  Historical matching implementations exist at:
+    cff3b4e5c345f66b75e01fd4b5f36e6839f6192b (2024-10-18, AGPL-3.0)
+    e69ffacf83c1ce1df03402f6c72c8199d11bbc91 (2024-07-19, AGPL-3.0)
+    52d75d54c1ce58e4ea352358a0ed7c6fa0875308 (2024-06-27, CC-BY-NC-4.0)
+  The exact historical license texts are retained as
+  LICENSE.ChatTTS-AGPL-3.0 and LICENSE.ChatTTS-CC-BY-NC-4.0.
+  The initial 2024-05-28 license was CC-BY-NC-ND-4.0; the 2024-06-01
+  revision changed it to CC-BY-NC-4.0, and the 2024-07-15 revision changed
+  it to AGPL-3.0. No permissive historical root grant was found.
+  See third_party_provenance.json for exact commits, hashes and boundaries.
+  A superficial rewrite of only DVAE/GFSQ would not establish independent
+  provenance for the rest of this inherited TTS code.
+
+Vocos:
+  https://github.com/gemelo-ai/vocos
+  ConvNeXtBlock is attributed by the inherited source to Vocos.
+  Copyright (c) 2023 Charactr Inc.
+  The MIT license is retained as LICENSE.Vocos-MIT from
+  eb39abfc42c1dee4854d9b10d44dd7d4fd3b0e53.
+
+Transformers / SigLIP / Whisper / Encodec:
+  Copyright 2024 Google AI and The HuggingFace Team. All rights reserved.
+  Apache-2.0. Original copied-from notices remain in the relevant source.
+  The NaViT SigLIP implementation additionally identifies
+  HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit.
+  Runtime decoder classes are imported from installed Transformers 5,
+  rather than copied from an unrelated MiniCPM-V architecture.
+
+The vector-quantize-pytorch FSQ implementation is an installed dependency,
+not vendored code. Its upstream MIT attribution is Copyright (c) 2020
+Phil Wang. This port does not include model weights, Vocos weights or
+StepAudio2/BigVGAN neural-codec assets.
