@@ -599,3 +599,84 @@ def test_optimum_gptq_quantizer_is_routed_through_the_native_bridge(monkeypatch)
 
     assert quantizer.post_init_model(model) is model
     assert post_initialized == [(model, sentinel_context)]
+
+
+def test_transformers_awq_quantizer_is_routed_through_the_native_bridge(monkeypatch):
+    """Transformers' own AWQ loader must use the bridge that GPTQ already uses.
+
+    ``quant_method: "awq"`` never reaches Optimum, so without this wrapper the
+    AWQ path only replaces ``nn.Linear`` and drops every per-expert packed
+    tensor. The bridge context must be produced before weights load and consume
+    the checkpoint manifest in ``_process_model_after_weight_loading``.
+    """
+
+    from transformers.quantizers.quantizer_awq import AwqQuantizer
+
+    import gptqmodel
+    from gptqmodel.utils import hf_load
+
+    sentinel_context = object()
+    prepared = []
+    post_initialized = []
+    original_calls = []
+
+    def fake_prepare(model, **kwargs):
+        prepared.append((model, kwargs))
+        return sentinel_context
+
+    def fake_post_init(model, context):
+        post_initialized.append((model, context))
+        return model
+
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", fake_prepare)
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_post_init_for_load", fake_post_init)
+
+    def tracking_prepare(self, model, **kwargs):
+        original_calls.append(("prepare", model))
+        return model
+
+    def tracking_post_init(self, model, **kwargs):
+        original_calls.append(("post_init", model))
+        return model
+
+    monkeypatch.setattr(AwqQuantizer, "_process_model_before_weight_loading", tracking_prepare)
+    monkeypatch.setattr(AwqQuantizer, "_process_model_after_weight_loading", tracking_post_init)
+
+    installer = getattr(gptqmodel, "_patch_transformers_awq_gptqmodel_load_bridge", None)
+    assert installer is not None, "the package does not install a bridge for transformers' AWQ loader"
+    installer()
+
+    quantizer = AwqQuantizer.__new__(AwqQuantizer)
+    model = torch.nn.Linear(4, 4)
+    checkpoint_files = ["/tmp/model.safetensors"]
+
+    returned = quantizer._process_model_before_weight_loading(
+        model, checkpoint_files=checkpoint_files, dtype=torch.float16
+    )
+
+    assert returned is model
+    assert getattr(model, "_gptqmodel_hf_load_context", None) is sentinel_context
+    assert prepared == [
+        (
+            model,
+            {
+                "checkpoint_files": checkpoint_files,
+                "device_map": None,
+                "dtype": torch.float16,
+            },
+        )
+    ]
+    assert original_calls == []
+
+    assert quantizer._process_model_after_weight_loading(model) is model
+    assert post_initialized == [(model, sentinel_context)]
+    assert original_calls == []
+
+    # An AWQ checkpoint the bridge does not own keeps transformers' own path.
+    monkeypatch.setattr(hf_load, "hf_gptqmodel_prepare_model_for_load", lambda model, **kwargs: None)
+    non_native = torch.nn.Linear(4, 4)
+    quantizer._process_model_before_weight_loading(non_native)
+    assert original_calls == [("prepare", non_native)]
+    assert not hasattr(non_native, "_gptqmodel_hf_load_context")
+    quantizer._process_model_after_weight_loading(non_native)
+    assert original_calls == [("prepare", non_native), ("post_init", non_native)]
