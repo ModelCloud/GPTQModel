@@ -1287,16 +1287,19 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
     def _can_rebuild_checkpoint_qweight(self) -> bool:
         """Whether the checkpoint ``qweight`` can be rebuilt on demand.
 
-        Only the ATen CPU int4pack permutation has an inverse. The AVX512
-        extension and the XPU packing use different layouts, so their
-        subclasses leave ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+        Only the CPU int4pack permutations have an inverse: the ATen layout
+        (``"gptq"``/``"awq"``) and the AVX512 layout (``"avx512_gptq"``, whose
+        ``unpack_hf_int4`` is the documented inverse of ``pack_hf_int4``). The
+        XPU packing uses a different layout, so its subclass leaves
+        ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
 
         This is only a cheap pre-filter: the clone is dropped by
         ``finalize_fused_train_state`` only after the rebuilt words match the
         checkpoint bytes this module actually carried.
         """
 
-        if self._FUSED_TRAIN_STATE_REBUILD is None:
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
             return False
         weight = getattr(self, "qweight", None)
         if not isinstance(weight, t.Tensor) or weight.device.type != "cpu":
@@ -1305,18 +1308,24 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             # The rebuilt words are int32; any other checkpoint dtype keeps
             # its snapshot.
             return False
+        if kind == "avx512_gptq":
+            # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4`` and
+            # is pure Torch, so this path needs no ATen int4pack support and can
+            # undo the ``ret_idx`` channel reorder of a ``desc_act`` checkpoint.
+            return True
         from ._cpu_int4pack_layout import int4pack_block_size
 
         if int4pack_block_size() is None:
             return False
         identity = getattr(self, "_ret_idx_is_identity", None)
         if (
-            self._FUSED_TRAIN_STATE_REBUILD == "gptq"
+            kind == "gptq"
             and callable(identity)
             and not identity()
         ):
-            # The fused transform reorders the input rows by ``ret_idx``; only
-            # the identity order leaves the packed words invertible here.
+            # The ATen fused transform reorders the input rows by ``ret_idx``
+            # without keeping the gather, so only the identity order leaves the
+            # packed words invertible here.
             return False
         return True
 
@@ -1328,10 +1337,16 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             raise RuntimeError(
                 f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
             )
-        from ._cpu_int4pack_layout import rebuild_awq_qweight, rebuild_gptq_qweight
+        from ._cpu_int4pack_layout import (
+            rebuild_avx512_qweight,
+            rebuild_awq_qweight,
+            rebuild_gptq_qweight,
+        )
 
         if kind == "awq":
             return rebuild_awq_qweight(self)
+        if kind == "avx512_gptq":
+            return rebuild_avx512_qweight(self)
         return rebuild_gptq_qweight(self)
 
     def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
