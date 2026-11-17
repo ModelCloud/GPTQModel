@@ -593,7 +593,12 @@ class QQQLinear(GroupedQuantLinear):
             quantizer = _qqq_gpu_quantizer()
             if quantizer is not None:
                 return quantizer(x)
-        x = x.float()
+        # ``mul`` below hands ``x`` to a native kernel that reads it as densely
+        # packed rows. The element-wise fallback preserves the input's strides,
+        # so a column-strided view (``x.t()`` of a ``[K, M]`` buffer, which is
+        # what batched decoding feeds) would stay column-major and be read
+        # scrambled (#4740). Pack it before quantizing.
+        x = x.float().contiguous()
         quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
         quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)

@@ -1090,6 +1090,14 @@ void qqq_gemm(
   int prob_m = A.size(0);
   int prob_n = C.size(1);
   int prob_k = A.size(1);
+  // The kernel dereferences A as densely packed rows. A strided view (e.g. the
+  // column-major ``x.t()`` that batched decoding produces) would be read
+  // scrambled and return silently wrong output (#4740), so fail loudly instead.
+  TORCH_CHECK(
+    A.is_contiguous(),
+    "qqq_gemm: A must be row-major contiguous, but got strides ", A.strides(),
+    ". Pack the activation (A.contiguous()) before calling the native kernel."
+  );
   int groupsize = (s3.numel() == 0) ? -1 : prob_k / s3.size(0);
   if (groupsize != -1 && groupsize * s3.size(0) != prob_k)
     AT_ERROR("k=", prob_k, " not compatible with ", s3.size(0), " groups.");
