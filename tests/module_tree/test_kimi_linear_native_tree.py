@@ -65,7 +65,7 @@ def test_kimi_linear_registry_still_names_the_k3_definition():
 )
 def test_kimi_linear_dispatch_uses_config_fields(monkeypatch, config, expected):
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *args, **kwargs: False)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: config)
 
     assert auto.check_and_get_model_definition("tiny-kimi-linear") is expected
 

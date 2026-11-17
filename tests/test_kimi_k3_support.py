@@ -33,14 +33,7 @@ def utils():
 
 @pytest.fixture(scope="module")
 def reference(utils):
-    path = Path(os.environ.get(
-        "KIMI_K3_SNAPSHOT",
-        str(Path.home() / ".cache/huggingface/hub/models--moonshotai--Kimi-K3/snapshots/"
-            "f831ab66814297da540d832a5235f8e904f29d06"),
-    ))
-    if not (path / "modeling_kimi_linear.py").is_file():
-        pytest.skip("Kimi K3 checkpoint reference code is not cached; set KIMI_K3_SNAPSHOT")
-    return utils.load_calibration_reference(path, trust_remote_code=True)
+    return importlib.import_module("gptqmodel.models.ports.kimi_k3.modeling_kimi_linear")
 
 
 def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
