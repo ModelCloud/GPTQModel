@@ -2823,7 +2823,12 @@ class LazyTurtle:
                 return []
 
             fused_parts = parts[: expert_pos + 1] + [fused_leaf]
-            return [(".".join(fused_parts), expert_index, split_index, split_dim)]
+            candidates = [(".".join(fused_parts), expert_index, split_index, split_dim)]
+            if proj_name in {"gate_proj", "up_proj"}:
+                separate_leaf = proj_name if tensor_name == "weight" else f"{proj_name}_bias"
+                separate_parts = parts[: expert_pos + 1] + [separate_leaf]
+                candidates.append((".".join(separate_parts), expert_index, None, None))
+            return candidates
 
         if len(parts) < 2:
             return []
