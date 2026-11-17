@@ -181,6 +181,23 @@ def test_moss_source_numerics_and_mixed_dtype_cache(heads, width, rotary, dtype)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_moss_released_rotary_fraction_near_original_position_limit(dtype):
+    # Released 64/256 rotary fraction, without allocating a 16B model.
+    model = _model(n_embd=64, n_head=4, rotary_dim=4, n_positions=2048).to(dtype)
+    ids = torch.tensor([[3, 7, 5, 11, 9]])
+    positions = torch.tensor([[2043, 2044, 2045, 2046, 2047]])
+    expected, expected_cache, _, _ = _source_equations(model.state_dict(), model.config, ids, positions)
+    actual = model(ids, position_ids=positions)
+    tolerance = {torch.float32: 3e-6, torch.float16: 0.002, torch.bfloat16: 0.02}[dtype]
+    torch.testing.assert_close(actual.logits, expected, atol=tolerance, rtol=tolerance)
+    for layer, (keys, values) in zip(actual.past_key_values.layers, expected_cache):
+        assert layer.keys.dtype == torch.float32 and layer.values.dtype == dtype
+        torch.testing.assert_close(layer.keys, keys, atol=tolerance, rtol=tolerance)
+        torch.testing.assert_close(layer.values, values, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("beams", [1, 3])
 @torch.inference_mode()
 def test_moss_generation_and_two_safetensors_roundtrips(tmp_path, dtype, beams):
