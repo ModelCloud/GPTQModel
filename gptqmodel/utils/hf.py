@@ -136,15 +136,20 @@ def _local_config_model_type(model_id_or_path: Optional[str]) -> Optional[str]:
 
 
 def ensure_qwen_drive_registered(model_id_or_path: Optional[str] = None) -> bool:
-    """Register the official Qwen-Drive config before any ``AutoConfig`` call.
+    """Register legacy Qwen-Drive only when no package-owned loader exists.
 
-    Qwen-Drive is intentionally not bundled with GPT-QModel.  Importing its
-    package performs the official ``AutoConfig``/``AutoModel`` registrations.
-    A missing package is made actionable for a local Qwen-Drive directory
-    instead of surfacing Transformers' generic unknown ``model_type`` error.
-    Other model types are left untouched so importing GPT-QModel does not load
-    an unrelated optional planning stack.
+    Package ownership must bypass the optional official package in every
+    caller, including native probes and writer shell reconstruction. The
+    fallback retains actionable errors for legacy externally registered
+    definitions without importing an unrelated planning stack.
     """
+
+    from ..models.local import local_model_loader
+
+    # Package ownership precedes the legacy optional registration hook in
+    # config loading, native probing and writer reconstruction alike.
+    if local_model_loader(_QWEN_DRIVE_MODEL_TYPE) is not None:
+        return False
 
     local_model_type = _local_config_model_type(model_id_or_path)
     if local_model_type != _QWEN_DRIVE_MODEL_TYPE:
@@ -1025,11 +1030,11 @@ def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kw
     """
     from ..models.local import local_model_loader_for_config
 
-    ensure_qwen_drive_registered(model_id_or_path)
     payload, _ = PreTrainedConfig.get_config_dict(model_id_or_path, **kwargs)
     loader = local_model_loader_for_config(payload)
     if loader is not None:
         return loader.load_config(model_id_or_path, **kwargs)
+    ensure_qwen_drive_registered(model_id_or_path)
     config_selection_kwargs = get_config_selection_kwargs(kwargs)
     # GGUF metadata is the selected config. The trust preflight must inspect
     # the same file, including when an unrelated config.json is also present.
@@ -1042,10 +1047,11 @@ def load_model_config(model_id_or_path, *, trust_remote_code: bool = False, **kw
 
 
 def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool, **config_load_kwargs) -> bool:
-    # Keep registration ahead of the trust-remote-code probe as well as the
-    # main loader's AutoConfig call.  The probe runs very early in every public
-    # GPTQModel entry point when callers explicitly pass trust_remote_code.
-    ensure_qwen_drive_registered(model_id_or_path)
+    # Disabling Python requires no metadata, network access or registration.
+    # The config loader owns malformed/missing asset diagnostics and retries.
+    if not trust_remote_code:
+        return False
+
     from ..models.local import local_model_loader_for_config
 
     if model_id_or_path:
@@ -1069,9 +1075,10 @@ def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_c
                     "the native Transformers implementation cannot represent it."
                 )
             return require_remote_code_permission(trust_remote_code)
-    if not trust_remote_code or not model_id_or_path:
+    if not model_id_or_path:
         return require_remote_code_permission(trust_remote_code)
 
+    ensure_qwen_drive_registered(model_id_or_path)
     native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path), **config_load_kwargs)
     if not native_supported:
         # Multimodal definitions use auto classes other than causal LM. Inspect

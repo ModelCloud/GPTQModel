@@ -19,7 +19,7 @@ def test_qwen_drive_model_type_selects_definition(monkeypatch):
     fake_config = SimpleNamespace(model_type="qwen_drive")
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
     monkeypatch.setattr(auto, "patch_remote_code_before_config_load", lambda path: None)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition("/tmp/qwen-drive") is QwenDriveQModel
 

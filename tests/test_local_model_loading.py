@@ -24,6 +24,58 @@ from gptqmodel.utils.hf import (
 from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
 
 
+@pytest.mark.parametrize("model_type", ["llama", "internlm"])
+def test_disabled_trust_defers_config_errors_and_allows_repair(tmp_path, model_type):
+    path = tmp_path / "repair"
+    path.mkdir()
+    config_file = path / "config.json"
+    config_file.write_text("{invalid JSON")
+    # Permission resolution needs no checkpoint data when Python is disabled.
+    assert resolve_trust_remote_code(path, trust_remote_code=False) is False
+    with pytest.raises(OSError):
+        load_model_config(path, trust_remote_code=False)
+    config_file.write_text(json.dumps({
+        "model_type": model_type, "hidden_size": 16, "num_attention_heads": 2,
+        "num_key_value_heads": 1, "intermediate_size": 32,
+    }))
+    config = load_model_config(path, trust_remote_code=False)
+    assert config.model_type == model_type
+    assert type(config).__module__.startswith(("transformers.", "gptqmodel."))
+
+
+@pytest.mark.parametrize("subfolder", ["", "selected"])
+@pytest.mark.parametrize("trust", [False, True])
+def test_owned_config_precedes_optional_qwen_drive_registration(tmp_path, monkeypatch, subfolder, trust):
+    import builtins
+
+    from gptqmodel.models.definitions.qwen_drive import QwenDriveQModel
+    from gptqmodel.utils import hf
+
+    # Exercise the generic boundary using a real existing owned config class;
+    # the Qwen-Drive port separately qualifies its actual public model loads.
+    owned = MODEL_MAP_CASEFOLD["internlm"].loader
+    monkeypatch.setattr(QwenDriveQModel, "loader", owned)
+    selected = tmp_path / subfolder
+    selected.mkdir(exist_ok=True)
+    (tmp_path / "config.json").write_text('{"model_type":"qwen_drive"}')
+    (selected / "config.json").write_text(json.dumps({
+        "model_type": "qwen_drive", "hidden_size": 16, "num_attention_heads": 2,
+        "num_key_value_heads": 1, "intermediate_size": 32,
+    }))
+    original_import = builtins.__import__
+
+    def forbidden_optional_package(name, *args, **kwargs):
+        if name == "qwen_drive":
+            raise AssertionError("Owned loading imported the optional official package")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", forbidden_optional_package)
+    kwargs = {"subfolder": subfolder} if subfolder else {}
+    config = hf.load_model_config(tmp_path, trust_remote_code=trust, **kwargs)
+    assert type(config).__module__ == "gptqmodel.models.ports.internlm.configuration_internlm"
+    assert hf.resolve_trust_remote_code(tmp_path, trust_remote_code=trust, **kwargs) is False
+
+
 @pytest.fixture(autouse=True)
 def security_default(monkeypatch):
     monkeypatch.delenv(BYPASS_ENV, raising=False)

@@ -22,11 +22,11 @@ flowchart TD
     C -- yes --> D["LocalModelLoader.load_config: package config class"]
     D --> E["LocalModelLoader.from_config / from_pretrained: package model class"]
     C -- no --> F["resolve_trust_remote_code"]
-    F --> G{"Declared remote-only layout?"}
-    G -- no --> H{"Native Transformers loader mapping?"}
+    F --> G{"Explicit trust requested?"}
+    G -- no --> I["trust_remote_code=False: native config and model"]
+    G -- yes --> H{"Native Transformers loader mapping?"}
     H -- yes --> I["trust_remote_code=False: native config and model"]
     H -- no --> J{"Explicit trust AND safety bypass?"}
-    G -- yes --> J
     J -- yes --> K["Checkpoint Python allowed"]
     J -- no --> L["RemoteCodeSecurityError or unsupported native config"]
     style L fill:#ffcdd2,stroke:#b71c1c
@@ -49,9 +49,30 @@ The existing security bypass is `GPTQ_BYPASS_SAFETY_CHECKS=1`. It is additional
 consent: it does not turn trust on. For a remote-only implementation, both that
 flag and the explicit API argument `trust_remote_code=True` are necessary.
 Local ports ignore both for model/config selection. Native implementations
-continue to override remote trust. A known remote-only checkpoint layout
-(currently Bailing Hybrid MLA, selected by `q_lora_rank`) cannot silently fall
-back to an incompatible native model.
+continue to override remote trust. The package-owned Ling loader selects dense
+or MLA Bailing Hybrid layouts from `q_lora_rank`; checkpoint Python cannot
+replace either layout.
+
+`resolve_trust_remote_code(..., trust_remote_code=False)` returns immediately
+without registering optional packages, reading a config or probing the Hub.
+The actual config loader owns malformed/missing-asset diagnostics and rereads
+repaired local data. An owned config is selected before the legacy Qwen-Drive
+registration hook; the hook also checks definition ownership for direct native
+probe and writer callers.
+
+| Boundary | Before (`b444efaac:utils/hf.py`) | After |
+| --- | --- | --- |
+| Disabled trust | `resolve_trust_remote_code:1044-1068` registered optional packages and read config despite denying Python | Immediate `False`; config construction reports errors and permits repair/retry |
+| Owned config | `load_model_config:1028` registered Qwen-Drive before selected config ownership | Selected raw config and `LocalModelLoader` first; owned definitions bypass optional registration |
+
+The new `tests/test_local_model_loading.py` nodes
+`test_disabled_trust_defers_config_errors_and_allows_repair` and
+`test_owned_config_precedes_optional_qwen_drive_registration` first failed all
+six cases at the premature config/optional-package boundaries. The corrected
+implementation passes the complete loader, processor, tokenizer, Tokenicer
+profile, trust-isolation, layout and Qwen-Drive support batch: **141 passed,
+zero skipped, 15 warnings, 4.97s**, on Python 3.14.6t (`PYTHON_GIL=0`),
+Transformers 5.23.0, Torch 2.15.0+cpu and released Tokenicer 0.0.19.
 
 `normalize_hf_config_compat` also resolves definition ownership before applying
 remote compatibility shims. Local configs retain their own field contract even
