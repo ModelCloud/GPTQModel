@@ -2048,6 +2048,7 @@ def ModelLoader(cls):
             model_local_path,
             model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
+            return_tokenicer=True,
             **_get_tokenizer_load_kwargs(model_init_kwargs),
         )
 
@@ -2690,6 +2691,7 @@ def ModelLoader(cls):
             model_local_path,
             model_config=config,
             trust_remote_code=tokenizer_trust_remote_code,
+            return_tokenicer=True,
             # The tokenizer must come from the same directory and revision as
             # the config and weights. A nested checkpoint keeps all of them in
             # the requested subfolder, so resolving only the weights there would

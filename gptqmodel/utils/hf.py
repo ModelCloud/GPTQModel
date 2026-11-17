@@ -2804,6 +2804,7 @@ def load_hf_tokenizer(
         *,
         model_config: Any = None,
         trust_remote_code: bool = False,
+        return_tokenicer: bool = False,
         **kwargs,
 ):
     from tokenicer import Tokenicer
@@ -2839,11 +2840,9 @@ def load_hf_tokenizer(
         trust_remote_code=trust_remote_code,
         **kwargs,
     )
-    # BaseQModel applies GPTQModel's runtime Tokenicer wrapper once the model is
-    # constructed. Keep this loader's native-tokenizer return contract while
-    # delegating tokenizer construction and compatibility normalization to
-    # Tokenicer.
-    return tokenicer.tokenizer
+    # Internal model loads retain the normalized wrapper through construction.
+    # Direct callers keep the native-tokenizer return contract by default.
+    return tokenicer if return_tokenicer else tokenicer.tokenizer
 
 
 

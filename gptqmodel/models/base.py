@@ -1051,7 +1051,9 @@ class BaseQModel(nn.Module):
         self.auto_dtype_cast_events: List[Dict[str, Any]] = []
 
         if tokenizer is not None:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
+            if isinstance(tokenizer, Tokenicer):
+                self.tokenizer = tokenizer
+            elif isinstance(tokenizer, PreTrainedTokenizerBase):
                 self.tokenizer = Tokenicer.load(
                     tokenizer,
                     trust_remote_code=trust_remote_code,

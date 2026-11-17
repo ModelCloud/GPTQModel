@@ -83,9 +83,13 @@ def test_public_load_selects_definition_owned_processor(tmp_path, monkeypatch, t
             return result
 
     module.LocalProcessor = LocalProcessor
+    # This contract fixture owns a generic tokenizer; release-specific InternLM
+    # SentencePiece behavior is covered by test_internlm_tokenizers_local_port.
+    module.LocalTokenizer = PreTrainedTokenizerFast
     monkeypatch.setitem(sys.modules, module_name, module)
     monkeypatch.setattr(InternLMQModel, "loader", replace(
         InternLMQModel.loader, processor_class=f"{module_name}.LocalProcessor",
+        tokenizer_class=f"{module_name}.LocalTokenizer",
     ))
     monkeypatch.setattr(InternLMQModel, "require_load_processor", True)
     # A processor may never fall back to the checkpoint-controlled auto class.

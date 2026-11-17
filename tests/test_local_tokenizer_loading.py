@@ -145,6 +145,9 @@ def test_public_tokenizer_uses_owned_class_and_normalizes(tmp_path, monkeypatch,
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
 def test_local_model_without_owned_tokenizer_cannot_import_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
+    # Exercise the loader's native-tokenizer branch independently of which
+    # release tokenizer InternLM itself declares.
+    monkeypatch.setattr(InternLMQModel, "loader", replace(InternLMQModel.loader, tokenizer_class=None))
     reference = InternLMForCausalLM(_config()).eval()
     reference.save_pretrained(tmp_path)
     _write_tokenizer(tmp_path)
@@ -165,6 +168,35 @@ def test_local_model_without_owned_tokenizer_cannot_import_checkpoint_python(tmp
     assert not marker.exists()
 
 
+def test_owned_constructor_receives_preloaded_legacy_tokens(tmp_path, monkeypatch, owned):
+    _, tokenizer_class, calls = owned
+    config = _config()
+    config.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    marker = _hostile_metadata(tmp_path)
+    path = tmp_path / "tokenizer_config.json"
+    metadata = json.loads(path.read_text())
+    metadata["additional_special_tokens"] = [
+        {"content": "<legacy>", "single_word": True, "lstrip": True, "rstrip": False, "normalized": False},
+    ]
+    path.write_text(json.dumps(metadata))
+    original_assets = {asset.name: asset.read_bytes() for asset in tmp_path.iterdir() if asset.is_file()}
+    _ban_auto(monkeypatch)
+
+    loaded = load_hf_tokenizer(tmp_path, model_config=config, local_files_only=True)
+    assert type(loaded) is tokenizer_class
+    token = calls[0][1]["additional_special_tokens"][0]
+    assert token.content == "<legacy>"
+    assert token.special and token.single_word and token.lstrip
+    assert not token.rstrip and not token.normalized
+    token_id = loaded.convert_tokens_to_ids("<legacy>")
+    assert token_id >= len(VOCAB)
+    assert loaded.decode([token_id], skip_special_tokens=False) == "<legacy>"
+    assert loaded.decode([token_id], skip_special_tokens=True) == ""
+    assert not marker.exists()
+    assert original_assets == {asset.name: asset.read_bytes() for asset in tmp_path.iterdir() if asset.is_file()}
+
+
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
 def test_public_model_load_uses_owned_tokenizer(tmp_path, monkeypatch, owned, trust, bypass):
@@ -176,7 +208,19 @@ def test_public_model_load_uses_owned_tokenizer(tmp_path, monkeypatch, owned, tr
     if bypass:
         monkeypatch.setenv(BYPASS_ENV, "1")
     _ban_auto(monkeypatch)
+    normalized = []
+    original = Tokenicer.load.__func__
+
+    def record_normalization(cls, value, *args, **kwargs):
+        result = original(cls, value, *args, **kwargs)
+        normalized.append(result)
+        return result
+
+    monkeypatch.setattr(Tokenicer, "load", classmethod(record_normalization))
     loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
+    assert len(normalized) == 1
+    assert loaded.tokenizer is normalized[0]
+    assert loaded.model.tokenizer is normalized[0].tokenizer
     assert type(loaded.tokenizer.tokenizer) is tokenizer_class
     ids = loaded.tokenizer("hello science", add_special_tokens=False, return_tensors="pt").input_ids
     assert ids.tolist() == [[3, 4]]
@@ -203,6 +247,51 @@ def test_caller_tokenizer_keeps_identity_and_normalization_overrides(tmp_path, m
     assert loaded("hello science", add_special_tokens=False).input_ids == [3, 4]
 
 
+def test_quantized_reload_retains_once_normalized_wrapper(tmp_path, monkeypatch, owned):
+    from gptqmodel import BACKEND
+    from gptqmodel.quantization.config import AWQConfig
+
+    config = _config()
+    config.intermediate_size = 32
+    reference = InternLMForCausalLM(config).eval()
+    reference.save_pretrained(tmp_path)
+    _write_tokenizer(tmp_path)
+    marker = _hostile_metadata(tmp_path)
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    normalized = []
+    original = Tokenicer.load.__func__
+
+    def record_normalization(cls, value, *args, **kwargs):
+        result = original(cls, value, *args, **kwargs)
+        normalized.append(result)
+        return result
+
+    monkeypatch.setattr(Tokenicer, "load", classmethod(record_normalization))
+    loaded = GPTQModel.load(
+        str(tmp_path), dtype=torch.float16, trust_remote_code=True,
+        quantize_config=AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=False),
+        backend=BACKEND.TORCH,
+    )
+    assert len(normalized) == 1 and loaded.tokenizer is normalized[0]
+    sample = {"input_ids": torch.tensor([[1, 3, 4, 3, 4, 3, 4, 2]]),
+              "attention_mask": torch.ones(1, 8, dtype=torch.long)}
+    loaded.quantize([sample, sample], batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    with torch.inference_mode():
+        expected = loaded.model(**sample, use_cache=False).logits
+    for cycle in range(2):
+        saved = tmp_path / f"quantized-{cycle}"
+        loaded.save_quantized(str(saved))
+        normalized.clear()
+        loaded = GPTQModel.load(str(saved), device="cpu", dtype=torch.float16, backend=BACKEND.TORCH)
+        assert len(normalized) == 1
+        assert loaded.tokenizer is normalized[0]
+        assert loaded.model.tokenizer is normalized[0].tokenizer
+        assert loaded.tokenizer("hello science", add_special_tokens=False).input_ids == [3, 4]
+        with torch.inference_mode():
+            torch.testing.assert_close(loaded.model(**sample, use_cache=False).logits, expected, rtol=0, atol=0)
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("broken_asset", ["missing", "malformed", "config"])
 def test_broken_owned_tokenizer_fails_then_repairs_without_auto_fallback(tmp_path, monkeypatch, owned, broken_asset):
     _, tokenizer_class, calls = owned
@@ -222,7 +311,8 @@ def test_broken_owned_tokenizer_fails_then_repairs_without_auto_fallback(tmp_pat
     with pytest.raises(Exception) as error:
         load_hf_tokenizer(str(tmp_path), model_config=selected, trust_remote_code=True)
     assert not isinstance(error.value, AssertionError), "must fail in owned asset loading, never Auto discovery"
-    assert len(calls) == 1
+    failed_constructions = 0 if broken_asset == "config" else 1
+    assert len(calls) == failed_constructions
     assert selected.pad_token_id is None
     assert not marker.exists()
     asset.write_bytes(good)
@@ -230,7 +320,7 @@ def test_broken_owned_tokenizer_fails_then_repairs_without_auto_fallback(tmp_pat
     assert type(repaired) is tokenizer_class
     assert repaired("hello science", add_special_tokens=False).input_ids == [3, 4]
     assert selected.pad_token_id == repaired.pad_token_id == 0
-    assert len(calls) == 2
+    assert len(calls) == failed_constructions + 1
     assert not marker.exists()
 
 
@@ -308,6 +398,8 @@ def test_owned_tokenizer_retains_checkpoint_selection_kwargs(tmp_path, monkeypat
 
 @pytest.mark.parametrize("local_config", [False, True])
 def test_ordinary_models_keep_auto_tokenizer_loading(tmp_path, monkeypatch, local_config):
+    if local_config:
+        monkeypatch.setattr(InternLMQModel, "loader", replace(InternLMQModel.loader, tokenizer_class=None))
     _write_tokenizer(tmp_path)
     config = _config() if local_config else LlamaConfig(bos_token_id=1, eos_token_id=2, pad_token_id=None)
     monkeypatch.setattr(AutoConfig, "from_pretrained", _reject_auto)
