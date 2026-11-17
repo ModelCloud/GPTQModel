@@ -286,3 +286,99 @@ def test_device_thread_pool_can_keep_the_caller_intraop_pool():
     result = _run_python(code, {})
 
     assert "RESULT 3" in result.stdout.splitlines()
+
+
+def test_worker_intraop_install_leaves_the_process_global_ambient():
+    """The worker budget is installed on one thread, not published globally.
+
+    libtorch reads the process-global ``num_threads`` when a thread first
+    initializes its intra-op team, so the worker budget must never live there
+    while other threads can initialize (issue #4796).
+    """
+
+    code = (
+        "import threading, torch\n"
+        "from gptqmodel.utils.threadx import install_worker_intraop_threads\n"
+        "torch.set_num_threads(8)\n"
+        "seen = {}\n"
+        "def worker():\n"
+        "    install_worker_intraop_threads(2)\n"
+        "    seen['worker'] = torch.get_num_threads()\n"
+        "thread = threading.Thread(target=worker)\n"
+        "thread.start(); thread.join()\n"
+        "seen['caller'] = torch.get_num_threads()\n"
+        "def fresh():\n"
+        "    seen['fresh'] = torch.get_num_threads()\n"
+        "other = threading.Thread(target=fresh)\n"
+        "other.start(); other.join()\n"
+        "print(f\"RESULT {seen['worker']} {seen['caller']} {seen['fresh']}\")\n"
+    )
+    result = _run_python(code, {})
+
+    assert "RESULT 2 8 8" in result.stdout.splitlines()
+
+
+def test_thread_started_during_a_pool_task_keeps_the_ambient_intraop_pool():
+    """Issue #4796: a thread started while a pool task runs must not be capped.
+
+    The worker budget used to be installed with the process-global
+    ``torch.set_num_threads`` for the whole task, which permanently pinned any
+    thread whose first ATen call landed in that window. This test starts a
+    plain thread while a task is blocked, initializes its intra-op team with a
+    matmul there, and checks the team it keeps for the rest of its life. The
+    team size is asserted rather than wall time: this host mixes fast and slow
+    cores and is shared, so sub-4x wall-clock ratios are not a reliable signal.
+    """
+
+    code = (
+        "import threading, torch\n"
+        "from gptqmodel.utils.threadx import DeviceThreadPool\n"
+        "torch.set_num_threads(8)\n"
+        "def omp_threads():\n"
+        "    for line in torch.__config__.parallel_info().splitlines():\n"
+        "        if 'omp_get_max_threads' in line:\n"
+        "            return int(line.rsplit(':', 1)[1])\n"
+        "    return -1\n"
+        "pool = DeviceThreadPool(\n"
+        "    devices=[torch.device('cpu')], include_cuda=False, include_xpu=False,\n"
+        "    include_npu=False, include_mps=False, workers={'cpu': 4},\n"
+        "    empty_cache_every_n=0,\n"
+        ")\n"
+        "running = threading.Event()\n"
+        "release = threading.Event()\n"
+        "finished = threading.Event()\n"
+        "def task():\n"
+        "    running.set()\n"
+        "    release.wait(120)\n"
+        "future = pool.submit(torch.device('cpu'), task)\n"
+        "assert running.wait(60)\n"
+        "seen = {}\n"
+        "def user():\n"
+        "    seen['during'] = torch.get_num_threads()\n"
+        "    seen['omp'] = omp_threads()\n"
+        "    small = torch.randn(64, 64)\n"
+        "    small @ small\n"
+        "    seen['after_matmul'] = torch.get_num_threads()\n"
+        "    release.set()\n"
+        "    finished.wait(120)\n"
+        "    seen['after_shutdown'] = torch.get_num_threads()\n"
+        "thread = threading.Thread(target=user)\n"
+        "thread.start()\n"
+        "future.result(timeout=120)\n"
+        "seen['worker'] = pool.submit(torch.device('cpu'), torch.get_num_threads).result(timeout=120)\n"
+        "pool.shutdown(wait=True)\n"
+        "seen['caller'] = torch.get_num_threads()\n"
+        "finished.set()\n"
+        "thread.join()\n"
+        "print(\n"
+        "    f\"RESULT {seen['during']} {seen['after_matmul']} {seen['after_shutdown']}\"\n"
+        "    f\" {seen['worker']} {seen['caller']} {seen['omp']}\"\n"
+        ")\n"
+    )
+    result = _run_python(code, {})
+
+    # The thread started during the task keeps the ambient 8-wide team: while
+    # the task is blocked, after its first matmul, and after shutdown; its
+    # OpenMP team is 8 wide as well. The worker kept its own split budget
+    # (8 / 4 workers) and the caller stayed ambient.
+    assert "RESULT 8 8 8 2 8 8" in result.stdout.splitlines()
