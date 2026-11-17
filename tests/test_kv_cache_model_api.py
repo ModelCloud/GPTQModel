@@ -98,3 +98,56 @@ def test_load_emits_the_estimate(capsys, tmp_path):
     estimate = model.kv_cache_estimate()
     assert estimate is not None
     assert estimate.growing_layers == config.num_hidden_layers
+
+
+def test_kv_cache_plan_takes_an_explicit_budget():
+    stub = _stub()
+    budget, rows, estimate = BaseQModel.kv_cache_plan(stub, vram_gib=1)
+    assert budget == 1024 ** 3
+    assert rows and estimate.context_limit is None
+    assert all(context > 0 for _, context in rows)
+
+
+def test_kv_cache_plan_uses_free_vram_when_no_budget_is_given(monkeypatch):
+    import gptqmodel.models.base as base
+
+    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: 2 * 1024 ** 3)
+    budget, rows, _estimate = BaseQModel.kv_cache_plan(_stub())
+    assert budget == 2 * 1024 ** 3
+    assert rows
+
+
+def test_kv_cache_plan_returns_none_without_a_budget(monkeypatch):
+    import gptqmodel.models.base as base
+
+    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: None)
+    assert BaseQModel.kv_cache_plan(_stub()) is None
+
+
+def test_free_vram_budget_applies_the_reserve(monkeypatch):
+    import gptqmodel.models.base as base
+
+    monkeypatch.setattr(base.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(base.torch.cuda, "mem_get_info", lambda: (10 * 1024 ** 3, 24 * 1024 ** 3))
+    assert base._free_vram_budget(0.1) == int(9 * 1024 ** 3)
+    assert base._free_vram_budget(0.0) == 10 * 1024 ** 3
+
+
+def test_logging_adds_the_plan_when_a_budget_is_known(monkeypatch, capsys):
+    import gptqmodel.models.base as base
+
+    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: 1024 ** 3)
+    BaseQModel.log_kv_cache_estimate(_stub())
+    out = capsys.readouterr().out
+    assert "KV cache:" in out
+    assert "KV plan:" in out
+
+
+def test_logging_skips_the_plan_when_asked(monkeypatch, capsys):
+    import gptqmodel.models.base as base
+
+    monkeypatch.setattr(base, "_free_vram_budget", lambda reserve=0.1: 1024 ** 3)
+    BaseQModel.log_kv_cache_estimate(_stub(), plan=False)
+    out = capsys.readouterr().out
+    assert "KV cache:" in out
+    assert "KV plan:" not in out

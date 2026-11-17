@@ -393,6 +393,25 @@ def _log_quantize_summary(
 
 
 
+def _free_vram_budget(reserve: float = 0.1) -> Optional[int]:
+    """Bytes the KV cache can use on the current CUDA device, minus a reserve.
+
+    Read at the moment of the call: it is a snapshot of what is free after the
+    weights are resident, not a promise about what a different process will
+    leave behind.
+    """
+
+    if not torch.cuda.is_available():
+        return None
+    try:
+        free, _total = torch.cuda.mem_get_info()
+    except Exception:  # pragma: no cover - driver edge cases
+        return None
+    if free <= 0:
+        return None
+    return int(free * (1.0 - max(0.0, min(0.9, reserve))))
+
+
 def _kv_cache_estimate_for(inner: object, *, dtype: Optional[torch.dtype] = None) -> Optional[KVCacheEstimate]:
     """KV-cache estimate for a decoder module, dtype taken from its weights."""
 
@@ -2278,12 +2297,35 @@ class BaseQModel(nn.Module):
 
         return _kv_cache_estimate_for(getattr(self, "model", None), dtype=dtype)
 
-    def log_kv_cache_estimate(self) -> None:
+    def kv_cache_plan(self, *, vram_gib: Optional[float] = None, reserve: float = 0.1,
+                      batches: Sequence[int] = (1, 2, 4, 8, 16, 32)):
+        """What contexts fit at each batch size, or None when the config hides it.
+
+        ``vram_gib`` is the budget for the KV cache. Left unset, it is the
+        device's free memory right now minus ``reserve``, which is what is left
+        next to the loaded weights.
+        """
+
+        estimate = _kv_cache_estimate_for(getattr(self, "model", None))
+        if estimate is None:
+            return None
+        budget = int(float(vram_gib) * 1024 ** 3) if vram_gib is not None else _free_vram_budget(reserve)
+        if not budget:
+            return None
+        return budget, estimate.plan(budget, batches), estimate
+
+    def log_kv_cache_estimate(self, *, plan: bool = True) -> None:
         """Log the KV-cache cost once, when the config supports the estimate."""
 
         estimate = _kv_cache_estimate_for(getattr(self, "model", None))
-        if estimate is not None:
-            log.info(estimate.format())
+        if estimate is None:
+            return
+        log.info(estimate.format())
+        if not plan:
+            return
+        budget = _free_vram_budget()
+        if budget:
+            log.info(estimate.format_plan(budget))
 
     @with_quantization_device_telemetry
     def quantize(

@@ -112,6 +112,7 @@ class KVCacheEstimate:
     layers: Tuple[LayerCache, ...]
     dtype: torch.dtype
     mtp_layers: int = 0
+    context_limit: Optional[int] = None
     unclassified: Tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -182,12 +183,17 @@ class KVCacheEstimate:
         return elements * self.itemsize * batch
 
     def tokens_for(self, budget_bytes: int, *, batch_size: int = 1) -> int:
-        """Largest context whose cache fits in ``budget_bytes`` (monotonic search)."""
+        """Largest usable context for ``budget_bytes`` at ``batch_size``.
+
+        Capped by the model's own context limit: a cache that would fit 160k
+        tokens is still only usable up to ``max_position_embeddings``, and
+        answering past it would be a planning error, not a rounding one.
+        """
 
         budget = max(0, int(budget_bytes)) // max(1, int(batch_size))
         if budget <= 0 or not self.growing_layers:
             return 0
-        low, high = 0, 1 << 20
+        low, high = 0, self.context_limit or (1 << 20)
         while low < high:
             mid = (low + high + 1) // 2
             if self.bytes_for(mid) <= budget:
@@ -195,6 +201,48 @@ class KVCacheEstimate:
             else:
                 high = mid - 1
         return low
+
+    def max_batch(self, budget_bytes: int, tokens: int) -> int:
+        """How many sequences of ``tokens`` fit in ``budget_bytes``."""
+
+        per_sequence = self.bytes_for(tokens, batch_size=1)
+        if per_sequence <= 0:
+            return 0
+        return max(0, int(budget_bytes)) // per_sequence
+
+    def plan(self, budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> Tuple[Tuple[int, int], ...]:
+        """``(batch, usable context)`` for each batch size, dropping empty rows."""
+
+        rows = []
+        for batch in batches:
+            context = self.tokens_for(budget_bytes, batch_size=batch)
+            if context > 0:
+                rows.append((int(batch), int(context)))
+        return tuple(rows)
+
+    def format_plan(self, budget_bytes: int, batches: Sequence[int] = (1, 2, 4, 8, 16, 32)) -> str:
+        """One line: what this budget buys, collapsing equal context widths."""
+
+        rows = self.plan(budget_bytes, batches)
+        if not rows:
+            return f"KV plan: {_human(budget_bytes)} fits no usable context"
+
+        # Rows are ordered by increasing batch, so contexts never grow; equal
+        # neighbours collapse into "up to N seq".
+        groups: list[list[int]] = []
+        for batch, context in rows:
+            if groups and groups[-1][0] == context:
+                groups[-1][1] = batch
+            else:
+                groups.append([context, batch])
+
+        parts = [
+            f"{_tokens_name(context)} ctx up to {batch} seq" if batch > 1
+            else f"{_tokens_name(context)} ctx at 1 seq"
+            for context, batch in groups
+        ]
+        capped = " (model limit)" if self.context_limit and rows[0][1] >= self.context_limit else ""
+        return f"KV plan: {_human(budget_bytes)} -> " + ", ".join(parts) + capped
 
     def format(self, contexts: Sequence[int] = (8192, 32768)) -> str:
         parts_of_shape = [f"{self.growing_layers} growing layer(s)"]
@@ -400,6 +448,7 @@ def estimate_kv_cache(
     unclassified_all: list[str] = []
     mtp_total = 0
     resolved_dtype = None
+    limits = []
     for source in stacks:
         partial = _estimate_for_stack(source, dtype=dtype)
         if partial is None:
@@ -408,6 +457,8 @@ def estimate_kv_cache(
         unclassified_all.extend(partial.unclassified)
         mtp_total += partial.mtp_layers
         resolved_dtype = resolved_dtype or partial.dtype
+        if partial.context_limit:
+            limits.append(partial.context_limit)
 
     if not all_layers:
         return None
@@ -415,6 +466,7 @@ def estimate_kv_cache(
         layers=tuple(all_layers),
         dtype=resolved_dtype or torch.float16,
         mtp_layers=mtp_total,
+        context_limit=min(limits) if limits else None,
         unclassified=tuple(dict.fromkeys(unclassified_all)),
     )
 
@@ -534,10 +586,14 @@ def _estimate_for_stack(
     if all(layer.kind == "unknown" for layer in resolved):
         return None
 
+    limit = _safe_get(source, "max_position_embeddings")
+    limit = int(limit) if isinstance(limit, int) and limit > 0 else None
+
     return KVCacheEstimate(
         layers=tuple(resolved),
         dtype=resolved_dtype,
         mtp_layers=mtp,
+        context_limit=limit,
         unclassified=tuple(dict.fromkeys(unclassified)),
     )
 

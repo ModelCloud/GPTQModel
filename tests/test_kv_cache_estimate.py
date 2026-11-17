@@ -300,3 +300,70 @@ def test_fp8_kv_cache_is_one_byte_per_element():
     fp8 = estimate_kv_cache(_gqa(), dtype=fp8_dtype)
     assert fp8 is not None
     assert fp8.bytes_per_token * 2 == fp16.bytes_per_token
+
+
+def _capped(**overrides):
+    base = {
+        "hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+        "num_key_value_heads": 8, "max_position_embeddings": 8192,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_the_model_context_limit_is_carried_and_caps_the_answer():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    assert estimate.context_limit == 8192
+    # 20 GiB would buy far more than the model can take; the answer must not
+    # claim 160k tokens for an 8k model.
+    assert estimate.tokens_for(20 * 1024 ** 3) == 8192
+
+
+def test_without_a_declared_limit_the_budget_decides():
+    estimate = estimate_kv_cache(_gqa(), dtype=torch.float16)
+    assert estimate.context_limit is None
+    assert estimate.tokens_for(20 * 1024 ** 3) > 8192
+
+
+def test_max_batch_is_the_budget_over_one_sequence():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    budget = 4 * 1024 ** 3
+    batch = estimate.max_batch(budget, 8192)
+    assert batch > 0
+    assert estimate.bytes_for(8192, batch_size=batch) <= budget
+    assert estimate.bytes_for(8192, batch_size=batch + 1) > budget
+
+
+def test_plan_contexts_never_grow_with_batch():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    rows = estimate.plan(4 * 1024 ** 3)
+    assert [batch for batch, _ in rows] == sorted(batch for batch, _ in rows)
+    contexts = [context for _, context in rows]
+    assert contexts == sorted(contexts, reverse=True)
+    assert all(context <= estimate.context_limit for context in contexts)
+
+
+def test_plan_drops_batches_that_fit_nothing():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    rows = estimate.plan(4096)                      # a few tokens of budget
+    assert rows == ()
+
+
+def test_format_plan_collapses_equal_contexts():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    line = estimate.format_plan(16 * 1024 ** 3)
+    # 128 KiB per token: 16 GiB holds the 8k cap up to 16 sequences, 4k up to 32.
+    assert "8k ctx up to 16 seq" in line
+    assert "(model limit)" in line
+    # One clause per distinct width, not one per batch size.
+    assert line.count("ctx") == 2
+
+
+def test_format_plan_marks_the_limit_only_when_the_cap_binds():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    assert "(model limit)" not in estimate.format_plan(512 * 1024 ** 2)
+
+
+def test_format_plan_reports_an_unusable_budget():
+    estimate = estimate_kv_cache(_capped(), dtype=torch.float16)
+    assert "fits no usable context" in estimate.format_plan(0)
