@@ -17,13 +17,12 @@ from ..looper.loop_processor import (
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
-from ..looper.shared_input import SharedInputCaptureMixin
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models._const import DEVICE
 from ..models.writer import (
@@ -49,7 +48,7 @@ from ..utils.torch import CPU
 
 log = setup_logger()
 
-class QQQProcessor(SharedInputCaptureMixin, LoopProcessor):
+class QQQProcessor(SharedInputCaptureProcessor):
     """Captures activations and quantizes modules with the QQQ workflow."""
 
     lifecycle = ProcessorLifecycleConfig(

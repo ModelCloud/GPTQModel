@@ -15,13 +15,12 @@ from ..looper.loop_processor import (
     CalibrationConfig,
     CalibrationTypes,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
     bind_resolved_module_config,
     get_resolved_module_config,
 )
 from ..looper.named_module import NamedModule
-from ..looper.shared_input import SharedInputCaptureMixin
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -46,7 +45,7 @@ from ..utils.torch import CPU
 log = setup_logger()
 
 
-class VPTQProcessor(SharedInputCaptureMixin, LoopProcessor):
+class VPTQProcessor(SharedInputCaptureProcessor):
     """Captures activations and quantizes modules with the VPTQ workflow.
 
     The calibration forward passes feed the same Hessian accumulator used by

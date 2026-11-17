@@ -35,11 +35,10 @@ from ..looper.loop_processor import (
     CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
-    LoopProcessor,
     ProcessorLifecycleConfig,
 )
 from ..looper.named_module import NamedModule
-from ..looper.shared_input import SharedInputCaptureMixin
+from ..looper.shared_input import SharedInputCaptureProcessor
 from ..models import BaseQModel
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -695,7 +694,7 @@ def clone_exllamav3_config_for_module(
     return qcfg_clone
 
 
-class EXL3Processor(SharedInputCaptureMixin, LoopProcessor):
+class EXL3Processor(SharedInputCaptureProcessor):
     """Captures activations and repacks modules into ExLlamaV3 format."""
 
     lifecycle = ProcessorLifecycleConfig(

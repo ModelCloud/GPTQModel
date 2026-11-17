@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from ..models.shared_input import SharedInputPlan
 from ..utils.logger import setup_logger
+from .loop_processor import LoopProcessor
 
 
 log = setup_logger()
@@ -226,3 +227,28 @@ class SharedInputCaptureMixin:
             return leaders.get(name)
         with lock:
             return leaders.get(name)
+
+
+class SharedInputCaptureProcessor(SharedInputCaptureMixin, LoopProcessor):
+    """Processor base that enables shared-input capture dedup.
+
+    Both bases define ``begin_shared_input_capture`` and
+    ``end_shared_input_capture``: the mixin elects capture leaders and adopts
+    their statistics, while :class:`LoopProcessor` provides no-op defaults for
+    every processor that does not dedup.  Delegating explicitly here resolves
+    that multiple-inheritance conflict in one place and keeps the mixin's
+    implementations authoritative, without changing either base.
+    """
+
+    def begin_shared_input_capture(
+        self,
+        model: Any,
+        subset_names: Iterable[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        return SharedInputCaptureMixin.begin_shared_input_capture(
+            self, model, subset_names, is_lm_head_module
+        )
+
+    def end_shared_input_capture(self, subset_names: Iterable[str]) -> Dict[str, Any]:
+        return SharedInputCaptureMixin.end_shared_input_capture(self, subset_names)

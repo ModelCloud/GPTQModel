@@ -21,11 +21,15 @@ from torch import nn
 
 from gptqmodel.looper.exllamav3_processor import EXL3Processor
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
+from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
 from gptqmodel.looper.macaq_processor import MacaqProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.looper.qqq_processor import QQQProcessor
+from gptqmodel.looper.shared_input import (
+    SharedInputCaptureMixin,
+    SharedInputCaptureProcessor,
+)
 from gptqmodel.looper.vptq_processor import VPTQProcessor
 from gptqmodel.models.shared_input import SharedInputPlan, build_shared_input_plan
 from gptqmodel.quantization.config import (
@@ -543,3 +547,98 @@ def test_gptaq_foem_gate_up_group_dedups(kind: str):
         processor.tasks["mlp.g"]._finalize_foem_hessian()
     assert torch.equal(follower.H, reference.H)
     assert torch.equal(follower.dXXT, reference.dXXT)
+
+
+# ---------------------------------------------------------------------------
+# Base-class resolution for the shared-input capture lifecycle
+# ---------------------------------------------------------------------------
+
+
+_PROCESSOR_CONFIGS = [
+    (QQQProcessor, QQQConfig(bits=4, group_size=8, desc_act=False)),
+    (VPTQProcessor, _vptq_config()),
+    (MacaqProcessor, _macaq_config()),
+    (EXL3Processor, EXL3Config()),
+]
+
+
+@pytest.mark.parametrize(("processor_cls", "qcfg"), _PROCESSOR_CONFIGS)
+def test_shared_input_capture_methods_resolve_to_single_shared_base(processor_cls, qcfg):
+    # The four calibrated processors inherit one intermediate base, so the
+    # mixin/loop-processor conflict is resolved in exactly one place.
+    assert issubclass(processor_cls, SharedInputCaptureProcessor)
+    assert processor_cls.begin_shared_input_capture is SharedInputCaptureProcessor.begin_shared_input_capture
+    assert processor_cls.end_shared_input_capture is SharedInputCaptureProcessor.end_shared_input_capture
+    assert processor_cls.begin_shared_input_capture is not LoopProcessor.begin_shared_input_capture
+    assert processor_cls.end_shared_input_capture is not LoopProcessor.end_shared_input_capture
+
+    processor = processor_cls(tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig())
+    model = _fake_model(_plan(), qcfg)
+    if processor_cls is EXL3Processor:
+        # EXL3's capture tasks are plain GPTQ accumulators and preprocess()
+        # rejects the 64-wide fixture geometry (it requires 128-aligned input).
+        capture_cfg = GPTQConfig(
+            bits=4,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            offload_to_disk=False,
+            device="cpu",
+        )
+        modules = {}
+        for index, name in enumerate(_QKV):
+            named = _named_linear(name, seed=index)
+            processor.tasks[name] = {"capture": _exl3_capture(named, capture_cfg), "qcfg": qcfg}
+            modules[name] = named
+    else:
+        modules = _preprocess_all(processor, _QKV)
+    batches = _batches()
+
+    leaders = processor.begin_shared_input_capture(model, _QKV)
+    assert leaders == {"self_attn.k": "self_attn.q", "self_attn.v": "self_attn.q"}
+    _feed(processor, modules, _QKV, batches)
+
+    telemetry = processor.end_shared_input_capture(_QKV)
+    assert telemetry["enabled"] is True
+    assert telemetry["expected_followers"] == 2
+    assert telemetry["adopted_followers"] == 2
+    assert telemetry["status"] == "verified"
+
+
+def test_shared_input_capture_wrapper_delegates_to_mixin(monkeypatch):
+    calls = []
+    original_begin = SharedInputCaptureMixin.begin_shared_input_capture
+    original_end = SharedInputCaptureMixin.end_shared_input_capture
+
+    def spy_begin(self, *args, **kwargs):
+        calls.append("begin")
+        return original_begin(self, *args, **kwargs)
+
+    def spy_end(self, *args, **kwargs):
+        calls.append("end")
+        return original_end(self, *args, **kwargs)
+
+    monkeypatch.setattr(SharedInputCaptureMixin, "begin_shared_input_capture", spy_begin)
+    monkeypatch.setattr(SharedInputCaptureMixin, "end_shared_input_capture", spy_end)
+
+    qcfg = QQQConfig(bits=4, group_size=8, desc_act=False)
+    processor = QQQProcessor(tokenizer=None, qcfg=qcfg, calibration=CalibrationConfig())
+    model = _fake_model(_plan(), qcfg)
+    modules = _preprocess_all(processor, _QKV)
+
+    assert processor.begin_shared_input_capture(model, _QKV) == {
+        "self_attn.k": "self_attn.q",
+        "self_attn.v": "self_attn.q",
+    }
+    _feed(processor, modules, _QKV, _batches())
+    telemetry = processor.end_shared_input_capture(_QKV)
+    assert calls == ["begin", "end"]
+    assert telemetry["adopted_followers"] == 2
+
+
+def test_loop_processor_without_mixin_keeps_noop_defaults():
+    proc = LoopProcessor.__new__(LoopProcessor)
+    assert type(proc).begin_shared_input_capture is LoopProcessor.begin_shared_input_capture
+    assert type(proc).end_shared_input_capture is LoopProcessor.end_shared_input_capture
+    assert proc.begin_shared_input_capture(object(), ["a", "b"]) == {}
+    assert proc.end_shared_input_capture(["a", "b"]) is None
