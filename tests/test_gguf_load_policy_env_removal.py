@@ -338,6 +338,7 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
             self.config = model.config
             self.quantized = False
             self.quantize_config = None
+            self._config_load_kwargs = _kwargs.get("config_load_kwargs")
 
     class _Inner:
         @staticmethod
@@ -360,7 +361,7 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
     monkeypatch.setattr(loader, "load_hf_tokenizer", lambda *_a, **_k: object())
     monkeypatch.setattr(loader, "print_module_tree", lambda *_a, **_k: None)
     monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_a, **_k: None)
-    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_a, **_k: _Config())
+    monkeypatch.setattr(loader, "load_model_config", lambda *_a, **_k: _Config())
     monkeypatch.setattr(
         DummyQModel,
         "from_quantized",
@@ -377,7 +378,14 @@ def test_public_load_uses_the_kernel_policy_to_choose_the_gguf_parser(tmp_path, 
         checkpoint,
         quantize_config=None,
         kernel=KernelConfig(gguf_native_quantized_loader=False),
+        revision="pinned-source",
+        local_files_only=True,
     )
     assert len(redirected) == 1
     assert result.quantized is False
     assert dense_calls[0]["kwargs"]["gguf_file"] == "qwen3-q8_0.gguf"
+    assert result._config_load_kwargs == {
+        "revision": "pinned-source",
+        "local_files_only": True,
+        "gguf_file": "qwen3-q8_0.gguf",
+    }

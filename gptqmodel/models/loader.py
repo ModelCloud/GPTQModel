@@ -1982,6 +1982,7 @@ def ModelLoader(cls):
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
+        config_load_kwargs = {**get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(model_init_kwargs_without_internal), **hf_gguf_load_kwargs)
 
@@ -2158,6 +2159,7 @@ def ModelLoader(cls):
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
                 processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
+                config_load_kwargs=config_load_kwargs,
             )
             _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2360,6 +2362,7 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
             processor_load_kwargs=get_config_selection_kwargs(model_init_kwargs),
+            config_load_kwargs=config_load_kwargs,
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
@@ -2481,6 +2484,7 @@ def ModelLoader(cls):
             # The explicit device map determines placement and kernel targets.
             device = auto_select_device(normalize_device_device_map(None, requested_device_map), backend)
 
+        config_load_kwargs = {**get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs}
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code, **get_config_selection_kwargs(kwargs_without_internal), **hf_gguf_load_kwargs)
         native_support = has_native_transformers_model_support(
@@ -2773,6 +2777,7 @@ def ModelLoader(cls):
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
                 processor_load_kwargs=processor_load_kwargs,
+                config_load_kwargs=config_load_kwargs,
             )
             instance._runtime_generate = runtime_generate
             _set_paged_attention_safe_cuda_graphs(instance.model)
@@ -3601,6 +3606,7 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
             processor_load_kwargs=processor_load_kwargs,
+            config_load_kwargs=config_load_kwargs,
         )
         if backend == BACKEND.MLX:
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)

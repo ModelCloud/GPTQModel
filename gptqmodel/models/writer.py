@@ -59,7 +59,6 @@ from ..utils.exl3_error_ledger import write_exl3_error_ledger
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
-    ensure_qwen_drive_registered,
     get_hf_config_dtype,
     load_model_config,
     normalize_hf_config_compat,
@@ -2585,13 +2584,14 @@ def ModelWriter(cls):
         # save-side build races concurrent loads (issue #4204, regression of #4129).
         from .loader import model_load_lock
 
-        ensure_qwen_drive_registered(model_id_or_path)
+        config_load_kwargs = dict(getattr(self, "_config_load_kwargs", {}) or {})
         trust_remote_code = resolve_trust_remote_code(
-            model_id_or_path, trust_remote_code=self.trust_remote_code
+            model_id_or_path, trust_remote_code=self.trust_remote_code, **config_load_kwargs
         )
         config = load_model_config(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
+            **config_load_kwargs,
         )
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         model_dtype = get_hf_config_dtype(config)
