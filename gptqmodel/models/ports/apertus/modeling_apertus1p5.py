@@ -721,6 +721,7 @@ class Apertus1p5TextForCausalLM(Apertus1p5TextPreTrainedModel, GenerationMixin):
     _keys_to_ignore_on_load_unexpected = [r"^model\.vision_tokenizer\.", r"^model\.audio_tokenizer\."]
 
     def __init__(self, config: Apertus1p5TextConfig):
+        config.validate_output_vocab_size()
         super().__init__(config)
         self.model = Apertus1p5TextModel(config)
         self.vocab_size = config.vocab_size
@@ -1025,6 +1026,7 @@ class Apertus1p5ForConditionalGeneration(Apertus1p5PreTrainedModel, GenerationMi
     _tp_plan = {"lm_head": "colwise_gather_output"}
 
     def __init__(self, config: Apertus1p5Config):
+        config.validate_architecture()
         super().__init__(config)
         self.model = Apertus1p5Model(config)
         # the LM head may be pruned to the text-only prefix of the vocabulary (see Apertus1p5TextConfig)

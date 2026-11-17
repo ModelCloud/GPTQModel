@@ -25,6 +25,17 @@ from gptqmodel.utils.security import BYPASS_ENV
 
 
 KINDS = ["apertus", "apertus1p5_text", "apertus1p5_text_pruned", "apertus1p5", "apertus1p5_pruned"]
+HEAD_TYING_CASES = [
+    ("apertus1p5_text", False, False),
+    ("apertus1p5_text", True, False),
+    *(("apertus1p5", outer, inner) for outer in (False, True) for inner in (False, True)),
+]
+PRUNED_TYING_CASES = [case for case in HEAD_TYING_CASES if case[1] or case[2]]
+VALID_HEAD_LAYOUTS = [
+    (*case, width)
+    for case in HEAD_TYING_CASES for width in (None, 96, 48)
+    if width != 48 or not (case[1] or case[2])
+]
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +81,16 @@ def set_attention(model, implementation):
         model.model.language_model.set_attn_implementation(implementation)
     else:
         model.set_attn_implementation(implementation)
+
+
+def head_config(kind, outer_tied, inner_tied, output_vocab_size):
+    config = tiny_config(kind)
+    config.tie_word_embeddings = outer_tied
+    text_config = config.text_config if kind == "apertus1p5" else config
+    if kind == "apertus1p5":
+        text_config.tie_word_embeddings = inner_tied
+    text_config.output_vocab_size = output_vocab_size
+    return config
 
 
 def tokenizer():
@@ -300,6 +321,116 @@ def test_local_processor_roundtrip_ignores_checkpoint_auto_map(tmp_path):
     with torch.inference_mode():
         assert torch.isfinite(tiny_model("apertus1p5")(**inputs).logits).all()
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("kind,outer_tied,inner_tied", PRUNED_TYING_CASES)
+def test_tied_pruned_head_config_is_rejected(kind, outer_tied, inner_tied):
+    config = head_config(kind, outer_tied, inner_tied, 48)
+    with pytest.raises(StrictDataclassClassValidationError, match="tie_word_embeddings.*pruned"):
+        type(config).from_dict(config.to_dict())
+
+
+@pytest.mark.parametrize("kind,outer_tied,inner_tied", PRUNED_TYING_CASES)
+@pytest.mark.parametrize("mutation", ["tying", "pruning"])
+def test_tied_pruned_head_mutation_rejected_at_constructor(kind, outer_tied, inner_tied, mutation):
+    if mutation == "tying":
+        config = head_config(kind, False, False, 48)
+    else:
+        config = head_config(kind, outer_tied, inner_tied, None)
+    config = type(config).from_dict(config.to_dict())
+    text_config = config.text_config if kind == "apertus1p5" else config
+    config.tie_word_embeddings = outer_tied
+    if kind == "apertus1p5":
+        text_config.tie_word_embeddings = inner_tied
+    text_config.output_vocab_size = 48
+    model_class = Apertus1p5ForConditionalGeneration if kind == "apertus1p5" else Apertus1p5TextForCausalLM
+    with pytest.raises(ValueError, match="tie_word_embeddings.*pruned"):
+        model_class(config)
+    # The rejected caller-owned config remains usable after explicit repair.
+    config.tie_word_embeddings = text_config.tie_word_embeddings = False
+    model = model_class(config).eval()
+    with torch.inference_mode():
+        ids = torch.tensor([[1, 12, 13]])
+        result = model(ids, labels=ids, use_cache=False)
+    assert result.logits.shape == (1, 3, 48)
+    assert torch.isfinite(result.loss)
+
+
+@pytest.mark.parametrize("kind,outer_tied,inner_tied", PRUNED_TYING_CASES)
+def test_public_load_rejects_tied_pruned_head_and_retries(tmp_path, monkeypatch, kind, outer_tied, inner_tied):
+    from gptqmodel import GPTQModel
+
+    original, marker = poisoned_checkpoint(tmp_path, kind + "_pruned")
+    if kind == "apertus1p5":
+        save_processor(tmp_path)
+    else:
+        tokenizer().save_pretrained(tmp_path)
+    payload = json.loads((tmp_path / "config.json").read_text())
+    payload["tie_word_embeddings"] = outer_tied
+    if kind == "apertus1p5":
+        payload["text_config"]["tie_word_embeddings"] = inner_tied
+    (tmp_path / "config.json").write_text(json.dumps(payload))
+    monkeypatch.setenv(BYPASS_ENV, "1")
+    with pytest.raises(StrictDataclassClassValidationError, match="tie_word_embeddings.*pruned"):
+        GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=True)
+    assert not marker.exists()
+    payload["tie_word_embeddings"] = False
+    if kind == "apertus1p5":
+        payload["text_config"]["tie_word_embeddings"] = False
+    (tmp_path / "config.json").write_text(json.dumps(payload))
+    restored = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=True).model
+    with torch.inference_mode():
+        ids = torch.tensor([[1, 12, 13]])
+        result = restored(ids, labels=ids, use_cache=False)
+        torch.testing.assert_close(result.logits, original(ids, use_cache=False).logits)
+    assert result.logits.shape == (1, 3, 48)
+    assert torch.isfinite(result.loss)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("kind,outer_tied,inner_tied,width", VALID_HEAD_LAYOUTS)
+def test_supported_head_tying_width_loss_and_safetensors_roundtrip(tmp_path, kind, outer_tied, inner_tied, width):
+    config = head_config(kind, outer_tied, inner_tied, width)
+    config = type(config).from_dict(config.to_dict())
+    model = MODEL_MAP[kind].loader.from_config(config).eval()
+    expected_width = width or 96
+    ids = torch.tensor([[1, 12, 13, 14], [1, 21, 22, 23]])
+
+    def check(current):
+        text_config = current.config.text_config if kind == "apertus1p5" else current.config
+        assert current.config.tie_word_embeddings is outer_tied
+        if kind == "apertus1p5":
+            assert text_config.tie_word_embeddings is inner_tied
+        assert text_config.output_vocab_size == (None if width in (None, 96) else width)
+        assert current.get_input_embeddings().weight.shape == (96, 16)
+        assert current.lm_head.out_features == expected_width
+        assert current.lm_head.weight.shape == (expected_width, 16)
+        # The multimodal wrapper flag controls its head; an inner-only flag does not tie it.
+        assert (current.lm_head.weight is current.get_input_embeddings().weight) is outer_tied
+        with torch.inference_mode():
+            result = current(ids, labels=ids, use_cache=False)
+            assert result.logits.shape == (2, 4, expected_width)
+            assert torch.isfinite(result.loss)
+            expected_loss = torch.nn.functional.cross_entropy(
+                result.logits[:, :-1].reshape(-1, expected_width), ids[:, 1:].reshape(-1)
+            )
+            torch.testing.assert_close(result.loss, expected_loss)
+        return result
+
+    reference = check(model)
+    for path in (tmp_path, tmp_path / "resaved"):
+        model.save_pretrained(path, safe_serialization=True)
+        assert (path / "model.safetensors").is_file()
+        assert not list(path.glob("*.bin"))
+        restored, info = type(model).from_pretrained(path, output_loading_info=True)
+        restored.eval()
+        assert not any(info[key] for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"))
+        actual = check(restored)
+        torch.testing.assert_close(actual.logits, reference.logits, rtol=0, atol=0)
+        torch.testing.assert_close(actual.loss, reference.loss, rtol=0, atol=0)
+        for name, value in model.state_dict().items():
+            torch.testing.assert_close(restored.state_dict()[name], value, rtol=0, atol=0)
+        model = restored
 
 
 @pytest.mark.parametrize("kind", KINDS)
