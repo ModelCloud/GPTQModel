@@ -260,24 +260,28 @@ def test_invalid_inputs_fail_then_same_model_retries_with_cache():
     assert model(ids, return_dict=False, use_cache=False)[0].shape == (1, 3, 48)
 
 
-@pytest.mark.parametrize("trust", [False, True])
-@pytest.mark.parametrize("bypass", [False, True])
-def test_public_dense_load_never_dispatches_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
+def write_tokenizer(path):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import PreTrainedTokenizerFast
 
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "hello": 3, "[UNK]": 4}, unk_token="[UNK]")),
+        pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]",
+    )
+    tokenizer.save_pretrained(path)
+
+
+@pytest.mark.parametrize("trust", [False, True])
+@pytest.mark.parametrize("bypass", [False, True])
+def test_public_dense_load_never_dispatches_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     if bypass:
         monkeypatch.setenv(BYPASS_ENV, "1")
     c = tiny_config()
     original = InternLM2ForCausalLM(c).eval()
     original.save_pretrained(tmp_path)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(WordLevel({"[PAD]": 0, "[BOS]": 1, "[EOS]": 2, "hello": 3, "[UNK]": 4}, unk_token="[UNK]")),
-        pad_token="[PAD]", bos_token="[BOS]", eos_token="[EOS]", unk_token="[UNK]",
-    )
-    tokenizer.save_pretrained(tmp_path)
+    write_tokenizer(tmp_path)
     marker = hostile_checkpoint(tmp_path, c)
     loaded = GPTQModel.load(str(tmp_path), device="cpu", dtype=torch.float32, trust_remote_code=trust)
     assert isinstance(loaded, InternLM2QModel)
@@ -294,3 +298,35 @@ def test_twenty_b_head_group_ratio_and_explicit_positions():
     ids = torch.tensor([[1, 5, 7], [1, 4, 9]])
     positions = torch.tensor([[4, 5, 6], [7, 8, 9]])
     torch.testing.assert_close(model(ids, position_ids=positions, use_cache=False).logits, reference_logits(model, ids, positions=positions), atol=1e-7, rtol=1e-5)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("heads", [1, 2, 4], ids=["mqa", "gqa", "mha"])
+@pytest.mark.parametrize("bias", [False, True])
+def test_public_plain_awq_quantizes_packs_and_reloads(tmp_path, heads, bias):
+    from gptqmodel import BACKEND
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+
+    original = InternLM2ForCausalLM(tiny_config(num_key_value_heads=heads, bias=bias)).eval()
+    original.save_pretrained(tmp_path)
+    write_tokenizer(tmp_path)
+    config = AWQConfig(device="cpu", group_size=16, fallback=None)
+    wrapper = GPTQModel.load(str(tmp_path), quantize_config=config, backend=BACKEND.TORCH, dtype=torch.float16)
+    assert wrapper.awq_get_modules_for_scaling(wrapper.model.model.layers[0], {}, {}) == []
+    calibration = [{"input_ids": torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11]]),
+                    "attention_mask": torch.ones(1, 8, dtype=torch.long)} for _ in range(2)]
+    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == 10
+    with torch.inference_mode():
+        expected = wrapper.model(**calibration[0], use_cache=False).logits
+    assert torch.isfinite(expected).all()
+    saved = tmp_path / "quantized"
+    wrapper.save_quantized(str(saved))
+    assert list(saved.glob("*.safetensors")) and not list(saved.glob("*.bin"))
+    reloaded = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    assert type(reloaded.model) is InternLM2ForCausalLM
+    assert sum(isinstance(module, AwqTorchLinear) for module in reloaded.model.modules()) == 10
+    with torch.inference_mode():
+        torch.testing.assert_close(reloaded.model(**calibration[0], use_cache=False).logits, expected,
+                                   atol=2e-4, rtol=2e-3)

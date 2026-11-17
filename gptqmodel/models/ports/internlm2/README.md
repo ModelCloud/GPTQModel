@@ -109,6 +109,10 @@ AWQ policy for **every** layout is **plain quantization only**: no inferred
 folds, candidate scaling search, or replay claims. Actual `AWQProcessor` tests
 verify all five linears change and acquire scales/zeros while both norms stay
 bitwise unchanged, including `fallback=None`. Fused execution is unqualified.
+Public quantize/pack/save/reload tests additionally exercise MHA/GQA/MQA with
+and without biases using the Torch AWQ CPU backend: ten packed linears across
+two real decoder layers, safetensors-only output, finite inference and reload
+logit equivalence. This does not qualify any GPU kernel or AWQ scaling search.
 
 Runtime evidence: Python 3.14.6t, `PYTHON_GIL=0`, Torch 2.15.0+cpu,
 Transformers 5.23.0. No multi-threaded safety claim follows from serial GIL=0
