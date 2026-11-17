@@ -5,7 +5,7 @@
 
 from typing import Dict
 
-from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
+from transformers import ProcessorMixin
 
 from ...utils.calibration import batched_conversations
 from ...utils.image import load_image_from_url
@@ -13,12 +13,24 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class InternS1QModel(BaseQModel):
     require_pkgs = ["sentencepiece>=0.2.0"]
 
-    loader = AutoModelForCausalLM
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.interns1.configuration_interns1.InternS1Config",
+        model_class="gptqmodel.models.ports.interns1.modeling_interns1.InternS1ForConditionalGeneration",
+        processor_class="gptqmodel.models.ports.interns1.processing_interns1.InternS1Processor",
+        tokenizer_class="gptqmodel.models.ports.interns1.tokenization_interns1.InternS1Tokenizer",
+    )
+
+    dynamic_expert_index = "num_experts"
+    # Mixed dense/routed layers resolve only their declared MLP branch.
+    layer_modules_strict = False
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     pre_lm_head_norm_module = "model.language_model.norm"
     rotary_embedding = "model.language_model.rotary_emb"
@@ -46,7 +58,36 @@ class InternS1QModel(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
     require_load_processor = True
-    require_trust_remote_code = True
+
+    @classmethod
+    def get_num_experts(cls, model_config):
+        return getattr(model_config.get_text_config(), "num_experts", 0)
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector)
+        config = getattr(model, "config", None)
+        text = getattr(config, "text_config", None)
+        if getattr(text, "model_type", None) == "qwen3_moe":
+            sparse_layers = [
+                index for index in range(text.num_hidden_layers)
+                if index not in text.mlp_only_layers and (index + 1) % text.decoder_sparse_step == 0
+            ]
+            if not sparse_layers:
+                return tree
+            tree[-1]["mlp:moe:?"] = {
+                "gate": ("gate:!",),
+                "experts": {"#": ("gate_proj:0", "up_proj:0", "down_proj:1")},
+            }
+            if len(sparse_layers) < text.num_hidden_layers:
+                for projection, order in (("gate_proj", 0), ("up_proj", 0), ("down_proj", 1)):
+                    tree[-1]["mlp:moe:?"][projection] = (f"{projection}:{order}",)
+            del tree[-1]["mlp"]
+        return tree
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # No vision/text or routed-expert folding relationships are qualified.
+        return []
 
     def pre_quantize_generate_hook_start(self):
         language_model = self.model.model.language_model
@@ -88,9 +129,6 @@ class InternS1QModel(BaseQModel):
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
 
-    def load_processor(self) -> ProcessorMixin:
-        return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=self.trust_remote_code)
-
     @classmethod
     def prepare_inputs_for_conversations(
         cls,
@@ -125,7 +163,7 @@ class InternS1QModel(BaseQModel):
         return sample
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        processor = self.load_processor()
+        processor = self.processor
         calib_data = []
         for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             batched_samples = []
