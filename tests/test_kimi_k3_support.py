@@ -47,11 +47,12 @@ def test_calibration_reference_requires_trust_remote_code(utils, tmp_path):
     # tests/module_tree/test_kimi_linear_native_tree.py.
     ("kimi_k3", KimiK3QModel), ("kimi_linear", KimiLinearNativeQModel),
 ])
-def test_registry_selects_kimi_backbone(monkeypatch, model_type, definition):
+def test_registry_selects_kimi_backbone(monkeypatch, tmp_path, model_type, definition):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda *a, **kw: True)
     monkeypatch.setattr(auto, "load_model_config", lambda *a, **kw:
                         SimpleNamespace(model_type=model_type))
-    assert auto.check_and_get_model_definition("tiny-kimi", trust_remote_code=True) is definition
+    assert auto.check_and_get_model_definition(tmp_path, trust_remote_code=True) is definition
 
 
 @pytest.mark.parametrize("definition,nested", [(KimiK3QModel, True), (KimiLinearQModel, False)])

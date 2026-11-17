@@ -404,6 +404,30 @@ class TikTokenTokenizer(PythonBackend):
         )
 
 
+class KimiLinearTokenizer(TikTokenTokenizer):
+    """Ordinary Kimi-Linear source BPE with JSON/Jinja chat, not K3 XTML."""
+
+    num_reserved_special_tokens = 258
+
+    def apply_chat_template(self, conversation, tools=None, tokenize=False, add_generation_prompt=True, **kwargs):
+        return PythonBackend.apply_chat_template(
+            self,
+            conversation,
+            tools=_deep_sort_dict(tools),
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            **kwargs,
+        )
+
+
+def _deep_sort_dict(value):
+    if isinstance(value, dict):
+        return {key: _deep_sort_dict(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [_deep_sort_dict(item) for item in value]
+    return value
+
+
 class KimiTokenizerFactory:
     @classmethod
     def from_pretrained(cls, path, **kwargs):
@@ -427,6 +451,4 @@ class KimiTokenizerFactory:
         config = KimiConfigFactory.from_pretrained(path, **config_kwargs)
         if isinstance(config, KimiLinearConfig):
             return TikTokenTokenizer.from_pretrained(path, **kwargs)
-        from transformers import AutoTokenizer
-
-        return AutoTokenizer.from_pretrained(path, config=config, trust_remote_code=False, **kwargs)
+        return KimiLinearTokenizer.from_pretrained(path, **kwargs)

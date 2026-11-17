@@ -37,6 +37,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, can_return_tuple, logging
 
+from .checkpoint import ActiveKDAHeads, KimiCheckpointMixin
 from .configuration_kimi_k3 import KimiLinearConfig
 from .eager_kda import FusedRMSNormGated, ShortConvolution, kda_forward
 
@@ -109,6 +110,8 @@ class KimiDynamicCache:
         super().__init__()
         self.config = config
         self.seen_tokens = 0
+        self.multimodal_attention_mask = None
+        self.multimodal_input_mask = None
 
         if config.linear_attn_config is not None:
             self.layer_types = []
@@ -153,6 +156,10 @@ class KimiDynamicCache:
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search, given the selected beam indices."""
+        for name in ("multimodal_attention_mask", "multimodal_input_mask"):
+            mask = getattr(self, name)
+            if mask is not None:
+                setattr(self, name, mask.index_select(0, beam_idx.to(mask.device)))
         for layer_idx in range(len(self.key_cache)):
             if self.key_cache[layer_idx] is not None:
                 device = self.key_cache[layer_idx].device
@@ -433,6 +440,12 @@ class KimiMLAAttention(nn.Module):
 
 
 class KimiDeltaAttention(nn.Module):
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        key = prefix + "A_log"
+        if key in state_dict:
+            state_dict[key] = ActiveKDAHeads(self.num_heads).convert({key: state_dict[key]}, [key], [key])[key]
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def __init__(self, config: KimiLinearConfig, layer_idx: int):
         super().__init__()
         self.config = config
@@ -969,7 +982,7 @@ class KimiDecoderLayer(nn.Module):
         return prefix_sum, block_residual
 
 
-class KimiPreTrainedModel(PreTrainedModel):
+class KimiPreTrainedModel(KimiCheckpointMixin, PreTrainedModel):
     config_class = KimiLinearConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True

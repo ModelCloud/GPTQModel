@@ -33,9 +33,10 @@ flowchart TD
     G --> L[Native definition or direct factory: native KimiLinearForCausalLM]
     E --> M[Package-owned TikTokenTokenizer and KimiK3Processor]
     I --> N[KimiTokenizerFactory: package-owned TikTokenTokenizer]
-    G --> O[KimiTokenizerFactory: native AutoTokenizer with explicit native config and trust false]
+    G --> O[KimiTokenizerFactory: owned KimiLinearTokenizer with source BPE and Jinja chat]
     M --> P[Local tiktoken.model and processor data only]
     N --> P
+    O --> P
     P -->|missing or malformed data| Q[Fail without executing checkpoint Python; repair and retry]
 ```
 
@@ -149,7 +150,7 @@ instead of the obsolete `AutoConfig` boundary.
 
 ## Explicit limits
 
-No trained K3 weights, accelerator backend, fused FLA/FlashAttention, multi-GPU,
+No complete trained K3 checkpoint, accelerator backend, fused FLA/FlashAttention, multi-GPU,
 threaded execution, compilation, long-context accuracy, training, MTP, or video
 qualification is claimed. CPU eager KDA is a correctness-oriented Python loop,
 not a high-throughput replacement for fused kernels. Only the package-owned
@@ -157,3 +158,119 @@ dynamic cache is supported; foreign/static/offloaded cache implementations and
 speculative rollback are not qualified. Tiny cache/generation/beam checks are
 not a claim of arbitrary beam/search compatibility or trained-model quality.
 Accelerator paths retained from upstream require separate actual-device checks.
+
+## Tokenizer, padded-checkpoint and multimodal continuation repairs
+
+Ordinary non-AttnRes model/config classes remain native Transformers. The owned
+`KimiLinearTokenizer` shares K3's source BPE but has 258 reserved tokens and the
+ordinary sorted-tools Jinja chat contract, not XTML. Outer Tokenicer still owns
+generic normalization. Its authoritative source is
+[`Kimi-Linear-48B-A3B-Instruct@e1df551a447157d4658b573f9a695d57658590e9`](https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct/tree/e1df551a447157d4658b573f9a695d57658590e9).
+Tests parse its literal regex without importing checkpoint Python and build an
+independent TikToken oracle. `I'm sure we'll see it's fine` must produce
+`[17172, 3287, 20944, 2050, 4643, 8201]`; `it's` alone is `[64072]`.
+
+`a_log_reference.json` contains a pinned 512-byte K3 tensor fragment, **not** a
+complete trained checkpoint. Its metadata identifies shard 13, byte range and
+SHA-256. Published `language_model.model.layers.12.self_attn.A_log` has 128 F32
+entries while the config has 96 active heads; the last 32 entries are positive
+zero bytes. Only this padded geometry is admitted. Exact active-head tensors
+remain valid. Wrong rank/size, non-F32 padded data, negative-zero/nonzero tails,
+or padding for other head counts fail even with `ignore_mismatched_sizes=True`.
+
+```mermaid
+flowchart TD
+    A[KimiCheckpointMixin._load_pretrained_model] --> B[Inspect A_log source bytes before dtype casts]
+    B --> C{Active shape or verified F32 128 for 96 heads?}
+    C -->|invalid| X[ValueError before load; repaired source may retry]
+    C -->|valid| D[ActiveKDAHeads WeightConverter]
+    D --> E[Active-sized FP32 parameter]
+    D --> F[HF offloads converted safetensors]
+    E --> G[save_pretrained retains active shape]
+    F --> G
+    H[KimiDeltaAttention._load_from_state_dict] --> C
+    style X fill:#fdd
+```
+
+Converters are attached per load without global registration. HF retains shard
+streaming and device placement; preflight reads only the small A_log vectors.
+Direct state loading covers fresh/existing modules and both assignment modes.
+Ordinary native Linear's loading implementation is not changed.
+
+```mermaid
+flowchart TD
+    A[KimiK3ForConditionalGeneration.forward image prefill] --> B[Merge image features and mask]
+    B --> C[Store raw and expanded masks on returned KimiDynamicCache]
+    C --> D[prepare_inputs_for_generation slices by raw processed length]
+    D --> E[forward validates supplied raw or expanded cached prefix]
+    E -->|wrong shape, prefix or suffix| X[ValueError before decoder or cache mutation]
+    E -->|valid or omitted mask| F[Append current suffix to expanded mask; derive positions]
+    F --> G[Run decoder successfully, then commit masks]
+    G --> D
+    H[_expand_inputs_for_generation] --> I[Repeat per-row image grid and patch groups for beams]
+    I --> A
+    J[KimiDynamicCache.reorder_cache] --> K[Reorder both masks alongside KV, conv and recurrent state]
+    style X fill:#fdd
+```
+
+Masks belong to each cache, not model-global state; they are not checkpoint
+tensors. Beam expansion repeats whole image groups, including zero/two-image
+rows. Repeating individual patches changes nonuniform image content.
+
+| Before at parent `0fdfd2396` | After |
+| --- | --- |
+| `tokenization_kimi.py:430-432`: ordinary fallback used AutoTokenizer | Source BPE and separate ordinary Jinja chat |
+| `modeling_kimi_linear.py:475`: active96 mismatched published128 | Pre-cast validation/conversion and canonical96 saves |
+| `modeling_kimi_k3.py:1126-1138`: raw mask sliced against expanded cache | Per-cache raw/expanded masks and aligned positions |
+| Generation repeated each patch for beams | Repeat whole per-row image groups |
+
+### Follow-up validation
+
+On Python3.14.6t/GIL0, TF5.23.0, Torch2.15CPU, released Tokenicer0.0.17,
+tiktoken0.12.0 and safetensors0.8.0, the owned/native sibling and shared
+loader/processor/tokenizer/config/registry suites pass **742 tests**, with one
+existing shared fixture skip, in 43.28s. Real tokenizer assets ran without
+skipping. From `tests/`, prepend `PYTHON_GIL=0` and use the isolated environment:
+
+```sh
+python -s -m pytest test_kimi_k3_local_port.py \
+  module_tree/test_kimi_k3_local_port.py test_kimi_k3_support.py \
+  module_tree/test_kimi_linear_native_tree.py test_local_model_loading.py \
+  test_local_processor_loading.py test_local_tokenizer_loading.py \
+  test_hf_config_compat.py module_tree/test_registered_module_plans.py \
+  -q --disable-warnings
+```
+
+Intended red evidence before these repairs:
+
+| Test node (under `test_kimi_k3_local_port.py`) | Failure before repair |
+| --- | --- |
+| `test_native_linear_real_tokenizer_contractions_match_pinned_source` | All six trust/bypass cases: `[277,1048]` for `it's`, source expected `[64072]` |
+| `test_published_padded_a_log_first_load_and_two_safetensors_roundtrips[dtype0-k3]` | Checkpoint size mismatch: published128 versus active96 |
+| `test_padded_mixed_images_generate_matches_independent_merge_and_text_oracle[hybrid-1]` (before dtype/text-only parameters) | Step2 raw mask versus expanded cache prefix: `cached prefix` ValueError |
+
+Green regressions cover real hashes/IDs/chat/tools and asset repair, public
+hostile-map load/retry/reload across all six trust/bypass cases, exact full
+state, FP32/BF16/FP16 two-cycle safetensors reload, invalid-padding rejection,
+direct assignment and actual KDA-submodule disk-offload/restore/resave in text
+and multimodal wrappers. Mixed-image/text-only batch generation checks every
+step's mask, positions, tokens and logits against independent placeholder
+substitution/left-padding plus text-decoder generation for MLA/hybrid/KDA,
+all three dtypes, greedy and three beams. Rejected-mask retry checks every
+KV/convolution/recurrence tensor stays unchanged; tuple/dict returns both work.
+
+Whole AttnRes-layer disk dispatch is **not** qualified: its source residual
+reducer reads child weights directly, needing preload support for whole-layer
+disk placement. Tested placement is the KDA submodule, including A_log and its
+consuming computation. AWQ, ordinary looper and LazyTurtle quantization remain
+unsupported for AttnRes. No complete trained checkpoint/quality, GPU/fused FLA,
+FlashAttention, multi-GPU, compilation, concurrent model execution, MTP/video
+or foreign-cache qualification is added. Parent owns central docs/README links
+and PR diagrams; this port-local reference supplies the exact flow and evidence.
+
+Static validation: repository `format/check.sh` with Ruff0.14.2, compileall and
+`git diff --check` pass. Pyright1.1.407 on all four changed runtime files reports
+154 diagnostics (HF API/type signatures and optional imports included); it is
+**not** a clean whole-port type check. The new `checkpoint.py` alone has zero
+errors/warnings. Shared fixture skip: PEFT AWQ compatibility probe dependency
+absent in `test_prepare_remote_model_init_compat_tightens_peft_awq_probe`.
