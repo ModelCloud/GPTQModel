@@ -202,6 +202,40 @@ def _build_allspark():
     return module.eval(), x, True
 
 
+def _build_cpu_avx512():
+    """Pack a BF16 checkpoint and take the fused AVX512-BF16 path.
+
+    ``TorchCpuAvx512Linear`` is BF16-only and CPU-only; the forward widens the
+    scales and packs the weight on the first BF16 call (``transform_cpu``).
+    """
+
+    torch.manual_seed(0)
+    dense = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False, dtype=torch.bfloat16)
+    module = TorchCpuAvx512Linear(
+        bits=4,
+        group_size=GROUP_SIZE,
+        sym=True,
+        desc_act=False,
+        in_features=IN_FEATURES,
+        out_features=OUT_FEATURES,
+        bias=False,
+        format=FORMAT.GPTQ_V2,
+        dtype=torch.bfloat16,
+    )
+    groups = IN_FEATURES // GROUP_SIZE
+    module.pack(
+        dense,
+        torch.full((OUT_FEATURES, groups), 1 / 128, dtype=torch.bfloat16),
+        torch.full((OUT_FEATURES, groups), 1 << 3, dtype=torch.int32),
+        torch.arange(IN_FEATURES, dtype=torch.int32) // GROUP_SIZE,
+    )
+    module = module.to("cpu").eval()
+    module.post_init()
+    module.transform_cpu()
+    x = torch.randn(ROWS, IN_FEATURES, dtype=torch.bfloat16)
+    return module, x, False
+
+
 def _unavailable(cls) -> Optional[str]:
     try:
         ok, err = cls.cached_validate_once()
@@ -262,7 +296,11 @@ CASES = [
         lambda: _from_torch_source(TorchAtenLinear, bits=4, device="cpu"),
         lambda: None,
     ),
-    Case(TorchCpuAvx512Linear, None, lambda: _unavailable(TorchCpuAvx512Linear)),
+    Case(
+        TorchCpuAvx512Linear,
+        _build_cpu_avx512,
+        lambda: _unavailable(TorchCpuAvx512Linear),
+    ),
     Case(MarlinLinear, _build_marlin, _marlin_unavailable),
     Case(MacheteLinear, None, _machete_unavailable),
     Case(ExllamaV2Linear, _build_exllamav2, lambda: _unavailable(ExllamaV2Linear)),
