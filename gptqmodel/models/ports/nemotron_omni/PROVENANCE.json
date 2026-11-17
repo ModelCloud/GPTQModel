@@ -1,0 +1,62 @@
+{
+  "repository": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
+  "revision": "e5e9932441de940c9a62185c870ea5bcd4cd24e2",
+  "upstream_base_url": "https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/resolve/e5e9932441de940c9a62185c870ea5bcd4cd24e2/",
+  "transformers_version": "5.23.0",
+  "source_license": "Apache-2.0 headers on original modeling.py/configuration.py; unheaded evs.py inspected, not copied",
+  "trained_model_assets_license": "NVIDIA Open Model Agreement; separate from source code; no trained tensors/tokenizer assets copied",
+  "source_sha256": {
+    "modeling.py": "a666aeaa23ab98571412496772254f10aff84464b714819b8e11fa10a36f76b2",
+    "configuration.py": "f13df0f4ed641c968c52a61f0ba46f6408fbfccf57fea5dc5ef9fafd76d8d245",
+    "configuration_nemotron_h.py": "13dc1b61b72d624e6415b523fc038c3312788600d7ef2e45477fb951c259944c",
+    "modeling_nemotron_h.py": "046b199c440b6a2b0c7f71d2174dd8820ff94810e210c4a10ca1aaeaf4a71b93",
+    "configuration_radio.py": "27f16c9dccc06b28435e75d6b97877ab7cd2e5809029039b0c84e0b8f8602bb7",
+    "audio_model.py": "a3bbb1e79c002f92c2695a6f4718cf8af93cef7b1f60e30ffc0b4f5c5c3ddd79",
+    "image_processing.py": "360fd99b157c802ada9d752716e05c5d8f01fa9f2ef2514224c706599cec9d03",
+    "video_processing.py": "9cc25c47e6d896439aff41faab505b3d2f4fe56afb9bb5b52121a589cc5163a8",
+    "processing.py": "823b55ccbb472353032cb3b3a849d3ea77c3a47287af074caad995e3a6cc51e2",
+    "processing_utils.py": "f107d30e96bf9ff949fbf71b2429601d4971e51c8cbd8f27ab73b82f05d2ce59",
+    "evs.py": "79f0659f3532b5ebd941e497c4ccd0808879e5487673e6f9387ca29f6d789cd8",
+    "config.json": "bf8859c106ef73d65fd194cbd336584d24dceaf724a408c762db7945e3925957",
+    "model.safetensors.index.json": "ed79893f81389fba6b2065954b4ea706015774d2d52a557fb8b9ff8d58f234cb",
+    "tokenizer.json": "e5e7dc84d72e8f248321611c3d6dce23407b135f55f8caf5b26119798d12f85f",
+    "tokenizer_config.json": "02176136a63e361649f47530943b1e75019556b4cfe5a102eace996f1600e7b2",
+    "special_tokens_map.json": "e3a4f63da745f02317a45e00e6476c17fc66ac41faf14bb1b0be1f3211b0ca53",
+    "preprocessor_config.json": "5b06a0684fad7b0567598f83325e2307ffef329fab5e5b745a7e51df35acb62c",
+    "chat_template.jinja": "41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa",
+    "README.md": "3081b24932a80ff4ade38bad73d0b3cb1c161867dad7559bdfa42345879f1348"
+  },
+  "fetched_safetensors_header_json_sha256": {
+    "model-00001-of-00017.safetensors.header.json": "223548807fc5afbc187c582e6bb2ac6a91a55a868e061fd4d8722b876fb6f8d4",
+    "model-00002-of-00017.safetensors.header.json": "001d76f5b0bafc1c84abbf9c4a2064c66fb99b64dbb4d76c5d1cbd07441eb305",
+    "model-00003-of-00017.safetensors.header.json": "ec5b7adc074df412cd9a35e92ef61b1c01f739ffbf8442b276b05311e67faa8f",
+    "model-00004-of-00017.safetensors.header.json": "9490424764ac1ecc3720e266aeacf73cdd7a9eaefb9ca6e192d0ad891375b069",
+    "model-00005-of-00017.safetensors.header.json": "906725e997e71fc8e8afbd5cf67af8fd3c20c4374d2b65ce0f2d907b25825aba",
+    "model-00006-of-00017.safetensors.header.json": "a1cca6bf7480c54914aeb53bbd81c7285079961f4e4c8e800a0a2299204f7240",
+    "model-00007-of-00017.safetensors.header.json": "af518529eb2bc79780c9f46800120b0f426714127cee88ca2229e53eacea722f",
+    "model-00008-of-00017.safetensors.header.json": "a4efa723bb3c1922233509b083cf505e14f3c73450f7f7d39256a31c70547c9b",
+    "model-00009-of-00017.safetensors.header.json": "f6e03dcc7d80bdb1691fdf390cb69fc3beb377b6dec28ecdc7f77b2b7b44fe3c",
+    "model-00010-of-00017.safetensors.header.json": "95bec909901258ff7244cc38b495dfa7e0148b35db5bf3db0e1eee6c953e7172",
+    "model-00011-of-00017.safetensors.header.json": "9ac845689cbd2311288f21322eb489dc770a82b84b7533ab546147e20f301811",
+    "model-00012-of-00017.safetensors.header.json": "94b908ea6a81d80f6761e6455b3f55765760783d66cbbfcaafa04a5ae8953e39",
+    "model-00013-of-00017.safetensors.header.json": "f3f27e2e3d510fba1733753345ed539d6823b8997dc7662d616b5affd948e698",
+    "model-00014-of-00017.safetensors.header.json": "8cca1daf76a3057b0882cd9d41fcc6f58570473e96bf5572851c12f1496891e6",
+    "model-00015-of-00017.safetensors.header.json": "8b8a9d53a768f251fbe7cd7e138814904e76147bc06f15f8c17fd6e60c4f91ba",
+    "model-00016-of-00017.safetensors.header.json": "bf323f9440e086d069ee3a431362d5007b061e754e0a5fed074378399b1375bc",
+    "model-00017-of-00017.safetensors.header.json": "600983e245efb70cf2b2db2805e73721d95c4236ec665065fd843e8b2ac009c5"
+  },
+  "native_module_sha256": {
+    "models/nemotron_h_omni/modeling_nemotron_h_omni.py": "20369d1b27edacee6f50f463e648855d76393ebe2d54e40dca38f42655cc5ba2",
+    "models/nemotron_h_omni/configuration_nemotron_h_omni.py": "4c05b5220a16b8c4d485b8bf2e31392cbb3ce92efb74351eaf74ec5d821bd216",
+    "models/nemotron_h/modeling_nemotron_h.py": "d13b26d1adb49f54dd952b9ee11b3b008b79e55792c9e8d1cce9f46c213f6397",
+    "models/radio/modeling_radio.py": "9e54103929a265354e248c1086db91c1af75c5baed4ba876f1f704978412e228",
+    "models/parakeet/modeling_parakeet.py": "2dbe49d189b55ea61860b8d0dbca6ad8873dc796d36c31fb8bef789a0d864a0c"
+  },
+  "packaged_data_sha256": {
+    "source_config.json": "bf8859c106ef73d65fd194cbd336584d24dceaf724a408c762db7945e3925957",
+    "checkpoint_inventory.json.gz": "d2b80a2d4679ade8508ff00db3afd4c5abfd5f30b1e8fe1bf5c35c03bef2e768",
+    "LICENSE": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049",
+    "tokenizer_oracle.json": "ae54cff8ad53e4af345e836ba5f0debb7f3980e27185656c99e62c12b282247f"
+  },
+  "inventory": "All 7349 released header tensors, exact shapes/dtypes; no trained weights fetched. Four preprocessing buffers preserved outside execution; native deterministic summary_idxs added. 7473 native/defused parameter/buffer owners match converted inventory excluding preprocessing; source vision packed QKV splits and source MoE individual experts match defused native owners."
+}

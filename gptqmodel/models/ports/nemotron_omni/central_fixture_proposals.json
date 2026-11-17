@@ -1,0 +1,74 @@
+{
+  "registered_module_plans": {
+    "cases": {
+      "NemotronOmniQModel/gptq": {
+        "layers": [
+          "language_model.model.layers"
+        ],
+        "blocks": [
+          [
+            "norm:!"
+          ],
+          [
+            "mixer.q_proj",
+            "mixer.k_proj",
+            "mixer.v_proj",
+            "mixer.A_log:!",
+            "mixer.D:!",
+            "mixer.dt_bias:!"
+          ],
+          [
+            "mixer.o_proj"
+          ],
+          [
+            "mixer.in_proj"
+          ],
+          [
+            "mixer.out_proj",
+            "mixer.gate_proj",
+            "mixer.up_proj"
+          ],
+          [
+            "mixer.down_proj"
+          ],
+          [
+            "mixer.conv1d:!"
+          ],
+          [
+            "mixer.gate:!"
+          ],
+          [
+            "mixer.shared_experts.up_proj"
+          ],
+          [
+            "mixer.shared_experts.down_proj"
+          ],
+          [
+            "mixer.fc1_latent_proj"
+          ],
+          [
+            "mixer.experts.{expert_index}.up_proj"
+          ],
+          [
+            "mixer.experts.{expert_index}.down_proj"
+          ],
+          [
+            "mixer.fc2_latent_proj"
+          ],
+          [
+            "mixer.norm:!"
+          ]
+        ]
+      }
+    }
+  },
+  "fusable_models": {
+    "models": {
+      "nemotronh_nano_omni_reasoning_v3": {
+        "definition": "NemotronOmniQModel",
+        "reason": "Native Transformers 5 Nemotron-H/RADIO/Parakeet with package-owned legacy Omni binding and temporal media merge; fusion executor has not been qualified."
+      }
+    }
+  },
+  "awq_scaling_families": "Existing generic FAMILIES omits Omni, so no generic PLAIN_QUANTIZATION_FAMILIES change is required. Four port-owned real public plain-AWQ cases qualify actual quantization."
+}

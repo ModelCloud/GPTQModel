@@ -1,0 +1,106 @@
+{
+  "revision": "e5e9932441de940c9a62185c870ea5bcd4cd24e2",
+  "oracle": "Pinned tokenizer.json interpreted by native TokenizersBackend without GPT-QModel or Tokenicer; data, never checkpoint Python",
+  "text_cases": [
+    {
+      "text": "Hello world!",
+      "input_ids": [
+        22177,
+        4304,
+        1033
+      ],
+      "decoded": "Hello world!"
+    },
+    {
+      "text": " café 你好\n  test",
+      "input_ids": [
+        35858,
+        1032,
+        124108,
+        1010,
+        1032,
+        2688
+      ],
+      "decoded": " café 你好\n  test"
+    },
+    {
+      "text": "<img><image></img>\nWhat is here?",
+      "input_ids": [
+        19,
+        18,
+        20,
+        1010,
+        7493,
+        1395,
+        3226,
+        1063
+      ],
+      "decoded": "<img><image></img>\nWhat is here?"
+    }
+  ],
+  "chat_messages": [
+    {
+      "role": "user",
+      "content": "What is 2 + 2?"
+    }
+  ],
+  "chat_input_ids": {
+    "input_ids": [
+      10,
+      25708,
+      1010,
+      11,
+      1010,
+      10,
+      3263,
+      1010,
+      7493,
+      1395,
+      1032,
+      1050,
+      1867,
+      1032,
+      1050,
+      1063,
+      11,
+      1010,
+      10,
+      1503,
+      19464,
+      1010,
+      12,
+      1010
+    ],
+    "attention_mask": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "specials": {
+    "bos_token_id": 1,
+    "eos_token_id": 11,
+    "pad_token_id": 11
+  }
+}
