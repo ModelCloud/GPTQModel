@@ -14,6 +14,7 @@ on:
       - 'gptqmodel/nn_modules/qlinear/gemm_awq_triton.py'
       - 'docs/**'
       - 'tests/test_awq_*.py'
+      - 'tests/test_hymba_awq_*.py'
       - 'tests/test_calibration_*.py'
       - 'tests/test_docs_contract_refs.py'
       - 'tests/module_tree/**'
@@ -71,6 +72,7 @@ jobs:
                 tests/test_awq_cohere2_moe_parallel_norm_4898.py \
                 tests/test_training_kernel_inplace_4974.py \
                 tests/test_peft_adalora_training_4974.py \
+                tests/test_hymba_awq_4891.py \
                 tests/test_smooth_percentile_bounds_5005.py \
                 tests/module_tree/test_awq_relationships.py \
                 tests/module_tree/test_granitemoehybrid_model_tree.py \

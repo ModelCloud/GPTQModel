@@ -197,6 +197,14 @@ needs:
   If a token-aligned kwarg still does not describe the replayed rows,
   `_prepare_module_forward` raises `_AWQScaleGroupError`, so the configured
   plain-quantization fallback applies instead of aborting `quantize()`.
+- A forward declared with a `**kwargs` catch-all takes its real inputs from
+  that dict: Hymba's `HymbaBlock` reads `attention_mask`, `position_ids`,
+  `kv_last_layer` and `use_swa` out of it. `AWQProcessor._sanitize_kwargs`
+  therefore passes the captured kwargs through unchanged, and
+  `_prepare_module_forward` treats `position_ids` as accepted so a 2-D
+  activation is promoted to `[1, seq, hidden]` the way the block's
+  `pack(...)` requires (#4891). A name-based filter handed the block an empty
+  dict and the replay raised `KeyError: 'attention_mask'`.
 
 ### Bloom ALiBi
 

@@ -306,6 +306,26 @@ def _is_rotary_embedding_module(module: nn.Module, leaf_name: str) -> bool:
     return len(positional) >= 2
 
 
+def _forward_accepts_var_kwargs(module: nn.Module) -> bool:
+    """Whether ``module.forward`` collects unknown keywords into ``**kwargs``.
+
+    A forward declared as ``(hidden_states, past_key_value=None, **kwargs)``
+    reads its real inputs out of the catch-all: Hymba's ``HymbaBlock`` takes
+    ``attention_mask``, ``position_ids``, ``kv_last_layer`` and ``use_swa``
+    that way (#4891). Every name-based signature filter therefore has to treat
+    such a module as accepting every key, not as accepting none of them.
+    """
+
+    try:
+        parameters = inspect.signature(module.forward).parameters
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 def _is_recurrent_attention_layer_type(layer_type: Optional[str]) -> bool:
     """Whether ``layer_type`` is a recurrent / convolution mixer, not attention.
 
@@ -4429,6 +4449,12 @@ class AWQProcessor(LoopProcessor):
         except (ValueError, TypeError):
             pass
 
+        if not supports_position_ids and _forward_accepts_var_kwargs(module):
+            # A `**kwargs` forward (Hymba's `HymbaBlock`) reads `position_ids`
+            # out of the catch-all, so the 2-D activation still has to be
+            # promoted to `[batch, seq, hidden]` for the replay (#4891).
+            supports_position_ids = True
+
         if x.dim() == 2 and (supports_position_ids or supports_position_embeddings):
             x = x.unsqueeze(0)
 
@@ -5071,6 +5097,18 @@ class AWQProcessor(LoopProcessor):
             module (`torch.nn.Module`):
                 Target module to quantize.
         """
+        if _forward_accepts_var_kwargs(module):
+            # The catch-all *is* the module's input list. Filtering by name
+            # handed Hymba's `HymbaBlock` an empty dict, so its replay raised
+            # `KeyError: 'attention_mask'` (#4891). Private keys are the
+            # processor's own bookkeeping (`_awq_feature_kwargs`) and must not
+            # reach the module; the retained-rows position key is the one
+            # private key `_prepare_module_forward` consumes.
+            return {
+                k: v
+                for k, v in inputs_kwargs.items()
+                if not k.startswith("_") or k == _AWQ_ROTARY_POSITION_IDS
+            }
         module_signature = inspect.signature(module.forward).parameters
         sanitized_kwargs = {}
         for k, v in inputs_kwargs.items():
