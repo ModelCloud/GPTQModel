@@ -10,7 +10,7 @@ class TestMiniCpm(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/MiniCPM-2B-128k"  # "openbmb/MiniCPM-2B-128k"
     NATIVE_ARC_CHALLENGE_ACC = 0.3848
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4164
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 4
     ASSERT_INFERENCE = True
 
@@ -21,7 +21,7 @@ class TestMiniCpm(ModelTest):
 
 
 class TestMiniCpmDpo(ModelTest):
-    """MiniCPM-2B-dpo reads `past_key_values.seen_tokens` in `generate()`.
+    """The package-owned decoder must not read the removed `seen_tokens` field.
 
     Issue #4121 item 3: transformers 5 removed the attribute, so a native load
     raised `AttributeError: 'DynamicCache' object has no attribute
@@ -30,7 +30,7 @@ class TestMiniCpmDpo(ModelTest):
     """
 
     NATIVE_MODEL_ID = "/monster/data/model/MiniCPM-2B-dpo-bf16"  # "openbmb/MiniCPM-2B-dpo-bf16"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
 
     def test_minicpm_dpo_native_generate(self):
@@ -39,7 +39,7 @@ class TestMiniCpmDpo(ModelTest):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=None,
-            trust_remote_code=True,
+            trust_remote_code=False,
             device="cuda:0",
         )
         try:
