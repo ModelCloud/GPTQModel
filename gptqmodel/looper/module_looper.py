@@ -2134,6 +2134,22 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                             # them to a kernel this device can run before the
                             # next forward (#4947).
                             rehome_failed_run_kernels(self.gptq_model)
+                            # A cancelled run must return the same ordinary
+                            # tensors a completed one does: the norms, biases
+                            # and buffers `pre_quantize` materialized under
+                            # inference mode otherwise stay inference tensors,
+                            # and a plain grad-mode forward raises "Inference
+                            # tensors cannot be saved for backward" (#5012).
+                            # The repair is best-effort so it can never mask
+                            # the failure that got us here.
+                            try:
+                                ensure_version_counters(self.gptq_model.model)
+                            except Exception:
+                                log.warning(
+                                    "failed to repair tensor version counters while "
+                                    "failing the quantization run",
+                                    exc_info=True,
+                                )
                             # Layers that finished before the cancel stay as
                             # disk-offloaded meta shells pointing into this run's
                             # private offload root. Deleting that root now would
