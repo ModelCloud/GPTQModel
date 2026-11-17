@@ -832,6 +832,36 @@ class QQQ:
             self._device_sample_counts.clear()
             return self._fallback_quantize(resolved_strategy)
 
+        # A module that received some calibration rows but fewer than the
+        # configured ``Fallback.threshold`` has a near rank-deficient Hessian
+        # (a rarely routed MoE expert is the typical case). GPTQ applies the
+        # documented low-sample policy before it uses the Hessian; QQQ used to
+        # consult the threshold only after a failed inverse, so these modules
+        # silently ran the full error-propagation loop. Apply the same check
+        # here, before the block pass, so the configured fallback is honoured
+        # for every module the policy selects.
+        if should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
+            threshold_text = str(getattr(self.fallback, "threshold", None))
+            extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+            log.warn(
+                "Quantization: Module `%s` -> Using `%s` fallback quantization "
+                "(observed %s samples, threshold=%s%s, max_total=%s).",
+                self.name,
+                resolved_strategy.value,
+                self.nsamples,
+                threshold_text,
+                extra,
+                self.expected_nsamples,
+            )
+            # The fallback is data-independent: release the Hessian instead of
+            # carrying a near-singular matrix into the block loop.
+            self.H = None
+            self._materialized_samples = 0
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            return self._fallback_quantize(resolved_strategy)
+
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
         actorder = self.qcfg.desc_act
