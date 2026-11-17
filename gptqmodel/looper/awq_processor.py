@@ -3019,6 +3019,14 @@ class AWQProcessor(LoopProcessor):
         declares across sibling branches of one norm (Falcon-H1's attention and
         Mamba mixer). Those members read the same tensor, so the same folded
         scale is correct for them even though this replay cannot score them.
+
+        ``allow_outside_fold`` lifts the boundary for the group's scale
+        consumers too. A Cohere2-MoE group carries the MoE router as a consumer
+        of the shared `input_layernorm`; the router lives in the sibling MoE
+        branch, so it can never run inside the `self_attn` replay. The fold is
+        still exact for it - it reads the same normed tensor - and
+        ``apply_scale`` compensates every declared consumer through its
+        consumer map. Only members the search scores are replayed (#4898).
         """
 
         try:
@@ -3051,13 +3059,21 @@ class AWQProcessor(LoopProcessor):
             if source_weight.ndim in (1, 2) and source_weight.shape[0] != width:
                 raise _AWQScaleGroupError(f"AWQ: source `{source_name}` cannot produce {width} channels.")
         inspection_modules = {id(child) for child in module2inspect.modules()}
-        checked = targets + consumers if allow_outside_fold else targets + extra + consumers
+        checked = targets if allow_outside_fold else targets + extra + consumers
         outside = [name for name, target in checked if id(target) not in inspection_modules]
         if outside:
             raise _AWQScaleGroupError(
                 f"AWQ: replay boundary `{inspect_name}` does not contain targets {outside} for source "
                 f"`{source_name}`; a matching replay input and boundary are required."
             )
+        if allow_outside_fold:
+            # Consumers outside the boundary are folded, not replayed: they are
+            # compensated through ``apply_scale``'s consumer map.
+            consumers = [
+                (name, consumer)
+                for name, consumer in consumers
+                if id(consumer) in inspection_modules
+            ]
         return targets + consumers
 
     def _replay_moe_routing_override(self) -> Optional[int]:
