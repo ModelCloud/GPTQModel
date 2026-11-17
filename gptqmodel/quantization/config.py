@@ -5959,20 +5959,24 @@ class GPTQConfig(PreProcessorConfig):
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
     act_group_aware: Optional[bool] = field(default=None)
-    # Calibration-only: drop the first token of every calibration sequence
+    # Calibration-only: drop the leading BOS token of each calibration sequence
     # before accumulating the input Hessian. Tokenizers that prepend a BOS
     # token turn that position into an attention sink whose activation norm can
     # exceed the rest of the sequence by orders of magnitude; a single such row
     # then dominates ``X^T X`` and GPTQ stops optimizing for the text tokens
-    # (issue #4393). Off by default: the historical Hessian is unchanged, and
-    # only tokenizers/datasets whose rows begin with a special token benefit.
+    # (issue #4393). The position is only dropped when the calibration
+    # ``input_ids`` show the tokenizer's BOS id there: BOS-less tokenizers
+    # (Qwen2.5/Qwen3) keep their first real token, and a run that cannot prove
+    # the decision leaves the Hessian untouched (issue #4459). Off by default:
+    # the historical Hessian is unchanged.
     exclude_attention_sinks: bool = field(
         default=False,
         metadata={
             "help": (
-                "Skip the first token of each calibration sequence when accumulating "
-                "the GPTQ Hessian. Enable for calibration rows whose leading token is a "
-                "BOS/attention-sink special token. Default: False (unchanged behavior)."
+                "Skip the leading BOS token of each calibration sequence when accumulating "
+                "the GPTQ Hessian. Only positions whose token id is the tokenizer's BOS are "
+                "skipped; BOS-less tokenizers (Qwen2.5/Qwen3) keep position 0. "
+                "Default: False (unchanged behavior)."
             )
         },
     )
