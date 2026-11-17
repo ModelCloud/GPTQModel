@@ -136,6 +136,11 @@ def _iter_calibration_rows(dataset):
 
 _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 
+# Extra chat-template inputs a `messages` row may carry. The standard HF layout
+# keeps the tool schemas in `tools` (and RAG templates read `documents`); a
+# columnar mapping must carry them into every row like a plain row does (#4858).
+_TEMPLATE_INPUT_COLUMNS = ("tools", "documents")
+
 # Calibration input kinds a model definition may declare. The default is the
 # token/text path every existing definition uses; `tensor_kwargs` is the opt-in
 # path for models whose forward takes named tensors (Decision Transformer).
@@ -389,6 +394,23 @@ def _is_batched_column(value: Any) -> bool:
     return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
 
 
+def _is_conversation_entry(value: Any) -> bool:
+    """Return True when a ``messages`` column entry is itself a conversation.
+
+    A single row stores one conversation as a list of role mappings, so its
+    entries start with a mapping. A column stores one conversation per row, so
+    its entries start with a container: a list/tuple, or the ``ndarray``/
+    ``Series`` row that ``with_format("numpy"|"pandas")[:]`` produces (#4936).
+    """
+
+    if isinstance(value, (str, bytes, bytearray, Mapping)) or torch.is_tensor(value):
+        return False
+    ndim = getattr(value, "ndim", None)
+    if ndim is not None and ndim >= 1:
+        return True
+    return isinstance(value, Sequence)
+
+
 def _is_columnar_mapping(mapping: Mapping) -> bool:
     """Return True when a top-level mapping stores columns instead of one row.
 
@@ -406,7 +428,7 @@ def _is_columnar_mapping(mapping: Mapping) -> bool:
         entries = _column_entries(mapping["messages"])
         if not entries:
             return False
-        return isinstance(entries[0], (list, tuple))
+        return _is_conversation_entry(entries[0])
     return False
 
 
@@ -446,17 +468,96 @@ def _is_dataset_split_mapping(mapping: Mapping) -> bool:
     return all(isinstance(value, hf_dataset_types) for value in mapping.values())
 
 
+def _to_python_containers(value: Any) -> Any:
+    """Return ``value`` with NumPy/pandas containers unwrapped to Python ones.
+
+    A ``Dataset.with_format("numpy")[:]`` row stores ``messages``/``tools`` as
+    ``ndarray`` objects (a 1-D object array of conversations, or a 2-D object
+    array of turns when every conversation has the same length) and pandas
+    stores them as a ``Series`` of arrays. A chat template needs plain lists of
+    dicts: handed an ``ndarray`` it renders the template's default system turn
+    and silently drops the conversation (#4936). Copy the row into plain
+    ``list``/``dict``/``str``/number containers so every input shape renders
+    identically.
+
+    Torch tensors are returned unchanged: the token-id path consumes them and
+    converting them to lists would change how they are classified. The copy is
+    recursive and never mutates the caller's dataset.
+    """
+
+    if torch.is_tensor(value) or isinstance(value, (str, bytes, bytearray)):
+        return value
+    if isinstance(value, Mapping):
+        return {key: _to_python_containers(item) for key, item in value.items()}
+
+    # A NumPy structured array (record array) or one of its ``np.void`` rows
+    # stores the columns by name; ``tolist()`` would turn each row into a bare
+    # tuple and lose the column names.
+    dtype_names = getattr(getattr(value, "dtype", None), "names", None)
+    if dtype_names:
+        if getattr(value, "ndim", 0) == 0:
+            return {
+                name: _to_python_containers(item)
+                for name, item in zip(dtype_names, value.tolist())
+            }
+        return [_to_python_containers(row) for row in value]
+
+    # A pandas ``DataFrame`` row (iterating a pandas-formatted dataset) maps
+    # column names to one-element lists; keep it columnar so the caller's
+    # row/column logic sees the same shape as ``to_dict``.
+    if getattr(value, "columns", None) is not None:
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                mapped = to_dict("list")
+            except TypeError:
+                mapped = None
+            if isinstance(mapped, Mapping):
+                return {key: _to_python_containers(item) for key, item in mapped.items()}
+
+    # ``ndarray`` and pandas ``Series`` expose ``tolist``; a 0-D scalar's
+    # ``tolist()`` returns a Python scalar. A Series of arrays keeps the arrays
+    # in its list, hence the recursion.
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            listed = tolist()
+        except Exception:  # pragma: no cover - defensive
+            listed = None
+        if isinstance(listed, list):
+            return [_to_python_containers(item) for item in listed]
+        if listed is not None and not isinstance(listed, (tuple, Mapping)):
+            return listed
+
+    if isinstance(value, tuple):
+        return tuple(_to_python_containers(item) for item in value)
+    if isinstance(value, list):
+        return [_to_python_containers(item) for item in value]
+
+    # A ``pyarrow`` scalar (e.g. from a table that was not routed through
+    # ``_frame_columns``) converts itself with ``as_py``.
+    as_py = getattr(value, "as_py", None)
+    if callable(as_py):
+        try:
+            return _to_python_containers(as_py())
+        except Exception:  # pragma: no cover - defensive
+            return value
+    return value
+
+
 def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
     """Split a columnar calibration mapping into one mapping per row.
 
     Object-dtype NumPy columns and pandas ``Series`` columns are indexed through
     ``_column_entries`` so each row receives one element, not the whole column.
+    ``tools``/``documents`` travel with the row so the chat template sees the
+    same schema a plain row would pass (#4858, #4936).
     """
 
     primary = next(name for name in _CALIBRATION_COLUMNS if mapping.get(name) is not None)
 
     columns: Dict[str, Any] = {}
-    for name in _CALIBRATION_COLUMNS:
+    for name in (*_CALIBRATION_COLUMNS, *_TEMPLATE_INPUT_COLUMNS):
         if name not in mapping or mapping[name] is None:
             continue
         entries = _column_entries(mapping[name])
@@ -588,6 +689,11 @@ def prepare_calibration_dataset(
             batch_size=batch_size,
             log=log,
         )
+
+    # A numpy/pandas-formatted row keeps ``messages``/``tools`` in ``ndarray``/
+    # ``Series`` objects that a chat template cannot render as a conversation
+    # (#4936). Unwrap them once, for every input shape, before templating.
+    raw_examples = [_to_python_containers(example) for example in raw_examples]
 
     message_examples = 0
     message_template_name = None

@@ -350,3 +350,35 @@ reproducible when the batch has more than 32 rows.
 | `test_paro_pair_grad_is_launch_plan_invariant` | x, gradient and angle gradient are bit-identical across all 6 launch plans (1, 1000 and 1001 rows) |
 | `test_paro_fused_rotation_theta_grad_matches_autograd` | `rotate_pair_grad`, `grad_theta` and the torch fallback, with and without channel scales, match fp64 autograd for \|theta\| up to 0.8 |
 | `test_paro_pair_grad_reduce_folds_tiles_in_ascending_order` | The granule fold equals adding the per-4-row results one at a time |
+
+### Module training path
+
+The backward above is only reachable when the layer calls the autograd
+wrapper. `ParoLinear._rotate_inputs` now does so whenever a gradient is
+needed (`torch.is_grad_enabled()` and the input, `theta` or `channel_scales`
+requires grad), which is the same condition the Paro optimizer already used.
+Otherwise it keeps the plain rotation, so inference numerics are unchanged:
+the wrapper's forward runs the same fused kernel and returns a bitwise
+identical tensor.
+
+The matmul needs the same treatment. The native AWQ GEMM
+(`gptqmodel_awq::gemm_forward` and `gemm_forward_fp32_reduce`) and the fused
+Triton decode/prefill plans are raw kernel launches with no autograd kernel,
+so a gradient taken through them is dropped even when the rotation is
+differentiable. `ParoLinear._forward_cuda_awq_kernel` therefore returns
+`None` when the rotated operand requires a gradient and lets the dense
+reference serve the call, and `ParoTritonLinear` already selects its
+differentiable dense plan through `_needs_dense_autograd`.
+
+| Path | Before | Now |
+| --- | --- | --- |
+| Rotation | `apply_paro_rotation` always, including in train mode | `apply_paro_rotation_autograd` when a gradient is needed; the fused forward stays bitwise identical |
+| Native AWQ GEMM | Ran in train mode; `x.grad`, `theta.grad` and `channel_scales.grad` were all `None` on CUDA | Inference keeps the native kernel; a gradient-bearing operand takes the dense reference |
+| Upstream parameters | Every parameter before a Paro projection trained on a gradient that missed the projection's residual-stream contribution | The projection contributes its share; a parameter ahead of the layer gets a finite, nonzero gradient |
+
+| Test | Invariant |
+| --- | --- |
+| `test_paro_linear_cuda_training_gradients_match_reference` | FP16 and BF16 CUDA training gradients for the input, `theta` and `channel_scales` match a dense FP32 reference within the single output rounding |
+| `test_paro_triton_linear_cuda_training_gradients_match_reference` | The same contract through `ParoTritonLinear`'s dense plan |
+| `test_rotation_dispatch_keeps_the_inference_path` | The autograd wrapper is used only when a gradient is needed; eval and `no_grad` forwards keep the plain and vectorized paths |
+| `test_cuda_awq_gemm_is_reserved_for_inference` | The native AWQ GEMM still serves `no_grad` forwards and is skipped only for a gradient-bearing operand |

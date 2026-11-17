@@ -12,13 +12,17 @@ top-level flag and silently replaces the real head with the embedding.
 
 This module resolves the mapping once, from evidence instead of one flag:
 
-* the decoder text config (``config.get_text_config().tie_word_embeddings``)
-  when the wrapper exposes one, so a composite default cannot tie a decoder
-  that declares itself untied, and a decoder default cannot tie a wrapper that
-  declares itself untied (#4369);
+* the wrapper's ``tie_word_embeddings`` flag and its declared
+  ``_tied_weights_keys`` mapping (``all_tied_weights_keys``), which is exactly
+  what Transformers' ``tie_weights()`` consults. A nested decoder's
+  ``text_config.tie_word_embeddings`` does not gate the wrapper's head: for a
+  composite such as InternVL the wrapper ties ``lm_head`` while its text config
+  defaults to ``False`` (#4973). A wrapper that says ``False`` still ties
+  nothing (#4369);
 * the checkpoint: a pair whose source tensor is absent cannot be tied, and a
   pair whose target tensor is present *and differs* from the source is a real
-  separate head, not a tie;
+  separate head, not a tie (#4799). A declared pair whose target the checkpoint
+  omits is the normal tied-save layout, so it stays tied;
 * the model's own ``all_tied_weights_keys`` for the candidate pairs.
 
 The result is stamped on the model as a snapshot and re-applied after every
@@ -67,6 +71,11 @@ def word_embeddings_tied(config) -> bool:
     defaults to ``True`` must not override a decoder that says ``False``
     (InternVL3-hf, #4799), and a decoder that defaults to ``True`` must not
     override a wrapper that says ``False`` (Qwen3-VL, #4369).
+
+    This is the config-only fallback for callers that have no resolved
+    snapshot. ``resolve_tied_weights_keys`` deliberately does *not* use it: the
+    checkpoint is the authority on whether a declared pair is really tied, and
+    Transformers ties the wrapper's head from the wrapper flag alone (#4973).
     """
 
     if config is None:
@@ -98,12 +107,22 @@ def resolve_tied_weights_keys(
     ``checkpoint_has_tensor`` and ``checkpoint_tensors_equal`` take runtime
     parameter names (``lm_head.weight``) and may return ``None`` when the
     checkpoint cannot answer; an unknown answer never drops a declared tie.
+
+    The wrapper's flag and declared mapping decide *which* pairs may be tied;
+    the checkpoint only refutes a declared pair. In particular a decoder
+    ``text_config.tie_word_embeddings=False`` does not untie the wrapper's head
+    (#4973): Transformers' own ``tie_weights()`` ignores it for the wrapper.
     """
 
     declared = _declared_tied_weights_keys(model)
     if not declared:
         return {}
-    if not word_embeddings_tied(getattr(model, "config", None)):
+    config = getattr(model, "config", None)
+    # Transformers ties a composite's head from the *wrapper* flag; a nested
+    # decoder's flag only gates that decoder's own declared pairs. Keeping the
+    # wrapper flag as the gate also preserves #4369 for legacy remote-code
+    # models whose synthesized `all_tied_weights_keys` includes nested entries.
+    if config is None or not bool(getattr(config, "tie_word_embeddings", False)):
         return {}
 
     resolved: Dict[str, str] = {}

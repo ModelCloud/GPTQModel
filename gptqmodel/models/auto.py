@@ -645,6 +645,30 @@ def _get_config_load_kwargs(kwargs: dict) -> dict:
     return config_kwargs
 
 
+def select_model_definition(model_type: str, config) -> type:
+    """Return the definition the loader uses for an already-resolved ``config``.
+
+    Mirrors `check_and_get_model_definition` without reading a checkpoint, so
+    tests (for example the meta-device MoE coverage sweep) resolve exactly the
+    definition a real load would pick.
+    """
+
+    model_type = (model_type or "").lower()
+
+    # Unsupported model types use BaseQModel and fail closed unless the caller
+    # supplies an explicit model definition/module tree.
+    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
+    # checkpoint that needs the bounded K3 runner, and native Transformers
+    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
+    # looper. Dispatch on config fields rather than on the registry key.
+    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
+        return KimiLinearNativeQModel
+
+    return definition
+
+
 def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_load_kwargs):
     if "gguf_file" not in config_load_kwargs:
         model_dir = normalize_model_id_or_path_for_hf_gguf(
@@ -657,9 +681,7 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code, **config_load_kwargs)
     model_type = config.model_type.lower()
 
-    # Unsupported model types use BaseQModel and fail closed unless the caller
-    # supplies an explicit model definition/module tree.
-    definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    definition = select_model_definition(model_type, config)
 
     # `model_type: llava` covers both the Hugging Face composite checkpoint and
     # the original liuhaotian checkpoint, which declares a plain causal-LM
@@ -673,13 +695,6 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
             "Hugging Face `LlavaForConditionalGeneration` checkpoint. Use the "
             "Hugging Face format instead, e.g. `llava-hf/llava-1.5-7b-hf`."
         )
-
-    # `kimi_linear` covers two incompatible layouts: the legacy AttnRes/K3
-    # checkpoint that needs the bounded K3 runner, and native Transformers
-    # `KimiLinearForCausalLM` (no AttnRes), which quantizes with the ordinary
-    # looper. Dispatch on config fields rather than on the registry key.
-    if model_type == "kimi_linear" and not is_kimi_k3_config(config):
-        return KimiLinearNativeQModel
 
     return definition
 
