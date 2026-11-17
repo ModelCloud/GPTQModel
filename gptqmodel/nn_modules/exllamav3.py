@@ -392,27 +392,41 @@ class ExllamaV3Linear(nn.Module):
         Rows already inside the safe range keep a scale of 1 and stay bit-exact.
 
         Returns ``(fp16_input, output_scale)``, where ``output_scale`` is
-        ``None`` when nothing was scaled. Otherwise the kernel result must have
+        ``None`` only for an empty batch. Otherwise the kernel result must have
         the bias removed, be multiplied by ``output_scale``, and have the bias
-        restored. Returns ``None`` for non-finite activations so they keep the
-        FP32 Torch reconstruction path.
+        restored. Rows that need no scaling carry a scale of exactly 1, so the
+        rescale is the identity for them. Returns ``None`` for non-finite
+        activations so they keep the FP32 Torch reconstruction path.
+
+        The whole decision is computed on the device: there is no
+        ``float(amax)``/``.item()``/``bool()`` of the activation per forward,
+        which used to drain the CUDA stream once per linear per decoded token
+        (#4955). The one remaining host read is the ``isfinite`` warmup probe
+        below, paid once per module instead of once per forward.
         """
         if x.numel() == 0:
             # A zero-row batch has no inf-norm identity; LinearEXL3 already
             # returns an empty output for it, so no scaling is needed.
             return x.to(torch.float16), None
         # ``vector_norm(inf)`` is the max-abs reduction without materializing
-        # an ``abs`` copy, and it is the cheapest form on CUDA.
-        amax = float(torch.linalg.vector_norm(x.detach(), ord=float("inf")))
-        if not math.isfinite(amax):
-            return None
-        if amax <= _FP16_SAFE_AMAX:
-            return x.to(torch.float16), None
+        # an ``abs`` copy, and it is the cheapest form on CUDA. Reducing per row
+        # keeps the decision on the device; a single tensor-wide scalar would
+        # have to be read back to the host to be compared (#4955).
+        row_amax = torch.linalg.vector_norm(
+            x.detach(), ord=float("inf"), dim=-1, keepdim=True
+        ).float()
+        if not getattr(self, "_native_bf16_inputs_finite", False):
+            # Warmup probe, once per module: a per-forward ``isfinite`` is the
+            # same device->host sync this method just stopped doing. A module
+            # whose first BF16 activation is non-finite keeps the exact FP32
+            # reconstruction and probes again on its next forward.
+            if not bool(torch.isfinite(row_amax).all()):
+                return None
+            self._native_bf16_inputs_finite = True
         # ``frexp(row_amax / bound)`` yields ``row_amax / bound < 2**exponent``,
         # so the scaled maximum lies in ``(bound / 2, bound]``: still a normal
         # FP16 number, with the most headroom left for the row's small elements.
         # Rows that do not need it keep 1.0, so only the wide rows change.
-        row_amax = x.detach().float().abs().amax(dim=-1, keepdim=True)
         _, exponent = torch.frexp(row_amax / _FP16_SAFE_AMAX)
         output_scale = torch.where(
             row_amax > _FP16_SAFE_AMAX,
