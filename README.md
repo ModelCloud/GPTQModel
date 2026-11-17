@@ -131,6 +131,10 @@ Quantized kernels keep only packed weights resident; per-call QQQ reduce scratch
   measured on their real tokens, not their padded width, so a left-padded row
   cannot lose real tokens to its own padding. See
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
+- **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
+  base text path instead of a chat template, columnar mappings are unpacked, and
+  conversations reject `calibration_concat_size`. See
+  [VLM calibration input normalization](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md).
 
 ### Inference and deployment 🚢
 
