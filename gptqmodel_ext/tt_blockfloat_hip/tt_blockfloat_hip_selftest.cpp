@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -37,6 +38,19 @@ constexpr int kLevels[2] = {4, 64};  // indexed by bits==4 ? 0 : 1
 constexpr int kOffset[2] = {7, 127};
 
 int bits_index(int bits) { return bits == 4 ? 0 : 1; }
+
+constexpr int kExponentMin = -127;
+constexpr int kExponentMax = 127;
+
+// Exact ``floor(log2(x))`` for a positive normal float, from the bit pattern.
+// ``std::log2`` rounds to nearest, so it reads ``FLT_MAX`` as ``2**128`` and a
+// value just below ``2**k`` as ``k + 1``.
+int floor_log2_exact(float x) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &x, sizeof(bits));
+    const int e = static_cast<int>(bits >> 23) - 127;
+    return e < -126 ? -126 : e;
+}
 
 float ref_value(int code, int bits, int exponent) {
     const int idx = bits_index(bits);
@@ -54,13 +68,15 @@ void ref_quantise_block(const float* x, int bits, int* code_out, int* exp_out) {
         magnitude = std::max(magnitude, std::fabs(x[i]));
     }
     const float safe = std::max(magnitude, 1.17549435e-38f);
-    const int base = static_cast<int>(std::floor(std::log2(safe)));
+    const int base = floor_log2_exact(safe);
 
-    float best_error = INFINITY;
+    float best_error = 0.0f;
     int best_exp = base;
-    int best_code[16];
+    int best_code[16] = {0};
     for (int candidate = 0; candidate < 3; ++candidate) {
         const int exponent = base + (candidate == 0 ? 0 : (candidate == 1 ? -1 : 1));
+        // A neighbour outside the storable range has no representable scale.
+        const bool usable = exponent >= kExponentMin && exponent <= kExponentMax;
         const float scale = std::exp2(static_cast<float>(exponent));
         float error = 0.0f;
         int code[16];
@@ -76,8 +92,9 @@ void ref_quantise_block(const float* x, int bits, int* code_out, int* exp_out) {
         }
         // Candidate 0 is taken unconditionally, matching the Torch reference.
         // Comparing strictly against INFINITY leaves ``best_code`` untouched
-        // when every candidate overflows, which happens for large inputs.
-        if (candidate == 0 || error < best_error) {
+        // when every candidate overflows, which happens for large inputs.  A
+        // NaN/inf neighbour error must never replace the winner.
+        if (usable && (candidate == 0 || (std::isfinite(error) && error < best_error))) {
             best_error = error;
             best_exp = exponent;
             std::memcpy(best_code, code, sizeof(code));

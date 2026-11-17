@@ -143,6 +143,21 @@ struct Grid {
     static constexpr float kInvLevels = 1.0f / static_cast<float>(kLevels);
 };
 
+// Shared exponents the int8 field can store.  One step beyond either end is an
+// infinity (``2**128``) or a non-normal scale, so it is not a grid point.
+constexpr int kExponentMin = -127;
+constexpr int kExponentMax = 127;
+
+// ``floor(log2(x))`` for a positive normal float, exactly, from the bit
+// pattern.  ``log2f`` rounds to nearest, so it reads ``FLT_MAX`` as ``2**128``
+// and ``2**k`` from below as ``k + 1``; the field never rounds.
+__device__ __forceinline__
+int ttbf_floor_log2_exact(float x) {
+    const int e = static_cast<int>((__float_as_uint(x) >> 23) & 0xFFu) - 127;
+    // Callers clamp to FLT_MIN first, so subnormals cannot reach this path.
+    return e < -126 ? -126 : e;
+}
+
 // Decode one packed code, given a pre-computed ``2**exponent``.
 __device__ __forceinline__
 float ttbf_value(int code, int offset, float inv_levels, float scale) {
@@ -294,15 +309,23 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
         magnitude = fmaxf(magnitude, fabsf(xp[i]));
     }
     const float safe = fmaxf(magnitude, 1.17549435e-38f);  // FLT_MIN
-    const int base = static_cast<int>(floorf(log2f(safe)));
+    const int base = ttbf_floor_log2_exact(safe);
 
-    float best_error = INFINITY;
+    float best_error = 0.0f;
     int best_exponent = base;
     int best_code[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        best_code[i] = 0;
+    }
 
 #pragma unroll
     for (int candidate = 0; candidate < 3; ++candidate) {
         const int exponent = base + (candidate == 0 ? 0 : (candidate == 1 ? -1 : 1));
+        // A neighbour outside the storable exponent range has no representable
+        // scale -- ``2**128`` is inf, and ``0 * inf`` is NaN -- so it cannot be
+        // a grid point.  Skip it before its error is computed or compared.
+        const bool usable = exponent >= kExponentMin && exponent <= kExponentMax;
         const float scale = ttbf_exp2i(exponent);
         float error = 0.0f;
         int code[16];
@@ -322,8 +345,9 @@ void ttbf_quantise_block(const float* __restrict__ xp, int* code_out,
         // (``best = _round_with(base_exponent)`` then compare the neighbours).
         // A strict comparison against INFINITY would leave ``best_code``
         // uninitialised whenever every candidate's error overflows -- which
-        // happens for inputs near FLT_MAX, where the squared error is inf.
-        if (candidate == 0 || error < best_error) {
+        // happens for inputs near FLT_MAX, where the squared error is inf.  A
+        // NaN/inf neighbour error must never replace the winner.
+        if (usable && (candidate == 0 || (isfinite(error) && error < best_error))) {
             best_error = error;
             best_exponent = exponent;
 #pragma unroll
@@ -432,7 +456,7 @@ __global__ void decompose_kernel(const float* __restrict__ x,
             magnitude = fmaxf(magnitude, fabsf(xp[i]));
         }
         const float safe = fmaxf(magnitude, 1.17549435e-38f);
-        const int base = static_cast<int>(floorf(log2f(safe)));
+        const int base = ttbf_floor_log2_exact(safe);
 
         int chosen_code[16] = {0};
         int chosen_exponent = base;
@@ -441,6 +465,9 @@ __global__ void decompose_kernel(const float* __restrict__ x,
         for (int t = 0; t < 4 && !found; ++t) {
             const int shift = (t == 0) ? 0 : (t == 1 ? 1 : (t == 2 ? -1 : 2));
             const int exponent = base + shift;
+            // A shift past the storable exponent range has no representable
+            // scale, so it cannot reproduce the block exactly.  Skip it.
+            if (exponent < kExponentMin || exponent > kExponentMax) continue;
             const float scale = ttbf_exp2i(exponent);
             int code[16];
             bool ok = true;
