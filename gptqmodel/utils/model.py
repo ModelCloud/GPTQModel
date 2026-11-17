@@ -867,6 +867,11 @@ def create_quant_module(
                 f"did not assign {sample}. Load this checkpoint with `GPTQModel.load`."
             )
         new_layer.load_state_dict(source_state, strict=False)
+        # A freshly constructed module is in training mode; the module it
+        # replaces may not be (a completed load is in eval). The CPU int4pack
+        # kernels pick their layout from `self.training` on the first forward
+        # and latch it, so carry the replaced module's mode over (#4907).
+        new_layer.train(transfer_from.training)
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
