@@ -33,6 +33,24 @@ _INT8_REBUILD_LOCK = threading.Lock()
 # transient scratch: it is released before the next tile or group is processed.
 _INT8_ASYMMETRIC_DECODE_TILE = 256
 
+# `aten::_weight_int8pack_mm` reduces the contraction axis in 8-wide chunks and
+# is only defined for `K % 8 == 0`: with a narrower or misaligned width it reads
+# past the end of every weight row and silently returns wrong values (measured on
+# torch 2.11: K=8/16/24/32 correct, K=4/12/15/17/33 wrong). Group codes are zero
+# padded up to this alignment; the matching activation columns are already zero,
+# so the extra products contribute exactly nothing.
+_INT8_KERNEL_CONTRACTION_ALIGN = 8
+
+
+def _align_int8_group_width(width: int) -> int:
+    """Return the kernel-valid contraction width that holds ``width`` channels."""
+
+    width = int(width)
+    if width <= 0:
+        raise ValueError(f"INT8 group width must be positive, got {width}")
+    remainder = width % _INT8_KERNEL_CONTRACTION_ALIGN
+    return width if remainder == 0 else width + _INT8_KERNEL_CONTRACTION_ALIGN - remainder
+
 
 def _require_native_int8(bits: int) -> None:
     if bits != 8:
@@ -188,6 +206,13 @@ class Int8PackedModule(torch.nn.Module):
         group_lengths: Optional[tuple[int, ...]] = None,
     ):
         super().__init__()
+        # The contraction axis must be kernel-aligned. Production tensors are
+        # already padded by `transform_cpu`; a directly constructed module pads
+        # its own copy so it cannot silently miscompute.
+        self.source_group_width = int(int8_weight_gnk.shape[-1])
+        aligned_width = _align_int8_group_width(self.source_group_width)
+        if aligned_width != self.source_group_width:
+            int8_weight_gnk = F.pad(int8_weight_gnk, (0, aligned_width - self.source_group_width))
         self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_gnk, persistent=False)
         self.register_buffer(INT8_GROUP_SCALE_BUFFER_NAME, group_scale, persistent=False)
         self.register_buffer(INT8_GROUP_OFFSET_BUFFER_NAME, group_offset, persistent=False)
@@ -211,7 +236,9 @@ class Int8PackedModule(torch.nn.Module):
         """
         width = self.group_width
         num_groups = int(self.int8_weight_gnk.shape[0])
-        lengths = self.group_lengths or (width,) * num_groups
+        # The default group length is the *unpadded* width; `group_width` is the
+        # kernel-aligned contraction width that may be larger.
+        lengths = self.group_lengths or (self.source_group_width,) * num_groups
         ordered = x if self.int8_input_perm is None else x.index_select(-1, self.int8_input_perm)
         ordered = ordered.float()
         if all(length == width for length in lengths):
@@ -542,19 +569,21 @@ class TorchInt8Linear(GPTQQuantLinear):
         # invertible for dequantization and export.
         input_perm = torch.argsort(groups, stable=True)
         ordered_codes = codes.index_select(0, input_perm)
-        group_width = max(group_lengths)
-        if all(length == group_width for length in group_lengths):
+        # Pad the widest group up to the INT8 kernel's contraction alignment so
+        # the runtime module never has to copy the codes again.
+        kernel_width = _align_int8_group_width(max(group_lengths))
+        if all(length == kernel_width for length in group_lengths):
             # [K, N] -> [G, W, N] -> [G, N, W]
-            grouped_codes = ordered_codes.reshape(num_groups, group_width, self.out_features).permute(0, 2, 1)
+            grouped_codes = ordered_codes.reshape(num_groups, kernel_width, self.out_features).permute(0, 2, 1)
         else:
             pieces = []
             start = 0
             for length in group_lengths:
                 piece = ordered_codes[start:start + length]
                 start += length
-                if length != group_width:
+                if length != kernel_width:
                     piece = torch.cat(
-                        (piece, piece.new_zeros(group_width - length, self.out_features)), dim=0
+                        (piece, piece.new_zeros(kernel_width - length, self.out_features)), dim=0
                     )
                 pieces.append(piece)
             grouped_codes = torch.stack(pieces, dim=0).permute(0, 2, 1)
