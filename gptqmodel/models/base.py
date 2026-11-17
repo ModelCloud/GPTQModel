@@ -92,7 +92,7 @@ from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config, install_legacy_generation_compat
+from ..utils.hf import autofix_hf_model_config, get_config_selection_kwargs, install_legacy_generation_compat
 from ..utils.importer import select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
@@ -939,6 +939,7 @@ class BaseQModel(nn.Module):
         turtle_model: Optional[LazyTurtle] = None,
         effective_module_tree: Optional[Any] = None,
         fusion_enabled: bool = False,
+        processor_load_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         if type(fusion_enabled) is not bool:
@@ -1077,6 +1078,7 @@ class BaseQModel(nn.Module):
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
+        self._processor_load_kwargs = get_config_selection_kwargs(processor_load_kwargs or {})
         if self.require_load_processor:
             loader = type(self).loader
             if isinstance(loader, LocalModelLoader) and loader.processor_class is not None:
@@ -1084,9 +1086,13 @@ class BaseQModel(nn.Module):
                     model_local_path,
                     config=self.model.config,
                     tokenizer=getattr(self.tokenizer, "tokenizer", self.tokenizer),
+                    **self._processor_load_kwargs,
                 )
             else:
-                self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.trust_remote_code)
+                self.processor = AutoProcessor.from_pretrained(
+                    model_local_path, trust_remote_code=self.trust_remote_code,
+                    **self._processor_load_kwargs,
+                )
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
