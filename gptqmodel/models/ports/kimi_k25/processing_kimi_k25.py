@@ -33,7 +33,10 @@ class Kimi_K25Processor(NativeKimiProcessor):
 
         if isinstance(tokenizer, TikTokenTokenizer):
             # Native Transformers distinguishes video from image placeholders; released vocabulary does not.
-            tokenizer.add_special_tokens({"additional_special_tokens": ["<|kimi_k25_video_placeholder|>"]})
+            tokenizer.add_special_tokens(
+                {"additional_special_tokens": ["<|kimi_k25_video_placeholder|>"]},
+                replace_extra_special_tokens=False,
+            )
         super().__init__(image_processor, tokenizer, video_processor, chat_template=chat_template, **kwargs)
 
     @classmethod

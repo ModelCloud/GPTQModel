@@ -57,10 +57,13 @@ and Tokenicer's published owned-instance normalization (`0.0.17` tested).
 
 The native processor binding translates released `media_proc_cfg` into fixed
 native image/video components. It adds the native video marker at ID **163840**
-only to the processor's package-owned tokenizer; native forward masks modality
-IDs before embedding, so no checkpoint embedding row is invented. Ordinary
-tokenizer loading preserves the pinned vocabulary unchanged. Tokenicer remains
-the normalization owner and receives an instantiated package tokenizer.
+to the package-owned tokenizer shared by the model and processor; native forward
+masks modality IDs before embedding, so no checkpoint embedding row is invented.
+Registration uses `replace_extra_special_tokens=False`: the pinned 12 extra
+special tokens and all 16 original special IDs survive, and the video marker is
+appended exactly once. Ordinary tokenizer loading preserves the pinned vocabulary
+unchanged. Tokenicer remains the normalization owner and receives an instantiated
+package tokenizer; this adapter only registers its native video placeholder.
 
 ## Native adaptation and flow
 
@@ -121,6 +124,36 @@ flowchart TD
 | Native `modeling_kimi_k25.py:601-604`: temporal dimension counted twice | Spatial split after temporal pooling |
 | Native reverse conversion on save | Native-format safetensors by default |
 
+### Shared tokenizer lifecycle
+
+The model wrapper and processor intentionally hold the **same** tokenizer.
+Replacing its extra-special-token list broke both consumers and persisted the
+damage through `save_quantized`, even though ordinary encode IDs remained equal.
+Append-only placeholder registration preserves role/media decoding, templates,
+and repeated construction without copying or normalizing the tokenizer again.
+
+```mermaid
+flowchart TD
+  A["LocalModelLoader.load_processor: shared Tokenicer.tokenizer"] --> B["Kimi_K25Processor.__init__"]
+  B --> C["add_special_tokens: replace_extra_special_tokens=False"]
+  C --> D["Pinned 12 extras become 13; preserve all 16 original special IDs"]
+  D --> E{"NativeKimiProcessor.__init__ succeeds?"}
+  E -->|yes| F["Model and processor retain the same tokenizer"]
+  E -->|raises| X["Error propagates; original special IDs remain intact"]
+  X -->|retry same tokenizer| B
+  F --> G["save_quantized: save tokenizer then processor"]
+  G --> H["GPTQModel.load: preserve IDs, skip-special decoding and chat"]
+  H -->|second processor or save cycle| B
+  classDef failure fill:#fee,stroke:#a00
+  class X failure
+```
+
+| Before (`38c562761`) | After |
+| --- | --- |
+| `processing_kimi_k25.py:35`: default replacement removes 12 extra special tokens; all-special IDs shrink from 16 to 5 | Append-only registration preserves the original IDs; 13 extras and 17 special IDs include the video marker |
+| Shared model decoding leaks role/media markers with `skip_special_tokens=True` | Model, processor and reloaded quantized tokenizer skip all original markers and the video marker |
+| Repeated processor construction repeats replacement; saving persists the corrupted list | Same-object failure/retry, two live processors and two quantized save/reload cycles preserve the contract |
+
 ## Qualification
 
 Environment: CPython 3.14.6 free-threaded with `PYTHON_GIL=0`, Torch
@@ -131,10 +164,12 @@ The owned and shared suite also passes at the dependency floor `0.12.0`:
 | --- | --- |
 | Two owned Kimi suites | 38 passed in 19.34s |
 | Owned + shared loaders/tokenizer/processor/AWQ, tiktoken 0.14.0 | 175 passed in 20.36s |
-| Same suite, tiktoken 0.12.0 | 175 passed in 30.91s |
+| Same suite, tiktoken 0.12.0 | 175 passed in 30.42s |
 | Added real image/video/mixed generation decoding assertions, 0.12.0 | 3 passed in 5.91s |
 | Full pinned real index vs compressed ownership fixture | All 208,550 keys equal |
 | Shared registered-model consumer contract with proposed case supplied in memory | Passed; no shared-file edits |
+| Owned suites after shared-tokenizer lifecycle regression, tiktoken 0.12.0 | 41 passed in 39.68s |
+| Public plain-AWQ dense/split-Q, two save/reload cycles each | 2 passed in 21.08s |
 
 All tokenizer fixtures are pinned, local, non-weight data; the tests run offline.
 The template retains upstream whitespace byte-for-byte; the port's attributes
@@ -163,6 +198,16 @@ safetensors save/load/save/load; malformed expert retry; and plain AWQ.
 
 Red/green checks:
 
+- Before append-only registration, the seven selected public trust/bypass,
+  failed-processor/retry, and public plain-AWQ cases fail on the intended
+  12-to-1 extra-special-token replacement (13.49s). After the fix, both owned
+  suites pass, including two live processors sharing the same tokenizer,
+  original ID preservation, skip-special batch decoding, identical chat/tool
+  rendering and IDs, and two public quantized save/reload cycles per Q layout.
+  The public AWQ fixture uses diverse multilingual inputs and a small nonzero
+  router bias so every expert is observed: all 26 dense-Q or 28 split-Q selected
+  projections pack, without dynamic exclusion or weakening the complete-count
+  assertion. Existing direct-processor tests still cover unsampled experts.
 - Ignoring legacy media options reproduces `patch_size == 14` rather than `2`
   in `test_legacy_media_metadata_owns_native_components_and_overrides[2]`.
 - Native two-frame video splitting fails with `split_sizes=[2]` for one pooled

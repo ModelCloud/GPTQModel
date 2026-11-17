@@ -44,6 +44,30 @@ def save_real_tokenizer(path):
     (path / "tokenizer_config.json").write_text(json.dumps(data))
 
 
+def assert_shared_tokenizer_contract(tokenizer, reference):
+    original_ids = reference.all_special_ids
+    assert len(original_ids) == 16 and len(reference.extra_special_tokens) == 12
+    assert tokenizer.extra_special_tokens == reference.extra_special_tokens + ["<|kimi_k25_video_placeholder|>"]
+    assert set(tokenizer.all_special_ids) == set(original_ids) | {163840}
+    assert tokenizer.convert_tokens_to_ids(reference.all_special_tokens) == original_ids
+    assert tokenizer.convert_tokens_to_ids("<|kimi_k25_video_placeholder|>") == 163840
+    ids = original_ids + reference.encode("Hello, 世界!") + [163840]
+    assert tokenizer.decode(ids, skip_special_tokens=True) == "Hello, 世界!"
+    assert tokenizer.batch_decode([ids], skip_special_tokens=True) == ["Hello, 世界!"]
+    conversation = [{"role": "user", "content": "Hello"}]
+    tools = [{"type": "function", "function": {"name": "weather", "description": "Weather lookup",
+              "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
+    for thinking in (False, True):
+        for selected_tools in (None, tools):
+            kwargs = {"thinking": thinking, "tools": selected_tools}
+            assert tokenizer.apply_chat_template(conversation, **kwargs) == reference.apply_chat_template(
+                conversation, **kwargs,
+            )
+            assert tokenizer.apply_chat_template(conversation, tokenize=True, **kwargs) == (
+                reference.apply_chat_template(conversation, tokenize=True, **kwargs)
+            )
+
+
 def tiny_config(q_lora_rank=8, first_k_dense_replace=1, image_token_id=30, video_token_id=31,
                 vision_patch_size=2, **overrides):
     text = {
@@ -161,13 +185,13 @@ def released_state(model):
     return result
 
 
-def write_checkpoint(path, *, released=False, **overrides):
+def write_checkpoint(path, *, released=False, routing_bias=(.1, -.2, .3, -.4), **overrides):
     torch.manual_seed(76)
     reference = Kimi_K25ForConditionalGeneration(tiny_config(**overrides)).eval()
     with torch.no_grad():
         for layer in reference.model.language_model.layers:
             if hasattr(layer.mlp, "gate"):
-                layer.mlp.gate.e_score_correction_bias.copy_(torch.tensor([.1, -.2, .3, -.4]))
+                layer.mlp.gate.e_score_correction_bias.copy_(torch.tensor(routing_bias))
     reference.save_pretrained(path, safe_serialization=True, save_original_format=False)
     if released:
         save_file(released_state(reference), path / "model.safetensors", metadata={"format": "pt"})
@@ -195,7 +219,9 @@ def write_checkpoint(path, *, released=False, **overrides):
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
 def test_public_load_ignores_checkpoint_python(tmp_path, monkeypatch, trust, bypass):
-    reference, marker = write_checkpoint(tmp_path)
+    reference, marker = write_checkpoint(
+        tmp_path, vocab_size=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585,
+    )
     save_real_tokenizer(tmp_path)
     if bypass:
         monkeypatch.setenv(BYPASS_ENV, "1")  # Existing security bypass is explicitly under test.
@@ -213,11 +239,105 @@ def test_public_load_ignores_checkpoint_python(tmp_path, monkeypatch, trust, byp
     assert type(loaded.processor) is PackagedProcessor
     assert type(loaded.tokenizer.tokenizer) is TikTokenTokenizer
     assert loaded.processor.tokenizer is loaded.tokenizer.tokenizer
+    assert_shared_tokenizer_contract(loaded.tokenizer.tokenizer, TikTokenTokenizer.from_pretrained(
+        PORT / "qualification_assets",
+    ))
     assert loaded.tokenizer.encode("Hello, 世界!") == [19180, 11, 220, 2243, 0]
     assert not loaded.trust_remote_code
     ids = torch.tensor([[1, 4, 5, 7]])
     with torch.inference_mode():
         torch.testing.assert_close(loaded.model(ids).logits, reference(ids).logits, rtol=1e-5, atol=1e-6)
+    assert not marker.exists()
+
+
+def test_shared_tokenizer_survives_failed_processor_and_two_live_consumers(tmp_path, monkeypatch):
+    from transformers.models.kimi_k25.processing_kimi_k25 import Kimi_K25Processor as NativeProcessor
+
+    _, marker = write_checkpoint(
+        tmp_path, vocab_size=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585,
+    )
+    save_real_tokenizer(tmp_path)
+    config = load_model_config(tmp_path)
+    tokenizer = load_hf_tokenizer(tmp_path, model_config=config)
+    reference = TikTokenTokenizer.from_pretrained(PORT / "qualification_assets")
+    assert tokenizer.all_special_ids == reference.all_special_ids
+    initialize = NativeProcessor.__init__
+    failed = []
+
+    def fail_after_initialization(processor, *args, **kwargs):
+        initialize(processor, *args, **kwargs)
+        failed.append(processor)
+        raise RuntimeError("injected failure after native processor initialization")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeProcessor, "__init__", fail_after_initialization)
+        with pytest.raises(RuntimeError, match="injected failure after native processor"):
+            KimiK25QModel.loader.load_processor(tmp_path, config=config, tokenizer=tokenizer)
+    assert len(failed) == 1 and failed[0].tokenizer is tokenizer
+    assert_shared_tokenizer_contract(tokenizer, reference)
+    processors = [KimiK25QModel.loader.load_processor(tmp_path, config=config, tokenizer=tokenizer) for _ in range(2)]
+    assert processors[0] is not processors[1]
+    for processor in processors:
+        assert processor.tokenizer is tokenizer
+        assert processor.video_token_id == 163840 and processor.image_token_id == 163605
+        assert_shared_tokenizer_contract(processor.tokenizer, reference)
+        assert processor.batch_decode([[163587, 19180, 163605, 163586, 163840]],
+                                      skip_special_tokens=True) == ["Hello"]
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("q_lora_rank", [None, 16], ids=["dense_q", "split_q"])
+def test_public_plain_awq_preserves_shared_tokenizer_across_two_save_reloads(tmp_path, q_lora_rank):
+    from gptqmodel import BACKEND
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.config import AWQConfig
+
+    _, marker = write_checkpoint(
+        tmp_path, routing_bias=(.01, -.02, .03, -.04), q_lora_rank=q_lora_rank,
+        vocab_size=163840, hidden_size=32, intermediate_size=32,
+        moe_intermediate_size=16, kv_lora_rank=16, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=16,
+        image_token_id=163605, video_token_id=163840, pad_token_id=163839, bos_token_id=163584, eos_token_id=163585,
+    )
+    save_real_tokenizer(tmp_path)
+    reference = TikTokenTokenizer.from_pretrained(PORT / "qualification_assets")
+    config = AWQConfig(device="cpu", group_size=16, fallback=None, offload_to_disk=False)
+    wrapper = GPTQModel.load(str(tmp_path), quantize_config=config, backend=BACKEND.TORCH,
+                            dtype=torch.float16, attn_implementation="eager", trust_remote_code=False)
+    assert wrapper.processor.tokenizer is wrapper.tokenizer.tokenizer
+    assert_shared_tokenizer_contract(wrapper.tokenizer.tokenizer, reference)
+    calibration = [wrapper.tokenizer(text, return_tensors="pt") for text in (
+        "Hello, 世界! GPT-QModel 123456", "Quantization preserves special-token semantics.",
+        "量化😀 学习语言模型的每一个专家。", "def weather(city: str): return city.lower()",
+        "Paris, Tokyo, Москва, Αθήνα, القاهرة!", "Numbers: 9876543210 3.141592653589793238462643",
+        "The quick brown fox jumps over the lazy dog.", "\t    \n{'role': 'user', 'content': 'Hello'}",
+    )]
+    calibration = [{key: value for key, value in sample.items() if key in {"input_ids", "attention_mask"}}
+                   for sample in calibration]
+    with torch.inference_mode():
+        dense_logits = wrapper.model(**calibration[0], use_cache=False).logits
+        assert torch.isfinite(dense_logits).all() and dense_logits.std() > .01
+    wrapper.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    packed_count = 26 if q_lora_rank is None else 28
+    assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == packed_count
+    with torch.inference_mode():
+        expected = wrapper.model(**calibration[0], use_cache=False).logits
+        assert torch.isfinite(expected).all()
+    for attempt in range(2):
+        saved = tmp_path / f"quantized-{attempt}"
+        wrapper.save_quantized(str(saved))
+        assert list(saved.glob("*.safetensors")) and not list(saved.glob("*.bin")) and not list(saved.glob("*.pt"))
+        saved_tokenizer = TikTokenTokenizer.from_pretrained(saved)
+        assert_shared_tokenizer_contract(saved_tokenizer, reference)
+        serialized = json.loads((saved / "tokenizer_config.json").read_text())
+        assert len(serialized["extra_special_tokens"]) == 13
+        wrapper = GPTQModel.load(str(saved), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16,
+                                attn_implementation="eager", trust_remote_code=False)
+        assert wrapper.quantized and wrapper.processor.tokenizer is wrapper.tokenizer.tokenizer
+        assert_shared_tokenizer_contract(wrapper.tokenizer.tokenizer, reference)
+        assert sum(isinstance(module, AwqTorchLinear) for module in wrapper.model.modules()) == packed_count
+        with torch.inference_mode():
+            torch.testing.assert_close(wrapper.model(**calibration[0], use_cache=False).logits, expected,
+                                       atol=2e-4, rtol=2e-3)
     assert not marker.exists()
 
 
