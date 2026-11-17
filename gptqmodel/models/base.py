@@ -92,7 +92,13 @@ from ..utils.calibration import prepare_calibration_dataset
 from ..utils.checkpoint_paths import resolve_checkpoint_path
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
-from ..utils.hf import autofix_hf_model_config, get_config_selection_kwargs, install_legacy_generation_compat
+from ..utils.hf import (
+    autofix_hf_model_config,
+    get_config_selection_kwargs,
+    install_legacy_generation_compat,
+    load_model_config,
+    resolve_trust_remote_code,
+)
 from ..utils.importer import select_quant_linear
 from ..utils.kv_cache import KVCacheEstimate, estimate_kv_cache
 from ..utils.logger import QuantizationRegionTimer, format_quantize_summary, setup_logger
@@ -138,7 +144,7 @@ from ._const import (
 )
 from .fusable import FusableConfig, require_fusable_config
 from .loader import ModelLoader, _setup_rotation_online_had
-from .local import LocalModelLoader
+from .local import LocalModelLoader, local_model_loader_for_config
 from .module_plan import ModulePlan
 from .quantization_run_plan import ProcessorStep, QuantizationRunPlan, processor_class
 from .shared_input import SharedInputPlan, build_shared_input_plan
@@ -2765,11 +2771,15 @@ class BaseQModel(nn.Module):
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
-            teacher = AutoModelForCausalLM.from_pretrained(
+            teacher_trust = resolve_trust_remote_code(teacher, trust_remote_code=self.trust_remote_code)
+            teacher_config = load_model_config(teacher, trust_remote_code=teacher_trust)
+            teacher_loader = local_model_loader_for_config(teacher_config.to_dict()) or AutoModelForCausalLM
+            teacher = teacher_loader.from_pretrained(
                 teacher,
+                config=teacher_config,
                 dtype=self.model.dtype,
                 device_map={"": device},
-                trust_remote_code=self.trust_remote_code,
+                trust_remote_code=teacher_trust,
             )
         try:
             stats = tune_norm_params(self.model, teacher, batches, names, norm)
