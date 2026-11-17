@@ -209,6 +209,9 @@ def test_public_hostile_maps_processor_and_repaired_checkpoint_retry(tmp_path, m
     _assets(tmp_path)
     marker = tmp_path / "executed"
     (tmp_path / "hostile.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError('remote code')\n")
+    (tmp_path / "custom_generate").mkdir()
+    (tmp_path / "custom_generate" / "generate.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError('checkpoint custom generation')\n")
     for filename in ("config.json", "tokenizer_config.json", "preprocessor_config.json"):
         payload = json.loads((tmp_path / filename).read_text())
         payload["auto_map"] = {key: ["hostile.Bad", "hostile.Bad"] if key == "AutoTokenizer" else "hostile.Bad"
@@ -333,6 +336,56 @@ def test_budgeted_thinking_matches_source_two_native_generation_stages(tmp_path)
     with pytest.raises(ValueError, match="one prompt and tensor output"):
         model.generate(**inputs, enable_thinking=True, enable_thinking_budget=True,
                         return_dict_in_generate=True, max_new_tokens=64)
+    model.generation_config.return_dict_in_generate = True
+    with pytest.raises(ValueError, match="one prompt and tensor output"):
+        model.generate(**inputs, enable_thinking=True, enable_thinking_budget=True, max_new_tokens=64)
+
+
+@pytest.mark.parametrize("media", [False, True])
+def test_saved_generation_policy_reaches_native_decoder_and_two_reloads(tmp_path, media):
+    from transformers import GenerationConfig
+
+    from gptqmodel import GPTQModel
+
+    model = _model()
+    # Non-defaults mirror the released policy's sampling and EOS-list structure.
+    policy = GenerationConfig(do_sample=True, top_k=20, top_p=.95, temperature=.6,
+                              repetition_penalty=1.05, eos_token_id=[2, 63], pad_token_id=0,
+                              bos_token_id=1, max_new_tokens=3, return_dict_in_generate=True,
+                              output_scores=True, multimodal_max_length=8192)
+    model.generation_config = copy.deepcopy(policy)
+    inputs = _inputs() if media else {"input_ids": torch.tensor([[1, 5, 6]])}
+    for cycle in range(3):
+        reference = Qwen3ForCausalLM(copy.deepcopy(model.config.llm_config)).eval()
+        reference.load_state_dict(model.llm.state_dict())
+        with torch.no_grad():
+            ids = inputs["input_ids"]
+            embeddings = reference.get_input_embeddings()(ids.clamp_min(0))
+            if media:
+                embeddings[ids == -300] = _vision_oracle(model, inputs["pixel_values"], inputs["grid_thws"]).float()
+                embeddings[ids == -301] = model.vte.weight[-4]
+                embeddings[ids == -302] = model.vte.weight[-3]
+            torch.manual_seed(3525)
+            expected = reference.generate(inputs_embeds=embeddings, generation_config=copy.deepcopy(policy))
+            torch.manual_seed(3525)
+            actual = model.generate(**inputs)
+            assert hasattr(actual, "sequences"), "Saved root generation policy did not reach the native decoder"
+            assert torch.equal(actual.sequences, expected.sequences)
+            for got, want in zip(actual.scores, expected.scores, strict=True):
+                torch.testing.assert_close(got, want, atol=2e-5, rtol=2e-5)
+            # An explicit policy supersedes the saved one; EOS is the actual greedy first token.
+            eos = int(reference(inputs_embeds=embeddings, use_cache=False).logits[0, -1].argmax())
+            override = GenerationConfig(do_sample=False, eos_token_id=eos, pad_token_id=0, max_new_tokens=4)
+            assert model.generate(**inputs, generation_config=override).tolist() == [[eos]]
+            assert model.generate(**inputs, generation_config=override, eos_token_id=None,
+                                  max_new_tokens=2).shape == (1, 2)
+        assert model.generation_config.to_dict() == policy.to_dict()
+        if cycle < 2:
+            directory = tmp_path / str(cycle)
+            model.save_pretrained(directory)
+            _assets(directory)
+            model = (GPTQModel.load(str(directory), device="cpu", dtype=torch.float32).model
+                     if cycle == 0 else Ovis2_5.from_pretrained(directory)).eval()
 
 
 @pytest.mark.parametrize("kv,bias", [(4, False), (2, True), (1, False)])

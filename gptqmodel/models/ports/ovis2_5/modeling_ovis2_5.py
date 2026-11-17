@@ -113,6 +113,9 @@ class Ovis2_5(PreTrainedModel, GenerationMixin):
         inputs = kwargs.pop("input_ids", None) if inputs is None else inputs
         if inputs is None:
             raise ValueError("Ovis2.5 generation requires input_ids")
+        # HF loads the release policy onto this wrapper, rather than its nested decoder.
+        generation_config = kwargs.pop("generation_config", None) or self.generation_config
+        kwargs["generation_config"] = generation_config
         pad_id = self.text_tokenizer.pad_token_id if self.text_tokenizer is not None else self.config.llm_config.pad_token_id
         attention_mask = kwargs.pop("attention_mask", None)
         if attention_mask is None:
@@ -127,11 +130,15 @@ class Ovis2_5(PreTrainedModel, GenerationMixin):
         thinking_budget = kwargs.pop('thinking_budget', 1024)
 
         if enable_thinking and enable_thinking_budget:
-            if inputs.shape[0] != 1 or kwargs.get('num_return_sequences', 1) != 1 or kwargs.get('return_dict_in_generate', False):
+            if (inputs.shape[0] != 1
+                    or kwargs.get('num_return_sequences', generation_config.num_return_sequences) not in (None, 1)
+                    or kwargs.get('return_dict_in_generate', generation_config.return_dict_in_generate)):
                 raise ValueError('Ovis2.5 budgeted thinking requires one prompt and tensor output')
             if self.text_tokenizer is None:
                 raise ValueError('Ovis2.5 budgeted thinking requires the text tokenizer')
-            actual_max_new_tokens = kwargs['max_new_tokens']
+            actual_max_new_tokens = kwargs.get('max_new_tokens', generation_config.max_new_tokens)
+            if actual_max_new_tokens is None:
+                raise ValueError('Ovis2.5 budgeted thinking requires max_new_tokens')
             kwargs['max_new_tokens'] = thinking_budget
             generated_ids = self.llm.generate(inputs=None, inputs_embeds=inputs_embeds, attention_mask=attention_mask, **kwargs)
             output_ids = generated_ids
