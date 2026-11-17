@@ -462,7 +462,9 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
     raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
 
 
-def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
+def _explicit_requested_devices(
+    device, *, validate_families: bool = True
+) -> Optional[List[torch.device]]:
     """Return the concrete accelerators when the caller named specific devices.
 
     `device=("cuda:1", "cuda:2")` is a request for exactly those two GPUs.
@@ -473,6 +475,13 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
     A sequence of one or more concrete ordinals requests exactly those devices. Integer
     ordinals use the active accelerator namespace. Mixing a concrete ordinal
     with an abstract selector is ambiguous and must not expand the request.
+
+    ``validate_families`` keeps the single-capability-group rule, which exists
+    because one inference kernel is selected for the whole placement map
+    (#4632/#4705/#4734). A *quantization* pool is not an inference map -- it
+    runs the dense model on CPU and picks no kernel for the pool -- so the
+    quantization entry points pass ``False`` and may span generations, exactly
+    like the default pool already does (#4875).
     """
     if not isinstance(device, (tuple, list)):
         return None
@@ -489,7 +498,8 @@ def _explicit_requested_devices(device) -> Optional[List[torch.device]]:
             "A device sequence cannot mix concrete accelerator ordinals with abstract selectors; "
             "use only concrete ordinals or one accelerator family."
         )
-    selector_device_family(targets)  # validate every selected family/capability
+    if validate_families:
+        selector_device_family(targets)  # validate every selected family/capability
     return concrete
 
 
@@ -2013,7 +2023,11 @@ def ModelLoader(cls):
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
             _override_attn_implementation(config, atten_impl)
 
-        resolved_device = normalize_device_device_map(device, device_map)
+        # A quantization load selects no inference kernel for its pool, so an
+        # explicit sequence may span compute capabilities (#4875).
+        resolved_device = normalize_device_device_map(
+            device, device_map, validate_families=False
+        )
         resolved_device = auto_select_device(resolved_device, backend)
 
         if cls.require_dtype:
@@ -2215,7 +2229,12 @@ def ModelLoader(cls):
         with suspend_hf_weight_init():
             # normalize and auto select quantization device is not passed
             if quantize_config.device is None:
-                requested_devices = _explicit_requested_devices(device)
+                # A quantization pool may span compute capabilities; the
+                # single-capability rule only guards inference kernel selection
+                # (#4875).
+                requested_devices = _explicit_requested_devices(
+                    device, validate_families=False
+                )
                 # `quantize_config.device` only carries an accelerator family
                 # (ordinals are stripped by `normalize_device`), so an explicit
                 # device list is expressed through the compute filter.
