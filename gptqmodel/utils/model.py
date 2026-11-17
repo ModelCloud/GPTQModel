@@ -701,6 +701,7 @@ def create_quant_module(
     dtype: Optional[torch.dtype] = None,
     bias_dtype: Optional[torch.dtype] = None,
     resolved_module_config: Optional[ResolvedModuleConfig] = None,
+    transfer_from: Optional[nn.Module] = None,
 
 ):
     # An adapter only covers the modules named by its PEFT target list and
@@ -734,8 +735,10 @@ def create_quant_module(
 
     # Transformers builds quantized models on the meta device before assigning
     # checkpoint tensors, so allow either CPU or meta here and keep the
-    # replacement layer on the device the original layer occupied.
-    if ori_layer_device.type not in {CPU.type, "meta"}:
+    # replacement layer on the device the original layer occupied. A rebuild of
+    # an already-loaded layer (`transfer_from`) legitimately sees a live device:
+    # its checkpoint tensors are moved into the replacement below.
+    if transfer_from is None and ori_layer_device.type not in {CPU.type, "meta"}:
         raise AssertionError(
             f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
@@ -848,6 +851,21 @@ def create_quant_module(
         **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
+    if transfer_from is not None:
+        # The caller already loaded the checkpoint tensors into the module this
+        # one replaces (a load started before the native bridge was installed,
+        # #4795). The replacement was constructed from the same serialized
+        # config, so every persistent tensor keeps the checkpoint's shape and
+        # only has to be copied over before the device move.
+        source_state = transfer_from.state_dict()
+        missing = sorted(set(new_layer.state_dict()) - set(source_state))
+        if missing:
+            sample = ", ".join(missing[:8])
+            raise ValueError(
+                f"Cannot rebuild `{name}` from its loaded tensors: the checkpoint "
+                f"did not assign {sample}. Load this checkpoint with `GPTQModel.load`."
+            )
+        new_layer.load_state_dict(source_state, strict=False)
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
@@ -868,6 +886,7 @@ def create_quant_layer(
         init_kwargs: Optional[Dict[str, Any]] = None,
         dtype: Optional[torch.dtype] = None,
         bias_dtype: Optional[torch.dtype] = None,
+        transfer_from: Optional[Dict[str, nn.Module]] = None,
 
 ) -> Type[BaseQuantLinear]:
     if any(isinstance(module, candidate) for candidate in linear_candidates):
@@ -903,6 +922,9 @@ def create_quant_layer(
                     init_kwargs=init_kwargs,
                     dtype=dtype,
                     bias_dtype=bias_dtype,
+                    transfer_from=(
+                        transfer_from.get(name) if transfer_from is not None else None
+                    ),
                 )
             except NotImplementedError as error:
                 last_error = error
@@ -2924,6 +2946,86 @@ def validate_checkpoint_qweights(
         )
 
 
+def _matches_ignore_pattern(name: str, pattern) -> bool:
+    try:
+        return re.search(pattern, name) is not None
+    except (TypeError, re.error):
+        return False
+
+
+def _unmaterialized_checkpoint_parameters(
+    model: nn.Module, checkpoint: str | os.PathLike | None,
+) -> List[str]:
+    """Non-quantized parameters that no checkpoint tensor was loaded into.
+
+    A quantized checkpoint only stores the non-quantized tensors as plain
+    dense entries. When a key cannot be mapped back onto the runtime module the
+    parameter keeps the ``torch.empty`` storage allocated while the initializers
+    were suspended: random values, sometimes NaN/inf, with no warning. Compare
+    the checkpoint key set against the live parameters so such a load fails
+    loudly instead of returning a model that runs on garbage.
+    """
+
+    if checkpoint is None:
+        return []
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        # Pickle checkpoints cannot be inspected without loading them; leave
+        # that path to Accelerate's own reporting.
+        return []
+
+    loaded_parameter_ids = {
+        id(parameter)
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+        if name in checkpoint_keys
+    }
+
+    quantized_prefixes: List[str] = []
+    for name, module in model.named_modules():
+        if getattr(module, "QUANT_TYPE", None) is not None:
+            quantized_prefixes.append(f"{name}." if name else "")
+
+    ignored_patterns = getattr(model, "_keys_to_ignore_on_load_missing", None) or ()
+
+    missing: List[str] = []
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        if name in checkpoint_keys:
+            continue
+        if parameter.is_meta:
+            # Meta parameters belong to a lazy shell; its own checks cover them.
+            continue
+        if id(parameter) in loaded_parameter_ids:
+            # Tied to a parameter the checkpoint did populate.
+            continue
+        if any(name.startswith(prefix) for prefix in quantized_prefixes):
+            continue
+        if any(_matches_ignore_pattern(name, pattern) for pattern in ignored_patterns):
+            continue
+        missing.append(name)
+    return missing
+
+
+def _raise_on_unmaterialized_checkpoint_parameters(
+    model: nn.Module, checkpoint: str | os.PathLike | None,
+) -> None:
+    """Raise when a load leaves non-quantized parameters uninitialized."""
+
+    missing = _unmaterialized_checkpoint_parameters(model, checkpoint)
+    if not missing:
+        return
+    preview = ", ".join(missing[:8]) + (", ..." if len(missing) > 8 else "")
+    raise RuntimeError(
+        "Loader: the checkpoint "
+        f"{os.fspath(checkpoint)!r} does not provide tensors for {len(missing)} "
+        f"non-quantized parameter(s): {preview}. They would keep the "
+        "`torch.empty` storage allocated while weight initialization was "
+        "suspended, so inference would run on random (sometimes NaN/inf) "
+        "values. This usually means the checkpoint was written in a module "
+        "layout the loader cannot map back onto the runtime model; save it in "
+        "the source HF layout or load a checkpoint that matches this model."
+    )
+
+
 def _tie_weights_after_checkpoint_load(
     model,
     checkpoint: str | os.PathLike | None,
@@ -3720,6 +3822,9 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             model,
             load_checkpoint,
             extra_keys=fp8_weight_names if converted_checkpoint is not None else None,
+        )
+        _raise_on_unmaterialized_checkpoint_parameters(
+            model, kwargs.get("checkpoint", checkpoint)
         )
     finally:
         _cleanup_remapped_checkpoint(converted_checkpoint)

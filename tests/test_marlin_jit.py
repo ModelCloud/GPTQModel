@@ -1294,7 +1294,9 @@ def test_marlin_cuda_smoke_build_and_forward(monkeypatch, tmp_path):
         ).to(device)
         with torch.no_grad():
             module.qweight.copy_(torch.randint(0, 16, module.qweight.shape, device=device, dtype=torch.int32))
-            module.g_idx.copy_(torch.arange(module.in_features, device=device, dtype=torch.int32))
+            # ``desc_act=False`` and one group of ``in_features``: every column
+            # belongs to group 0, so ``arange(k) // group_size`` is all zeros.
+            module.g_idx.copy_(torch.zeros(module.in_features, device=device, dtype=torch.int32))
             module.scales.copy_(torch.ones_like(module.scales, device=device))
             module.qzeros.copy_(torch.zeros_like(module.qzeros, device=device))
         module.post_init()

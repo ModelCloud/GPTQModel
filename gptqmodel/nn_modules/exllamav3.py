@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import math
+import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -22,6 +24,15 @@ if TYPE_CHECKING:
 
 
 _EXL3_BUFFER_NAMES = ("trellis", "suh", "svh", "su", "sv", "bias", "mcg", "mul1")
+
+# The native EXL3 kernels accept FP16 only. A BF16 activation inside FP16's
+# finite range converts exactly, so the default BF16 checkpoint can use them.
+# Above this magnitude the activation is normalized to <= 1 by a power of two:
+# the Hadamard rotation is bounded by sqrt(128) times the input maximum, and the
+# GEMM accumulation stays far below FP16's 65504 limit. Inputs at or below the
+# threshold are passed through untouched, so ordinary activations are bit-exact
+# with the plain FP16 path.
+_FP16_SAFE_AMAX = 64.0
 
 
 def _torch_dtype(value: Any) -> torch.dtype:
@@ -42,9 +53,12 @@ class ExllamaV3Linear(nn.Module):
 
     @classmethod
     def validate_device(cls, device) -> None:
-        if normalize_device(device) not in cls.SUPPORTS_DEVICES:
+        family = normalize_device(device)
+        if family not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(
-                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA; use EXL3_TORCH on ROCm or CPU."
+                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA, but the module is on "
+                f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
+                "(or use EXL3_TORCH on ROCm or CPU)."
             )
 
     def __init__(
@@ -69,6 +83,12 @@ class ExllamaV3Linear(nn.Module):
         self._inner_signature: Optional[tuple[Any, ...]] = None
         self._torch_inner = None
         self._torch_inner_signature: Optional[tuple[Any, ...]] = None
+        # Serializes handle publication and teardown. `_ensure_inner` used to
+        # drop the old handle and re-read `self._inner` after building the new
+        # one, so a concurrent first forward could be handed the `None` another
+        # thread had just published (issue #4793). Per module, not process-wide:
+        # this runs on every forward.
+        self._inner_guard = threading.RLock()
 
         if tensors is not None:
             for buffer_name in _EXL3_BUFFER_NAMES:
@@ -170,6 +190,10 @@ class ExllamaV3Linear(nn.Module):
         return tuple(signature)
 
     def _drop_inner(self) -> None:
+        with self._inner_guard:
+            self._drop_inner_locked()
+
+    def _drop_inner_locked(self) -> None:
         if self._inner is not None:
             try:
                 self._inner.unload()
@@ -225,6 +249,10 @@ class ExllamaV3Linear(nn.Module):
                 setattr(self, buffer_name, tensor.half())
 
     def _ensure_inner(self) -> "LinearEXL3":
+        with self._inner_guard:
+            return self._ensure_inner_locked()
+
+    def _ensure_inner_locked(self) -> "LinearEXL3":
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
@@ -263,11 +291,29 @@ class ExllamaV3Linear(nn.Module):
             transformers_fix=True,
             key=self.name,
         )
+        inner = self._inner
         self._inner_signature = signature
-        return self._inner
+        return inner
 
     def _ensure_torch_inner(self):
         """Build the bounded FP32 reconstruction path for wide inputs."""
+        with self._inner_guard:
+            return self._ensure_torch_inner_locked()
+
+    def _needs_torch_fallback(self) -> bool:
+        """Whether this module must reconstruct through the portable kernel.
+
+        The native EXL3 kernels are compiled for CUDA only
+        (``SUPPORTS_DEVICES``). A materialized trellis on any other device
+        cannot run them, so the forward uses the same bounded FP32
+        reconstruction that FP32 and off-CUDA BF16 already use. An absent or
+        meta trellis is left to the native path, which reports that state with
+        its existing message.
+        """
+        trellis = getattr(self, "trellis", None)
+        return trellis is not None and trellis.device.type not in ("cuda", "meta")
+
+    def _ensure_torch_inner_locked(self):
         from .exllamav3_torch import ExllamaV3TorchLinear
 
         signature = self._current_signature()
@@ -296,6 +342,22 @@ class ExllamaV3Linear(nn.Module):
         self._torch_inner_signature = signature
         return torch_inner
 
+    def __getstate__(self):
+        # A lock cannot cross a copy or a process; the receiver recreates it.
+        state = super().__getstate__()
+        state.pop("_inner_guard", None)
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self._inner_guard = threading.RLock()
+        # The native handle belongs to the source module's process and may be
+        # shared with a shallow copy, so never unload it here - just forget it.
+        self._inner = None
+        self._inner_signature = None
+        self._torch_inner = None
+        self._torch_inner_signature = None
+
     def post_init(self) -> None:
         self._drop_inner()
         self._coerce_buffer_dtypes()
@@ -308,19 +370,91 @@ class ExllamaV3Linear(nn.Module):
         self._coerce_buffer_dtypes()
         return result
 
+    def _native_bf16_input(
+        self, x: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, float]]:
+        """Map a BF16 activation onto the FP16-only native kernel contract.
+
+        BF16's 8-bit significand is a subset of FP16's 11-bit one, so every BF16
+        value inside FP16's finite range converts exactly. Above ``_FP16_SAFE_AMAX`` the
+        activation is divided by a power of two before the cast and the kernel
+        output is multiplied back, which keeps the Hadamard rotation and the
+        GEMM accumulation inside FP16's range without changing the relative
+        rounding (power-of-two scaling is exact in FP16).
+
+        Returns ``(fp16_input, output_scale)``. The kernel result must have the
+        bias removed, be multiplied by ``output_scale``, and have the bias
+        restored. Returns ``None`` for non-finite activations so they keep the
+        FP32 Torch reconstruction path.
+        """
+        if x.numel() == 0:
+            # A zero-row batch has no inf-norm identity; LinearEXL3 already
+            # returns an empty output for it, so no scaling is needed.
+            return x.to(torch.float16), 1.0
+        # ``vector_norm(inf)`` is the max-abs reduction without materializing
+        # an ``abs`` copy, and it is the cheapest form on CUDA.
+        amax = float(torch.linalg.vector_norm(x.detach(), ord=float("inf")))
+        if not math.isfinite(amax):
+            return None
+        if amax <= _FP16_SAFE_AMAX:
+            return x.to(torch.float16), 1.0
+        # ``math.frexp`` yields ``amax < 2**exponent``, so the scaled magnitude
+        # lies in (0.5, 1] and every power-of-two step is exact.
+        exponent = math.frexp(amax)[1]
+        output_scale = math.ldexp(1.0, exponent)
+        return (x * (1.0 / output_scale)).to(torch.float16), output_scale
+
+    def _rescale_native_output(
+        self, result: torch.Tensor, output_scale: float
+    ) -> torch.Tensor:
+        """Undo ``_native_bf16_input``'s pre-scale, keeping the bias unscaled."""
+        bias = getattr(self, "bias", None)
+        output = result.to(torch.float32)
+        if bias is None:
+            return output * output_scale
+        bias = bias[:self.out_features].to(torch.float32)
+        return (output - bias) * output_scale + bias
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
-        if input_dtype != torch.float16:
+        if self._needs_torch_fallback():
+            # The native kernels are CUDA-only. After `quantize()` the packed
+            # layers stay on CPU until the caller moves the model, and a
+            # checkpoint loaded for a portable device also keeps them off CUDA.
+            # The portable kernel reads the same trellis/suh/svh buffers, so
+            # reconstruct there instead of raising from `_ensure_inner` (#4789).
+            # BF16 off CUDA already used this path, so its behaviour is
+            # unchanged.
             return self._ensure_torch_inner().forward(x)
+        if input_dtype == torch.float16:
+            inner = self._ensure_inner()
+            result = inner.forward(
+                x.to(dtype=torch.float16),
+                {},
+                out_dtype=torch.float16,
+            )
+            return result[..., :self.out_features].to(input_dtype)
 
-        inner = self._ensure_inner()
-        runtime_dtype = torch.float16
-        result = inner.forward(
-            x.to(dtype=runtime_dtype),
-            {},
-            out_dtype=runtime_dtype,
-        )
-        return result[..., :self.out_features].to(input_dtype)
+        # BF16 is the default dtype of most EXL3 checkpoints. Keep it on the
+        # native kernels instead of the ~20-200x slower Torch reconstruction
+        # (#4767); the pre-scale keeps #3731's wide-input guarantee.
+        if input_dtype == torch.bfloat16 and x.is_cuda:
+            prepared = self._native_bf16_input(x)
+            if prepared is not None:
+                inner = self._ensure_inner()
+                native_input, output_scale = prepared
+                result = inner.forward(
+                    native_input,
+                    {},
+                    out_dtype=torch.float16,
+                )[..., :self.out_features]
+                if output_scale != 1.0:
+                    result = self._rescale_native_output(result, output_scale)
+                return result.to(input_dtype)
+
+        # FP32 (and non-finite BF16) keep the bounded FP32 reconstruction: a
+        # cast would silently drop precision, and the wide path is exact.
+        return self._ensure_torch_inner().forward(x)
 
     def _multiplier_value(self, name: str) -> Optional[int]:
         tensor = getattr(self, name, None)

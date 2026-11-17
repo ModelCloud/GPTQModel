@@ -40,6 +40,10 @@ def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> t
     """Decode the packed FP8 payload with independent FP64 arithmetic.
 
     This does not call ``dequantize_weight`` or any other code under test.
+    The native GEMM narrows the decoded weight to the activation dtype before
+    the FP32-reduced product (#4716), so the oracle applies the same rounding.
+    An un-narrowed FP64 weight would demand precision the activation dtype
+    cannot represent (a full bf16 ulp at |y|~1).
     """
 
     codes = kernel.weight.to(torch.float64)
@@ -66,6 +70,8 @@ def _weight_only_oracle(kernel: fp8_module.TorchFP8Linear, x: torch.Tensor) -> t
             scale[:, None, :, None],
         ).reshape(kernel.out_features, kernel.in_features)
 
+    # Match the weight narrowing the native GEMM performs for this activation.
+    decoded = decoded.to(x.dtype).to(torch.float64)
     output = x.to(torch.float64) @ decoded.t()
     if kernel.bias is not None:
         output = output + kernel.bias.to(torch.float64)
@@ -285,6 +291,11 @@ def test_fp8_default_forward_is_w8a16(fmt: str, weight_scale_method: str, dtype:
 
     oracle = _weight_only_oracle(kernel, x)
     assert out.dtype == dtype
+    # With the weight narrowing matched, only the FP32-vs-FP64 reduction and
+    # the final output rounding remain. Half a bf16 ulp at unity is
+    # 2^-9 ~= 2e-3, which is the bound this tolerance allows; an oracle built
+    # from the un-narrowed FP32 weight differs by a full bf16 ulp (2^-8) and
+    # still fails here.
     torch.testing.assert_close(out, oracle.to(dtype), rtol=2e-3, atol=2e-3)
 
 

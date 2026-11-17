@@ -2520,10 +2520,11 @@ def test_calibration_hessian_strides_through_the_text():
     assert len(windows) == 4, "every calibration sample must use a distinct window"
     assert all(len(window) == seqlen for window in seen)
     # Spread across the whole text: the budget reaches the end instead of
-    # stopping at ``nsamples * seqlen``. span = 64 - 8 + 1 = 57, so the four
-    # windows start at 0, 14, 28 and 42 and do not overlap.
+    # stopping at ``nsamples * seqlen``. The legal start range is
+    # ``0..total - seqlen`` = ``0..56``; the four windows are spaced by
+    # ``56 // 3`` and land on 0, 18, 37 and 56, so they still do not overlap.
     starts = [window[0] for window in seen]
-    assert starts == [0, 14, 28, 42]
+    assert starts == [0, 18, 37, 56]
     assert all(b - a >= seqlen for a, b in zip(starts, starts[1:]))
 
 

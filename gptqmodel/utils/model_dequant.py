@@ -43,6 +43,27 @@ from ..utils.planar_packing import (
 
 LOG = logging.getLogger(__name__)
 
+
+# GPT-QModel methods whose checkpoint layout has no dense decoder here. Their
+# `format` is a *sub-format* of the method (`mxfp4_macaq`, and plain `mxfp4`
+# for a rotation-free MACaQ checkpoint), so neither the MX/FP8 strings nor a
+# `.qweight` without `.g_idx` identifies a decoder: Paro was decoded as AWQ and
+# MACaQ as MXFP4, both dropping their rotation and reporting success on a
+# checkpoint with wrong weights (#4786).
+_UNDECODABLE_METHODS = frozenset(
+    {
+        "paro",
+        "macaq",
+        "gguf",
+        "gptqmodel_gguf",
+        "qqq",
+        "nf12",
+        "vptq",
+        "exl3",
+        "tt_blockfloat",
+    }
+)
+
 # Quantization-only metadata must not survive into a dense export: leaving it
 # behind makes loaders route the dense checkpoint back through from_quantized.
 _DENSE_OUTPUT_EXCLUDED_FILES = frozenset(
@@ -664,6 +685,14 @@ def detect_format(model_path: Path, config: dict) -> str:
     ):
         # Preserved FP8 predictors do not describe the base model's encoding.
         return "gptq"
+
+    if method in _UNDECODABLE_METHODS:
+        # A GPT-QModel method owns its packed layout, and its `format` is a
+        # sub-format of that method: `mxfp4_macaq` is not an MXFP4 checkpoint,
+        # and a rotation-free MACaQ checkpoint stores `format: "mxfp4"` next to
+        # `method: "macaq"`. Report the method so the caller refuses it rather
+        # than guessing a decoder from the tensor names (#4786).
+        return method
 
     # MXFP4 and MXFP8 use the same value dtypes as NVFP4 and plain FP8.
     # Inspect declared scale semantics before guessing from a weight dtype.
@@ -2007,7 +2036,6 @@ def dequantize_model(
 
     if output_path.exists() and not resume:
         raise FileExistsError(f"Output path {output_path} already exists")
-    output_path.mkdir(parents=True, exist_ok=resume)
 
     config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
@@ -2022,6 +2050,16 @@ def dequantize_model(
             quant_cfg = {**legacy_quant_cfg, **quant_cfg}
         config["quantization_config"] = quant_cfg
     fmt = detect_format(model_path, config)
+    if fmt in _UNDECODABLE_METHODS:
+        raise NotImplementedError(
+            f"export(..., 'hf') does not support `{fmt}` checkpoints: they have no "
+            "dense decoder, and decoding them with another layout's decoder writes "
+            "wrong weights without reporting an error. Load the checkpoint with "
+            "GPTQModel, or export a format that has a dense decoder (GPTQ, AWQ, "
+            "FP8, NVFP4/MXFP4, BitsAndBytes, compressed-tensors)."
+        )
+    # Only mutate the filesystem once the checkpoint is known to be convertible.
+    output_path.mkdir(parents=True, exist_ok=resume)
     if target_dtype is None:
         target_dtype = resolve_dense_target_dtype(config)
 

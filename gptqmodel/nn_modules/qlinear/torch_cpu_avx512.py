@@ -13,7 +13,9 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
+from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
+from ._fused_train_state import finalize_fused_train_state
 from .torch_aten_kernel import TorchAtenLinear
 
 
@@ -121,9 +123,10 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     # ``transform_cpu`` widens scales *and* bias to FP32 in place, so both must
     # be restored before a checkpoint load or save.
     _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros", "scales", "bias")
-    # The AVX512 extension packs a different layout with no verified inverse;
-    # keep the full checkpoint snapshot.
-    _FUSED_TRAIN_STATE_REBUILD = None
+    # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4``, so the
+    # checkpoint ``qweight`` is rebuilt on save instead of kept resident. The
+    # remaining snapshot entries are per-column metadata, not the packed weight.
+    _FUSED_TRAIN_STATE_REBUILD = "avx512_gptq"
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
@@ -184,9 +187,18 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         # Keep scales in FP32. BF16 scale rounding alone consumes most of the
         # 2e-3 inference error budget on small-K layers; the dot product still
         # uses BF16 inputs with FP32 accumulation.
-        self.scales = self.scales.to(torch.float32).contiguous()
+        #
+        # ``to`` returns the same tensor when the dtype already matches, which
+        # would leave scales as a view of the checkpoint mapping (#4785).
+        scales = self.scales.to(torch.float32)
+        if scales.data_ptr() == self.scales.data_ptr():
+            scales = detach_cpu_operand(scales)
+        self.scales = scales.contiguous()
         if self.bias is not None:
-            self.bias = self.bias.to(torch.float32).contiguous()
+            bias = self.bias.to(torch.float32)
+            if bias.data_ptr() == self.bias.data_ptr():
+                bias = detach_cpu_operand(bias)
+            self.bias = bias.contiguous()
 
         if self.pack_gptq_int4_kernel is None:
             ok, err = type(self).cached_validate_once()
@@ -207,6 +219,14 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         )
         self._cpu_transform_dtype = torch.bfloat16
         self._cpu_transformed = True
+        # ``g_idx`` still aliases the checkpoint mapping and would pin the whole
+        # shard even though ``qweight``/``qzeros`` are now private (#4785).
+        self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
+        # ``unpack_hf_int4`` inverts ``pack_hf_int4``, so the checkpoint
+        # ``qweight`` can be rebuilt on save. Drop the resident clone once that
+        # inverse reproduces the bytes captured before the transform; a layout
+        # this build cannot invert keeps it (#4783).
+        finalize_fused_train_state(self)
 
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:

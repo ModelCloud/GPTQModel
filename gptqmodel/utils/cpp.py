@@ -34,6 +34,7 @@ import pcre
 import torch
 from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
 
+from .arch import normalize_arch
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
@@ -1085,6 +1086,77 @@ def resolved_cuda_arch_flags() -> list[str]:
     return _effective_cuda_arch_flags(merge_visible_caps=True)
 
 
+def _normalize_rocm_arch_list(value: str) -> list[str]:
+    """Canonicalize a ``PYTORCH_ROCM_ARCH`` value.
+
+    Torch turns spaces into ``;`` and splits on ``;`` before emitting one
+    ``--offload-arch`` per entry, so mirror that split and sort/dedupe the
+    result. Target feature suffixes (``:xnack+``/``:sramecc-``) are preserved:
+    torch passes them to hipcc verbatim, so they change the emitted code
+    objects and must not collapse two builds onto one cache key.
+    """
+
+    targets = {
+        token.strip().lower()
+        for token in value.replace(" ", ";").split(";")
+        if token.strip()
+    }
+    return sorted(targets)
+
+
+def _visible_rocm_arch_list() -> list[str]:
+    """Return the sorted, suffix-stripped ``gcnArchName`` of the visible devices.
+
+    This mirrors torch's ``_get_rocm_arch_flags`` fallback when
+    ``PYTORCH_ROCM_ARCH`` is unset. A host without a visible GPU, or a device
+    that cannot report properties, contributes nothing instead of raising: the
+    cache key must still be computable.
+    """
+
+    try:
+        if not torch.cuda.is_available():
+            return []
+        device_count = torch.cuda.device_count()
+    except Exception:
+        return []
+
+    targets: set[str] = set()
+    for device_index in range(device_count):
+        try:
+            properties = torch.cuda.get_device_properties(device_index)
+        except Exception:
+            continue
+        arch = normalize_arch(getattr(properties, "gcnArchName", None))
+        if arch:
+            targets.add(arch)
+    return sorted(targets)
+
+
+def _hip_cache_fingerprint_payload(hip_version: str) -> list[str]:
+    """Return the HIP target payload for the JIT cache key.
+
+    ``PYTORCH_ROCM_ARCH`` wins because torch passes it to hipcc verbatim;
+    otherwise torch compiles for every visible device's ``gcnArchName``. The
+    payload is sorted so device enumeration order cannot fork the cache, and it
+    replaces the CUDA capability pair, which cannot tell ROCm targets apart.
+    """
+
+    payload = ["cuda_ext=1", f"hip={hip_version}"]
+    override = os.getenv("PYTORCH_ROCM_ARCH")
+    if override:
+        targets = _normalize_rocm_arch_list(override)
+    else:
+        targets = _visible_rocm_arch_list()
+
+    if targets:
+        payload.append(f"rocm_arch_list={';'.join(targets)}")
+    else:
+        # Keep a stable marker so a key built without a target is never
+        # mistaken for a key built for a real one.
+        payload.append("rocm_arch_list=none")
+    return payload
+
+
 def torch_cxx11_abi_flag() -> int:
     """Return the ABI mode local JIT extensions must match for this torch build."""
 
@@ -1739,10 +1811,19 @@ class TorchOpsJitExtension:
         return digest[:16]
 
     def _cuda_cache_fingerprint_payload(self) -> list[str]:
-        """Capture the effective CUDA target set so cached binaries stay device-compatible."""
+        """Capture the effective CUDA/ROCm target set so cached binaries stay device-compatible."""
 
         if not self.requires_cuda:
             return ["cuda_ext=0"]
+
+        hip_version = getattr(torch.version, "hip", None)
+        if hip_version:
+            # hipcc ignores ``TORCH_CUDA_ARCH_LIST`` and the coarse
+            # ``get_device_capability()`` pair cannot distinguish gfx1200 from
+            # gfx1201 (or gfx908 from gfx90a). ``PYTORCH_ROCM_ARCH``, else the
+            # visible devices' ``gcnArchName``, is what torch compiles for, so
+            # it has to identify the cached binary (#4815).
+            return _hip_cache_fingerprint_payload(str(hip_version))
 
         payload = ["cuda_ext=1"]
         override = os.getenv("TORCH_CUDA_ARCH_LIST")

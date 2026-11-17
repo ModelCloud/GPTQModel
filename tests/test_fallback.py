@@ -1128,16 +1128,10 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
     source = module.weight.detach().double()
     expected_scale = torch.full_like(scale, 2.0**-24, dtype=torch.float64)
     if smoothing == "mse" or strategy == FallbackStrategy.RTN:
-        expected_zero = (torch.full_like(expected_scale, 8) if sym else
-                         (-source.amin(1, keepdim=True) / expected_scale).round())
-        if smoothing == "mse":
-            codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
-        else:
-            codes = ((source / expected_scale).round() + expected_zero).clamp(0, 15)
+        expected_zero = (-source.amin(1, keepdim=True) / expected_scale).round()
     elif strategy == FallbackStrategy.STDCLIP:
         lo = source.mean(1, keepdim=True) - 3 * source.std(1, keepdim=True, unbiased=False)
         expected_zero = (-lo / expected_scale).round().clamp(0, 15)
-        codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
     else:
         if strategy == FallbackStrategy.MIDPOINT:
             lo = source.amin(1, keepdim=True)
@@ -1155,7 +1149,15 @@ def test_fallback_near_dead_scale_survives_smoothing_and_packing(device, strateg
         lo = torch.minimum(lo, torch.zeros_like(lo))
         hi = torch.maximum(hi, torch.zeros_like(hi))
         expected_zero = (-lo / expected_scale).round().clamp(0, 15)
+    if sym:
+        # Every symmetric kernel assumes zero == 2 ** (bits - 1); the fallback
+        # fits the zero-centered ``[-max|x|, max|x|]`` range for all strategies
+        # instead of the asymmetric endpoints used above.
+        expected_zero = torch.full_like(expected_scale, 8)
+    if smoothing == "mse" or strategy != FallbackStrategy.RTN:
         codes = (source / expected_scale + expected_zero).round().clamp(0, 15)
+    else:
+        codes = ((source / expected_scale).round() + expected_zero).clamp(0, 15)
     expected = (codes - expected_zero) * expected_scale
     torch.testing.assert_close(scale.double(), expected_scale, rtol=1e-6, atol=0)
     torch.testing.assert_close(zero.double(), expected_zero, rtol=0, atol=0)

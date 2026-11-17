@@ -81,12 +81,18 @@ except ImportError:
 
 log = setup_logger()
 
-# Torch storage dtypes that reach the MLX kernels through a payload.
-_MLX_DTYPES = {
-    torch.float16: mx.float16,
-    torch.bfloat16: mx.bfloat16,
-    torch.float32: mx.float32,
-}
+# Torch storage dtypes that reach the MLX kernels through a payload. Keep the
+# module importable without the optional runtime so the pure conversion helpers
+# (and their tests) do not need MLX installed.
+_MLX_DTYPES = (
+    {
+        torch.float16: mx.float16,
+        torch.bfloat16: mx.bfloat16,
+        torch.float32: mx.float32,
+    }
+    if MLX_AVAILABLE
+    else {}
+)
 
 
 def _mlx_dtype(dtype):
@@ -139,6 +145,28 @@ def _mlx_holder_class(module):
     if isinstance(module, TorchLinear):
         return MlxQuantLinear
     return AwqMlxQuantLinear
+
+
+def _sanitize_mlx_weights(mlx_model, weights):
+    """Run the target model's weight sanitizer before ``load_weights``.
+
+    ``mlx_lm.load`` calls ``Model.sanitize(weights)`` first. Families such as
+    ``gemma3_text`` always build ``lm_head`` and only drop it in ``sanitize``
+    when the tied head is absent, instead of reading ``tie_word_embeddings``.
+    Building the model and loading directly skipped that step, so the strict
+    load still expected ``lm_head.weight`` and every tied Gemma-3 text export
+    failed (#4808). Families whose ``sanitize`` rewrites the key set (llama and
+    qwen2 drop ``lm_head.weight`` when tied) need the returned mapping, so use
+    it as-is.
+    """
+
+    sanitize = getattr(mlx_model, "sanitize", None)
+    if not callable(sanitize):
+        return weights
+    sanitized = sanitize(dict(weights))
+    if isinstance(sanitized, dict):
+        return sanitized
+    return weights
 
 
 def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool = False):
@@ -466,6 +494,7 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
         mlx_model.update_modules(tree_map_with_path(
             replace_custom, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
+    weights = _sanitize_mlx_weights(mlx_model, weights)
     mlx_model.load_weights(list(weights.items()))
     if (group16 or paro or qqq or fp8_native or fp8_packed or gptq_dtype or awq_dtype
             or gguf_dtype or bitsandbytes_native or exl3_native or macaq_native or nf12_native):
@@ -627,6 +656,7 @@ def _convert_gptq_to_mlx_weights(
 
     # Load and quantize weights
     log.info("Starting MLX quantization...")
+    weights = _sanitize_mlx_weights(mlx_model, weights)
     mlx_model.load_weights(list(weights.items()))
     weights, mlx_config = quantize_model(mlx_model, mlx_config, group_size=gptq_config["group_size"],
                                      bits=gptq_config["bits"], quant_predicate=quant_predicate)

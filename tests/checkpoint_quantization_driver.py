@@ -138,6 +138,11 @@ def main():
             else 32,
             desc_act=False,
         )
+    if args.format in {"gemv", "llm-awq"}:
+        # The native GEMV/LLM-AWQ kernels reject the generic group_size=32 at
+        # quantize time (GEMV accepts 64/128, LLM-AWQ only 128). These formats
+        # were never valid with 32; the fixture used to fail before it ran.
+        method_settings.update(group_size=128)
     if args.format == "gemv_fast":
         method_settings.update(group_size=128, pack_dtype=torch.int16)
     backend = {

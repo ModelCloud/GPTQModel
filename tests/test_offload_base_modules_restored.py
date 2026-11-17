@@ -8,6 +8,7 @@ in-session model unusable because ``tie_weights()`` re-points ``lm_head.weight``
 at the meta embedding parameter, which has no offload hook.
 """
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,22 @@ def _assert_runnable(model):
     assert logits.shape == (1, 3, 32)
 
 
+def _bare_looper(model, entries):
+    """A ``ModuleLooper`` built without ``__init__`` but with the loop's state.
+
+    ``loop()`` reads ``_inflight_layer`` on the failure path (#4546) and drains
+    ``_dangling_threads`` before restoring anything (#4595); a double without
+    them raises ``AttributeError`` while handling the injected failure.
+    """
+    looper = object.__new__(ModuleLooper)
+    looper.gptq_model = SimpleNamespace(model=model)
+    looper._offloaded_base_modules = entries
+    looper._inflight_layer = None
+    looper._dangling_threads_lock = threading.Lock()
+    looper._dangling_threads = []
+    return looper
+
+
 def test_restore_offloaded_modules_materializes_tied_embeddings(tmp_path):
     model = _tiny_tied_model()
     entries = _offload_tied_base_modules(model, tmp_path)
@@ -94,9 +111,7 @@ def test_loop_restores_base_modules_on_success(monkeypatch, tmp_path):
     model = _tiny_tied_model()
     entries = _offload_tied_base_modules(model, tmp_path)
 
-    looper = object.__new__(ModuleLooper)
-    looper.gptq_model = SimpleNamespace(model=model)
-    looper._offloaded_base_modules = entries
+    looper = _bare_looper(model, entries)
     monkeypatch.setattr(looper, "_loop_impl", lambda **_kwargs: "finished")
 
     assert looper.loop() == "finished"
@@ -108,9 +123,7 @@ def test_loop_restores_base_modules_when_quantize_fails(monkeypatch, tmp_path):
     model = _tiny_tied_model()
     entries = _offload_tied_base_modules(model, tmp_path)
 
-    looper = object.__new__(ModuleLooper)
-    looper.gptq_model = SimpleNamespace(model=model)
-    looper._offloaded_base_modules = entries
+    looper = _bare_looper(model, entries)
 
     def _boom(**_kwargs):
         raise RuntimeError("quantize failed")

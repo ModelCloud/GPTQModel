@@ -21,6 +21,12 @@ from ._runtime_cache import tensor_cache_key
 log = setup_logger()
 
 
+# The dtypes `_decode_dtype_for_activation` can ask about: the two half
+# activation dtypes, plus the FP32 fallback. Their range answers are computed
+# eagerly so a compiled graph can read them as plain Python constants (#4794).
+_DECODE_RANGE_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+
+
 class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
@@ -102,6 +108,7 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_warning_logged = False
         self._decode_range_key = None
         self._decode_range_fits = True
+        self._decode_range_fits_by_dtype = {}
 
     def post_init(self):
         # `scales` and `bias` keep the precision they were loaded with. The
@@ -123,6 +130,7 @@ class AwqTorchLinear(AWQuantLinear):
         self._cpu_packed_warning_logged = False
         self._decode_range_key = None
         self._decode_range_fits = True
+        self._refresh_decode_range_fits()
 
     def extra_repr(self) -> str:
         return (
@@ -208,44 +216,85 @@ class AwqTorchLinear(AWQuantLinear):
         output.
         """
 
-        scales = self.scales
+        scales = getattr(self, "scales", None)
         if scales is None or scales.numel() == 0 or scales.device.type == "meta":
             return True
 
         # A host-side value would become a data-dependent branch in a compiled
-        # graph and cannot be read during CUDA graph capture. Keep the
-        # conservative wide decode in both cases without caching the choice:
-        # the graph re-reads the live scale tensor on every replay, and an
-        # eager call after capture must still be allowed the narrow decode.
-        # The check must precede the cache key: `tensor_cache_key` reads
-        # `.is_inference()`/`data_ptr()` on the host, which dynamo rejects and
-        # a CUDA-graph capture cannot cross.
+        # graph and cannot be read during CUDA graph capture. Read the answer
+        # computed outside the compiled region instead of returning `False` for
+        # every dtype: `False` here escalates the decode to FP64, and FP64
+        # promotes the whole GEMM to FP64 (#4794). The check must still precede
+        # the cache key: `tensor_cache_key` reads `.is_inference()`/`data_ptr()`
+        # on the host, which dynamo rejects and a CUDA-graph capture cannot
+        # cross.
         if torch.compiler.is_compiling() or (
             scales.device.type == "cuda" and torch.cuda.is_current_stream_capturing()
         ):
-            return False
+            precomputed = getattr(self, "_decode_range_fits_by_dtype", None)
+            if precomputed is None:
+                return False
+            return precomputed.get(dtype, False)
 
         key = (tensor_cache_key(scales), dtype, self.bits)
         if key == self._decode_range_key:
             return self._decode_range_fits
 
-        # Check the actual cast the decoder will perform, in the decoder's
-        # dtype: a scale that overflows, or a nonzero scale that rounds to
-        # zero, is not representable there, and neither is a scale whose
-        # largest code (`2**bits - 1`) makes the product overflow. The three
-        # reductions run on the scale's device and synchronize only on a cache
-        # miss (a checkpoint load, move, or explicit clear).
-        span = (1 << self.bits) - 1
-        magnitude = scales.detach().abs()
-        converted = magnitude.to(dtype)
-        fits = (
-            bool(converted.isfinite().all())
-            and bool((converted * span).isfinite().all())
-            and not bool(((magnitude > 0) & (converted == 0)).any())
-        )
+        fits = self._compute_decode_range_fits(dtype)
         self._decode_range_key = key
         self._decode_range_fits = fits
+        # Keep the compiled-region answer in step with an eager recompute (a
+        # caller that mutates the scales in place and calls an eager forward
+        # before compiling).
+        precomputed = getattr(self, "_decode_range_fits_by_dtype", None)
+        if precomputed is not None:
+            precomputed[dtype] = fits
         return fits
+
+    def _compute_decode_range_fits(self, dtype: torch.dtype) -> bool:
+        """Whether the stored scales keep every decoded weight in ``dtype``.
+
+        Check the actual cast the decoder will perform, in the decoder's dtype:
+        a scale that overflows, or a nonzero scale that rounds to zero, is not
+        representable there, and neither is a scale whose largest code
+        (`2**bits - 1`) makes the product overflow. The reduction runs on the
+        scale's device, so this must never be called from a compiled region or
+        a CUDA-graph capture.
+        """
+
+        span = (1 << self.bits) - 1
+        magnitude = self.scales.detach().abs()
+        converted = magnitude.to(dtype)
+        # One reduction (one host sync), not three: this also runs for every
+        # dtype on each device/dtype move.
+        representable = (
+            converted.isfinite()
+            & (converted * span).isfinite()
+            & ~((magnitude > 0) & (converted == 0))
+        )
+        return bool(representable.all())
+
+    def _refresh_decode_range_fits(self) -> None:
+        """Recompute the per-dtype answers read inside a compiled graph.
+
+        A compiled graph cannot read the scale tensor on the host, so the answer
+        it needs is decided here, eagerly, and read back as a plain Python
+        constant (dynamo guards on it, so a change recompiles). This runs
+        wherever the scales can change: ``post_init()``, a device/dtype move and
+        a state-dict load (both via ``_apply``/``_load_from_state_dict`` ->
+        ``clear_weight_cache()``), and a training transition. An in-place
+        mutation of the scales must call ``clear_weight_cache()`` explicitly,
+        the same contract ``tensor_cache_key`` documents.
+        """
+
+        scales = getattr(self, "scales", None)
+        if scales is None or scales.numel() == 0 or scales.device.type == "meta":
+            self._decode_range_fits_by_dtype = dict.fromkeys(_DECODE_RANGE_DTYPES, True)
+            return
+        self._decode_range_fits_by_dtype = {
+            dtype: self._compute_decode_range_fits(dtype)
+            for dtype in _DECODE_RANGE_DTYPES
+        }
 
     def _decode_dtype_for_activation(self, activation_dtype: torch.dtype) -> torch.dtype:
         """Return the dtype that decodes the checkpoint without range loss.
