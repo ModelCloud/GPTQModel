@@ -297,9 +297,17 @@ built and before the exported `config.json` is written:
 | `rope_theta` | top-level `rope_theta` |
 | `rope_type` other than `default`, plus `factor`, `high_freq_factor`, `low_freq_factor`, `original_max_position_embeddings`, `partial_rotary_factor` | top-level `rope_scaling` |
 | `rope_type: default` | no `rope_scaling` |
-| per-layer-type dicts (`full_attention` / `sliding_attention`) | collapsed when every type agrees; `ValueError` otherwise |
+| per-layer-type dicts (`full_attention` / `sliding_attention`) on `gemma3` / `gemma3_text` | `full_attention.rope_theta` → `rope_theta`; `sliding_attention.rope_theta` → `rope_local_base_freq`; `full_attention` scaling → `rope_scaling` |
+| other per-layer-type dicts | collapsed when every type agrees; `ValueError` otherwise |
 | `rope_parameters` itself | kept, for architectures such as `qwen3` that read it |
 
 A `rope_parameters` mapping without `rope_theta` logs a warning instead of
 silently accepting mlx-lm's 10000 default. `qwen3` configs are left untouched
 because their `ModelArgs` read the nested form directly.
+
+Gemma 3 is the one family whose local/global split mlx-lm *can* represent:
+`mlx_lm.models.gemma3_text.ModelArgs` builds the `sliding_attention` layers from
+`rope_local_base_freq` and the `full_attention` layers from `rope_theta`, applying
+`rope_scaling` to the global rope only. Those configs are mapped rather than
+refused (#4678). A scaling on the *local* rope is still rejected, because mlx-lm
+would silently drop it.

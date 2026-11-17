@@ -139,12 +139,81 @@ def test_uniform_per_layer_rope_parameters_collapse():
 
 
 def test_conflicting_per_layer_rope_parameters_are_rejected():
+    """An architecture with no local/global split still cannot be represented."""
+
     rope = {
         "full_attention": {"rope_theta": 500000.0},
         "sliding_attention": {"rope_theta": 10000.0},
     }
 
     with pytest.raises(ValueError, match="per-layer-type RoPE"):
+        normalize_mlx_rope_config({"model_type": "mistral", "rope_parameters": rope})
+
+
+def _gemma3_rope(*, full_scaling=None) -> dict:
+    full = {"rope_type": "default", "rope_theta": 1000000}
+    if full_scaling:
+        full.update(full_scaling)
+    return {
+        "sliding_attention": {"rope_type": "default", "rope_theta": 10000},
+        "full_attention": full,
+    }
+
+
+def test_gemma3_per_layer_rope_maps_to_mlx_lm_fields():
+    """Gemma 3's global/local split is representable: theta + local base freq.
+
+    mlx-lm's ``gemma3_text.ModelArgs`` reads ``rope_theta`` for the
+    ``full_attention`` layers, ``rope_local_base_freq`` for the
+    ``sliding_attention`` layers and applies ``rope_scaling`` to the global rope
+    only. Refusing this layout broke every Gemma 3 export (#4678, regression of
+    #4617).
+    """
+
+    exported = normalize_mlx_rope_config(
+        {"model_type": "gemma3_text", "rope_parameters": _gemma3_rope()}
+    )
+
+    assert exported["rope_theta"] == 1000000.0
+    assert exported["rope_local_base_freq"] == 10000.0
+    # A plain rotary setup carries no scaling marker for mlx-lm to trip over.
+    assert "rope_scaling" not in exported
+
+
+def test_gemma3_full_attention_scaling_lands_on_rope_scaling():
+    """4B+ models scale only the global rope; that is exactly mlx-lm's contract."""
+
+    rope = _gemma3_rope(full_scaling={"rope_type": "linear", "factor": 8.0})
+    exported = normalize_mlx_rope_config({"model_type": "gemma3_text", "rope_parameters": rope})
+
+    assert exported["rope_theta"] == 1000000.0
+    assert exported["rope_local_base_freq"] == 10000.0
+    assert exported["rope_scaling"] == {"rope_type": "linear", "factor": 8.0}
+
+
+def test_gemma3_vlm_text_config_is_mapped_through_the_recursion():
+    config = {
+        "model_type": "gemma3",
+        "text_config": {"model_type": "gemma3_text", "rope_parameters": _gemma3_rope()},
+    }
+
+    exported = _mlx_model_config(config)["text_config"]
+
+    assert exported["rope_theta"] == 1000000.0
+    assert exported["rope_local_base_freq"] == 10000.0
+
+
+def test_gemma3_local_scaling_is_refused_not_silently_dropped():
+    """mlx-lm never scales the sliding layers, so a local scaling must not vanish."""
+
+    rope = _gemma3_rope()
+    rope["sliding_attention"] = {
+        "rope_type": "linear",
+        "factor": 2.0,
+        "rope_theta": 10000,
+    }
+
+    with pytest.raises(ValueError, match="applies `rope_scaling` to the global rope only"):
         normalize_mlx_rope_config({"model_type": "gemma3_text", "rope_parameters": rope})
 
 
@@ -223,3 +292,53 @@ def test_mlx_lm_consumes_the_translated_config():
         "low_freq_factor": 1.0,
         "original_max_position_embeddings": 8192,
     }
+
+
+class _MlxGemma3Args:
+    """``mlx_lm.models.gemma3_text.ModelArgs`` reduced to its RoPE contract.
+
+    Verified against upstream: the sliding layers are built with
+    ``base=args.rope_local_base_freq`` and no scaling, the full-attention layers
+    with ``base=args.rope_theta`` and ``scaling_config=args.rope_scaling``.
+    """
+
+    _FIELDS = ("rope_theta", "rope_local_base_freq", "rope_scaling")
+
+    def __init__(self, rope_theta=1_000_000.0, rope_local_base_freq=10_000.0, rope_scaling=None):
+        self.rope_theta = rope_theta
+        self.rope_local_base_freq = rope_local_base_freq
+        self.rope_scaling = rope_scaling
+
+    @classmethod
+    def from_dict(cls, params):
+        return cls(**{key: params[key] for key in cls._FIELDS if key in params})
+
+    def base_for_layer(self, *, sliding: bool):
+        return self.rope_local_base_freq if sliding else self.rope_theta
+
+    def scaling_for_layer(self, *, sliding: bool):
+        return None if sliding else self.rope_scaling
+
+
+def test_gemma3_config_reaches_the_mlx_lm_consumer():
+    """Before the fix every Gemma 3 config raised; mlx-lm's defaults masked it.
+
+    The un-translated config leaves mlx-lm on its 1e6/1e4 defaults, which happens
+    to match a 1B checkpoint but silently drops the 4B+ global linear factor.
+    """
+
+    raw = {"model_type": "gemma3_text", "rope_parameters": _gemma3_rope(full_scaling={"rope_type": "linear", "factor": 8.0})}
+
+    # The nested form carries no top-level key mlx-lm reads, so it silently keeps
+    # its own defaults: a matching theta, and no global scaling at all.
+    untouched = _MlxGemma3Args.from_dict(raw)
+    assert untouched.base_for_layer(sliding=False) == 1_000_000.0
+    assert untouched.scaling_for_layer(sliding=False) is None
+
+    args = _MlxGemma3Args.from_dict(_mlx_model_config(raw))
+
+    assert args.base_for_layer(sliding=True) == 10000.0
+    assert args.base_for_layer(sliding=False) == 1000000.0
+    assert args.scaling_for_layer(sliding=False) == {"rope_type": "linear", "factor": 8.0}
+    # mlx-lm applies no scaling to the sliding layers.
+    assert args.scaling_for_layer(sliding=True) is None
