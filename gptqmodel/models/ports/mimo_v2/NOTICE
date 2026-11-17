@@ -1,0 +1,18 @@
+MiMo-V2 local port for GPT-QModel
+
+Adapted from XiaomiMiMo/MiMo-V2.5-Base at
+199e5d1d0113b3fa886b29da54eb276b9c54d58e.
+Copyright 2026 Xiaomi Corporation.
+Copyright 2026 The HuggingFace Inc. team.
+The upstream Python files declare Apache License, Version 2.0; those notices
+are preserved. The upstream repository README separately advertises MIT for
+the model/repository; this port redistributes the Python files under their
+explicit Apache-2.0 headers. A copy of Apache-2.0 is included in LICENSE.
+
+Audio codec implementation in that pinned modeling file is attributed there
+to https://github.com/XiaomiMiMo/MiMo-Audio-Tokenizer.git.
+Native Qwen2 decoder/audio-local-transformer and Qwen2-VL image/video processing
+are supplied by the installed Transformers library under its own license.
+
+Transformers 5 API adaptation, direct loader/processor ownership and regression
+qualification: Copyright 2026 ModelCloud.ai, Apache-2.0.
