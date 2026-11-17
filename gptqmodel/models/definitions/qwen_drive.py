@@ -8,8 +8,12 @@ planning expert and perception model are separate artifacts, so this
 definition deliberately quantizes and delegates only the VLM text path.
 """
 
-from transformers import AutoModel
+from collections.abc import Mapping
 
+import torch
+
+from ..local import LocalModelLoader
+from ._vlm_calibration import finalize_conversation_batches, pop_conversation_calibration_options
 from .qwen3_5 import Qwen3_5QModel
 
 
@@ -18,16 +22,13 @@ class QwenDriveQModel(Qwen3_5QModel):
     fusable = None  # No qualified executor for this definition.
 
 
-    loader = AutoModel
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.qwen_drive.QwenDriveConfig",
+        model_class="gptqmodel.models.ports.qwen_drive.QwenDriveForConditionalGeneration",
+    )
 
-    # The official package is imported by the GPT-QModel HF registration hook.
-    # Qwen-Drive's top-level model is natively registered there and does not
-    # use Transformers' trust_remote_code mechanism.
     require_trust_remote_code = False
     require_load_processor = False
-    # The official package is imported by ``ensure_qwen_drive_registered``.
-    # Do not use ``require_pkgs`` here: a source checkout made importable via
-    # PYTHONPATH has no distribution metadata for ``check_versions`` to read.
 
     layer_modules_strict = False
 
@@ -36,8 +37,8 @@ class QwenDriveQModel(Qwen3_5QModel):
     rotary_embedding = "vlm.model.language_model.rotary_emb"
 
     # This is the Qwen3.5 decoder topology with the additional ``vlm`` root
-    # used by QwenDriveForPlanning.  Vision modules and the planning expert
-    # remain base/pass-through modules and are not quantized by this tree.
+    # used by QwenDriveForPlanning. Vision stays dense; the separately released
+    # planning and perception heads are outside this VLM-only definition.
     module_tree = [
         "vlm",
         "model",
@@ -54,7 +55,7 @@ class QwenDriveQModel(Qwen3_5QModel):
                 "v_proj:0:in=x",
                 "o_proj:1",
             ),
-            "linear_attn": (
+            "linear_attn:!": (
                 "norm:!",
                 "conv1d:!",
                 "in_proj_qkv:0:in=x",
@@ -68,22 +69,30 @@ class QwenDriveQModel(Qwen3_5QModel):
         },
     ]
 
-    def after_model_load(self, model, load_quantized_model=False):
-        # QwenDriveForPlanning constructs this module from config even when
-        # loading the root VLM checkpoint.  The released root safetensors do
-        # not contain planner tensors, and planning is intentionally outside
-        # this quantization definition.  Remove the module before the lazy
-        # source, materialization, or save logic can observe it.
-        del load_quantized_model
-        modules = getattr(model, "_modules", None)
-        if isinstance(modules, dict):
-            modules.pop("planning_expert", None)
-        # StageInputsCapture invokes the wrapped HF model directly while it
-        # intercepts the first decoder layer.  The official planning wrapper
-        # has no generic forward method, so make its supported root-VLM path
-        # explicit for calibration as well as ordinary inference.
-        model.forward = model.vlm.forward
-        return model
+    def awq_get_modules_for_scaling(self, *args, **kwargs):
+        """Keep hybrid recurrent/gated attention on plain AWQ quantization."""
+        return []
+
+    def prepare_dataset(self, calibration_dataset, batch_size=1, **kwargs):
+        media_keys = {"pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
+        if isinstance(calibration_dataset, (str, bytes)):
+            return super().prepare_dataset(calibration_dataset, batch_size=batch_size, **kwargs)
+        rows = [calibration_dataset] if isinstance(calibration_dataset, Mapping) else list(calibration_dataset)
+        if not any(isinstance(row, Mapping) and media_keys.intersection(row) for row in rows):
+            return super().prepare_dataset(calibration_dataset if isinstance(calibration_dataset, Mapping) else rows,
+                                           batch_size=batch_size, **kwargs)
+        if batch_size != 1:
+            raise ValueError("Qwen-Drive media calibration requires prebatched native tensor rows and batch_size=1")
+        sort, min_length = pop_conversation_calibration_options(kwargs, label="Qwen-Drive")
+        allowed = media_keys | {"input_ids", "attention_mask", "position_ids", "mm_token_type_ids"}
+        batches = []
+        for row in rows:
+            if not isinstance(row, Mapping) or "input_ids" not in row or set(row) - allowed:
+                raise ValueError("Qwen-Drive media calibration requires native VLM tensor dictionaries")
+            if not all(torch.is_tensor(value) for value in row.values()) or row["input_ids"].ndim != 2:
+                raise ValueError("Qwen-Drive media calibration requires batched input_ids and native tensor values")
+            batches.append(dict(row))
+        return finalize_conversation_batches(batches, sort=sort, min_length=min_length, label="Qwen-Drive")
 
     def forward(self, *args, **kwargs):
         """Run the text/VLM forward path, excluding the absent planner."""
@@ -93,7 +102,7 @@ class QwenDriveQModel(Qwen3_5QModel):
     def generate(self, *args, **kwargs):
         """Delegate text generation to the wrapped Qwen3.5 VLM."""
 
-        return self.model.vlm.generate(*args, **kwargs)
+        return self.model.generate(*args, **kwargs)
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
         return self.model.vlm.prepare_inputs_for_generation(*args, **kwargs)

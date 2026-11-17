@@ -1,0 +1,22 @@
+Qwen-Drive root VLM wrapper for GPT-QModel
+
+Configuration and wrapper adapted from QwenLM/Qwen-Drive-1.0:
+https://github.com/QwenLM/Qwen-Drive-1.0
+Revision: 28091c1532e869bc7aee91fc0aef6b3e6fd0b2e0
+Copyright 2026 Alibaba Group Holding Limited
+Apache License, Version 2.0; preserved in LICENSE.
+
+GPT-QModel adaptations and regression tests:
+Copyright 2026 ModelCloud.ai
+Apache License, Version 2.0.
+
+The exact native Qwen3.5 implementation is imported from Transformers 5;
+no Transformers modeling source is copied. Released config, tokenizer,
+chat-template and safetensors-header data are pinned to
+Qwen/Qwen-Drive-1.0-4B at 28484089a7cc8c335cf5089fb0745cf7c49b6eaa.
+See fixtures/provenance.json for original asset/source SHA-256 values.
+Compressed fixtures contain metadata/tokenizer data, not model weights.
+
+This implementation covers only the released root vlm.* checkpoint.
+Separate planner-sft, planner-rl, perception models, scene preprocessing,
+trajectory generation and driving safety are not implemented or qualified.
