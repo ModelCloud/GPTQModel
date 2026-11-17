@@ -886,6 +886,13 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             self.bias = None
 
     def forward(self, x: torch.Tensor):
+        # The native INT8 vectorwise quantizer and matmul reject an M=0
+        # problem, and bitsandbytes answers with ``Error invalid argument``
+        # from ops.cu, which terminates the interpreter instead of raising.
+        # Return the empty Linear output before any native launch.
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
         bnb = import_bitsandbytes()
 
         input_dtype = x.dtype
