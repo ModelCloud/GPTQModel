@@ -168,7 +168,7 @@ def test_bfloat16_normal_range_cast_is_exact():
 
     assert prepared is not None
     native_input, output_scale = prepared
-    assert output_scale == 1.0
+    assert output_scale is None
     assert native_input.dtype == torch.float16
     assert torch.equal(native_input.float(), x.float())
 
@@ -184,8 +184,8 @@ def test_bfloat16_wide_input_is_power_of_two_prescaled(magnitude):
     native_input, output_scale = prepared
     assert native_input.dtype == torch.float16
     assert float(native_input.abs().amax()) <= 1.0
-    assert math.log2(output_scale).is_integer()
-    assert output_scale > 1.0
+    assert math.log2(float(output_scale.flatten()[0])).is_integer()
+    assert float(output_scale.flatten()[0]) > 1.0
     # Power-of-two scaling is exact, so only the BF16 rounding remains.
     torch.testing.assert_close(
         native_input.float() * output_scale, x.float(), rtol=1e-6, atol=0
@@ -203,6 +203,35 @@ def test_bfloat16_wide_input_prescale_handles_amax_above_fp16():
     torch.testing.assert_close(
         native_input.float() * output_scale, x.float(), rtol=1e-6, atol=0
     )
+
+
+def test_bfloat16_prescale_is_per_row_not_per_tensor():
+    """One outlier row must not scale the ordinary rows (#4870).
+
+    A per-tensor scale divided every row by ``2**ceil(log2(amax))``, so a
+    single massive activation pushed the rest of the batch into FP16
+    subnormals (smallest normal 6.1e-5) and lost most of their precision.
+    """
+
+    module = _bridge()
+    torch.manual_seed(4870)
+    x = (torch.randn(64, 257) * 0.3).to(torch.bfloat16)
+    x[0, 5] = 1e4
+
+    prepared = module._native_bf16_input(x)
+
+    assert prepared is not None
+    native_input, output_scale = prepared
+    # Only the row that needs it is scaled.
+    assert float(output_scale[0, 0]) > 1.0
+    assert torch.equal(output_scale[1:], torch.ones_like(output_scale[1:]))
+    # BF16 -> FP16 is exact inside the safe range, so the ordinary rows are
+    # bit-identical to the input: no shared divisor, no subnormal loss.
+    torch.testing.assert_close(native_input[1:].float(), x[1:].float(), rtol=0, atol=0)
+    # The wide row stays finite. Its own small values do go subnormal, which is
+    # inherent to a row that mixes 1e4 with 0.3; the point is that it can no
+    # longer drag the other rows down with it.
+    assert bool(torch.isfinite(native_input[0]).all())
 
 
 @requires_cuda
