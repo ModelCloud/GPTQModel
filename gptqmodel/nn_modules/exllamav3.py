@@ -53,9 +53,12 @@ class ExllamaV3Linear(nn.Module):
 
     @classmethod
     def validate_device(cls, device) -> None:
-        if normalize_device(device) not in cls.SUPPORTS_DEVICES:
+        family = normalize_device(device)
+        if family not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(
-                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA; use EXL3_TORCH on ROCm or CPU."
+                "EXL3_EXLLAMA_V3 inference requires NVIDIA CUDA, but the module is on "
+                f"`{getattr(family, 'value', family)}`; move the model to a CUDA device "
+                "(or use EXL3_TORCH on ROCm or CPU)."
             )
 
     def __init__(
@@ -297,6 +300,19 @@ class ExllamaV3Linear(nn.Module):
         with self._inner_guard:
             return self._ensure_torch_inner_locked()
 
+    def _needs_torch_fallback(self) -> bool:
+        """Whether this module must reconstruct through the portable kernel.
+
+        The native EXL3 kernels are compiled for CUDA only
+        (``SUPPORTS_DEVICES``). A materialized trellis on any other device
+        cannot run them, so the forward uses the same bounded FP32
+        reconstruction that FP32 and off-CUDA BF16 already use. An absent or
+        meta trellis is left to the native path, which reports that state with
+        its existing message.
+        """
+        trellis = getattr(self, "trellis", None)
+        return trellis is not None and trellis.device.type not in ("cuda", "meta")
+
     def _ensure_torch_inner_locked(self):
         from .exllamav3_torch import ExllamaV3TorchLinear
 
@@ -401,6 +417,15 @@ class ExllamaV3Linear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
+        if self._needs_torch_fallback():
+            # The native kernels are CUDA-only. After `quantize()` the packed
+            # layers stay on CPU until the caller moves the model, and a
+            # checkpoint loaded for a portable device also keeps them off CUDA.
+            # The portable kernel reads the same trellis/suh/svh buffers, so
+            # reconstruct there instead of raising from `_ensure_inner` (#4789).
+            # BF16 off CUDA already used this path, so its behaviour is
+            # unchanged.
+            return self._ensure_torch_inner().forward(x)
         if input_dtype == torch.float16:
             inner = self._ensure_inner()
             result = inner.forward(
