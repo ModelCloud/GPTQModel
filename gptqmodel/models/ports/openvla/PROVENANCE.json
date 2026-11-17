@@ -1,0 +1,85 @@
+{
+  "checkpoint": {
+    "repository": "openvla/openvla-7b",
+    "revision": "47a0ec7fc4ec123775a391911046cf33cf9ed83f"
+  },
+  "code": {
+    "repository": "https://github.com/openvla/openvla",
+    "revision": "c8f03f48af692657d3060c19588038c7220e9af9",
+    "paths": [
+      "prismatic/extern/hf/configuration_prismatic.py",
+      "prismatic/extern/hf/modeling_prismatic.py",
+      "prismatic/extern/hf/processing_prismatic.py",
+      "prismatic/vla/action_tokenizer.py"
+    ],
+    "license": "MIT"
+  },
+  "tokenizer_lineage_notices": {
+    "repository": "https://github.com/meta-llama/llama",
+    "revision": "7565eb6fee2175b2d4fe2cfb45067a61b35d7f5e",
+    "paths": [
+      "LICENSE",
+      "USE_POLICY.md"
+    ]
+  },
+  "license_files": {
+    "LICENSE": "c4ee2ba5958af03d74b1d3dfa174e3749171d689fb4c23cc170749c05ae3eeb5",
+    "LICENSE-LLAMA2": "f28d05612fee8ef09283d4e755c468080b13d1cd92c9ae1aa52c84b075799e23",
+    "LLAMA2-USE-POLICY.md": "7c23fb36d80141c4ab8cdbb61ee4790102ebd2bf7aeff414453177d4f2110e5d"
+  },
+  "source_sha256": {
+    "configuration_prismatic.py": "68cc5ae34f1b46af3168d8d479cb81bb776965653453fd904aa8eefb6c8f9f68",
+    "modeling_prismatic.py": "9ce241c5ca09a4bed73654d0ca509baaff0fc5887d0bdd62e360ca8254f7794a",
+    "processing_prismatic.py": "06563586bbc73d36501a14a231a3174904ede830d33174d0c625ece8e931ef1e",
+    "github-prismatic__extern__hf__processing_prismatic.py": "2474a5c3fdd4ff15234924636dc0ead6419c89f49699193be47dbb87510a5425",
+    "github-prismatic__vla__action_tokenizer.py": "fdc98fcbf5b0926ef2181db71946d23ffbfa052cf8443dc933d52c42a191352c",
+    "README.md": "16449c659127df8f4d0f43958be0d114be41e94317f5fc72740d84eab99c5624",
+    "model.safetensors.index.json": "b3a4516f74a609422002e265e542c23ddf11e54c2b781e1c0d4e23e5181f3fd0",
+    "model-00001-of-00003.safetensors.header.json": "fe637d09b57fe6f5550d0c90107272fda1f79a057fafc9473134325117fa3984",
+    "model-00002-of-00003.safetensors.header.json": "393f827e3a640e4e1e786fb09f53be72fd19ad3520af8bb3a01b8013edc1eb37",
+    "model-00003-of-00003.safetensors.header.json": "68c8506d484f455f28490981ddae5f5ac1b026b0a2a0c89cf54755b9c2a87c0c"
+  },
+  "fixtures": {
+    "added_tokens.json.gz": {
+      "compressed_sha256": "9816df4d7347f6fa187005c8e1946605c84b0b2f56d8011a642c9ba87bb487cd",
+      "source_bytes_sha256": "ab43123267b190cb7990bc9f2ae4ad32dcb7ed029fb0fccb1b4e062c6f54a2a1",
+      "source_bytes": 21
+    },
+    "checkpoint_inventory.json.gz": {
+      "compressed_sha256": "8261956da82ff9013faa5701e9d84007d4d31937eadc12e25d1da5992352a566",
+      "source_bytes_sha256": "21beda2851ddf06ca4275aa8567e3b1a386fd62110e363ea6c859cb5fa9005ba",
+      "source_bytes": 121801
+    },
+    "config.json.gz": {
+      "compressed_sha256": "7c74c0fa3b70a400de534e38f76a59ba2aa76ec643f349e370dcbf5db7545b7a",
+      "source_bytes_sha256": "edd5c5cf6d7927e07465cf086ebe41f7b3ec8f3b128a51f71d6db14dad7ad8b1",
+      "source_bytes": 60712
+    },
+    "preprocessor_config.json.gz": {
+      "compressed_sha256": "dfd0d05de567757718fb6ac95351f9a8c8ce7a3bbe5f66e9d5eca0c64e84e95d",
+      "source_bytes_sha256": "bd024783fb785cbdfe35b710b621c5e8678d4c157a9ba625675e67d40d1757da",
+      "source_bytes": 1650
+    },
+    "processor_config.json.gz": {
+      "compressed_sha256": "9477e133473177d0f2fcdbea97b7c76a8b0e1189ea3117a2134577146163c433",
+      "source_bytes_sha256": "167e026d8121f6cb0bf5c18310b97ba8139152f970822bb3824213bd37dc7a76",
+      "source_bytes": 130
+    },
+    "special_tokens_map.json.gz": {
+      "compressed_sha256": "a052dcf052bbbc5a0caf2578f6e68c45fb8797ab0bab0f5726289a23575fa148",
+      "source_bytes_sha256": "cb90ee5cf5793aa444039af9795b00db59d3fef8942e7eca9cf1990bab370d61",
+      "source_bytes": 552
+    },
+    "tokenizer.json.gz": {
+      "compressed_sha256": "f9ba3ad1292595abae0372a68ea99d96a701ec3ebf4999744633e3616ba4d706",
+      "source_bytes_sha256": "8f5e2869e1807b8bb3c7717a294539c37e9de5d728ad60e31ef57e83cc5ea527",
+      "source_bytes": 1842976
+    },
+    "tokenizer_config.json.gz": {
+      "compressed_sha256": "3411b7fee694247c58f8bdce06358e8246d292a506848a82fd0a9db7393639cc",
+      "source_bytes_sha256": "f5f1d3ed015ebb71cf11686ff00bc8e0c25957bbf3952f95312cecc9b168fbea",
+      "source_bytes": 1192
+    }
+  },
+  "inventory_method": "Union of tensor names, shapes and dtypes independently read from the safetensors headers of three released shards, checked against the index. Header hashes above cover the inspected JSON renderings; checkpoint_inventory.json is the sorted union with byte offsets removed. No trained tensor payloads were downloaded."
+}
