@@ -382,6 +382,127 @@ def test_cache_failure_after_first_layer_rolls_back_and_retry_matches_fresh(monk
     torch.testing.assert_close(retry, fresh, rtol=2e-5, atol=1e-6)
 
 
+def transaction_model(layout):
+    if layout in ("deci", "nemotron-nas"):
+        return tiny(layout)
+    attn = {"n_heads_in_group": 2, "window_length": 6 if layout == "shifted" else 3}
+    if layout != "sliding":
+        attn.update(num_sink_tokens=1, unshifted_sink=layout == "unshifted")
+    blocks = config_kwargs("nemotron-nas")["block_configs"]
+    blocks[1] = {"attention": attn, "ffn": {"ffn_mult": 2.0}}
+    return tiny("nemotron-nas", block_configs=blocks)
+
+
+def snapshot_cache(cache):
+    # Include cache identity and every dynamic layer field, including the sink
+    # rotation tables; a correct seen_tokens alone does not restore KV state.
+    return cache.layers, cache.seen_tokens, [
+        {name: (value, value.clone() if isinstance(value, torch.Tensor) else value)
+         for name, value in vars(layer).items()}
+        for layer in cache.layers
+    ]
+
+
+def assert_cache_unchanged(cache, snapshot):
+    layers, seen, states = snapshot
+    assert cache.seen_tokens == seen
+    assert cache.layers is layers
+    for layer, original, state in zip(cache.layers, layers, states):
+        assert layer is original
+        assert vars(layer).keys() == state.keys()
+        for name, (reference, value) in state.items():
+            actual = getattr(layer, name)
+            if isinstance(value, torch.Tensor):
+                assert actual is reference
+                torch.testing.assert_close(actual, value, rtol=0, atol=0)
+            else:
+                assert actual == value
+
+
+@pytest.mark.parametrize("layout", ["deci", "nemotron-nas", "sliding", "unshifted", "shifted"])
+@pytest.mark.parametrize("fault,return_dict", [
+    ("head", True), ("head", False), ("loss", True), ("loss", False), ("tuple", False),
+])
+@torch.inference_mode()
+def test_public_lm_cache_transaction_through_head_loss_and_encoding(monkeypatch, layout, fault, return_dict):
+    from transformers.modeling_outputs import CausalLMOutputWithPast
+
+    model = transaction_model(layout)
+    ids = torch.tensor([[1, 4, 7, 9, 2, 5, 8]])
+    prefix, tail = ids[:, :5], ids[:, 5:]
+    cache = model(prefix).past_key_values
+    control_cache = model(prefix).past_key_values
+    before = snapshot_cache(cache)
+    expected = model(tail, labels=tail, past_key_values=control_cache, return_dict=return_dict)
+    reached = []
+
+    def fail_head(*args):
+        reached.append("head failure")
+        raise RuntimeError("injected LM head failure")
+
+    def fail_encoding(self):
+        reached.append("tuple failure")
+        raise RuntimeError("injected LM tuple failure")
+
+    decoder_hook = model.model.layers[-1].register_forward_hook(lambda *args: reached.append("decoder done"))
+    head_hook = model.lm_head.register_forward_pre_hook(fail_head) if fault == "head" else None
+    try:
+        with monkeypatch.context() as patch:
+            if fault == "tuple":
+                patch.setattr(CausalLMOutputWithPast, "to_tuple", fail_encoding)
+            labels = torch.full_like(tail, model.config.vocab_size + 3) if fault == "loss" else tail
+            kind, pattern = (IndexError, "out of bounds") if fault == "loss" else (RuntimeError, "injected LM")
+            with pytest.raises(kind, match=pattern):
+                model(tail, labels=labels, past_key_values=cache, return_dict=return_dict)
+    finally:
+        decoder_hook.remove()
+        if head_hook is not None:
+            head_hook.remove()
+    assert "decoder done" in reached
+    if fault != "loss":
+        assert f"{fault} failure" in reached
+    assert_cache_unchanged(cache, before)
+    retry = model(tail, labels=tail, past_key_values=cache, return_dict=return_dict)
+    if return_dict:
+        assert retry.past_key_values is cache
+        actual_values, expected_values = (retry.loss, retry.logits), (expected.loss, expected.logits)
+    else:
+        assert retry[2] is cache
+        actual_values, expected_values = retry[:2], expected[:2]
+    for actual, reference in zip(actual_values, expected_values):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    assert cache.seen_tokens == ids.shape[1]
+    for actual, reference in zip(cache.layers, control_cache.layers):
+        for name, value in vars(reference).items():
+            if isinstance(value, torch.Tensor):
+                torch.testing.assert_close(getattr(actual, name), value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("layout", ["deci", "nemotron-nas", "sliding", "unshifted", "shifted"])
+@torch.inference_mode()
+def test_decoder_cache_transaction_includes_tuple_encoding(monkeypatch, layout):
+    from transformers.modeling_outputs import BaseModelOutputWithPast
+
+    decoder = transaction_model(layout).model
+    ids = torch.tensor([[1, 4, 7, 9, 2, 5, 8]])
+    cache = decoder(ids[:, :5]).past_key_values
+    control = decoder(ids[:, :5]).past_key_values
+    before = snapshot_cache(cache)
+
+    def fail_encoding(self):
+        raise RuntimeError("injected decoder tuple failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(BaseModelOutputWithPast, "to_tuple", fail_encoding)
+        with pytest.raises(RuntimeError, match="injected decoder tuple failure"):
+            decoder(ids[:, 5:], past_key_values=cache, return_dict=False)
+    assert_cache_unchanged(cache, before)
+    retry = decoder(ids[:, 5:], past_key_values=cache, return_dict=False)
+    expected = decoder(ids[:, 5:], past_key_values=control, return_dict=False)
+    assert retry[1] is cache and cache.seen_tokens == 7
+    torch.testing.assert_close(retry[0], expected[0], rtol=0, atol=0)
+
+
 def test_invalid_architecture_fails_then_corrected_checkpoint_loads(tmp_path):
     from gptqmodel.models.ports.decilm.configuration_decilm import DeciLMConfig
 
