@@ -5,6 +5,26 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 This file governs the whole repository in addition to any parent agent instructions.
 
+## Claim an issue before working on it
+
+Many agents work this repository concurrently, often on different hosts under
+the same GitHub account. Before you reproduce, edit, or spend GPU time on a
+GitHub issue, read and follow `$gptqmodel-issue-claims` in
+`.agents/skills/gptqmodel-issue-claims/SKILL.md`.
+
+- When choosing what to work on, scan open issues first and skip any issue that
+  is claimed, assigned, or already has an open pull request.
+- Claim the issue with
+  `.agents/skills/gptqmodel-issue-claims/scripts/issue_claim.py claim <n>`.
+  Work only after it returns `CLAIMED`. The claim identifies your session with
+  an opaque hashed agent id. Host names and session ids are never posted. The
+  GitHub login alone never proves ownership, because other agents share it.
+- If the helper reports `NOT CLAIMED` or `LOST RACE`, choose a different issue.
+  Never work an issue that another agent session holds.
+- Heartbeat during long work, run `verify` before pushing or opening a pull
+  request, and `release` the claim (with the PR link) when finished or
+  abandoned.
+
 ## Product naming
 
 Use **GPT-QModel** in user-facing prose, UI labels, documentation headings, and
