@@ -41,6 +41,8 @@ definition ownership corrections alongside the package-owned ports.
 | `AfMoeQModel` / `afmoe` | [Native Afmoe / Trinity qualification](../gptqmodel/models/ports/afmoe/README.md); Transformers 5.23.0 Apache-2.0 implementation; pinned Mini/Nano/Large index schemas and checkpoint license recorded locally | Full meta inventories match all three checkpoint schemas; unequal attention/residual widths; dense/MoE ownership, native conversion and routing oracle, cache/generation, public trust/bypass matrix, safetensors retry/round trips | Tested plain quantization for all declared linears; norms, router and expert bias stay dense | CPU pseudoquantization; no GPU packing/kernel or trained-checkpoint quality qualification; no scaling/folding claim |
 | `InternLMQModel` / `internlm` | [InternLM 1 port](../gptqmodel/models/ports/internlm/README.md); Apache-2.0; upstream revision `96e127d08d851a88cac736a9b091dd953ae1b873` | Independent FP32/FP16/BF16 numerical oracle; biased/unbiased origin/dynamic rotary; eager/SDPA; generation/cache/beam lifecycle; public dense load and safetensors reload; live meta-model weight ownership; all 14 linears in two-layer AWQ quantization/reload | Tested plain quantization, zero scale-fold groups | No GPU or trained 7B numerical/quality qualification; fusion and foreign/static/quantized KV caches unsupported |
 
+| `LFM3QModel`, `LFM3VLQModel`, `LFM3OmniQModel` | [Native decoder ownership and conservative AWQ](../gptqmodel/models/ports/lfm3/COVERAGE.md) | Real CPU/meta text and VL decoders plus Omni text-prefix coverage; native/legacy gate spelling, explicit depthwise exclusions, actual packing and failure/retry | Plain quantization only, including `fallback=None`; five convolution-layer or seven attention-layer projections remain eligible | No trained-checkpoint, accelerator, VL media or full Omni/audio qualification |
+
 Only integrated implementations are listed here. This table does not qualify
 other definitions, architectures, kernels, or trained checkpoints by analogy.
 
@@ -342,3 +344,87 @@ helper validation passed **881 tests with 36 skips** in 43.97 seconds on the
 CPU environment above. Skips cover unavailable NVIDIA paths and unrelated
 generic-family fixtures. The final InternLM2 packed AWQ save/reload follow-up
 then passed all **66 owned tests**, with no skips, in 4.79 seconds.
+
+## Package-owned tokenizer selection
+
+`LocalModelLoader.tokenizer_class` declares a full package class path per
+definition. `load_hf_tokenizer` selects it using the outer model config's
+`model_type`, preserving caller-supplied tokenizer instances. Shared checkpoint
+class names do not select a tokenizer: Intern-S1 and Intern-S2 require distinct
+scientific tokenization implementations despite both naming `InternS1Tokenizer`.
+The individual ports own their scientific assets and numerical qualification.
+
+```mermaid
+flowchart TD
+    A["load_hf_tokenizer"] --> B{"String or PathLike?"}
+    B -->|instance| I["Preserve supplied tokenizer instance"]
+    B -->|path| C["local_model_loader: selected outer model_type"]
+    C --> D{"Definition declares tokenizer_class?"}
+    D -->|no| N["Tokenicer.load: ordinary path and serialized preference"]
+    D -->|yes| E["load_hf_tokenizer: filter constructor-irrelevant options"]
+    E --> F["LocalModelLoader.load_tokenizer: strip trust and code_revision"]
+    F --> G["Owned tokenizer.from_pretrained"]
+    G -->|success| I
+    G -->|missing or malformed assets| X["Propagate error; no AutoTokenizer fallback"]
+    I --> T["Tokenicer.load: instance first positional; normalize"]
+    T --> R["Return tokenicer.tokenizer"]
+    N --> R
+    classDef failure fill:#fdd,stroke:#b00
+    class X failure
+```
+
+| Mechanism | Before | Shipped behavior |
+| --- | --- | --- |
+| Tokenizer implementation | Base `c72de4911`, `utils/hf.py:2802-2827`: every path went to Tokenicer auto discovery | `utils/hf.py:2812-2825`: definition-owned tokenizer paths instantiate directly; instances remain instances |
+| Trust options | No package tokenizer entry point | `models/local.py:64-69`: package tokenizer loading discards `trust_remote_code` and `code_revision` |
+| Corrective normalization | Tokenicer owns normalization | Tokenicer still receives the selected instance and model config; no GPT-QModel normalization shim |
+| Missing scientific assets | Auto-discovery could select checkpoint Python | Owned construction errors propagate; no generic tokenizer substitution or remote retry |
+
+The package requires `tokenicer>=0.0.17`. Its
+[published source](https://pypi.org/project/tokenicer/0.0.17/) archive has SHA-256
+`24ba4e1f503e652df757365dd8d08ad145fe7a0f52bd74fb32fda2741489cef0`.
+All five packaged Python files were independently compared byte-for-byte to the
+merged upstream fix. Tokenicer handles generic trust enforcement and ordinary
+serialized-tokenizer preference; unknown custom semantics fail closed rather
+than silently substituting a generic tokenizer. See
+[the upstream security change](https://github.com/ModelCloud/Tokenicer/pull/64).
+
+With the published 0.0.17 artifact installed, the owned tokenizer adapter,
+processor/model/path/security tests, ERNIE VL, Hymba and InternLM2 runtime suites
+passed **239 tests with no skips** in 25.37 seconds. Tests preserve ordinary
+serialized-tokenizer preference/opt-out and supplied-instance identity, exercise
+hostile outer/nested metadata across trust and bypass combinations, and verify
+missing/corrupt owned assets fail without fallback and can be retried after repair.
+
+## LFM3 native decoder ownership
+
+LFM3 retains the Transformers 5.23 decoder. Its native `conv.conv` depthwise
+kernel and `self_attn.g_proj` per-head sigmoid gate now have explicit source-dtype
+exclusions; legacy `gate_proj` remains excluded. The same policy applies to text,
+VL and Omni decoder definitions. [Native-source evidence and regression scope](../gptqmodel/models/ports/lfm3/COVERAGE.md)
+record the gate and convolution relationships.
+
+```mermaid
+flowchart TD
+    A["LFM3QModel.module_tree; VL and Omni variants"] --> P["ModulePlan.from_tree"]
+    P --> K["conv.conv / g_proj / gate_proj: source dtype"]
+    P --> L["ModuleLooper: declared decoder projections"]
+    L --> Q["AWQProcessor._quantize_layer"]
+    Q --> Z["LFM3QModel.awq_get_modules_for_scaling: empty list"]
+    Z --> W["Plain AWQ quantize and pack every supported linear"]
+    Q -->|capture failure| X["Propagate; leave weights unchanged; retry with valid inputs"]
+    classDef failure fill:#fdd,stroke:#b00
+    class X failure
+```
+
+| Mechanism | Before | Shipped behavior |
+| --- | --- | --- |
+| Native dense leaves | Base `569c693de`, `definitions/lfm3.py:58-68`: depthwise kernel and native sigmoid gate undeclared | `definitions/lfm3.py:58-71`: nested depthwise owner and both gate spellings explicitly excluded; VL/Omni share the policy |
+| AWQ groups | Generic inference could cross nonlinear convolution/gating boundaries | `definitions/lfm3.py:80-83`: no scale groups; real CPU packing preserves all declared linear targets |
+
+The parent independently reproduced both original registry failures. After the
+fix and explicit registry snapshots, combined native coverage, support tests,
+full leaf inventory, registry and required AWQ baseline passed **759 tests with
+24 skips and 3 expected failures** in 83.56 seconds. Missing checkpoint/GPU
+fixtures and existing expected failures remain unqualified. No trained weights,
+VL media processing, full Omni wrapper/audio or accelerator behavior is claimed.

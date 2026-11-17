@@ -274,6 +274,10 @@ use package-selected implementations with explicit plain AWQ policies; the
 reference records processor selection, cache failure behavior and provenance.
 [Hymba hybrid replay and InternLM2/2.5 packed attention](docs/transformers5-model-ports.md#hymba-hybrid-replay-and-internlm2-packed-attention)
 describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
+[Package-owned tokenizer selection and LFM3 decoder ownership](docs/transformers5-model-ports.md#package-owned-tokenizer-selection)
+cover definition-specific scientific tokenizer dispatch and native gate/convolution
+exclusions. Tokenizer normalization and trust enforcement require Tokenicer 0.0.17
+or newer.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
