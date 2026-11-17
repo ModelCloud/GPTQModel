@@ -5468,6 +5468,7 @@ class BaseQModel(nn.Module):
             input_width: int | None,
             allow_block_norm: bool = False,
             shared_source: nn.Module | None = None,
+            refuse_last_module_fallback: bool = False,
         ):
             """Return the normalization that immediately feeds the consumer block.
 
@@ -5489,6 +5490,13 @@ class BaseQModel(nn.Module):
             example Cohere/Cohere2 attention and MLP) read one norm without an
             intervening norm block, so the consumer's input tag is the only
             declaration that both branches share the same source.
+
+            ``refuse_last_module_fallback`` is set when the block immediately
+            before this one declared only modules that this layer does not own
+            (for example the MLA `q_b_proj`/`kv_b_proj` pair on a Ling 2.0
+            layer). `last_module` then still points at the run before that
+            absent block, which is not this block's producer: falling back to it
+            folded `attention.dense` into `input_layernorm` (#4677).
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -5510,6 +5518,11 @@ class BaseQModel(nn.Module):
                 return last_norm_candidate
             if shared_source is not None and _norm_width(shared_source) == input_width:
                 return shared_source
+            if refuse_last_module_fallback:
+                # Nothing in this run produces the consumer's input and the
+                # preceding declaration resolved to no module on this layer.
+                # Leave the group unscaled instead of folding a stale source.
+                return None
             # A fallback norm whose width differs from the consumer's input
             # cannot absorb this scale: `scale_ln_fcs` would multiply a
             # differently sized weight (or raise). DeepSeek MLA is the concrete
@@ -5640,7 +5653,11 @@ class BaseQModel(nn.Module):
         # the previous branch's output projection.
         shared_input_sources: Dict[str, nn.Module] = {}
         prev_not_quantized = False
+        # True when the previous block declared only modules this layer does not
+        # own (`layer_modules_strict=False` alternative layouts).
+        prev_block_absent = False
         for block in full_layer_modules:
+            block_absent = False
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
             if not_quantized:
                 # An empty block carries no module to remember; it also must not
@@ -5661,6 +5678,8 @@ class BaseQModel(nn.Module):
                 if not prev_not_quantized:
                     _try_update_last_module(candidate_name)
                 prev_not_quantized = True
+                # A declared norm block is a real producer for the next run.
+                prev_block_absent = False
                 continue
 
             prev_not_quantized = False
@@ -5747,6 +5766,7 @@ class BaseQModel(nn.Module):
                         subset.append(m)
                         subset_names.append(name)
 
+                block_absent = not subset and not skip
                 if skip or not subset:
                     pending_nonquant.clear()
                     skip_block = True
@@ -5792,6 +5812,7 @@ class BaseQModel(nn.Module):
                         input_width,
                         allow_block_norm=allow_block_norm,
                         shared_source=shared_source,
+                        refuse_last_module_fallback=prev_block_absent,
                     )
                     moe_consumers = (
                         _moe_block_consumers(block, input_width, subset)
@@ -5865,6 +5886,7 @@ class BaseQModel(nn.Module):
 
                     nodes.append(n)
 
+            prev_block_absent = block_absent
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
                 # Mixed MoE blocks can legitimately place shared-expert projections
