@@ -1694,6 +1694,41 @@ def _keep_tied_groups_on_one_device(device_map, tied_params) -> None:
             device_map[entry] = target
 
 
+def _single_resident_device(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Optional[torch.device]:
+    """Return the map's one device when every tensor is already resident there.
+
+    ``add_hook_to_module`` rebinds ``module.forward`` to ``partial(new_forward, module)``
+    and keeps the previous bound method on ``module._old_forward``.  Both point back
+    at the module, so a hooked model is a reference cycle: a GPU model keeps its VRAM
+    allocated after the last user reference is dropped, until a full ``gc.collect()``
+    (#4847).  A layer-wise map whose entries all name the same device does not need
+    the hooks at all -- accelerate's own ``dispatch_model`` only attaches them when
+    the map spans more than one device or offloads to disk -- so skip them whenever
+    nothing is left to materialise or offload.
+    """
+
+    devices = {d for d in device_map.values() if d is not None}
+    if len(devices) != 1:
+        return None
+    raw_device = next(iter(devices))
+    if isinstance(raw_device, str) and raw_device in ("cpu", "mps", "disk"):
+        return None
+    try:
+        device = torch.device(raw_device)
+    except (TypeError, RuntimeError):
+        return None
+    for parameter in model.parameters():
+        if parameter.device.type != device.type:
+            return None
+        if device.index is not None and parameter.device.index != device.index:
+            return None
+    # Buffers may legitimately stay on the CPU (a scalar format flag, a rotary
+    # ``inv_freq`` cache), but a meta buffer still has to be materialised.
+    if any(buffer.device.type == "meta" for buffer in model.buffers()):
+        return None
+    return device
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
@@ -1706,6 +1741,13 @@ def simple_dispatch_model(model, device_map):
     if single_root or all_single_cpu_or_mps:
         d = next(iter(device_map.values()))
         model = model.to(torch.device(d))
+        model.hf_device_map = device_map
+        return model
+
+    # One device and nothing to materialise: the per-entry hooks would only pin the
+    # model in a reference cycle, so place nothing and keep the tensors where the
+    # checkpoint loader already put them.
+    if _single_resident_device(model, device_map) is not None:
         model.hf_device_map = device_map
         return model
 
