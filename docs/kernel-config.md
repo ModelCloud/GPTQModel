@@ -139,6 +139,11 @@ quantization and host utilities still use a process-wide fallback installed
 before the loop or load starts. Concurrent quantization runs with different
 shared runtime settings are not isolated.
 
+Resolution snapshots the request as well: `resolve_backend_config` copies a
+caller-supplied legacy `KernelConfig`, so mutating that object after
+`resolve_quantize_backend` / `resolve_backend_config` returns does not change
+`QuantizeConfig._resolved_kernel` or any module built from it (#4615).
+
 ### Forward dispatch reads the module snapshot
 
 Two inference dispatch sites used to re-read the process-wide policy on every
