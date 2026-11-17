@@ -19,8 +19,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
+import gptqmodel.nn_modules.qlinear.qqq as qqq_mod
 from gptqmodel.utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 pytestmark = pytest.mark.cuda
@@ -73,7 +74,7 @@ def _reference(module, x: torch.Tensor) -> torch.Tensor:
 def qqq_module():
     if not qqq_runtime_available():
         pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
-    return _build(QQQLinear)
+    return _build(qqq_mod.QQQLinear)
 
 
 @pytest.mark.parametrize("rows", ROWS)
@@ -95,8 +96,8 @@ def test_qqq_forward_matches_torch_reference_for_column_strided_input(rows):
 
     if not qqq_runtime_available():
         pytest.skip(qqq_runtime_error() or "QQQ CUDA runtime unavailable")
-    native = _build(QQQLinear)
-    oracle = _build(QQQTorchLinear)
+    native = _build(qqq_mod.QQQLinear)
+    oracle = _build(qqq_mod.QQQTorchLinear)
     oracle.load_state_dict(native.state_dict(), strict=False)
 
     x = _column_strided(rows)
@@ -143,10 +144,6 @@ def test_qqq_native_entry_rejects_a_strided_activation(qqq_module):
 
 # --- Follow-up coverage (#4740): the fallback operand and the native guard ---
 
-import gptqmodel.nn_modules.qlinear.qqq as qqq_mod
-from gptqmodel.nn_modules.qlinear.qqq import _workspace_numel, mul
-from gptqmodel.utils.rocm import IS_ROCM
-
 
 def _column_strided_k(rows: int, in_features: int) -> torch.Tensor:
     """Return the ``[rows, K]`` column-strided view batched decoding produces."""
@@ -176,7 +173,7 @@ def _build_native_module(in_features: int, out_features: int):
         (out_features, in_features // GROUP_SIZE), dtype=torch.float16
     ) * 0.02 + 0.01
 
-    module = QQQLinear(
+    module = qqq_mod.QQQLinear(
         bits=4,
         group_size=GROUP_SIZE,
         sym=True,
@@ -202,7 +199,7 @@ def test_dynamic_quant_packs_a_column_strided_activation(monkeypatch):
 
     monkeypatch.setattr(qqq_mod, "_qqq_gpu_quantizer", lambda: None)
 
-    module = QQQLinear.__new__(QQQLinear)
+    module = qqq_mod.QQQLinear.__new__(qqq_mod.QQQLinear)
     torch.nn.Module.__init__(module)
 
     x_strided = _column_strided_k(rows=17, in_features=GROUP_SIZE)
@@ -307,12 +304,12 @@ def test_native_qqq_gemm_rejects_a_non_contiguous_activation():
         (in_features // 128, out_features), device="cuda", dtype=torch.float16
     )
     workspace = torch.zeros(
-        _workspace_numel(out_features, 16), device="cuda", dtype=torch.int32
+        qqq_mod._workspace_numel(out_features, 16), device="cuda", dtype=torch.int32
     )
 
     def run(operand):
         out = torch.empty((rows, out_features), device="cuda", dtype=torch.float16)
-        mul(operand, packed_weight, reduce_scratch, out, s1, s2, s3, workspace)
+        qqq_mod.mul(operand, packed_weight, reduce_scratch, out, s1, s2, s3, workspace)
         return out
 
     with pytest.raises(RuntimeError, match="contiguous"):
