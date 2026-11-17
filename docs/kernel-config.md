@@ -131,11 +131,13 @@ it means a test can exercise both paths in one process.
 
 ## Lifetime and serialization
 
-Quantized linear modules own a snapshot of their execution policy. Later
-loads, `configure_kernel` calls and mutations to the original legacy object do
-not change those modules. Shared quantization and host utilities still use a
-process-wide fallback installed before the loop or load starts. Concurrent
-quantization runs with different shared runtime settings are not isolated.
+Quantized linear modules and block-float embedding tables own a snapshot of
+their execution policy, because a tied output head consumes the table's policy
+through the same block-float kernel. Later loads, `configure_kernel` calls and
+mutations to the original legacy object do not change those modules. Shared
+quantization and host utilities still use a process-wide fallback installed
+before the loop or load starts. Concurrent quantization runs with different
+shared runtime settings are not isolated.
 
 `kernel` and `runtime` are runtime-only fields. Neither is written to the checkpoint, because
 the host that loads a checkpoint is not necessarily the host that produced it.

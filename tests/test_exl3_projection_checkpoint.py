@@ -3,6 +3,8 @@
 
 import json
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 import torch
@@ -15,9 +17,13 @@ from gptqmodel.utils.exl3_projection_checkpoint import (
 )
 
 
-def _request(scale: float = 1.0) -> dict:
+def _request(
+    scale: float = 1.0,
+    *,
+    module_full_name: str = "model.layers.7.mlp.experts.31.gate_proj",
+) -> dict:
     return build_projection_request(
-        module_full_name="model.layers.7.mlp.experts.31.gate_proj",
+        module_full_name=module_full_name,
         layer_index=7,
         input_weight=torch.arange(32, dtype=torch.float32).reshape(8, 4) * scale,
         hessian=torch.eye(8, dtype=torch.float32),
@@ -408,3 +414,78 @@ def test_packed_replay_matches_exllamav3_runtime_reconstruction() -> None:
         assert torch.equal(replay.view(torch.int16), reference.view(torch.int16))
     finally:
         runtime.unload()
+
+
+def _stage_interrupted_publication(
+    store: EXL3ProjectionCheckpointStore,
+    request: dict,
+    *,
+    stage: str,
+) -> Path:
+    """Leave the file an interrupted ``_atomic_write`` would leave behind."""
+
+    manifest_path, tensor_path = store._paths(request["request_sha256"])
+    target = manifest_path if stage == "manifest" else tensor_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(b"interrupted-publication")
+    return Path(name)
+
+
+@pytest.mark.parametrize("stage", ["tensor", "manifest"])
+def test_interrupted_publication_temporaries_do_not_block_recovery(
+    tmp_path, stage: str
+) -> None:
+    """A crash between mkstemp and os.replace must not poison the store.
+
+    The staged file lives in the final shard prefix and is never a committed
+    checkpoint, but discovery and prune treated it as an unexpected file, so a
+    resumed run could not reserve, prune, or recompute the interrupted module.
+    """
+
+    store = EXL3ProjectionCheckpointStore(tmp_path / "checkpoints")
+    committed = _request()
+    store.commit(committed, _tensors(), _result())
+    interrupted = _request(module_full_name="model.layers.7.mlp.experts.31.down_proj")
+    staged = _stage_interrupted_publication(store, interrupted, stage=stage)
+
+    # The committed control stays discoverable; the staged temp is not a result.
+    inspected = [request for request, _result in store.inspect_committed_manifests()]
+    assert [request["request_sha256"] for request in inspected] == [
+        committed["request_sha256"]
+    ]
+    store.reserve_module_request(interrupted)
+
+    # The retry recomputes the interrupted module and publishes normally.
+    retried = {**_result(), "sequence": 2}
+    assert store.commit(interrupted, _tensors(), retried) == retried
+    assert store.load(interrupted) is not None
+    assert store.load(committed) is not None
+
+    summary = store.prune(max_entries=2)
+    assert summary["removed_orphans"] == 1
+    assert not staged.exists()
+    assert store.load(interrupted) is not None
+
+
+def test_interrupted_publication_namespace_is_still_strict(tmp_path) -> None:
+    """Only the exact writer-owned staged shape is reclaimed."""
+
+    store = EXL3ProjectionCheckpointStore(tmp_path / "checkpoints")
+    request = _request()
+    store.commit(request, _tensors(), _result())
+    manifest_path, _tensor_path = store._paths(request["request_sha256"])
+
+    lookalike = manifest_path.parent / f".{request['request_sha256']}.json.partial-backup"
+    lookalike.write_bytes(b"not a staged publication")
+    with pytest.raises(ValueError, match="unexpected file"):
+        list(store.inspect_committed_manifests())
+    assert lookalike.exists()
+    lookalike.unlink()
+
+    wrong_prefix = store.root / "aa" / "bb"
+    wrong_prefix.mkdir(parents=True)
+    (wrong_prefix / f".{'f' * 64}.json.abcdefgh").write_bytes(b"staged elsewhere")
+    with pytest.raises(ValueError, match="temporary file is under the wrong prefix"):
+        list(store.inspect_committed_manifests())

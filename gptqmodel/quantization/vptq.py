@@ -411,6 +411,44 @@ class VPTQ:
         self._device_sample_counts.clear()
         return self.H2
 
+    def adopt_hessian_from(self, leader: "VPTQ") -> None:
+        """Replace this task's Hessian with a private copy of ``leader``'s.
+
+        Sibling projections of one ``:in=<tag>`` group see the same activation
+        tensor, so their float64 means are bitwise identical.  The leader's
+        partials are folded into ``H2`` first, and the copy stays independent
+        because ``quantize_weight(..., owns_hessian=True)`` normalizes the
+        buffer in place.
+        """
+
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"VPTQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        source = leader.materialize_hessian(self.dev)
+        with leader.lock:
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            materialized_samples = leader._materialized_samples
+            copy = safe_move_to(
+                source.detach(),
+                self.dev,
+                dtype=_HESSIAN_DTYPE,
+                copy=True,
+            )
+
+        with self.lock:
+            self.H2 = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._materialized_samples = materialized_samples
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+
     def _layer_weight(self) -> torch.Tensor:
         weight = self.layer.weight.data
         if isinstance(self.layer, transformers.Conv1D):

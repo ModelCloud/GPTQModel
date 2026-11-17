@@ -27,25 +27,41 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph NEW["New: one flat buffer per device"]
-        R["_shared_reduce_scratch(device, N)<br/>int32[1024 * max(N)]"]
-        L1["QQQLinear B=128"] -->|"view(1024, 128)"| R
-        L2["QQQLinear B=256"] -->|"view(1024, 256)"| R
-        L3["QQQLinear B=14336"] -->|"view(1024, 14336)"| R
-        R --> K["qqq_gemm C"]
+    subgraph NEW["New: one flat buffer per device + current stream"]
+        R1["_shared_reduce_scratch(cuda:0, stream s1)<br/>int32[1024 * max(N)]"]
+        R2["_shared_reduce_scratch(cuda:0, stream s2)<br/>int32[1024 * max(N)]"]
+        L1["QQQLinear B=128 on s1"] -->|"view(1024, 128)"| R1
+        L2["QQQLinear B=128 on s1"] -->|"ordered reuse"| R1
+        L3["QQQLinear B=256 on s2"] -->|"view(1024, 256)"| R2
+        R1 --> K1["qqq_gemm C on s1"]
+        R2 --> K2["qqq_gemm C on s2"]
     end
 ```
 
-`QQQLinear._reduce_scratch()` returns a contiguous view into the flat buffer;
-`_shared_reduce_scratch` grows the allocation when a wider layer appears.
-`QQQTorchLinear` no longer registers the buffer at all.  The process-wide cache
-is intentionally not used inside `torch.compile`, where it would become a graph
-constant.
+`QQQLinear._reduce_scratch()` returns a contiguous view into the buffer owned
+by the call's current CUDA stream; `_shared_reduce_scratch` grows it when a
+wider layer appears.  Calls on one stream are ordered by that stream, so they
+may reuse its buffer.  Distinct streams get distinct buffers, because the
+kernel reads and writes `C` for the whole call and the allocation mutex is not
+a scratch-use lease ([issue
+#4488](https://github.com/ModelCloud/GPTQModel/issues/4488)).  CPU devices have
+no streams and keep one buffer, which is safe because the CPU path is
+synchronous and the native kernel is CUDA-only.  `QQQTorchLinear` no longer
+registers the buffer at all.  The process-wide cache is intentionally not used
+inside `torch.compile`, where it would become a graph constant.
+
+| Before | After |
+| --- | --- |
+| Cache key: `device` | Cache key: `(device, stream identity)` |
+| Two modules on different streams share `C` | Each stream has its own `C` |
+| Mutex only guards allocation | Stream ordering guards same-stream reuse |
+| — | CPU/no-stream callers keep one device buffer |
 
 For an 8B QQQ model with `N = 14336` the old per-module total was 5376 MiB
-(1024 rows x 14336 x 4 bytes x 96 modules); one shared buffer is 56 MiB.  The
-regression tests assert the buffer count, the shared storage, and bitwise-equal
-Torch outputs.
+(1024 rows x 14336 x 4 bytes x 96 modules); one shared buffer per stream is
+56 MiB, and the default single-stream case is unchanged.  The regression tests
+assert stream exclusivity, same-stream reuse, the shared CPU storage, and
+bitwise-equal Torch outputs.
 
 ## GGUF CUDA plan scratch
 
@@ -106,6 +122,8 @@ exercised only through mocked `qqq_gemm` dispatch.
   answer a later forward without recomputation.
 - A QQQ reduce buffer is not part of `state_dict()`; it is non-persistent and
   rebuilt lazily.
+- A QQQ reduce buffer is owned by one `(device, stream)`: calls on that stream
+  reuse it in stream order, and a different stream never sees it.
 - A GGUF plan owns graph metadata only.  Its backend memory belongs to the
   device arena, and a generation mismatch is a hard rebuild, not a silent reuse.
 - FP8 checkpoint-load peak (item 3 of #4387) is not addressed by this change.
