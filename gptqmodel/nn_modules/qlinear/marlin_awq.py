@@ -71,6 +71,11 @@ class AwqMarlinLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
+    # The Marlin evaluator adds the bias to its FP32 accumulator before the
+    # visible cast, so the buffer keeps its checkpoint width instead of
+    # following the model dtype at load time.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_marlin"
 
@@ -349,9 +354,11 @@ class AwqMarlinLinear(AWQuantLinear):
         self.g_idx_sort_indices = torch.empty(0, dtype=torch.int, device=device)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(
-                marlin_pad_dim(self.bias, self.out_features, padded_n)
-            )
+            # The kernel addresses the bias in its padded tile order, so the
+            # launch operand is derived per call (``_kernel_bias``) instead of
+            # replacing the registered buffer. ``self.bias`` therefore keeps
+            # the checkpoint width and order.
+            self._marlin_bias_padding = (self.out_features, padded_n)
 
         # AWQ words are now repacked and permuted into Marlin's runtime layout;
         # the original checkpoint tensors are no longer recoverable.
@@ -372,6 +379,27 @@ class AwqMarlinLinear(AWQuantLinear):
                 )
         super()._save_to_state_dict(destination, prefix, keep_vars)
 
+    def _kernel_bias(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return the FP32, tile-ordered bias operand for this call.
+
+        ``self.bias`` keeps the checkpoint width and order; the padded,
+        Marlin-permuted FP32 operand exists only for this launch.
+        """
+
+        bias = self.bias
+        if bias is None:
+            return None
+        if bias.device != x.device:
+            bias = bias.to(device=x.device)
+        source, padded = getattr(
+            self, "_marlin_bias_padding", (self.out_features, self.out_features)
+        )
+        if bias.dtype != torch.float32:
+            bias = bias.to(dtype=torch.float32)
+        if bias.shape != (source,):
+            bias = bias.reshape(-1)
+        return marlin_permute_bias(marlin_pad_dim(bias, source, padded))
+
     def forward(self, x: torch.Tensor):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
@@ -385,8 +413,7 @@ class AwqMarlinLinear(AWQuantLinear):
         if self.scales.dtype != x.dtype:
             self.scales.data = self.scales.data.to(x.dtype)
 
-        if self.bias is not None and self.bias.dtype != x.dtype:
-            self.bias.data = self.bias.data.to(x.dtype)
+        bias = self._kernel_bias(x)
 
         # Aligned layers retain the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -401,7 +428,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 quant_type=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
-                bias=self.bias,
+                bias=bias,
                 use_fp32_reduce=self.fp32,
             )
         else:
@@ -417,7 +444,7 @@ class AwqMarlinLinear(AWQuantLinear):
                 quant_type=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
-                bias=self.bias,
+                bias=bias,
                 use_fp32_reduce=self.fp32,
             )
 

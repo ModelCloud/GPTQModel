@@ -1343,8 +1343,24 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     TORCH_CHECK(b_bias.is_contiguous(), "b_bias is not contiguous");
     TORCH_CHECK(b_bias.size(0) == size_n, "b_bias.size(0) != size_n");
     TORCH_CHECK(b_bias.stride(0) == 1, "b_bias.stride(0) != 1");
+    // The epilogue adds the bias to its FP32 accumulator before the visible
+    // cast, so an FP32 operand is what keeps a checkpoint value the activation
+    // dtype cannot hold finite. The kernel stages it as FP32 either way; a
+    // half/bfloat16 operand is widened here so existing callers keep working.
+    TORCH_CHECK(b_bias.scalar_type() == at::ScalarType::Float ||
+                    b_bias.scalar_type() == a.scalar_type(),
+                "b_bias must be float32 or the activation dtype");
   } else {
-    b_bias = torch::empty({0}, options);
+    b_bias = torch::empty({0}, options_fp32);
+  }
+  // The kernel stages and adds the bias in FP32. A half/bfloat16 caller is
+  // widened once, per call; the widening is a temporary operand and never
+  // replaces the caller's buffer.
+  torch::Tensor bias_f32;
+  if (has_bias && b_bias.scalar_type() != at::ScalarType::Float) {
+    bias_f32 = b_bias.to(at::ScalarType::Float);
+  } else {
+    bias_f32 = b_bias;
   }
 
   torch::Tensor b_zeros;
@@ -1417,6 +1433,9 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   if (c_or_none.has_value()) c.record_stream(stream);
   if (c_tmp_or_none.has_value()) c_tmp.record_stream(stream);
   if (a_tmp_or_none.has_value()) a_tmp.record_stream(stream);
+  // A half/bfloat16 bias produces a short-lived FP32 widening here; record it
+  // so it cannot be recycled while the asynchronous launch still reads it.
+  if (has_bias) bias_f32.record_stream(stream);
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
@@ -1447,7 +1466,8 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
 
     marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
+        c_tmp.data_ptr<float>(),
+        static_cast<void*>(bias_f32.data_ptr()), scales_ptr,
         global_scale.data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::Half>(), kernel_size_m,
         kernel_size_n, kernel_size_k, kernel_lda, workspace.data_ptr(),
@@ -1491,7 +1511,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_bias.data_ptr<at::BFloat16>(), scales_ptr,
+        static_cast<void*>(bias_f32.data_ptr()), scales_ptr,
         global_scale.data_ptr<float>(), b_zeros.data_ptr(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         kernel_size_m, kernel_size_n, kernel_size_k, kernel_lda,
