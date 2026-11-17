@@ -1,0 +1,15 @@
+{
+  "layers": ["model.layers"],
+  "blocks": [
+    ["input_layernorm:!"],
+    ["self_attn.qkv_proj", "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.attention_sink_bias:!"],
+    ["self_attn.o_proj"],
+    ["post_attention_layernorm:!"],
+    ["mlp:?"],
+    ["mlp.gate_proj", "mlp.up_proj"],
+    ["mlp.down_proj"],
+    ["mlp.gate:!"],
+    ["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+    ["mlp.experts.{expert_index}.down_proj"]
+  ]
+}

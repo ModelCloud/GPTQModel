@@ -7,7 +7,6 @@ import json
 import os
 from collections.abc import Callable
 from functools import wraps
-from importlib import import_module
 from typing import Any
 
 from safetensors import safe_open
@@ -19,6 +18,7 @@ from ...utils.mimo import is_mimo_mixed_source
 from ...utils.model import nested_move_to
 from ...utils.torch import CPU
 from ..base import BaseQModel
+from ..local import LocalModelLoader
 
 
 _REPLAY_INPUTS_KEY = "_mimo_v2_replay_inputs"
@@ -46,8 +46,13 @@ def _compatible_mask(function: Callable) -> Callable:
 
 
 class MimoV2QModel(BaseQModel):
-    # MiMo V2 uses repository-defined configuration/modeling classes.
-    require_trust_remote_code = True
+    loader = LocalModelLoader(
+        config_class="gptqmodel.models.ports.mimo_v2.configuration_mimo_v2.MiMoV2Config",
+        model_class="gptqmodel.models.ports.mimo_v2.modeling_mimo_v2.MiMoV2ForCausalLM",
+        processor_class="gptqmodel.models.ports.mimo_v2.processing_mimo_v2.MiMoV2Processor",
+    )
+    require_trust_remote_code = False
+    require_load_processor = True
 
     dynamic_expert_index = "n_routed_experts"
 
@@ -71,7 +76,7 @@ class MimoV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("qkv_proj:0", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("qkv_proj:0", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "attention_sink_bias:!"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
@@ -155,11 +160,6 @@ class MimoV2QModel(BaseQModel):
 
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
-        modeling = import_module(type(model).__module__)
-        for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
-            function = getattr(modeling, name, None)
-            if callable(function):
-                setattr(modeling, name, _compatible_mask(function))
         if is_mimo_mixed_source(model.config):
             model.config.mimo_mtp_source_quantization_config = copy.deepcopy(
                 model.config.quantization_config
@@ -167,6 +167,12 @@ class MimoV2QModel(BaseQModel):
         self._drop_visual_merger_biases_if_checkpoint_omits_them(model, self.model_local_path)
         self._drop_checkpoint_omitted_audio_tensors(model, self.model_local_path)
         return model
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Packed QKV with unequal QK/V widths, SWA sinks and routed experts
+        # have not been qualified for folding/search. Quantize all linears
+        # through AWQ's existing explicit no-group path, including fallback=None.
+        return []
 
     def pre_quantize_generate_hook_start(self):
         model = self.model.model
@@ -224,17 +230,16 @@ class MimoV2QModel(BaseQModel):
         if isinstance(raw_mask, dict):
             attention_mask = raw_mask[attention_type]
         else:
-            modeling = import_module(type(self.model).__module__)
+            from ..ports.mimo_v2 import modeling_mimo_v2 as modeling
             mask_builder = (
                 modeling.create_sliding_window_causal_mask
                 if attention_type == "sliding_window_attention"
                 else modeling.create_causal_mask
             )
             attention_mask = mask_builder(
-                config=self.model.config,
-                input_embeds=layer_input[0],
+                config=modeling.mimo_mask_config(self.model.config),
+                inputs_embeds=layer_input[0],
                 attention_mask=nested_move_to(raw_mask, device=target_device),
-                cache_position=prepared.get("cache_position"),
                 past_key_values=None,
                 position_ids=prepared.get("position_ids"),
             )
