@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ..ports.qwen3 import Qwen3Loader
 from . import LlamaQModel
 
 
@@ -13,8 +14,20 @@ class Qwen3QModel(LlamaQModel):
     ahead of the attention projections. We mark those helper modules as
     non-quantized so the layer walker captures the complete structure.
     """
+
     fusable = FusableConfig("qwen3").merge(LlamaFusableConfig())
 
+    loader = Qwen3Loader()
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Q/K have per-head RMSNorm after their projections. The shared
+        # projection tree is an ownership contract, not fold/search/replay
+        # qualification. Keep every projection quantizable without guessing
+        # scale sources from this ordering. Derived definitions keep their
+        # own native AWQ policy.
+        if type(self) is Qwen3QModel:
+            return []
+        return super().awq_get_modules_for_scaling(module, input_feat, module_kwargs)
 
     shared_input_verified_model_types = frozenset({"qwen3"})
 
