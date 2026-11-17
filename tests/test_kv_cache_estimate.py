@@ -249,19 +249,29 @@ def test_compressed_attention_counts_sliding_branch_plus_pooled_entries():
     assert estimate.bytes_for(32768) < 32768 * 2 * 64 * 512
 
 
-def test_chunked_attention_counts_as_full_attention():
-    """Llama4 masking pattern: global attention, cache covers the whole context.
+def test_chunked_attention_is_capped_at_its_chunk_size():
+    """Llama4 chunked layers are bounded, not full-context layers.
 
-    Its hybrid stack is 36 chunked + 12 full layers out of 48; treating the
-    chunked ones as unknown under-reported the cache by 4x.
+    Transformers builds a ``DynamicSlidingWindowLayer`` with
+    ``sliding_window = attention_chunk_size`` for ``chunked_attention``. The
+    previous expectation (full context) overestimated Llama4 by ~3.4x at 128k
+    and made the estimate claim ``exact=True``.
     """
 
-    config = _gqa(num_hidden_layers=48)
+    config = _gqa(num_hidden_layers=48, attention_chunk_size=8192)
     config.layer_types = ["chunked_attention"] * 36 + ["full_attention"] * 12
     estimate = estimate_kv_cache(config, dtype=torch.float16)
+    per_layer = 2 * 8 * 128 * 2
     assert estimate.exact is True
     assert estimate.growing_layers == 48
-    assert estimate.bytes_per_token == 48 * 2 * 8 * 128 * 2
+    assert estimate.sliding_layers == 36
+    assert estimate.window == 8192
+    # Below the chunk size every layer grows with the context.
+    assert estimate.bytes_for(4096) == 48 * 4096 * per_layer
+    # Past the chunk size only the 12 full layers keep growing.
+    assert estimate.bytes_for(32768) == (36 * 8192 + 12 * 32768) * per_layer
+    assert estimate.bytes_per_token == 12 * per_layer
+    assert "capped at 8k" in estimate.format()
 
 
 def test_non_attention_blocks_contribute_nothing():
