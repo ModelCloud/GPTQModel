@@ -134,7 +134,7 @@ embeddings take a required `layer_type` / `attention_type` argument, so the old
 `rotary(x, position_ids)` call raised
 `TypeError: Gemma3RotaryEmbedding.forward() missing 1 required positional
 argument: 'layer_type'` for every Gemma 3 text model.
-`_rotary_layer_type_kwargs` (`gptqmodel/looper/awq_processor.py:4471`) inspects
+`_rotary_layer_type_kwargs` (`gptqmodel/looper/awq_processor.py::_rotary_layer_type_kwargs`) inspects
 the rotary signature and supplies the attention module's declared type. Rotaries
 without that parameter are called exactly as before.
 
