@@ -324,6 +324,24 @@ def _owns_meta_tensor(module: nn.Module) -> bool:
     return any(tensor.is_meta for tensor in tensors)
 
 
+def _tracks_version(tensor: torch.Tensor) -> bool:
+    """Whether ``tensor`` exposes a usable version counter.
+
+    Inference tensors raise ``RuntimeError: Inference tensors do not track
+    version counter``. A parameter can also lose its counter while reporting
+    ``is_inference() == False``: ``post_quantize`` moves an inference-mode
+    layer to CPU with ``param.data = cpu_copy``, and the resulting Parameter is
+    an ordinary tensor that still cannot take part in in-place updates, so
+    ``F.linear`` rejects it (issue #4572).
+    """
+
+    try:
+        tensor._version  # noqa: SLF001 - the counter itself is the contract
+    except RuntimeError:
+        return False
+    return True
+
+
 @torch.inference_mode(False)
 def replace_inference_parameters(module: nn.Module) -> None:
     """Rebind ``module``'s inference-mode parameters as ordinary parameters.
@@ -333,12 +351,82 @@ def replace_inference_parameters(module: nn.Module) -> None:
     refuses outside that mode ("Inference tensors do not track version
     counter"), so a later ``model.to(device)`` on the in-session model failed.
     Buffers are reassigned by ``to()`` and need no rebinding.
+
+    A parameter that lost its counter through ``.data =`` assignment is
+    repaired too: it reports ``is_inference() == False`` yet still rejects the
+    in-place update ``F.linear`` needs (issue #4572).
     """
 
+    replacement: dict[int, nn.Parameter] = {}
     for submodule in module.modules():
         for name, param in list(submodule.named_parameters(recurse=False)):
-            if param.is_inference():
-                setattr(submodule, name, nn.Parameter(param.clone(), requires_grad=param.requires_grad))
+            if not param.is_inference() and _tracks_version(param):
+                continue
+            fresh = replacement.get(id(param))
+            if fresh is None:
+                fresh = nn.Parameter(param.detach().clone(), requires_grad=param.requires_grad)
+                replacement[id(param)] = fresh
+            setattr(submodule, name, fresh)
+
+
+@torch.inference_mode(False)
+def ensure_version_counters(model: nn.Module) -> List[str]:
+    """Rebind every parameter whose version counter is unusable.
+
+    This is the loop-exit repair for the #4498 contract: when ``quantize()``
+    returns, every tensor in the in-session model must accept the in-place
+    updates a forward performs. Quantized modules are restored into ordinary
+    parameters already; unquantized layers (MoE routers, dynamic ``-:``
+    exclusions, norms) were materialized under ``inference_mode`` and then
+    moved to CPU with ``param.data = ...``, which leaves them with
+    ``is_inference() == False`` and no counter (issue #4572).
+
+    Aliased parameters keep their aliasing: every owner of one old object is
+    rebound to the same replacement. Returns the rebind names for diagnostics.
+    """
+
+    replacement: dict[int, nn.Parameter] = {}
+    repaired: List[str] = []
+    for name, submodule in model.named_modules():
+        for attr, param in list(submodule.named_parameters(recurse=False)):
+            if param.is_inference() or not _tracks_version(param):
+                fresh = replacement.get(id(param))
+                if fresh is None:
+                    fresh = nn.Parameter(param.detach().clone(), requires_grad=param.requires_grad)
+                    replacement[id(param)] = fresh
+                setattr(submodule, attr, fresh)
+                repaired.append(f"{name}.{attr}" if name else attr)
+        for attr, buffer in list(submodule.named_buffers(recurse=False)):
+            if buffer.is_inference() or not _tracks_version(buffer):
+                setattr(submodule, attr, buffer.detach().clone())
+                repaired.append(f"{name}.{attr}" if name else attr)
+    return repaired
+
+
+def _retie_shared_embeddings(model: nn.Module) -> bool:
+    """Re-establish a tied output embedding after materialization.
+
+    A tied checkpoint stores only the input embedding, so an ``lm_head`` that
+    was on meta cannot be loaded from it (issue #4597). The lazy shell also
+    replaces parameters as it materializes, which breaks the tie the config
+    declares. Re-tie before judging whether a module is still meta.
+    """
+
+    tie = getattr(model, "tie_weights", None)
+    if not callable(tie):
+        return False
+    config = getattr(model, "config", None)
+    tied = bool(getattr(config, "tie_word_embeddings", False))
+    if not tied and hasattr(config, "get_text_config"):
+        try:
+            text_config = config.get_text_config()
+        except Exception:  # pragma: no cover - defensive
+            text_config = None
+        tied = bool(getattr(text_config, "tie_word_embeddings", False))
+    if not tied:
+        return False
+    tie()
+    return True
 
 
 def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) -> List[str]:
@@ -352,8 +440,13 @@ def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) ->
     end state (issue #4450). Packed quantized modules are skipped: their
     payload never comes from the dense checkpoint.
 
-    Returns the names of modules that still own meta tensors; they are logged,
-    not raised, because the saved checkpoint stays correct either way.
+    A tied output embedding is re-tied after materialization instead of being
+    read from the checkpoint, which never stores it (issue #4597).
+
+    Raises ``RuntimeError`` when a non-quantized module still owns meta
+    tensors: the in-session model would fail on its first forward or ``.to()``,
+    and a partial ``.to()`` can escalate to a CUDA device-side assert, so a
+    loud failure is safer than the previous log-only path.
     """
 
     model = qmodel.model
@@ -377,12 +470,20 @@ def materialize_remaining_meta_modules(qmodel, *, device: torch.device = CPU) ->
         if _owns_meta_tensor(module):
             unresolved.append(name)
 
+    # The tie must be restored before the remaining-meta verdict: a tied
+    # `lm_head` is not a checkpoint tensor (issue #4597).
+    _retie_shared_embeddings(model)
+    unresolved = [
+        name for name in unresolved if _owns_meta_tensor(model.get_submodule(name))
+    ]
+
     if unresolved:
-        log.error(
-            "Offload: modules remain on the meta device after quantization (%s). "
-            "The in-session model cannot run inference; reload the saved checkpoint "
-            "before using it.",
-            ", ".join(unresolved[:8]) + (", ..." if len(unresolved) > 8 else ""),
+        raise RuntimeError(
+            "Offload: modules remain on the meta device after quantization ("
+            + ", ".join(unresolved[:8])
+            + (", ..." if len(unresolved) > 8 else "")
+            + "). The in-session model cannot run inference or be moved with "
+            "`.to()`; reload the saved checkpoint before using it."
         )
     return unresolved
 
@@ -1235,6 +1336,53 @@ def _offload_disk_locked(
     # print_module_tree(module)
 
 # undo offload
+def attach_disk_offload_hook(
+    module: nn.Module,
+    offload_dir: str,
+    *,
+    execution_device: torch.device = CPU,
+) -> None:
+    """Register an already-meta module with an existing offload bundle.
+
+    A resumed run restores completed packed modules as meta tensors from the
+    checkpoint object and writes an Accelerate-format ``index.json`` for them
+    (issue #4562). Without a hook the loop-exit restore never sees those
+    modules, so they stay on meta and the in-session forward fails silently.
+    Attaching the same hook ``_offload_disk_locked`` installs lets
+    :func:`restore_disk_offloaded_modules` materialize them at loop exit and
+    raise the reload-the-checkpoint error when the bundle is unreadable.
+
+    ``AlignDevicesHook.detach_hook`` only reloads leaves whose recorded
+    ``original_devices`` entry is not meta. A module that was already meta when
+    the hook attached has no such entry, so its recorded devices are rewritten
+    to ``execution_device``; otherwise detaching would leave every tensor meta.
+
+    ``offload_dir`` must already contain the index; a missing one is an error,
+    not something to regenerate from meta tensors.
+    """
+
+    if not os.path.isfile(os.path.join(offload_dir, "index.json")):
+        raise RuntimeError(
+            f"Offload: no offload index for `{offload_dir}`; the resumed packed "
+            "module cannot be materialized after quantization"
+        )
+    disk_offload(
+        module,
+        offload_dir=offload_dir,
+        offload_buffers=True,
+        execution_device=execution_device,
+    )
+    _install_live_qzero_restore(module)
+    for _owner, hook in _iter_offload_hooks(module):
+        devices = getattr(hook, "original_devices", None)
+        if not isinstance(devices, dict):
+            continue
+        hook.original_devices = {
+            name: (execution_device if torch.device(device).type == "meta" else device)
+            for name, device in devices.items()
+        }
+
+
 def _iter_leaf_tensors(mod: nn.Module, *, include_buffers: bool) -> Iterable[Tuple[str, torch.Tensor, bool]]:
     """Yield (name, tensor, is_param) for direct children (no recurse) to preserve module attribute names."""
     for n, p in mod.named_parameters(recurse=False):

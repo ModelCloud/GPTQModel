@@ -352,3 +352,159 @@ def test_default_offload_quantize_leaves_a_normal_in_session_model(tmp_path, met
         torch.testing.assert_close(
             hf(input_ids=ids.to("cuda:0")).logits.float().cpu(), in_session, rtol=0, atol=5e-2,
         )
+
+
+def test_unquantized_layers_keep_a_version_counter_after_the_cpu_move():
+    """#4572: `param.data = cpu_copy` leaves a parameter that cannot be used.
+
+    ``pre_quantize`` materializes unquantized layers (MoE routers, dynamic
+    ``-:`` exclusions, norms) under ``inference_mode``; ``post_quantize`` then
+    moves them to CPU with ``param.data =``, which clears the inference flag but
+    not the unusable state: the parameter still has no version counter, so
+    ``F.linear`` raises "Inference tensors do not track version counter".
+    """
+
+    from gptqmodel.utils.offload import ensure_version_counters, replace_inference_parameters
+
+    with torch.inference_mode():
+        module = nn.Sequential(nn.Linear(8, 8), nn.LayerNorm(8)).half()
+    for param in module.parameters():
+        param.data = param.data.clone()  # move_module_to_cpu_pinned
+    assert all(not param.is_inference() for param in module.parameters())
+    for param in module.parameters():
+        with pytest.raises(RuntimeError, match="version counter"):
+            _ = param._version
+    with pytest.raises(RuntimeError, match="version counter"):
+        module(torch.ones(2, 8, dtype=torch.float16))
+
+    repaired = ensure_version_counters(module)
+    assert repaired
+    for param in module.parameters():
+        assert param._version == 0
+    module(torch.ones(2, 8, dtype=torch.float16))
+
+    # The materialization helper repairs the same state on its own subtree.
+    with torch.inference_mode():
+        other = nn.Linear(4, 4)
+    other.weight.data = other.weight.data.clone()
+    replace_inference_parameters(other)
+    assert other.weight._version == 0
+    other(torch.ones(2, 4))
+
+
+def test_resumed_packed_module_hook_is_materialized_at_loop_exit(tmp_path):
+    """#4562: a resumed meta module needs the offload hook the loop restores.
+
+    The resume path rebuilds packed modules on ``meta`` and writes an
+    Accelerate-format index for them. Without a hook the loop-exit restore
+    never sees them, so they stay meta and the in-session forward fails
+    silently. Attaching the hook makes the #4498 restore materialize them.
+    """
+
+    from gptqmodel.utils.offload import attach_disk_offload_hook
+
+    model, names = _quantized_llama()
+    name = names[0]
+    module = model.get_submodule(name)
+    probe = torch.randn(2, module.in_features, dtype=torch.float16)
+    with torch.inference_mode():
+        expected = module(probe)
+
+    offload_root = tmp_path / "run"
+    offload_to_disk(model=model, module=module, disk_path=str(offload_root), force=True)
+    assert is_meta_module(module)
+
+    # A fresh model stands in for the resumed process: the packed module is
+    # rebuilt on meta with no hook, exactly like `restore_packed_module`.
+    resumed, _ = _quantized_llama()
+    resumed_module = resumed.get_submodule(name).to("meta")
+    resumed.set_submodule(name, resumed_module)
+    assert is_meta_module(resumed_module) and not hasattr(resumed_module, "_hf_hook")
+
+    attach_disk_offload_hook(resumed_module, str(offload_root / name))
+    assert hasattr(resumed_module, "_hf_hook")
+    assert restore_disk_offloaded_modules(resumed, device=torch.device("cpu"), strict=True) == []
+    assert not is_meta_module(resumed_module)
+    with torch.inference_mode():
+        assert torch.equal(resumed_module(probe), expected)
+
+
+def _tiny_tied_vl():
+    from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig
+    from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
+
+    config = Qwen2VLConfig(
+        text_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "vocab_size": 64,
+            "max_position_embeddings": 32,
+            "tie_word_embeddings": True,
+            "eos_token_id": 2,
+            "bos_token_id": 1,
+            "pad_token_id": 0,
+        },
+        vision_config={
+            "depth": 1,
+            "embed_dim": 32,
+            "hidden_size": 32,
+            "num_heads": 2,
+            "in_chans": 3,
+            "patch_size": 14,
+            "spatial_merge_size": 2,
+            "temporal_patch_size": 2,
+        },
+        tie_word_embeddings=True,
+    )
+    return Qwen2VLForConditionalGeneration(config)
+
+
+def test_tied_vl_lm_head_is_retied_after_base_materialization():
+    """#4597: a tied VL head is not a checkpoint tensor; re-tie, don't read it."""
+
+    from gptqmodel.utils.offload import materialize_remaining_meta_modules
+
+    model = _tiny_tied_vl()
+    embedding = model.get_input_embeddings()
+    head = model.get_output_embeddings()
+    assert head.weight is embedding.weight
+
+    # The #4498 end state after the lazy shell materialized the base module:
+    # the embedding is real, the tie is broken and lm_head is a meta placeholder.
+    embedding.weight = nn.Parameter(embedding.weight.detach().clone())
+    head.weight = nn.Parameter(torch.empty((0, 0), device="meta"))
+    assert any(tensor.is_meta for tensor in model.parameters())
+
+    unresolved = materialize_remaining_meta_modules(SimpleNamespace(model=model))
+    assert unresolved == []
+    assert head.weight is embedding.weight
+    assert not any(tensor.is_meta for tensor in model.parameters())
+
+
+def test_untied_meta_output_embedding_fails_loudly():
+    """#4597: a head that cannot be materialized must raise, not be logged."""
+
+    from gptqmodel.utils.offload import materialize_remaining_meta_modules
+
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+        tie_word_embeddings=False,
+    )
+    model = LlamaForCausalLM(config)
+    model.lm_head.weight = nn.Parameter(torch.empty((0, 0), device="meta"))
+
+    with pytest.raises(RuntimeError, match="remain on the meta device"):
+        materialize_remaining_meta_modules(SimpleNamespace(model=model))
