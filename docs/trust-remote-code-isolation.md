@@ -56,8 +56,10 @@ flowchart TD
     style H fill:#ffcdd2,stroke:#b71c1c
 ```
 
-Tokenizers receive remote trust only when both explicit trust and the safety
-bypass are present. This gate does not change Tokenicer normalization.
+For a package-owned model, tokenizers never receive remote trust, including
+definitions that use an ordinary native tokenizer rather than declaring a
+custom package tokenizer. For other models, both explicit trust and the safety
+bypass are required. This policy does not change Tokenicer normalization.
 Tokenizer construction also receives the policy-selected config as Transformers'
 `config` argument, separately from Tokenicer's `model_config` normalization
 argument. This prevents AutoTokenizer from importing checkpoint `AutoConfig`
@@ -67,7 +69,10 @@ trust and the bypass are both enabled.
 ```mermaid
 flowchart TD
     A["load_model_config: selected config"] --> B["load_hf_tokenizer: model_config"]
-    B --> C["Tokenicer.load: model_config and config both receive selected config"]
+    B --> J{"local_model_loader selects package model?"}
+    J -- yes --> K["Force tokenizer trust_remote_code=False; select declared tokenizer if any"]
+    J -- no --> C
+    K --> C["Tokenicer.load: model_config and config both receive selected config"]
     C --> D["AutoTokenizer: reuse config; skip AutoConfig discovery"]
     D --> E{"Tokenizer checkpoint Python requested?"}
     E -- no --> F["Native tokenizer"]
