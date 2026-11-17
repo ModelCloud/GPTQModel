@@ -9,7 +9,7 @@
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
 
-from copy import copy, deepcopy
+from copy import copy
 from pathlib import Path
 from typing import Union
 
@@ -51,6 +51,7 @@ from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization import FORMAT
 from ..quantization.config import dynamic_get, resolve_quant_format
 from .logger import setup_logger
+from .mlx_rope import _mlx_model_config
 from .torch import torch_empty_cache
 
 
@@ -337,7 +338,7 @@ def _packed_mlx_weights(model, config, lm_head_name, *, stock_compatible: bool =
             if name in qqq:
                 weights[f"{name}.linear.bias"] = mx.zeros((module.out_features,), dtype=mx.float16)
 
-    mlx_config = deepcopy(config)
+    mlx_config = _mlx_model_config(config)
     mlx_config.pop("quantization", None)
     mlx_config.pop("quantization_config", None)
     if layer_params:
@@ -620,13 +621,14 @@ def _convert_gptq_to_mlx_weights(
     torch_empty_cache()
 
     # Initialize MLX model
-    model_class, model_args_class = _get_classes(config=config)
-    mlx_model = model_class(model_args_class.from_dict(config))
+    mlx_config = _mlx_model_config(config)
+    model_class, model_args_class = _get_classes(config=mlx_config)
+    mlx_model = model_class(model_args_class.from_dict(mlx_config))
 
     # Load and quantize weights
     log.info("Starting MLX quantization...")
     mlx_model.load_weights(list(weights.items()))
-    weights, mlx_config = quantize_model(mlx_model, config, group_size=gptq_config["group_size"],
+    weights, mlx_config = quantize_model(mlx_model, mlx_config, group_size=gptq_config["group_size"],
                                      bits=gptq_config["bits"], quant_predicate=quant_predicate)
     log.info("MLX quantization completed")
 
