@@ -38,6 +38,24 @@ continue to override remote trust. A known remote-only checkpoint layout
 (currently Bailing Hybrid MLA, selected by `q_lora_rank`) cannot silently fall
 back to an incompatible native model.
 
+For GGUF checkpoints, the explicitly selected `gguf_file` remains the config
+source through the data read, trust preflight and final construction, including
+when a subfolder is selected. An unrelated `config.json` cannot veto that
+selection or introduce a remote-only layout marker. This also allows a
+GGUF-only subfolder to load without a JSON config.
+
+```mermaid
+flowchart TD
+    A["load_model_config: gguf_file and subfolder"] --> B["PreTrainedConfig.get_config_dict: selected GGUF metadata"]
+    B --> C["local_model_loader: metadata model_type"]
+    C --> D{"Definition owns local classes?"}
+    D -- yes --> E["LocalModelLoader.load_config: same GGUF selection"]
+    D -- no --> F["resolve_trust_remote_code: preserve gguf_file and subfolder"]
+    F --> G["AutoConfig.from_pretrained: same GGUF selection"]
+    F --> H["Unsupported selected metadata: permission gate or clear error"]
+    style H fill:#ffcdd2,stroke:#b71c1c
+```
+
 Tokenizers receive remote trust only when both explicit trust and the safety
 bypass are present. This gate does not change Tokenicer normalization.
 Tokenizer construction also receives the policy-selected config as Transformers'
