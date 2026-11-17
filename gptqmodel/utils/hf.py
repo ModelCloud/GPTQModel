@@ -2809,6 +2809,20 @@ def load_hf_tokenizer(
     from tokenicer import Tokenicer
 
     trust_remote_code = bool(trust_remote_code and safety_checks_bypassed())
+    if isinstance(tokenizer_or_path, (str, os.PathLike)):
+        from ..models.local import local_model_loader
+
+        tokenizer_or_path = os.fspath(tokenizer_or_path)
+        loader = local_model_loader(getattr(model_config, "model_type", None))
+        if loader is not None and loader.tokenizer_class is not None:
+            # Class selection belongs to the definition, including when two
+            # checkpoints declare the same tokenizer class name. Tokenicer
+            # receives the owned instance and remains the normalization owner.
+            tokenizer_kwargs = {
+                key: value for key, value in kwargs.items()
+                if key not in {"config", "strict", "pad_tokens", "prefer_serialized_tokenizer"}
+            }
+            tokenizer_or_path = loader.load_tokenizer(tokenizer_or_path, **tokenizer_kwargs)
     if isinstance(model_config, PreTrainedConfig):
         # Tokenicer's model_config controls normalization; AutoTokenizer uses
         # the separate `config` argument for class selection. Reuse the config
