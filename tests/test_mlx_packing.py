@@ -675,9 +675,10 @@ def _convert_tiny_qwen2(path, dynamic, desc_act=False, stock_compatible=False):
     model.quantize()
     quantized = path.parent / (path.name + "_quantized")
     model.save(str(quantized))
-    # Export reloads the saved checkpoint; do the same so the source tensors
+    # Conversion reloads the saved checkpoint; do the same so the source tensors
     # are materialized rather than the quantization pass's meta scaffolding.
-    # `GPTQModel.export` pins the portable Torch GPTQ backend, so do the same.
+    # Pin the portable Torch GPTQ backend so conversion sees the same layout as
+    # the in-process checkpoint.
     source = GPTQModel.load(str(quantized), device="cpu", backend=BACKEND.GPTQ_TORCH)
     return source, convert_gptq_to_mlx_weights(
         str(quantized), source, qcfg.to_dict(), source.lm_head,
