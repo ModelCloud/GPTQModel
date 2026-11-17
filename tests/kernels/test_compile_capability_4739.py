@@ -136,7 +136,7 @@ def test_fp8_is_trace_clean_and_compiled_decode_is_faster():
     x = torch.randn(M, K, dtype=torch.float16, device=DEVICE)
 
     with torch.inference_mode():
-        eager = module(x)  # warms the load-time decoded-weight bound
+        module(x)  # warms the load-time decoded-weight bound
         eager = module(x)
 
     explained = torch._dynamo.explain(module)(x)
