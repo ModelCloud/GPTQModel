@@ -7,6 +7,14 @@ description: Qualify AWQ source/consumer relationships, scale-search objectives,
 
 # AWQ model-onboarding safety gate
 
+## At a glance
+
+- **What:** prove each AWQ scaling group's true source, every consumer, and the search objective from the native model code, or fall back to plain quantization deliberately.
+- **Why:** a wrong fold (wrong producer, a missed consumer, a nonlinear or residual boundary) corrupts the model while module plans, shapes, and generation still look fine.
+- **When:** adding a model type or alias, changing paths, tags, variants, or AWQ overrides, or touching grouping, search, replay, or folding.
+- **Where:** `gptqmodel/models/definitions/` (`awq_get_modules_for_scaling`, replay hooks), `gptqmodel/looper/awq_processor.py`, `docs/awq-scaling-groups.md`, `docs/awq-bloom-replay.md`, and the AWQ tests listed in section 4.
+- **How:** (1) read the native forward, (2) express only justified groups with existing APIs, (3) preserve candidate coordinates and native replay context, (4) add the regression evidence table, (5) state one qualification outcome per layout.
+
 Apply this skill before adding any model type/alias or changing model paths,
 tags, layout/config variants, AWQ overrides, grouping, replay, search, or folds.
 Use it alongside `gptqmodel-model-plan-tests`; passing the module-plan inventory

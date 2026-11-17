@@ -24,10 +24,15 @@
 
 typedef void (*fp_exl3_gemm_kernel) (EXL3_GEMM_ARGS);
 
-#define EXL3_GEMM_SHAPE_1     16,     16,    128,     6,     5
-#define EXL3_GEMM_SHAPE_2     16,     32,    128,     4,     3
-#define EXL3_GEMM_SHAPE_3     16,     32,    256,     4,     3
-#define EXL3_GEMM_SHAPE_4     16,     16,    512,     4,     3
+// Every shape tiles the batch dimension with the same 16-row block.  The host
+// side sizes the split-K lock array from this value, so it must match the
+// TILESIZE_M the kernels are instantiated with.
+#define EXL3_GEMM_TILESIZE_M  16
+
+#define EXL3_GEMM_SHAPE_1     EXL3_GEMM_TILESIZE_M,     16,    128,     6,     5
+#define EXL3_GEMM_SHAPE_2     EXL3_GEMM_TILESIZE_M,     32,    128,     4,     3
+#define EXL3_GEMM_SHAPE_3     EXL3_GEMM_TILESIZE_M,     32,    256,     4,     3
+#define EXL3_GEMM_SHAPE_4     EXL3_GEMM_TILESIZE_M,     16,    512,     4,     3
 
 #define EXL3_GEMM_TILESIZE_K  0, 16, 32, 32, 16
 #define EXL3_GEMM_TILESIZE_N  0, 128, 128, 256, 512

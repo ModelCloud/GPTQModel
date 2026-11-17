@@ -16,7 +16,6 @@ class TestMimo(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 6
 
     def test_mimo(self):

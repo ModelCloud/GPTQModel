@@ -8,12 +8,12 @@ from typing import Dict
 from transformers import AutoModelForPreTraining, AutoProcessor, ProcessorMixin
 
 from ...utils.audio import process_audio_info
-from ...utils.calibration import batched_conversations
 from ...utils.model import move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 from .qwen2 import Qwen2QModel
 
 
@@ -78,23 +78,30 @@ class Qwen2AudioGPTQ(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path)
 
+    def _prepare_calibration_batch(self, processor, batch):
+        text = processor.apply_chat_template(batch, tokenize=False, add_generation_prompt=True)
+        audio_inputs = process_audio_info(batch, use_audio_in_video=False)
+        return processor(
+            text=text,
+            audio=audio_inputs if audio_inputs else None,
+            padding=True,
+            return_tensors="pt",
+        )
+
     def prepare_dataset(
         self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1, **kwargs
     ):
-        processor = self.load_processor()
-        calib_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            text = processor.apply_chat_template(batch, tokenize=False, add_generation_prompt=True)
-            audio_inputs = process_audio_info(batch, use_audio_in_video=False)
-            inputs = processor(
-                text=text,
-                audio=audio_inputs if audio_inputs else None,
-                padding=True,
-                return_tensors="pt",
-            )
-            calib_data.append(inputs)
-        del processor
-        return calib_data
+        options = dict(kwargs)
+        if calibration_dataset_concat_size is not None:
+            options["calibration_dataset_concat_size"] = calibration_dataset_concat_size
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=options,
+            prepare_batch=self._prepare_calibration_batch,
+            preprocess_func=self.preprocess_dataset,
+        )
 
 
 __all__ = ["Qwen2AudioGPTQ"]

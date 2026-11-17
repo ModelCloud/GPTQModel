@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched_conversations
+from ...utils.calibration import _frame_columns, batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
@@ -561,10 +561,15 @@ class BaseQwen3VLGPTQ(DeepStackReplayMixin, BaseQModel):
         return prefix, iter(()), True
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        if isinstance(calibration_dataset, (str, bytes, bytearray, Mapping)):
+        # A DataFrame is not a ``Mapping``: iterating it yields its column
+        # labels, which would be calibrated as text. This definition does not
+        # use the shared columnar splitter, so reject the table explicitly.
+        if isinstance(calibration_dataset, (str, bytes, bytearray, Mapping)) or (
+            _frame_columns(calibration_dataset) is not None
+        ):
             raise ValueError(
                 "Qwen3-VL calibration dataset must be an iterable of samples, "
-                "not a single string or mapping."
+                "not a single string, mapping, or DataFrame."
             )
         if isinstance(calibration_dataset, Sized) and len(calibration_dataset) == 0:
             raise ValueError("Qwen3-VL calibration dataset is empty.")

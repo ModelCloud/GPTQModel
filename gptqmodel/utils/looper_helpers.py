@@ -33,7 +33,7 @@ from ..utils.p2p import (
 )
 from ..utils.python import has_gil_disabled
 from ..utils.safe import ThreadSafe
-from ..utils.torch import CPU, HAS_NPU, all_torch_devices, torch_sync
+from ..utils.torch import CPU, HAS_NPU, accelerator_context_claimed, all_torch_devices, torch_sync
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -230,6 +230,30 @@ def plan_layer_count(
     return max(0, last_quantized_layer_index + 1)
 
 
+def _resolve_device_ctx_target(dev) -> Optional[torch.device]:
+    """Resolve a device-like value without pinning an indexless family to device 0.
+
+    ``device_ctx`` only needs to make the right device *current*. Collapsing an
+    index-less family selector (``quantize_config.device`` holds the family) to
+    ``cuda:0`` would switch the thread's current device and create a primary
+    context on GPU 0 even when the run excluded it (issue #4653).
+    """
+
+    if isinstance(dev, torch.device):
+        return dev
+    # The ``DEVICE`` enum is a ``str`` subclass; its family name is not a torch
+    # device on its own (``DEVICE.ROCM``), so resolve through the runtime type.
+    family_type = getattr(dev, "type", None)
+    if family_type is not None and not isinstance(family_type, str):
+        family_type = None
+    if family_type is not None:
+        return torch.device(family_type)
+    try:
+        return torch.device(str(dev))
+    except (RuntimeError, TypeError, ValueError):
+        return None
+
+
 @contextmanager
 def device_ctx(dev: Optional[torch.device | "DEVICE" | str]):
     """Temporarily set the thread-local device for CUDA/XPU backends."""
@@ -237,20 +261,41 @@ def device_ctx(dev: Optional[torch.device | "DEVICE" | str]):
         yield
         return
 
-    dev = normalize_device_like(dev)
-    if dev is None:
+    target = _resolve_device_ctx_target(dev)
+    if target is None:
         raise ValueError("device_ctx received an invalid device")
 
-    if dev.type == "cuda":
-        with torch.cuda.device(dev.index):
+    # An index-less family selector (``quantize_config.device`` holds only the
+    # family) used to be collapsed to ``<type>:0``. That silently created the
+    # default device's primary context, which claimed a GPU the run excluded
+    # (issue #4653). Keep the old "select device 0" behaviour when that device
+    # is already in use, and leave the current device alone otherwise.
+    if target.index is None:
+        # ``torch.cuda.device(None)`` still selects the default device, so the
+        # family selector keeps its historical device-0 meaning whenever that
+        # device is already in use, and stays a no-op while it is untouched.
+        if target.type == "cuda" and not accelerator_context_claimed("cuda", 0):
+            yield
+            return
+        runtime = getattr(torch, target.type, None)
+        device_scope = getattr(runtime, "device", None)
+        if device_scope is None:
+            yield
+            return
+        with device_scope(0):
             yield
         return
-    if dev.type == "xpu" and hasattr(torch, "xpu"):
-        with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
+
+    if target.type == "cuda":
+        with torch.cuda.device(target.index):
             yield
         return
-    if dev.type == "npu" and HAS_NPU:
-        with torch.npu.device(dev.index):  # type: ignore[attr-defined]
+    if target.type == "xpu" and hasattr(torch, "xpu"):
+        with torch.xpu.device(target.index):  # type: ignore[attr-defined]
+            yield
+        return
+    if target.type == "npu" and HAS_NPU:
+        with torch.npu.device(target.index):  # type: ignore[attr-defined]
             yield
         return
 
@@ -759,9 +804,19 @@ def forward_batch_worker(
             target_device=module_device,
         )
 
+    from ..looper.loop_processor import resolve_calibration_keep_mask
+
+    calibration_keep_mask = resolve_calibration_keep_mask(
+        processor,
+        keep_mask,
+        batch_index=batch_index,
+        layer_input=inputs,
+    )
+
     mask_tls = getattr(processor, "_mask_tls", None)
     if mask_tls is not None:
-        mask_tls.value = keep_mask
+        mask_tls.value = calibration_keep_mask
+        mask_tls.padding_value = keep_mask
 
     module_output = None
     kv_next = None
@@ -775,6 +830,7 @@ def forward_batch_worker(
     finally:
         if mask_tls is not None:
             mask_tls.value = None
+            mask_tls.padding_value = None
         processor._set_current_batch_index(None)
 
     if (reuse_kv or write_shared_kv_cache) and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:

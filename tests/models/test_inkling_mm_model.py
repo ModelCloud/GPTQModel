@@ -135,6 +135,7 @@ def test_inkling_calibration_uses_native_multimodal_chat_template():
         "reasoning_effort": "medium",
         "return_dict": True,
         "return_tensors": "pt",
+        "padding": True,
     }
 
 

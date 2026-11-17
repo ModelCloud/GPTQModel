@@ -9,13 +9,13 @@ import torch
 from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
-from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class InklingMMQModel(BaseQModel):
@@ -127,16 +127,13 @@ class InklingMMQModel(BaseQModel):
             reasoning_effort="medium",
             return_dict=True,
             return_tensors="pt",
+            padding=True,
         )
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        processor = self.load_processor()
-        calibration_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size):
-            calibration_data.append(self.prepare_inputs_for_conversations(processor, batch))
-        del processor
-        return calibration_data
+        return prepare_vlm_calibration_dataset(
+            self, calibration_dataset, batch_size=batch_size, options=kwargs
+        )
 
     def move_input_capture_example(
         self,

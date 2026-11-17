@@ -108,19 +108,9 @@ def test_deepseek_v4_exl3_resolves_native_checkpoint_projection(
     )
 
 
-def test_deepseek_v4_model_type_selects_definition(monkeypatch):
-    fake_config = SimpleNamespace(model_type="deepseek_v4")
-
-    monkeypatch.setattr(
-        auto,
-        "resolve_trust_remote_code",
-        lambda path, trust_remote_code=False: trust_remote_code,
-    )
-    monkeypatch.setattr(
-        auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config
-    )
-
-    assert auto.check_and_get_model_definition("/tmp/deepseek-v4") is DeepSeekV4QModel
+def test_deepseek_v4_model_type_selects_definition(tmp_path):
+    _tiny_v4_config().save_pretrained(tmp_path)
+    assert auto.check_and_get_model_definition(str(tmp_path)) is DeepSeekV4QModel
 
 
 def test_deepseek_v4_module_tree_matches_v4_attention_and_fused_experts():

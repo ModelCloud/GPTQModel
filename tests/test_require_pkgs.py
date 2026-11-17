@@ -90,8 +90,9 @@ def test_phi4_ci_deps_cover_required_packages():
         assert requirement in pkgs
 
 
-def test_tenstorrent_manifest_defuser_satisfies_the_project_requirement():
-    """The pinned TT defuser must satisfy requirements.txt.
+@pytest.mark.parametrize("package", ["defuser", "transformers", "tokenicer"])
+def test_tenstorrent_manifest_satisfies_project_runtime_requirements(package):
+    """TT's model and tokenizer dependencies must satisfy requirements.txt.
 
     Older releases leave the Granite MoE SWA routed experts packed, so
     ``tests/module_tree/test_granite_swa_model_tree.py`` cannot expose the
@@ -103,21 +104,21 @@ def test_tenstorrent_manifest_defuser_satisfies_the_project_requirement():
     requirements = [
         line.strip()
         for line in project.splitlines()
-        if line.strip().startswith("defuser")
+        if line.strip().startswith(package)
     ]
     assert len(requirements) == 1, requirements
-    specifier = SpecifierSet(requirements[0].removeprefix("defuser"))
+    specifier = SpecifierSet(requirements[0].removeprefix(package))
 
     manifest = (repo / "requirements" / "tenstorrent-py312.txt").read_text(encoding="utf-8")
     pins = [
         line.strip()
         for line in manifest.splitlines()
-        if line.strip().startswith("defuser==")
+        if line.strip().startswith(f"{package}==")
     ]
     assert len(pins) == 1, pins
     pinned = Version(pins[0].split("==", 1)[1])
 
     assert specifier.contains(pinned), (
-        f"Tenstorrent manifest pins defuser=={pinned}, which does not satisfy "
-        f"{requirements[0]}; Granite MoE SWA routed experts stay packed on older releases"
+        f"Tenstorrent manifest pins {package}=={pinned}, which does not satisfy "
+        f"{requirements[0]}; model dispatch and tokenizer trust require compatible versions"
     )

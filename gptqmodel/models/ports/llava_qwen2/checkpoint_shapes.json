@@ -1,0 +1,3534 @@
+{
+  "repo_id": "apple/FastVLM-0.5B",
+  "revision": "16375720c2d673fa583e57e9876afde27549c7d0",
+  "header_sha256": "04f7abbf0d3fad23baa2c3631ee05888a596067a12bb6f8327747ad9932a913b",
+  "tensors": {
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.conv.bn.num_batches_tracked": [],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.conv.bn.num_batches_tracked": [],
+    "lm_head.weight": [
+      151936,
+      896
+    ],
+    "model.embed_tokens.weight": [
+      151936,
+      896
+    ],
+    "model.layers.0.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.0.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.0.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.0.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.0.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.0.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.0.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.0.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.0.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.0.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.0.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.0.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.1.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.1.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.1.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.1.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.1.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.1.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.1.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.1.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.1.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.1.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.1.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.1.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.10.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.10.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.10.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.10.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.10.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.10.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.10.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.10.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.10.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.10.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.10.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.10.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.11.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.11.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.11.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.11.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.11.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.11.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.11.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.11.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.11.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.11.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.11.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.11.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.12.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.12.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.12.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.12.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.12.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.12.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.12.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.12.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.12.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.12.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.12.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.12.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.13.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.13.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.13.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.13.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.13.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.13.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.13.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.13.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.13.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.13.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.13.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.13.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.14.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.14.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.14.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.14.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.14.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.14.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.14.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.14.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.14.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.14.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.14.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.14.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.15.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.15.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.15.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.15.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.15.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.15.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.15.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.15.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.15.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.15.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.15.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.15.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.16.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.16.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.16.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.16.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.16.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.16.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.16.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.16.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.16.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.16.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.16.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.16.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.17.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.17.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.17.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.17.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.17.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.17.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.17.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.17.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.17.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.17.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.17.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.17.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.18.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.18.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.18.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.18.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.18.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.18.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.18.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.18.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.18.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.18.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.18.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.18.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.19.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.19.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.19.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.19.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.19.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.19.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.19.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.19.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.19.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.19.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.19.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.19.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.2.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.2.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.2.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.2.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.2.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.2.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.2.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.2.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.2.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.2.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.2.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.2.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.20.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.20.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.20.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.20.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.20.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.20.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.20.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.20.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.20.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.20.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.20.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.20.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.21.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.21.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.21.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.21.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.21.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.21.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.21.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.21.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.21.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.21.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.21.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.21.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.22.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.22.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.22.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.22.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.22.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.22.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.22.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.22.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.22.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.22.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.22.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.22.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.23.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.23.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.23.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.23.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.23.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.23.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.23.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.23.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.23.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.23.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.23.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.23.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.3.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.3.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.3.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.3.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.3.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.3.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.3.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.3.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.3.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.3.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.3.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.3.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.4.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.4.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.4.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.4.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.4.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.4.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.4.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.4.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.4.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.4.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.4.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.4.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.5.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.5.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.5.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.5.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.5.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.5.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.5.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.5.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.5.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.5.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.5.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.5.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.6.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.6.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.6.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.6.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.6.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.6.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.6.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.6.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.6.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.6.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.6.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.6.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.7.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.7.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.7.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.7.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.7.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.7.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.7.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.7.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.7.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.7.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.7.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.7.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.8.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.8.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.8.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.8.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.8.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.8.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.8.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.8.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.8.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.8.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.8.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.8.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.9.input_layernorm.weight": [
+      896
+    ],
+    "model.layers.9.mlp.down_proj.weight": [
+      896,
+      4864
+    ],
+    "model.layers.9.mlp.gate_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.9.mlp.up_proj.weight": [
+      4864,
+      896
+    ],
+    "model.layers.9.post_attention_layernorm.weight": [
+      896
+    ],
+    "model.layers.9.self_attn.k_proj.bias": [
+      128
+    ],
+    "model.layers.9.self_attn.k_proj.weight": [
+      128,
+      896
+    ],
+    "model.layers.9.self_attn.o_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.9.self_attn.q_proj.bias": [
+      896
+    ],
+    "model.layers.9.self_attn.q_proj.weight": [
+      896,
+      896
+    ],
+    "model.layers.9.self_attn.v_proj.bias": [
+      128
+    ],
+    "model.layers.9.self_attn.v_proj.weight": [
+      128,
+      896
+    ],
+    "model.mm_projector.0.bias": [
+      896
+    ],
+    "model.mm_projector.0.weight": [
+      896,
+      3072
+    ],
+    "model.mm_projector.2.bias": [
+      896
+    ],
+    "model.mm_projector.2.weight": [
+      896,
+      896
+    ],
+    "model.norm.weight": [
+      896
+    ],
+    "model.vision_tower.vision_tower.model.conv_exp.reparam_conv.bias": [
+      3072
+    ],
+    "model.vision_tower.vision_tower.model.conv_exp.reparam_conv.weight": [
+      3072,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.conv_exp.se.expand.bias": [
+      3072
+    ],
+    "model.vision_tower.vision_tower.model.conv_exp.se.expand.weight": [
+      3072,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.conv_exp.se.reduce.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.conv_exp.se.reduce.weight": [
+      192,
+      3072,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.head.proj": [
+      3072,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.conv.bn.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.conv.bn.running_mean": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.conv.bn.running_var": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.conv.bn.weight": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.conv.conv.weight": [
+      96,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.fc1.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.fc1.weight": [
+      384,
+      96,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.fc2.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.convffn.fc2.weight": [
+      96,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.layer_scale": [
+      96,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.token_mixer.reparam_conv.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.0.token_mixer.reparam_conv.weight": [
+      96,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.conv.bn.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.conv.bn.running_mean": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.conv.bn.running_var": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.conv.bn.weight": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.conv.conv.weight": [
+      96,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.fc1.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.fc1.weight": [
+      384,
+      96,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.fc2.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.convffn.fc2.weight": [
+      96,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.layer_scale": [
+      96,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.token_mixer.reparam_conv.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.network.0.1.token_mixer.reparam_conv.weight": [
+      96,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.1.proj.0.lkb_reparam.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.1.proj.0.lkb_reparam.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.1.proj.1.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.1.proj.1.reparam_conv.weight": [
+      192,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.conv.bn.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.conv.bn.running_mean": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.conv.bn.running_var": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.conv.bn.weight": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.conv.conv.weight": [
+      1536,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.fc1.bias": [
+      6144
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.fc1.weight": [
+      6144,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.fc2.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.convffn.fc2.weight": [
+      1536,
+      6144,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.layer_scale_1": [
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.layer_scale_2": [
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.norm.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.norm.weight": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.token_mixer.proj.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.token_mixer.proj.weight": [
+      1536,
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.0.token_mixer.qkv.weight": [
+      4608,
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.conv.bn.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.conv.bn.running_mean": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.conv.bn.running_var": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.conv.bn.weight": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.conv.conv.weight": [
+      1536,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.fc1.bias": [
+      6144
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.fc1.weight": [
+      6144,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.fc2.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.convffn.fc2.weight": [
+      1536,
+      6144,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.layer_scale_1": [
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.layer_scale_2": [
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.norm.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.norm.weight": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.token_mixer.proj.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.token_mixer.proj.weight": [
+      1536,
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.10.1.token_mixer.qkv.weight": [
+      4608,
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.0.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.1.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.10.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.11.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.2.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.3.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.4.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.5.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.6.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.7.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.8.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.conv.bn.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.conv.bn.running_mean": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.conv.bn.running_var": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.conv.bn.weight": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.conv.conv.weight": [
+      192,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.fc1.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.fc1.weight": [
+      768,
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.fc2.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.convffn.fc2.weight": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.layer_scale": [
+      192,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.token_mixer.reparam_conv.bias": [
+      192
+    ],
+    "model.vision_tower.vision_tower.model.network.2.9.token_mixer.reparam_conv.weight": [
+      192,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.3.proj.0.lkb_reparam.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.3.proj.0.lkb_reparam.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.3.proj.1.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.3.proj.1.reparam_conv.weight": [
+      384,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.0.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.1.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.10.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.11.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.12.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.13.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.14.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.15.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.16.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.17.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.18.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.19.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.2.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.20.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.21.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.22.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.23.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.3.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.4.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.5.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.6.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.7.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.8.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.conv.bn.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.conv.bn.running_mean": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.conv.bn.running_var": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.conv.bn.weight": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.conv.conv.weight": [
+      384,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.fc1.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.fc1.weight": [
+      1536,
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.fc2.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.convffn.fc2.weight": [
+      384,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.layer_scale": [
+      384,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.token_mixer.reparam_conv.bias": [
+      384
+    ],
+    "model.vision_tower.vision_tower.model.network.4.9.token_mixer.reparam_conv.weight": [
+      384,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.network.5.proj.0.lkb_reparam.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.5.proj.0.lkb_reparam.weight": [
+      768,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.5.proj.1.reparam_conv.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.5.proj.1.reparam_conv.weight": [
+      768,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.6.reparam_conv.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.6.reparam_conv.weight": [
+      768,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.conv.bn.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.conv.bn.running_mean": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.conv.bn.running_var": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.conv.bn.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.conv.conv.weight": [
+      768,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.fc1.bias": [
+      3072
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.fc1.weight": [
+      3072,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.fc2.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.convffn.fc2.weight": [
+      768,
+      3072,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.layer_scale_1": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.layer_scale_2": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.norm.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.norm.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.token_mixer.proj.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.token_mixer.proj.weight": [
+      768,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.0.token_mixer.qkv.weight": [
+      2304,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.conv.bn.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.conv.bn.running_mean": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.conv.bn.running_var": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.conv.bn.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.conv.conv.weight": [
+      768,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.fc1.bias": [
+      3072
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.fc1.weight": [
+      3072,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.fc2.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.convffn.fc2.weight": [
+      768,
+      3072,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.layer_scale_1": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.layer_scale_2": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.norm.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.norm.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.token_mixer.proj.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.token_mixer.proj.weight": [
+      768,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.1.token_mixer.qkv.weight": [
+      2304,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.conv.bn.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.conv.bn.running_mean": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.conv.bn.running_var": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.conv.bn.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.conv.conv.weight": [
+      768,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.fc1.bias": [
+      3072
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.fc1.weight": [
+      3072,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.fc2.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.convffn.fc2.weight": [
+      768,
+      3072,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.layer_scale_1": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.layer_scale_2": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.norm.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.norm.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.token_mixer.proj.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.token_mixer.proj.weight": [
+      768,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.2.token_mixer.qkv.weight": [
+      2304,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.conv.bn.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.conv.bn.running_mean": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.conv.bn.running_var": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.conv.bn.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.conv.conv.weight": [
+      768,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.fc1.bias": [
+      3072
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.fc1.weight": [
+      3072,
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.fc2.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.convffn.fc2.weight": [
+      768,
+      3072,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.layer_scale_1": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.layer_scale_2": [
+      768,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.norm.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.norm.weight": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.token_mixer.proj.bias": [
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.token_mixer.proj.weight": [
+      768,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.7.3.token_mixer.qkv.weight": [
+      2304,
+      768
+    ],
+    "model.vision_tower.vision_tower.model.network.8.proj.0.lkb_reparam.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.8.proj.0.lkb_reparam.weight": [
+      1536,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.network.8.proj.1.reparam_conv.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.8.proj.1.reparam_conv.weight": [
+      1536,
+      1536,
+      1,
+      1
+    ],
+    "model.vision_tower.vision_tower.model.network.9.reparam_conv.bias": [
+      1536
+    ],
+    "model.vision_tower.vision_tower.model.network.9.reparam_conv.weight": [
+      1536,
+      1,
+      7,
+      7
+    ],
+    "model.vision_tower.vision_tower.model.patch_embed.0.reparam_conv.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.patch_embed.0.reparam_conv.weight": [
+      96,
+      3,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.patch_embed.1.reparam_conv.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.patch_embed.1.reparam_conv.weight": [
+      96,
+      1,
+      3,
+      3
+    ],
+    "model.vision_tower.vision_tower.model.patch_embed.2.reparam_conv.bias": [
+      96
+    ],
+    "model.vision_tower.vision_tower.model.patch_embed.2.reparam_conv.weight": [
+      96,
+      96,
+      1,
+      1
+    ]
+  }
+}

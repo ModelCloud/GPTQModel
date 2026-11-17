@@ -1,0 +1,59 @@
+{
+  "global_keys": ["lm_head.weight", "model.embed_tokens.weight", "model.norm.weight"],
+  "common_layer_keys": [
+    "input_layernorm.weight", "post_attention_layernorm.weight", "post_mlp_layernorm.weight",
+    "pre_mlp_layernorm.weight", "self_attn.gate_proj.weight", "self_attn.k_norm.weight",
+    "self_attn.k_proj.weight", "self_attn.o_proj.weight", "self_attn.q_norm.weight",
+    "self_attn.q_proj.weight", "self_attn.v_proj.weight"
+  ],
+  "dense_mlp_keys": ["mlp.down_proj.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight"],
+  "moe_mlp_keys": [
+    "mlp.expert_bias", "mlp.router.gate.weight", "mlp.shared_experts.down_proj.weight",
+    "mlp.shared_experts.gate_proj.weight", "mlp.shared_experts.up_proj.weight",
+    "mlp.experts.#.down_proj.weight", "mlp.experts.#.gate_proj.weight", "mlp.experts.#.up_proj.weight"
+  ],
+  "checkpoints": [
+    {
+      "repo": "arcee-ai/Trinity-Mini",
+      "revision": "e7fa016763d03089ab547c9ee19044980073669b",
+      "index_sha256": "b475bd6e2804a015f44feb1c48c8720c8d0209ba426e0fc8178195ce3af51e4e",
+      "key_count": 12031,
+      "config": {
+        "hidden_size": 2048, "intermediate_size": 6144, "moe_intermediate_size": 1024,
+        "num_hidden_layers": 32, "num_dense_layers": 2, "num_attention_heads": 32,
+        "num_key_value_heads": 4, "head_dim": 128, "num_experts": 128, "num_experts_per_tok": 8,
+        "num_shared_experts": 1, "vocab_size": 200192, "global_attn_every_n_layers": 4,
+        "sliding_window": 2048, "mup_enabled": true, "route_scale": 2.826,
+        "score_func": "sigmoid", "route_norm": true, "max_position_embeddings": 131072
+      }
+    },
+    {
+      "repo": "arcee-ai/Trinity-Nano-Preview",
+      "revision": "e2ef4a3bebfb265283736454a24c8fb07cd30e75",
+      "index_sha256": "43cd417f2e943fefff5b25eba7453f2030d66c6d9c432e27ddac10c13115175f",
+      "key_count": 21631,
+      "config": {
+        "hidden_size": 1024, "intermediate_size": 3072, "moe_intermediate_size": 256,
+        "num_hidden_layers": 56, "num_dense_layers": 2, "num_attention_heads": 8,
+        "num_key_value_heads": 2, "head_dim": 128, "num_experts": 128, "num_experts_per_tok": 8,
+        "num_shared_experts": 1, "vocab_size": 200192, "global_attn_every_n_layers": 4,
+        "sliding_window": 2048, "mup_enabled": true, "route_scale": 2.826,
+        "score_func": "sigmoid", "route_norm": true, "max_position_embeddings": 131072
+      }
+    },
+    {
+      "repo": "arcee-ai/Trinity-Large-Preview",
+      "revision": "fe24811cce621d64a499aa22f6718c99d2fbee2d",
+      "index_sha256": "3237f9a1b66953f19c6ee44bef1d78f34d43333ed9ae6ca47db02b6d52adba90",
+      "key_count": 42423,
+      "config": {
+        "hidden_size": 3072, "intermediate_size": 12288, "moe_intermediate_size": 3072,
+        "num_hidden_layers": 60, "num_dense_layers": 6, "num_attention_heads": 48,
+        "num_key_value_heads": 8, "head_dim": 128, "num_experts": 256, "num_experts_per_tok": 4,
+        "num_shared_experts": 1, "vocab_size": 200192, "global_attn_every_n_layers": 4,
+        "sliding_window": 4096, "mup_enabled": true, "route_scale": 2.448,
+        "score_func": "sigmoid", "route_norm": true, "max_position_embeddings": 262144
+      }
+    }
+  ]
+}

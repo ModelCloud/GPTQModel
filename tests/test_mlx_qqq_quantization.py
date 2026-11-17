@@ -274,7 +274,7 @@ def test_qqq_qwen38_projection_oracle(name, rows, columns, dtype, group_size):
     np.fill_diagonal(factor[:, 1:], 0.05)
     expected = _torch_banded_oracle(resident, group_size)
     actual = _observe(weight, factor, group_size)
-    for index in (1, 2, 3):
+    for index in (1, 2):
         if expected[index] is not None:
             np.testing.assert_allclose(
                 actual[index],
@@ -286,6 +286,32 @@ def test_qqq_qwen38_projection_oracle(name, rows, columns, dtype, group_size):
     actual_codes = _codes(actual, group_size)
     expected_codes = _codes(expected, group_size)
     changed = actual_codes != expected_codes
+    if group_size != -1:
+        # `scale_extra` is fitted to the produced codes (max|Q| / 127), so a
+        # documented one-step tie flip at the row's largest magnitude element
+        # moves it by at most one group scale. Compare exactly where the codes
+        # agree, bound the drift where they do not, and require the exported
+        # scale to describe the codes this implementation actually emitted.
+        unchanged_rows = ~changed.any(axis=1)
+        np.testing.assert_allclose(
+            actual[3][unchanged_rows],
+            expected[3][unchanged_rows],
+            atol=1e-6,
+            rtol=1e-6,
+            err_msg=f"{name} scale_extra away from code drift",
+        )
+        row_step = np.max(expected[1], axis=1)[:, None] / 127
+        assert np.all(
+            np.abs(actual[3] - expected[3]) <= row_step + 1e-6
+        ), f"{name}: scale_extra drift exceeds one quantization step"
+        bound = np.abs(actual[0]).max(axis=1, keepdims=True)
+        np.testing.assert_allclose(
+            actual[3],
+            np.where(bound == 0, 1.0, bound) / 127,
+            atol=0.0,
+            rtol=1e-6,
+            err_msg=f"{name}: scale_extra does not describe the produced codes",
+        )
     last_changed = {}
     for row, column in np.argwhere(changed):
         assert (

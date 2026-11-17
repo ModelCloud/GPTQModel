@@ -142,6 +142,70 @@ The failure path is an empty filtered list, which `_filter_forward_devices`
 already resolves by keeping the unfiltered pool; `run` then falls back to
 `cur_layer_device`.
 
+## Excluded devices stay unclaimed
+
+A run may exclude a visible GPU either with `device=("cuda:1",)` or with the
+documented `QuantizeConfig.compute_device_filter` callable. Both routes narrow
+the forward and quantize pool, but three paths outside those pools used to
+touch every visible index anyway. Each touch creates a full CUDA/HIP primary
+context on the excluded GPU (measured 386 MiB on a compute-only driver, and up
+to 1.5 GiB with the linalg warmup allocations).
+
+The flow below is what the code does now. `_quantize_warmup_devices` resolves
+the warmup allow-list from the same filtered pool the loopers consume;
+`torch_sync()`, the pool's per-worker activation, and the janitor sweep each
+consult `accelerator_context_claimed` before touching an index.
+
+```mermaid
+flowchart TD
+    A["GPTQModel.load device kwarg + QuantizeConfig"] --> B["_quantize_warmup_devices"]
+    B --> C{"explicit ordinals or compute_device_filter?"}
+    C -- "neither" --> D["None: warm the whole family as before"]
+    C -- "either" --> E["select_forward_devices base_device"]
+    E --> F["compute_device_filter candidates"]
+    F -- "empty" --> D
+    F -- "non-empty" --> G["warmup_devices = filtered pool"]
+    G --> H["_prebuild_device_thread_pool set_warmup_devices"]
+    G --> I["_resolve_prewarm_device -> first filtered device"]
+    H --> J["DeviceThreadPool._kick_worker_warmups"]
+    I --> K["kick_torch_linear_prewarm / kick_torch_quantize_prewarm"]
+    L["torch_sync()"] --> M{"accelerator_context_claimed idx?"}
+    M -- "no" --> N["skip: enqueueing work would create the context"]
+    M -- "yes" --> O["torch.cuda.synchronize idx"]
+    P["DP-Janitor sweep"] --> M
+    Q["device_ctx family selector"] --> R{"device 0 already claimed?"}
+    R -- "no" --> S["keep the current device"]
+    R -- "yes" --> T["torch.cuda.device 0 as before"]
+    classDef failure fill:#ffe8e8,stroke:#b30000,color:#111;
+    class N,S failure;
+```
+
+| Mechanism | Before | After |
+| --- | --- | --- |
+| `torch_sync()` (`gptqmodel/utils/torch.py:564`) | `torch.cuda.synchronize(idx)` for every visible index | Skips indices whose primary context this process never created |
+| Warmup pool (`gptqmodel/models/auto.py:_prebuild_device_thread_pool`) | Derived only from the `device=` kwarg | Derived from `compute_device_filter` too, via `_quantize_warmup_devices` |
+| Prewarm target (`gptqmodel/models/auto.py:_resolve_prewarm_device`) | Same `device=`-only resolution | First device of the filtered pool |
+| Janitor sweep (`gptqmodel/utils/threadx.py:_janitor_loop`) | `empty_cache` on every pool device | Only devices with a live context |
+| `device_ctx` family selector (`gptqmodel/utils/looper_helpers.py`) | Always resolved the family to `<type>:0` | Keeps the current device while device 0 is unused |
+
+Failure and ambiguity paths: a torch build without
+`torch._C._cuda_hasPrimaryContext` reports `None` and every call site keeps its
+historical behaviour, because dropping a real barrier is worse than claiming an
+idle GPU. A filter that rejects every device keeps the full pool, matching the
+looper fallback. HIP's primary-context query is conservative on measured ROCm
+wheels (it reports every device active after the first allocation), so ROCm
+runs fall back to synchronizing all devices; the excluded GPU still receives no
+allocations there.
+
+Measured on two NVIDIA GPUs with the excluded device idle, quantizing a 0.5B
+model: the `compute_device_filter` route went from 384 MiB peak and a live
+context on the excluded GPU to 0 MiB and no context; the `device=("cuda:1",)`
+route went from a 386 MiB context to none.
+
+The regression is
+`tests/test_excluded_device_warmup.py::test_quantize_never_claims_the_excluded_device`
+plus the per-mechanism unit cases in the same file.
+
 ## Data-parallel forward copies
 
 With `auto_forward_data_parallel=True` (the default), `ForwardExecutor.run_parallel`

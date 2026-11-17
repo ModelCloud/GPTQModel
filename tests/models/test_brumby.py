@@ -3,11 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import unittest
-from importlib.metadata import PackageNotFoundError, version
-
 from model_test import ModelTest
-from packaging.version import Version
 
 
 class TestBrumby(ModelTest):
@@ -20,8 +16,7 @@ class TestBrumby(ModelTest):
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     OFFLOAD_TO_DISK_FAST = False
     NATIVE_MODEL_ID = "/monster/data/model/Brumby-14B-Base"
-    TRUST_REMOTE_CODE = True
-    LOAD_MODEL_EXTRA_ARGS = {"use_cache": False}
+    TRUST_REMOTE_CODE = False
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
@@ -54,19 +49,6 @@ class TestBrumby(ModelTest):
             "acc": {"value": 0.89, "floor_pct": 0.10, "ceil_pct": 1.0},
         },
     }
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        try:
-            installed = Version(version("retention"))
-        except PackageNotFoundError:
-            raise unittest.SkipTest("retention>=1.0.7 is required for Brumby")
-
-        if installed < Version("1.0.7"):
-            raise unittest.SkipTest(
-                f"retention>=1.0.7 is required for Brumby, found {installed}"
-            )
 
     def test_brumby(self):
         self.quantize_and_evaluate()

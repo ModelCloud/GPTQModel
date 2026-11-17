@@ -7,8 +7,7 @@ py::class_<BC_LinearEXL3, std::shared_ptr<BC_LinearEXL3>>(m, "BC_LinearEXL3").de
         int,
         c10::optional<at::Tensor>,
         bool,
-        bool,
-        at::Tensor
+        bool
     >(),
     py::arg("trellis"),
     py::arg("suh"),
@@ -16,7 +15,6 @@ py::class_<BC_LinearEXL3, std::shared_ptr<BC_LinearEXL3>>(m, "BC_LinearEXL3").de
     py::arg("K"),
     py::arg("bias"),
     py::arg("mcg"),
-    py::arg("mul1"),
-    py::arg("xh")
+    py::arg("mul1")
 )
 .def("run", &BC_LinearEXL3::run);

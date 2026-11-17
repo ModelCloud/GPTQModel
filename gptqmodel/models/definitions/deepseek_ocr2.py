@@ -15,6 +15,7 @@ from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class DeepSeekOCR2QModel(BaseQModel):
@@ -121,11 +122,10 @@ class DeepSeekOCR2QModel(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
 
-    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
+    def _prepare_calibration_batches(self, conversations, batch_size):
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched(conversations, batch_size, process_func=self.preprocess_dataset):
             inputs = processor(
                 images=[sample["image"] for sample in batch],
                 text=[sample["text"] for sample in batch],
@@ -133,8 +133,16 @@ class DeepSeekOCR2QModel(BaseQModel):
                 return_tensors="pt",
             )
             calib_data.append(inputs)
-        del processor
         return calib_data
+
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        return prepare_vlm_calibration_dataset(
+            self,
+            calibration_dataset,
+            batch_size=batch_size,
+            options=kwargs,
+            prepare_conversations=lambda rows: self._prepare_calibration_batches(rows, batch_size),
+        )
 
     def move_input_capture_example(self, example: Dict[str, Any], data_device: torch.device) -> Dict[str, Any]:
         example = super().move_input_capture_example(example, data_device)

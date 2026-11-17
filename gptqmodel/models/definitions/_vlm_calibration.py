@@ -25,17 +25,20 @@ from __future__ import annotations
 import itertools
 import numbers
 import random
-from collections.abc import Mapping
-from typing import Any, Iterable, Optional
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, Optional
 
 import numpy as np
 import torch
 
 from ...utils.calibration import (
     _columnar_mapping_examples,
+    _frame_columns,
     _is_columnar_mapping,
     _is_dataset_split_mapping,
     _is_integer_sequence,
+    batched_conversations,
+    prepare_calibration_dataset,
 )
 from ...utils.logger import setup_logger
 
@@ -213,6 +216,10 @@ def split_calibration_dataset(
     drop them silently.
     """
 
+    frame_columns = _frame_columns(calibration_dataset)
+    if frame_columns is not None:
+        calibration_dataset = frame_columns
+
     if isinstance(calibration_dataset, Mapping):
         calibration_dataset = _mapping_rows(calibration_dataset, label=label)
 
@@ -316,3 +323,86 @@ def finalize_conversation_batches(
         random.shuffle(batches)
 
     return batches
+
+
+def _model_processor(model: Any) -> Any:
+    """Return the loaded processor, loading it only when the model has none.
+
+    ``__dict__`` is read first: an uninitialized wrapper built with
+    ``object.__new__`` cannot go through ``nn.Module.__getattr__``.
+    """
+
+    processor = getattr(model, "__dict__", {}).get("processor")
+    if processor is not None:
+        return processor
+    return model.load_processor()
+
+
+def prepare_vlm_calibration_dataset(
+    model: Any,
+    calibration_dataset: Any,
+    *,
+    batch_size: int = 1,
+    options: Optional[Mapping[str, Any]] = None,
+    prepare_batch: Optional[Callable[[Any, list[Any]], Any]] = None,
+    prepare_conversations: Optional[Callable[[Iterable[Any]], Iterable[Any]]] = None,
+    preprocess_func: Optional[Callable[[Any], Any]] = None,
+    processor: Any = None,
+    label: Optional[str] = None,
+) -> list[Any]:
+    """Prepare VLM calibration data through the shared #4228/#4308 contract.
+
+    Every vision-language ``prepare_dataset`` override delegates here so the
+    contract cannot drift per model again:
+
+    * pre-tokenized rows (and columnar mappings) take the base text path;
+    * ``calibration_concat_size`` is rejected for conversations;
+    * ``calibration_dataset_sort`` / ``calibration_data_min_length`` are applied;
+    * rows that mix token ids with conversations are rejected.
+
+    ``prepare_batch(processor, conversations)`` prepares one processor batch and
+    is the usual hook: it defaults to the model's
+    ``prepare_inputs_for_conversations``. Definitions whose input rows are not
+    chat conversations pass ``prepare_conversations`` instead; it receives the
+    raw non-tokenized rows and returns the prepared batches.
+    """
+
+    label = label or type(model).__name__
+    options = dict(options or {})
+
+    pretokenized, conversations = split_calibration_dataset(calibration_dataset, label=label)
+    if pretokenized is not None:
+        return prepare_calibration_dataset(
+            model,
+            calibration_dataset=pretokenized,
+            batch_size=batch_size,
+            **options,
+        )
+
+    sort, min_length = pop_conversation_calibration_options(options, label=label)
+
+    if prepare_conversations is not None:
+        if prepare_batch is not None:
+            raise ValueError(
+                f"{label}: pass either `prepare_batch` or `prepare_conversations`, not both."
+            )
+        batches = list(prepare_conversations(conversations))
+    else:
+        if prepare_batch is None:
+            prepare_batch = getattr(model, "prepare_inputs_for_conversations", None)
+            if prepare_batch is None:
+                raise ValueError(
+                    f"{label}: the VLM calibration helper needs a "
+                    "`prepare_inputs_for_conversations` hook or an explicit `prepare_batch`."
+                )
+        processor = processor if processor is not None else _model_processor(model)
+        batches = [
+            prepare_batch(processor, batch)
+            for batch in batched_conversations(
+                conversations, batch_size, process_func=preprocess_func
+            )
+        ]
+
+    return finalize_conversation_batches(
+        batches, sort=sort, min_length=min_length, label=label
+    )

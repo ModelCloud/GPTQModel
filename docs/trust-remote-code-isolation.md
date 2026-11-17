@@ -16,7 +16,9 @@ It never registers checkpoint classes globally with Transformers.
 ```mermaid
 flowchart TD
     A["GPTQModel.load / from_pretrained / from_quantized"] --> B["load_model_config: read config data"]
-    B --> C{"Definition loader is LocalModelLoader?"}
+    B --> Q["local_model_loader_for_config: explicit type or declared legacy architecture"]
+    Q --> C{"Definition loader is LocalModelLoader?"}
+    Q --> M["Conflicting/ambiguous package architectures: ValueError before checkpoint code"]
     C -- yes --> D["LocalModelLoader.load_config: package config class"]
     D --> E["LocalModelLoader.from_config / from_pretrained: package model class"]
     C -- no --> F["resolve_trust_remote_code"]
@@ -28,7 +30,20 @@ flowchart TD
     J -- yes --> K["Checkpoint Python allowed"]
     J -- no --> L["RemoteCodeSecurityError or unsupported native config"]
     style L fill:#ffcdd2,stroke:#b71c1c
+    style M fill:#ffcdd2,stroke:#b71c1c
 ```
+
+Legacy checkpoints may omit `model_type`. A local definition can explicitly
+declare `LocalModelLoader.config_architectures=("MiniCPMForCausalLM",)` as trusted
+package metadata. Both `load_model_config` and `resolve_trust_remote_code` use
+`local_model_loader_for_config` before any checkpoint import. A present
+`model_type` is authoritative, including an empty, null or unsupported value.
+Only an absent key permits inference; every architecture must match the same
+unique declared loader. Aliases sharing a loader do not create ambiguity.
+Partial matches, malformed entries alongside a known name, and conflicting
+package declarations raise even under explicit trust and the bypass. Unknown
+families retain the ordinary security gate; neither checkpoint paths nor
+`auto_map` determine package class names. Nothing is registered globally.
 
 The existing security bypass is `GPTQ_BYPASS_SAFETY_CHECKS=1`. It is additional
 consent: it does not turn trust on. For a remote-only implementation, both that
@@ -38,8 +53,48 @@ continue to override remote trust. A known remote-only checkpoint layout
 (currently Bailing Hybrid MLA, selected by `q_lora_rank`) cannot silently fall
 back to an incompatible native model.
 
-Tokenizers receive remote trust only when both explicit trust and the safety
-bypass are present. This gate does not change Tokenicer normalization.
+`normalize_hf_config_compat` also resolves definition ownership before applying
+remote compatibility shims. Local configs retain their own field contract even
+when a direct caller passes raw trust; ordinary RoPE metadata backfill still
+runs. The old Brumby remote RoPE/padding rewrites are removed because its
+packaged config/model own those fields.
+
+```mermaid
+flowchart TD
+    A["normalize_hf_config_compat: caller trust and config.model_type"] --> B{"local_model_loader selects a package loader?"}
+    B -- yes --> C["Disable remote compatibility; preserve local field contract"]
+    B -- no --> D["Keep caller remote compatibility permission"]
+    C --> E["_normalize_rope_parameters_config_compat: ordinary metadata backfill"]
+    D --> E
+    E --> F{"Remote compatibility still permitted?"}
+    F -- no --> G["Return without checkpoint-code field shims"]
+    F -- yes --> H["_patch_transformers_remote_code_compat and legacy field normalization"]
+    H --> I["Invalid legacy config: propagate construction error"]
+    style I fill:#ffcdd2,stroke:#b71c1c
+```
+
+For GGUF checkpoints, the explicitly selected `gguf_file` remains the config
+source through the data read, trust preflight and final construction, including
+when a subfolder is selected. An unrelated `config.json` cannot veto that
+selection or introduce a remote-only layout marker. This also allows a
+GGUF-only subfolder to load without a JSON config.
+
+```mermaid
+flowchart TD
+    A["load_model_config: gguf_file and subfolder"] --> B["PreTrainedConfig.get_config_dict: selected GGUF metadata"]
+    B --> C["local_model_loader: metadata model_type"]
+    C --> D{"Definition owns local classes?"}
+    D -- yes --> E["LocalModelLoader.load_config: same GGUF selection"]
+    D -- no --> F["resolve_trust_remote_code: preserve gguf_file and subfolder"]
+    F --> G["AutoConfig.from_pretrained: same GGUF selection"]
+    F --> H["Unsupported selected metadata: permission gate or clear error"]
+    style H fill:#ffcdd2,stroke:#b71c1c
+```
+
+For a package-owned model, tokenizers never receive remote trust, including
+definitions that use an ordinary native tokenizer rather than declaring a
+custom package tokenizer. For other models, both explicit trust and the safety
+bypass are required. This policy does not change Tokenicer normalization.
 Tokenizer construction also receives the policy-selected config as Transformers'
 `config` argument, separately from Tokenicer's `model_config` normalization
 argument. This prevents AutoTokenizer from importing checkpoint `AutoConfig`
@@ -49,7 +104,14 @@ trust and the bypass are both enabled.
 ```mermaid
 flowchart TD
     A["load_model_config: selected config"] --> B["load_hf_tokenizer: model_config"]
-    B --> C["Tokenicer.load: model_config and config both receive selected config"]
+    B --> J{"local_model_loader selects package model?"}
+    J -- yes --> K["Force tokenizer trust_remote_code=False"]
+    J -- no --> C
+    K --> L{"LocalModelLoader declares tokenizer_class?"}
+    L -- yes --> M["LocalModelLoader.load_tokenizer: package class"]
+    M --> N["Tokenicer.load: normalize selected tokenizer instance"]
+    M --> O["Missing or malformed assets: propagate error; no auto fallback"]
+    L -- no --> C["Tokenicer.load: model_config and config both receive selected config"]
     C --> D["AutoTokenizer: reuse config; skip AutoConfig discovery"]
     D --> E{"Tokenizer checkpoint Python requested?"}
     E -- no --> F["Native tokenizer"]
@@ -57,6 +119,7 @@ flowchart TD
     G -- yes --> H["Checkpoint tokenizer allowed"]
     G -- no --> I["Native fallback or rejection; no checkpoint Python"]
     style I fill:#ffcdd2,stroke:#b71c1c
+    style O fill:#ffcdd2,stroke:#b71c1c
 ```
 
 Definitions can also declare `LocalModelLoader.processor_class`. For models
@@ -73,9 +136,9 @@ flowchart TD
     A["BaseQModel.__init__"] --> B{"require_load_processor?"}
     B -- no --> C["No processor load"]
     B -- yes --> D{"LocalModelLoader declares processor_class?"}
-    D -- yes --> E["LocalModelLoader.load_processor: selected config and tokenizer"]
+    D -- yes --> E["LocalModelLoader.load_processor: selected config, tokenizer and asset kwargs"]
     E --> F["Direct package processor; strip checkpoint code options"]
-    D -- no --> G["AutoProcessor.from_pretrained: resolved model trust"]
+    D -- no --> G["AutoProcessor.from_pretrained: resolved trust and same asset kwargs"]
     G --> H["Native processor or explicitly permitted checkpoint code"]
     G --> I["Unsupported processor: load error"]
     style I fill:#ffcdd2,stroke:#b71c1c
@@ -135,10 +198,12 @@ the responsibility of those engines.
 | Remote-only implementation | Explicit trust alone allowed checkpoint Python (`gptqmodel/utils/hf.py:1011-1052`) | Explicit trust and the existing security bypass are both required |
 | Native model with a remote-only layout marker | Kept remote trust (`gptqmodel/utils/hf.py:1024-1038`) | Local port, explicit bypass, or a clear failure; no incompatible native fallback |
 | Config selection | `AutoConfig.from_pretrained` selected checkpoint config classes (`gptqmodel/models/auto.py:643`, `gptqmodel/models/loader.py:1887,2440`) | Definition-owned config class first, then gated AutoConfig |
+| Missing legacy `model_type` | Only `payload.get("model_type")` could select package code (`9ebb28f07:gptqmodel/utils/hf.py:1030,1060`) | Explicit opt-in architecture metadata in the package; unique complete match or clear conflict error |
 | Re-save | Loaded config directly through AutoConfig (`gptqmodel/models/writer.py:2587`) | Uses the same local/native/security policy |
 | Remote pre-load hooks | Could import checkpoint modules on a native load (`gptqmodel/models/loader.py:917-933`) | Declared remote hooks require resolved trust and the bypass |
 | Tokenizer config discovery | AutoTokenizer could reload checkpoint `AutoConfig` despite a policy-selected local config | `load_hf_tokenizer` supplies the selected config through the existing Tokenicer API |
 | Processor selection | Always entered `AutoProcessor.from_pretrained` (`464cfb05f:gptqmodel/models/base.py:1071`) | Optional definition-owned processor class receives selected config/tokenizer directly |
+| Processor asset selection | Lost subfolder/revision/cache options at wrapper construction (`8f472e139:gptqmodel/models/base.py:1080-1090`) | All four dense/quantized wrapper construction paths pass filtered HF selection kwargs to the automatic processor loader |
 
 Tests in `tests/test_local_model_loading.py` exercise public load rejection,
 actual checkpoint config and model imports under explicit bypass, permission
@@ -146,3 +211,25 @@ revocation, native/local precedence, all three public dispatchers, lazy local
 meta construction, native multimodal mappings and subfolder selection.
 They establish dispatch and security behavior, not numerical qualification of
 the separate model ports.
+
+Automatic processor initialization preserves the model/tokenizer asset selection,
+including `subfolder`, `revision`, cache and authentication options. Both package
+and native processors receive `get_config_selection_kwargs`; checkpoint code
+options cannot enter through that argument. Invalid or absent processor assets
+raise normally. `tests/test_local_processor_loading.py` exercises root/nested
+public loads, hostile trust/bypass combinations, removal and repair of the actual
+selected asset, and exact model-logit parity after retry. Before propagation all
+eight public selection cases fail (missing forwarded options or the root asset);
+the focused suite passes all 13 cases after the fix. Its processor is a boundary
+fixture reading a real asset, rather than a model/media numerical oracle.
+
+The missing-type regression uses a real tiny owned InternLM checkpoint under a
+neutral root/subfolder and a temporary trusted architecture declaration; it does
+not assert support by importing the checkpoint. It covers both trust values,
+all three bypass states, actual exact FP32 logits, successful load followed by
+conflicting/malformed metadata and repaired retry, explicit-type precedence,
+and two incompatible package declarations. The new nodes initially report seven
+failures/four passes because package selection is missed; the complete shared
+loader/paths/processor/tokenizer suite passes 114 cases in 4.09 seconds after
+the fix. Dtype and attention implementation are selected explicitly in the
+fixture so the selection test does not compare different compute policies.

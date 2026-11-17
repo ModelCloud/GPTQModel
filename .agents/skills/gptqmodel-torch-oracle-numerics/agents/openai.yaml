@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Torch Oracle Numerics"
+  short_description: "Validate numerics and quantized storage"
+  default_prompt: "Use $gptqmodel-torch-oracle-numerics to validate this quantization, packer, or kernel change against an independent Torch oracle."

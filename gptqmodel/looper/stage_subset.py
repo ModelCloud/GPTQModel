@@ -961,7 +961,6 @@ def _run_single_subset_pass(
             )
 
     handle = []
-    subset_size = len(subset_names)
 
     if execute_forward:
         looper._prepare_layer_direct_state_for_forward(
@@ -1034,13 +1033,24 @@ def _run_single_subset_pass(
                 shared_input_leaders,
             )
 
+    # A subset's declared order need not match the order the model calls the
+    # modules: Falcon-H1's MLP runs `up_proj` before `gate_proj`, and
+    # bailing_hybrid's hybrid attention runs `b_proj` before `g_proj`. Stopping
+    # on the declared-last member therefore starved its siblings of every
+    # calibration sample (#4679). Stop only once every hooked member of the
+    # subset has fired at least once.
+    pending_members = None
+    if execute_forward and (
+        forward.replay_after_process or forward.subset_early_stop
+    ):
+        pending_members = set(subset_names)
+
     if execute_forward:
         for idx, name in enumerate(subset_names):
             m = subset[name]
             # Register the forward hook that captures activations for quantization.
-            # The final module optionally flips a flag so processors can trigger
-            # once-per-subset logic after the forward pass.
-            is_last = idx == subset_size - 1
+            # The member that completes the subset optionally flips a flag so
+            # processors can trigger once-per-subset logic after the forward pass.
             hook_source = getattr(m, "full_name", None)
             if hook_source is None:
                 hook_source = getattr(m, "name", name)
@@ -1052,6 +1062,10 @@ def _run_single_subset_pass(
 
             if hasattr(subset[name], "forward_hook"):
                 original_hook = processor.pre_process_fwd_hook(name)
+                if pending_members is not None:
+                    original_hook = _mark_subset_member(
+                        original_hook, name, subset[name], pending_members
+                    )
                 # Use pre-hook for MoE modules to fire before StopForward
                 if is_moe_module:
                     subset[name].forward_hook = looper._masked_pre_hook_wrapper(
@@ -1061,14 +1075,12 @@ def _run_single_subset_pass(
                     subset[name].forward_hook = looper._masked_hook_wrapper(
                         processor, original_hook, hook_source
                     )
-                enable_stop = (
-                    forward.replay_after_process
-                    or forward.subset_early_stop
-                )
-                if is_last and enable_stop:
-                    subset[name].forward_hook_last = True
             else:
                 original_hook = processor.pre_process_fwd_hook(name)
+                if pending_members is not None:
+                    original_hook = _mark_subset_member(
+                        original_hook, name, subset[name], pending_members
+                    )
                 # Use pre-hook registration for MoE modules
                 if is_moe_module:
                     handle.append(
@@ -1685,6 +1697,24 @@ def _run_single_subset_pass(
         used_data_parallel = True
 
     return processed_subset, returned_outputs, used_data_parallel
+
+
+def _mark_subset_member(hook, member_name, module, pending):
+    """Mark one subset member as captured and stop once the subset is complete.
+
+    ``HookedLinear`` raises ``StopForward`` after its hook when
+    ``forward_hook_last`` is set, so flipping the flag from inside the hook of
+    the member that actually completes the subset keeps the stop correct
+    whatever order the model calls the modules in (#4679).
+    """
+
+    def marked(_module, inputs, output):
+        hook(_module, inputs, output)
+        pending.discard(member_name)
+        if not pending:
+            module.forward_hook_last = True
+
+    return marked
 
 
 def run_subset_stage(

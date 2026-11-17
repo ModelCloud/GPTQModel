@@ -11,8 +11,6 @@ from PIL import Image
 
 class TestInternvlChat(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/InternVL3_5-1B-Instruct/" # OpenGVLab/InternVL3_5-1B-Instruct
-    # InternVL-Chat does not support text-only forwarding.
-    # TypeError: InternVLChatModel.forward() missing 1 required positional argument: 'pixel_values'
     # EVAL_TASKS_SLOW = {
     #     "arc_challenge": {
     #         "chat_template": True,
@@ -21,7 +19,7 @@ class TestInternvlChat(ModelTest):
     #     },
     # }
     # EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     OFFLOAD_TO_DISK = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"

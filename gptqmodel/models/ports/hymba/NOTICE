@@ -1,0 +1,25 @@
+NVIDIA Hymba local Transformers 5 adaptation for GPT-QModel
+
+Authoritative model: nvidia/Hymba-1.5B-Instruct
+Pinned Hugging Face revision: bc2d2b43bc73d62ad8bfc9e6a3dcc26ab0795e77
+https://huggingface.co/nvidia/Hymba-1.5B-Instruct/tree/bc2d2b43bc73d62ad8bfc9e6a3dcc26ab0795e77
+Related source repository: https://github.com/NVlabs/hymba
+
+The upstream model card identifies the NVIDIA Open Model License Agreement,
+June 2024, as the license for Hymba. The unchanged agreement is LICENSE.pdf
+in this directory, obtained from the official NVIDIA URL:
+https://developer.download.nvidia.com/licenses/nvidia-open-model-license-agreement-june-2024.pdf
+Retain this notice and the agreement when distributing this adaptation.
+
+NVIDIA's modeling source includes Hugging Face Transformers-derived attention,
+RMSNorm, MLP, model-output, and generation conventions. Those portions originate
+from Hugging Face Transformers and its contributors under Apache License 2.0:
+https://github.com/huggingface/transformers/blob/v4.44.0/LICENSE
+The GPT-QModel repository's root LICENSE contains the Apache 2.0 terms.
+
+Changes by ModelCloud.ai, 2026: package-owned class selection; Transformers 5
+configuration/generation/cache APIs; portable Torch selective-state recurrence
+and SDPA masks; request-owned hybrid-cache lifecycle; multi-token continuation;
+memory-boundary insertion and output gathering; no checkpoint-code imports or
+optional compiled-kernel imports. See PROVENANCE.md and COVERAGE.md for exact
+source hashes, retained checkpoint layout, behavioral fixes and limits.

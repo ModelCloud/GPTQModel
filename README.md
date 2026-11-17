@@ -38,8 +38,12 @@
 - **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md):** Native MXFP4 W4A4 quantization for low-precision weights and activations, with CUDA, ROCm, and Apple silicon inference. Includes packed checkpoints and a portable Torch fallback.
 - **[NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12):** Lossless 12-bit compression of BF16 weights reduces source-weight storage during calibration without changing the restored values. Packed inference now includes native Metal support alongside CUDA, HIP, and Torch paths. [MLX](https://github.com/ModelCloud/GPTQModel/blob/main/docs/mlx-runtime.md) · [MoE capture contract](https://github.com/ModelCloud/GPTQModel/blob/main/docs/nf12-moe-capture-contract.md)
 - **Tenstorrent:** Packed GPTQ inference through Torch/XLA and TTNN, multi-card execution, and block-float quantization. Long-context Llama serving adds paged caching and chunked prefill; compatible block-float checkpoints also run on CUDA, ROCm, and CPU. [Guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tenstorrent.md) · [Serving](https://github.com/ModelCloud/GPTQModel/blob/main/docs/tt-llama-paged-serving.md) · [Device ownership](https://github.com/ModelCloud/GPTQModel/blob/main/docs/ttnn-device-ownership.md)
-- **Quantization:** Resumable [distributed EXL3](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-durable-execution.md) jobs ([projection publication recovery](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-projection-publication-recovery.md)), broader mixed-bit allocation across [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)/[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)/[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF), and [SmoothQuant](https://github.com/ModelCloud/GPTQModel/blob/main/docs/protocol-actions.md) preprocessing improve large-model workflows and quality control. [Quantizer calibration flows](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantizer-moe.md#4-hessian-failure-and-zero-sample-fallback-chain) document the shared Hessian-failure and zero-sample fallback contracts. [Shared-input Hessian dedup](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gptq-hessian-accumulation.md#shared-input-dedup-for-calibrated-quantizers) covers QQQ/VPTQ/MACaQ/EXL3 and GPTAQ/FOEM.
+- **Quantization:** Resumable [distributed EXL3](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-durable-execution.md) jobs ([projection publication recovery](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-projection-publication-recovery.md)), broader mixed-bit allocation across [AWQ](https://github.com/ModelCloud/GPTQModel/wiki/AWQ)/[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)/[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF), and [SmoothQuant](https://github.com/ModelCloud/GPTQModel/blob/main/docs/protocol-actions.md) preprocessing improve large-model workflows and quality control. [Quantizer calibration flows](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantizer-moe.md#4-hessian-failure-and-zero-sample-fallback-chain) document the shared Hessian-failure and zero-sample fallback contracts. [MoE routing override and bypass](https://github.com/ModelCloud/GPTQModel/blob/main/docs/moe-routing-override.md) defines when each mode is honoured and when it fails closed. [Shared-input Hessian dedup](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gptq-hessian-accumulation.md#shared-input-dedup-for-calibrated-quantizers) covers QQQ/VPTQ/MACaQ/EXL3 and GPTAQ/FOEM. Optional [calibration attention-sink exclusion](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-attention-sinks.md) drops BOS-token rows from the calibration statistics.
 - **Inference:** Opt-in attention and MLP projection fusion, faster quantized embedding lookups, and improved small-batch inference. Native backend selection and packed-weight storage are preserved. [Fusion guide](https://github.com/ModelCloud/GPTQModel/blob/main/docs/fusion-planner.md)
+- **Configuration:** Typed [backend configurations](https://github.com/ModelCloud/GPTQModel/blob/main/docs/backend-selection.md) unify backend selection and tuning, with explicit numerical and worker controls instead of environment switches.
+- **Calibration:** Broader [dataset input support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md), document-isolated [AWQ replay](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md), and opt-in [attention-sink exclusion](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#gptq-w8a16-or-another-integer-weight-width) improve calibration coverage and control.
+- **Memory:** Reduced packed-weight duplication, bounded EXL3 scratch, and shorter-lived [inference workspaces](https://github.com/ModelCloud/GPTQModel/blob/main/docs/kernel-scratch-lifecycle.md) lower memory use.
+- **Models:** Added OLMo Hybrid, Granite SWA/MoE SWA, and Dots3 Note quantization, plus broader decoder-weight coverage and Transformers 5.22 compatibility. [Model notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md)
 - **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#7110)
 - **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md) · [Serving security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md)
 
@@ -68,14 +72,14 @@ compatible deployment engine.
 | **[ParoQuant](https://github.com/ModelCloud/GPTQModel/wiki/ParoQuant)** | Low-bit weight quantization with learned rotations for accuracy recovery. [Affine fitting and optimization controls](docs/paroquant-optimization.md). [Fused rotation backward](docs/paroquant.md#fused-rotation-backward). |
 | **[MACaQ](https://github.com/ModelCloud/GPTQModel/blob/main/docs/macaq.md)** | Calibrated MXFP4 weights and activations, with native W4A4 inference and a W4A16 option. |
 | **[QQQ](https://github.com/ModelCloud/GPTQModel/wiki/QQQ)** | INT4 weights with dynamic INT8 activation quantization for W4A8 inference. |
-| **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). [mmap pages after the aligned copy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#mmap-pages-after-the-aligned-copy). |
-| **[FP8](https://github.com/ModelCloud/GPTQModel/wiki/FP8-and-NVFP4)** | Floating-point weight quantization with scaled E4M3/E5M2 formats. Native inference is weight-only W8A16; [W8A8 is an explicit per-token opt-in](docs/fp8-weight-only-dispatch.md). [Packed-weight load and move lifecycle](docs/fp8-packed-weight-lifecycle.md). |
+| **[GGUF](https://github.com/ModelCloud/GPTQModel/wiki/GGUF)** | Block-quantized checkpoints for GGUF-oriented workflows and native inference. [Torch fused dispatch](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-torch-fused-dispatch.md). [CPU zero-copy packed weights](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#cpu-zero-copy-packed-weight). [mmap pages after the aligned copy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-kernel-selection.md#mmap-pages-after-the-aligned-copy). [Checkpoint load policy](https://github.com/ModelCloud/GPTQModel/blob/main/docs/gguf-load-policy.md). |
+| **[FP8](https://github.com/ModelCloud/GPTQModel/wiki/FP8-and-NVFP4)** | Floating-point weight quantization with scaled E4M3/E5M2 formats. Native inference is weight-only W8A16; [W8A8 is an explicit per-token opt-in](docs/fp8-weight-only-dispatch.md). [Packed-weight load and move lifecycle](docs/fp8-packed-weight-lifecycle.md).  NVFP4 decode keeps the [effective-weight range](docs/fp4-effective-weight-range.md) instead of rounding the reconstructed weight to the activation dtype. |
 | **[EXL3](https://github.com/ModelCloud/GPTQModel/wiki/EXL3)** | Variable-rate compression with target average bits per weight and mixed-tier allocation. |
-| **[VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ)** | Vector-codebook quantization for low-bit model compression. |
+| **[VPTQ](https://github.com/ModelCloud/GPTQModel/wiki/VPTQ)** | Vector-codebook quantization for low-bit model compression. [Runtime kernel selection](docs/vptq.md#inference-and-checkpoint-compatibility). |
 | **[BitsAndBytes](https://github.com/ModelCloud/GPTQModel/wiki/BitsAndBytes)** | NF4/FP4 and INT8 quantization options. |
 | **[NF12](https://github.com/ModelCloud/GPTQModel/wiki/NF12)** | Lossless BF16 weight compression, distinct from lossy low-bit quantization. |
 
-Quantized kernels keep only packed weights resident; shared per-device scratch, plan lifetimes and the single GGUF CUDA weight copy are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md). CPU layer packing quantizes and packs each bounded input block in one shift/reduce pass; see [CPU block packing](docs/cpu-block-packing.md).
+Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kernel scratch, one quantization stream and one tile-scratch pair per device, per-device plan lifetimes and the single GGUF CUDA weight copy are documented in [kernel scratch lifecycle](docs/kernel-scratch-lifecycle.md). CPU layer packing quantizes and packs each bounded input block in one shift/reduce pass; see [CPU block packing](docs/cpu-block-packing.md).
 
 ### Control, scale, and quality ⚙️
 
@@ -103,7 +107,9 @@ Quantized kernels keep only packed weights resident; shared per-device scratch, 
   loading support further task adaptation; exported EoRA `rank_pattern` keys follow the [adapter rank-pattern contract](docs/adapter-rank-pattern-matching.md) so PEFT builds the trained rank per module. [Rotation model support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/rotation-model-support.md) lists the exact definitions that opt in. AWQ GSQ uses the
   [packed-code scoring contract](docs/gsq-awq-code-recovery.md) to evaluate exported candidates.
   The fused relaxation kernel keeps the [eager precision contract](docs/gsq-fused-relaxation-precision.md)
-  for BF16 and FP32 logits.
+  for BF16 and FP32 logits, and per-linear refinement searches the exported
+  codes and refits scales under the [scalar refinement
+  contract](docs/gsq-scalar-refinement.md).
 - **Trust the fold.** AWQ divides a scale only into the norm that actually feeds
   a quantized block, including multimodal wrappers and hybrid layer shapes; see
   the [AWQ scaling groups](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-scaling-groups.md) contract. Scale search keeps
@@ -112,11 +118,27 @@ Quantized kernels keep only packed weights resident; shared per-device scratch, 
 - **Reject unrepresentable AWQ pack scales.** The native GEMM/GEMV packers
   validate the actual FP16 storage cast before replacing module state; see
   [AWQ pack-time scale representability](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-scale-representability.md).
+- **Decode AWQ weights in range.** The portable Torch AWQ forward picks its
+  decode dtype from the stored scale range, so a wide or tiny checkpoint scale
+  no longer becomes `inf`/`0` before the product; see
+  [AWQ Torch forward decode range](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-torch-decode-range.md).
+- **Keep the AWQ bias out of the scale dtype.** A non-quantized bias is added
+  after the reduction, so packing keeps its source precision instead of casting
+  it to FP16; see
+  [AWQ pack-time bias storage](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-pack-bias-representability.md).
+- **Keep the Marlin bias in the checkpoint.** The native Marlin kernel adds the
+  bias to its FP32 accumulator, so the buffer keeps its checkpoint width and
+  order and the padded, permuted operand is derived per launch; see
+  [Marlin bias epilogue and storage](https://github.com/ModelCloud/GPTQModel/blob/main/docs/marlin-bias-epilogue.md).
 - **Measure before deploying.** Evaluate perplexity and downstream tasks, compare
   against a non-quantized baseline, and test prompts representative of your users.
   Compression settings trade model size, calibration cost, speed, and quality.
 - **Preserve causal replay.** Bloom AWQ keeps captured attention context and
   rejects unsafe residual folds; see [Bloom replay safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-bloom-replay.md).
+- **Capture masks a model passes positionally.** GPT-2 hands its causal mask to
+  each block as a positional argument; reading only keyword arguments dropped it
+  and replayed every layer without causality. See
+  [positional replay mask capture](https://github.com/ModelCloud/GPTQModel/blob/main/docs/positional-replay-mask-capture.md).
 - **Replay each calibration document separately.** AWQ token-row replay rebuilds
   a block-diagonal per-document mask and keeps each row's original position;
   additive masks treat `0` as attended. See
@@ -125,10 +147,16 @@ Quantized kernels keep only packed weights resident; shared per-device scratch, 
   measured on their real tokens, not their padded width, so a left-padded row
   cannot lose real tokens to its own padding. See
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
+- **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
+  base text path instead of a chat template, columnar mappings are unpacked, and
+  conversations reject `calibration_concat_size`. See
+  [VLM calibration input normalization](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md).
 
 ### Inference and deployment 🚢
 
-Run compatible checkpoints directly with GPT-QModel, integrate with Transformers,
+Run compatible checkpoints directly with GPT-QModel, integrate with Transformers
+(import `gptqmodel` first so packed MoE experts load through the
+[native bridge](https://github.com/ModelCloud/GPTQModel/blob/main/docs/hf-interop.md)),
 or deploy supported GPTQ/AWQ formats through vLLM and SGLang. Apple silicon has
 native MLX quantization and packed inference. Optional projection fusion can
 combine supported attention and MLP operations without changing the saved format.
@@ -234,12 +262,44 @@ print(model.tokenizer.decode(tokens))
 
 [Loading and inference](https://github.com/ModelCloud/GPTQModel/wiki/Loading-and-Inference)
 covers backend selection, generation, and adapters. GPT-QModel targets
-Transformers 5. Model definitions use native Transformers implementations or
+Transformers 5.23.0 or newer and requires Python 3.11 or newer. Model definitions
+use native Transformers implementations or
 local modeling code shipped with GPT-QModel; local ports always ignore
 checkpoint `auto_map`. Executing unsupported checkpoint Python requires both
 `trust_remote_code=True` and the existing `GPTQ_BYPASS_SAFETY_CHECKS=1` security
 bypass. See [model loading policy](docs/trust-remote-code-isolation.md) and
 [local Transformers 5 ports and validation](docs/transformers5-model-ports.md).
+[Bailing/Ling layout and MTP replay](docs/transformers5-model-ports.md#bailing--ling-selection-and-replay)
+cover the package-owned GQA/MLA/recurrent variants and their qualification limits.
+[CodeGen, ChatGLM and converted DBRX loading](docs/transformers5-model-ports.md#codegen-layout-and-chatglm--converted-dbrx-loading)
+documents partition selection, cache ownership and plain AWQ qualification.
+[DeepSeek V2/V3/V4/VL2, Kimi-K2, Deci/Nemotron-NAS, DBRX, Dream, native ERNIE MoE and EXAONE 4/4.5](docs/transformers5-model-ports.md#native-bridges-sparse-decoders-and-diffusion)
+have model-specific compatibility boundaries, source references and CPU validation.
+[GRIN-MoE, Instella, EXAONE 3 and both ERNIE VL aliases](docs/transformers5-model-ports.md#grin-moe-instella-exaone-3-and-ernie-vl-selection)
+use package-selected implementations with explicit plain AWQ policies; the
+reference records processor selection, cache failure behavior and provenance.
+[Hymba hybrid replay and InternLM2/2.5 packed attention](docs/transformers5-model-ports.md#hymba-hybrid-replay-and-internlm2-packed-attention)
+describe shared-KV calibration, recurrent cache recovery and packed QKV layout.
+[Package-owned tokenizer selection and LFM3 decoder ownership](docs/transformers5-model-ports.md#package-owned-tokenizer-selection)
+cover definition-specific scientific tokenizer dispatch and native gate/convolution
+exclusions. Tokenizer normalization and trust enforcement require Tokenicer 0.0.17
+or newer.
+[Klear and Kimi tokenizer/AttnRes selection](docs/transformers5-model-ports.md#klear-and-kimi-implementation-selection)
+documents dense/MoE ownership, distinct tokenizer semantics and the explicit
+AttnRes quantization boundary. Packaged TikToken implementations require
+`tiktoken>=0.12.0`.
+[LFM3 media and Kimi-K2.5 loading](docs/transformers5-model-ports.md#lfm3-media-and-kimi-k25-loading)
+documents native versus package-owned media components, FP16 image calibration,
+ragged video pooling and checkpoint round trips.
+[LLaDA2 version selection and routing precision](docs/transformers5-model-ports.md#llada2-version-selection-and-routing-precision)
+explains explicit decoder versions, ambiguous checkpoint metadata and FP32
+routing state through lazy AWQ and repeated safetensors reloads.
+[Llama aliases, MiMo and flat LLaVA-Qwen2 selection](docs/transformers5-model-ports.md#llama-aliases-mimo-and-flat-llava-qwen2-selection)
+covers LongLLaMA memory, source-matched native aliases, dense auxiliary MTP
+and image-aware calibration through package-owned model selection.
+[InternVL-chat and K2-Horizon loading](docs/transformers5-model-ports.md#internvl-wrapper-and-k2-horizon-selection)
+documents the package-owned wrapper/vision and dense/MoVA/MoE implementations,
+decoder selection, pinned licenses and CPU plain-AWQ validation.
 Generation settings preserved during quantized checkpoint re-save are described
 in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md).
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on

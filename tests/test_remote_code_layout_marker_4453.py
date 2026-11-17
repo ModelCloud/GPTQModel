@@ -8,9 +8,9 @@ differently (``PhiMoEForCausalLM`` vs ``PhimoeForCausalLM``, ``MPTForCausalLM``
 vs ``MptForCausalLM``, ``MiniMaxM2ForCausalLM`` vs ``MiniMaxForCausalLM``).
 Treating any spelling difference as a layout override made an explicit
 ``trust_remote_code=True`` run stale remote code for natively supported
-checkpoints. Explicit trust is kept only when the checkpoint config sets a
-declared remote-only layout marker (the Ling-2.6-flash ``q_lora_rank`` MLA
-branch from #4373). Fixtures are local ``config.json`` files only; no remote
+checkpoints. Ling's ``q_lora_rank`` MLA marker still identifies a distinct
+layout, now handled by the definition's local port regardless of trust or
+security bypass. Fixtures are local ``config.json`` files only; no remote
 module is imported.
 """
 
@@ -23,7 +23,7 @@ import pytest
 
 from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils.hf import resolve_trust_remote_code
-from gptqmodel.utils.security import BYPASS_ENV, RemoteCodeSecurityError
+from gptqmodel.utils.security import BYPASS_ENV
 
 
 pytestmark = [pytest.mark.cpu]
@@ -101,7 +101,7 @@ def test_remote_class_name_difference_keeps_native_layout(tmp_path, model_type, 
     assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
 
 
-def test_ling_mla_marker_requires_security_bypass(tmp_path, monkeypatch):
+def test_ling_mla_marker_uses_package_code_with_or_without_bypass(tmp_path, monkeypatch):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     checkpoint = _write_config(
         tmp_path / "ling_flash",
@@ -117,12 +117,10 @@ def test_ling_mla_marker_requires_security_bypass(tmp_path, monkeypatch):
     )
 
     assert hf_utils._checkpoint_remote_layout_marker(checkpoint) == ("q_lora_rank", "BailingMoeV2_5ForCausalLM")
-    with pytest.raises(RemoteCodeSecurityError, match=BYPASS_ENV):
-        resolve_trust_remote_code(checkpoint, trust_remote_code=True)
+    assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
     monkeypatch.setenv(BYPASS_ENV, "1")
-    assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is True
-    with pytest.raises(RemoteCodeSecurityError, match="local model port"):
-        resolve_trust_remote_code(checkpoint, trust_remote_code=False)
+    assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
+    assert resolve_trust_remote_code(checkpoint, trust_remote_code=False) is False
 
 
 @pytest.mark.parametrize("q_lora_rank", [None, 0])
@@ -141,7 +139,7 @@ def test_ling_unset_mla_marker_is_native_layout(tmp_path, q_lora_rank):
     assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
 
 
-def test_layout_marker_without_remote_model_code_still_rejects_incompatible_native(tmp_path, monkeypatch):
+def test_layout_marker_without_remote_model_code_selects_local_port(tmp_path, monkeypatch):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     checkpoint = _write_config(
         tmp_path / "ling_no_auto_map",
@@ -149,8 +147,7 @@ def test_layout_marker_without_remote_model_code_still_rejects_incompatible_nati
     )
 
     assert hf_utils._checkpoint_remote_layout_marker(checkpoint) == (None, None)
-    with pytest.raises(RemoteCodeSecurityError):
-        resolve_trust_remote_code(checkpoint, trust_remote_code=True)
+    assert resolve_trust_remote_code(checkpoint, trust_remote_code=True) is False
 
 
 def test_layout_marker_is_scoped_to_its_model_type(tmp_path):

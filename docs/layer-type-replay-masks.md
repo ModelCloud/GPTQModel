@@ -72,6 +72,23 @@ The mask builder is `LAYER_PATTERN_TO_MASK_FUNCTION_MAPPING` from
 Gemma bidirectional overlay all come from the same table the model uses. A type
 whose builder is missing or is a `hybrid` dict keeps the incoming kwargs.
 
+## Recurrent mixers take a planar mask, never the attention grid
+
+`linear_attention` and `conv` are the two entries whose builder is
+`create_recurrent_attention_mask`. That builder returns `None` for an unpadded
+batch -- the default at `batch_size=1` -- because the mixer applies its own
+causal convolution/scan. A Mamba/conv layer multiplies its input by the mask as
+`hidden * attention_mask[:, :, None]`, so it can never consume the additive
+`[1, 1, T, T]` grid an attention layer takes: the extra singleton dims raise
+`tensor a (768) must match tensor b (366)`.
+
+`BaseQModel._resolve_layer_replay_type` therefore also consults a layer's
+`block_type` and its mixer sibling's `layer_type`/`layer_idx` (GraniteMoE-Hybrid
+exposes the mixer as `mamba`, not `self_attn`), and the AWQ token-row replay
+uses that type to switch to a planar `[1, retained]` keep mask
+(`_is_recurrent_attention_layer_type`, issue #4671). GPTQ layer replay keeps the
+captured `None` mask, which is exactly what the model passed.
+
 ## Definition overrides must call the base hook first
 
 `BaseQModel.prepare_layer_replay_kwargs` is where the private capture key is

@@ -211,7 +211,7 @@ def _assert_after(indices, producer: str, consumer: str) -> None:
         ),
         (
             "bailing_moe",
-            {"self_attn.kv_b_proj": 1, "self_attn.o_proj": 2},
+            {"self_attn.kv_a_proj_with_mqa": 1, "self_attn.kv_b_proj": 2, "self_attn.o_proj": 3},
         ),
         (
             "deepseek_vl_v2",

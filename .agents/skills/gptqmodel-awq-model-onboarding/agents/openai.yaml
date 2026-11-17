@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel AWQ Onboarding"
+  short_description: "Qualify AWQ scaling for a model"
+  default_prompt: "Use $gptqmodel-awq-model-onboarding to qualify AWQ sources, consumers, and replay for this model or definition change."

@@ -13,7 +13,7 @@ from __future__ import annotations
 from transformers.quantizers import HfQuantizer
 from transformers.utils.quantization_config import QuantizationConfigMixin
 
-from .._quant_methods import REFUSED_HF_QUANT_METHODS
+from .._quant_methods import REFUSED_HF_QUANT_METHODS, refused_hf_load_remedy
 
 
 class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
@@ -33,6 +33,17 @@ class GPTQModelRefusingQuantizationConfig(QuantizationConfigMixin):
     @classmethod
     def from_dict(cls, config_dict, **kwargs):
         return cls(**config_dict)
+
+
+def refusal_message(method) -> str:
+    """The actionable error for a checkpoint transformers cannot read."""
+
+    label = REFUSED_HF_QUANT_METHODS.get(method, method)
+    return (
+        f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
+        f"load them with {refused_hf_load_remedy(method)}. "
+        f"(quant_method: {method!r})"
+    )
 
 
 class GPTQModelRefusingHfQuantizer(HfQuantizer):
@@ -67,12 +78,7 @@ class GPTQModelRefusingHfQuantizer(HfQuantizer):
                 "`GPTQModel.load` or re-save the checkpoint. "
                 f"(quant_method: {method!r})"
             )
-        label = REFUSED_HF_QUANT_METHODS.get(method, method)
-        raise ValueError(
-            f"GPT-QModel {label} checkpoints cannot be loaded by `transformers`; "
-            "load them with `GPTQModel.load` or vLLM. "
-            f"(quant_method: {method!r})"
-        )
+        raise ValueError(refusal_message(method))
 
     @property
     def is_trainable(self) -> bool:

@@ -31,6 +31,12 @@ from gptqmodel.quantization.awq.utils.module import get_op_name
 # module and class are resolved from MODEL_MAP, so adding a model type here
 # automatically tracks its registered definition.
 FAMILY_MODEL_TYPES = [
+    "agnes",
+    "exaone",
+    "grinmoe",
+    "hymba",
+    "internlm2",
+    "internvl_chat",
     # Dense decoder families.
     "llama",
     "mistral",
@@ -71,9 +77,7 @@ FAMILY_MODEL_TYPES = [
     "gemma4",
     "gemma4_unified",
     "nemotron_h",
-    # Remote-code families from issue #4093 items 1-2. Their definitions live in
-    # the checkpoint's own code, so the tiny config is derived from the local
-    # checkpoint config.json instead of `AutoConfig.for_model`.
+    # Package-owned ports from issue #4093 items 1-2.
     "instella",
     "k2_horizon",
     # Issue #4121 item 7: PanGu's top-query layer reads `custom_query` instead
@@ -115,12 +119,8 @@ _BASE_CONFIG = {
     "bos_token_id": 0,
 }
 
-# Architectures that only exist in a checkpoint's remote code. The values are
-# the fixtures used to build the tiny model; the invariant is skipped with a
-# precise reason when a fixture is absent.
+# Unported checkpoint architecture; skip precisely when its fixture is absent.
 REMOTE_CODE_MODEL_PATHS = {
-    "instella": "/monster/data/model/Instella-3B-Instruct",
-    "k2_horizon": "/monster/data/model/K2-Horizon-0.9B",
     "gpt_pangu": "/monster/data/model/pangu_alpha_2_6B",
 }
 
@@ -220,6 +220,38 @@ def _field_names(config):
 
 
 def _tiny_config(model_type):
+    if model_type in {"exaone", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat"}:
+        return importlib.import_module(f"tests.test_{model_type}_local_port").tiny_config()
+    if model_type == "k2_horizon":
+        from tests.test_k2_horizon_local_port import variant_config
+
+        return variant_config("yarn")
+    if model_type == "agnes":
+        # The CPU decoder invariant must not import the image/video test suite:
+        # that suite requires torchvision, which is optional for text execution.
+        from gptqmodel.models.ports.agnes.configuration_agnes import (
+            AgnesConfig,
+            AgnesTextConfig,
+            AgnesVisionConfig,
+        )
+
+        return AgnesConfig(
+            text_config=AgnesTextConfig(
+                vocab_size=64, hidden_size=16, num_hidden_layers=2, intermediate_size=32,
+                parallel_ffn_intermediate_size=12, num_attention_heads=2, num_key_value_heads=1,
+                head_dim=8, linear_num_key_heads=1, linear_num_value_heads=2,
+                linear_key_head_dim=4, linear_value_head_dim=4, linear_conv_kernel_dim=3,
+                layer_types=["agnes_delta_attention", "agnes_global_attention"],
+                rope_parameters={"rope_type": "default", "rope_theta": 10000.0,
+                                 "partial_rotary_factor": 1.0, "mrope_section": [2, 1, 1]},
+                pad_token_id=0, eos_token_id=None,
+            ),
+            vision_config=AgnesVisionConfig(
+                depth=1, hidden_size=16, intermediate_size=24, num_heads=2, out_hidden_size=16,
+                patch_size=2, temporal_patch_size=1, spatial_merge_size=2, num_position_embeddings=16,
+            ),
+            image_token_id=60, video_token_id=61, vision_start_token_id=62, vision_end_token_id=63,
+        )
     if model_type in REMOTE_CODE_MODEL_PATHS:
         return _tiny_remote_config(model_type)
     if model_type in COMPOSITE_TEXT_CONFIG_FAMILIES:
@@ -363,11 +395,12 @@ def _in_features(module):
 
 
 def _vocab_size(config) -> int:
-    """Vocabulary size of the decoder, which composite configs keep in `text_config`."""
+    """Resolve native and legacy-wrapper decoder vocabularies."""
 
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None and hasattr(text_config, "vocab_size"):
-        return int(text_config.vocab_size)
+    for name in ("text_config", "llm_config"):
+        text_config = getattr(config, name, None)
+        if text_config is not None and hasattr(text_config, "vocab_size"):
+            return int(text_config.vocab_size)
     return int(config.vocab_size)
 
 
@@ -410,9 +443,12 @@ def _features(layer, plan):
 def _tiny_model(model_type):
     qmodel_cls = MODEL_MAP[model_type]
     torch.manual_seed(0)
-    hf_model = AutoModelForCausalLM.from_config(
-        _tiny_config(model_type), trust_remote_code=True
-    ).eval()
+    if model_type in {"agnes", "exaone", "grinmoe", "hymba", "instella", "internlm2", "internvl_chat", "k2_horizon"}:
+        hf_model = qmodel_cls.loader.from_config(_tiny_config(model_type)).eval()
+    else:
+        hf_model = AutoModelForCausalLM.from_config(
+            _tiny_config(model_type), trust_remote_code=True
+        ).eval()
     try:
         from gptqmodel.models.loader import _convert_model_with_defuser
 
@@ -478,7 +514,10 @@ def _worst_relative_change(hf_model, ids, layer, groups):
 
 
 # Families whose decoder layer has no foldable AWQ group and is quantized plainly.
-PLAIN_QUANTIZATION_FAMILIES = {"codegen", "gpt2", "minimax"}
+PLAIN_QUANTIZATION_FAMILIES = {
+    "exaone", "grinmoe", "hymba", "internlm2", "internvl_chat", "k2_horizon",
+    "afmoe", "agnes", "apertus", "codegen", "deepseek_v2", "deepseek_v3", "deepseek_v4", "deepseek_vl_v2", "exaone4", "gpt2", "instella", "minimax"
+}
 
 # Hybrid SSM families whose decoder forward resolves Mamba-2 scan kernels through
 # `transformers`' hub-kernel fallback. When that decorator selects CUDA-only
@@ -581,8 +620,6 @@ MOE_SHARED_FAMILIES = [
     "glm_moe_dsa",
     "hy_v3",
     "solar_open",
-    "deepseek_v2",
-    "deepseek_v4",
     "qwen2_moe",
 ]
 
@@ -654,6 +691,143 @@ def test_declared_non_sources_never_become_prev_ops(family, forbidden):
             if prev_op is not None:
                 used.add(get_op_name(layer, prev_op))
     assert not (used & set(forbidden)), f"{family}: folded a scale into {used & set(forbidden)}"
+
+
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+def test_excluded_projection_is_never_a_fold_source(family):
+    """A `:!`/`:?` projection cannot absorb a scale: nothing compensates it (#4651).
+
+    Folding into an excluded module divides its output rows and multiplies the
+    consumer's input columns, but the plan keeps the source in the checkpoint
+    dtype and no later step multiplies it back. Jamba's
+    `['mamba.in_proj', 'mamba.conv1d:!', 'mamba.dt_proj:!']` made the excluded
+    `mamba.dt_proj` the source for `mamba.x_proj` (width 64 -> 34), silently
+    rescaling the discretization projection. A gain norm is still a valid
+    source; a projection is only valid when the plan quantizes it.
+    """
+
+    _, qmodel, layers, tree = _tiny_model(family)
+    plan = ModulePlan.from_tree(tree)
+    checked = 0
+    for layer in layers:
+        nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+        for node in nodes:
+            prev_op = node.get("prev_op")
+            weight = getattr(prev_op, "weight", None)
+            if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+                continue
+            checked += 1
+            name = get_op_name(layer, prev_op)
+            spec = plan.find(name)
+            assert spec is not None, (family, name)
+            assert spec.quantize, (
+                f"{family}: scaling group folded a scale into excluded `{name}`; "
+                f"layers={[get_op_name(layer, m) for m in node['layers']]}"
+            )
+    # `falcon_mamba` declares every projection `:nosrc`, so it has no Linear
+    # source at all and is quantized plainly.
+    assert checked or family in PLAIN_QUANTIZATION_FAMILIES or family == "falcon_mamba", family
+
+
+# Jamba's Mamba-2 mixer resolves its scan/conv kernels through
+# `use_kernel_func_from_hub_with_fallback`, which prefers an installed
+# `mamba_ssm` (CUDA-only) over the eager Torch reference. The CPU fold invariant
+# needs the reference math, and the decoder is attention-interleaved, so the
+# default cache cannot be used either (`get_seq_length` rejects a cache that
+# holds only linear-attention layers).
+JAMBA_TORCH_KERNELS = (
+    "causal_conv1d_fn",
+    "causal_conv1d_update",
+    "mamba_inner_fn",
+    "mamba_selective_scan",
+    "mamba_selective_state_update",
+)
+
+
+@pytest.fixture()
+def jamba_torch_mixer(monkeypatch):
+    """Build a tiny Jamba whose mixer runs the eager Torch Mamba-2 reference."""
+
+    module = importlib.import_module("transformers.models.jamba.modeling_jamba")
+    restored = []
+    for name in JAMBA_TORCH_KERNELS:
+        wrapper = getattr(module, name)
+        reference = getattr(wrapper, "__wrapped__", None)
+        if reference is None:
+            continue
+        monkeypatch.setattr(module, name, reference)
+        restored.append(name)
+    hf_model, qmodel, layers, tree = _tiny_model("jamba")
+    hf_model.config.use_cache = False
+    return hf_model, qmodel, layers, tree, restored
+
+
+def test_jamba_never_folds_x_proj_scale_into_excluded_dt_proj(jamba_torch_mixer):
+    """Issue #4651: the fold must land on `in_proj`, never on excluded `dt_proj`."""
+
+    hf_model, qmodel, layers, tree, restored = jamba_torch_mixer
+    assert restored, "jamba: no hub-kernel wrapper resolved; the Torch reference was not installed"
+    plan = ModulePlan.from_tree(tree)
+    layer = layers[0]
+    nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+    groups = _foldable_groups(layer, nodes)
+    by_source = {get_op_name(layer, node["prev_op"]): node for node in groups}
+
+    assert "mamba.dt_proj" not in by_source, "jamba: excluded `mamba.dt_proj` is still a fold source"
+    # `x_proj` reads `silu(conv1d(in_proj(x)))`: neither `in_proj`, the excluded
+    # `dt_proj`, nor the excluded `conv1d` produces its input. It must be
+    # quantized without a fold instead of borrowing a width-compatible source.
+    for node in nodes:
+        assert get_op_name(layer, node["prev_op"]) != "mamba.dt_proj"
+        assert "mamba.x_proj" not in [get_op_name(layer, module) for module in node["layers"]]
+
+    ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
+    with torch.no_grad():
+        before = hf_model(ids).logits.clone()
+    dt_proj_before = layer.mamba.dt_proj.weight.detach().clone()
+    conv1d_before = layer.mamba.conv1d.weight.detach().clone()
+    x_proj_before = layer.mamba.x_proj.weight.detach().clone()
+    for node in groups:
+        source = get_op_name(layer, node["prev_op"])
+        targets = [get_op_name(layer, module) for module in node["layers"]]
+        width = (
+            node["prev_op"].out_features
+            if isinstance(node["prev_op"], nn.Linear)
+            else node["prev_op"].weight.numel()
+        )
+        scales = torch.linspace(0.55, 1.45, width)
+        apply_scale(layer, [(source, targets, scales, None)])
+        try:
+            with torch.no_grad():
+                after = hf_model(ids).logits
+            relative = float((after - before).norm() / before.norm())
+            assert relative < 1e-5, f"jamba: folding {source} -> {targets} changed the logits by {relative:.3e}"
+            assert torch.equal(layer.mamba.dt_proj.weight, dt_proj_before), (
+                f"jamba: the excluded `mamba.dt_proj` weight changed while folding {source}"
+            )
+            assert torch.equal(layer.mamba.conv1d.weight, conv1d_before)
+            assert torch.equal(layer.mamba.x_proj.weight, x_proj_before)
+        finally:
+            apply_scale(layer, [(source, targets, 1.0 / scales, None)])
+
+
+def test_jamba_awq_scaling_groups_preserve_decoder_layer_output(jamba_torch_mixer):
+    """Full tiny-model invariant for the hybrid SSM decoder (#4651)."""
+
+    hf_model, qmodel, layers, tree, _restored = jamba_torch_mixer
+    plan = ModulePlan.from_tree(tree)
+    ids = torch.randint(0, _vocab_size(hf_model.config), (1, 8))
+    worst = 0.0
+    saw_group = False
+    for layer in layers:
+        nodes = qmodel.awq_get_modules_for_scaling(layer, _features(layer, plan), {})
+        groups = _foldable_groups(layer, nodes)
+        if not groups:
+            continue
+        saw_group = True
+        worst = max(worst, _worst_relative_change(hf_model, ids, layer, groups))
+    assert saw_group, "jamba: no AWQ scaling groups were built"
+    assert worst < 1e-5, f"jamba: AWQ scaling changed the model output by {worst:.3e}"
 
 
 def test_exaone4_5_marks_post_attention_norm_as_postnorm():

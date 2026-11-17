@@ -79,30 +79,19 @@ def test_prepare_deepseek_vl_v2_dataset_reuses_shared_dataset(monkeypatch):
     ]
 
 
-def test_deepseek_vl_v2_forward_patches_missing_remote_config_defaults():
-    class FakeRemoteModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.config = SimpleNamespace()
+def test_deepseek_vl_v2_uses_package_owned_config_defaults():
+    from gptqmodel.models.ports.deepseek_vl_v2.configuration_deepseek_vl_v2 import DeepseekVLV2Config
 
-        def forward(self):
-            return (
-                self.config.use_cache,
-                self.config.output_attentions,
-                self.config.output_hidden_states,
-                self.config.use_return_dict,
-            )
-
-    qmodel = object.__new__(DeepSeekVLV2QModel)
-    nn.Module.__init__(qmodel)
-    qmodel.model = FakeRemoteModel()
-
-    assert qmodel.forward() == (True, False, False, True)
+    config = DeepseekVLV2Config()
+    assert config.use_cache
+    assert not config.output_attentions
+    assert not config.output_hidden_states
+    assert config.return_dict
 
 
 class TestDeepSeekVLV2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/deepseek-vl2-tiny" # "Isotr0py/deepseek-vl2-tiny"
-    TRUST_REMOTE_CODE = True
+    TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     USE_FLASH_ATTN = False
     OFFLOAD_TO_DISK = False

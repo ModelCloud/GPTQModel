@@ -682,6 +682,154 @@ def test_vptq_backend_mapping_separates_torch_and_cuda_implementations():
     assert VPTQCudaLinear.SUPPORTS_BACKENDS == [BACKEND.VPTQ_CUDA]
 
 
+def _vptq_auto_select(device, *, dtype=torch.float16, backend=BACKEND.AUTO):
+    from gptqmodel.utils.importer import select_quant_linear
+
+    return select_quant_linear(
+        bits=2,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=device,
+        backend=backend,
+        format=FORMAT.VPTQ,
+        quant_method=METHOD.VPTQ,
+        dtype=dtype,
+        pack_dtype=torch.int32,
+    )
+
+
+def test_vptq_cuda_ranks_above_torch_for_auto_selection():
+    """AUTO must rank the native kernel first; ROCm falls back on ``validate_once``.
+
+    Ranking is what decides the tie: both kernels declare ``FORMAT.VPTQ``, and
+    the selector's stable sort keeps registry order for equal ranks, which lists
+    the portable kernel first. Without a higher rank, every AUTO-loaded VPTQ
+    checkpoint decoded on the reference implementation (issue #4591).
+    """
+
+    assert VPTQCudaLinear.auto_select_priority(FORMAT.VPTQ) > VPTQLinear.auto_select_priority(FORMAT.VPTQ)
+
+    from gptqmodel.utils.importer import get_auto_backend_kernel_mapping
+
+    order = list(get_auto_backend_kernel_mapping()[METHOD.VPTQ][FORMAT.VPTQ])
+    assert order.index(BACKEND.VPTQ_CUDA) < order.index(BACKEND.VPTQ_TORCH)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_vptq_auto_selects_cuda_kernel_on_nvidia(monkeypatch, dtype):
+    """On an NVIDIA host with the extension available, AUTO resolves the CUDA kernel."""
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("AUTO resolves the CUDA kernel only on an NVIDIA CUDA host")
+
+    from gptqmodel.utils import importer
+
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    importer.clear_validation_cache()
+    try:
+        ok, error = VPTQCudaLinear.cached_validate_once()
+        if not ok:
+            pytest.skip(f"VPTQ_CUDA is unavailable on this host: {error}")
+        selected = _vptq_auto_select(torch.device("cuda:0"), dtype=dtype)
+    finally:
+        VPTQCudaLinear.cached_validate_once.cache_clear()
+        importer.clear_validation_cache()
+
+    assert selected is VPTQCudaLinear
+
+
+def test_vptq_auto_selects_portable_kernel_on_rocm(monkeypatch):
+    """A ROCm host must keep the portable kernel even though CUDA outranks it."""
+
+    from gptqmodel.models import _const as model_const
+    from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
+    from gptqmodel.utils import importer
+
+    monkeypatch.setattr(model_const, "IS_ROCM", True)
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(vptq_cuda_module, "IS_ROCM", True)
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    importer.clear_validation_cache()
+    try:
+        selected = _vptq_auto_select(model_const.DEVICE.ROCM, dtype=torch.float16)
+    finally:
+        VPTQCudaLinear.cached_validate_once.cache_clear()
+        importer.clear_validation_cache()
+
+    assert selected is VPTQLinear
+
+
+def test_vptq_auto_falls_back_when_the_cuda_extension_cannot_build(monkeypatch):
+    """A failed JIT probe must select the portable kernel, not fail the load.
+
+    This is what makes the higher AUTO rank safe on an NVIDIA host without a
+    CUDA toolchain: the selector has to reject the native kernel up front
+    instead of raising on the first forward.
+    """
+
+    from gptqmodel.nn_modules.qlinear import vptq_cuda as vptq_cuda_module
+    from gptqmodel.utils import importer
+
+    monkeypatch.setattr(vptq_cuda_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(vptq_cuda_module, "vptq_cuda_runtime_available", lambda: False)
+    monkeypatch.setattr(
+        vptq_cuda_module,
+        "vptq_cuda_runtime_error",
+        lambda: "VPTQ CUDA requires an NVIDIA CUDA device: its torch.ops extension is built from CUDA sources.",
+    )
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    importer.clear_validation_cache()
+    try:
+        ok, error = VPTQCudaLinear.cached_validate_once()
+        assert ok is False
+        assert isinstance(error, ImportError)
+        assert "NVIDIA CUDA device" in str(error)
+        selected = _vptq_auto_select(torch.device("cuda:0"), dtype=torch.float16)
+    finally:
+        VPTQCudaLinear.cached_validate_once.cache_clear()
+        importer.clear_validation_cache()
+
+    assert selected is VPTQLinear
+
+
+def test_vptq_cuda_post_init_requires_a_gpu_resident_layer(monkeypatch):
+    """The native kernel cannot run ``post_init`` on a CPU-offloaded layer.
+
+    An FP16/BF16 checkpoint whose device map keeps some layers on CPU still
+    routes those layers through ``post_init`` on CPU, where the native kernel
+    has nothing to execute on. The declaration is what keeps AUTO on the
+    portable kernel for that load.
+    """
+
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear as cuda_cls
+    from gptqmodel.utils.importer import select_quant_linear
+
+    assert VPTQCudaLinear.SUPPORTS_DEVICES == [DEVICE.CUDA]
+    assert VPTQCudaLinear.SUPPORTS_CPU_OFFLOAD is False
+
+    monkeypatch.setattr(cuda_cls, "cached_validate_once", classmethod(lambda cls: (True, None)))
+    monkeypatch.setattr(cuda_cls, "validate_device", classmethod(lambda cls, _device: None))
+    selected = select_quant_linear(
+        bits=2,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=torch.device("cuda:0"),
+        backend=BACKEND.AUTO,
+        format=FORMAT.VPTQ,
+        quant_method=METHOD.VPTQ,
+        dtype=torch.float16,
+        pack_dtype=torch.int32,
+        cpu_offload=True,
+    )
+    assert selected is VPTQLinear
+
+
 def synthetic_problem(out_features=48, in_features=64, seed=0):
     """Return a small `(weight, hessian)` pair with a well conditioned Hessian."""
 
@@ -2769,6 +2917,73 @@ def test_tiny_qwen3_vptq_cuda_smoke(tmp_path: Path):
         atol=1e-4,
         rtol=1e-4,
     )
+
+
+@pytest.mark.cuda
+@pytest.mark.slow
+def test_tiny_qwen3_vptq_cuda_auto_reload_uses_the_native_kernel(tmp_path: Path):
+    """An AUTO reload of a saved checkpoint must run the fused CUDA kernel.
+
+    The end-to-end assertion the tie missed: the checkpoint round trip under
+    AUTO has to load ``VPTQCudaLinear`` modules, and greedy decode must stay
+    label-identical to the portable kernel on the same checkpoint.
+    """
+
+    from gptqmodel.utils import importer
+
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("CUDA is required for VPTQ AUTO reload coverage (VPTQ_CUDA is CUDA-only)")
+
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    importer.clear_validation_cache()
+    try:
+        ok, error = VPTQCudaLinear.cached_validate_once()
+        if not ok:
+            pytest.skip(f"VPTQ_CUDA is unavailable on this host: {error}")
+    finally:
+        VPTQCudaLinear.cached_validate_once.cache_clear()
+
+    native_dir = tmp_path / "native"
+    quantized_dir = tmp_path / "quantized"
+    native_dir.mkdir()
+    _, tokenizer = _build_tiny_qwen3_fixture(native_dir)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 8],
+        kmeans_iters=8,
+    )
+    model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
+    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+    model.save(quantized_dir)
+
+    importer.clear_validation_cache()
+    try:
+        auto_model = GPTQModel.load(str(quantized_dir), backend=BACKEND.AUTO, dtype=torch.float16, device="cuda:0")
+        auto_modules = [
+            (name, module) for name, module in auto_model.named_modules() if isinstance(module, VPTQLinear)
+        ]
+        assert auto_modules, "the AUTO reload produced no VPTQ layers"
+        for name, module in auto_modules:
+            assert isinstance(module, VPTQCudaLinear), (name, type(module).__name__)
+
+        inputs = tokenizer("tiny vptq calibration sample", return_tensors="pt").to("cuda:0")
+        with torch.no_grad():
+            auto_tokens = auto_model.model.generate(**inputs, max_new_tokens=4, do_sample=False)
+        del auto_model
+        torch.cuda.empty_cache()
+
+        reference = GPTQModel.load(
+            str(quantized_dir), backend=BACKEND.VPTQ_TORCH, dtype=torch.float16, device="cuda:0"
+        )
+        with torch.no_grad():
+            reference_tokens = reference.model.generate(**inputs, max_new_tokens=4, do_sample=False)
+    finally:
+        importer.clear_validation_cache()
+
+    assert torch.equal(auto_tokens, reference_tokens)
 
 
 def test_vptq_pack_preserves_fp32_bias_range():

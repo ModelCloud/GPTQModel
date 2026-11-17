@@ -3,11 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Opt-in Gumbel-Softmax refinement on an existing GPTQ scalar grid.
+"""Opt-in refinement on an existing GPTQ scalar grid.
 
 The checkpoint still uses GPTQ scales, zero-points, group indices and packers.
 This is a local reconstruction objective, not the paper's full block-training
 schedule. The baseline is retained unless a hard, export-aware candidate wins.
+
+Integer codes are searched by Gauss-Seidel coordinate descent scored on the
+exported hard weight, and every output row is accepted separately. The
+Gumbel-Softmax relaxation is not used to move codes: sampling a soft mixture of
+codes descends an expectation that the packer never stores, so from a GPTQ
+initializer it only ever lost to the initializer and the refiner returned it
+unchanged (#4592). Scales are continuous and are refit in closed form instead.
 """
 
 from dataclasses import dataclass
@@ -16,8 +23,34 @@ import pcre
 import torch
 
 from ..utils.gemv import awq_gemv_codes
+from ..utils.logger import setup_logger
 from ..utils.packing_math import awq_packed_codes, awq_storage_dtype
 from .config import normalize_gsq_config
+
+
+log = setup_logger()
+
+
+# Sweep cap for the hard code search. Real layers converge within a handful of
+# sweeps, so this bounds the added cost to a small multiple of one quantization
+# pass instead of running the configured step budget with no effect.
+_HARD_SWEEP_CAP = 8
+# Columns advanced together per sweep. Wider blocks need more sweeps for the
+# same objective; narrower blocks cost more scalar launches.
+_HARD_SWEEP_BLOCK = 8
+# Code moves per column, counted as the half width of the search window. Only
+# immediate neighbours transfer off the calibration Gram: wider windows lower
+# the calibration score further but lose accuracy on held-out activations.
+_HARD_SWEEP_WINDOW = 1
+# Fractional hard-score gain a row must clear before its codes are replaced.
+# The exported objective is measured on the calibration Gram, so a marginal
+# gain there is inside the sampling noise of that Gram; only large row gains
+# reproduced on held-out activations in the measurements behind this constant.
+_HARD_ACCEPT_MARGIN = 0.05
+# Scale refits move the grid under the codes, so they alternate with the code
+# sweeps. Each round is one code sweep plus one closed-form scale refit; the
+# measured gain is reached in two and later rounds only re-optimize.
+_HARD_SCALE_ROUNDS = 2
 
 
 @dataclass
@@ -29,6 +62,9 @@ class ScalarGSQResult:
     before: float | None
     after: float | None
     history: list[float]
+    #: True when the search was provably unable to beat the baseline and was
+    #: skipped (calibration-free weight MSE with fixed scales, #4691).
+    skipped: bool = False
 
 
 def asymmetric_error_term(weight_error, teacher, cross_moment, alpha=1.0):
@@ -168,21 +204,90 @@ def refine_gptq_scalar(
         )
 
 
+def hard_code_sweep(
+    codes: torch.Tensor,
+    column_scale: torch.Tensor,
+    *,
+    metric: torch.Tensor,
+    teacher: torch.Tensor,
+    decode,
+    row_loss,
+    bits: int,
+    offsets: torch.Tensor,
+    block: int = _HARD_SWEEP_BLOCK,
+) -> torch.Tensor:
+    """One Gauss-Seidel sweep over exported integer codes, accepted per row.
+
+    ``decode(codes)`` returns the weight the packer stores for those codes and
+    ``row_loss(weight)`` returns one hard reconstruction score per output row.
+    ``column_scale`` holds the stored scale of every ``[out, in]`` column, so a
+    code step of ``d`` moves the reconstruction by ``column_scale * d``;
+    ``metric`` is the factor ``row_loss`` projects through.
+
+    Blocks advance one after another inside the sweep, so the residual
+    projection carries the off-diagonal Gram coupling that earlier blocks
+    already moved. A row keeps its new codes only when its exact hard score
+    improves, so one bad row cannot veto the rest of the chunk.
+    """
+    limit = 2**bits - 1
+    # ``row_loss`` projects through ``metric``, so the Gram is ``metric @
+    # metric.T`` and its diagonal is the column sum of ``metric`` squared.
+    curvature = metric.square().sum(dim=1)
+    current_weight = decode(codes)
+    best_codes = codes.clone()
+    best_rows = row_loss(current_weight)
+    if not bool(torch.isfinite(best_rows).all()):
+        raise ValueError("non-finite GSQ hard objective")
+    current = codes.clone()
+    projected = (current_weight.float() - teacher) @ metric
+    for start in range(0, codes.shape[1], block):
+        stop = min(codes.shape[1], start + block)
+        width = stop - start
+        gradient = projected @ metric[start:stop].T
+        shifted = current[:, start:stop].unsqueeze(-1) + offsets.view(1, 1, -1)
+        valid = (shifted >= 0) & (shifted <= limit)
+        shifted = shifted.clamp(0, limit)
+        delta = column_scale[:, start:stop].unsqueeze(-1) * (
+            shifted - current[:, start:stop].unsqueeze(-1)
+        )
+        step = delta.square() * curvature[start:stop].view(1, width, 1)
+        step = step + 2 * delta * gradient.unsqueeze(-1)
+        step = step.masked_fill(~valid, torch.inf)
+        choice = step.argmin(-1)
+        proposed = shifted.gather(-1, choice.unsqueeze(-1)).squeeze(-1)
+        move = column_scale[:, start:stop] * (proposed - current[:, start:stop])
+        current[:, start:stop] = proposed
+        projected = projected + move @ metric[start:stop]
+    candidate_rows = row_loss(decode(current))
+    if not bool(torch.isfinite(candidate_rows).all()):
+        raise ValueError("non-finite GSQ hard objective")
+    accepts = candidate_rows < best_rows
+    return torch.where(accepts.unsqueeze(-1), current, best_codes)
+
+
 def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, config, scale_dtype, row_start):
     rows, columns = weight.shape
     teacher = target.detach().float().clone()
     baseline = weight.detach().clone()
     base_scales = scales.detach().float().clone()
     zero = zeros.detach().float().clone()
-    teacher_energy = (teacher @ factor).square().sum()
-    denominator = torch.where(
-        teacher_energy > torch.finfo(torch.float32).eps,
-        teacher_energy,
-        torch.ones_like(teacher_energy),
-    )
+    teacher_projected = teacher @ factor
+    teacher_energy = teacher_projected.square().sum()
+    if not bool(torch.isfinite(teacher_energy)) or float(teacher_energy) <= torch.finfo(torch.float32).eps:
+        # A near-zero teacher is not a useful normalization. Score the
+        # unnormalized quadratic, which keeps the ordering and the sign.
+        teacher_energy = torch.ones_like(teacher_energy)
 
     def loss(matrix):
-        return ((matrix.float() - teacher) @ factor).square().sum() / denominator
+        return ((matrix.float() - teacher) @ factor).square().sum() / teacher_energy
+
+    def row_loss(matrix):
+        # One raw projection score per output row. Summing these and dividing
+        # by the shared teacher energy reproduces ``loss`` exactly, so a
+        # per-row acceptance decision is the same objective the checkpoint is
+        # reported against.
+        error = matrix.float() - teacher
+        return (error @ factor).square().sum(dim=1)
 
     def recover_codes(candidate_weight, candidate_scales):
         # Match pack_original: the scale/zero product, addition and division
@@ -202,65 +307,146 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
         return decode(recover_codes(candidate_weight, candidate_scales), candidate_scales)
 
     base_codes = recover_codes(baseline, scales)
-    if choices == 2**bits:
-        codes = torch.arange(choices, device=weight.device).float().expand(rows, columns, choices)
-        valid = torch.ones((rows, columns, choices), device=weight.device, dtype=torch.bool)
-    else:
-        offsets = torch.tensor(
-            [0] + [((-1) ** i) * ((i + 1) // 2) for i in range(1, choices)],
-            device=weight.device,
-        )
-        codes = base_codes.unsqueeze(-1) + offsets
-        valid = (codes >= 0) & (codes < 2**bits)
-        codes = codes.clamp(0, 2**bits - 1)
-
-    logits = (-0.5 * (codes - base_codes.unsqueeze(-1)).square()).requires_grad_()
-    scale_delta = torch.zeros_like(base_scales, requires_grad=config.learn_scales)
-    parameters = [logits] + ([scale_delta] if config.learn_scales else [])
-    optimizer = torch.optim.Adam(parameters, lr=config.learning_rate)
-    rng = torch.Generator(device=weight.device).manual_seed(config.seed + row_start)
     before = float(loss(exported(baseline, scales)))
     if not torch.isfinite(torch.tensor(before)):
         raise ValueError("non-finite GSQ baseline objective")
-    best, best_weight, best_scales = before, baseline, scales.detach().clone()
-    history = [before]
-    for step in range(config.steps):
-        temperature = config.temperature_start * (
-            config.temperature_end / config.temperature_start
-        ) ** (step / max(config.steps - 1, 1))
-        uniform = torch.rand(logits.shape, device=weight.device, generator=rng).clamp_(1e-6, 1 - 1e-6)
-        gumbel = -(-uniform.log()).log()
-        probabilities = ((logits.masked_fill(~valid, -torch.inf) + gumbel) / temperature).softmax(-1)
-        current_scales = base_scales * scale_delta.exp()
-        soft_codes = (probabilities * codes).sum(-1)
-        objective = loss(current_scales[:, group] * (soft_codes - zero[:, group]))
-        if not bool(torch.isfinite(objective)):
-            raise ValueError("non-finite GSQ relaxed objective")
-        optimizer.zero_grad()
-        objective.backward()
-        if any(not bool(torch.isfinite(parameter.grad).all()) for parameter in parameters):
-            raise ValueError("non-finite GSQ gradient")
-        optimizer.step()
-        with torch.no_grad():
-            chosen = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
-            hard_codes = codes.gather(-1, chosen).squeeze(-1)
-            hard_scales = (base_scales * scale_delta.exp()).to(scale_dtype).float()
-            candidate = decode(hard_codes, hard_scales).to(weight.dtype)
-            score = float(loss(exported(candidate, hard_scales)))
-            if not torch.isfinite(torch.tensor(score)):
-                raise ValueError("non-finite GSQ hard objective")
-            history.append(score)
-            if score < best:
-                best, best_weight, best_scales = score, candidate.clone(), hard_scales.clone()
+
+    current_codes = base_codes.clone()
+    current_scales = base_scales.clone()
+    best_rows = row_loss(decode(current_codes, current_scales))
+    history = []
+    offsets = torch.tensor(
+        [0] + [((-1) ** i) * ((i + 1) // 2) for i in range(1, 2 * _HARD_SWEEP_WINDOW + 1)],
+        device=weight.device,
+    )
+
+    # Hard code search on the exported weight. A GPTQ initializer is already a
+    # local optimum of the same Gram, so an accepted move needs the exported
+    # score of a complete candidate; the relaxed expectation of a code
+    # distribution cannot describe the export and is never used to accept one.
+    #
+    # Two candidate families are scored every round and merged per row: codes
+    # alone, and codes with a refit scale table. Refitting scales moves the
+    # grid under the codes, so the accepted state always has its codes
+    # re-searched at those scales before the next round.
+    def score_rows(candidate_codes, candidate_scales):
+        return row_loss(decode(candidate_codes, candidate_scales))
+
+    best_codes = current_codes
+    best_scales = current_scales
+    rounds = min(config.steps, _HARD_SCALE_ROUNDS) if config.learn_scales else min(config.steps, _HARD_SWEEP_CAP)
+    floor = 1.0 - _HARD_ACCEPT_MARGIN
+    for _ in range(rounds):
+        # Candidate 1: move codes on the current scale table.
+        searched = hard_code_sweep(
+            current_codes,
+            current_scales[:, group],
+            metric=factor,
+            teacher=teacher,
+            decode=lambda codes: decode(codes, current_scales),
+            row_loss=lambda codes: score_rows(codes, current_scales),
+            bits=bits,
+            offsets=offsets,
+        )
+        current_codes = searched
+        code_rows = score_rows(current_codes, current_scales)
+        accepts = code_rows < best_rows * floor
+        best_codes = torch.where(accepts.unsqueeze(-1), current_codes, best_codes)
+        best_scales = torch.where(accepts.unsqueeze(-1), current_scales, best_scales)
+        best_rows = torch.where(accepts, code_rows, best_rows)
+        history.append(float(best_rows.sum() / teacher_energy))
+        if not config.learn_scales or not bool(accepts.any()):
+            break
+        # Candidate 2: refit the scale table under those codes. Scales move the
+        # grid, so the next round re-searches the codes on the new table.
+        scaled = _fit_group_scales(
+            current_codes, zero, group, teacher, factor, decode,
+            scale_dtype, current_scales,
+        )
+        scale_rows = score_rows(current_codes, scaled)
+        accepts = scale_rows < best_rows * floor
+        if not bool(accepts.any()):
+            break
+        best_codes = torch.where(accepts.unsqueeze(-1), current_codes, best_codes)
+        best_scales = torch.where(accepts.unsqueeze(-1), scaled, best_scales)
+        best_rows = torch.where(accepts, scale_rows, best_rows)
+        current_scales = torch.where(accepts.unsqueeze(-1), scaled, current_scales)
+        history.append(float(best_rows.sum() / teacher_energy))
+
+    # Final per-row acceptance against the initializer, so a row that got worse
+    # somewhere in the loop keeps its GPTQ export.
+    final_rows = score_rows(best_codes, best_scales)
+    keep = final_rows <= best_rows
+    best_codes = torch.where(keep.unsqueeze(-1), best_codes, base_codes)
+    best_scales = torch.where(keep.unsqueeze(-1), best_scales, base_scales)
+    best_weight = decode(best_codes, best_scales)
+    # The aggregate history has one entry per configured step plus the
+    # initializer. A converged sweep stops early and scale learning may add its
+    # own entries, so normalize the length here instead of per chunk.
+    history = history[:config.steps]
+    while len(history) < config.steps:
+        history.append(history[-1] if history else before)
+
+    # Score the checkpoint that is actually written: the search runs in FP32,
+    # so casting to the model dtype can round a code across a half step.
+    exported_weight = best_weight.detach().to(weight.dtype)
+    after = float(loss(exported(exported_weight, best_scales)))
+    if not torch.isfinite(torch.tensor(after)):
+        raise ValueError("non-finite GSQ hard objective")
+    if after > before:
+        raise ValueError("GSQ hard export regressed from its initializer")
     return ScalarGSQResult(
-        best_weight.detach().to(weight.dtype),
+        exported_weight,
         best_scales.detach().to(scales.dtype),
         zeros.detach().clone(),
         group.detach().clone(),
         before,
-        best,
-        history,
+        after,
+        [before] + history,
     ), float(teacher_energy)
+
+
+def _fit_group_scales(codes, zero, group, teacher, metric, decode, scale_dtype, fallback):
+    """Closed-form per-group scale refit with the integer codes held fixed.
+
+    The objective is quadratic in one group scale, but a group's columns still
+    enter every output coordinate through the Gram, so the minimizer is not a
+    block-diagonal ratio. Hold the group's own reconstruction at zero, project
+    the remaining residual, and solve the resulting scalar least squares:
+
+    ``s* = -<d metric, residual> / ||d metric||^2`` over that group's columns.
+
+    Codes are frozen, which is what makes this exact; it also keeps the cost to
+    one projection per group instead of a learning-rate schedule.
+    """
+    # Start from the incoming table so groups the search never visits
+    # (padding rows, unused ids) keep their stored value.
+    stored = fallback.to(codes.dtype).clone()
+    current = decode(codes, fallback)
+    for group_id in sorted({int(value) for value in group.tolist()}):
+        columns = (group == group_id).nonzero().squeeze(-1)
+        delta_codes = codes[:, columns] - zero[:, group_id].unsqueeze(1)
+        # Residual with this group's own contribution removed, in metric space.
+        without = current.clone()
+        without[:, columns] = 0
+        residual = (without.float() - teacher) @ metric
+        basis = delta_codes @ metric[columns]
+        numerator = -(basis * residual).sum(dim=1)
+        denominator = basis.square().sum(dim=1)
+        scale = torch.where(
+            denominator > torch.finfo(torch.float32).eps,
+            numerator / denominator.clamp_min(torch.finfo(torch.float32).eps),
+            fallback[:, group_id],
+        )
+        stored[:, group_id] = scale
+    refined = stored.to(scale_dtype).float()
+    usable = torch.isfinite(refined).all(dim=1) & (refined > 0).all(dim=1)
+    refined = torch.where(usable.unsqueeze(1), refined, fallback.to(scale_dtype).float())
+    if not bool(torch.isfinite(decode(codes, refined)).all()):
+        raise ValueError("GSQ scale refit produced a non-finite export")
+    return refined
+
+
 def refine_affine_scalar(
     weight, scales, zeros, g_idx, *, target, bits, config=None,
     hessian=None, inputs=None, packing="gptq", scale_dtype=torch.float16,
@@ -274,6 +460,8 @@ def refine_affine_scalar(
     Hard checkpoints are scored after weight casting, code reconstruction by the
     selected packer convention, and scale casting to the checkpoint dtype.
     The original baseline tensors are returned unchanged unless that score improves.
+    A calibration-free objective with fixed scales is skipped outright: nearest
+    rounding already minimizes it, so the search could only reproduce the baseline.
     An optional native-minus-current cross moment adds the asymmetric linear
     term. Scores then omit a candidate-independent constant and can be negative;
     they are not absolute normalized reconstruction errors.
@@ -354,7 +542,8 @@ def refine_affine_scalar(
                 sum(part.before * norm for part, norm in zip(results, normalizers)) / total,
                 sum(part.after * norm for part, norm in zip(results, normalizers)) / total,
                 [sum(part.history[step] * norm for part, norm in zip(results, normalizers)) / total
-                 for step in range(config.steps + 1)],
+                 for step in range(len(results[0].history))],
+                skipped=results[0].skipped,
             )
 
     with torch.inference_mode(False), torch.enable_grad():
@@ -444,6 +633,22 @@ def refine_affine_scalar(
             raise ValueError("non-finite scalar GSQ baseline objective")
         best, best_weight, best_scales = before, baseline, scales.detach().clone()
         history = [before]
+        if hessian is None and inputs is None and cross_moment is None and not config.learn_scales:
+            # The objective is plain weight MSE and the scales are fixed, so it
+            # is separable per element: the nearest-rounding code RTN/AWQ
+            # already produced is the exact minimizer, and no candidate this
+            # loop can export scores strictly better. Skipping keeps the
+            # checkpoint bit-identical while dropping the whole step budget
+            # (RTN+GSQ was 6.7x slower for 0 changed tensors, #4691).
+            log.info(
+                "GSQ: weight-MSE objective with fixed scales cannot improve nearest "
+                "rounding; skipping the code search for this module."
+            )
+            return ScalarGSQResult(
+                best_weight.detach().to(weight.dtype), best_scales.detach().to(scales.dtype),
+                zeros.detach().clone(), g_idx.detach().clone(), before, best, history,
+                skipped=True,
+            )
         for step in range(config.steps):
             tau = config.temperature_start * (config.temperature_end / config.temperature_start) ** (
                 step / max(config.steps-1, 1))

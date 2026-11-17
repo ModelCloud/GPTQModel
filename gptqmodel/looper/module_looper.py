@@ -99,6 +99,7 @@ log = setup_logger()
 
 _IO_WRITE_SPEED_MB: Optional[float] = None
 _IO_WRITE_SPEED_LOCK = threading.Lock()
+_SAME_MASK = object()
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from logbar.progress import ProgressBar
@@ -164,6 +165,28 @@ def _resolve_strategy_device_pool(
         raise ValueError(f"ModuleLooper: {label} device pool is empty after normalization.")
 
     return resolved
+
+
+def validate_moe_routing_support(gptq_model) -> None:
+    """Reject ``ExpertsRoutingBypass`` when the definition cannot feed all experts.
+
+    A model without ``moe_lifecycle_hooks`` cannot replay the whole calibration
+    batch through every expert. Warning per forward and continuing to calibrate
+    only the natively routed tokens while the saved config still claimed bypass
+    routing made the option a silent no-op.
+    """
+
+    if not gptq_model.quantize_config.moe_routing_bypass():
+        return
+    if getattr(gptq_model, "moe_lifecycle_hooks", None) is not None:
+        return
+    raise ValueError(
+        f"ModuleLooper: MoEConfig(routing=ExpertsRoutingBypass()) was requested but "
+        f"{type(gptq_model).__name__} does not declare `moe_lifecycle_hooks`. "
+        "The all-experts calibration path cannot run, and continuing would silently "
+        "fall back to native routed calibration. Declare `moe_lifecycle_hooks` on the "
+        "model definition, or use `ExpertsRoutingOverride` instead."
+    )
 
 
 class StopMainLoop(Exception):
@@ -406,6 +429,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         else:
             self.moe_routing_override = None
         self.moe_routing_bypass = self.gptq_model.quantize_config.moe_routing_bypass()
+        validate_moe_routing_support(self.gptq_model)
         self._emit_moe_parallel_quant_runtime()
 
         for processor in self.processors:
@@ -846,11 +870,21 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         tls = getattr(processor, "_hooks_paused_tls", None)
         return getattr(tls, "value", False) if tls else False
 
-    def _set_processor_mask(self, processor: LoopProcessor, mask):
-        """Store the active sequence mask for the current worker thread."""
+    def _set_processor_mask(self, processor: LoopProcessor, mask, padding_mask=_SAME_MASK):
+        """Store the active sequence mask for the current worker thread.
 
+        ``mask`` is the calibration row mask every statistic uses (padding and,
+        with ``CalibrationConfig.exclude_attention_sinks``, the attention-sink
+        tokens). ``padding_mask`` is the attention padding alone; it drives the
+        forward-visible MoE padding zeroing and activation ranges, which must
+        never alter a real token. It defaults to ``mask``.
+        """
+
+        if padding_mask is _SAME_MASK:
+            padding_mask = mask
         tls = self._processor_mask_tls(processor)
         tls.value = mask
+        tls.padding_value = padding_mask
         # ``mask`` is [batch, seq] on the execution device. Derive the
         # per-sample emptiness flags once per batch here; every module's
         # forward hook would otherwise synchronize once per sample.
@@ -862,11 +896,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         # Routed-expert hooks need to know whether this batch contains padding
         # before they scan a `[routed_rows, H]` activation for all-zero rows.
         # Resolve it here, once per batch, instead of synchronizing per expert.
-        tls.mask_has_padding = (
-            not bool(mask.all())
-            if torch.is_tensor(mask) and mask.ndim == 2
-            else None
-        )
+        if torch.is_tensor(padding_mask) and padding_mask.ndim == 2:
+            tls.mask_has_padding = not bool(padding_mask.all())
+        elif padding_mask is None and torch.is_tensor(mask):
+            # Only sink tokens are masked; there is no padding to scan for.
+            tls.mask_has_padding = False
+        else:
+            tls.mask_has_padding = None
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
@@ -1021,15 +1057,16 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         if not flag_enabled:
             return False
 
-        # Check if model has lifecycle hooks
+        # Check if model has lifecycle hooks. __init__ already rejects a bypass
+        # request for a model without hooks; keep this guard so a config mutated
+        # after construction cannot silently re-enable native routing.
         hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
-            log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
-                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
-                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
+            raise ValueError(
+                f"ModuleLooper: ExpertsRoutingBypass was requested but "
+                f"{self.gptq_model.__class__.__name__} does not declare `moe_lifecycle_hooks`. "
+                "The all-experts calibration path cannot run."
             )
-            return False
 
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block_for_subset(
@@ -1964,6 +2001,38 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 exc_info=True,
             )
 
+    def _fence_run_work(self) -> None:
+        """Wait for work this run already submitted before tearing its state down.
+
+        ``loop()`` drains the device pool and the watcher threads only on the
+        success path. The failure path used to restore the model and delete the
+        per-run offload directory while already-submitted submodule finalizers
+        were still executing: those finalizers re-created the run directory
+        that ``release_private_offload_root`` had just removed (leaking one
+        layer's bundles per failed run) and kept packing/replacing modules
+        after ``quantize()`` had already raised (issue #4595).
+
+        Each wait is independent. A pool that fails to drain must not skip the
+        remaining waits, and nothing here may mask the original exception.
+        """
+
+        from ..utils.stream import STREAM_DEVICE_POOL
+
+        waits = (
+            ("device thread pool", DEVICE_THREAD_POOL.wait),
+            ("finalizer watcher threads", self.wait_dangling_threads),
+            ("stream device pool", STREAM_DEVICE_POOL.wait),
+        )
+        for label, wait in waits:
+            try:
+                wait()
+            except Exception:
+                log.warning(
+                    "failed to drain the %s while failing the quantization run",
+                    label,
+                    exc_info=True,
+                )
+
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
@@ -1971,19 +2040,26 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 result = self._loop_impl(fallback=fallback, **kwargs)
             except BaseException:
-                # A cancelled or failed run must also release the layer that
-                # was mid-stage: the success path moves it back only after
-                # post_quantize, which the exception skipped (#4546).
+                # Fence already-submitted work before restoring anything it may
+                # still be mutating. A finalizer that ran after the teardown
+                # re-created the deleted run directory and kept packing modules
+                # after `quantize()` had raised (issue #4595).
                 try:
-                    self._restore_inflight_layer()
+                    self._fence_run_work()
                 finally:
-                    # A failed run must not leave the base modules stranded on meta.
+                    # A cancelled or failed run must also release the layer that
+                    # was mid-stage: the success path moves it back only after
+                    # post_quantize, which the exception skipped (#4546).
                     try:
-                        self._restore_offloaded_base_modules(strict=False)
+                        self._restore_inflight_layer()
                     finally:
-                        # A failed run cannot be saved, so its per-run offload
-                        # bundles are no longer reachable (issue #4368).
-                        release_private_offload_root(self.gptq_model)
+                        # A failed run must not leave the base modules stranded on meta.
+                        try:
+                            self._restore_offloaded_base_modules(strict=False)
+                        finally:
+                            # A failed run cannot be saved, so its per-run offload
+                            # bundles are no longer reachable (issue #4368).
+                            release_private_offload_root(self.gptq_model)
                 raise
             finally:
                 # Process-wide scratch (e.g. EXL3's per-stream tile buffers)

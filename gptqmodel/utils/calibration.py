@@ -137,26 +137,134 @@ def _iter_calibration_rows(dataset):
 _CALIBRATION_COLUMNS = ("input_ids", "attention_mask", "text", "messages")
 
 
+def _column_entries(value: Any) -> Optional[List[Any]]:
+    """Return a column's per-row entries as a Python list, else ``None``.
+
+    ``Dataset.with_format("numpy")[:]`` stores a ragged token column as a 1-D
+    ``ndarray(dtype=object)`` whose elements are arrays, and a pandas
+    ``Series`` is not a ``Sequence`` and does not index positionally through
+    ``[]``. Both hold one entry per calibration row, so resolve their entries
+    here instead of classifying them by ``ndim`` or ``isinstance`` alone.
+
+    ``None`` means the value is not a container of rows (a string, a scalar, a
+    0-D array, ...). A 1-D numeric array/tensor is returned as its scalar
+    entries; the caller decides whether those scalars make one token row or a
+    column of rows.
+    """
+
+    if isinstance(value, (str, bytes, bytearray)):
+        return None
+    ndim = getattr(value, "ndim", None)
+    if ndim is not None:
+        if ndim == 0:
+            return None
+        if ndim >= 2:
+            # Row-major 2-D array/tensor: one entry per row.
+            return [value[index] for index in range(len(value))]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if ndim == 1:
+        # A 1-D ``ndarray``/``Series``: ``tolist()`` unwraps an object column
+        # element-wise without converting the elements themselves.
+        tolist = getattr(value, "tolist", None)
+        if callable(tolist):
+            entries = tolist()
+            if isinstance(entries, list):
+                return entries
+    if isinstance(value, Sequence):
+        # ``datasets.arrow_dataset.Column`` is a ``Sequence`` without
+        # ``ndim``/``tolist``.
+        return list(value)
+    return None
+
+
+def _frame_columns(dataset: Any) -> Optional[Mapping[str, Any]]:
+    """Return a DataFrame-like input as a columnar mapping, else ``None``.
+
+    A ``pandas.DataFrame`` is not a ``Mapping``, so iterating it yields its
+    column *labels*: a text-only frame calibrated on the literal string
+    ``"text"``, and an ``input_ids`` frame failed with a misleading
+    minimum-length error. A table that stores one entry per row per column is
+    therefore converted to the columnar mapping the rest of this module
+    understands. ``None`` means the object is not table-like, so the existing
+    handling applies unchanged.
+    """
+
+    if isinstance(dataset, Mapping):
+        return None
+    if getattr(dataset, "columns", None) is None:
+        return None
+    to_dict = getattr(dataset, "to_dict", None)
+    if not callable(to_dict):
+        return None
+
+    # pandas spells the orientation as a positional argument or ``orient=``;
+    # Polars uses ``as_series=False``. A `to_dict` that understands none of
+    # them is not a row-wise table, so let the iterable handling take it.
+    for args, kwargs in (
+        (("list",), {}),
+        ((), {"orient": "list"}),
+        ((), {"as_series": False}),
+    ):
+        try:
+            mapped = to_dict(*args, **kwargs)
+        except TypeError:
+            continue
+        if isinstance(mapped, Mapping):
+            break
+    else:
+        return None
+
+    columns: Dict[str, Any] = {}
+    for name, value in mapped.items():
+        if callable(getattr(value, "to_list", None)):
+            value = value.to_list()
+        if not isinstance(value, (list, tuple)):
+            # A column that is not a per-row sequence means this is not a
+            # row-wise table after all.
+            return None
+        columns[name] = value
+    return columns
+
+
+def _unwrap_object_array(value: Any) -> Any:
+    """Return an object-dtype ``ndarray`` as a Python list.
+
+    ``torch.as_tensor`` refuses ``dtype=object`` arrays even when every element
+    is an integer token id, which is exactly what a NumPy-formatted HF dataset
+    yields per row. Unwrapping the elements lets the existing integer/dtype
+    checks classify them; anything else (nested arrays, strings) keeps failing
+    with the same structural error as before.
+    """
+
+    if getattr(getattr(value, "dtype", None), "kind", None) != "O":
+        return value
+    tolist = getattr(value, "tolist", None)
+    if not callable(tolist):
+        return value
+    return tolist()
+
+
 def _is_batched_column(value: Any) -> bool:
     """Return True when ``value`` holds one entry per calibration row."""
 
     if isinstance(value, (str, bytes, bytearray)):
         return False
     ndim = getattr(value, "ndim", None)
-    if ndim is not None:
-        return ndim >= 2
-    if isinstance(value, Sequence):
-        if len(value) == 0:
-            return False
-        first = value[0]
-        first_ndim = getattr(first, "ndim", None)
-        if first_ndim is not None:
-            return first_ndim >= 1
-        # A nested sequence is a column of rows; a sequence of scalars is one
-        # token row. This also covers ``datasets.arrow_dataset.Column``, which
-        # is a ``Sequence`` but exposes neither ``ndim`` nor a ``list`` type.
-        return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
-    return False
+    if ndim is not None and ndim >= 2:
+        return True
+    entries = _column_entries(value)
+    if not entries:
+        return False
+    first = entries[0]
+    first_ndim = getattr(first, "ndim", None)
+    if first_ndim is not None:
+        # A 1-D object column of arrays/lists is a column of rows; a column of
+        # 0-D scalars is one token row.
+        return first_ndim >= 1
+    # A nested sequence is a column of rows; a sequence of scalars is one token
+    # row. This also covers ``datasets.arrow_dataset.Column``.
+    return isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray))
 
 
 def _is_columnar_mapping(mapping: Mapping) -> bool:
@@ -171,13 +279,12 @@ def _is_columnar_mapping(mapping: Mapping) -> bool:
     if "input_ids" in mapping:
         return _is_batched_column(mapping["input_ids"])
     if "text" in mapping:
-        value = mapping["text"]
-        return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+        return _column_entries(mapping["text"]) is not None
     if "messages" in mapping:
-        value = mapping["messages"]
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        entries = _column_entries(mapping["messages"])
+        if not entries:
             return False
-        return len(value) > 0 and isinstance(value[0], (list, tuple))
+        return isinstance(entries[0], (list, tuple))
     return False
 
 
@@ -208,68 +315,6 @@ def calibration_input_row_count(dataset: Any) -> Optional[int]:
         return None
 
 
-def attention_sink_bos_flags(
-    input_ids: Any,
-    attention_mask: Any = None,
-    bos_token_id: Optional[int] = None,
-) -> Optional[torch.Tensor]:
-    """Per-sample flags: the first non-padding token of the sample is BOS.
-
-    ``exclude_attention_sinks`` may only drop a token that is really an
-    attention sink. Qwen2.5/Qwen3 tokenizers add no BOS, so the historical
-    unconditional ``keep[:, 0] = False`` removed the first *text* token of
-    every row and could make GPTQ worse than RTN (issue #4459). This helper
-    turns the calibration ``input_ids`` into one flag per sample, which lets
-    the Hessian skip exactly the rows whose first retained token is the
-    tokenizer's BOS id.
-
-    Padding is resolved from ``attention_mask`` (left padding included): the
-    flag describes the first position that survives the mask, which is also
-    the first row GPTQ sees after the batch keep-mask is applied.
-
-    Returns ``None`` when the decision cannot be made from the supplied
-    metadata (no ids, no BOS id, unusable shape). Callers must then skip
-    position-0 masking instead of guessing. A tensor of all ``False`` is a
-    positive decision that nothing in this batch is a BOS sink.
-    """
-
-    if input_ids is None or bos_token_id is None:
-        return None
-
-    try:
-        ids = torch.as_tensor(input_ids)
-    except (TypeError, ValueError, RuntimeError):
-        return None
-    if ids.dim() == 1:
-        ids = ids.unsqueeze(0)
-    if ids.dim() != 2 or ids.shape[0] == 0:
-        return None
-    if ids.dtype == torch.bool or ids.is_floating_point() or ids.is_complex():
-        return None
-    ids = ids.to(dtype=torch.long)
-
-    if attention_mask is None:
-        keep = torch.ones_like(ids, dtype=torch.bool)
-    else:
-        try:
-            keep = torch.as_tensor(attention_mask)
-        except (TypeError, ValueError, RuntimeError):
-            return None
-        if keep.dim() == 1:
-            keep = keep.unsqueeze(0)
-        if keep.dim() != 2:
-            return None
-        if keep.shape != ids.shape:
-            return None
-        keep = keep.to(dtype=torch.bool)
-
-    has_token = keep.any(dim=1)
-    # ``argmax`` on an all-False row yields 0, which ``has_token`` masks out.
-    first_position = keep.to(dtype=torch.int8).argmax(dim=1)
-    first_ids = ids.gather(1, first_position.unsqueeze(1)).squeeze(1)
-    return has_token & (first_ids == int(bos_token_id))
-
-
 def _is_dataset_split_mapping(mapping: Mapping) -> bool:
     """Return True for a ``DatasetDict``-style mapping of splits to datasets."""
 
@@ -280,16 +325,25 @@ def _is_dataset_split_mapping(mapping: Mapping) -> bool:
 
 
 def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
-    """Split a columnar calibration mapping into one mapping per row."""
+    """Split a columnar calibration mapping into one mapping per row.
 
-    primary = next(name for name in _CALIBRATION_COLUMNS if name in mapping)
-    row_count = len(mapping[primary])
+    Object-dtype NumPy columns and pandas ``Series`` columns are indexed through
+    ``_column_entries`` so each row receives one element, not the whole column.
+    """
 
+    primary = next(name for name in _CALIBRATION_COLUMNS if mapping.get(name) is not None)
+
+    columns: Dict[str, Any] = {}
     for name in _CALIBRATION_COLUMNS:
         if name not in mapping or mapping[name] is None:
             continue
+        entries = _column_entries(mapping[name])
+        columns[name] = mapping[name] if entries is None else entries
+
+    row_count = len(columns[primary])
+    for name, column in columns.items():
         try:
-            column_length = len(mapping[name])
+            column_length = len(column)
         except TypeError:
             continue
         if column_length != row_count:
@@ -298,16 +352,10 @@ def _columnar_mapping_examples(mapping: Mapping) -> List[Dict[str, Any]]:
                 f"expected {row_count} (same as `{primary}`)."
             )
 
-    examples: List[Dict[str, Any]] = []
-    for row_index in range(row_count):
-        examples.append(
-            {
-                name: (None if mapping[name] is None else mapping[name][row_index])
-                for name in _CALIBRATION_COLUMNS
-                if name in mapping
-            }
-        )
-    return examples
+    return [
+        {name: column[row_index] for name, column in columns.items()}
+        for row_index in range(row_count)
+    ]
 
 
 def _is_integer_scalar(value: Any) -> bool:
@@ -363,6 +411,10 @@ def prepare_calibration_dataset(
     if isinstance(calibration_dataset, str):
         raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")
 
+    frame_columns = _frame_columns(calibration_dataset)
+    if frame_columns is not None:
+        calibration_dataset = frame_columns
+
     if isinstance(calibration_dataset, Mapping):
         if len(calibration_dataset) == 0:
             raw_examples = []
@@ -402,6 +454,7 @@ def prepare_calibration_dataset(
     message_examples = 0
     message_template_name = None
     message_text_fallback_examples = 0
+    ignored_source_examples = 0
 
     def _require_tokenizer(reason: str) -> None:
         if tokenizer is None:
@@ -451,7 +504,7 @@ def prepare_calibration_dataset(
 
     def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
         try:
-            tensor = torch.as_tensor(value)
+            tensor = torch.as_tensor(_unwrap_object_array(value))
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
 
@@ -480,7 +533,7 @@ def prepare_calibration_dataset(
 
     def _normalize_attention_mask(mask_value: Any, ids_tensor: torch.Tensor, idx: int) -> torch.Tensor:
         try:
-            mask_tensor = torch.as_tensor(mask_value)
+            mask_tensor = torch.as_tensor(_unwrap_object_array(mask_value))
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(
                 f"Quantize: failed to convert `attention_mask` to tensor for calibration item {idx}."
@@ -618,6 +671,18 @@ def prepare_calibration_dataset(
         # builtin dict. Accept every mapping so the AutoGPTQ-style
         # `[tokenizer(text), ...]` calibration input reaches the input_ids path.
         if isinstance(example, Mapping):
+            # Explicit token ids win over every source column. A row carrying
+            # `input_ids` next to `text` or `messages` is the normal output of
+            # `Dataset.map(tokenizer, truncation=True, ...)` and of
+            # `dataset[:]` / `list(dataset)`, so re-tokenizing from the source
+            # silently discarded the caller's truncation, special-token, and
+            # chat choices and fed documents far past the requested length
+            # (#4635 for `text`, #4670 for `messages`).
+            if example.get("input_ids") is not None:
+                if example.get("messages") is not None or example.get("text") is not None:
+                    ignored_source_examples += 1
+                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
+                continue
             if "messages" in example:
                 apply_fn, _ = _get_message_template()
                 if apply_fn is None:
@@ -633,9 +698,6 @@ def prepare_calibration_dataset(
                 continue
             if "text" in example:
                 processed_examples.append(_tokenize_text_value(example["text"], idx))
-                continue
-            if "input_ids" in example:
-                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
                 continue
             raise ValueError(
                 f"Quantize: unsupported calibration example structure at index {idx}: keys={list(example.keys())}"
@@ -854,6 +916,12 @@ def prepare_calibration_dataset(
             "Calibration: tokenized %s `messages` examples via tokenizer.%s",
             message_examples,
             message_template_name,
+        )
+    if ignored_source_examples > 0:
+        log.info(
+            "Calibration: used the provided `input_ids` for %s examples that also carried `text`/`messages`; "
+            "the source column was not re-tokenized.",
+            ignored_source_examples,
         )
     if message_text_fallback_examples > 0:
         log.warn(

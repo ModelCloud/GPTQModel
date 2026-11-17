@@ -1,9 +1,19 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: ttbfp-perf
 description: Measure, profile, or optimize the ttbfp CPU kernels (Tenstorrent bf8_b/bf4_b/bf2_b block floats) under gptqmodel_ext/ttbfp/ - running the suite, reporting throughput, A/B comparing builds, or editing gptqmodel_ext/ttbfp/src/ttbfp_cpu.cpp. Use when a task concerns ttbfp performance, thread or tile tuning, or a reported slowdown. Not for questions about the TT block-float bit layout or dtype naming; those are answered in gptqmodel_ext/ttbfp/README.md.
 ---
 
 # ttbfp performance work
+
+## At a glance
+
+- **What:** tune the fused decode+GEMM CPU microkernels for Tenstorrent `bf8_b`/`bf4_b`/`bf2_b` block floats without changing a single output bit.
+- **Why:** these kernels sit close to the FMA floor, so most claimed wins are measurement noise, and some "optimizations" (k blocking) silently break bitwise parity.
+- **When:** measuring, profiling, A/B-comparing, or editing `gptqmodel_ext/ttbfp/src/ttbfp_cpu.cpp`, or investigating a ttbfp slowdown.
+- **Where:** `gptqmodel_ext/ttbfp/` (`src/`, `bench/`, `tests/`, `tools/`, `README.md` for the bit layout).
+- **How:** measure with the four rules below, A/B in one process, keep all paths bitwise equal, and check the dead-ends list before trying an idea.
 
 The kernels are fused decode+GEMM microkernels over 16-element block-float
 blocks. Performance work here means changing tile shape, blocking, or the
@@ -57,7 +67,9 @@ figure without them is not reproducible.
 
 ## Where the time goes
 
-Start from the FMA floor, not from the current number.  A pure FMA loop
+Start from the FMA floor, not from the current number. The figures below were
+measured on the Zen 5 development host; re-derive them on yours before
+comparing. A pure FMA loop
 (no decode, no scale, no broadcast) runs a 16x4096x16 panel in ~0.0178 ms on
 this host, i.e. ~118 GFLOP/s or ~18.2 ms for the whole M=64, K=N=4096
 problem.  The bf8_b int8 kernel takes ~26.1 ms, so it is at ~70% of that floor,
@@ -126,7 +138,10 @@ slower at 16x1 because each k touches `MR` different cache lines and the
 compiler runs out of address registers.  It is free at 4x4, where only four
 rows are staged.
 
-Tile shape can be overridden for experiments without a rebuild:
+Tile shape can be overridden for experiments without a rebuild. These
+`TTBFP_*` variables are benchmark and debugging knobs of the standalone
+library; GPT-QModel code must never set or depend on them (see the
+environment-variable rule in `AGENTS.md`):
 
 ```bash
 TTBFP_MRT=8 TTBFP_JM=2 python gptqmodel_ext/ttbfp/bench/bench_matmul.py  # MR=8, J=2
@@ -138,7 +153,7 @@ TTBFP_FORCE_SCALAR=1 ...                         # reference path
 
 ```bash
 make -C gptqmodel_ext/ttbfp            # libttbfp.so
-make -C gptqmodel_ext/ttbfp test       # 280 tests, includes bitwise parity
+make -C gptqmodel_ext/ttbfp test       # full suite, includes bitwise parity
 make -C gptqmodel_ext/ttbfp bench      # microbenchmarks
 make -C gptqmodel_ext/ttbfp cuda       # optional CUDA library (needs nvcc + GPU)
 ```

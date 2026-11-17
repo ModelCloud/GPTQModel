@@ -18,6 +18,7 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 torch = pytest.importorskip("torch")
 
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import foem as foem_module
 from gptqmodel.quantization.config import FOEMConfig, GPTQConfig
 from gptqmodel.quantization.foem import FOEM
@@ -106,7 +107,8 @@ def _processor_quantize(source, factor, config, *, blocksize):
         source.shape[1], source.shape[0], bias=False, dtype=source.dtype
     )
     layer.weight.data.copy_(source)
-    task = FOEM(layer, config)
+    # Native processors read routing metadata from the NamedModule wrapper.
+    task = FOEM(NamedModule(layer, "proj", "proj", 0), config)
     task.quantizer.configure(
         perchannel=True,
         grid=100,

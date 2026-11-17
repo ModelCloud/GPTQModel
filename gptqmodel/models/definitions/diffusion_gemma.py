@@ -12,12 +12,12 @@ from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
 from transformers.pytorch_utils import id_tensor_storage
 
 from ...nn_modules.qlinear import BaseQuantLinear
-from ...utils.calibration import batched_conversations
 from ...utils.device import get_device
 from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_move_to
 from ...utils.torch import torch_empty_cache
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 _DIFFUSION_GEMMA_MASKS = "__gptqmodel_diffusion_gemma_attention_masks"
@@ -341,22 +341,24 @@ class DiffusionGemmaQModel(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=False)
 
+    @classmethod
+    def prepare_inputs_for_conversations(
+        cls,
+        processor: ProcessorMixin,
+        conversations: list[dict] | list[list[dict]],
+    ):
+        return processor.apply_chat_template(
+            conversations,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
-        del kwargs
-        processor = self.load_processor()
-        calibration_data = []
-        for batch in batched_conversations(calibration_dataset, batch_size):
-            calibration_data.append(
-                processor.apply_chat_template(
-                    batch,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                )
-            )
-        del processor
-        return calibration_data
+        return prepare_vlm_calibration_dataset(
+            self, calibration_dataset, batch_size=batch_size, options=kwargs
+        )
 
     def move_input_capture_example(
         self,

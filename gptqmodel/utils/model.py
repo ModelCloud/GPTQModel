@@ -13,6 +13,7 @@ import json
 import math
 import operator
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -3312,12 +3313,13 @@ def _restore_checkpoint_buffers(
     *, exact_source_names: set[str] | frozenset[str] = frozenset(),
     name_map: dict[str, str] | None = None,
     device_map: dict | None = None,
+    offload_folder: str | os.PathLike | None = None,
 ) -> None:
     """Restore buffers and dense parameters after Accelerate casts.
 
-    ``None`` keeps the source dtype. Dense parameters are restored only by the
-    export shell (``restore_checkpoint_buffer_dtypes``); a normal load passes
-    its requested model dtype and must keep casting them.
+    ``None`` keeps the source dtype. Dense parameters are restored by the
+    export shell or an explicit native FP32 policy; other dense tensors keep
+    the requested model dtype.
 
     ``name_map`` maps a runtime tensor name to the name stored in the
     checkpoint. It lets the restore read from the original checkpoint when
@@ -3325,11 +3327,14 @@ def _restore_checkpoint_buffers(
 
     ``device_map`` places a tensor that Accelerate never saw (packed FP8
     weights removed from its checkpoint) on the device the map assigns.
+    Intentionally disk-offloaded slots stay meta; their payload and offload
+    index are updated together instead of materializing them in the model.
     """
     names = set(dtypes)
+    offload_index = {}
     source_name = (lambda name: name_map.get(name, name)) if name_map else (lambda name: name)
 
-    def mapped_device(name: str):
+    def mapped_device(name: str, *, include_disk: bool = False):
         if not isinstance(device_map, dict):
             return None
         module_name = name
@@ -3338,7 +3343,7 @@ def _restore_checkpoint_buffers(
         if module_name == "" and "" not in device_map:
             return None
         target = device_map[module_name]
-        if target in ("disk", "meta"):
+        if target == "meta" or (target == "disk" and not include_disk):
             return None
         return target
 
@@ -3383,13 +3388,22 @@ def _restore_checkpoint_buffers(
         slot = current if current is not None else parameter
         if not isinstance(slot, torch.Tensor) or tuple(slot.shape) != tuple(value.shape):
             raise RuntimeError(f"Cannot restore checkpoint tensor {name!r}: missing or mismatched model slot")
-        if slot.device.type == "meta":
+        disk_offloaded = slot.device.type == "meta" and mapped_device(name, include_disk=True) == "disk"
+        if slot.device.type == "meta" and not (disk_offloaded and offload_folder is not None):
             raise RuntimeError(f"Cannot restore checkpoint tensor {name!r} on a meta device")
         if name in exact_source_names and value.dtype != dtypes[name]:
             raise RuntimeError(
                 f"Checkpoint tensor {name!r} must have packed dtype {dtypes[name]}, got {value.dtype}"
             )
         target_dtype = dtypes[name]
+        if disk_offloaded:
+            from accelerate.utils import offload_weight, set_module_tensor_to_device
+
+            restored_value = value.to(device="cpu", dtype=value.dtype if target_dtype is None else target_dtype)
+            offload_weight(restored_value, name, offload_folder, index=offload_index)
+            set_module_tensor_to_device(model, name, "meta", dtype=restored_value.dtype)
+            restored.add(name)
+            return
         target_device = slot.device
         if name in exact_source_names:
             target_device = mapped_device(name) or target_device
@@ -3425,6 +3439,11 @@ def _restore_checkpoint_buffers(
             "Cannot restore checkpoint tensors missing from checkpoint: "
             + ", ".join(sorted(missing))
         )
+    if offload_index:
+        from accelerate.utils import save_offload_index
+
+        # Accelerate merges these entries with unrelated offloaded tensors.
+        save_offload_index(offload_index, offload_folder)
 
 
 def _load_narrowed(checkpoint_dtype: torch.dtype, loaded_dtype: torch.dtype) -> bool:
@@ -3449,10 +3468,59 @@ def _restore_fp32_checkpoint_buffers(model, checkpoint, names: set[str]) -> None
     _restore_checkpoint_buffers(model, checkpoint, dict.fromkeys(names, torch.float32))
 
 
+def _native_fp32_checkpoint_names(model, dtype) -> set[str]:
+    """Resolve Transformers' dtype policy on registered, unquantized slots.
+
+    Transformers uses regex search after replacing ``*`` with ``.*``. Reuse
+    its compiler: segment equality, substring checks and escaped globs each
+    change real native policies. Quantized modules retain their own packed
+    storage/buffer ABI even when a broad native pattern covers their names.
+    """
+    if isinstance(dtype, str):
+        dtype = getattr(torch, dtype.removeprefix("torch."), None)
+    patterns = []
+    if dtype == torch.float16:
+        patterns.extend(getattr(model, "_keep_in_fp32_modules", None) or ())
+    if dtype in (torch.float16, torch.bfloat16):
+        patterns.extend(getattr(model, "_keep_in_fp32_modules_strict", None) or ())
+    if not patterns:
+        return set()
+    try:
+        from transformers.core_model_loading import build_glob_alternation
+    except ImportError as error:
+        raise RuntimeError("Cannot resolve native FP32 policy: Transformers dtype-policy compiler unavailable") from error
+    try:
+        policy, _, _ = build_glob_alternation(patterns)
+    except (re.error, TypeError, ValueError) as error:
+        raise ValueError("Cannot resolve invalid native FP32 dtype policy") from error
+    names = set()
+    quantized_prefixes = set()
+    for prefix, module in model.named_modules():
+        parts = prefix.split(".")
+        if quantized_prefixes and any(".".join(parts[:end]) in quantized_prefixes for end in range(len(parts) + 1)):
+            continue
+        if isinstance(module, BaseQuantLinear) or getattr(module, "MODEL_DTYPE_BUFFERS", None) is not None:
+            quantized_prefixes.add(prefix)
+            continue
+        slots = dict(module._parameters)
+        slots.update({name: value for name, value in module._buffers.items()
+                      if name not in module._non_persistent_buffers_set})
+        for name, tensor in slots.items():
+            full_name = f"{prefix}.{name}" if prefix else name
+            if isinstance(tensor, torch.Tensor) and tensor.is_floating_point() and policy.search(full_name):
+                names.add(full_name)
+    return names
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
         checkpoint = args[0]
+    # Positional argument order is Accelerate's public checkpoint-loader ABI.
+    dtype = kwargs.get("dtype", args[3] if len(args) > 3 else None)
+    device_map = kwargs.get("device_map", args[1] if len(args) > 1 else None)
+    offload_folder = kwargs.get("offload_folder", args[2] if len(args) > 2 else None)
+    native_fp32_names = _native_fp32_checkpoint_names(model, dtype)
     key_converter = kwargs.pop("key_converter", None)
     fp32_bf16_buffer_names = set(kwargs.pop("fp32_bf16_buffer_names", ()))
     packed_fp8_buffer_dtypes = dict(kwargs.pop("packed_fp8_buffer_dtypes", {}))
@@ -3468,7 +3536,10 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             checkpoint, key_converter, fp8_weight_names,
         )
         if converted_checkpoint is not None:
-            kwargs["checkpoint"] = converted_checkpoint
+            if args:
+                args = (converted_checkpoint, *args[1:])
+            else:
+                kwargs["checkpoint"] = converted_checkpoint
             if fp8_weight_names:
                 # Packed FP8 weights are absent from the temporary checkpoint:
                 # Accelerate would cast them to the model dtype (and stage the
@@ -3484,14 +3555,19 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
             else:
                 restore_checkpoint = converted_checkpoint
     try:
+        load_checkpoint = converted_checkpoint or checkpoint
         _prepare_variable_quant_buffers(
             model,
-            kwargs.get("checkpoint", checkpoint),
+            load_checkpoint,
         )
         accelerate.load_checkpoint_in_model(model, *args, **kwargs)
         restore_dtypes = dict(packed_fp8_buffer_dtypes)
-        if str(kwargs.get("dtype")) in {"torch.bfloat16", "bfloat16"}:
+        if str(dtype) in {"torch.bfloat16", "bfloat16"}:
             restore_dtypes.update(dict.fromkeys(fp32_bf16_buffer_names, torch.float32))
+        # Restore from the checkpoint, not the already narrowed model tensor.
+        # Accelerate ignores BF16 keep rules and cannot match native suffix /
+        # regex policies such as ERNIE's `gate.weight` under FP16 either.
+        restore_dtypes.update(dict.fromkeys(native_fp32_names, torch.float32))
         # Accelerate casts every floating buffer to the requested model dtype.
         # A quantized module's buffers (scales, QQQ `s_group`/`s_channel`,
         # EXL3 sign vectors, ...) are quantization state, not activation
@@ -3500,7 +3576,7 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
         # buffers the module declares in `MODEL_DTYPE_BUFFERS`. The re-save
         # shell (`restore_checkpoint_buffer_dtypes`) republishes every
         # floating buffer at exactly its stored dtype instead (#4379).
-        checkpoint_dtypes = _checkpoint_tensor_dtypes(kwargs.get("checkpoint", checkpoint))
+        checkpoint_dtypes = _checkpoint_tensor_dtypes(load_checkpoint)
         for name, module in model.named_modules():
             model_dtype_buffers = getattr(module, "MODEL_DTYPE_BUFFERS", None)
             if model_dtype_buffers is None and not restore_checkpoint_buffer_dtypes:
@@ -3573,11 +3649,12 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
                 model, restore_checkpoint, restore_dtypes,
                 exact_source_names=set(packed_fp8_buffer_dtypes),
                 name_map=restore_name_map,
-                device_map=kwargs.get("device_map"),
+                device_map=device_map,
+                offload_folder=offload_folder,
             )
         _tie_weights_after_checkpoint_load(
             model,
-            kwargs.get("checkpoint", checkpoint),
+            load_checkpoint,
             extra_keys=fp8_weight_names if converted_checkpoint is not None else None,
         )
     finally:
@@ -4061,6 +4138,49 @@ def _get_local_expert_count(module: nn.Module) -> Optional[int]:
     return None
 
 
+def _install_phimoe_topk_override(router: nn.Module) -> None:
+    """Make ``PhimoeTopKRouter`` honour a changed ``top_k``.
+
+    Transformers 5.22 passes ``top_k`` into ``sparsemixer``, but that function
+    always selects exactly two experts (the argmax and the argmax of the
+    remainder).  Writing ``router.top_k`` alone is therefore a silent no-op.
+    Keep the native sparse-mixer path for the model's configured value, and
+    only replace the forward when the override actually changes it.
+    """
+
+    if getattr(router, "_gptqmodel_phimoe_topk_aware", False):
+        return
+
+    native_top_k = getattr(router, "top_k", None)
+    if not isinstance(native_top_k, int):
+        return
+
+    original_forward = router.forward
+
+    def forward_with_topk(hidden_states):
+        if getattr(router, "top_k", None) == native_top_k:
+            return original_forward(hidden_states)
+
+        input_jitter_noise = getattr(router, "input_jitter_noise", 0.0)
+        if router.training and input_jitter_noise > 0:
+            hidden_states = hidden_states * torch.empty_like(hidden_states).uniform_(
+                1.0 - input_jitter_noise, 1.0 + input_jitter_noise
+            )
+
+        router_logits = nn.Linear.forward(router, hidden_states)
+        top_k = int(router.top_k)
+        num_experts = getattr(router, "num_experts", None)
+        if isinstance(num_experts, int) and num_experts > 0:
+            top_k = min(top_k, num_experts)
+        top_k = max(1, top_k)
+        routing_weights = torch.softmax(router_logits, dim=-1)
+        topk_weights, topk_indices = torch.topk(routing_weights, top_k, dim=-1)
+        return router_logits, topk_weights, topk_indices
+
+    router.forward = forward_with_topk
+    router._gptqmodel_phimoe_topk_aware = True
+
+
 def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
     routers = find_moe_routing_modules(model)
     state: MoETopKState = []
@@ -4068,6 +4188,8 @@ def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
         local_count = _get_local_expert_count(r)
         if local_count is None:
             continue
+        if r.__class__.__name__ == "PhimoeTopKRouter":
+            _install_phimoe_topk_override(r)
         for name in MOE_TOPK_FIELD_NAMES:
             if hasattr(r, name):
                 old = getattr(r, name)

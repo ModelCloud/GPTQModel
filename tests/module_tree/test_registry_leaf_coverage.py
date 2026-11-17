@@ -163,7 +163,6 @@ KNOWN_UNDECLARED = {
     "mllama": "cross-attention intentionally stays in the source dtype (issue #4174 known TODO)",
     "mllama_text_model": "cross-attention intentionally stays in the source dtype (issue #4174 known TODO)",
     "unlimited_ocr": "no decoder layers resolve; definition is owned outside issue #4174",
-    "granitemoehybrid": "mamba.conv1d is checkpoint-owned but the definition is owned outside issue #4174",
 }
 
 def _definition_for(model_type, config):

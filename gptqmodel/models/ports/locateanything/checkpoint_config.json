@@ -1,0 +1,82 @@
+{
+  "_attn_implementation": "magi",
+  "_commit_hash": null,
+  "architectures": [
+    "LocateAnythingForConditionalGeneration"
+  ],
+  "auto_map": {
+    "AutoConfig": "configuration_locateanything.LocateAnythingConfig",
+    "AutoModel": "modeling_locateanything.LocateAnythingForConditionalGeneration"
+  },
+  "box_end_token_id": 151669,
+  "box_start_token_id": 151668,
+  "coord_end_token_id": 152677,
+  "coord_start_token_id": 151677,
+  "image_token_index": 151665,
+  "mlp_checkpoint": false,
+  "mlp_connector_layers": 2,
+  "model_type": "locateanything",
+  "none_token_id": 4064,
+  "ref_end_token_id": 151673,
+  "ref_start_token_id": 151672,
+  "template": null,
+  "text_config": {
+    "_attn_implementation_autoset": true,
+    "_name_or_path": "Qwen/Qwen2.5-3B-Instruct",
+    "architectures": [
+      "Qwen2ForCausalLM"
+    ],
+    "attention_dropout": 0.0,
+    "block_size": 6,
+    "bos_token_id": 151643,
+    "causal_attn": false,
+    "eos_token_id": 151645,
+    "hidden_act": "silu",
+    "hidden_size": 2048,
+    "initializer_range": 0.02,
+    "intermediate_size": 11008,
+    "max_position_embeddings": 32768,
+    "max_window_layers": 70,
+    "model_type": "qwen2",
+    "null_token_id": 152678,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 36,
+    "num_key_value_heads": 2,
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": null,
+    "rope_theta": 1000000.0,
+    "sliding_window": 32768,
+    "switch_token_id": 152679,
+    "text_mask_token_id": 151676,
+    "tie_word_embeddings": true,
+    "torch_dtype": "bfloat16",
+    "use_cache": false,
+    "use_sliding_window": false,
+    "vocab_size": 152681
+  },
+  "torch_dtype": "bfloat16",
+  "transformers_version": null,
+  "use_backbone_lora": 0,
+  "use_llm_lora": 0,
+  "vision_config": {
+    "_attn_implementation_autoset": true,
+    "_name_or_path": "moonshotai/MoonViT-SO-400M",
+    "auto_map": {
+      "AutoConfig": "moonshotai/MoonViT-SO-400M--configuration_moonvit.MoonViTConfig",
+      "AutoModel": "moonshotai/MoonViT-SO-400M--modeling_moonvit.MoonVitPretrainedModel"
+    },
+    "hidden_size": 1152,
+    "init_pos_emb_height": 64,
+    "init_pos_emb_width": 64,
+    "intermediate_size": 4304,
+    "merge_kernel_size": [
+      2,
+      2
+    ],
+    "model_type": "moonvit",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 27,
+    "patch_size": 14,
+    "torch_dtype": "bfloat16"
+  }
+}

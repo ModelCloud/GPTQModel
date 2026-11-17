@@ -78,6 +78,10 @@ class AwqGEMVLinear(AWQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16]
 
+    # The bias is added after the kernel's FP16 result by a wide epilogue when
+    # the stored width differs, so it keeps its checkpoint dtype.
+    MODEL_DTYPE_BUFFERS = ()
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv"
 
@@ -256,9 +260,13 @@ class AwqGEMVLinear(AWQuantLinear):
         )
         # Reject an unrepresentable FP16 scale before replacing module state.
         qscales[:, : scales.shape[1]] = scale_to_storage_dtype(scales, qscales.dtype)
+        stored_bias = None if linear.bias is None else linear.bias.detach().clone()
         self.register_buffer("scales", qscales)
-        if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.clone().half())
+        if stored_bias is not None:
+            # The bias is not a quantization operand. Store it at the source
+            # width: ``forward`` adds it in a wide FP32 epilogue, so narrowing
+            # it to FP16 here could only turn a finite value into ``inf``.
+            self.register_buffer("bias", stored_bias)
         else:
             self.bias = None
 

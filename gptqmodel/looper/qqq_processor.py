@@ -91,14 +91,15 @@ class QQQProcessor(SharedInputCaptureProcessor):
         must follow the same declaration or ``quantize()`` leaves a model whose
         first forward raises ``NotImplementedError``.
         """
-        if self.requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
+        requested_backend = getattr(self, "requested_backend", BACKEND.AUTO)
+        if requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         # QQQ's Marlin-derived W4A8 kernel is CUDA-only in practice; its JIT
         # extension uses CUDA inline PTX that hipcc cannot compile for gfx120*.
         # An explicit BACKEND.QQQ request on ROCm is a user error, so report it
         # here rather than failing later inside the pack/forward path.
         if IS_ROCM:
-            if self.requested_backend == BACKEND.QQQ:
+            if requested_backend == BACKEND.QQQ:
                 raise NotImplementedError(QQQ_ROCM_UNSUPPORTED)
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
@@ -112,7 +113,7 @@ class QQQProcessor(SharedInputCaptureProcessor):
             return QQQTorchLinear, BACKEND.QQQ_TORCH
 
         if not QQQLinear.supports_dtype(dtype):
-            if self.requested_backend == BACKEND.QQQ:
+            if requested_backend == BACKEND.QQQ:
                 raise NotImplementedError(
                     f"QQQ (BACKEND.QQQ) only supports `{QQQLinear.SUPPORTS_DTYPES}` "
                     f"activations; the model dtype is `{dtype}`. Use "
@@ -126,6 +127,46 @@ class QQQProcessor(SharedInputCaptureProcessor):
 
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
+    def _validate_module_shape(self, module: NamedModule) -> None:
+        """Reject a module the selected QQQ kernel cannot pack.
+
+        QQQ's kernels tile both the contraction and the output axis
+        (``IN_OUTPUT_FEATURES_DIVISIBLE_BY``), but that contract was only
+        enforced inside ``create_quant_module`` during finalize, i.e. after the
+        whole calibration had run. A FalconMamba/Mamba ``x_proj`` (8192 -> 288)
+        therefore lost an entire 7B calibration to a shape error that could be
+        reported in the first layer (issue #4567). Unlike AWQ, no QQQ kernel
+        accepts an arbitrary width, so the run fails here instead of leaving the
+        module dense by surprise.
+        """
+
+        state = getattr(module, "state", None) or {}
+        if state.get("capture_only"):
+            # Forward-only capture modules are never packed, so their shape
+            # does not have to satisfy the kernel tile contract.
+            return
+        in_features = int(getattr(module, "in_features", 0) or 0)
+        out_features = int(getattr(module, "out_features", 0) or 0)
+        if in_features <= 0 or out_features <= 0:
+            return
+        weight = getattr(module, "weight", None)
+        dtype = weight.dtype if isinstance(weight, torch.Tensor) else None
+        kernel, _backend = self._quant_linear_kernel(dtype)
+        tiles = getattr(kernel, "IN_OUTPUT_FEATURES_DIVISIBLE_BY", None) or ()
+        if not tiles:
+            return
+        if any(
+            in_features % thread_k == 0 and out_features % thread_n == 0
+            for thread_k, thread_n in tiles
+        ):
+            return
+        raise ValueError(
+            f"QQQ cannot pack module `{module.full_name}`: {in_features} -> {out_features} "
+            f"does not satisfy any {kernel.__name__}.IN_OUTPUT_FEATURES_DIVISIBLE_BY tile "
+            f"{tuple(tiles)}. Exclude it with a `-:` dynamic rule, or quantize with a "
+            "backend whose kernel supports this shape."
+        )
+
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
@@ -133,6 +174,9 @@ class QQQProcessor(SharedInputCaptureProcessor):
         if resolved_cfg.excluded:
             return
         bind_resolved_module_config(module, resolved_cfg)
+        # Fail on the first un-packable module instead of in finalize, after
+        # every layer was calibrated (issue #4567).
+        self._validate_module_shape(module)
 
         qcfg_clone = copy.deepcopy(self.qcfg)
         apply_scalar_module_overrides(qcfg_clone, resolved_cfg)
@@ -189,7 +233,7 @@ class QQQProcessor(SharedInputCaptureProcessor):
 
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
-            q.add_batch(inp[0].data, out.data)  # noqa: F821
+            q.add_batch(self.calibration_rows(inp[0].data), out.data)  # noqa: F821
         return tmp
 
     def _shared_input_task_enabled(self, task: QQQ) -> bool:

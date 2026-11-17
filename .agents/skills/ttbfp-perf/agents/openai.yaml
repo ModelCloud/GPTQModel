@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel ttbfp Performance"
+  short_description: "Tune Tenstorrent block-float CPU kernels"
+  default_prompt: "Use $ttbfp-perf to measure or optimize the ttbfp CPU kernels without changing their output bits."

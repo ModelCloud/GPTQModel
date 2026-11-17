@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Device Families"
+  short_description: "Keep NVIDIA and AMD support explicit"
+  default_prompt: "Use $gptqmodel-device-families before changing device selection, placement, or kernel SUPPORTS declarations."

@@ -19,6 +19,7 @@ from ..nn_modules.hooked_linear import StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
+from ..utils.inspect import bound_forward_argument
 from ..utils.linalg_warmup import await_torch_linear_prewarm
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import device_ctx, normalize_device_like, select_forward_devices
@@ -309,6 +310,7 @@ class StageInputsCapture:
             ).draw()
 
         def _capture_layer_inputs(
+            module: torch.nn.Module,
             args: tuple[Any, ...],
             kwargs: Dict[str, Any],
             batch_device: torch.device,
@@ -318,14 +320,23 @@ class StageInputsCapture:
                 kwargs=kwargs,
                 batch_device=batch_device,
             )
-            attention_mask = (
-                kwargs["attention_mask"].to(device=batch_device)
-                if kwargs.get("attention_mask") is not None
-                else None
+            # `transformers` 5 hands some blocks their causal mask positionally:
+            # `GPT2Model.forward` calls every block as
+            # `block(hidden_states, past_key_values, causal_mask, ...)`. Reading
+            # `kwargs` alone therefore captured `attention_mask=None` for GPT-2,
+            # and replay ran every layer without causality under eager attention
+            # and without padding under SDPA. Bind the block's own signature and
+            # read the parameter by name; it is the same object the model passed.
+            attention_mask = bound_forward_argument(
+                module, args, kwargs, "attention_mask"
             )
-            pos_ids = kwargs.get("position_ids", None)
-            if pos_ids is not None:
+            if torch.is_tensor(attention_mask):
+                attention_mask = move_to(attention_mask, device=batch_device)
+            pos_ids = bound_forward_argument(module, args, kwargs, "position_ids")
+            if torch.is_tensor(pos_ids):
                 pos_ids = move_to(pos_ids, device=batch_device)
+            else:
+                pos_ids = None
             one_kwargs: Dict[str, Any] = {}
             for (k, v) in kwargs.items():
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
@@ -364,7 +375,7 @@ class StageInputsCapture:
             """Captures the incoming batch for the first layer and aborts the forward."""
 
             layer_input, attention_mask, pos_ids, one_kwargs = _capture_layer_inputs(
-                args, kwargs, _batch_device(),
+                module, args, kwargs, _batch_device(),
             )
             layer_inputs.append(layer_input)
             attention_masks.append(attention_mask)
@@ -434,7 +445,7 @@ class StageInputsCapture:
                     batch_captured.add(branch_index)
                     capture = branch_captures[branch_index]
                     layer_input, attention_mask, pos_ids, one_kwargs = _capture_layer_inputs(
-                        args, kwargs, _batch_device(),
+                        module, args, kwargs, _batch_device(),
                     )
                     capture["layer_inputs"].append(layer_input)
                     capture["attention_masks"].append(attention_mask)

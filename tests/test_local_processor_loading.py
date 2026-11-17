@@ -5,6 +5,7 @@
 import json
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -40,7 +41,8 @@ def test_local_processor_requires_explicit_definition_metadata():
 
 @pytest.mark.parametrize("trust", [False, True])
 @pytest.mark.parametrize("bypass", [False, True])
-def test_public_load_selects_definition_owned_processor(tmp_path, monkeypatch, trust, bypass):
+@pytest.mark.parametrize("subfolder", ["", "nested"])
+def test_public_load_selects_definition_owned_processor(tmp_path, monkeypatch, trust, bypass, subfolder):
     monkeypatch.delenv(BYPASS_ENV, raising=False)
     if bypass:
         monkeypatch.setenv(BYPASS_ENV, "1")
@@ -49,23 +51,27 @@ def test_public_load_selects_definition_owned_processor(tmp_path, monkeypatch, t
         vocab_size=8, hidden_size=16, intermediate_size=24,
         num_hidden_layers=1, num_attention_heads=2,
     )
-    InternLMForCausalLM(config).eval().save_pretrained(tmp_path)
+    checkpoint = tmp_path / subfolder
+    checkpoint.mkdir(exist_ok=True)
+    InternLMForCausalLM(config).eval().save_pretrained(checkpoint)
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel({"<pad>": 0, "<s>": 1, "</s>": 2, "hello": 3})),
         pad_token="<pad>", bos_token="<s>", eos_token="</s>",
     )
-    tokenizer.save_pretrained(tmp_path)
-    (tmp_path / "processor_config.json").write_text(json.dumps({
+    tokenizer.save_pretrained(checkpoint)
+    (checkpoint / "processor_config.json").write_text(json.dumps({
         "processor_class": "UntrustedProcessor",
         "auto_map": {"AutoProcessor": "checkpoint_processor.UntrustedProcessor"},
     }))
-    (tmp_path / "checkpoint_processor.py").write_text(
+    (checkpoint / "checkpoint_processor.py").write_text(
         f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
         "raise RuntimeError('checkpoint processor executed')\n"
     )
     module_name = "gptqmodel._processor_contract_fixture"
     module = ModuleType(module_name)
     calls = []
+    asset = checkpoint / "processor_asset.json"
+    asset.write_text(json.dumps({"pixel_scale": 0.375, "source": "selected-checkpoint"}))
 
     class LocalProcessor:
         @classmethod
@@ -73,6 +79,7 @@ def test_public_load_selects_definition_owned_processor(tmp_path, monkeypatch, t
             calls.append((path, kwargs))
             result = cls()
             result.tokenizer = kwargs["tokenizer"]
+            result.asset = json.loads((Path(path) / kwargs.get("subfolder", "") / "processor_asset.json").read_text())
             return result
 
     module.LocalProcessor = LocalProcessor
@@ -86,14 +93,30 @@ def test_public_load_selects_definition_owned_processor(tmp_path, monkeypatch, t
         raise AssertionError("definition-owned processor re-entered AutoProcessor")
 
     monkeypatch.setattr(AutoProcessor, "from_pretrained", reject_auto_processor)
-    loaded = GPTQModel.load(str(tmp_path), device="cpu", trust_remote_code=trust)
+    options = {
+        "subfolder": subfolder, "revision": "processor-source",
+        "local_files_only": True, "cache_dir": str(tmp_path / "cache"),
+    }
+    loaded = GPTQModel.load(str(tmp_path), device="cpu", trust_remote_code=trust, **options)
     assert isinstance(loaded.processor, LocalProcessor)
     assert len(calls) == 1
     assert calls[0][1]["config"] is loaded.model.config
     assert calls[0][1]["tokenizer"] is loaded.tokenizer.tokenizer
+    assert all(calls[0][1][key] == value for key, value in options.items())
+    assert loaded.processor.asset == {"pixel_scale": 0.375, "source": "selected-checkpoint"}
     assert not {"trust_remote_code", "code_revision"}.intersection(calls[0][1])
     assert not marker.exists()
-    assert loaded.model(torch.tensor([[1, 3]])).logits.shape == (1, 2, 8)
+    inputs = torch.tensor([[1, 3]])
+    expected = loaded.model(inputs).logits
+    assert expected.shape == (1, 2, 8)
+    asset.unlink()
+    with pytest.raises(FileNotFoundError, match="processor_asset.json"):
+        GPTQModel.load(str(tmp_path), device="cpu", trust_remote_code=trust, **options)
+    asset.write_text(json.dumps(loaded.processor.asset))
+    retried = GPTQModel.load(str(tmp_path), device="cpu", trust_remote_code=trust, **options)
+    assert retried.processor.asset == loaded.processor.asset
+    torch.testing.assert_close(retried.model(inputs).logits, expected, rtol=0, atol=0)
+    assert not marker.exists()
 
 
 def test_local_processor_ignores_checkpoint_code_options(monkeypatch):

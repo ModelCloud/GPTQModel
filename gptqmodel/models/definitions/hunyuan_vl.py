@@ -7,13 +7,13 @@ from typing import Any, Dict
 
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched_conversations
 from ...utils.looper_helpers import normalize_device_like
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 from ..fusable import FusableConfig, LlamaFusableConfig
+from ._vlm_calibration import prepare_vlm_calibration_dataset
 
 
 class HunYuanVLQModel(BaseQModel):
@@ -107,31 +107,34 @@ class HunYuanVLQModel(BaseQModel):
             backend="pil",
         )
 
+    @classmethod
+    def prepare_inputs_for_conversations(
+        cls,
+        processor: ProcessorMixin,
+        conversations: list[dict] | list[list[dict]],
+    ):
+        return processor.apply_chat_template(
+            conversations,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            processor_kwargs={"padding": True},
+        )
+
     def prepare_dataset(
         self,
         calibration_dataset,
         batch_size: int = 1,
         **kwargs,
     ) -> list[Dict[str, Any]]:
-        del kwargs
-        processor = self.load_processor()
-        calibration_data = []
-        for batch in batched_conversations(
+        return prepare_vlm_calibration_dataset(
+            self,
             calibration_dataset,
-            batch_size,
-            process_func=self.preprocess_dataset,
-        ):
-            inputs = processor.apply_chat_template(
-                batch,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-                processor_kwargs={"padding": True},
-            )
-            calibration_data.append(inputs)
-        del processor
-        return calibration_data
+            batch_size=batch_size,
+            options=kwargs,
+            preprocess_func=self.preprocess_dataset,
+        )
 
 
 __all__ = ["HunYuanVLQModel"]

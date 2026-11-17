@@ -1,0 +1,235 @@
+{
+  "exaone30": {
+    "repo": "heegyu/EXAONE-3.0-7.8B-Instruct-bf16",
+    "revision": "d0c610e8b29096f20beb91433d8cd2e490e05a78",
+    "config": {
+      "_name_or_path": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct",
+      "activation_function": "silu",
+      "architectures": [
+        "ExaoneForCausalLM"
+      ],
+      "attention_dropout": 0.0,
+      "auto_map": {
+        "AutoConfig": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct--configuration_exaone.ExaoneConfig",
+        "AutoModelForCausalLM": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct--modeling_exaone.ExaoneForCausalLM",
+        "AutoModelForSequenceClassification": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct--modeling_exaone.ExaoneForSequenceClassification"
+      },
+      "bos_token_id": 1,
+      "embed_dropout": 0.0,
+      "eos_token_id": 361,
+      "hidden_size": 4096,
+      "initializer_range": 0.02,
+      "intermediate_size": 14336,
+      "layer_norm_epsilon": 1e-05,
+      "max_position_embeddings": 4096,
+      "model_type": "exaone",
+      "num_attention_heads": 32,
+      "num_key_value_heads": 8,
+      "num_layers": 32,
+      "pad_token_id": 0,
+      "rope_scaling": null,
+      "rope_theta": 500000.0,
+      "tie_word_embeddings": false,
+      "torch_dtype": "bfloat16",
+      "transformers_version": "4.43.0.dev0",
+      "use_cache": true,
+      "vocab_size": 102400
+    },
+    "index_git_blob": "96aa9983cfe59111f4b99d0833a1233f606167fe",
+    "checkpoint_keys_sha256": "7bd5647098a7a6eb57a2324a2ea49c59a28adab511cdf6a689919746755f542a",
+    "checkpoint_tensor_count": 291,
+    "normalized_checkpoint_keys": [
+      "lm_head.weight",
+      "transformer.h.#.attn.attention.k_proj.weight",
+      "transformer.h.#.attn.attention.out_proj.weight",
+      "transformer.h.#.attn.attention.q_proj.weight",
+      "transformer.h.#.attn.attention.v_proj.weight",
+      "transformer.h.#.ln_1.weight",
+      "transformer.h.#.ln_2.weight",
+      "transformer.h.#.mlp.c_fc_0.weight",
+      "transformer.h.#.mlp.c_fc_1.weight",
+      "transformer.h.#.mlp.c_proj.weight",
+      "transformer.ln_f.weight",
+      "transformer.wte.weight"
+    ]
+  },
+  "exaone35_2b": {
+    "repo": "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+    "revision": "ccce25bd39c141fe053e0bc75818a8f5fe962802",
+    "config": {
+      "activation_function": "silu",
+      "architectures": [
+        "ExaoneForCausalLM"
+      ],
+      "attention_dropout": 0.0,
+      "auto_map": {
+        "AutoConfig": "configuration_exaone.ExaoneConfig",
+        "AutoModelForCausalLM": "modeling_exaone.ExaoneForCausalLM",
+        "AutoModelForSequenceClassification": "modeling_exaone.ExaoneForSequenceClassification"
+      },
+      "bos_token_id": 1,
+      "embed_dropout": 0.0,
+      "eos_token_id": 361,
+      "head_dim": 80,
+      "hidden_size": 2560,
+      "initializer_range": 0.02,
+      "intermediate_size": 7168,
+      "layer_norm_epsilon": 1e-05,
+      "max_position_embeddings": 32768,
+      "model_type": "exaone",
+      "num_attention_heads": 32,
+      "num_key_value_heads": 8,
+      "num_layers": 30,
+      "pad_token_id": 0,
+      "rope_scaling": {
+        "factor": 8.0,
+        "high_freq_factor": 4.0,
+        "low_freq_factor": 1.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3"
+      },
+      "rope_theta": 1000000,
+      "tie_word_embeddings": true,
+      "torch_dtype": "float32",
+      "transformers_version": "4.43.0",
+      "use_cache": true,
+      "vocab_size": 102400
+    },
+    "index_git_blob": "40878ec73ffb1b9bce695e2e153fc344f2fd20d5",
+    "checkpoint_keys_sha256": "e877c569323322a6e51e5b9ac7d2cd1d75086db12b144383d0b292947ca83b93",
+    "checkpoint_tensor_count": 272,
+    "normalized_checkpoint_keys": [
+      "transformer.h.#.attn.attention.k_proj.weight",
+      "transformer.h.#.attn.attention.out_proj.weight",
+      "transformer.h.#.attn.attention.q_proj.weight",
+      "transformer.h.#.attn.attention.v_proj.weight",
+      "transformer.h.#.ln_1.weight",
+      "transformer.h.#.ln_2.weight",
+      "transformer.h.#.mlp.c_fc_0.weight",
+      "transformer.h.#.mlp.c_fc_1.weight",
+      "transformer.h.#.mlp.c_proj.weight",
+      "transformer.ln_f.weight",
+      "transformer.wte.weight"
+    ]
+  },
+  "exaone35_7b": {
+    "repo": "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct",
+    "revision": "553ea250b9a5317231459279d5847d6cf955b9aa",
+    "config": {
+      "activation_function": "silu",
+      "architectures": [
+        "ExaoneForCausalLM"
+      ],
+      "attention_dropout": 0.0,
+      "auto_map": {
+        "AutoConfig": "configuration_exaone.ExaoneConfig",
+        "AutoModelForCausalLM": "modeling_exaone.ExaoneForCausalLM",
+        "AutoModelForSequenceClassification": "modeling_exaone.ExaoneForSequenceClassification"
+      },
+      "bos_token_id": 1,
+      "embed_dropout": 0.0,
+      "eos_token_id": 361,
+      "head_dim": 128,
+      "hidden_size": 4096,
+      "initializer_range": 0.02,
+      "intermediate_size": 14336,
+      "layer_norm_epsilon": 1e-05,
+      "max_position_embeddings": 32768,
+      "model_type": "exaone",
+      "num_attention_heads": 32,
+      "num_key_value_heads": 8,
+      "num_layers": 32,
+      "pad_token_id": 0,
+      "rope_scaling": {
+        "factor": 8.0,
+        "high_freq_factor": 4.0,
+        "low_freq_factor": 1.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3"
+      },
+      "rope_theta": 1000000.0,
+      "tie_word_embeddings": false,
+      "torch_dtype": "float32",
+      "transformers_version": "4.43.0",
+      "use_cache": true,
+      "vocab_size": 102400
+    },
+    "index_git_blob": "c10966a43995835df33ebc7689668846ddcb3e59",
+    "checkpoint_keys_sha256": "7bd5647098a7a6eb57a2324a2ea49c59a28adab511cdf6a689919746755f542a",
+    "checkpoint_tensor_count": 291,
+    "normalized_checkpoint_keys": [
+      "lm_head.weight",
+      "transformer.h.#.attn.attention.k_proj.weight",
+      "transformer.h.#.attn.attention.out_proj.weight",
+      "transformer.h.#.attn.attention.q_proj.weight",
+      "transformer.h.#.attn.attention.v_proj.weight",
+      "transformer.h.#.ln_1.weight",
+      "transformer.h.#.ln_2.weight",
+      "transformer.h.#.mlp.c_fc_0.weight",
+      "transformer.h.#.mlp.c_fc_1.weight",
+      "transformer.h.#.mlp.c_proj.weight",
+      "transformer.ln_f.weight",
+      "transformer.wte.weight"
+    ]
+  },
+  "exaone35_32b": {
+    "repo": "LGAI-EXAONE/EXAONE-3.5-32B-Instruct",
+    "revision": "3d27aab477c042df2e174d36eea47b77c8871ef0",
+    "config": {
+      "activation_function": "silu",
+      "architectures": [
+        "ExaoneForCausalLM"
+      ],
+      "attention_dropout": 0.0,
+      "auto_map": {
+        "AutoConfig": "configuration_exaone.ExaoneConfig",
+        "AutoModelForCausalLM": "modeling_exaone.ExaoneForCausalLM",
+        "AutoModelForSequenceClassification": "modeling_exaone.ExaoneForSequenceClassification"
+      },
+      "bos_token_id": 1,
+      "embed_dropout": 0.0,
+      "eos_token_id": 361,
+      "head_dim": 128,
+      "hidden_size": 5120,
+      "initializer_range": 0.02,
+      "intermediate_size": 27392,
+      "layer_norm_epsilon": 1e-05,
+      "max_position_embeddings": 32768,
+      "model_type": "exaone",
+      "num_attention_heads": 40,
+      "num_key_value_heads": 8,
+      "num_layers": 64,
+      "pad_token_id": 0,
+      "rope_scaling": {
+        "factor": 8.0,
+        "high_freq_factor": 4.0,
+        "low_freq_factor": 1.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3"
+      },
+      "rope_theta": 1000000.0,
+      "tie_word_embeddings": false,
+      "torch_dtype": "float32",
+      "transformers_version": "4.43.0",
+      "use_cache": true,
+      "vocab_size": 102400
+    },
+    "index_git_blob": "a0aea0c0a5c9ea02f2936e93283d381dd250f1c9",
+    "checkpoint_keys_sha256": "f19c86853c665d8b7d48b455cb5c05f062c3c8951e53b627827605faaedb9ea8",
+    "checkpoint_tensor_count": 579,
+    "normalized_checkpoint_keys": [
+      "lm_head.weight",
+      "transformer.h.#.attn.attention.k_proj.weight",
+      "transformer.h.#.attn.attention.out_proj.weight",
+      "transformer.h.#.attn.attention.q_proj.weight",
+      "transformer.h.#.attn.attention.v_proj.weight",
+      "transformer.h.#.ln_1.weight",
+      "transformer.h.#.ln_2.weight",
+      "transformer.h.#.mlp.c_fc_0.weight",
+      "transformer.h.#.mlp.c_fc_1.weight",
+      "transformer.h.#.mlp.c_proj.weight",
+      "transformer.ln_f.weight",
+      "transformer.wte.weight"
+    ]
+  }
+}

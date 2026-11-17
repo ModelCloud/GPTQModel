@@ -36,7 +36,7 @@ def test_lfm3_model_type_selects_definition(monkeypatch, model_type, definition)
     fake_config = SimpleNamespace(model_type=model_type)
 
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition(f"/tmp/{model_type}") is definition
 
@@ -66,7 +66,7 @@ def test_lfm3_module_tree_covers_conv_attention_and_mlp_paths(definition):
     flat_modules = _flat_layer_modules(definition)
 
     assert definition.layer_modules_strict is False
-    assert definition.require_trust_remote_code is True
+    assert not definition.require_trust_remote_code
     assert definition.rotary_embedding.endswith("rotary_emb")
     # `:!` marks a module that keeps its source dtype, so it is not quantized.
     assert flat_modules == {

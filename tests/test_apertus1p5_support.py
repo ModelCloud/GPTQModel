@@ -4,10 +4,10 @@
 from types import SimpleNamespace
 
 from torch import nn
-from transformers import AutoModelForMultimodalLM
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.apertus import Apertus1p5QModel, Apertus1p5TextQModel
+from gptqmodel.models.local import LocalModelLoader
 
 
 class _FakeApertus1p5LanguageModel(nn.Module):
@@ -37,7 +37,7 @@ class _FakeApertus1p5Wrapper(nn.Module):
 def _select_definition(monkeypatch, model_type):
     fake_config = SimpleNamespace(model_type=model_type)
     monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "load_model_config", lambda *args, **kwargs: fake_config)
     return auto.check_and_get_model_definition(f"/tmp/{model_type}")
 
 
@@ -53,7 +53,13 @@ def test_apertus_v15_module_tree_matches_multimodal_checkpoint_layout():
     )
     flat_modules = {name for block in layer_modules for name in block}
 
-    assert Apertus1p5QModel.loader is AutoModelForMultimodalLM
+    # The 1.5 layout is definition-owned: the loader builds the packaged
+    # config/model/processor classes instead of a checkpoint `auto_map` or a
+    # native Transformers shell.
+    assert isinstance(Apertus1p5QModel.loader, LocalModelLoader)
+    assert Apertus1p5QModel.loader.model_class == (
+        "gptqmodel.models.ports.apertus.modeling_apertus1p5.Apertus1p5ForConditionalGeneration"
+    )
     assert Apertus1p5QModel.require_load_processor is True
     assert Apertus1p5QModel.extract_layers_node() == ["model.language_model.layers"]
     assert Apertus1p5QModel.pre_lm_head_norm_module == "model.language_model.norm"

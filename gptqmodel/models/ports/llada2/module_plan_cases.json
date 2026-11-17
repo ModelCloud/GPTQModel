@@ -1,0 +1,63 @@
+{
+  "registered_module_plans": {
+    "cases": {
+      "LLaDA2MoeQModel/gptq": {
+        "layers": [
+          "model.layers"
+        ],
+        "blocks": [
+          [
+            "input_layernorm:!"
+          ],
+          [
+            "attention.query_key_value",
+            "attention.query_layernorm:!",
+            "attention.key_layernorm:!"
+          ],
+          [
+            "attention.dense"
+          ],
+          [
+            "post_attention_layernorm:!"
+          ],
+          [
+            "mlp:?"
+          ],
+          [
+            "mlp.gate:!",
+            "mlp.gate.expert_bias:!"
+          ],
+          [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          [
+            "mlp.down_proj"
+          ],
+          [
+            "mlp.shared_experts.gate_proj",
+            "mlp.shared_experts.up_proj"
+          ],
+          [
+            "mlp.shared_experts.down_proj"
+          ],
+          [
+            "mlp.experts.{expert_index}.gate_proj",
+            "mlp.experts.{expert_index}.up_proj"
+          ],
+          [
+            "mlp.experts.{expert_index}.down_proj"
+          ]
+        ]
+      }
+    }
+  },
+  "fusable_models": {
+    "models": {
+      "llada2_moe": {
+        "definition": "LLaDA2MoeQModel",
+        "reason": "Package-owned LLaDA2 packed-QKV diffusion MoE with versioned block masking, routing and edit decoding; fusion executor has not been qualified."
+      }
+    }
+  }
+}

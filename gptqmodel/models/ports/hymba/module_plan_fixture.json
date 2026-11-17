@@ -1,0 +1,43 @@
+{
+  "HymbaQModel/gptq": {
+    "layers": [
+      "model.layers"
+    ],
+    "blocks": [
+      [
+        "input_layernorm:!"
+      ],
+      [
+        "mamba.in_proj",
+        "mamba.conv1d:!",
+        "mamba.x_proj.0:!",
+        "mamba.dt_proj.0:!",
+        "mamba.A_log:!",
+        "mamba.D:!",
+        "mamba.dt_layernorm:!",
+        "mamba.B_layernorm:!",
+        "mamba.C_layernorm:!",
+        "mamba.pre_avg_layernorm1:!",
+        "mamba.pre_avg_layernorm2:!",
+        "mamba.self_attn.q_norm:!",
+        "mamba.self_attn.k_norm:!"
+      ],
+      [
+        "mamba.out_proj"
+      ],
+      [
+        "pre_moe_layernorm:!"
+      ],
+      [
+        "moe.router:!"
+      ],
+      [
+        "moe.experts.{expert_index}.gate_proj",
+        "moe.experts.{expert_index}.up_proj"
+      ],
+      [
+        "moe.experts.{expert_index}.down_proj"
+      ]
+    ]
+  }
+}

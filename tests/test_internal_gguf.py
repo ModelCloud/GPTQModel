@@ -11,6 +11,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear import gguf as gguf_qlinear
 from gptqmodel.utils import internal_gguf
+from gptqmodel.utils.kernel import KernelConfig
 
 
 def test_internal_gguf_types_match_current_upstream_assignments():
@@ -171,10 +172,13 @@ def test_internal_gguf_dequantize_uses_torch_sign_only_path_when_requested(monke
         calls["count"] += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setenv("GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE", "cpu")
     monkeypatch.setattr(internal_gguf, "_dequantize_sign_only_torch_to_numpy", _wrapped)
 
-    actual = internal_gguf.dequantize(row, internal_gguf.GGMLQuantizationType.Q1_0_g128)
+    actual = internal_gguf.dequantize(
+        row,
+        internal_gguf.GGMLQuantizationType.Q1_0_g128,
+        policy=KernelConfig(gguf_dequant_device="cpu"),
+    )
 
     assert calls["count"] == 1
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)

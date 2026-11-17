@@ -4,6 +4,8 @@
 
 from types import SimpleNamespace
 
+from transformers import AfmoeConfig
+
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.afmoe import AfMoeQModel
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -13,15 +15,9 @@ def _config():
     return SimpleNamespace(num_experts=2, num_local_experts=2, num_shared_experts=1)
 
 
-def test_afmoe_model_type_selects_definition(monkeypatch):
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(
-        auto.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(model_type="afmoe"),
-    )
-
-    assert auto.check_and_get_model_definition("/tmp/afmoe") is AfMoeQModel
+def test_afmoe_model_type_selects_definition(tmp_path):
+    AfmoeConfig().save_pretrained(tmp_path)
+    assert auto.check_and_get_model_definition(str(tmp_path)) is AfMoeQModel
     assert auto.MODEL_MAP["afmoe"] is AfMoeQModel
 
 

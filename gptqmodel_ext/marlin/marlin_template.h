@@ -586,8 +586,10 @@ __global__ void Marlin(
                  (threadIdx.x % 32) % 4;
   }
 
+  // Bias groups are 8 columns wide like the scales; the FP32 stage needs two
+  // int4 slots (8 floats) for them.
   int bias_sh_wr = threadIdx.x;
-  int bias_gl_rd = (thread_n_blocks * 16 / 8) * slice_col + threadIdx.x;
+  int bias_gl_rd = (thread_n_blocks * 16) * slice_col + 8 * threadIdx.x;
 
   // Zero-points have the same read layout as the scales
   // (without column-wise case)
@@ -662,7 +664,11 @@ __global__ void Marlin(
       (sh_red_size < sh_b_size ? sh_red_size : sh_b_size);
   constexpr int sh_size_b_red_max =
       (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
-  constexpr int sh_bias_size = (thread_n_blocks * 16 / 8);
+  // The bias is staged as FP32: it is added to the FP32 accumulator and only
+  // then rounded with the visible output cast, so a finite bias the output
+  // dtype cannot hold must not be narrowed before the cancellation. One int4
+  // stage slot therefore carries four columns instead of eight.
+  constexpr int sh_bias_size = (thread_n_blocks * 16 / 4);
   constexpr int sh_b_red_bias_size =
       sh_size_b_red_max > (sh_size_b_red_min + sh_bias_size)
           ? sh_size_b_red_max
@@ -685,7 +691,9 @@ __global__ void Marlin(
   I4 frag_b_quant[2][b_thread_vecs];
   FragC frag_c[thread_m_blocks][4][2];
   FragS frag_s[2][4];  // No act-order
-  FragS frag_bias[2][4];
+  // Four FP32 pairs per row: the same (column, column + 1) slots the FP16
+  // staging used, just widened.
+  Vec<float, 2> frag_bias[2][4];
   FragS act_frag_s[2][4][4];             // For act-order
   int frag_qzp[2][num_ints_per_thread];  // Zero-points
   FragZP frag_zp;                        // Zero-points in fp16
@@ -1443,7 +1451,8 @@ __global__ void Marlin(
     int c_gl_wr_end = c_gl_stride * prob_m;
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
-    auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
+    auto write = [&](int idx, float c0, float c1, FragS& s,
+                     Vec<float, 2>& b_bias) {
       // Keep the epilogue in FP32 until the single output cast. Rounding the
       // partial sum first would turn a finite biased result into inf whenever
       // the pre-bias sum exceeded the output dtype's range.
@@ -1469,14 +1478,17 @@ __global__ void Marlin(
         c1 *= global_scale_f32;
       }
       if (has_bias && last) {
+        // ``b_bias`` already holds FP32 values, so the addition below keeps the
+        // stored precision and the result is rounded exactly once, by the
+        // visible output cast.
         if constexpr (m_block_size_8) {
-          const scalar_t* bias_ptr = reinterpret_cast<scalar_t*>(&b_bias[0]);
-          const float bias = Dtype::num2float(bias_ptr[(threadIdx.x % 8) / 4]);
+          const float* bias_ptr = reinterpret_cast<float*>(&b_bias[0]);
+          const float bias = bias_ptr[(threadIdx.x % 8) / 4];
           c0 += bias;
           c1 += bias;
         } else {
-          c0 += Dtype::num2float(b_bias[0].x);
-          c1 += Dtype::num2float(b_bias[0].y);
+          c0 += b_bias[0];
+          c1 += b_bias[1];
         }
       }
 
@@ -1675,8 +1687,14 @@ __global__ void Marlin(
 
       if (has_bias && last) {
         __syncthreads();
-        cp_async4_pred(&sh_bias[bias_sh_wr], &b_bias_ptr[bias_gl_rd],
-                       threadIdx.x < 16 * thread_n_blocks / 8);
+        // Each int4 slot now holds four FP32 columns, so an 8-column group is
+        // staged with two async copies from the same 8-column global window.
+        const float* b_bias_f32 = reinterpret_cast<const float*>(b_bias_ptr);
+        const bool bias_pred = threadIdx.x < 16 * thread_n_blocks / 8;
+        cp_async4_pred(&sh_bias[bias_sh_wr * 2], &b_bias_f32[bias_gl_rd],
+                       bias_pred);
+        cp_async4_pred(&sh_bias[bias_sh_wr * 2 + 1],
+                       &b_bias_f32[bias_gl_rd + 4], bias_pred);
         cp_async_fence();
       }
 
@@ -1746,8 +1764,18 @@ __global__ void Marlin(
       if (has_bias && last) {
         cp_async_wait<0>();
         __syncthreads();
-        reinterpret_cast<int4*>(&frag_bias)[0] = sh_bias[bias_sh_rd];
-        reinterpret_cast<int4*>(&frag_bias)[1] = sh_bias[bias_sh_rd + 4];
+        // ``bias_sh_rd`` still counts 8-column groups, while the FP32 stage
+        // packs four columns per int4.
+        const float* bias_sh_f32 = reinterpret_cast<const float*>(sh_bias);
+        const float* bias_row0 = bias_sh_f32 + 8 * bias_sh_rd;
+        const float* bias_row1 = bias_sh_f32 + 8 * (bias_sh_rd + 4);
+  #pragma unroll
+        for (int k = 0; k < 4; k++) {
+          frag_bias[0][k][0] = bias_row0[2 * k];
+          frag_bias[0][k][1] = bias_row0[2 * k + 1];
+          frag_bias[1][k][0] = bias_row1[2 * k];
+          frag_bias[1][k][1] = bias_row1[2 * k + 1];
+        }
         __syncthreads();
       }
 
@@ -1773,7 +1801,7 @@ __global__ void Marlin(
           for (int i = 0; i < b_sh_wr_iters; i++) B_ptr[i] -= b_gl_stride;
         }
 
-        bias_gl_rd = (thread_n_blocks * 16 / 8) * slice_col + threadIdx.x;
+        bias_gl_rd = (thread_n_blocks * 16) * slice_col + 8 * threadIdx.x;
         // Update slice k/n for scales loading
         if constexpr (has_act_order) {
           slice_k_start = tb_k * slice_row;

@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import AutoModelForCausalLM
 
 from ...utils.exl3_error_ledger import (
     ZERO_ROUTE_RECOVERY_MODE_IDENTITY,
@@ -1408,6 +1409,11 @@ def deepseek_v4_mtp_source_projection_prefix(runtime_prefix: str) -> str:
 
 
 class DeepSeekV4QModel(DeepSeekV3QModel):
+    # V3 owns a package config/model bridge for Kimi-K2. V4 is natively
+    # registered in Transformers 5 and must not inherit the V3 local loader.
+    loader = AutoModelForCausalLM
+    require_trust_remote_code = False
+
     dynamic_expert_index = "n_routed_experts"
     rotary_embedding = "model.rotary_emb"
     # Transformers intentionally ignores the integrated dSpark/MTP checkpoint
@@ -1473,6 +1479,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
             },
         },
     ]
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        # Hyper-connections, compressed attention and shared/routed MoE branches
+        # are not jointly qualified for folding/search. Quantize without folds.
+        return []
 
     def exllamav3_checkpoint_module_candidates(
         self,
@@ -2635,7 +2646,10 @@ class DeepSeekV4MTPQuantizationModel(DeepSeekV4QModel):
             if pending_ffn_input is not None:
                 raise RuntimeError("DeepSeek V4 recovery router input was not consumed")
             expert_input = ffn_input.reshape(-1, ffn_input.shape[-1])
-            keep_mask = getattr(getattr(processor, "_mask_tls", None), "value", None)
+            # Router rows include the BOS sinks, so align with padding only.
+            from ...looper.loop_processor import active_padding_mask
+
+            keep_mask = active_padding_mask(processor)
             if keep_mask is not None:
                 keep_mask = keep_mask.reshape(-1).to(
                     device=expert_input.device,
