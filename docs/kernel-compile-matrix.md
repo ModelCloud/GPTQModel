@@ -72,7 +72,7 @@ python -m tests.kernels.gen_compile_matrix
 | `AwqSwordfishLinear` | `swordfish` | `EAGER` | no | no |
 | `AwqTorchLinear` | `torch_awq` | `CUDAGRAPH` | no | yes |
 | `BitblasLinear` | `bitblas` | `EAGER` | no | no |
-| `BitsAndBytesLinear` | `bitsandbytes` | `EAGER` | no | no |
+| `BitsAndBytesLinear` | `bitsandbytes` | `CUDAGRAPH` | yes | no |
 | `BitsAndBytesMlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |
 | `ExllamaV2Linear` | `exllamav2` | `EAGER` | yes | no |
 | `FP8MlxQuantLinear` | `mlx` | `NOT_APPLICABLE` | no | no |

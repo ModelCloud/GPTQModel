@@ -1934,7 +1934,24 @@ class GGUFCudaKernel(GGUFTorchLinear):
             evicted.close()
 
     def forward(self, x: torch.Tensor):
+        # A zero-row input has no matmul to run, so return an empty output
+        # before the device check, the weight upload and the plan cache. An
+        # empty MoE/batch slice otherwise builds a zero-sized ggml plan, which
+        # the bridge rejects with "GGML plan has no scratch tensors" (#4743),
+        # and would grow the shared arena for nothing. Every other kernel takes
+        # this path through `input_rows()`/`empty_linear_output()`, and the
+        # empty output is allocated on the input's own device, so no CUDA
+        # context is needed here.
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
         original_shape = x.shape[:-1] + (self.out_features,)
+        # An empty batch (MoE experts that receive no tokens, empty batch
+        # slices) must not build a ggml plan: the plan would contain
+        # zero-sized tensors and the arena allocation refuses it (#4743).
+        # Every other kernel returns an empty output for M=0.
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
         x_flat = x.reshape(-1, x.shape[-1])
         if x_flat.device.type != "cuda":
             raise RuntimeError(

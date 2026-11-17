@@ -237,6 +237,11 @@ class _CudaTensor:
         self.device = torch.device("cuda:0")
         self.dtype = tensor.dtype
         self.shape = tensor.shape
+        # ``forward`` asks the shared ``input_rows()`` helper for the rank, and
+        # the empty path asks for ``requires_grad``; keep the fake faithful so
+        # it exercises the same guards as a real tensor.
+        self.ndim = tensor.ndim
+        self.requires_grad = tensor.requires_grad
 
     def reshape(self, *shape):
         return _CudaTensor(self._tensor.reshape(*shape))

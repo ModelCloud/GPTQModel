@@ -109,9 +109,10 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
 
     REQUIRES_FORMAT_V2 = True
 
-    # Not buildable here: aarch64 host without AVX512-BF16. It inherits
-    # TorchAtenLinear's RLock-guarded forward, which already breaks dynamo, and
-    # the kernel is CPU-only: conservative EAGER, no capture measured.
+    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
+    # builds and the fused BF16 forward runs, but it inherits
+    # TorchAtenLinear's RLock-guarded forward, which dynamo cannot enter:
+    # EAGER. CPU-only, so no CUDA-graph capture applies.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
     SUPPORTS_GRAPH_CAPTURE = False
 
