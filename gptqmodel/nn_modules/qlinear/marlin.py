@@ -48,6 +48,7 @@ from ...utils.marlin import (
     marlin_runtime_available,
     marlin_runtime_error,
     marlin_sort_g_idx,
+    marlin_stream_workspace,
     marlin_validate_runtime_device,
     replace_parameter,
 )
@@ -109,11 +110,12 @@ class MarlinLinear(GPTQQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
-    # Not buildable here: the Marlin torch.ops JIT extension needs CUDA_HOME/nvcc
-    # (both absent), and apply_gptq_marlin_linear has no fake/meta impl, so
-    # dynamo would break. Conservative EAGER; no capture measured.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the eager forward and an explicit
+    # ``torch.cuda.graph`` capture both run, and the replayed output matches
+    # eager. ``apply_gptq_marlin_linear`` has no fake/meta implementation, so
+    # ``torch.compile`` still stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # The Marlin evaluator adds the bias to its FP32 accumulator before the
     # visible cast, so the buffer keeps its checkpoint width instead of
@@ -414,8 +416,10 @@ class MarlinLinear(GPTQQuantLinear):
 
         self.is_k_full = marlin_is_k_full(effective_desc_act, is_row_parallel=False)
 
-        # Allocate marlin workspace.
+        # Allocate marlin workspace. Each CUDA stream that runs this module
+        # gets its own zeroed copy of these lock counters (#4683).
         self.workspace = marlin_make_workspace_new(device)
+        self._marlin_stream_workspaces = {}
 
         # GPTQModel also accepts group_size=K as channelwise quantization.
         marlin_group_size = (
@@ -548,6 +552,7 @@ class MarlinLinear(GPTQQuantLinear):
         if x.dtype != self.scales.dtype:
             replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
         bias = self._kernel_bias(x)
+        workspace = marlin_stream_workspace(self)
 
         # Keep aligned layers on the original decode-sensitive call path.
         if self._marlin_tile_padding is None:
@@ -558,7 +563,7 @@ class MarlinLinear(GPTQQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 wtype=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,
@@ -576,7 +581,7 @@ class MarlinLinear(GPTQQuantLinear):
                 weight_zp=self.qzeros,
                 g_idx=self.g_idx,
                 g_idx_sort_indices=self.g_idx_sort_indices,
-                workspace=self.workspace,
+                workspace=workspace,
                 wtype=self.weight_type,
                 output_size_per_partition=self.out_features,
                 input_size_per_partition=self.in_features,

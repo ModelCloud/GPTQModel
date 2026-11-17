@@ -112,7 +112,11 @@ def test_concat_path_strips_pad_tokens_before_packing():
         dataset,
         calibration_dataset_concat_size=8,
         batch_size=1,
-        calibration_data_min_length=1,
+        # 0, not 1: `min_length` now filters the packed windows, and this
+        # dataset's tail window carries a single real token. The assertion
+        # below is about pad ids staying out of the packed window, not about
+        # the minimum-length filter (#4892 covers the tail-window rule).
+        calibration_data_min_length=0,
     )
 
     assert prepared[0]["input_ids"].tolist() == [[1, 2, 3, 4, 5, 6, 7, 8]]

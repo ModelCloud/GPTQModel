@@ -225,6 +225,42 @@ def test_split_calibration_dataset_keeps_single_row_mapping():
     assert rows == [row]
 
 
+@pytest.mark.parametrize("format", ["pandas", "arrow"])
+@pytest.mark.parametrize("sliced", [False, True], ids=["iterated", "sliced"])
+def test_split_calibration_dataset_ignores_the_dataset_display_format(format, sliced):
+    """A ``Dataset`` left in a display format still yields its rows (#4882).
+
+    Iterating a pandas-formatted dataset yields one-row ``DataFrame`` objects
+    and an arrow-formatted one yields one-row ``Table`` objects, so the
+    splitter rejected every row before it could tell pre-tokenized rows from
+    conversations.
+    """
+
+    datasets = pytest.importorskip("datasets")
+    dataset = datasets.Dataset.from_dict(
+        {
+            "input_ids": [[1, 2], [3, 4]],
+            "attention_mask": [[1, 1], [1, 1]],
+        }
+    )
+    calibration_input = dataset.with_format(format)
+    if sliced:
+        calibration_input = calibration_input[:]
+
+    rows, conversations = split_calibration_dataset(calibration_input, label="Test")
+
+    # ``pandas`` keeps the per-row token columns as NumPy arrays, which the
+    # splitter passes through unchanged; compare the ids, not the container.
+    def _ids(row):
+        return {name: [int(value) for value in row[name]] for name in ("input_ids", "attention_mask")}
+
+    assert conversations is None
+    assert [_ids(row) for row in rows] == [
+        {"input_ids": [1, 2], "attention_mask": [1, 1]},
+        {"input_ids": [3, 4], "attention_mask": [1, 1]},
+    ]
+
+
 @pytest.mark.parametrize("cls", MAPPING_DEFINITIONS, ids=lambda cls: cls.__name__)
 def test_numpy_formatted_dataset_columns_are_unpacked(cls, monkeypatch):
     """`Dataset.with_format("numpy")[:]` must reach the same rows as the dataset.

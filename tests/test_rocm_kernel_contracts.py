@@ -43,6 +43,7 @@ CUDA_ONLY_KERNELS = set("""
 OTHER_KERNELS = set("""
     TorchFusedLinear TorchFusedAwqLinear TorchAtenLinear TorchAtenAwqLinear
     TorchCpuAvx512Linear TorchCpuAvx512AwqLinear TorchInt8Linear TorchInt8AwqLinear
+    AwqGEMVFastTorchLinear AwqGEMVTorchLinear LLMAwqTorchLinear
     GGUFCppKernel MlxQuantLinear GPTQMarlinMlxQuantLinear GPTQBitBLASMlxQuantLinear
     AwqMlxQuantLinear AWQMarlinMlxQuantLinear AWQBitBLASMlxQuantLinear
     AwqGemvMlxQuantLinear AwqGemvFastMlxQuantLinear LLMAwqMlxQuantLinear

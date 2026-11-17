@@ -456,6 +456,12 @@ def get_resolved_module_config(module):
     return getattr(module, "resolved_module_config", None)
 
 
+# Marks a processor whose Device-SMI handles were never opened. Handles are
+# opened on the first metric query, so a processor that never runs starts no
+# sampler thread (#4862). ``{}`` means "opened and nothing was available".
+_DEVICE_SMI_UNINITIALIZED = object()
+
+
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
@@ -546,8 +552,12 @@ class LoopProcessor:
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
         self.log_tmp_log_file_name = str(self._build_log_file_path(self.name(), current_time))
         self._torch_rocm_memory_devices: List[str] = []
-        self._device_smi_handles = self._init_device_smi_handles()
-        self._cpu_device_smi = self._init_cpu_device_handle()
+        # A ``device_smi.Device`` owns a daemon sampler thread. Open the handles
+        # on the first metric query instead of here: a processor that never
+        # runs -- rejected calibration, a failure before ``loop()``, or a later
+        # processor in the chain failing -- must not start any (#4862).
+        self._device_smi_handles: Any = _DEVICE_SMI_UNINITIALIZED
+        self._cpu_device_smi: Optional[Device] = None
         self._device_metric_failures: Set[str] = set()
 
 
@@ -610,6 +620,7 @@ class LoopProcessor:
             calibration_summary = getattr(
                 calibration_dataset, "gptqmodel_calibration_summary", None
             )
+            token_rows = len(calibration_dataset)
             if calibration_summary is not None:
                 if not isinstance(calibration_summary, dict):
                     raise TypeError(
@@ -639,7 +650,12 @@ class LoopProcessor:
             else:
                 total_input_ids_length = 0
                 max_input_id_length = 0
+                token_rows = 0
                 for row in calibration_dataset:
+                    # Tensor-kwargs calibration (Decision Transformer) carries no
+                    # token ids, so token-length accounting does not apply.
+                    if "input_ids" not in row:
+                        continue
                     input_ids = row["input_ids"]
                     if isinstance(input_ids, torch.Tensor):
                         if input_ids.dim() <= 2:
@@ -651,14 +667,16 @@ class LoopProcessor:
                     else:
                         input_ids_length = len(input_ids)
 
+                    token_rows += 1
                     if input_ids_length > max_input_id_length:
                         max_input_id_length = input_ids_length
                     total_input_ids_length += input_ids_length
-            avg = total_input_ids_length / len(calibration_dataset)
+            if token_rows:
+                avg = total_input_ids_length / token_rows
 
-            if avg < min_calibration_dataset_input_ids_avg_length:
-                log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
-                               f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+                if avg < min_calibration_dataset_input_ids_avg_length:
+                    log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
+                                   f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
             self.num_batches = len(calibration_dataset)
             self.calibration_dataset = calibration_dataset
@@ -1121,6 +1139,20 @@ class LoopProcessor:
 
         return dtype_alias.get(dtype_str, dtype_str)
 
+    def _ensure_device_smi_handles(self) -> None:
+        """Open the Device-SMI handles on the first metric query (#4862).
+
+        Every handle starts a 5 Hz daemon sampler thread. Opening them in
+        ``__init__`` meant a processor that failed calibration validation, or
+        whose run failed before ``loop()``, leaked those threads for the life
+        of the process. Callers already hold ``_device_smi_lock``.
+        """
+
+        if self._device_smi_handles is not _DEVICE_SMI_UNINITIALIZED:
+            return
+        self._device_smi_handles = self._init_device_smi_handles()
+        self._cpu_device_smi = self._init_cpu_device_handle()
+
     def _init_device_smi_handles(self) -> Dict[str, Device]:
         """Create Device-SMI handles except where ROCm VFs use Torch metrics."""
 
@@ -1225,6 +1257,7 @@ class LoopProcessor:
         """Captures current accelerator memory usage in GiB per device."""
 
         with self._device_smi_lock:
+            self._ensure_device_smi_handles()
             snapshot: Dict[str, float] = {}
             for device_id in getattr(self, "_torch_rocm_memory_devices", ()):
                 if device_id in self._device_metric_failures:
@@ -1247,6 +1280,7 @@ class LoopProcessor:
         """Captures current CPU memory usage in GiB when supported."""
 
         with self._device_smi_lock:
+            self._ensure_device_smi_handles()
             if self._cpu_device_smi is None:
                 return None
             metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
@@ -1290,12 +1324,17 @@ class LoopProcessor:
         """Closes all Device-SMI handles owned by this processor."""
 
         with self._device_smi_lock:
-            for handle in self._device_smi_handles.values():
+            handles = self._device_smi_handles
+            if handles is _DEVICE_SMI_UNINITIALIZED:
+                # Never opened: nothing to close, and the processor stays
+                # closed so a released processor cannot start a sampler later.
+                handles = {}
+            for handle in handles.values():
                 try:
                     handle.close()
                 except Exception:
                     log.debug("Failed to close device telemetry handle during cleanup.", exc_info=True)
-            self._device_smi_handles.clear()
+            self._device_smi_handles = {}
 
             if self._cpu_device_smi is not None:
                 try:
@@ -1637,6 +1676,23 @@ class LoopProcessor:
 
         pass
 
+    def release_failed_run(self) -> None:
+        """Release run resources that ``finalize()`` would otherwise close.
+
+        ``finalize()`` runs only after a successful loop, so a cancelled or
+        failed run used to keep its Device-SMI handles -- and their 5 Hz sampler
+        threads -- alive for the life of the process (#4813). Closing here is
+        idempotent: ``finalize()`` may still run later and finds no handles
+        left, and a repeated release never raises.
+        """
+
+        self._close_device_smi_handles()
+        # ``finalize`` also drops the process-wide Hessian workspace; a failed
+        # run must not keep it pinned until the next successful one.
+        from ..quantization.gptq import release_workspace_cache
+
+        release_workspace_cache()
+
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
     def finalize(self, model: BaseQModel, **kwargs):
@@ -1676,6 +1732,30 @@ class LoopProcessor:
         """Override point for the processor name shown in logs and reports."""
 
         pass
+
+
+def release_failed_run_processors(processors) -> None:
+    """Release every processor a failed run built, best effort (#4862).
+
+    ``quantize()`` can fail while the processor chain is still being built or
+    before a looper exists (calibration validation, checkpoint entry,
+    ``ModuleLooper.__init__``). Nothing calls ``finalize()`` on that path, so
+    the processors already constructed must release their per-run resources
+    here. Each release is independent and must never mask the run failure.
+    """
+
+    for processor in processors or ():
+        release = getattr(processor, "release_failed_run", None)
+        if not callable(release):
+            continue
+        try:
+            release()
+        except Exception:
+            log.warn(
+                "failed to release processor resources while failing the quantization run",
+                exc_info=True,
+            )
+
 
 def get_max_memory() -> str:
     """Returns current accelerator memory usage for the first one or two devices."""

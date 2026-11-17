@@ -148,6 +148,50 @@ def rebuild_gptq_qweight(module) -> torch.Tensor:
     return packed
 
 
+def rebuild_avx512_qweight(module) -> torch.Tensor:
+    """Rebuild the GPTQ checkpoint ``qweight`` from the AVX512 runtime words.
+
+    ``TorchCpuAvx512Linear.transform_cpu`` sorts the input channels by GPTQ
+    group (``ret_idx``) and packs with ``pack_hf_int4``. The checkpoint keeps
+    the original channel order, so the inverse restores that order and packs
+    the nibbles back into ``[in_features // pack_factor, out_features]``.
+
+    ``unpack_hf_int4`` is the documented inverse of ``pack_hf_int4``, so this
+    path is pure Torch and works without the ATen int4pack ops. The result is
+    verified against the pre-transform bytes by
+    ``finalize_fused_train_state`` before the duplicate is dropped.
+    """
+
+    from .torch_cpu_avx512 import unpack_hf_int4
+
+    codes = unpack_hf_int4(
+        module.qweight,
+        out_features=module.out_features,
+        in_features=module.in_features,
+    )
+    if not module._ret_idx_is_identity():
+        # The transform gathers the input channels; the checkpoint stores them
+        # in their original order, so scatter them back the same way
+        # ``dequantize_weight`` does.
+        ret_idx = module._build_ret_idx().to(device=codes.device, dtype=torch.long)
+        restored = torch.empty_like(codes)
+        restored[:, ret_idx] = codes
+        codes = restored
+
+    pack_factor = module.pack_factor
+    out_features = module.out_features
+    grouped = codes.t().reshape(-1, pack_factor, out_features).to(torch.int32)
+    shifts = torch.arange(
+        pack_factor, dtype=torch.int32, device=codes.device
+    ) * module.bits
+    packed = torch.zeros(
+        (grouped.shape[0], out_features), dtype=torch.int32, device=codes.device
+    )
+    for index in range(pack_factor):
+        packed.bitwise_or_(grouped[:, index, :] << shifts[index])
+    return packed
+
+
 def rebuild_awq_qweight(module) -> torch.Tensor:
     """Rebuild the AWQ checkpoint ``qweight`` from the live int4pack words.
 
@@ -165,6 +209,7 @@ def rebuild_awq_qweight(module) -> torch.Tensor:
 __all__ = [
     "int4pack_block_size",
     "int4pack_to_codes",
+    "rebuild_avx512_qweight",
     "rebuild_awq_qweight",
     "rebuild_gptq_qweight",
 ]

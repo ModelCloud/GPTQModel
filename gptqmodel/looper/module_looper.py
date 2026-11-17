@@ -29,7 +29,11 @@ from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
-from ..looper.loop_processor import LoopProcessor, record_quant_log
+from ..looper.loop_processor import (
+    LoopProcessor,
+    record_quant_log,
+    release_failed_run_processors,
+)
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -72,6 +76,7 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     ensure_version_counters,
+    has_disk_offloaded_modules,
     materialize_remaining_meta_modules,
     offload_to_disk,
     release_private_offload_root,
@@ -85,6 +90,7 @@ from ..utils.p2p import (
     safe_move_to,
 )
 from ..utils.python import has_gil_control, has_gil_disabled
+from ..utils.tied_weights import lm_head_is_tied
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .execution_state import DeviceAssignmentState
@@ -1467,9 +1473,13 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             return True
 
         # A tied checkpoint may still contain `lm_head.weight` (Qwen3 stores it
-        # even though the head is tied). Only the *root* config flag is trusted
-        # here; a nested text_config flag does not describe the loaded model's
-        # actual storage (issue #4369).
+        # even though the head is tied). The load-time snapshot resolved this
+        # from the decoder config and the checkpoint, so prefer it over the
+        # wrapper's config flag (#4799, #4369).
+        snapshot = lm_head_is_tied(model, lm_head_name)
+        if snapshot is not None:
+            return snapshot
+
         config = getattr(model, "config", None)
         if not bool(getattr(config, "tie_word_embeddings", False)):
             return False
@@ -1950,11 +1960,44 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         materialize_remaining_meta_modules(self.gptq_model, device=CPU)
 
+    def _materialize_unreached_meta_modules(self) -> None:
+        """Best-effort fill of the layers a cancelled/failed run never reached.
+
+        With the default ``offload_to_disk=True`` the model is a lazy meta
+        shell: the loop materializes each layer on demand, so every layer after
+        the cancel point still owns meta tensors and has no offload hook. The
+        success path fills those modules in ``_materialize_remaining_meta_
+        modules``; the failure path must do the same or the next forward fails
+        on the first unreached layer (#4860). Cleanup must never mask the
+        cancellation that got us here, so a materialization failure is logged
+        and ignored.
+        """
+
+        try:
+            self._materialize_remaining_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the layers the cancelled/failed run never reached",
+                exc_info=True,
+            )
+
     def _release_run_workspace(self) -> None:
         """Release processor-owned scratch shared across the whole run."""
 
         for processor in getattr(self, "processors", ()) or ():
             processor.release_run_workspace()
+
+    def _release_failed_run_processors(self) -> None:
+        """Close the per-run resources a successful loop releases in ``finalize``.
+
+        A cancelled or failed run never reaches ``finalize()``, which is the only
+        other place a processor closes its Device-SMI handles. Without this every
+        attempt leaves one daemon sampler thread per device (and CPU) polling for
+        the life of the process (#4813). Each release is independent and must
+        never mask the failure that got us here.
+        """
+
+        release_failed_run_processors(getattr(self, "processors", ()))
 
     def _track_inflight_layer(
         self,
@@ -2059,6 +2102,12 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                 try:
                     self._fence_run_work()
                 finally:
+                    # ``finalize()`` is the only other place the processors close
+                    # their Device-SMI handles, and a failed run never reaches it:
+                    # every cancelled attempt would leave its sampler threads
+                    # polling for the life of the process (#4813). Release them
+                    # after the fence drained the workers that use them.
+                    self._release_failed_run_processors()
                     # A cancelled or failed run must also release the layer that
                     # was mid-stage: the success path moves it back only after
                     # post_quantize, which the exception skipped (#4546).
@@ -2069,9 +2118,31 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
                         try:
                             self._restore_offloaded_base_modules(strict=False)
                         finally:
-                            # A failed run cannot be saved, so its per-run offload
-                            # bundles are no longer reachable (issue #4368).
-                            release_private_offload_root(self.gptq_model)
+                            # The loop never materialized the layers past the
+                            # cancel point; fill them before the next forward
+                            # (#4860).
+                            self._materialize_unreached_meta_modules()
+                            # Layers that finished before the cancel stay as
+                            # disk-offloaded meta shells pointing into this run's
+                            # private offload root. Deleting that root now would
+                            # make them unrecoverable and break the next forward
+                            # with FileNotFoundError (#4807). A cancelled run must
+                            # also stay cheap: materializing every finished layer
+                            # would defeat the memory bound the default
+                            # ``offload_to_disk=True`` exists for. Keep the root
+                            # instead; ``bind_private_offload_root`` already
+                            # registered a model-lifetime finalizer that removes
+                            # it, and the next run on this model releases it
+                            # (#4368). Only release it eagerly when no module
+                            # still reads from it.
+                            model = getattr(self.gptq_model, "model", None)
+                            if model is not None and has_disk_offloaded_modules(model):
+                                log.debug(
+                                    "Offload: keeping the per-run directory for the "
+                                    "disk-offloaded layers of a cancelled/failed run."
+                                )
+                            else:
+                                release_private_offload_root(self.gptq_model)
                 raise
             finally:
                 # Process-wide scratch (e.g. EXL3's per-stream tile buffers)

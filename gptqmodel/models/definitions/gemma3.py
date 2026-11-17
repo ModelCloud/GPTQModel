@@ -112,8 +112,12 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             operations=[],
         ),
         SimpleNamespace(
-            source_patterns=[r"model\.language_model"],
-            target_patterns=[r"^language_model.model"],
+            # Runtime `model.language_model.<rest>` <-> checkpoint
+            # `language_model.model.<rest>`. Keep the explicit capture group so
+            # both directions carry the suffix instead of relying on a prefix
+            # replace (issue #4802).
+            source_patterns=[r"^model\.language_model\.(.+)$"],
+            target_patterns=[r"^language_model.model.\1"],
             operations=[],
         ),
         SimpleNamespace(

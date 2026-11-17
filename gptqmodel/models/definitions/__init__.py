@@ -18,6 +18,7 @@ from .cohere_compass import CohereCompassQModel
 from .dbrx import DbrxQModel
 from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
+from .decision_transformer import DecisionTransformerQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
 from .deepseek_v32 import DeepSeekV32QModel

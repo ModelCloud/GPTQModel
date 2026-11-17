@@ -20,7 +20,7 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
-from . import AWQuantLinear
+from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
@@ -291,6 +291,10 @@ class TorchFusedAwqLinear(AWQuantLinear):
         # ``qweight`` now holds int4pack words: drop the checkpoint clone if
         # the inverse reproduces exactly the bytes captured before the pack.
         finalize_fused_train_state(self)
+        # AWQ has no ``g_idx``, but ``scales`` and ``bias`` are still the
+        # loader's tensors and pin the shard mapping (#4785).
+        self.scales = detach_cpu_operand(self.scales)
+        self.bias = detach_cpu_operand(getattr(self, "bias", None))
 
     def transform_xpu_awq(self, dtype):
         # Unpack AWQ weights directly to integer form

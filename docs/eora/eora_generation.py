@@ -93,7 +93,7 @@ if __name__ == '__main__':
 
     eora = Lora(
         # for quant, path is save path. for load, it is loading path
-        path=os.path.join(quant_path, eora_path),
+        path=eora_path,
         rank=rank,
     )
 

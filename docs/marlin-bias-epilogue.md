@@ -63,8 +63,17 @@ and a re-save all see the same tensor.
 | --- | --- | --- |
 | shared-memory extent (`sh_bias_size`) | `thread_n_blocks * 16 / 8` int4 | `thread_n_blocks * 16 / 4` int4 |
 | fetch | one `cp_async4` of 8 columns | two `cp_async4` of 4 FP32 columns each |
-| register fragment | `FragS frag_bias[2][4]` of `half2` | `Vec<float, 2> frag_bias[2][4]` |
+| register fragment | `FragS frag_bias[2][4]` of `half2` | none; the epilogue reads the staged FP32 bias from shared memory |
 | epilogue add | `Dtype::num2float(scalar_t)` | the FP32 value directly |
+
+The FP32 stage is twice the 16-bit extent, so it gets its own region after the
+B/reduce union (`sh_bias = sh + sh_size_b_red_max`) instead of sharing the
+union. The split-K reduction writes the union after the bias copy is issued;
+placing the bias after the union means the wider stage can never overlap a
+reduction write. The host model in `get_kernel_cache_size()` must mirror both
+halves: `sh_bias_size = tb_n * 4` bytes and
+`tmp_size = max(sh_b, sh_red) + sh_bias_size`. The `g_idx` stage is likewise
+`tb_k / 4` int4, i.e. `tb_k * 4` bytes per pipeline stage.
 
 `gptq_marlin.cu` widens a half/bfloat16 `b_bias` to FP32 once per call and
 records that temporary on the stream, so an existing caller that still passes a

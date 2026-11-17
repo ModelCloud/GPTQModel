@@ -174,9 +174,10 @@ def input_rows(x: t.Tensor) -> int:
     batch dimension, so a 4D input has ``B * S * T`` matrix rows.
     """
 
-    if x.ndim == 0:
+    shape = x.shape
+    if len(shape) == 0:
         raise ValueError("Linear input must have at least one dimension")
-    return math.prod(x.shape[:-1])
+    return math.prod(shape[:-1])
 
 
 def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
@@ -192,6 +193,41 @@ def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
         dtype=x.dtype,
         device=x.device,
     )
+
+
+def detach_cpu_operand(tensor):
+    """Return ``tensor`` as a private allocation instead of a checkpoint view.
+
+    A CPU load keeps quantized tensors as zero-copy views of the shard's
+    ``safetensors`` mapping. The CPU int4 repack replaces ``qweight`` and
+    ``qzeros`` with private tensors, but keeps small per-column metadata
+    (``g_idx``, and ``scales`` on the ATen path) as views of that mapping. A
+    single surviving view pins the whole shard: every page the loader touched
+    stays resident even though the packed weights were replaced, so the model
+    counts its quantized weights twice (#4785).
+
+    These operands are per-column metadata, so one copy at repack time is cheap
+    next to the shard pages it releases. ``None`` and non-tensors pass through
+    unchanged.
+
+    Only a tensor that actually aliases the checkpoint is copied. A storage
+    backed by a mapped file is non-resizable (that is how ``safetensors`` and
+    ``torch.frombuffer`` on an ``mmap`` create it); an ordinary allocation is
+    resizable and is returned unchanged so its object identity survives
+    (``scales`` must stay the loader's tensor, #4395).
+    """
+
+    if tensor is None or not isinstance(tensor, t.Tensor):
+        return tensor
+    if tensor.device.type != "cpu":
+        return tensor
+    try:
+        aliases_checkpoint = not tensor.untyped_storage().resizable()
+    except Exception:
+        return tensor
+    if not aliases_checkpoint:
+        return tensor
+    return tensor.clone()
 
 
 # Packed quantized weights are unpacked through shift operations in several
@@ -1265,16 +1301,19 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
     def _can_rebuild_checkpoint_qweight(self) -> bool:
         """Whether the checkpoint ``qweight`` can be rebuilt on demand.
 
-        Only the ATen CPU int4pack permutation has an inverse. The AVX512
-        extension and the XPU packing use different layouts, so their
-        subclasses leave ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
+        Only the CPU int4pack permutations have an inverse: the ATen layout
+        (``"gptq"``/``"awq"``) and the AVX512 layout (``"avx512_gptq"``, whose
+        ``unpack_hf_int4`` is the documented inverse of ``pack_hf_int4``). The
+        XPU packing uses a different layout, so its subclass leaves
+        ``_FUSED_TRAIN_STATE_REBUILD`` as ``None``.
 
         This is only a cheap pre-filter: the clone is dropped by
         ``finalize_fused_train_state`` only after the rebuilt words match the
         checkpoint bytes this module actually carried.
         """
 
-        if self._FUSED_TRAIN_STATE_REBUILD is None:
+        kind = self._FUSED_TRAIN_STATE_REBUILD
+        if kind is None:
             return False
         weight = getattr(self, "qweight", None)
         if not isinstance(weight, t.Tensor) or weight.device.type != "cpu":
@@ -1283,18 +1322,24 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             # The rebuilt words are int32; any other checkpoint dtype keeps
             # its snapshot.
             return False
+        if kind == "avx512_gptq":
+            # ``unpack_hf_int4`` is the verified inverse of ``pack_hf_int4`` and
+            # is pure Torch, so this path needs no ATen int4pack support and can
+            # undo the ``ret_idx`` channel reorder of a ``desc_act`` checkpoint.
+            return True
         from ._cpu_int4pack_layout import int4pack_block_size
 
         if int4pack_block_size() is None:
             return False
         identity = getattr(self, "_ret_idx_is_identity", None)
         if (
-            self._FUSED_TRAIN_STATE_REBUILD == "gptq"
+            kind == "gptq"
             and callable(identity)
             and not identity()
         ):
-            # The fused transform reorders the input rows by ``ret_idx``; only
-            # the identity order leaves the packed words invertible here.
+            # The ATen fused transform reorders the input rows by ``ret_idx``
+            # without keeping the gather, so only the identity order leaves the
+            # packed words invertible here.
             return False
         return True
 
@@ -1306,10 +1351,16 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
             raise RuntimeError(
                 f"{self.__class__.__name__} cannot rebuild its checkpoint qweight"
             )
-        from ._cpu_int4pack_layout import rebuild_awq_qweight, rebuild_gptq_qweight
+        from ._cpu_int4pack_layout import (
+            rebuild_avx512_qweight,
+            rebuild_awq_qweight,
+            rebuild_gptq_qweight,
+        )
 
         if kind == "awq":
             return rebuild_awq_qweight(self)
+        if kind == "avx512_gptq":
+            return rebuild_avx512_qweight(self)
         return rebuild_gptq_qweight(self)
 
     def _write_fused_train_state_snapshot(self, destination, prefix: str, keep_vars: bool) -> None:
@@ -1343,19 +1394,27 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        if self._is_runtime_layout():
-            from ...utils.checkpoint_state import is_checkpoint_serialization
+        # The first forward rewrites `_buffers` (register_buffer for the fused
+        # snapshot, rebinding `qweight`/`qzeros`, and popping the clone in
+        # `finalize_fused_train_state`). Serialize with that transform: without
+        # the lock `nn.Module._save_to_state_dict` iterates a dict that is being
+        # resized ("dictionary changed size during iteration"), and under
+        # free-threading it can also emit the runtime int4pack words under the
+        # checkpoint `qweight` key or drop tensors (issue #4788).
+        with self._cpu_transform_lock:
+            if self._is_runtime_layout():
+                from ...utils.checkpoint_state import is_checkpoint_serialization
 
-            if is_checkpoint_serialization():
-                raise RuntimeError(
-                    f"{self.__class__.__name__} rewrites packed tensors into a "
-                    "kernel-private runtime layout; the original checkpoint tensors "
-                    "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
-                    "for a loadable checkpoint, or reload the original checkpoint."
-                )
-        super()._save_to_state_dict(destination, prefix, keep_vars)
-        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
-        self._write_state_dict_layout_marker(destination, prefix, keep_vars)
+                if is_checkpoint_serialization():
+                    raise RuntimeError(
+                        f"{self.__class__.__name__} rewrites packed tensors into a "
+                        "kernel-private runtime layout; the original checkpoint tensors "
+                        "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
+                        "for a loadable checkpoint, or reload the original checkpoint."
+                    )
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
+            self._write_state_dict_layout_marker(destination, prefix, keep_vars)
 
     def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the layout code as a tensor so in-process transports keep it.
@@ -1394,6 +1453,14 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     def _load_from_state_dict(self, *args, **kwargs):
+        # `restore_fused_train_state` rebinds `qweight`/`qzeros` and the fused
+        # snapshot buffers, so a concurrent first forward must not interleave
+        # with it (issue #4788). The lock is re-entrant, so a nested call from a
+        # save path or from `load_state_dict` is safe.
+        with self._cpu_transform_lock:
+            return self._load_from_state_dict_locked(*args, **kwargs)
+
+    def _load_from_state_dict_locked(self, *args, **kwargs):
         state_dict = args[0] if args else kwargs.get("state_dict")
         prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
         missing_keys = args[4] if len(args) > 4 else kwargs.get("missing_keys")

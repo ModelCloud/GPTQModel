@@ -69,6 +69,7 @@ from ..utils.offload import (
     bind_private_offload_root,
     capture_offloaded_base_modules,
     ensure_version_counters,
+    has_disk_offloaded_modules,
     is_meta_module,
     materialize_remaining_meta_modules,
     offload_to_disk,
@@ -912,6 +913,24 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
 
         materialize_remaining_meta_modules(self.gptq_model, device=CPU)
 
+    def _materialize_unreached_meta_modules(self) -> None:
+        """Best-effort fill of the layers a cancelled/failed run never reached.
+
+        The weight-only loop also leaves the base modules on meta until the
+        success path fills them, so cover both before the next forward. Cleanup
+        must never mask the cancellation that got us here, so a materialization
+        failure is logged and ignored (#4860).
+        """
+
+        try:
+            self._materialize_meta_base_modules(strict=False)
+            self._materialize_remaining_meta_modules()
+        except Exception:
+            log.warning(
+                "failed to materialize the layers the cancelled/failed run never reached",
+                exc_info=True,
+            )
+
     def _materialize_meta_base_modules(self, *, strict: bool) -> None:
         """Fill base modules that the lazy shell never materialized.
 
@@ -972,9 +991,34 @@ class WeightOnlyLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             try:
                 self._restore_offloaded_base_modules(strict=False)
             finally:
-                # A failed run cannot be saved, so its per-run offload bundles
-                # are no longer reachable (issue #4368).
-                release_private_offload_root(self.gptq_model)
+                # The loop never materialized the layers past the cancel point;
+                # fill them before the next forward (#4860).
+                self._materialize_unreached_meta_modules()
+                # ``finalize()`` is the only other place the processor closes
+                # its Device-SMI handles, and a failed run never reaches it
+                # (#4813). The release is idempotent and must not mask the run
+                # failure; a processor that does not implement it is skipped.
+                release = getattr(self.processor, "release_failed_run", None)
+                if callable(release):
+                    try:
+                        release()
+                    except Exception:
+                        log.warn(
+                            "failed to release processor resources while failing the weight-only run",
+                            exc_info=True,
+                        )
+                # Finished layers stay as disk-offloaded meta shells pointing
+                # into this run's private offload root; keep it while they read
+                # from it (#4807). The model-lifetime finalizer reclaims it and
+                # the next run on this model releases it (#4368).
+                model = getattr(self.gptq_model, "model", None)
+                if model is not None and has_disk_offloaded_modules(model):
+                    log.debug(
+                        "Offload: keeping the per-run directory for the "
+                        "disk-offloaded layers of a cancelled/failed weight-only run."
+                    )
+                else:
+                    release_private_offload_root(self.gptq_model)
             raise
         self._restore_offloaded_base_modules(strict=True)
         self._restore_disk_offloaded_modules()

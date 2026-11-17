@@ -18,7 +18,7 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import AWQuantLinear
+from . import AWQuantLinear, detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import (
     bind_runtime_qzeros,
@@ -247,6 +247,13 @@ class TorchAtenAwqLinear(AWQuantLinear):
         # ``qweight`` now holds int4pack words: drop the checkpoint clone if
         # the inverse reproduces exactly the bytes captured before the pack.
         finalize_fused_train_state(self)
+        # ``scales`` keeps the checkpoint dtype and order and ``bias`` is
+        # untouched, so both are still views of the shard's ``safetensors``
+        # mapping; either one alone pins every page the loader faulted in
+        # (#4785). Detach them now that the runtime layout is built.
+        self.scales = detach_cpu_operand(self.scales)
+        self.bias = detach_cpu_operand(getattr(self, "bias", None))
+        self.g_idx = detach_cpu_operand(getattr(self, "g_idx", None))
 
     def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":

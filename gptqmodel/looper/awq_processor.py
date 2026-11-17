@@ -2786,6 +2786,7 @@ class AWQProcessor(LoopProcessor):
         for layer, scale_consumers in zip(sanitized_module_config, scale_consumers_by_group):
             search_layers = layer.pop("_awq_search_layers", None)
             allow_partial_replay = bool(layer.pop("_awq_allow_partial_replay", False))
+            allow_outside_fold = bool(layer.pop("_awq_allow_outside_fold", False))
             call_kwargs = dict(layer)
             if search_layers is not None:
                 # Search with the covered members only; fold into every member.
@@ -2796,6 +2797,7 @@ class AWQProcessor(LoopProcessor):
                     layer_module_ref,
                     scale_consumers=scale_consumers,
                     allow_partial_replay=allow_partial_replay,
+                    allow_outside_fold=allow_outside_fold,
                     **call_kwargs,
                 ))
             except _AWQScaleGroupError as exc:
@@ -2942,12 +2944,17 @@ class AWQProcessor(LoopProcessor):
     @staticmethod
     def _validate_scale_group(
         module, prev_op, layers, inp, module2inspect, scale_consumers, extra_layers=None,
+        allow_outside_fold=False,
     ):
         """Check exact bindings, widths and the existing replay boundary.
 
-        ``extra_layers`` are fold-only members: they must still bind, match the
-        source width, and live inside the replay boundary, but the search does
-        not score them, so they are not replayed targets.
+        ``extra_layers`` are fold-only members: they must still bind and match
+        the source width, but the search does not score them, so they are not
+        replayed targets. They normally also have to live inside the replay
+        boundary; ``allow_outside_fold`` lifts that for a group the tree
+        declares across sibling branches of one norm (Falcon-H1's attention and
+        Mamba mixer). Those members read the same tensor, so the same folded
+        scale is correct for them even though this replay cannot score them.
         """
 
         try:
@@ -2980,7 +2987,8 @@ class AWQProcessor(LoopProcessor):
             if source_weight.ndim in (1, 2) and source_weight.shape[0] != width:
                 raise _AWQScaleGroupError(f"AWQ: source `{source_name}` cannot produce {width} channels.")
         inspection_modules = {id(child) for child in module2inspect.modules()}
-        outside = [name for name, target in targets + extra + consumers if id(target) not in inspection_modules]
+        checked = targets + consumers if allow_outside_fold else targets + extra + consumers
+        outside = [name for name, target in checked if id(target) not in inspection_modules]
         if outside:
             raise _AWQScaleGroupError(
                 f"AWQ: replay boundary `{inspect_name}` does not contain targets {outside} for source "
@@ -3171,6 +3179,7 @@ class AWQProcessor(LoopProcessor):
             scale_consumers: Optional[List[str]] = None,
             fold_layers: Optional[List[nn.Linear]] = None,
             allow_partial_replay: bool = False,
+            allow_outside_fold: bool = False,
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
@@ -3202,7 +3211,7 @@ class AWQProcessor(LoopProcessor):
         fold_layers = list(fold_layers) if fold_layers is not None else list(layers)
         replay_targets = self._validate_scale_group(
             module, prev_op, layers, inp, module2inspect, scale_consumers,
-            extra_layers=fold_layers,
+            extra_layers=fold_layers, allow_outside_fold=allow_outside_fold,
         )
         kwargs = dict(kwargs)
         if "use_cache" in kwargs:
@@ -4458,9 +4467,8 @@ class AWQProcessor(LoopProcessor):
             return None
         return rotary(x, position_ids, **selector_kwargs)
 
-    @classmethod
     def _rotary_layer_type_kwargs(
-            cls, rotary: nn.Module, module: torch.nn.Module
+            self, rotary: nn.Module, module: torch.nn.Module
     ) -> Optional[Dict[str, Any]]:
         """Return the per-layer-type selector a typed rotary needs.
 
@@ -4477,10 +4485,10 @@ class AWQProcessor(LoopProcessor):
         Returns ``None`` when no valid selector can be resolved.
         """
 
-        parameter_name = cls._rotary_layer_type_parameter(rotary)
+        parameter_name = self._rotary_layer_type_parameter(rotary)
         if parameter_name is None:
             return {}
-        valid_types = set(cls._rotary_layer_types(rotary))
+        valid_types = set(self._rotary_layer_types(rotary))
         # `module` is normally the attention block, but a later AWQ group whose
         # root was already consumed (for example `o_proj`) falls back to the
         # decoder layer. Look through both shapes.
@@ -4501,7 +4509,33 @@ class AWQProcessor(LoopProcessor):
                 if valid_types and value not in valid_types:
                     continue
                 return {parameter_name: value}
+        # Some attentions expose the selector only through the model config:
+        # `LagunaAttention` keeps `is_local_attention`/`sliding_window` and the
+        # `full_attention`/`sliding_attention` label lives in
+        # `config.layer_types[layer_idx]` (#4874). Resolve it for the layer that
+        # is being scaled, and still only pass a label the rotary declares.
+        config_layer_type = self._config_layer_type()
+        if config_layer_type is not None and (
+                not valid_types or config_layer_type in valid_types
+        ):
+            return {parameter_name: config_layer_type}
         return None
+
+    def _config_layer_type(self) -> Optional[str]:
+        """``config.layer_types[layer_idx]`` for the layer being scaled."""
+
+        scale_context = getattr(self, "_scale_context", None)
+        layer_index = getattr(scale_context, "layer_index", None)
+        if not isinstance(layer_index, int):
+            return None
+        config = getattr(getattr(self, "model", None), "config", None)
+        layer_types = getattr(config, "layer_types", None)
+        if not isinstance(layer_types, (list, tuple)) or not layer_types:
+            return None
+        if not 0 <= layer_index < len(layer_types):
+            return None
+        value = layer_types[layer_index]
+        return value if isinstance(value, str) else None
 
     def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
         """Rows per scale-search replay forward.

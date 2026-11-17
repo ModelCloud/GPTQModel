@@ -87,7 +87,7 @@ Line numbers are from audit revision `93d3ae7a`.
 
 | Surface | Before | After |
 | --- | --- | --- |
-| Default bind | `DEFAULT_HOST = "0.0.0.0"` (`gptqmodel/utils/openai_server.py:35`) | `"127.0.0.1"`; `serve()` default matches (`gptqmodel/models/base.py:3168`) |
+| Default bind | `DEFAULT_HOST = "0.0.0.0"` (`gptqmodel/utils/openai_server.py:35`) | `"127.0.0.1"`; `serve()` default matches (`gptqmodel/models/base.py:3756`) |
 | Exposed bind without key | `_warn_if_exposed()` warned but started (`gptqmodel/utils/openai_server.py:424-446`) | `_validate_bind()` raises `ValueError` before uvicorn starts |
 | Host header | none | `TrustedHostMiddleware`; loopback binds accept only loopback names |
 | Request bounds | `max_tokens: int = 256`, `n: int = 1`, no body cap (`gptqmodel/utils/openai_server.py:219-226`) | pydantic bounds plus `BodySizeLimitMiddleware` |

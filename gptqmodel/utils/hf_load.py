@@ -27,8 +27,13 @@ from safetensors import safe_open
 
 from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import resolve_model_rotation, resolve_quant_format
+from ..quantization import FORMAT, METHOD, QuantizeConfig
+from ..quantization.config import (
+    _normalize_quant_bits,
+    dynamic_get,
+    resolve_model_rotation,
+    resolve_quant_format,
+)
 from .backend import BACKEND, backend_for_activation, normalize_backend
 from .hf import get_hf_config_dtype
 from .logger import setup_logger
@@ -40,6 +45,7 @@ __all__ = [
     "HFGPTQModelLoadContext",
     "hf_gptqmodel_post_init_for_load",
     "hf_gptqmodel_prepare_model_for_load",
+    "hf_gptqmodel_repair_awq_load",
     "is_native_gptqmodel_checkpoint",
 ]
 
@@ -300,6 +306,21 @@ def hf_gptqmodel_prepare_model_for_load(
 
     model_type = str(getattr(model.config, "model_type", "")).lower()
     model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+
+    # The checkpoint may use a legacy layout (for example the Transformers 4.x
+    # ``language_model.model.layers.*`` keys of a Gemma-3 VL checkpoint) while
+    # the live model exposes runtime names. Convert the manifest the same way
+    # the native loader does before matching it to ``find_modules`` (#4802).
+    key_converter = getattr(model_definition, "checkpoint_key_for_load", None)
+    if not callable(key_converter):
+        from ..models.loader import _checkpoint_key_converter
+
+        key_converter = _checkpoint_key_converter(model_definition, model, to_runtime=True)
+    if callable(key_converter):
+        quantized_module_names = tuple(
+            sorted({key_converter(name) for name in quantized_module_names})
+        )
+
     defuser.replace_fused_blocks(model_type)
 
     # Rebuild fused model structures before matching serialized module names.
@@ -417,3 +438,233 @@ def hf_gptqmodel_post_init_for_load(
     # ``init_continuous_batching`` work without a caller-side monkey patch.
     _set_paged_attention_safe_cuda_graphs(model)
     return model
+
+
+def _resolve_checkpoint_dir(model: nn.Module, checkpoint_files=None) -> Optional[str]:
+    """Resolve the checkpoint directory, including a hub repo loaded from the cache.
+
+    ``find_checkpoint_dir`` only accepts a local directory, which is what
+    Transformers hands the prepare hook. The post-weight repair has no
+    ``checkpoint_files``, so a checkpoint loaded from a repo id has to be
+    resolved through the hub cache instead.
+    """
+
+    checkpoint_path = find_checkpoint_dir(model, checkpoint_files)
+    if checkpoint_path is not None:
+        return checkpoint_path
+
+    config = getattr(model, "config", None)
+    for attribute in ("_name_or_path", "name_or_path"):
+        repo_id = getattr(config, attribute, None)
+        if not isinstance(repo_id, str) or not repo_id or os.path.isdir(repo_id):
+            continue
+        from .hub import cached_file
+
+        for filename in _QUANTIZE_CONFIG_FILENAMES:
+            try:
+                resolved = cached_file(repo_id, filename)
+            except Exception:
+                continue
+            if resolved:
+                return os.path.dirname(os.fspath(resolved))
+    return None
+
+
+def _awq_checkpoint_module_names(checkpoint_path: str, checkpoint_files) -> tuple:
+    """Return the module paths the AWQ checkpoint serializes packed weights for."""
+
+    tensor_keys = _checkpoint_tensor_keys(checkpoint_path, checkpoint_files)
+    return tuple(
+        sorted(
+            key.removesuffix(".qweight")
+            for key in tensor_keys
+            if key.endswith(".qweight")
+        )
+    )
+
+
+def _resolved_module_config(qcfg: QuantizeConfig, name: str, format_code: FORMAT):
+    """Resolve one module's constructor config from the checkpoint manifest."""
+
+    from ..quantization.module_config import resolve_module_constructor_config
+
+    return resolve_module_constructor_config(
+        bits=_normalize_quant_bits(qcfg.runtime_bits, format_value=format_code),
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        pack_dtype=qcfg.pack_dtype,
+        format=format_code,
+        init_kwargs=qcfg.quant_linear_init_kwargs(),
+        overrides=dynamic_get(dynamic=qcfg.dynamic, module_name=name),
+    )
+
+
+def _awq_modules_ignore_serialized_config(model: nn.Module, qcfg: QuantizeConfig, names) -> bool:
+    """Whether Transformers built these modules from the global config only.
+
+    Transformers' AWQ loader replaces every ``nn.Linear`` with one kernel chosen
+    from the *global* ``bits``/``group_size`` and never consults ``dynamic``.
+    The per-module config is authoritative, so a mismatch in bits, group size,
+    activation order, or zero-point symmetry means the module decodes the
+    checkpoint's tensors with the wrong geometry.
+    """
+
+    from .model import find_modules
+
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    # Transformers already replaced the quantized linears, so only the packed
+    # modules remain candidates (``find_modules`` defaults to dense types).
+    modules = find_modules(model, layers=[BaseQuantLinear])
+    for name in names:
+        module = modules.get(name)
+        if not isinstance(module, BaseQuantLinear):
+            continue
+        resolved = _resolved_module_config(qcfg, name, format_code)
+        if resolved is None:
+            continue
+        if int(module.bits) != int(resolved.bits):
+            return True
+        if int(module.group_size) != int(resolved.group_size):
+            return True
+        if hasattr(module, "desc_act") and bool(module.desc_act) != bool(resolved.desc_act):
+            return True
+        if hasattr(module, "sym") and bool(module.sym) != bool(resolved.sym):
+            return True
+    return False
+
+
+def hf_gptqmodel_repair_awq_load(
+    model: nn.Module,
+    *,
+    backend: Optional[Union[str, BACKEND]] = None,
+    checkpoint_files=None,
+    dtype: Optional[torch.dtype] = None,
+) -> Optional[HFGPTQModelLoadContext]:
+    """Repair a native AWQ load that started before the bridge was installed.
+
+    ``transformers.integrations.awq.replace_with_awq_linear`` imports
+    ``gptqmodel`` from inside its own body, so the AWQ quantizer's prepare hook
+    is installed too late to run for the load that triggered that import: every
+    module is built from the *global* ``bits``/``group_size`` and ``dynamic``
+    per-module overrides are ignored (#4795). On CPU the load then decodes the
+    checkpoint's group-sized tensors with the wrong group size (silently wrong
+    logits); on CUDA the Marlin pack raises a qzeros shape error.
+
+    By the time the post-weight hook runs the checkpoint tensors are resident,
+    so this rebuilds each checkpoint-backed module from its resolved per-module
+    config and kernel class, moves the loaded tensors into it, and returns the
+    context for the native post-init. Returns ``None`` when the checkpoint is
+    not a GPT-QModel-native AWQ checkpoint or when the modules Transformers
+    built already match the serialized config, so those loads keep their
+    existing path.
+    """
+
+    checkpoint_path = _resolve_checkpoint_dir(model, checkpoint_files)
+    if checkpoint_path is None:
+        return None
+    try:
+        qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    if qcfg.method != METHOD.AWQ or not _is_native_gptqmodel_config(qcfg):
+        return None
+
+    quantized_module_names = _awq_checkpoint_module_names(checkpoint_path, checkpoint_files)
+    if not quantized_module_names:
+        return None
+
+    from ..models.auto import MODEL_MAP_CASEFOLD
+    from ..models.base import BaseQModel
+    from ..utils.importer import select_quant_linear
+    from .kernel import snapshot_kernel_config
+    from .model import create_quant_layer, find_modules
+
+    modules = find_modules(model, layers=[BaseQuantLinear])
+    loaded = {
+        name: modules[name]
+        for name in quantized_module_names
+        if name in modules
+    }
+    dropped = sorted(set(quantized_module_names) - set(loaded))
+    if dropped:
+        sample = ", ".join(dropped[:4])
+        suffix = "" if len(dropped) <= 4 else f", ... ({len(dropped)} total)"
+        raise ValueError(
+            "This GPT-QModel AWQ checkpoint serializes quantized tensors that "
+            f"Transformers' built-in AWQ loader did not consume: {sample}{suffix}. "
+            "Its quantizer imports `gptqmodel` from inside "
+            "`replace_with_awq_linear`, so the native bridge cannot rebuild "
+            "fused or per-expert modules for this load, and continuing would "
+            "leave those modules randomly initialized. Import `gptqmodel` "
+            "before calling `AutoModelForCausalLM.from_pretrained`, or load the "
+            "checkpoint with `GPTQModel.load`."
+        )
+
+    if not _awq_modules_ignore_serialized_config(model, qcfg, quantized_module_names):
+        return None
+
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    export_method = qcfg.export_quant_method()
+    backend = _resolve_backend_for_checkpoint(qcfg, backend)
+    if not isinstance(dtype, torch.dtype):
+        # The kernel's activation dtype is the width the checkpoint tensors
+        # were assigned at, not necessarily the config's requested dtype:
+        # Transformers' AWQ quantizer casts bf16 to fp16 on CUDA/XPU.
+        scales = getattr(next(iter(loaded.values())), "scales", None)
+        if isinstance(scales, torch.Tensor) and scales.is_floating_point():
+            dtype = scales.dtype
+        else:
+            config_dtype = get_hf_config_dtype(model.config)
+            dtype = config_dtype if isinstance(config_dtype, torch.dtype) else None
+
+    devices = sorted({module.qweight.device for module in loaded.values()}, key=str)
+    device = devices[0] if len(devices) == 1 else tuple(devices)
+    bits = qcfg.runtime_bits
+    init_kwargs = qcfg.quant_linear_init_kwargs()
+    init_kwargs["kernel"] = snapshot_kernel_config(qcfg)
+
+    candidates = select_quant_linear(
+        bits=bits,
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        backend=backend,
+        format=format_code,
+        quant_method=export_method,
+        pack=False,
+        dynamic=qcfg.dynamic,
+        pack_dtype=qcfg.pack_dtype,
+        device=device,
+        dtype=dtype,
+        multi_select=True,
+    )
+    if not isinstance(candidates, (list, tuple)):
+        candidates = [candidates]
+
+    model_type = str(getattr(model.config, "model_type", "")).lower()
+    model_definition = MODEL_MAP_CASEFOLD.get(model_type, BaseQModel)
+    quant_linear = create_quant_layer(
+        linear_candidates=list(candidates),
+        bits=bits,
+        desc_act=qcfg.desc_act,
+        dynamic=qcfg.dynamic,
+        group_size=qcfg.group_size,
+        quant_result=dict.fromkeys(quantized_module_names, True),
+        module=model,
+        sym=qcfg.sym,
+        device=device,
+        lm_head_name=model_definition.lm_head,
+        pack_dtype=qcfg.pack_dtype,
+        backend=backend,
+        format=format_code,
+        init_kwargs=init_kwargs,
+        dtype=dtype,
+        transfer_from=loaded,
+    )
+    log.info(
+        "Transformers: rebuilt `%s` native GPTQModel AWQ modules after the "
+        "bridge missed this load's import order (#4795).",
+        len(loaded),
+    )
+    return HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=quant_linear)

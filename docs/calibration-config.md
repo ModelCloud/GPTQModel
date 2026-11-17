@@ -6,7 +6,7 @@
 The looper processors consume the same class; there is no second definition.
 
 ```python
-from gptqmodel import CalibrationConfig, GPTQConfig, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQConfig, GPTQModel
 
 model = GPTQModel.load("Qwen/Qwen3-0.6B", GPTQConfig(bits=4, group_size=128))
 model.quantize(

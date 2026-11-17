@@ -39,6 +39,7 @@ from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchLinear
+from ..quantization.awq.quantize.scale import is_foldable_source
 from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import (
     FORMAT,
@@ -121,6 +122,7 @@ from ..utils.structure import (
     alias_from_turtle_for_submodule,
     restore_init_owned_rotary_buffers,
 )
+from ..utils.tied_weights import lm_head_is_tied, word_embeddings_tied
 from ..utils.torch import (
     TORCH_HAS_COMPILE,
     as_torch_device,
@@ -838,6 +840,19 @@ class BaseQModel(nn.Module):
 
     # some models require Processor? For example, Qwen2VLImageProcessor.
     require_load_processor = False
+
+    # Some checkpoints ship no tokenizer at all (Decision Transformer offline-RL
+    # models). A definition that sets this to False is loaded without one; the
+    # text models keep the default so a missing tokenizer still fails loudly.
+    require_load_tokenizer: bool = True
+
+    # How prepared calibration rows reach the model forward:
+    #   "token_ids"     - normalise every row to `input_ids`/`attention_mask`
+    #                     and collate by token length (default, text models).
+    #   "tensor_kwargs" - pass a row whose values are all tensors straight
+    #                     through as keyword arguments (Decision Transformer's
+    #                     `states`/`actions`/`returns_to_go`/`timesteps`).
+    calibration_inputs: str = "token_ids"
 
     # TODO: use a better name and what if the value is not at the config root?
     # allow dynamic expert n-count layer extraction
@@ -2286,7 +2301,13 @@ class BaseQModel(nn.Module):
                         device_type=quant_device_type, is_rocm=IS_ROCM
                     )
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    preferred_backend = BACKEND.AWQ_GEMV_FAST
+                    # The native GEMV_FAST extension is CUDA-only; a CPU-only
+                    # host packs with the portable Torch reader (issue #4736).
+                    preferred_backend = (
+                        BACKEND.AWQ_TORCH
+                        if quant_device_type == "cpu"
+                        else BACKEND.AWQ_GEMV_FAST
+                    )
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
@@ -2821,7 +2842,10 @@ class BaseQModel(nn.Module):
         checkpoint: Optional["CheckpointConfig"] = None,
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
-        from ..looper.loop_processor import _reusable_calibration_dataset
+        from ..looper.loop_processor import (
+            _reusable_calibration_dataset,
+            release_failed_run_processors,
+        )
         from ..looper.module_looper import ModuleLooper
 
         # The native and EoRA steps each prepare their calibration input, so a
@@ -2874,91 +2898,100 @@ class BaseQModel(nn.Module):
         )
 
         processors = []
-        for step in run_plan.processors:
-            factory = processor_class(step)
-            if step is ProcessorStep.NATIVE:
-                native_args = dict(args)
-                native_args.pop("calculate_w_wq_diff")
-                processors.append(factory(**native_args))
-            elif step is ProcessorStep.PREPROCESSOR:
-                processors.append(
-                    factory(
+        try:
+            for step in run_plan.processors:
+                factory = processor_class(step)
+                if step is ProcessorStep.NATIVE:
+                    native_args = dict(args)
+                    native_args.pop("calculate_w_wq_diff")
+                    processors.append(factory(**native_args))
+                elif step is ProcessorStep.PREPROCESSOR:
+                    processors.append(
+                        factory(
+                            tokenizer=self.tokenizer,
+                            qcfg=self.quantize_config,
+                            calibration=CalibrationConfig(),
+                        )
+                    )
+                elif step is ProcessorStep.EORA:
+                    # EoRA prepares its samples with the same policy; its rows are
+                    # not quantizer statistics, so the attention-sink row policy
+                    # does not apply to them.
+                    eora_calibration = calibration_config.bind(
+                        self.prepare_dataset,
+                        dataset=adapter_dataset if adapter_dataset is not None else dataset,
+                        exclude_attention_sinks=False,
+                    )
+                    processors.append(factory(
                         tokenizer=self.tokenizer,
                         qcfg=self.quantize_config,
-                        calibration=CalibrationConfig(),
-                    )
-                )
-            elif step is ProcessorStep.EORA:
-                # EoRA prepares its samples with the same policy; its rows are
-                # not quantizer statistics, so the attention-sink row policy
-                # does not apply to them.
-                eora_calibration = calibration_config.bind(
-                    self.prepare_dataset,
-                    dataset=adapter_dataset if adapter_dataset is not None else dataset,
-                    exclude_attention_sinks=False,
-                )
-                processors.append(factory(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                    calibration=eora_calibration,
-                ))
-            elif step is ProcessorStep.EXL3:
-                exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
-                processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
-            elif step is ProcessorStep.FP8_GSQ:
-                fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
-                processors.append(factory(**fp8_args))
-            elif step is ProcessorStep.QQQ:
-                processors.append(factory(**args, backend=run_plan.loop_backend))
-            elif step is ProcessorStep.MACAQ:
-                processors.append(factory(**args, backend=run_plan.pack_backend))
-            elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
-                processors.append(factory(
-                    **args, gptq_model=self, model=self.model,
-                ))
-            else:
-                processors.append(factory(**args))
+                        calibration=eora_calibration,
+                    ))
+                elif step is ProcessorStep.EXL3:
+                    exl3_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
+                    processors.append(factory(**exl3_args, lm_head_name=self.lm_head))
+                elif step is ProcessorStep.FP8_GSQ:
+                    fp8_args = {key: value for key, value in args.items() if key != "calculate_w_wq_diff"}
+                    processors.append(factory(**fp8_args))
+                elif step is ProcessorStep.QQQ:
+                    processors.append(factory(**args, backend=run_plan.loop_backend))
+                elif step is ProcessorStep.MACAQ:
+                    processors.append(factory(**args, backend=run_plan.pack_backend))
+                elif step in (ProcessorStep.AWQ, ProcessorStep.PARO):
+                    processors.append(factory(
+                        **args, gptq_model=self, model=self.model,
+                    ))
+                else:
+                    processors.append(factory(**args))
 
-        gc_context = (
-            DEVICE_THREAD_POOL.no_auto_gc()
-            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
-            else nullcontext()
-        )
-
-        from ..looper.gptq_checkpoint import checkpoint_session
-
-        checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
-        with gc_context, checkpoint_context as extension:
-            if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
-                from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
-
-                install_w4a_llama_replay(self.model, self.quantize_config)
-            # Processor fusion is opt-in. Enabling it changes EoRA's calibration
-            # trajectory: the fused schedule no longer replays the corrected
-            # upstream weights that the separate EoRA pass would install.
-            module_looper = ModuleLooper(
-                self, processors=processors, embed_quant_config=embed_quant_config,
-                extensions=(extension,) if extension is not None else (),
-                disk_write_expected=(
-                    bool(self.quantize_config.offload_to_disk) or checkpoint is not None
-                ),
-                processor_fusion=bool(
-                    getattr(self.quantize_config, "processor_fusion", False)
-                ),
+            gc_context = (
+                DEVICE_THREAD_POOL.no_auto_gc()
+                if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
+                else nullcontext()
             )
-            use_cache = getattr(self.model.config, "use_cache", False)
-            try:
-                return module_looper.loop(backend=run_plan.loop_backend, fallback=self.quantize_config.fallback)
-            finally:
-                module_looper.layer_module_coverage.report(type(self).__name__)
-                # Keep the run lease until every worker has stopped accessing
-                # the attempt directory, including exceptional/stop exits.
-                if extension is not None:
-                    try:
-                        DEVICE_THREAD_POOL.wait()
-                        module_looper.wait_dangling_threads()
-                    finally:
-                        self.model.config.use_cache = use_cache
+
+            from ..looper.gptq_checkpoint import checkpoint_session
+
+            checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
+            with gc_context, checkpoint_context as extension:
+                if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+                    from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+
+                    install_w4a_llama_replay(self.model, self.quantize_config)
+                # Processor fusion is opt-in. Enabling it changes EoRA's
+                # calibration trajectory: the fused schedule no longer replays the
+                # corrected upstream weights that the separate EoRA pass installs.
+                module_looper = ModuleLooper(
+                    self, processors=processors, embed_quant_config=embed_quant_config,
+                    extensions=(extension,) if extension is not None else (),
+                    disk_write_expected=(
+                        bool(self.quantize_config.offload_to_disk) or checkpoint is not None
+                    ),
+                    processor_fusion=bool(
+                        getattr(self.quantize_config, "processor_fusion", False)
+                    ),
+                )
+                use_cache = getattr(self.model.config, "use_cache", False)
+                try:
+                    return module_looper.loop(backend=run_plan.loop_backend, fallback=self.quantize_config.fallback)
+                finally:
+                    module_looper.layer_module_coverage.report(type(self).__name__)
+                    # Keep the run lease until every worker has stopped accessing
+                    # the attempt directory, including exceptional/stop exits.
+                    if extension is not None:
+                        try:
+                            DEVICE_THREAD_POOL.wait()
+                            module_looper.wait_dangling_threads()
+                        finally:
+                            self.model.config.use_cache = use_cache
+        except BaseException:
+            # A failure before or around ``ModuleLooper.loop()`` never reaches
+            # ``finalize()``, so the processors already built must release
+            # their per-run resources (Device-SMI sampler threads, workspace)
+            # here or they outlive the attempt (#4862). The loop's own failure
+            # branch releases again; that is idempotent.
+            release_failed_run_processors(processors)
+            raise
 
     def _quantize_weight_only(
         self,
@@ -2969,6 +3002,7 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[QuantizeEmbedConfig],
         run_plan: Optional[QuantizationRunPlan] = None,
     ):
+        from ..looper.loop_processor import release_failed_run_processors
         from ..looper.weight_only_looper import WeightOnlyLooper
 
         if run_plan is None:
@@ -2988,30 +3022,37 @@ class BaseQModel(nn.Module):
         if calibration.dataset is not None:
             log.info("Weight-only quantization selected; ignoring provided calibration dataset.")
 
-        processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
-            tokenizer=self.tokenizer,
-            qcfg=self.quantize_config,
-        )
-
-        gc_context = (
-            DEVICE_THREAD_POOL.no_auto_gc()
-            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
-            else nullcontext()
-        )
-
-        from ..looper.gptq_checkpoint import checkpoint_session
-
-        with gc_context, (checkpoint_session(checkpoint, self) if checkpoint else nullcontext()) as extension:
-            module_looper = WeightOnlyLooper(
-                model=self, processor=processor, embed_quant_config=embed_quant_config,
-                extensions=(extension,) if extension else (),
+        processor = None
+        try:
+            processor = processor_class(ProcessorStep.WEIGHT_ONLY)(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
             )
-            try:
-                return module_looper.loop(backend=run_plan.loop_backend)
-            finally:
-                module_looper.layer_module_coverage.report(type(self).__name__)
-                if checkpoint:
-                    DEVICE_THREAD_POOL.wait()
+
+            gc_context = (
+                DEVICE_THREAD_POOL.no_auto_gc()
+                if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
+                else nullcontext()
+            )
+
+            from ..looper.gptq_checkpoint import checkpoint_session
+
+            with gc_context, (checkpoint_session(checkpoint, self) if checkpoint else nullcontext()) as extension:
+                module_looper = WeightOnlyLooper(
+                    model=self, processor=processor, embed_quant_config=embed_quant_config,
+                    extensions=(extension,) if extension else (),
+                )
+                try:
+                    return module_looper.loop(backend=run_plan.loop_backend)
+                finally:
+                    module_looper.layer_module_coverage.report(type(self).__name__)
+                    if checkpoint:
+                        DEVICE_THREAD_POOL.wait()
+        except BaseException:
+            # The weight-only processor also owns Device-SMI sampler threads;
+            # a failure before ``loop()`` never reaches ``finalize()`` (#4862).
+            release_failed_run_processors((processor,))
+            raise
 
     def _eora_generate(
         self,
@@ -3053,6 +3094,7 @@ class BaseQModel(nn.Module):
         from ..adapter.adapter import Lora
         from ..looper.dequantize_processor import DequantizeProcessor
         from ..looper.eora_processor import EoraProcessor
+        from ..looper.loop_processor import release_failed_run_processors
         from ..looper.module_looper import ModuleLooper
         from ..looper.module_preprocessor import ModulePreProcessor
 
@@ -3078,37 +3120,43 @@ class BaseQModel(nn.Module):
         # init processor with EoRA processor
         calibration_config = calibration.bind(self.prepare_dataset)
         processors = []
-        if getattr(self.quantize_config, "preprocessors", None):
-            processors.append(
-                ModulePreProcessor(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                ),
-            )
-        processors.extend(
-            [
-                DequantizeProcessor(
-                    quantized_modules=quantized_modules,
-                    qcfg=self.quantize_config,
-                ),
-                EoraProcessor(
-                    tokenizer=self.tokenizer,
-                    qcfg=self.quantize_config,
-                    calibration=calibration_config,
-                ),
-            ]
-        )
-
-        # prepare processor worker (looper)
-        module_looper = ModuleLooper(model=self, processors=processors)
-
         try:
-            module_looper.loop()
-        finally:
-            # The other two looper entry points report coverage in a `finally`
-            # too; EoRA generation could otherwise skip every routed expert
-            # without a warning.
-            module_looper.layer_module_coverage.report(type(self).__name__)
+            if getattr(self.quantize_config, "preprocessors", None):
+                processors.append(
+                    ModulePreProcessor(
+                        tokenizer=self.tokenizer,
+                        qcfg=self.quantize_config,
+                    ),
+                )
+            processors.extend(
+                [
+                    DequantizeProcessor(
+                        quantized_modules=quantized_modules,
+                        qcfg=self.quantize_config,
+                    ),
+                    EoraProcessor(
+                        tokenizer=self.tokenizer,
+                        qcfg=self.quantize_config,
+                        calibration=calibration_config,
+                    ),
+                ]
+            )
+
+            # prepare processor worker (looper)
+            module_looper = ModuleLooper(model=self, processors=processors)
+
+            try:
+                module_looper.loop()
+            finally:
+                # The other two looper entry points report coverage in a `finally`
+                # too; EoRA generation could otherwise skip every routed expert
+                # without a warning.
+                module_looper.layer_module_coverage.report(type(self).__name__)
+        except BaseException:
+            # EoRA generation builds processors before its looper; a rejected
+            # calibration there must release them too (#4862).
+            release_failed_run_processors(processors)
+            raise
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
@@ -3712,6 +3760,15 @@ class BaseQModel(nn.Module):
         return self.optimize(backend=backend, mode=mode, fullgraph=fullgraph)
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        """Compile the quantized kernels and the model ``forward``.
+
+        The ``forward`` is compiled in place so ``generate()`` enters the
+        compiled path; wrapping ``self.model`` did not, because transformers'
+        ``generate`` calls the original module's own ``forward`` (#4669). The
+        first ``generate()`` after this call pays the compile cost, and a
+        graph-breaking kernel runs slower compiled than eager.
+        """
+
         if not self.quantized:
             log.warn("model is not quantized, skip compiling...")
             return self
@@ -3737,7 +3794,26 @@ class BaseQModel(nn.Module):
         # torch._dynamo.config.suppress_errors = True
         log.info(f"Compiling model with backend: `{backend}`, mode: `{mode}`")
 
-        self.model = torch_compile(self.model, fullgraph=fullgraph, backend=backend, mode=mode)
+        # ``generate()`` resolves to the original module's ``generate``, which
+        # calls the original eager ``forward``. Replacing ``self.model`` with a
+        # ``torch.compile`` wrapper (an ``OptimizedModule``) therefore compiled
+        # nothing that ``generate()`` ran: its ``__getattr__`` hands ``generate``
+        # back to the unwrapped module (#4669). Compile the forward in place so
+        # both a direct ``model(...)`` call and ``generate()`` enter the compiled
+        # path, and keep the compile fallback for a deferred backend failure.
+        model = getattr(self.model, "_orig_mod", self.model)
+        # A repeated ``optimize()`` must not stack compile wrappers: the
+        # fallback proxy records the eager callable it wraps, so compile that
+        # one again and let dynamo reuse its cache.
+        eager_forward = getattr(
+            model.forward, "_torchdynamo_orig_callable", model.forward
+        )
+        compiled_forward = torch_compile(
+            eager_forward, fullgraph=fullgraph, backend=backend, mode=mode
+        )
+        if compiled_forward is not eager_forward:
+            model.forward = compiled_forward
+        self.model = model
 
         #trigger kernel compilation hooks
         # if self.compiled:
@@ -5514,15 +5590,19 @@ class BaseQModel(nn.Module):
 
             ``refuse_last_module_fallback`` is set when the block immediately
             before this one declared only modules that this layer does not own
-            (for example the MLA `q_b_proj`/`kv_b_proj` pair on a Ling 2.0
-            layer). `last_module` then still points at the run before that
-            absent block, which is not this block's producer: falling back to it
-            folded `attention.dense` into `input_layernorm` (#4677).
+            **and** that absent declaration is a data-flow predecessor of this
+            block (for example the MLA `q_b_proj`/`kv_b_proj` pair before
+            `attention.dense` on a Ling 2.0 layer). `last_module` then still
+            points at the run before that absent block, which is not this
+            block's producer: falling back to it folded `attention.dense` into
+            `input_layernorm` (#4677).
 
-            The caller clears the flag when this block declares the same
-            `:in=<tag>` shared input as the absent block: the two are siblings
-            reading one tensor, so the norm before them is still this block's
-            producer (#4732).
+            An absent *sibling branch* never clears the source: `mamba` vs
+            `self_attn`, `conv` vs `self_attn`, or `self_attn` vs `attention`
+            are alternative mixers of one layer, so the norm before them still
+            feeds this block (#4759). The caller also clears the flag when this
+            block declares the same `:in=<tag>` shared input as the absent
+            block: the two are siblings reading one tensor (#4732).
             """
             for candidate_name, candidate_module in reversed(pending_nonquant):
                 if _is_gain_norm(candidate_module, candidate_name, input_width):
@@ -5619,6 +5699,19 @@ class BaseQModel(nn.Module):
                     consumers.append(extra_name)
             return consumers
 
+        def _block_moe_root(block):
+            """Return the declared MoE root template that owns ``block``."""
+
+            for spec in plan.moe_roots():
+                template = spec.template
+                if any(
+                    strip_non_quantize_flags(name) == template
+                    or strip_non_quantize_flags(name).startswith(f"{template}.")
+                    for name in block
+                ):
+                    return template
+            return None
+
         def _moe_block_consumers(block, width, excluded):
             """Direct children of the MoE block that read its input.
 
@@ -5629,16 +5722,7 @@ class BaseQModel(nn.Module):
             module hierarchy keeps the rule structural instead of name-based.
             """
 
-            moe_root = None
-            for spec in plan.moe_roots():
-                template = spec.template
-                if any(
-                    strip_non_quantize_flags(name) == template
-                    or strip_non_quantize_flags(name).startswith(f"{template}.")
-                    for name in block
-                ):
-                    moe_root = template
-                    break
+            moe_root = _block_moe_root(block)
             if moe_root is None:
                 return []
             root_module, _ = get_module_by_name_prefix(module, moe_root)
@@ -5686,6 +5770,13 @@ class BaseQModel(nn.Module):
         # module still declares which tensor it would have read, so a following
         # block with the same tag is its sibling rather than its consumer.
         prev_absent_block_tags: set[str] = set()
+        # Branch (plan parent) of each block in that run of absent declarations.
+        prev_absent_block_parents: set[str] = set()
+        # Branch of every quantized block emitted since the last declared
+        # non-quantized block. A run of absent declarations that follows a
+        # present block of the same branch is a data-flow predecessor of the
+        # consumer: it sits downstream of a projection this layer owns.
+        present_block_parents: set[str] = set()
         for block in full_layer_modules:
             block_absent = False
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
@@ -5711,6 +5802,8 @@ class BaseQModel(nn.Module):
                 # A declared norm block is a real producer for the next run.
                 prev_block_absent = False
                 prev_absent_block_tags = set()
+                prev_absent_block_parents = set()
+                present_block_parents = set()
                 continue
 
             prev_not_quantized = False
@@ -5734,11 +5827,13 @@ class BaseQModel(nn.Module):
             is_moe_down_block = is_moe_block and any("down" in roles for roles in block_roles.values())
             is_moe_gate_up_block = is_moe_block and has_gate_up_roles
             block_input_tags = set()
+            block_parents = set()
             for name in block:
                 if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
                     spec = plan.find(self._parse_module_flags(name)[0])
                     if spec is not None:
                         block_input_tags.update(flag[3:] for flag in spec.flags if flag.startswith("in="))
+                        block_parents.add(spec.parent)
             shared_tag = next(iter(block_input_tags)) if len(block_input_tags) == 1 else None
             # Qwen3.5-style hybrid trees declare `self_attn` and `linear_attn`
             # against one `:in=` tag, and a linear-attention layer owns no
@@ -5750,6 +5845,17 @@ class BaseQModel(nn.Module):
             sibling_of_absent_block = (
                 shared_tag is not None and shared_tag in prev_absent_block_tags
             )
+            # An absent declaration may only take the fold source away when it
+            # is a data-flow predecessor of this block, never when it is a
+            # sibling branch the layer does not own. Sibling branches are
+            # declared under a different plan parent (`mamba` vs `self_attn`,
+            # `conv` vs `self_attn`, `self_attn` vs `attention`). The remaining
+            # case is the same branch (`attention.q_b/kv_b` before
+            # `attention.dense`), which only interrupts the flow when a
+            # quantized block of that branch was already emitted (#4677).
+            absent_in_same_branch = bool(block_parents & prev_absent_block_parents)
+            branch_already_quantized = bool(block_parents & present_block_parents)
+            absent_is_predecessor = absent_in_same_branch and branch_already_quantized
             skip_block = False
             if is_moe_down_block and last_module is not None and last_module_name is not None:
                 pending_nonquant.clear()
@@ -5808,6 +5914,10 @@ class BaseQModel(nn.Module):
                         subset_names.append(name)
 
                 block_absent = not subset and not skip
+                if subset:
+                    # This block really owns modules, so a later absent
+                    # declaration in the same branch is downstream of it.
+                    present_block_parents = present_block_parents | block_parents
                 if skip or not subset:
                     pending_nonquant.clear()
                     skip_block = True
@@ -5824,8 +5934,22 @@ class BaseQModel(nn.Module):
                             last_module_root = root
                             module2inspect, _ = get_module_by_name_prefix(module, root)
 
+                    # A MoE gate/up block always reads the MoE block input, which
+                    # is captured once per calibration batch. Sibling blocks that
+                    # share the root (a shared expert, or a dense MLP declared next
+                    # to `mlp:moe`) move `last_module_root` to the root before the
+                    # experts block, so the `root != last_module_root` gate above
+                    # leaves `module2inspect` unset and anchors the group on one of
+                    # its own members. #4675's partial split then never runs
+                    # (#4760). Prefer the root capture whenever it exists.
+                    moe_gate_up_root = (
+                        _block_moe_root(block) if has_gate_up_roles and is_moe_family else None
+                    )
+                    if moe_gate_up_root is not None and moe_gate_up_root in input_feat:
+                        feature_name = moe_gate_up_root
+                        inp = input_feat[moe_gate_up_root]
                     # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                    if is_moe_gate_up_block and module2inspect is not None:
+                    elif is_moe_gate_up_block and module2inspect is not None:
                         if last_module_root not in input_feat:
                             log.debug(
                                 "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
@@ -5869,7 +5993,9 @@ class BaseQModel(nn.Module):
                         allow_block_norm=allow_block_norm,
                         shared_source=shared_source,
                         refuse_last_module_fallback=(
-                            prev_block_absent and not sibling_of_absent_block
+                            prev_block_absent
+                            and absent_is_predecessor
+                            and not sibling_of_absent_block
                         ),
                     )
                     moe_consumers = (
@@ -5892,6 +6018,18 @@ class BaseQModel(nn.Module):
                     pending_nonquant.clear()
                     if prev_op is None:
                         log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
+                        skip_block = True
+                    elif not is_foldable_source(prev_op):
+                        # A Conv1d (Falcon-H1's `mamba.conv1d`), a weightless
+                        # norm or a gated norm has no plain gain to divide, so
+                        # `apply_scale` would discard the group after paying for
+                        # the search. Do not build it at all.
+                        log.debug(
+                            "awq_get_modules_for_scaling: skipping block %s; `%s` is not a foldable scale source",
+                            block,
+                            get_op_name(module, prev_op),
+                        )
+                        pending_nonquant.clear()
                         skip_block = True
 
                 # One group shares one scale vector, so it can only contain
@@ -5951,6 +6089,12 @@ class BaseQModel(nn.Module):
             # visible to the block that follows the run (#4732).
             prev_absent_block_tags = (
                 (prev_absent_block_tags | set(block_input_tags)) if block_absent else set()
+            )
+            # Same union for the declared branch of the run, so the block that
+            # follows a whole run of absent declarations still knows whether
+            # they were its siblings or its predecessors.
+            prev_absent_block_parents = (
+                (prev_absent_block_parents | block_parents) if block_absent else set()
             )
             # Update tracker to the LAST item of this block
             if is_moe_gate_up_block:
@@ -6061,6 +6205,20 @@ class BaseQModel(nn.Module):
                 inspect_module, _ = get_module_by_name_prefix(layer_module, inspect_name)
                 if inspect_module is not None:
                     base["module2inspect"] = inspect_module
+            # Parallel branches of one norm (Falcon-H1's attention and Mamba
+            # mixer) have no shared ancestor below the decoder layer, and the
+            # captured replay input is the post-norm activation, so replaying
+            # the layer itself would apply that norm twice. Score the members
+            # the current boundary covers and fold the same scale into the rest:
+            # every member reads this one tensor, so the fold is correct for
+            # all of them even though only some can be scored (#4741).
+            inspect_module = base.get("module2inspect")
+            if inspect_module is not None and len(base_layers) > 1:
+                inside = {id(child) for child in inspect_module.modules()}
+                covered = [layer for layer in base_layers if id(layer) in inside]
+                if covered and len(covered) < len(base_layers):
+                    base["_awq_search_layers"] = covered
+                    base["_awq_allow_outside_fold"] = True
         return merged
 
     def _filter_awq_scaling_sources(self, layer_module, nodes):
@@ -6660,11 +6818,95 @@ class BaseQModel(nn.Module):
         return node
 
     def tied_word_embedding(self) -> bool:
-        return getattr(self.model.config, "tie_word_embeddings", False)
+        # The load-time snapshot resolves tying from the decoder config and the
+        # checkpoint, so a composite wrapper's default flag cannot claim a tie
+        # the checkpoint does not have (#4799).
+        resolved = lm_head_is_tied(self.model, self.lm_head)
+        if resolved is not None:
+            return resolved
+        return word_embeddings_tied(getattr(self.model, "config", None))
+
+    # Direct children that carry the token embedding or the language head. The
+    # structural `nn.Module` check is the real guard; these names only break
+    # ties when a decoder parent owns more than one candidate.
+    _INPUT_EMBEDDING_CHILD_NAMES = (
+        "embed_tokens",
+        "wte",
+        "word_embeddings",
+        "tok_embeddings",
+        "embed_in",
+    )
+    _OUTPUT_HEAD_CHILD_NAMES = ("lm_head", "embed_out", "output")
+
+    def _declared_decoder_ancestor_paths(self) -> List[str]:
+        """Paths from each declared decoder up to the wrapper root, nearest first.
+
+        ``extract_layers_node()`` names the declared ``layers`` container, and
+        a decoder keeps its token embedding (and sometimes its language head)
+        as a sibling of that container. Walking the parents covers wrappers
+        that hoist the head above the decoder, such as the Qwen Omni
+        ``thinker``.
+        """
+        paths = self.extract_layers_node()
+        if isinstance(paths, str):
+            paths = [paths]
+        ancestors: List[str] = []
+        for path in paths or []:
+            if not isinstance(path, str) or not path:
+                continue
+            parts = path.split(".")
+            for end in range(len(parts) - 1, -1, -1):
+                candidate = ".".join(parts[:end])
+                if candidate not in ancestors:
+                    ancestors.append(candidate)
+        return ancestors
+
+    def _declared_embedding_endpoint(self, *, output: bool) -> Optional[nn.Module]:
+        """Resolve an embedding endpoint the HF wrapper refuses to expose.
+
+        Composite wrappers can leave ``get_input_embeddings`` /
+        ``get_output_embeddings`` unimplemented while the module tree still
+        declares the decoder that owns them (#4816). Resolution is structural:
+        only an ``nn.Embedding`` (input) or ``nn.Linear`` (output) that is a
+        direct child of a declared decoder ancestor is accepted.
+        """
+        names = self._OUTPUT_HEAD_CHILD_NAMES if output else self._INPUT_EMBEDDING_CHILD_NAMES
+        kind = nn.Linear if output else nn.Embedding
+        modules = []
+        for path in self._declared_decoder_ancestor_paths():
+            module = self.model if not path else get_module_by_name_prefix(self.model, path)[0]
+            if module is not None and not any(module is seen for seen in modules):
+                modules.append(module)
+
+        for module in modules:
+            for name in names:
+                child = getattr(module, name, None)
+                if isinstance(child, kind):
+                    return child
+
+        if output:
+            return None
+        # A decoder whose embedding is spelled differently is still unambiguous
+        # when its parent owns exactly one `nn.Embedding`.
+        for module in modules:
+            candidates = [child for child in module.children() if isinstance(child, nn.Embedding)]
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
 
     def get_input_embeddings(self) -> Optional[nn.Module]:
         getter = getattr(self.model, "get_input_embeddings", None)
-        return getter() if callable(getter) else None
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except NotImplementedError:
+            # Some composite wrappers never implement the getter; resolve the
+            # declared endpoint instead of aborting the quantization run.
+            resolved = self._declared_embedding_endpoint(output=False)
+            if resolved is None:
+                raise
+            return resolved
 
     def get_input_embeddings_name(self) -> Optional[str]:
         module = self.get_input_embeddings()
@@ -6672,7 +6914,15 @@ class BaseQModel(nn.Module):
 
     def get_output_embeddings(self) -> Optional[nn.Module]:
         getter = getattr(self.model, "get_output_embeddings", None)
-        return getter() if callable(getter) else None
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except NotImplementedError:
+            resolved = self._declared_embedding_endpoint(output=True)
+            if resolved is None:
+                raise
+            return resolved
 
     def get_output_embeddings_name(self) -> Optional[str]:
         module = self.get_output_embeddings()

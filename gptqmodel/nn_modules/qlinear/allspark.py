@@ -84,11 +84,12 @@ class AllSparkLinear(GPTQQuantLinear):
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
-    # AllSpark's capability window is 80-120; this GB10 is sm_121, so the
-    # extension cannot run here. The custom gemm has no fake/meta impl:
-    # conservative EAGER, no capture measured on this host.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the repacked layout is built in
+    # ``post_init``, so the eager forward and an explicit ``torch.cuda.graph``
+    # capture both run with matching output. Dynamo stops at EAGER on
+    # ``tensor.is_inference()`` in the repack guard.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_device(cls, device):

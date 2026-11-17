@@ -43,7 +43,7 @@
 - **Configuration:** Typed [backend configurations](https://github.com/ModelCloud/GPTQModel/blob/main/docs/backend-selection.md) unify backend selection and tuning, with explicit numerical and worker controls instead of environment switches.
 - **Calibration:** Broader [dataset input support](https://github.com/ModelCloud/GPTQModel/blob/main/docs/vlm-calibration-input-normalization.md), document-isolated [AWQ replay](https://github.com/ModelCloud/GPTQModel/blob/main/docs/awq-calibration-aggregation.md), and opt-in [attention-sink exclusion](https://github.com/ModelCloud/GPTQModel/blob/main/docs/quantization-guide.md#gptq-w8a16-or-another-integer-weight-width) improve calibration coverage and control.
 - **Memory:** Reduced packed-weight duplication, bounded EXL3 scratch, and shorter-lived [inference workspaces](https://github.com/ModelCloud/GPTQModel/blob/main/docs/kernel-scratch-lifecycle.md) lower memory use.
-- **Models:** Added OLMo Hybrid, Granite SWA/MoE SWA, and Dots3 Note quantization, plus broader decoder-weight coverage and Transformers 5.22 compatibility. [Model notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md)
+- **Models:** Added OLMo Hybrid, Granite SWA/MoE SWA, and Dots3 Note quantization, plus broader decoder-weight coverage and Transformers 5.22 compatibility. [Model notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/supported-models.md) · [Decision Transformer calibration](https://github.com/ModelCloud/GPTQModel/blob/main/docs/decision-transformer-calibration.md)
 - **Compat:** Major fixes across dense/MoE calibration, multimodal replay, checkpoint round trips, Transformers model loading, multi-GPU memory use, and ROCm execution. Unsupported combinations fail clearly rather than loading incomplete weights. [Full notes](https://github.com/ModelCloud/GPTQModel/blob/main/docs/changelog/recent.md#7110)
 - **Security:** Runtime checks for vulnerable PyTorch versions, explicit checkpoint-code trust, stronger checkpoint validation, and bounded server/media requests. [Runtime safety](https://github.com/ModelCloud/GPTQModel/blob/main/docs/torch-runtime-safety-gate.md) · [Serving security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md)
 
@@ -151,6 +151,11 @@ Quantized kernels keep only packed weights resident; per-call QQQ and EXL3 kerne
   measured on their real tokens, not their padded width, so a left-padded row
   cannot lose real tokens to its own padding. See
   [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md).
+- **Pack before filtering when concatenating.** With `concat_size` set, the
+  per-row minimum-length filter and position trim run on the packed windows
+  instead, so short documents are combined rather than discarded and a long
+  document is not cut before it is windowed. See
+  [calibration row trimming](https://github.com/ModelCloud/GPTQModel/blob/main/docs/calibration-row-trimming.md#concat_size-reverses-the-order-pack-then-filter).
 - **Keep VLM calibration rows intact.** Pre-tokenized rows (`input_ids`) take the
   base text path instead of a chat template, columnar mappings are unpacked, and
   conversations reject `CalibrationConfig.concat_size`. See
@@ -275,6 +280,10 @@ in [`docs/generation-config-round-trip.md`](docs/generation-config-round-trip.md
 Re-saving a loaded fused-expert MoE defuses the export shell and fails closed on
 dropped quantization payloads; see
 [`docs/quantized-moe-resave-defuse.md`](docs/quantized-moe-resave-defuse.md).
+`export(..., "hf")` picks its dense decoder from the checkpoint's declared
+`quant_method` and refuses methods that have none (Paro, MACaQ, GGUF, QQQ, NF12,
+VPTQ, EXL3) instead of decoding them with another layout's decoder; see
+[`docs/export-hf-format-detection.md`](docs/export-hf-format-detection.md).
 In-session QQQ kernel rehoming and cache initialization are documented in
 [docs/qqq-kernel-selection.md](docs/qqq-kernel-selection.md).
 QQQ's shared-memory staging of the per-group scales and the reduction-scratch
@@ -344,6 +353,7 @@ and [quantization recipes](https://github.com/ModelCloud/GPTQModel/blob/main/doc
 | Quantize large or MoE models | [Multi-GPU and memory](https://github.com/ModelCloud/GPTQModel/blob/main/docs/multi_gpu_quantization.md) · [MoE and multimodal](https://github.com/ModelCloud/GPTQModel/wiki/Multimodal-and-MoE-Models) |
 | Select and tune execution backends | [Typed backend configuration](https://github.com/ModelCloud/GPTQModel/blob/main/docs/backend-selection.md), [kernel and thread reference](https://github.com/ModelCloud/GPTQModel/blob/main/docs/kernel-config.md) |
 | Resume a job | [Checkpoint and resume](https://github.com/ModelCloud/GPTQModel/blob/main/checkpoint.md) · [Distributed EXL3](https://github.com/ModelCloud/GPTQModel/blob/main/docs/exl3-durable-execution.md) |
+| Export a dense or MLX checkpoint | [Dense dequantization](https://github.com/ModelCloud/GPTQModel/blob/main/docs/checkpoint-interop.md#7-dense-dequantization-with-dequantize_model) · [MLX conversion](https://github.com/ModelCloud/GPTQModel/blob/main/docs/mlx-runtime.md) |
 | Recover accuracy or fine-tune | [EoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/eora/README.md) · [PEFT/LoRA](https://github.com/ModelCloud/GPTQModel/blob/main/docs/peft.md) · [GSQ](https://github.com/ModelCloud/GPTQModel/wiki/GSQ) · [RCO](https://github.com/ModelCloud/GPTQModel/wiki/GSQ#non-uniform-bit-allocation-rco) |
 | Evaluate quality and performance | [Evaluation](https://github.com/ModelCloud/GPTQModel/wiki/Evaluation) · [Benchmark methodology](https://github.com/ModelCloud/GPTQModel/blob/main/docs/benchmark-methodology.md) |
 | Serve an OpenAI-compatible API | [Serving guide](https://github.com/ModelCloud/GPTQModel/wiki/Serving) · [Security](https://github.com/ModelCloud/GPTQModel/blob/main/docs/openai-server-exposure.md) |

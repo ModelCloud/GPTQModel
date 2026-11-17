@@ -268,7 +268,7 @@ flowchart TD
 The executor now hands the pruned module to the processor through
 `LoopProcessor.prune_uncovered_module(module)` (`loop_processor.py:1329`,
 called at `stage_subset.py:1451`). The base implementation pops
-`tasks[name]`; `AWQProcessor.prune_uncovered_module` (`awq_processor.py:4355`)
+`tasks[name]`; `AWQProcessor.prune_uncovered_module` (`awq_processor.py:4896`)
 also removes the module from its layer's `modules` and `pending_modules`.
 
 ```mermaid

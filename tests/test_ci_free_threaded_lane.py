@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,18 @@ def test_lane_runs_bounded_cpu_and_multi_gpu_concurrency_tests():
         assert by_script[script]["require_single_gpu"] == "false"
 
 
+def _free_threaded_build() -> bool:
+    """True only for a free-threaded (3.13t/3.14t) interpreter.
+
+    ``hasattr(sys, "_is_gil_enabled")`` is true on every CPython >= 3.13,
+    including GIL builds, so it cannot gate a ``PYTHON_GIL=0`` subprocess: a
+    regular build aborts with "Disabling the GIL is not supported by this
+    build" instead of running the gate (#4768).
+    """
+
+    return sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+
+
 def _run_gate(gil):
     env = dict(os.environ)
     env["PYTHON_GIL"] = gil
@@ -143,7 +156,7 @@ def test_gate_fails_when_the_gil_is_enabled():
 
 
 @pytest.mark.skipif(
-    not hasattr(sys, "_is_gil_enabled"),
+    not _free_threaded_build(),
     reason="requires a free-threaded interpreter to prove the gate can pass",
 )
 def test_gate_passes_with_gil0():

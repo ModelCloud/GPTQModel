@@ -86,11 +86,12 @@ class AwqGEMVLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv"
 
-    # Calls the native `awq.gemv_forward` custom op, which has no fake/meta
-    # kernel, so dynamo breaks. The JIT extension could not build on this host
-    # (no CUDA_HOME/nvcc); EAGER is the conservative static answer.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native
+    # ``awq.gemv_forward`` op has no fake/meta kernel, so ``torch.compile``
+    # stops at EAGER.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate(

@@ -34,6 +34,7 @@ import pcre
 import torch
 from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, _get_cuda_arch_flags, load
 
+from .arch import normalize_arch
 from .env import env_flag
 from .jit_compile_baselines import get_jit_compile_baseline_seconds
 from .logger import setup_logger
@@ -600,6 +601,62 @@ def detected_cuda_wheel_include_paths() -> list[str]:
     return _dedupe_path_strings(include_paths)
 
 
+def detected_cuda_wheel_library_paths() -> list[str]:
+    """Discover CUDA runtime libraries shipped via NVIDIA Python wheels.
+
+    CUDA 13 moved the math libraries out of the toolkit into per-component
+    wheels (``nvidia/cu13/lib/libcublas.so.13``). A host that installs CUDA
+    that way has the library but not the unversioned ``libcublas.so``
+    development symlink, so ``-lcublas`` fails to link even though the kernel
+    is buildable.
+    """
+
+    if IS_ROCM:
+        return []
+
+    try:
+        import nvidia  # type: ignore
+    except Exception:
+        return []
+
+    library_paths: list[str] = []
+    for base_text in getattr(nvidia, "__path__", []):
+        base_path = Path(base_text)
+        candidate_paths = list(base_path.glob("cu*/lib"))
+        candidate_paths.extend(base_path.glob("*/lib"))
+        for candidate in sorted(candidate_paths):
+            if candidate.is_dir():
+                library_paths.append(str(candidate))
+    return _dedupe_path_strings(library_paths)
+
+
+def resolve_cuda_library(name: str) -> Optional[str]:
+    """Absolute path of a CUDA math library, or ``None`` when it is not found.
+
+    ``-l<name>`` only links when the development symlink (``libcublas.so``)
+    exists. Prefer the toolkit copy when it is complete, then the NVIDIA wheel
+    copy, and accept the versioned ``lib<name>.so.<major>`` when that is all
+    the host installed.
+    """
+
+    search_roots: list[Path] = []
+    if CUDA_HOME:
+        search_roots.extend(
+            [Path(CUDA_HOME) / "lib64", Path(CUDA_HOME) / "lib"]
+        )
+    search_roots.extend(Path(path) for path in detected_cuda_wheel_library_paths())
+
+    for root in search_roots:
+        candidate = root / f"lib{name}.so"
+        if candidate.is_file():
+            return str(candidate)
+    for root in search_roots:
+        for candidate in sorted(root.glob(f"lib{name}.so.*")):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def _resolve_local_include_path(
     include_name: str,
     *,
@@ -1027,6 +1084,77 @@ def resolved_cuda_arch_flags() -> list[str]:
     """Return the effective NVCC arch flags Torch will emit for this host."""
 
     return _effective_cuda_arch_flags(merge_visible_caps=True)
+
+
+def _normalize_rocm_arch_list(value: str) -> list[str]:
+    """Canonicalize a ``PYTORCH_ROCM_ARCH`` value.
+
+    Torch turns spaces into ``;`` and splits on ``;`` before emitting one
+    ``--offload-arch`` per entry, so mirror that split and sort/dedupe the
+    result. Target feature suffixes (``:xnack+``/``:sramecc-``) are preserved:
+    torch passes them to hipcc verbatim, so they change the emitted code
+    objects and must not collapse two builds onto one cache key.
+    """
+
+    targets = {
+        token.strip().lower()
+        for token in value.replace(" ", ";").split(";")
+        if token.strip()
+    }
+    return sorted(targets)
+
+
+def _visible_rocm_arch_list() -> list[str]:
+    """Return the sorted, suffix-stripped ``gcnArchName`` of the visible devices.
+
+    This mirrors torch's ``_get_rocm_arch_flags`` fallback when
+    ``PYTORCH_ROCM_ARCH`` is unset. A host without a visible GPU, or a device
+    that cannot report properties, contributes nothing instead of raising: the
+    cache key must still be computable.
+    """
+
+    try:
+        if not torch.cuda.is_available():
+            return []
+        device_count = torch.cuda.device_count()
+    except Exception:
+        return []
+
+    targets: set[str] = set()
+    for device_index in range(device_count):
+        try:
+            properties = torch.cuda.get_device_properties(device_index)
+        except Exception:
+            continue
+        arch = normalize_arch(getattr(properties, "gcnArchName", None))
+        if arch:
+            targets.add(arch)
+    return sorted(targets)
+
+
+def _hip_cache_fingerprint_payload(hip_version: str) -> list[str]:
+    """Return the HIP target payload for the JIT cache key.
+
+    ``PYTORCH_ROCM_ARCH`` wins because torch passes it to hipcc verbatim;
+    otherwise torch compiles for every visible device's ``gcnArchName``. The
+    payload is sorted so device enumeration order cannot fork the cache, and it
+    replaces the CUDA capability pair, which cannot tell ROCm targets apart.
+    """
+
+    payload = ["cuda_ext=1", f"hip={hip_version}"]
+    override = os.getenv("PYTORCH_ROCM_ARCH")
+    if override:
+        targets = _normalize_rocm_arch_list(override)
+    else:
+        targets = _visible_rocm_arch_list()
+
+    if targets:
+        payload.append(f"rocm_arch_list={';'.join(targets)}")
+    else:
+        # Keep a stable marker so a key built without a target is never
+        # mistaken for a key built for a real one.
+        payload.append("rocm_arch_list=none")
+    return payload
 
 
 def torch_cxx11_abi_flag() -> int:
@@ -1683,10 +1811,19 @@ class TorchOpsJitExtension:
         return digest[:16]
 
     def _cuda_cache_fingerprint_payload(self) -> list[str]:
-        """Capture the effective CUDA target set so cached binaries stay device-compatible."""
+        """Capture the effective CUDA/ROCm target set so cached binaries stay device-compatible."""
 
         if not self.requires_cuda:
             return ["cuda_ext=0"]
+
+        hip_version = getattr(torch.version, "hip", None)
+        if hip_version:
+            # hipcc ignores ``TORCH_CUDA_ARCH_LIST`` and the coarse
+            # ``get_device_capability()`` pair cannot distinguish gfx1200 from
+            # gfx1201 (or gfx908 from gfx90a). ``PYTORCH_ROCM_ARCH``, else the
+            # visible devices' ``gcnArchName``, is what torch compiles for, so
+            # it has to identify the cached binary (#4815).
+            return _hip_cache_fingerprint_payload(str(hip_version))
 
         payload = ["cuda_ext=1"]
         override = os.getenv("TORCH_CUDA_ARCH_LIST")

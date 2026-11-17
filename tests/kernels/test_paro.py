@@ -824,17 +824,25 @@ def test_paro_cpu_optimized_forward_matches_fp32_oracle(group_size, dtype):
     torch.testing.assert_close(actual, expected.to(dtype=dtype), rtol=2e-3, atol=2e-3)
     normalized_error = (actual.float() - expected).norm() / expected.norm()
     assert normalized_error.item() <= 2e-3
-    if dtype == torch.float16:
-        assert module._cpu_aten_layer is not None
-    else:
-        assert module._cpu_packed_key is not None
+    # One resident kernel layout: FP16 uses ATen int4pack, BF16 uses the
+    # AVX512 packer (the test skips when that kernel is unavailable).
+    assert module._live_cpu_layout() == ("aten" if dtype == torch.float16 else "avx512")
+    checkpoint = module.state_dict()
+    assert torch.equal(checkpoint["qweight"], qweight)
+    assert torch.equal(checkpoint["qzeros"], qzeros)
+    assert torch.equal(checkpoint["scales"], scales)
+    assert torch.equal(checkpoint["bias"], bias)
 
 
-def test_paro_cpu_caches_invalidate_on_rotation_and_weight_mutation():
-    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
+def test_paro_cpu_caches_invalidate_on_rotation_and_weight_mutation(monkeypatch):
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import (
+        TorchCpuAvx512AwqLinear,
+    )
 
-    if not TorchCpuAvx512Linear.cached_validate_once()[0]:
-        pytest.skip("AVX512-BF16 CPU kernel is unavailable")
+    if not TorchCpuAvx512AwqLinear.cached_validate_once()[0]:
+        # Keep the layout contract covered on hosts without the x86 AVX512
+        # kernel by installing pure-torch stand-ins for its packer/GEMM.
+        _install_fake_avx512_kernels(monkeypatch)
 
     torch.manual_seed(24)
     bits = 4
@@ -882,9 +890,10 @@ def test_paro_cpu_caches_invalidate_on_rotation_and_weight_mutation():
     with torch.inference_mode():
         module(x)
     rotation_key = module._rotation_runtime_key
-    packed_key = module._cpu_packed_key
     assert rotation_key is not None
-    assert packed_key is not None
+    assert module._live_cpu_layout() == "avx512"
+    # The checkpoint operands are rebuilt on demand instead of kept resident.
+    checkpoint = module.state_dict()
 
     with torch.no_grad():
         module.theta.add_(0.01)
@@ -892,15 +901,232 @@ def test_paro_cpu_caches_invalidate_on_rotation_and_weight_mutation():
         module(x)
     assert module._rotation_runtime_key != rotation_key
 
-    with torch.no_grad():
-        module.qweight.add_(1)
+    # A checkpoint-shaped load restores the checkpoint operands, and the next
+    # forward re-packs them for the kernel.
+    module.load_state_dict(checkpoint)
+    assert module._live_cpu_layout() is None
+    assert module.qweight.dtype == torch.int32
     with torch.inference_mode():
         module(x)
-    assert module._cpu_packed_key != packed_key
+    assert module._live_cpu_layout() == "avx512"
 
     module.to(dtype=torch.float16)
     assert module._rotation_runtime_key is None
-    assert module._cpu_packed_key is None
+    assert module._live_cpu_layout() is None
+    assert module.qweight.dtype == torch.int32
+
+
+def _quantized_tensor_bytes(module) -> int:
+    """Bytes of a Paro module's packed operands, deduplicated by storage.
+
+    Rotation buffers and their runtime caches are not quantized weights, so
+    they stay out of the residency ratio. The derived ``scales_and_zeros`` and
+    the checkpoint snapshot are included: they are what the kernel layout costs.
+    """
+
+    seen = {}
+
+    def add(tensor):
+        if not isinstance(tensor, torch.Tensor):
+            return
+        # A view (``qzeros`` of ``scales_and_zeros``) shares storage with its
+        # base; count the largest allocation once.
+        key = tensor.untyped_storage().data_ptr()
+        size = tensor.numel() * tensor.element_size()
+        seen[key] = max(seen.get(key, 0), size)
+
+    for name in ("qweight", "qzeros", "scales", "bias"):
+        add(getattr(module, name, None))
+    add(getattr(module, "scales_and_zeros", None))
+    for name, buffer in module._buffers.items():
+        if name.startswith("_fused_train_state_"):
+            add(buffer)
+    return sum(seen.values())
+
+
+def _make_paro_cpu_module(dtype: torch.dtype, *, group_size: int = 128):
+    bits, in_features, out_features = 4, 512, 256
+    torch.manual_seed(4814)
+    qweight, qzeros, scales, bias = _make_packed_buffers(
+        bits, in_features, out_features, group_size
+    )
+    scales.mul_(0.01)
+    module = ParoLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+        krot=2,
+    )
+    module.qweight.copy_(qweight)
+    module.qzeros.copy_(qzeros)
+    module.scales.copy_(scales)
+    module.bias.copy_(bias)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=2,
+        dtype=dtype,
+    )
+    theta.normal_()
+    channel_scales.uniform_(0.75, 1.25)
+    module.pairs.copy_(pairs)
+    module.theta.copy_(theta)
+    module.channel_scales.copy_(channel_scales)
+    module.post_init()
+    module.eval()
+    checkpoint = {
+        name: getattr(module, name).detach().clone()
+        for name in ("qweight", "qzeros", "scales", "bias")
+    }
+    return module, checkpoint, in_features
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_paro_cpu_residency_after_first_forward(dtype):
+    """The first CPU forward must not keep a second packed-weight copy.
+
+    Regression for issue #4814: ``ParoLinear`` used to keep the checkpoint
+    operands next to the kernel-layout operands (2.0x), which is about 2x host
+    RAM for the quantized linears on the default CPU path.
+    """
+
+    from gptqmodel.nn_modules.qlinear.torch_aten_kernel import (
+        _has_local_int4pack_cpu_ops,
+    )
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import (
+        TorchCpuAvx512AwqLinear,
+    )
+
+    if dtype == torch.float16 and not _has_local_int4pack_cpu_ops():
+        pytest.skip("ATen CPU int4pack ops are unavailable")
+    if dtype == torch.bfloat16 and not (
+        _has_local_int4pack_cpu_ops() or TorchCpuAvx512AwqLinear.cached_validate_once()[0]
+    ):
+        pytest.skip("no CPU Paro kernel is available")
+
+    module, checkpoint, in_features = _make_paro_cpu_module(dtype)
+    before = _quantized_tensor_bytes(module)
+    x = torch.randn(7, in_features, dtype=dtype)
+    with torch.inference_mode():
+        out = module(x)
+
+    layout = module._live_cpu_layout()
+    assert layout in ("aten", "avx512")
+    if dtype == torch.bfloat16 and TorchCpuAvx512AwqLinear.cached_validate_once()[0]:
+        assert layout == "avx512"
+
+    after = _quantized_tensor_bytes(module)
+    # The AVX512 packer keeps only the packed words plus a small qzeros
+    # checkpoint tensor. The ATen op additionally needs its ``[groups, out, 2]``
+    # affine operand, whose FP32 fallback (used when the offsets do not
+    # round-trip) costs up to 4x the stored FP16 scale bytes; the previous
+    # layout cost 2.0x in both cases.
+    limit = 1.1 if layout == "avx512" else 1.15
+    assert after <= limit * before, f"{layout} kept {after / before:.2f}x the checkpoint bytes"
+    assert torch.isfinite(out).all()
+
+    # The kernel layout must still serialize the checkpoint operands exactly.
+    state = module.state_dict()
+    for name, tensor in checkpoint.items():
+        assert torch.equal(state[name], tensor), f"state_dict[{name}] changed"
+
+
+def _install_fake_avx512_kernels(monkeypatch):
+    """Pure-torch stand-ins for the AVX512-BF16 extension kernels.
+
+    The layout/residency contract must be covered on hosts without the x86
+    AVX512 kernel (the real numerics are covered by the AVX512-gated tests).
+    """
+
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import (
+        pack_hf_int4,
+        unpack_hf_int4,
+    )
+    from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import (
+        TorchCpuAvx512AwqLinear,
+    )
+
+    def fake_pack(qweight, qzeros, out_features, in_features):
+        iweight, izeros = unpack_awq(qweight, qzeros, 4)
+        iweight, izeros = reverse_awq_order(iweight, izeros, 4)
+        return (
+            pack_hf_int4(iweight.t().to(torch.uint8).contiguous()),
+            izeros.to(torch.uint8).contiguous(),
+        )
+
+    def fake_gemm(x, qweight, qzeros, scales, group_size, bias):
+        out_features, half = qweight.shape
+        in_features = half * 2
+        codes = unpack_hf_int4(qweight, out_features, in_features).to(torch.float32)
+        groups = torch.arange(in_features) // group_size
+        # qzeros/scales are [groups, out_features].
+        zeros = qzeros.float().t()[:, groups].t()
+        weight_scales = scales.float().t()[:, groups].t()
+        weight = (codes.t() - zeros) * weight_scales
+        out = x.float() @ weight
+        if bias is not None:
+            out = out + bias.float()
+        return out.to(x.dtype)
+
+    monkeypatch.setattr(
+        TorchCpuAvx512AwqLinear, "cached_validate_once", classmethod(lambda cls: (True, None))
+    )
+    monkeypatch.setattr(TorchCpuAvx512AwqLinear, "pack_awq_int4_kernel", fake_pack)
+    monkeypatch.setattr(
+        TorchCpuAvx512AwqLinear, "gemm_int4_qzero_group_scaled_cpu_kernel", fake_gemm
+    )
+
+
+def test_paro_avx512_layout_owns_packed_operands(monkeypatch):
+    """The AVX512 path keeps only the packed operands and rebuilds on demand."""
+
+    _install_fake_avx512_kernels(monkeypatch)
+
+    module, checkpoint, in_features = _make_paro_cpu_module(torch.bfloat16)
+    before = _quantized_tensor_bytes(module)
+    x = torch.randn(7, in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        out = module(x)
+
+    assert module._live_cpu_layout() == "avx512"
+    assert module.qweight.dtype == torch.uint8
+    assert module.qzeros.dtype == torch.uint8
+    assert module.scales.dtype == checkpoint["scales"].dtype
+    assert module.bias.dtype == checkpoint["bias"].dtype
+    after = _quantized_tensor_bytes(module)
+    assert after <= 1.1 * before, f"avx512 kept {after / before:.2f}x the checkpoint bytes"
+    # The verified inverse drops the qweight clone; only the small qzeros
+    # checkpoint tensor stays resident.
+    from gptqmodel.nn_modules.qlinear._fused_train_state import RebuiltCheckpointTensor
+
+    assert isinstance(module._fused_train_state["qweight"], RebuiltCheckpointTensor)
+    assert torch.isfinite(out).all()
+
+    state = module.state_dict()
+    for name, tensor in checkpoint.items():
+        assert torch.equal(state[name], tensor), f"state_dict[{name}] changed"
+
+    expected = _fp32_awq_oracle(
+        apply_paro_rotation_reference(
+            x,
+            module.pairs,
+            module.theta,
+            scales=module.channel_scales,
+            group_size=module.group_size,
+        ),
+        checkpoint["qweight"],
+        checkpoint["qzeros"],
+        checkpoint["scales"],
+        checkpoint["bias"],
+        bits=module.bits,
+        group_size=module.group_size,
+    ).to(torch.bfloat16)
+    torch.testing.assert_close(out, expected, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.skipif(

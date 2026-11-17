@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import atexit
+import importlib.util
 import os
 import sys
 import threading
@@ -482,6 +483,20 @@ def _hf_quantizer_backend(quantizer):
     return getattr(getattr(quantizer, "quantization_config", None), "backend", None)
 
 
+# Optimum's GPTQ bridge install state. ``optimum.gptq`` imports ``gptqmodel``
+# while it is still executing, so the package-init probe can observe a
+# partially initialized module; that is a *deferred* failure, never "Optimum is
+# not installed". These flags keep the retry cheap and idempotent (#4749).
+_OPTIMUM_GPTQ_BRIDGE_INSTALLED = False
+_OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE = False
+
+# Transformers' AWQ quantizer install state. Its first ``gptqmodel`` import
+# happens inside ``replace_with_awq_linear`` (after its prepare hook would have
+# run), so the bridge must be retried from later entry points (#4795).
+_AWQ_BRIDGE_INSTALLED = False
+_AWQ_BRIDGE_UNAVAILABLE = False
+
+
 def _patch_optimum_gptqmodel_load_bridge():
     """Route Optimum's GPTQ loading through GPTQModel's native bridge.
 
@@ -496,21 +511,27 @@ def _patch_optimum_gptqmodel_load_bridge():
     bridge returns ``None`` for them.
     """
 
+    global _OPTIMUM_GPTQ_BRIDGE_INSTALLED
+
     try:
         from functools import wraps
 
         from optimum.gptq import GPTQQuantizer
     except ImportError:
-        # Optimum is an optional dependency of Transformers' GPTQ loader.
-        return
+        # Either Optimum is not installed (optional dependency of Transformers'
+        # GPTQ loader) or ``optimum.gptq`` is importing ``gptqmodel`` right now
+        # and has not defined ``GPTQQuantizer`` yet. The caller decides which;
+        # ``_ensure_optimum_gptqmodel_load_bridge`` retries the deferred case.
+        return False
     except Exception:
         log.warning("Optimum GPTQ load-bridge compat probe failed", exc_info=True)
-        return
+        return False
 
     with _MONKEY_PATCH_LOCK:
         original_convert_model = GPTQQuantizer.convert_model
         if getattr(original_convert_model, "_gptqmodel_load_bridge", False):
-            return
+            _OPTIMUM_GPTQ_BRIDGE_INSTALLED = True
+            return True
         original_post_init_model = GPTQQuantizer.post_init_model
 
         @wraps(original_convert_model)
@@ -549,6 +570,94 @@ def _patch_optimum_gptqmodel_load_bridge():
         _post_init_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         GPTQQuantizer.convert_model = _convert_model_with_gptqmodel_bridge
         GPTQQuantizer.post_init_model = _post_init_model_with_gptqmodel_bridge
+        _OPTIMUM_GPTQ_BRIDGE_INSTALLED = True
+        return True
+
+
+def _ensure_optimum_gptqmodel_load_bridge():
+    """Install the Optimum GPTQ bridge at the first moment it can succeed.
+
+    ``optimum.gptq`` imports ``gptqmodel`` mid-import, so the package-init
+    attempt legitimately fails with a partially initialized module and must not
+    be cached as "Optimum not installed" (#4749). Everything Transformers or
+    Optimum calls after that import completes retries through here: the
+    ``GptqHfQuantizer`` hooks and the ``hf_select_quant_linear_v2`` /
+    ``hf_gptqmodel_post_init`` entry points Optimum resolves from this package.
+
+    The retry is cheap and idempotent: one module-level flag after success, one
+    after a genuine absence, and no import attempt while ``optimum.gptq`` is
+    visibly still initializing.
+    """
+
+    global _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE
+
+    if _OPTIMUM_GPTQ_BRIDGE_INSTALLED:
+        return True
+    if _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE:
+        return False
+
+    optimum_gptq = sys.modules.get("optimum.gptq")
+    if optimum_gptq is None:
+        try:
+            spec = importlib.util.find_spec("optimum.gptq")
+        except (AttributeError, ImportError, ValueError):
+            spec = None
+        if spec is None:
+            # Optimum is genuinely absent; do not retry the failed import.
+            _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE = True
+            return False
+    elif not hasattr(optimum_gptq, "GPTQQuantizer"):
+        # ``optimum.gptq`` is the import that is currently importing us. The
+        # class does not exist yet, so importing it again cannot succeed.
+        return False
+
+    if _patch_optimum_gptqmodel_load_bridge():
+        return True
+    _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE = True
+    return False
+
+
+def _patch_transformers_gptq_quantizer_bridge():
+    """Retry the Optimum GPTQ bridge from Transformers' GPTQ quantizer.
+
+    Transformers is fully imported before ``GptqHfQuantizer`` touches Optimum,
+    so its pre/post weight-loading hooks always run after ``optimum.gptq`` has
+    finished importing. That gives the deferred bridge install a slot before
+    Optimum's ``convert_model`` replaces any layer, independent of whether the
+    user imported ``gptqmodel`` first (#4749).
+    """
+
+    try:
+        from functools import wraps
+
+        from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
+    except ImportError:
+        # Older Transformers vendors its own GPTQ loader without Optimum.
+        return
+    except Exception:
+        log.warning("transformers GPTQ load-bridge compat probe failed", exc_info=True)
+        return
+
+    with _MONKEY_PATCH_LOCK:
+        original_before = GptqHfQuantizer._process_model_before_weight_loading
+        if getattr(original_before, "_gptqmodel_load_bridge", False):
+            return
+        original_after = GptqHfQuantizer._process_model_after_weight_loading
+
+        @wraps(original_before)
+        def _before_with_gptqmodel_bridge(self, model, **kwargs):
+            _ensure_optimum_gptqmodel_load_bridge()
+            return original_before(self, model, **kwargs)
+
+        @wraps(original_after)
+        def _after_with_gptqmodel_bridge(self, model, **kwargs):
+            _ensure_optimum_gptqmodel_load_bridge()
+            return original_after(self, model, **kwargs)
+
+        _before_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        _after_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        GptqHfQuantizer._process_model_before_weight_loading = _before_with_gptqmodel_bridge
+        GptqHfQuantizer._process_model_after_weight_loading = _after_with_gptqmodel_bridge
 
 
 def _patch_transformers_awq_gptqmodel_load_bridge():
@@ -562,13 +671,22 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
     ``experts.<n>.*.qweight`` tensors for fused 3-D expert parameters, so the
     experts stay dense and every packed expert tensor is reported UNEXPECTED:
     the model loads without error and the routed experts are randomly
-    initialized.
+    initialized. The same path builds every module from the global
+    ``bits``/``group_size``, so ``dynamic`` per-module overrides are ignored
+    (#4795).
 
     Wrapping the AWQ quantizer's pre/post weight-loading hooks lets
     ``hf_gptqmodel_prepare_model_for_load`` rebuild the checkpoint's real module
     manifest first. Checkpoints Transformers' AWQ path owns keep that path
-    because the bridge returns ``None`` for them.
+    because the bridge returns ``None`` for them. The post hook additionally
+    repairs a load that started before this patch could be installed: that is
+    exactly the plain-``AutoModelForCausalLM`` flow, where
+    ``replace_with_awq_linear`` imports ``gptqmodel`` from inside itself.
+
+    Returns ``True`` when the hooks are installed.
     """
+
+    global _AWQ_BRIDGE_INSTALLED
 
     try:
         from functools import wraps
@@ -581,15 +699,16 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
             "transformers AWQ load-bridge is inactive: AwqQuantizer API changed",
             exc_info=True,
         )
-        return
+        return False
     except Exception:
         log.warning("transformers AWQ load-bridge compat probe failed", exc_info=True)
-        return
+        return False
 
     with _MONKEY_PATCH_LOCK:
         original_prepare = AwqQuantizer._process_model_before_weight_loading
         if getattr(original_prepare, "_gptqmodel_load_bridge", False):
-            return
+            _AWQ_BRIDGE_INSTALLED = True
+            return True
         original_post_init = AwqQuantizer._process_model_after_weight_loading
 
         @wraps(original_prepare)
@@ -615,17 +734,70 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
 
         @wraps(original_post_init)
         def _post_init_with_gptqmodel_bridge(self, model, **kwargs):
+            from .utils.hf_load import (
+                hf_gptqmodel_post_init_for_load,
+                hf_gptqmodel_repair_awq_load,
+            )
+
+            _ensure_transformers_awq_gptqmodel_load_bridge()
             context = getattr(model, "_gptqmodel_hf_load_context", None)
             if context is None:
+                # No prepare step ran for this load: ``gptqmodel`` was first
+                # imported from inside transformers' ``replace_with_awq_linear``
+                # while it was already building modules (#4795). The checkpoint
+                # tensors are resident now, so rebuild the modules that ignored
+                # the serialized per-module config before the native post-init.
+                context = hf_gptqmodel_repair_awq_load(
+                    model,
+                    backend=_hf_quantizer_backend(self),
+                    checkpoint_files=kwargs.get("checkpoint_files"),
+                    dtype=kwargs.get("dtype"),
+                )
+            if context is None:
                 return original_post_init(self, model, **kwargs)
-            from .utils.hf_load import hf_gptqmodel_post_init_for_load
-
             return hf_gptqmodel_post_init_for_load(model, context)
 
         _prepare_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         _post_init_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         AwqQuantizer._process_model_before_weight_loading = _prepare_with_gptqmodel_bridge
         AwqQuantizer._process_model_after_weight_loading = _post_init_with_gptqmodel_bridge
+        _AWQ_BRIDGE_INSTALLED = True
+        return True
+
+
+def _ensure_transformers_awq_gptqmodel_load_bridge():
+    """Install the AWQ bridge at the first moment it can succeed.
+
+    Unlike Optimum's GPTQ quantizer, transformers' ``AwqQuantizer`` never
+    imports ``gptqmodel`` before it starts loading: the first import happens
+    inside ``replace_with_awq_linear``, i.e. after the prepare hook would have
+    run. This installer is retried from every later entry point (the quantizer's
+    post-weight hook, ``hf_select_quant_linear_v2``, and the package init) so
+    every *subsequent* load in the process gets the native prepare step, while
+    the post hook repairs the load that triggered the import (#4795).
+
+    Cheap and idempotent: one module-level flag after success, one after the
+    AWQ quantizer module is genuinely absent (an older Transformers), and no
+    latch while that module is visibly still initializing.
+    """
+
+    global _AWQ_BRIDGE_UNAVAILABLE
+
+    if _AWQ_BRIDGE_INSTALLED:
+        return True
+    if _AWQ_BRIDGE_UNAVAILABLE:
+        return False
+
+    quantizer_awq = sys.modules.get("transformers.quantizers.quantizer_awq")
+    if quantizer_awq is not None and not hasattr(quantizer_awq, "AwqQuantizer"):
+        # The module that is importing us has not defined its quantizer yet;
+        # importing it again cannot succeed.
+        return False
+
+    if _patch_transformers_awq_gptqmodel_load_bridge():
+        return True
+    _AWQ_BRIDGE_UNAVAILABLE = True
+    return False
 
 
 from .utils import has_gil_disabled
@@ -941,7 +1113,11 @@ if ensure_modelscope_available():
 
 
 # Installed last: `optimum.gptq` imports `gptqmodel` (BACKEND, QuantizeConfig)
-# while it loads, so the bridge can only be wrapped once this package has
-# finished defining its public names.
+# while it loads, so this eager attempt can only succeed once the package has
+# finished defining its public names. When it runs *during* that import the
+# probe sees a partially initialized `optimum.gptq`; `_ensure_...` then retries
+# from Transformers' GPTQ hooks and from the entry points Optimum calls, so the
+# bridge no longer depends on the user importing `gptqmodel` first (#4749).
 _patch_optimum_gptqmodel_load_bridge()
-_patch_transformers_awq_gptqmodel_load_bridge()
+_patch_transformers_gptq_quantizer_bridge()
+_ensure_transformers_awq_gptqmodel_load_bridge()

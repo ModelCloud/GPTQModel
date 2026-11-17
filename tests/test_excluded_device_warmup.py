@@ -12,6 +12,7 @@ caller excluded; the hardware test below runs a real quantization and checks
 the excluded device from the driver's compute-app list.
 """
 
+import contextlib
 import json
 import os
 import shutil
@@ -38,6 +39,23 @@ _CALIBRATION_TEXTS = [
 ] * 2
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _fake_device_pinning(monkeypatch):
+    """Keep warmup bookkeeping off the real device ordinals.
+
+    These tests assert which devices the pool *schedules*, not that the device
+    exists. ``_device_ctx`` enters ``torch.cuda.device("cuda:1")``, which raises
+    ``invalid device ordinal`` on a one-GPU host and silently aborts the warmup
+    the test is waiting for (#4768).
+    """
+
+    @contextlib.contextmanager
+    def _ctx(dev):
+        yield
+
+    monkeypatch.setattr(threadx, "_device_ctx", _ctx)
 
 
 def test_warmup_devices_skips_excluded_device(monkeypatch):
@@ -435,7 +453,7 @@ mode = sys.argv[2]
 
 from transformers import AutoTokenizer
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, GPTQModel, CalibrationConfig
 from gptqmodel.quantization import GPTQConfig
 
 tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -470,10 +488,8 @@ else:
 query = getattr(torch._C, "_cuda_hasPrimaryContext", None)
 before = bool(query(0)) if query is not None else None
 model.quantize(
-    calibration,
-    batch_size=1,
+    CalibrationConfig(dataset=calibration, batch_size=1, min_length=1),
     backend=BACKEND.TORCH,
-    calibration_data_min_length=1,
 )
 print(
     "RESULT="

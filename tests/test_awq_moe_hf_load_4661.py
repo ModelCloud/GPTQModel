@@ -140,3 +140,43 @@ def test_plain_transformers_load_decodes_the_same_expert_words(awq_checkpoint):
     # Both sides run packed 4-bit experts; the kernels differ, so compare at
     # FP16 logit scale rather than bit-for-bit.
     assert (actual - expected).abs().max().item() < 0.05
+
+
+def test_plain_transformers_load_without_gptqmodel_refuses_dropped_experts(awq_checkpoint):
+    """The plain flow cannot recover experts dropped before the bridge existed.
+
+    ``gptqmodel`` is imported from inside ``replace_with_awq_linear``, so the
+    bridge's prepare step cannot run for that load and the packed expert tensors
+    were already reported UNEXPECTED. The post hook must raise an actionable
+    error instead of returning randomly initialized experts (#4795).
+    """
+
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = (
+        "import torch\n"
+        "from transformers import AutoModelForCausalLM\n"
+        "AutoModelForCausalLM.from_pretrained("
+        f"{awq_checkpoint!r}, device_map='cpu', dtype=torch.float16)\n"
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(repo_root), env.get("PYTHONPATH")) if part
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        cwd=awq_checkpoint,
+        env=env,
+        text=True,
+    )
+
+    assert completed.returncode != 0, completed.stdout
+    assert "did not consume" in completed.stderr
+    assert "experts.0." in completed.stderr
+    assert "Import `gptqmodel`" in completed.stderr

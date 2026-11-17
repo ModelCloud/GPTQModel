@@ -136,9 +136,11 @@ they do not retain reconstructed dense weights.
 
 ## Wide activation inputs
 
-Native EXL3 requires FP16 activations. `ExllamaV3Linear.forward` routes BF16 and
-FP32 activations to the bounded `ExllamaV3TorchLinear` FP32 reconstruction path
-before either native GEMM branch; see [EXL3 wide activation dispatch](exl3-wide-activation-dispatch.md).
+Native EXL3 requires FP16 activations. `ExllamaV3Linear.forward` casts BF16 to
+FP16 (exactly, and power-of-two pre-scaled above 64) so BF16 keeps both native
+GEMM branches; FP32 and non-finite BF16 still use the bounded
+`ExllamaV3TorchLinear` FP32 reconstruction path. See
+[EXL3 wide activation dispatch](exl3-wide-activation-dispatch.md).
 GGUF CUDA has its own FP32 input normalization for BF16 callers. The visible
 output is cast back to the caller's dtype once.
 

@@ -28,8 +28,8 @@ flowchart TD
 | Before this extraction layer | Carried implementation |
 |---|---|
 | API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/kimi_k3.py:82`: `KimiK3Source` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/kimi_k3.py:138`: `prepare_moe` |
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/kimi_k3.py:160`: `finish_moe` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/kimi_k3.py:148`: `prepare_moe` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/utils/kimi_k3.py:170`: `finish_moe` |
 | API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/definitions/kimi_k3.py:18`: `KimiLinearQModel` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.

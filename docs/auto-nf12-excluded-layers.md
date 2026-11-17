@@ -58,7 +58,7 @@ behaviour.
 
 The writer no longer trusts the model tree to be clean. `save_quantized` and
 `save_quantized_embeddings` call `_validate_nf12_payload_ownership`
-(`gptqmodel/models/writer.py:436`), which walks the tree and fails closed when a
+(`gptqmodel/models/writer.py:728`), which walks the tree and fails closed when a
 module carries `nf12_*` buffers but the config does not declare it as NF12.
 
 ```mermaid
@@ -74,7 +74,7 @@ flowchart TD
     style G fill:#dfd,stroke:#080
 ```
 
-`_module_declares_nf12_checkpoint` (`gptqmodel/models/writer.py:418`) resolves
+`_module_declares_nf12_checkpoint` (`gptqmodel/models/writer.py:710`) resolves
 the winning `dynamic` rule for the module and its effective format, so a mixed
 config that genuinely asks for NF12 storage on a path still saves, while an
 excluded path or a non-NF12 method never does. The error names the offending

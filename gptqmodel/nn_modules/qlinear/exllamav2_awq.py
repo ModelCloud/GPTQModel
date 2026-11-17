@@ -57,11 +57,12 @@ class AwqExllamaV2Linear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_exllamav2"
 
-    # Calls the ExLlamaV2 AWQ custom op and builds a host-side q-handle cache
-    # (tensor_cache_key reads data_ptr) from forward, so dynamo breaks and a
-    # CUDA-graph capture cannot cross it; the JIT extension could not build here.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output; the q-handle
+    # cache is filled before capture, so ``forward`` only dispatches. Dynamo
+    # stops at EAGER on ``tensor.is_inference()``.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     def __init__(
             self,

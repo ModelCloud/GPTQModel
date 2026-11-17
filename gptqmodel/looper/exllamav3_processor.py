@@ -212,6 +212,13 @@ def prepare_exl3_hessian(
     """Restore GPTQ's normalized capture to EXL3's raw X^T X contract."""
 
     capture.finalize_hessian(target_device=target_device)
+    # ``materialize_global_hessian`` has already reduced every per-device
+    # partial into ``capture.H`` and only defers their release until the
+    # consuming stream drains.  GPTQ's own ``quantize()`` releases them before
+    # its memory-heavy phase; no EXL3 path did, so one fp32 C^2 partial stayed
+    # live through the fp64 congruence, LDL and tile solve.  Nothing reads the
+    # partials after finalization, so drain them now.
+    capture._release_deferred_hessian_sources()
     hessian = capture.H
     if hessian is None:
         raise RuntimeError(

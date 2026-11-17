@@ -17,6 +17,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
+from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
 from ...utils.kernel import resolve_kernel_config
 from ...utils.logger import setup_logger
@@ -28,7 +29,15 @@ from ...utils.paro import (
     validate_rotation_buffers,
 )
 from ...utils.rocm import IS_ROCM
+from . import detach_cpu_operand
 from ._compile_support import COMPILE_LEVEL
+from ._fused_train_state import (
+    bind_runtime_qzeros,
+    capture_fused_train_state,
+    discard_fused_train_state,
+    finalize_fused_train_state,
+    restore_fused_train_state,
+)
 from ._numerics import linear_wide_bias
 from ._runtime_cache import tensor_cache_key
 from .gemm_awq import (
@@ -85,11 +94,12 @@ def awq_gemm_bf16_supported(device: torch.device) -> bool:
 class ParoLinear(AwqTorchLinear):
     """Run Paro inference by rotating inputs and reusing AWQ packed GEMM."""
 
-    # The fused AWQ CUDA GEMM is a JIT extension that cannot build on this host
-    # (no CUDA toolkit), and the forward branches on host row counts around the
-    # rotation custom op. Static: EAGER, no capture.
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The rotation
+    # buffers are validated in ``post_init``; dynamo stops at EAGER on
+    # ``tensor.is_inference()``.
     SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
-    SUPPORTS_GRAPH_CAPTURE = False
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.PARO_CUDA]
     SUPPORTS_METHODS = [METHOD.PARO]
@@ -123,6 +133,10 @@ class ParoLinear(AwqTorchLinear):
     QUANT_TYPE = "awq_paro"
     # Unlike Torch AWQ, the forward adds an activation-dtype runtime bias.
     MODEL_DTYPE_BUFFERS = ("bias",)
+    # A CPU inference forward replaces the packed operands in place with the
+    # kernel layout. ``scales``/``bias`` stay in their checkpoint dtype, so
+    # only the two rewritten operands need a checkpoint snapshot.
+    _FUSED_TRAIN_STATE_NAMES = ("qweight", "qzeros")
 
     def __init__(
         self,
@@ -197,10 +211,13 @@ class ParoLinear(AwqTorchLinear):
             backend=kwargs.pop("backend", BACKEND.PARO_CUDA),
             **kwargs,
         )
-        self._cpu_aten_layer = None
-        self._cpu_aten_key = None
-        self._cpu_aten_failed_key = None
-        self._cpu_aten_warning_logged = False
+        # One resident CPU layout at a time: ``"avx512"`` or ``"aten"``. The
+        # checkpoint tensors are rebuilt for ``state_dict()``/save instead of
+        # being kept next to the packed operands (issue #4814).
+        self._cpu_runtime_layout: Optional[str] = None
+        self._cpu_runtime_dtype: Optional[torch.dtype] = None
+        self._cpu_layout_warning_logged = False
+        self.scales_and_zeros = None
         self._register_rotation_buffers()
         self._rotation_identity = True
 
@@ -234,6 +251,12 @@ class ParoLinear(AwqTorchLinear):
     def clear_weight_cache(self) -> None:
         """Drop packed-weight and rotation-derived state after a mutation."""
         super().clear_weight_cache()
+        # The live packed layout stays authoritative for moves and explicit
+        # clears; the export path and a checkpoint load restore the snapshot
+        # explicitly. Once that snapshot is gone the live buffers are back in
+        # checkpoint layout, so forget the layout flag with it.
+        if getattr(self, "_fused_train_state", None) is None:
+            self._clear_cpu_runtime_layout()
         self._clear_rotation_runtime_cache()
         # A meta/offloaded buffer has no values to inspect. Keep the shortcut
         # disabled until a materialized load or move clears the cache again.
@@ -242,6 +265,199 @@ class ParoLinear(AwqTorchLinear):
             and not self.channel_scales.is_meta
             and is_identity_rotation(self.theta, self.channel_scales)
         )
+
+    def _live_cpu_layout(self) -> Optional[str]:
+        """The packed CPU layout the live buffers hold, or ``None``.
+
+        ``restore_fused_train_state`` consumes the snapshot, so a missing
+        snapshot means the buffers are back in checkpoint layout even if the
+        flag has not been cleared yet.
+        """
+
+        if getattr(self, "_fused_train_state", None) is None:
+            return None
+        return self.__dict__.get("_cpu_runtime_layout")
+
+    def _clear_cpu_runtime_layout(self) -> None:
+        self._cpu_runtime_layout = None
+        self._cpu_runtime_dtype = None
+        self.scales_and_zeros = None
+
+    def _restore_cpu_checkpoint_layout(self) -> bool:
+        """Return the packed buffers to the checkpoint layout, if transformed."""
+
+        if self._live_cpu_layout() is None:
+            self._clear_cpu_runtime_layout()
+            return False
+        restored = restore_fused_train_state(self)
+        self._clear_cpu_runtime_layout()
+        return restored
+
+    def _can_rebuild_checkpoint_qweight(self) -> bool:
+        """Whether this layer's checkpoint ``qweight`` has a verified inverse."""
+
+        layout = self.__dict__.get("_pending_cpu_layout") or self.__dict__.get(
+            "_cpu_runtime_layout"
+        )
+        weight = getattr(self, "qweight", None)
+        if layout not in ("avx512", "aten"):
+            return False
+        if not isinstance(weight, torch.Tensor):
+            return False
+        if weight.device.type != "cpu" or weight.dtype != torch.int32:
+            return False
+        if layout == "aten":
+            from ._cpu_int4pack_layout import int4pack_block_size
+
+            return int4pack_block_size() is not None
+        return weight.dim() == 2
+
+    def _rebuild_checkpoint_qweight(self) -> torch.Tensor:
+        """Rebuild the checkpoint ``qweight`` from the live packed layout."""
+
+        layout = self.__dict__.get("_cpu_runtime_layout")
+        if layout == "avx512":
+            from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
+            from .torch_cpu_avx512 import unpack_hf_int4
+
+            # The AVX512 packer consumes natural AWQ codes; its packed bytes
+            # are the ``pack_hf_int4`` group layout, so the inverse is the HF
+            # unpack followed by the AWQ word order.
+            codes = unpack_hf_int4(self.qweight, self.out_features, self.in_features)
+            return pack_awq_columns(codes.t().to(torch.int32), self.bits, order=AWQ_ORDER)
+        if layout == "aten":
+            from ._cpu_int4pack_layout import rebuild_awq_qweight
+
+            return rebuild_awq_qweight(self)
+        raise RuntimeError(
+            f"{type(self).__name__} cannot rebuild its checkpoint qweight"
+        )
+
+    def _ensure_cpu_layout(self, layout: str, dtype: Optional[torch.dtype] = None) -> bool:
+        """Pack the checkpoint buffers in place for one CPU kernel layout.
+
+        Only one copy stays resident: the checkpoint tensors are captured as a
+        non-persistent snapshot, then ``qweight``/``qzeros`` are rebound to the
+        packed operands. ``finalize_fused_train_state`` drops the ``qweight``
+        clone once the inverse reproduces it byte for byte, so ``state_dict()``
+        still emits the checkpoint layout (issue #4814).
+        """
+
+        if layout == self._live_cpu_layout() and (
+            layout != "aten" or self._cpu_runtime_dtype == dtype
+        ):
+            return True
+        if self._live_cpu_layout() is not None:
+            if not self._restore_cpu_checkpoint_layout():
+                return False
+
+        self.__dict__["_pending_cpu_layout"] = layout
+        try:
+            capture_fused_train_state(self)
+            if layout == "avx512":
+                packed_qweight, packed_qzeros = self._pack_cpu_avx512()
+                scales_and_zeros = None
+            else:
+                packed_qweight, packed_qzeros, scales_and_zeros = self._pack_cpu_aten(dtype)
+        except Exception as exc:
+            # The transform is computed before any buffer is rebound, so a
+            # failure leaves the checkpoint tensors untouched.
+            discard_fused_train_state(self)
+            self._clear_cpu_runtime_layout()
+            if not self._cpu_layout_warning_logged:
+                log.warning(
+                    "Paro CPU %s layout unavailable for `%s`; using the dense fallback: %s",
+                    layout,
+                    self.name,
+                    exc,
+                )
+                self._cpu_layout_warning_logged = True
+            return False
+        finally:
+            self.__dict__.pop("_pending_cpu_layout", None)
+
+        self.qweight = packed_qweight
+        self.qzeros = packed_qzeros
+        self._cpu_runtime_layout = layout
+        self._cpu_runtime_dtype = dtype
+        if layout == "aten":
+            self.scales_and_zeros = scales_and_zeros
+            bind_runtime_qzeros(self)
+        finalize_fused_train_state(self)
+        # The per-column operands keep the checkpoint dtype and stay the
+        # loader's tensors, so they are views of the shard's ``safetensors``
+        # mapping and pin every page the loader touched even after
+        # ``qweight``/``qzeros`` were replaced (#4785/#4873). Detach them once
+        # the runtime layout is built; values, dtype and order are unchanged.
+        for operand in ("scales", "bias", "theta", "pairs", "channel_scales"):
+            value = getattr(self, operand, None)
+            if isinstance(value, torch.Tensor):
+                setattr(self, operand, detach_cpu_operand(value))
+        return True
+
+    def _pack_cpu_avx512(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
+
+        ok, err = TorchCpuAvx512AwqLinear.cached_validate_once()
+        packer = TorchCpuAvx512AwqLinear.pack_awq_int4_kernel
+        if not ok or packer is None:
+            raise RuntimeError(str(err) if err is not None else "AVX512-BF16 packer unavailable")
+        return packer(
+            self.qweight.contiguous(),
+            self.qzeros.contiguous(),
+            self.out_features,
+            self.in_features,
+        )
+
+    def _pack_cpu_aten(
+        self, dtype: Optional[torch.dtype]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        from .torch_aten_kernel import _cpu_int4pack_scale_dtype, _cpu_int4pack_zero_offsets
+        from .torch_fused import pack_scales_and_zeros
+
+        iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
+        iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
+        max_val = (1 << self.bits) - 1
+        iweight = torch.bitwise_and(iweight, max_val).to(torch.uint8)
+        izeros = torch.bitwise_and(izeros, max_val).reshape(self.scales.shape).to(torch.uint8)
+
+        # The op requires the activation and scales/zero-points to share one
+        # dtype. Match the first fused activation instead of assuming the
+        # checkpoint's scale buffer also implies the activation dtype.
+        target_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else self.scales.dtype
+        if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            target_dtype = torch.bfloat16
+        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, izeros, self.bits, target_dtype)
+        # Packed runtime metadata only: ``self.scales`` keeps the checkpoint
+        # dtype so a later forward or save cannot persist a narrowed scale
+        # (issue #4178).
+        compute_scales = self.scales.to(compute_dtype).contiguous()
+        packed_qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(
+            iweight.t().int(), 1
+        ).contiguous()
+        packed_qzeros = _cpu_int4pack_zero_offsets(izeros, compute_scales, self.bits).to(
+            compute_dtype
+        ).contiguous()
+        return packed_qweight, packed_qzeros, pack_scales_and_zeros(compute_scales, packed_qzeros)
+
+    def _apply(self, fn, recurse: bool = True):
+        """Restore checkpoint tensors before a device/dtype move.
+
+        A CPU runtime layout is only valid for the device and dtype that built
+        it. Restoring first also keeps ``.to()``/``.cuda()``/offload free of a
+        packed operand whose layout another backend cannot read; the next
+        forward re-transforms the module.
+        """
+
+        if self._live_cpu_layout() is not None:
+            self._restore_cpu_checkpoint_layout()
+        return super()._apply(fn, recurse=recurse)
+
+    def train(self, mode: bool = True):
+        if mode and not self.training and self._live_cpu_layout() is not None:
+            # Training reads the checkpoint tensors through the dense path.
+            self._restore_cpu_checkpoint_layout()
+        return super().train(mode=mode)
 
     def post_init(self) -> None:
         super().post_init()
@@ -281,9 +497,6 @@ class ParoLinear(AwqTorchLinear):
         self._runtime_theta = None
         self._runtime_channel_scales = None
         self._rotation_runtime_key = None
-        self._cpu_aten_layer = None
-        self._cpu_aten_key = None
-        self._cpu_aten_failed_key = None
         self._runtime_dtype_key = None
         self._runtime_scales = None
         self._runtime_bias = None
@@ -391,6 +604,10 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
+        # The dense path dequantizes the checkpoint tensors, so a CPU kernel
+        # layout must be returned first.
+        if self._live_cpu_layout() is not None:
+            self._restore_cpu_checkpoint_layout()
         # Keep the reconstructed grid, the reduction and the stored bias in
         # FP32, then round once.  Decoding to the activation dtype first makes
         # a finite FP16/BF16 result overflow before the bias can cancel it.
@@ -496,6 +713,51 @@ class ParoLinear(AwqTorchLinear):
             out = out.to(dtype=x_flat.dtype)
         return out
 
+    def _forward_cpu_avx512(
+        self,
+        x_flat: torch.Tensor,
+        *,
+        enabled: bool = True,
+    ) -> Optional[torch.Tensor]:
+        """Run the AVX512-BF16 int4 GEMM on the owned packed operands."""
+        if not enabled or not self._cpu_avx512_eligible(x_flat):
+            return None
+
+        from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
+
+        ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
+        gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
+        if not ok or gemm is None:
+            return None
+
+        original_dtype = x_flat.dtype
+        kernel_input = x_flat if x_flat.is_contiguous() else x_flat.contiguous()
+        # The transform rewrites registered buffers, so it must not interleave
+        # with `state_dict()`/`load_state_dict()`, which hold the same lock.
+        with self._cpu_transform_lock:
+            if not self._ensure_cpu_layout("avx512"):
+                return None
+            # The kernel requires FP32 affine operands. Widen per call so the
+            # checkpoint dtype stays resident instead of a second FP32 copy
+            # (issue #4814).
+            scales = self.scales.to(dtype=torch.float32).contiguous()
+            bias = (
+                self.bias.to(dtype=torch.float32).contiguous()
+                if self.bias is not None
+                else None
+            )
+            output = gemm(
+                kernel_input,
+                self.qweight,
+                self.qzeros,
+                scales,
+                self.group_size,
+                bias,
+            )
+        if output.dtype != original_dtype:
+            output = output.to(dtype=original_dtype)
+        return output
+
     def _forward_cpu_aten(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
         """Use ATen's native CPU int4pack GEMM for FP16/BF16 activations."""
         if (
@@ -514,85 +776,42 @@ class ParoLinear(AwqTorchLinear):
         if not _has_local_int4pack_cpu_ops():
             return None
 
-        key = (
-            tensor_cache_key(self.qweight),
-            tensor_cache_key(self.qzeros),
-            tensor_cache_key(self.scales),
-            self.bits,
-            self.group_size,
-            self.in_features,
-            self.out_features,
-            x_flat.dtype,
-        )
-        if self._cpu_aten_failed_key == key:
+        from .torch_aten_kernel_awq import TorchAtenAwqLinear
+
+        ok, _ = TorchAtenAwqLinear.cached_validate_once()
+        if not ok:
             return None
 
-        layer = self._cpu_aten_layer
-        if layer is None or self._cpu_aten_key != key:
-            from .torch_aten_kernel_awq import TorchAtenAwqLinear
+        from .torch_fused import _cpu_int4pack_mm
 
-            ok, _ = TorchAtenAwqLinear.cached_validate_once()
-            if not ok:
+        # The transform rewrites registered buffers, so it must not interleave
+        # with `state_dict()`/`load_state_dict()`, which hold the same lock.
+        with self._cpu_transform_lock:
+            if not self._ensure_cpu_layout("aten", x_flat.dtype):
                 return None
-
             try:
-                layer = TorchAtenAwqLinear(
-                    bits=self.bits,
-                    group_size=self.group_size,
-                    sym=self.sym,
-                    desc_act=self.desc_act,
-                    in_features=self.in_features,
-                    out_features=self.out_features,
-                    bias=False,
-                    pack_dtype=self.pack_dtype,
-                    adapter=None,
-                    register_buffers=False,
-                    name=f"{self.name}.cpu_aten",
-                    backend=BACKEND.AWQ_TORCH_ATEN,
+                # The layer has no bias: the parent adds it after return. Ask
+                # for the wide product so a finite sum is not rounded to
+                # infinity before the outer bias epilogue (issue #4471).
+                out = _cpu_int4pack_mm(
+                    x_flat,
+                    self.qweight,
+                    self.group_size,
+                    self.scales_and_zeros,
+                    out_dtype=torch.float32 if self.bias is not None else None,
                 )
-                layer.qweight = self.qweight
-                layer.qzeros = self.qzeros
-                layer.scales = self.scales
-                layer.bias = None
-                layer.eval()
-                layer.transform_cpu(dtype=x_flat.dtype)
             except Exception as exc:
-                if not self._cpu_aten_warning_logged:
+                # Fail closed to the dense reference instead of returning a
+                # half-transformed module.
+                self._restore_cpu_checkpoint_layout()
+                if not self._cpu_layout_warning_logged:
                     log.warning(
-                        "Paro ATen CPU int4pack unavailable for `%s`; using dense fallback: %s",
+                        "Paro ATen CPU int4pack failed for `%s`; using dense fallback: %s",
                         self.name,
                         exc,
                     )
-                    self._cpu_aten_warning_logged = True
-                self._cpu_aten_layer = None
-                self._cpu_aten_key = None
-                self._cpu_aten_failed_key = key
+                    self._cpu_layout_warning_logged = True
                 return None
-
-            self._cpu_aten_layer = layer
-            self._cpu_aten_key = key
-            self._cpu_aten_failed_key = None
-
-        try:
-            # The child has no bias: the parent adds it after return. Ask for
-            # the wide product so a finite sum is not rounded to infinity
-            # before the outer bias epilogue (issue #4471).
-            out = layer._fused_op_forward(
-                x_flat,
-                out_dtype=torch.float32 if self.bias is not None else None,
-            )
-        except Exception as exc:
-            if not self._cpu_aten_warning_logged:
-                log.warning(
-                    "Paro ATen CPU int4pack failed for `%s`; using dense fallback: %s",
-                    self.name,
-                    exc,
-                )
-                self._cpu_aten_warning_logged = True
-            self._cpu_aten_layer = None
-            self._cpu_aten_key = None
-            self._cpu_aten_failed_key = key
-            return None
 
         if self.bias is not None:
             # Accumulate the bias in FP32 before the visible dtype cast. ATen

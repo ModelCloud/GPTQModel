@@ -477,8 +477,9 @@ On MLX such a W4A16 layer is exactly a stock
 `mlx.nn.QuantizedLinear(mode="mxfp4", group_size=32, bits=4)`: the packed
 words and E8M0 bytes transfer unchanged, without requantization by MLX's own
 RTN. `GPTQModel.load(..., backend="mlx")` builds that stock layer, and
-`GPTQModel.export(..., format="mlx")` writes a checkpoint that stock
-`mlx_lm.load` reads, which rotated MACaQ checkpoints cannot do. Layers that
+`gptqmodel.utils.mlx.convert_gptq_to_mlx_weights(..., stock_compatible=True)`
+produces weights and a config that stock `mlx_lm.load` reads, which rotated
+MACaQ checkpoints cannot do. Layers that
 keep the D1 pre-scale or use W4A4 stay on the custom `MlxMACaQLinear`, which
 skips the rotate dispatch when the layer has no `BH`.
 

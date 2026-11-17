@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Issue #4455: ``export(..., "hf")`` keeps the checkpoint dtype.
+"""Issue #4455: ``dequantize_model`` keeps the checkpoint dtype.
 
 ``dequantize_model`` used to default to bfloat16, so an fp16 GPTQ checkpoint
-was exported with ``dtype=bfloat16`` and BF16 tensors. The dense dtype now
+was written with ``dtype=bfloat16`` and BF16 tensors. The dense dtype now
 defaults to the source checkpoint's own float dtype; an explicit
 ``target_dtype`` still wins and a checkpoint without one falls back to bf16.
 """
@@ -17,9 +17,8 @@ import pytest
 import torch
 from safetensors import safe_open
 
-from gptqmodel import GPTQModel
 from gptqmodel.utils.model_dequant import dequantize_model, resolve_dense_target_dtype
-from tests.test_export import _tiny_llama_checkpoint
+from tests.test_model_dequant_dense import _tiny_llama_checkpoint
 
 
 pytestmark = [pytest.mark.cpu]
@@ -55,11 +54,11 @@ def _output_dtypes(out):
     ],
     ids=["dtype-fp16", "legacy-torch_dtype-fp16", "bf16", "fp32", "undeclared-falls-back-bf16"],
 )
-def test_export_hf_keeps_checkpoint_dtype(tmp_path, dtype_fields, expected):
+def test_dequantize_model_keeps_checkpoint_dtype(tmp_path, dtype_fields, expected):
     source = _source(tmp_path, **dtype_fields)
     out = tmp_path / "out"
 
-    GPTQModel.export(str(source), str(out), "hf")
+    dequantize_model(source, out)
 
     config_dtype, tensor_dtypes = _output_dtypes(out)
     assert config_dtype == str(expected).removeprefix("torch.")
