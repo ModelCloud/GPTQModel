@@ -18,9 +18,9 @@ from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
 
 
 MODEL_PATHS = {
-    "lfm3": Path("/monster/data/models/LFM3-1.7B"),
-    "lfm3_vl": Path("/monster/data/models/LFM3-VL-2B"),
-    "lfm3_omni": Path("/monster/data/models/LFM3-Omni-2B"),
+    "lfm3": Path("/monster/data/model/LFM3-1.7B"),
+    "lfm3_vl": Path("/monster/data/model/LFM3-VL-2B"),
+    "lfm3_omni": Path("/monster/data/model/LFM3-Omni-2B"),
 }
 
 

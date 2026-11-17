@@ -7,8 +7,10 @@ from model_test import ModelTest
 
 
 class TestLFM3(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/models/LFM3-1.7B"  # LiquidAI/LFM3-1.7B
-    TRUST_REMOTE_CODE = False
+    # LFM3 ships as a remote-code (`auto_map`) checkpoint on both the 4.x and 5.x
+    # Transformers releases, so the definition always needs `trust_remote_code`.
+    NATIVE_MODEL_ID = "/monster/data/model/LFM3-1.7B"  # LiquidAI/LFM3-1.7B
+    TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     GROUP_SIZE = 32
     DATASET_SIZE = 512
