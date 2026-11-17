@@ -209,9 +209,23 @@ def detach_cpu_operand(tensor):
     These operands are per-column metadata, so one copy at repack time is cheap
     next to the shard pages it releases. ``None`` and non-tensors pass through
     unchanged.
+
+    Only a tensor that actually aliases the checkpoint is copied. A storage
+    backed by a mapped file is non-resizable (that is how ``safetensors`` and
+    ``torch.frombuffer`` on an ``mmap`` create it); an ordinary allocation is
+    resizable and is returned unchanged so its object identity survives
+    (``scales`` must stay the loader's tensor, #4395).
     """
 
     if tensor is None or not isinstance(tensor, t.Tensor):
+        return tensor
+    if tensor.device.type != "cpu":
+        return tensor
+    try:
+        aliases_checkpoint = not tensor.untyped_storage().resizable()
+    except Exception:
+        return tensor
+    if not aliases_checkpoint:
         return tensor
     return tensor.clone()
 
