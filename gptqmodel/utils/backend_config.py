@@ -102,7 +102,6 @@ class GGUFTorchConfig(BackendConfig):
         name: f"gguf_{name}" for name in (
             "fused_cuda_max_rows", "fused_cuda_min_matrix_elements", "fused_cpu_max_rows",
             "fused_cpu_min_matrix_elements", "fused_chunk_blocks", "fused_chunk_bytes",
-            "fused_autotune_warmup", "fused_autotune_iters", "fused_autotune_margin",
         )
     }
     fused_cuda_max_rows: int = 32
@@ -111,9 +110,6 @@ class GGUFTorchConfig(BackendConfig):
     fused_cpu_min_matrix_elements: int = 0
     fused_chunk_blocks: int = 0
     fused_chunk_bytes: int = 32 * 1024 * 1024
-    fused_autotune_warmup: int = 1
-    fused_autotune_iters: int = 2
-    fused_autotune_margin: float = 0.05
 
 
 @dataclass(frozen=True)
