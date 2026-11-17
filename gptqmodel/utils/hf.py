@@ -2814,6 +2814,10 @@ def load_hf_tokenizer(
 
         tokenizer_or_path = os.fspath(tokenizer_or_path)
         loader = local_model_loader(getattr(model_config, "model_type", None))
+        if loader is not None:
+            # A package-owned model never delegates tokenizer Python to its
+            # checkpoint, including when it uses an ordinary native tokenizer.
+            trust_remote_code = False
         if loader is not None and loader.tokenizer_class is not None:
             # Class selection belongs to the definition, including when two
             # checkpoints declare the same tokenizer class name. Tokenicer

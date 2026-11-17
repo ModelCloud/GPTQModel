@@ -362,7 +362,10 @@ flowchart TD
     A["load_hf_tokenizer"] --> B{"String or PathLike?"}
     B -->|instance| I["Preserve supplied tokenizer instance"]
     B -->|path| C["local_model_loader: selected outer model_type"]
-    C --> D{"Definition declares tokenizer_class?"}
+    C --> L{"Package-owned model loader?"}
+    L -->|yes| U["Force tokenizer trust_remote_code=False"]
+    U --> D{"Definition declares tokenizer_class?"}
+    L -->|no| N
     D -->|no| N["Tokenicer.load: ordinary path and serialized preference"]
     D -->|yes| E["load_hf_tokenizer: filter constructor-irrelevant options"]
     E --> F["LocalModelLoader.load_tokenizer: strip trust and code_revision"]
@@ -380,6 +383,7 @@ flowchart TD
 | --- | --- | --- |
 | Tokenizer implementation | Base `c72de4911`, `utils/hf.py:2802-2827`: every path went to Tokenicer auto discovery | `utils/hf.py:2812-2825`: definition-owned tokenizer paths instantiate directly; instances remain instances |
 | Trust options | No package tokenizer entry point | `models/local.py:64-69`: package tokenizer loading discards `trust_remote_code` and `code_revision` |
+| Local model without a custom tokenizer | `utils/hf.py` at `d3ea4d172:2816-2835` passed both caller opt-ins through to Tokenicer; a hostile tokenizer auto-map executed checkpoint Python | `utils/hf.py:2817-2820` disables tokenizer remote trust for every selected package model, including models using ordinary native tokenizer assets |
 | Corrective normalization | Tokenicer owns normalization | Tokenicer still receives the selected instance and model config; no GPT-QModel normalization shim |
 | Missing scientific assets | Auto-discovery could select checkpoint Python | Owned construction errors propagate; no generic tokenizer substitution or remote retry |
 
@@ -391,6 +395,16 @@ merged upstream fix. Tokenicer handles generic trust enforcement and ordinary
 serialized-tokenizer preference; unknown custom semantics fail closed rather
 than silently substituting a generic tokenizer. See
 [the upstream security change](https://github.com/ModelCloud/Tokenicer/pull/64).
+
+The actual `GPTQModel.load` regression
+`test_local_model_without_owned_tokenizer_cannot_import_checkpoint_python`
+first produced **one failure and three passing controls**: only both trust
+and bypass enabled imported the checkpoint marker code. After enforcing the
+definition's tokenizer trust boundary, shared model/tokenizer/processor/security
+and scientific-port suites passed **181 tests**, no skips, in 8.51 seconds.
+All four combinations preserve exact native input IDs and decoding; explicit
+unsupported checkpoint-code consent remains available outside package-owned
+model definitions. Tokenicer still owns generic loading and normalization.
 
 With the published 0.0.17 artifact installed, the owned tokenizer adapter,
 processor/model/path/security tests, ERNIE VL, Hymba and InternLM2 runtime suites
