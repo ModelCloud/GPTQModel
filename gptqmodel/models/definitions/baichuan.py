@@ -13,6 +13,7 @@ class BaiChuanQModel(BaseQModel):
     loader = LocalModelLoader(
         config_class="gptqmodel.models.ports.baichuan.configuration_baichuan.BaichuanConfig",
         model_class="gptqmodel.models.ports.baichuan.modeling_baichuan.BaichuanForCausalLM",
+        tokenizer_class="gptqmodel.models.ports.baichuan.tokenization_baichuan.BaichuanTokenizer",
     )
     fusable = None  # Fused QKV; no qualified fusion executor.
     pre_lm_head_norm_module = "model.norm"
