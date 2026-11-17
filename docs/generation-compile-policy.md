@@ -40,15 +40,25 @@ The policy runs in `BaseQModel._generation_compile_kwargs()`. It never mutates a
 ## Kernel declaration
 
 `BaseQuantLinear.SUPPORTS_COMPILE` (default `False`) is the per-kernel answer to
-"is compiling this forward not a pessimization?". False does not mean
-untraceable — it means the graph breaks and the eager path is fast enough that
-the fragments lose. A kernel opts in only with a measurement on the hardware it
-claims:
+"does compiling this forward beat its eager path?". The bar is **trace-clean**,
+and both halves are required:
+
+1. `torch.compile(..., fullgraph=True)` traces the forward with **zero graph
+   breaks**, and
+2. a compiled decode **measures faster** on the hardware the declaration
+   claims.
+
+A graph-breaking kernel pays for dozens of graph fragments and guard checks per
+decode step, so it loses even when its eager path is slow. A clean trace of a
+forward whose eager path is already fast is a wash, and one timing on one
+architecture does not qualify a kernel (#4739).
 
 | Kernel | `SUPPORTS_COMPILE` | Evidence |
 | --- | --- | --- |
-| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, QQQ, FP8, EXL3, Paro | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
-| `AwqTorchLinear` | `True` | pure-torch reference path; 1.36 s -> 0.76 s on Llama-1B/4090 (#4669), parity on the tiny fixture here. Its subclass `ParoLinear` re-declares `False` because its rotation/GEMM path branches on host row counts |
+| `TorchFP8Linear` | `True` | `fullgraph=True` traces clean (host-visible constants only; the decoded-weight bound is a load-time cache). Static-cache decode 0.126 s -> 0.055 s (2.3x, 1 graph, 0 breaks) on the tiny Llama here (#4739) |
+| `AwqTorchLinear` | `True` | trace-clean since #4737's decode-range guard returns before `tensor_cache_key()` under `is_compiling()`. Static-cache decode 0.174 s -> 0.047 s (1 graph, 0 breaks) on the tiny Llama here; 1.36 s -> 0.76 s on Llama-1B/4090 (#4669). Its subclass `ParoLinear` re-declares `False` because its rotation/GEMM path branches on host row counts |
+| `MarlinLinear`, `MarlinAwqLinear`, ExLlamaV2, `TorchLinear`, `TritonV2Linear`, QQQ, EXL3, Paro | `False` | custom op without a fake impl, or host-side `data_ptr()`/`id()`/`._version` guards in `forward` |
+| `FP8MlxQuantLinear` | `False` | native Metal MXFP8 kernels on MPS; never traced or timed, so it does not inherit the Torch FP8 opt-in |
 
 A dense model has no quantized linear to break the graph, so it keeps whatever
 compile policy the caller chose.
@@ -60,9 +70,16 @@ GB10 (sm_121):
 
 | run | dynamic cache | static cache | static, `disable_compile=True` | dynamo graphs |
 | --- | --- | --- | --- | --- |
-| before (main) | 0.096 s | 0.211 s | 0.103 s | 19 |
-| after | 0.097 s | 0.099 s | 0.099 s | 0 |
-| `AWQ_TORCH` after (declares `True`) | 0.168 s | 0.157-0.257 s | 0.175 s | 20 |
+| Marlin, before #4727 | 0.096 s | 0.211 s | 0.103 s | 19 |
+| Marlin, after #4727 | 0.097 s | 0.099 s | 0.099 s | 0 |
+| `AWQ_TORCH`, after #4737 | 0.171 s | 0.047 s | 0.174 s | 1 |
+| FP8, before #4739 (declares `False`) | 0.123 s | 0.126 s | 0.126 s | 0 |
+| FP8, after #4739 (declares `True`) | 0.123 s | 0.055 s | 0.126 s | 1 |
+
+Compiling FP8 changes the reduction order, so a compiled greedy decode can pick
+a different token from the eager one on some weights, while staying
+deterministic run to run; `disable_compile=True` still reproduces the dynamic
+tokens exactly. The same holds for the compiled AWQ decode.
 
 The reporter's Llama-1B numbers were larger (0.33 s eager vs 0.98-1.05 s static
 for Marlin).
