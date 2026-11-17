@@ -15,7 +15,11 @@ from tests.test_local_tokenizer_loading import (
     _hostile_metadata,
     _write_tokenizer,
 )
-from tests.test_local_tokenizer_loading import owned as owned
+from tests.test_local_tokenizer_loading import owned as owned_fixture
+
+
+# Re-export the pytest fixture without shadowing an imported name in tests.
+owned = owned_fixture
 
 
 @pytest.mark.parametrize("caller", [{}, {"normalize_sentencepiece": False},
