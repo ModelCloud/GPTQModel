@@ -70,10 +70,71 @@ def unpack_hf_int4(
 
     groups = out_features // 32
     half_in = in_features // 2
-    grouped = packed.reshape(groups, half_in, 16, 2).permute(0, 2, 1, 3)
-    low_rows = torch.bitwise_and(grouped, 0x0F)
-    high_rows = torch.bitwise_and(torch.bitwise_right_shift(grouped, 4), 0x0F)
-    return torch.cat((low_rows, high_rows), dim=1).reshape(out_features, in_features)
+    # The flat packed layout is ``[groups, half_in, 16, 2]``: the first 16
+    # rows of a group carry the low nibble and rows 16..31 the high nibble,
+    # while the last axis pairs two adjacent input channels. Read those two
+    # lanes as strided views and transpose only the 16 x half_in block instead
+    # of walking the whole 4-D view twice (issue #4884).
+    grouped = packed.reshape(groups, half_in, 16, 2)
+    low = grouped[..., 0]
+    high = grouped[..., 1]
+    codes = torch.empty(
+        (groups, 32, half_in, 2), dtype=torch.uint8, device=packed.device
+    )
+    codes[:, :16, :, 0] = torch.bitwise_and(low, 0x0F).transpose(1, 2)
+    codes[:, :16, :, 1] = torch.bitwise_and(high, 0x0F).transpose(1, 2)
+    codes[:, 16:, :, 0] = torch.bitwise_right_shift(low, 4).transpose(1, 2)
+    codes[:, 16:, :, 1] = torch.bitwise_right_shift(high, 4).transpose(1, 2)
+    return codes.reshape(out_features, in_features)
+
+
+def avx512_checkpoint_bytes(
+    packed: torch.Tensor,
+    out_features: int,
+    in_features: int,
+) -> torch.Tensor:
+    """Rebuild the checkpoint's packed bytes from the AVX512 runtime words.
+
+    The result is the checkpoint byte layout ``[out_features, in_features //
+    2]``: one byte holds two adjacent input-channel nibbles, and four of those
+    bytes little-endian form one ``int32`` checkpoint word. Building the bytes
+    directly avoids the old ``codes.t().reshape(...)`` plus eight strided
+    shift/OR passes over an ``int32`` expansion (issue #4884).
+    """
+
+    if packed.ndim != 2:
+        raise ValueError(f"packed must be 2D, got shape={tuple(packed.shape)}")
+    if out_features % 32 != 0:
+        raise ValueError("out_features must be divisible by 32")
+    if in_features % 2 != 0:
+        raise ValueError("in_features must be even")
+    if packed.shape != (out_features, in_features // 2):
+        raise ValueError(
+            "packed shape does not match the requested layer: "
+            f"expected {(out_features, in_features // 2)}, got {tuple(packed.shape)}"
+        )
+
+    groups = out_features // 32
+    half_in = in_features // 2
+    grouped = packed.reshape(groups, half_in, 16, 2)
+    low = grouped[..., 0]
+    high = grouped[..., 1]
+    # Rows 0..15 take the low nibble, rows 16..31 the high nibble, and each
+    # byte pairs the two adjacent input channels of one output row.
+    low_bytes = torch.bitwise_or(
+        torch.bitwise_and(low, 0x0F),
+        torch.bitwise_left_shift(torch.bitwise_and(high, 0x0F), 4),
+    )
+    high_bytes = torch.bitwise_or(
+        torch.bitwise_right_shift(low, 4),
+        torch.bitwise_and(high, 0xF0),
+    )
+    checkpoint = torch.empty(
+        (groups, 32, half_in), dtype=torch.uint8, device=packed.device
+    )
+    checkpoint[:, :16] = low_bytes.transpose(1, 2)
+    checkpoint[:, 16:] = high_bytes.transpose(1, 2)
+    return checkpoint.reshape(out_features, half_in)
 
 
 class TorchCpuAvx512Linear(TorchAtenLinear):
@@ -284,4 +345,9 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         return out
 
 
-__all__ = ["TorchCpuAvx512Linear", "pack_hf_int4", "unpack_hf_int4"]
+__all__ = [
+    "TorchCpuAvx512Linear",
+    "avx512_checkpoint_bytes",
+    "pack_hf_int4",
+    "unpack_hf_int4",
+]
