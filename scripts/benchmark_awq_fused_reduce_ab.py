@@ -85,7 +85,7 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def _make_quant_buffers(case: BenchCase, dtype: torch.dtype, bits: int = 4) -> dict[str, torch.Tensor]:
-    from gptqmodel.utils.paroquant import build_identity_rotation_buffers
+    from gptqmodel.utils.paro import build_identity_rotation_buffers
 
     groups = case.in_features // case.group_size
     int_weight = torch.randint(0, 2**bits, size=(case.in_features, case.out_features), dtype=torch.int32)
@@ -193,7 +193,7 @@ def _run_suite(
     baseline_disable_fused_reduce: bool,
     candidate_disable_fused_reduce: bool,
 ) -> dict[str, Any]:
-    from gptqmodel.utils.paroquant import apply_paroquant_rotation
+    from gptqmodel.utils.paro import apply_paro_rotation
 
     cases = _subset_cases(QUICK_CASES if quick else DEFAULT_CASES, shard_index=shard_index, num_shards=num_shards)
     rows = []
@@ -212,7 +212,7 @@ def _run_suite(
 
         kernel_input = x
         if rotate_inputs:
-            kernel_input = apply_paroquant_rotation(
+            kernel_input = apply_paro_rotation(
                 x,
                 buffers["pairs"].to(device),
                 buffers["theta"].to(device),
@@ -320,7 +320,7 @@ def run(
             baseline_disable_fused_reduce=baseline_disable_fused_reduce,
             candidate_disable_fused_reduce=candidate_disable_fused_reduce,
         ),
-        "paroquant": _run_suite(
+        "paro": _run_suite(
             device=device,
             dtype=dtype,
             warmup=warmup,
@@ -423,33 +423,33 @@ def _configure_awq_runtime(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Failed to build/load the AWQ CUDA runtime: {awq_runtime_error()}")
 
 
-def _configure_paroquant_runtime(args: argparse.Namespace, device: torch.device) -> None:
-    if args.force_rebuild_paroquant:
+def _configure_paro_runtime(args: argparse.Namespace, device: torch.device) -> None:
+    if args.force_rebuild_paro:
         build_root = _register_temp_build_dir(
-            f"paroquant_ext_fusedreduce_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}_"
+            f"paro_ext_fusedreduce_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}_"
         )
-        os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(build_root)
-        os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
+        os.environ["GPTQMODEL_PARO_BUILD_ROOT"] = str(build_root)
+        os.environ["GPTQMODEL_PARO_FORCE_REBUILD"] = "1"
     else:
-        os.environ.pop("GPTQMODEL_PAROQUANT_BUILD_ROOT", None)
-        os.environ.pop("GPTQMODEL_PAROQUANT_FORCE_REBUILD", None)
+        os.environ.pop("GPTQMODEL_PARO_BUILD_ROOT", None)
+        os.environ.pop("GPTQMODEL_PARO_FORCE_REBUILD", None)
 
-    from gptqmodel.utils.paroquant import clear_paroquant_rotation_extension_cache, prewarm_paroquant_rotation_extension
+    from gptqmodel.utils.paro import clear_paro_rotation_extension_cache, prewarm_paro_rotation_extension
 
-    if args.force_rebuild_paroquant:
-        clear_paroquant_rotation_extension_cache()
+    if args.force_rebuild_paro:
+        clear_paro_rotation_extension_cache()
 
-    if not prewarm_paroquant_rotation_extension(
+    if not prewarm_paro_rotation_extension(
         fused_rotation=True,
         group_size=128,
         krot=8,
         device=device,
     ):
-        raise RuntimeError("Failed to build/load the fused ParoQuant CUDA rotation extension.")
+        raise RuntimeError("Failed to build/load the fused Paro CUDA rotation extension.")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="A/B benchmark AWQ fused split-K reduction in AWQ and ParoQuant paths.")
+    parser = argparse.ArgumentParser(description="A/B benchmark AWQ fused split-K reduction in AWQ and Paro paths.")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="fp16")
     parser.add_argument("--warmup", type=int, default=5)
@@ -463,7 +463,7 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--force-rebuild-awq", action="store_true")
-    parser.add_argument("--force-rebuild-paroquant", action="store_true")
+    parser.add_argument("--force-rebuild-paro", action="store_true")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -471,7 +471,7 @@ def main() -> int:
 
     device = torch.device(f"cuda:{args.device}")
     _configure_awq_runtime(args)
-    _configure_paroquant_runtime(args, device)
+    _configure_paro_runtime(args, device)
     results = run(
         device=device,
         dtype=_resolve_dtype(args.dtype),
@@ -488,7 +488,7 @@ def main() -> int:
     print(f"Device: {results['device']} ({results['cuda_device']}, dtype={results['dtype']})")
     print()
     _print_suite("AWQ", results["awq"])
-    _print_suite("ParoQuant", results["paroquant"])
+    _print_suite("Paro", results["paro"])
 
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)

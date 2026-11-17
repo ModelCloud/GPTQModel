@@ -60,7 +60,6 @@ def test_unsupported_checkpoint_fails_before_model_or_disk_mutation(
     ):
         BaseQModel.quantize(
             model,
-            calibration=None,
             checkpoint=CheckpointConfig(root),
         )
     assert config.to_dict() == config_before

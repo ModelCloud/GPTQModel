@@ -26,7 +26,7 @@ import pcre
 import torch
 from packaging import version
 
-from .._quant_methods import GGUF_EXPORT_QUANT_METHOD
+from .._quant_methods import GGUF_EXPORT_QUANT_METHOD, LEGACY_PARO_QUANT_METHOD
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.backend_config import RuntimeConfig
 from ..utils.hf import resolve_checkpoint_subfolder
@@ -110,7 +110,7 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
-# Provenance of `quantize(calibration_exclude_attention_sinks=True)`. Written
+# Provenance of `CalibrationConfig(exclude_attention_sinks=True)`. Written
 # only when the option was on, so a default run's config stays byte-identical.
 META_FIELD_CALIBRATION_EXCLUDE_ATTENTION_SINKS = "calibration_exclude_attention_sinks"
 
@@ -154,7 +154,7 @@ class FORMAT(str, Enum):
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
-    PAROQUANT = "paroquant"
+    PARO = "paro"
     # MACaQ's MXFP4 checkpoint stores nibble-packed E2M1 and E8M0 scales
     # plus its activation transforms (block-Hadamard `BH`, D1 `pre_scale`).
     MXFP4_MACAQ = "mxfp4_macaq"
@@ -181,7 +181,7 @@ class METHOD(str, Enum):
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
-    PARO = "paroquant"
+    PARO = "paro"
     VPTQ = "vptq"
     MACAQ = "macaq"
     NF12 = "nf12"
@@ -201,7 +201,7 @@ METHOD_SUPPORTED_BITS: Dict[METHOD, Tuple[int, ...]] = {
     # kernel (`AwqTorchLinear`, 2-8 bits) can pack and run. Request GEMM plus
     # AWQ_TORCH; the AWQ processor also selects it for non-4-bit GEMM modules.
     METHOD.AWQ: (2, 3, 4, 8),
-    # QQQ and ParoQuant kernels are 4-bit only.
+    # QQQ and Paro kernels are 4-bit only.
     METHOD.QQQ: (4,),
     METHOD.PARO: (4,),
     # FP8 is a fixed 8-bit storage format.
@@ -243,6 +243,107 @@ class QuantizeEmbed(str, Enum):
 class QuantizeEmbedConfig:
     embed_quant_mode: QuantizeEmbed = QuantizeEmbed.OUTPUT
     embed_only: bool = True
+
+
+CALIBRATION_SORT_ORDERS = ("asc", "desc", "shuffle")
+
+
+def _require_optional_positive_int(name: str, value: Any) -> None:
+    if value is None:
+        return
+    if type(value) is not int:
+        raise TypeError(f"CalibrationConfig.{name} must be an int or None, got {type(value).__name__}.")
+    if value <= 0:
+        raise ValueError(f"CalibrationConfig.{name} must be positive, got {value}.")
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """Calibration data and preparation policy for ``quantize()``/``requantize()``.
+
+    One object owns every calibration choice of a run: the samples, how they
+    are concatenated, sorted, filtered and batched, which token rows feed the
+    calibration statistics, and the optional EoRA adapter samples. The same
+    class is consumed by every looper processor.
+    """
+
+    # Calibration samples: strings, token-id lists, ``{"input_ids", ...}``
+    # rows, a Hugging Face dataset, a DataFrame, or an iterable of those.
+    dataset: Any = None
+    # Concatenate samples into fixed-length rows of this many tokens.
+    concat_size: Optional[int] = None
+    # Sample order before batching: "asc", "desc", "shuffle", or ``None``
+    # to keep the input order.
+    sort: Optional[str] = "desc"
+    batch_size: int = 1
+    # Rows with this many or fewer non-padding tokens are dropped.
+    min_length: int = 10
+    # Text inserted between samples joined by ``concat_size``.
+    concat_separator: Optional[str] = None
+    # Drop attention-sink tokens (every attended BOS token: the leading one
+    # and each document-boundary BOS of concatenated calibration) from every
+    # calibration statistic (issue #4393). Tokenizers without a BOS token have
+    # no sink to drop, so nothing changes for them (issue #4459). The tokens
+    # still run through the forward, so later tokens keep attending to them;
+    # only the per-token rows each processor accumulates (Hessians, AWQ
+    # features, sample counts) skip them. Applied once, by
+    # ``LoopProcessor.calibration_keep_mask``.
+    exclude_attention_sinks: bool = False
+    # EoRA adapter samples, prepared with this same policy. ``None`` reuses
+    # ``dataset``. Only valid with a ``Lora`` adapter.
+    adapter_dataset: Any = None
+    # The model's dataset preparer, bound by ``quantize()`` through ``bind()``.
+    # It is not a constructor argument: preparation belongs to the model.
+    prepare_dataset: Optional[Any] = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        for name in ("dataset", "adapter_dataset"):
+            value = getattr(self, name)
+            if isinstance(value, (str, bytes)):
+                raise TypeError(
+                    f"CalibrationConfig.{name} must be an iterable of samples, not a single "
+                    f"{type(value).__name__}."
+                )
+            if isinstance(value, CalibrationConfig):
+                raise TypeError(f"CalibrationConfig.{name} must hold samples, not a CalibrationConfig.")
+        _require_optional_positive_int("concat_size", self.concat_size)
+        if self.sort is not None and self.sort not in CALIBRATION_SORT_ORDERS:
+            raise ValueError(
+                f"CalibrationConfig.sort must be one of {CALIBRATION_SORT_ORDERS} or None, got {self.sort!r}."
+            )
+        if type(self.batch_size) is not int:
+            raise TypeError(f"CalibrationConfig.batch_size must be an int, got {type(self.batch_size).__name__}.")
+        if self.batch_size <= 0:
+            raise ValueError(f"CalibrationConfig.batch_size must be positive, got {self.batch_size}.")
+        if type(self.min_length) is not int:
+            raise TypeError(f"CalibrationConfig.min_length must be an int, got {type(self.min_length).__name__}.")
+        if self.min_length < 0:
+            raise ValueError(f"CalibrationConfig.min_length must be non-negative, got {self.min_length}.")
+        if self.concat_separator is not None and not isinstance(self.concat_separator, str):
+            raise TypeError(
+                "CalibrationConfig.concat_separator must be a str or None, "
+                f"got {type(self.concat_separator).__name__}."
+            )
+        # Strict, like `QuantizeConfig._validate_bool_fields` (#4668):
+        # `bool("False")` would silently turn the option on.
+        if not isinstance(self.exclude_attention_sinks, bool):
+            raise TypeError(
+                "CalibrationConfig.exclude_attention_sinks must be a bool, "
+                f"got {type(self.exclude_attention_sinks).__name__} ({self.exclude_attention_sinks!r})."
+            )
+
+    def bind(self, prepare_dataset, **changes) -> "CalibrationConfig":
+        """Return a validated copy with ``changes`` that prepares data with ``prepare_dataset``.
+
+        ``prepare_dataset`` follows ``BaseQModel.prepare_dataset``'s keyword
+        contract. ``quantize()`` binds the model's preparer; tests bind a stub.
+        """
+
+        if not callable(prepare_dataset):
+            raise TypeError("CalibrationConfig.bind() requires a callable prepare_dataset.")
+        bound = replace(self, **changes)
+        object.__setattr__(bound, "prepare_dataset", prepare_dataset)
+        return bound
 
 
 class NormType(str, Enum):
@@ -1060,7 +1161,7 @@ def resolve_quant_format(
     if method == METHOD.EXL3:
         return FORMAT.EXL3
     if method == METHOD.PARO:
-        return FORMAT.PAROQUANT
+        return FORMAT.PARO
     if method == METHOD.MACAQ:
         if isinstance(format_value, (str, FORMAT)) and str(getattr(format_value, "value", format_value)).strip().lower() == FORMAT.MXFP4.value:
             return FORMAT.MXFP4
@@ -2317,7 +2418,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.LLM_AWQ,
     },
     METHOD.PARO: {
-        FORMAT.PAROQUANT,
+        FORMAT.PARO,
     },
     METHOD.VPTQ: {
         FORMAT.VPTQ,
@@ -2346,13 +2447,13 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.BITBLAS,
     FORMAT.LLM_AWQ,
 )
-PAROQUANT_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
-    FORMAT.PAROQUANT,
+PARO_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.PARO,
 )
-# Keep ParoQuant channel-scale clamps configurable so users can relax or
+# Keep Paro channel-scale clamps configurable so users can relax or
 # tighten the safeguard without patching the optimizer code.
-PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT = 1e-2
-PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
+PARO_OPT_SCALE_CLAMP_MIN_DEFAULT = 1e-2
+PARO_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
@@ -2410,7 +2511,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GEMV: METHOD.AWQ,
     FORMAT.GEMV_FAST: METHOD.AWQ,
     FORMAT.LLM_AWQ: METHOD.AWQ,
-    FORMAT.PAROQUANT: METHOD.PARO,
+    FORMAT.PARO: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
     FORMAT.VPTQ: METHOD.VPTQ,
     FORMAT.MXFP4_MACAQ: METHOD.MACAQ,
@@ -3710,6 +3811,8 @@ def resolve_module_config_snapshot(config: "BaseQuantizeConfig", module_name: st
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     if isinstance(value, str):
         value = value.lower()
+        if value == LEGACY_PARO_QUANT_METHOD:
+            return METHOD.PARO
         if value == FORMAT.MARLIN:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
@@ -3722,7 +3825,7 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.EXL3
         if value == GGUF_EXPORT_QUANT_METHOD:
             return METHOD.GGUF
-        if value == FORMAT.PAROQUANT:
+        if value == FORMAT.PARO:
             return METHOD.PARO
         try:
             return METHOD(value)
@@ -3735,6 +3838,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
 
 def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
     if isinstance(value, str):
+        if value.lower() == LEGACY_PARO_QUANT_METHOD:
+            return FORMAT.PARO
         try:
             return FORMAT(value.lower())
         except ValueError as exc:
@@ -3764,8 +3869,8 @@ def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torc
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
 
 
-def _normalize_paroquant_best_state_dtype(best_state_dtype: Optional[Union[str, torch.dtype]]) -> str:
-    """Canonicalize the ParoQuant best-state snapshot dtype into a serialized string."""
+def _normalize_paro_best_state_dtype(best_state_dtype: Optional[Union[str, torch.dtype]]) -> str:
+    """Canonicalize the Paro best-state snapshot dtype into a serialized string."""
     if best_state_dtype is None:
         return "fp32"
     if isinstance(best_state_dtype, str):
@@ -4124,8 +4229,13 @@ _TYPE_HINTS_CACHE: Dict[type, Dict[str, Any]] = {}
 #: Keys a ``dynamic`` per-module rule may carry beyond the config field names.
 #: ``fmt`` is the documented legacy alias for ``format``; ``nested`` is an opaque
 #: passthrough whose contents the dynamic fingerprint and defensive-copy paths
-#: preserve verbatim, so it is accepted as-is rather than inspected.
-_DYNAMIC_LEGACY_KEYS = frozenset({"fmt", "nested"})
+#: preserve verbatim, so it is accepted as-is rather than inspected. The
+#: ``bnb_*`` names are the legacy synonyms ``QUANT_CONFIG_ARG_SYNONYMS`` maps at
+#: the top level; the BnB per-module normalizer still translates them, so the
+#: key check must let them through (#4728).
+_DYNAMIC_LEGACY_KEYS = frozenset(
+    {"fmt", "nested", "bnb_quant_type", "bnb_block_size", "bnb_compress_statistics"}
+)
 
 
 def _resolved_type_hints(cls) -> Dict[str, Any]:
@@ -4147,6 +4257,29 @@ def _is_optional_bool(hint) -> bool:
     return hint is not bool and set(get_args(hint)) == {bool, type(None)}
 
 
+def _bool_annotated_fields(cls) -> List[Tuple[str, bool]]:
+    """Return ``(name, optional)`` for every ``bool``/``Optional[bool]`` field."""
+
+    hints = _resolved_type_hints(cls)
+    out = []
+    for field_info in fields(cls):
+        hint = hints.get(field_info.name)
+        optional = _is_optional_bool(hint)
+        if hint is bool or optional:
+            out.append((field_info.name, optional))
+    return out
+
+
+def _require_bool_value(owner_name: str, field_label: str, value: Any) -> None:
+    """Raise ``TypeError`` unless ``value`` is a real ``bool`` (#4668)."""
+
+    if not isinstance(value, bool):
+        raise TypeError(
+            f"{owner_name}: `{field_label}` must be a bool, "
+            f"got {type(value).__name__} ({value!r})."
+        )
+
+
 def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) -> None:
     """Reject unknown keys and uncompilable patterns in one ``dynamic`` rule (#4668).
 
@@ -4165,7 +4298,7 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
         # option that does apply it (#4393).
         raise ValueError(
             f"{owner.__class__.__name__}: `dynamic['{layer_name}'].exclude_attention_sinks` is "
-            "not a per-module option; use `quantize(calibration_exclude_attention_sinks=True)`."
+            "not a per-module option; use `CalibrationConfig(exclude_attention_sinks=True)`."
         )
     if unknown:
         details = []
@@ -4191,22 +4324,28 @@ def _validate_dynamic_layer_keys(owner, layer_name: str, layer_dict: Mapping) ->
             ) from exc
 
 
-def _validate_dynamic_boolean_overrides(layer_name: str, layer_dict: Mapping) -> None:
-    """Reject non-boolean `sym`/`desc_act` values in one per-module rule.
+def _validate_dynamic_boolean_overrides(owner, layer_name: str, layer_dict: Mapping) -> None:
+    """Reject non-boolean values for every bool field in one per-module rule.
 
-    The top-level fields are type-checked, but `dynamic` values were coerced
-    with `bool(...)` when the module was packed, so `{"sym": "False"}` silently
-    became `sym=True` and produced a checkpoint labelled with the opposite
-    layout. `None` keeps meaning "inherit the global value".
+    The top-level fields are type-checked by ``_validate_bool_fields``, but
+    ``dynamic`` values used to be copied verbatim or coerced with ``bool(...)``
+    when the module was packed. The string ``"False"`` is truthy, so
+    ``{"static_groups": "False"}`` silently turned static groups on. Derive the
+    set from the owning config's annotations, exactly like the top-level path,
+    and include the legacy synonyms those keys map to (``#4728``). ``None``
+    keeps meaning "inherit the global value".
     """
 
-    for key in ("sym", "desc_act"):
-        value = layer_dict.get(key)
-        if value is not None and not isinstance(value, bool):
-            raise TypeError(
-                f"QuantizeConfig: `dynamic['{layer_name}'].{key}` must be a bool, "
-                f"got {type(value).__name__} ({value!r})."
-            )
+    bool_fields = {name for name, _ in _bool_annotated_fields(type(owner))}
+    for key, value in layer_dict.items():
+        canonical = QUANT_CONFIG_ARG_SYNONYMS.get(key, key)
+        if canonical not in bool_fields or value is None:
+            continue
+        _require_bool_value(
+            owner.__class__.__name__,
+            f"dynamic['{layer_name}'].{key}",
+            value,
+        )
 
 
 def _default_damp_percent(method: METHOD) -> float:
@@ -4424,9 +4563,9 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
                 normalized[FORMAT_FIELD_CODE] = normalized_format
             except ValueError:
                 normalized_format = None
-        if normalized_format is not None and normalized_format != FORMAT.PAROQUANT:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
-            normalized[FORMAT_FIELD_CODE] = FORMAT.PAROQUANT
+        if normalized_format is not None and normalized_format != FORMAT.PARO:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PARO}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.PARO
     elif target_cls is GGUFConfig:
         expected_method = METHOD.GGUF
     elif target_cls is QQQConfig:
@@ -5109,7 +5248,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(
@@ -5188,20 +5327,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         default" value.
         """
 
-        hints = _resolved_type_hints(type(self))
-        for field_info in fields(self):
-            hint = hints.get(field_info.name)
-            optional = _is_optional_bool(hint)
-            if hint is not bool and not optional:
-                continue
-            value = getattr(self, field_info.name, None)
+        for field_name, optional in _bool_annotated_fields(type(self)):
+            value = getattr(self, field_name, None)
             if value is None and optional:
                 continue
-            if not isinstance(value, bool):
-                raise TypeError(
-                    f"{self.__class__.__name__}: `{field_info.name}` must be a bool, "
-                    f"got {type(value).__name__} ({value!r})."
-                )
+            _require_bool_value(self.__class__.__name__, field_name, value)
 
     def __post_init__(self):
         self._normalize_serialization_fields()
@@ -6340,7 +6470,7 @@ class AWQConfig(PreProcessorConfig):
 @dataclass
 class ParoConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.PARO)
-    format: FORMAT = field(default=FORMAT.PAROQUANT)
+    format: FORMAT = field(default=FORMAT.PARO)
     gsq: Optional[GSQConfig] = field(default=None)
     krot: int = field(default=8)
     opt_rotation_epochs: int = field(default=10)
@@ -6374,14 +6504,14 @@ class ParoConfig(PreProcessorConfig):
     opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
-    opt_channel_scale_clamp_min: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT)
-    opt_channel_scale_clamp_max: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT)
+    opt_channel_scale_clamp_min: float = field(default=PARO_OPT_SCALE_CLAMP_MIN_DEFAULT)
+    opt_channel_scale_clamp_max: float = field(default=PARO_OPT_SCALE_CLAMP_MAX_DEFAULT)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PARO,)
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
-        return PAROQUANT_EXPORT_FORMATS
+        return PARO_EXPORT_FORMATS
 
     @staticmethod
     def default_opt_gradient_checkpointing_for_scope(opt_scope: str) -> bool:
@@ -6391,9 +6521,9 @@ class ParoConfig(PreProcessorConfig):
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
-        if self.format != FORMAT.PAROQUANT:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
-            self.format = FORMAT.PAROQUANT
+        if self.format != FORMAT.PARO:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PARO}`")
+            self.format = FORMAT.PARO
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled:
@@ -6442,7 +6572,7 @@ class ParoConfig(PreProcessorConfig):
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
         if self.opt_amp is not None:
             self.opt_amp = bool(self.opt_amp)
-        self.opt_best_state_dtype = _normalize_paroquant_best_state_dtype(self.opt_best_state_dtype)
+        self.opt_best_state_dtype = _normalize_paro_best_state_dtype(self.opt_best_state_dtype)
         self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
@@ -7124,7 +7254,7 @@ class FP8Config(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -7426,7 +7556,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
         checkpoint_format: FORMAT,
     ) -> None:
         del valid_bit_widths, checkpoint_format
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         if "bits" in layer_dict:
             layer_dict["bits"] = _normalize_quant_bits(
                 layer_dict["bits"],
@@ -7463,14 +7593,17 @@ class BitsAndBytesConfig(PreProcessorConfig):
                 effective_format = _normalize_bitsandbytes_format(None, bits=effective_bits)
             if effective_format != self.format:
                 layer_dict[FORMAT_FIELD_CODE] = effective_format
+        layer_dict.pop("bnb_quant_type", None)
         if "block_size" in layer_dict or "bnb_block_size" in layer_dict:
             layer_dict["block_size"] = _normalize_bitsandbytes_block_size(
                 layer_dict.get("block_size", layer_dict.get("bnb_block_size"))
             )
         layer_dict.pop("bnb_block_size", None)
         if "compress_statistics" in layer_dict or "bnb_compress_statistics" in layer_dict:
-            layer_dict["compress_statistics"] = bool(
-                layer_dict.get("compress_statistics", layer_dict.get("bnb_compress_statistics"))
+            # `_validate_dynamic_boolean_overrides` already rejected a string
+            # like `"False"`; keep the real bool instead of re-coercing it.
+            layer_dict["compress_statistics"] = layer_dict.get(
+                "compress_statistics", layer_dict.get("bnb_compress_statistics")
             )
         layer_dict.pop("bnb_compress_statistics", None)
 
@@ -7854,7 +7987,7 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
-        _validate_dynamic_boolean_overrides(layer_name, layer_dict)
+        _validate_dynamic_boolean_overrides(self, layer_name, layer_dict)
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
 
@@ -8088,7 +8221,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3Config
-    if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
+    if method == METHOD.PARO or format_value == FORMAT.PARO:
         return ParoConfig
     if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
         return VPTQConfig

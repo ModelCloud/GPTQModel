@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import textwrap
 import types
 
 import pytest
@@ -225,6 +227,71 @@ def test_bitsandbytes_forward_matches_dequantized_reference(bits: int):
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 M=0 abort is CUDA-only; the CPU path already returns empty",
+)
+def test_bitsandbytes_zero_row_input_does_not_terminate_process():
+    """#4745: a zero-row activation must not reach the native M=0 launch.
+
+    ``int8_vectorwise_quant``/``int8_linear_matmul`` answer an M=0 problem with
+    ``Error invalid argument ... ops.cu`` and terminate the interpreter, so a
+    regression cannot be observed from inside this process. Run the forward in
+    a child and require it to exit cleanly for both bit widths and ranks.
+    """
+
+    script = textwrap.dedent(
+        """
+        import json
+        import torch
+        from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+
+        in_features = out_features = 256
+        linear = torch.nn.Linear(in_features, out_features, bias=False)
+        results = {}
+        for bits in (4, 8):
+            kernel = BitsAndBytesLinear(
+                bits=bits,
+                group_size=-1,
+                sym=True,
+                desc_act=False,
+                in_features=in_features,
+                out_features=out_features,
+                bias=False,
+                dtype=torch.float16,
+            )
+            kernel.pack_original(linear=linear, scales=None, zeros=None)
+            kernel = kernel.eval().cuda()
+            for shape in ((0, in_features), (2, 0, in_features)):
+                x = torch.randn(*shape, device="cuda", dtype=torch.float16)
+                with torch.inference_mode():
+                    out = kernel(x)
+                results[f"{bits}:{shape}"] = [list(out.shape), str(out.dtype), out.numel()]
+        print("ZERO_ROW_JSON:" + json.dumps(results))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+
+    markers = [
+        line for line in completed.stdout.splitlines() if line.startswith("ZERO_ROW_JSON:")
+    ]
+    assert markers, completed.stdout[-4000:]
+    results = json.loads(markers[-1].split("ZERO_ROW_JSON:", 1)[1])
+
+    for bits in (4, 8):
+        for leading in ((0,), (2, 0)):
+            shape = [*leading, 256]
+            key = f"{bits}:{tuple(shape)}"
+            assert results[key] == [shape, "torch.float16", 0], (key, results[key])
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
 def test_bitsandbytes_int8_dequant_matches_native_op():
     from gptqmodel.nn_modules.qlinear.bitsandbytes import import_bitsandbytes
 
@@ -433,6 +500,123 @@ def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
     assert out.dtype == x.dtype
     assert _relative_l2(out, expected) < 2e-3
     assert _relative_l2(out, expected.to(torch.float16)) < 2e-3
+
+
+# #4746: shapes whose 2-D cuBLASLt INT8 IMMA launch raises for M > 16. Both
+# K % 16 != 0 (with K % 4 == 0) and N % 4 != 0 must stay covered.
+_INT8_IMMA_MISALIGNED_SHAPES = [(100, 37), (100, 2050), (104, 37), (104, 2050)]
+
+
+def _build_int8_kernel(in_features: int, out_features: int) -> BitsAndBytesLinear:
+    torch.manual_seed(4746 + in_features * 1000 + out_features)
+    linear = nn.Linear(in_features, out_features, bias=False).to(torch.float16).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        dtype=torch.float16,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    return kernel.eval()
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 cuBLASLt IMMA path is CUDA/HIP-only",
+)
+@pytest.mark.parametrize(("in_features", "out_features"), _INT8_IMMA_MISALIGNED_SHAPES)
+def test_bitsandbytes_int8_misaligned_imma_shapes_match_dequantized_reference(
+    in_features: int,
+    out_features: int,
+):
+    """#4746: M > 16 must not reach cuBLASLt IMMA for a shape it rejects."""
+
+    kernel = _build_int8_kernel(in_features, out_features).to("cuda")
+    dequant32 = kernel.dequantize_weight()
+    assert dequant32.dtype == torch.float32
+    dequant64 = dequant32.to(torch.float64)
+
+    for rows in (1, 17):
+        torch.manual_seed(4746 + rows)
+        x = torch.randn(rows, in_features, device="cuda", dtype=torch.float16)
+        with torch.inference_mode():
+            out = kernel(x)
+
+        expected32 = x.to(torch.float32) @ dequant32.t()
+        expected64 = x.to(torch.float64) @ dequant64.t()
+
+        assert out.dtype == torch.float16
+        # The M=1 path still quantizes activations to INT8, so it only tracks
+        # the dequantized-weight reference to A8W8 precision. The M=17
+        # fallback multiplies the full-precision activation by the dequantized
+        # weight, so it must match both references tightly.
+        torch.testing.assert_close(
+            out.to(torch.float32),
+            expected64.to(torch.float32),
+            rtol=5e-2 if rows == 1 else 2e-3,
+            atol=2e-2 if rows == 1 else 2e-3,
+        )
+        if rows == 17:
+            torch.testing.assert_close(
+                out,
+                expected32.to(torch.float16),
+                rtol=1e-3,
+                atol=1e-3,
+            )
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the bitsandbytes INT8 cuBLASLt IMMA path is CUDA/HIP-only",
+)
+def test_bitsandbytes_int8_imma_guard_only_reroutes_misaligned_shapes(monkeypatch):
+    """#4746: the fallback is exact; aligned shapes keep the native INT8 kernel."""
+
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import import_bitsandbytes
+
+    bnb = import_bitsandbytes()
+    native_calls = []
+    fallback_calls = []
+    native = bnb.functional.int8_linear_matmul
+
+    def counted_native(*args, **kwargs):
+        native_calls.append(1)
+        return native(*args, **kwargs)
+
+    def counted_fallback(self, x, bias):
+        fallback_calls.append(1)
+        return fallback(self, x, bias)
+
+    monkeypatch.setattr(bnb.functional, "int8_linear_matmul", counted_native)
+    fallback = getattr(BitsAndBytesLinear, "_int8_dequant_tiled_forward", None)
+    monkeypatch.setattr(
+        BitsAndBytesLinear,
+        "_int8_dequant_tiled_forward",
+        counted_fallback,
+        raising=False,
+    )
+
+    aligned = _build_int8_kernel(128, 64).to("cuda")
+    x = torch.randn(17, 128, device="cuda", dtype=torch.float16)
+    with torch.inference_mode():
+        aligned(x)
+    assert native_calls and not fallback_calls
+
+    native_calls.clear()
+    fallback_calls.clear()
+    misaligned = _build_int8_kernel(100, 37).to("cuda")
+    x = torch.randn(17, 100, device="cuda", dtype=torch.float16)
+    with torch.inference_mode():
+        misaligned(x)
+    assert fallback_calls == [1]
+    assert not native_calls
 
 
 def _install_fake_bitsandbytes(monkeypatch) -> None:

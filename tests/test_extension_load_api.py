@@ -19,7 +19,7 @@ import gptqmodel.utils.exllamav2 as exllamav2_utils
 import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
-import gptqmodel.utils.paroquant as paroquant_utils
+import gptqmodel.utils.paro as paro_utils
 import gptqmodel.utils.qqq as qqq_utils
 import gptqmodel.utils.rocm as rocm
 import gptqmodel.utils.swordfish as swordfish_utils
@@ -85,7 +85,7 @@ def _install_fake_extensions(monkeypatch):
         "machete": _FakeExtension("Machete"),
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
-        "paroquant": _FakeExtension("ParoQuant rotation"),
+        "paro": _FakeExtension("Paro rotation"),
         "hadamard": _FakeExtension("Fast Hadamard transform"),
         "swordfish": _FakeExtension("Swordfish"),
     }
@@ -112,7 +112,7 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: True)
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
-    monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
+    monkeypatch.setattr(paro_utils, "_PARO_ROTATION_EXTENSION", fakes["paro"])
     monkeypatch.setattr(hadamard_utils, "_HADAMARD_TORCH_OPS_EXTENSION", fakes["hadamard"])
     monkeypatch.setattr(hadamard_utils, "hadamard_supported", lambda: True)
     monkeypatch.setattr(swordfish_utils, "_SWORDFISH_TORCH_OPS_EXTENSION", fakes["swordfish"])

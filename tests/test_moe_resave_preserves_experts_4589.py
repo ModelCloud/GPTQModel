@@ -26,7 +26,7 @@ from tokenizers.pre_tokenizers import Whitespace  # noqa: E402
 from tokenizers.trainers import WordLevelTrainer  # noqa: E402
 from transformers import OlmoeConfig, OlmoeForCausalLM, PreTrainedTokenizerFast  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig  # noqa: E402
 
 
@@ -110,10 +110,12 @@ def quantized_olmoe(tmp_path_factory):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        _calibration(tokenizer),
-        batch_size=1,
+        CalibrationConfig(
+            dataset=_calibration(tokenizer),
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     quantized = root / "quantized"
     model.save(quantized)

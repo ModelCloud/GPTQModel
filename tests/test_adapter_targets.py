@@ -16,6 +16,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.adapter.adapter import AdapterCache, Lora
 from gptqmodel.adapter.targeting import module_matches_targets
 from gptqmodel.quantization import QuantizeConfig
@@ -344,10 +345,12 @@ def test_partial_lora_and_dense_lm_head_load_end_to_end(tmp_path):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(quantized)
 

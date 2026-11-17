@@ -11,7 +11,7 @@ import platform
 import sys
 import time
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -213,7 +213,10 @@ class FOEM(GPTQ):
     #     self.dXXT.addmm_((native_inp.T-reshaped_inp.T), reshaped_inp, beta=beta, alpha=alpha)
     #     del native_inp, reshaped_inp
 
-    def process_batch(self, inp, batch_index: Optional[int] = None):
+    def process_batch(
+        self, inp: torch.Tensor, batch_index: Optional[int] = None
+    ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
+        """Accumulate one batch; ``batch_index`` pairs it with its native input."""
         inp = inp.to(dtype=torch.float32)
         native_inp = None
         if self.gptaq:
@@ -255,6 +258,9 @@ class FOEM(GPTQ):
 
         self._accumulate_device_batch(inp, native_inp, token_count)
         self.nsamples += token_count
+        # The Hessian partial is accumulated per device above, so no per-batch
+        # ``xtx`` is handed back to the caller.
+        return token_count, None, inp.device
 
     def _accumulate_device_batch(
         self,

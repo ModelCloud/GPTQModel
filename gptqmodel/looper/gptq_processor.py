@@ -16,7 +16,6 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -54,6 +53,7 @@ from ..quantization.activation_floatx import (
 )
 from ..quantization.config import (
     METHOD,
+    CalibrationConfig,
     FOEMConfig,
     GPTAQConfig,
     HessianConfig,

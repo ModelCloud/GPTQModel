@@ -22,6 +22,7 @@ from ...utils.exllamav2 import (
 )
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -55,6 +56,13 @@ class AwqExllamaV2Linear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_exllamav2"
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output; the q-handle
+    # cache is filled before capture, so ``forward`` only dispatches. Dynamo
+    # stops at EAGER on ``tensor.is_inference()``.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     def __init__(
             self,

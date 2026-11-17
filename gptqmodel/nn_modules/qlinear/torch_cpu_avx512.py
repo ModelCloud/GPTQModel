@@ -13,6 +13,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
+from ._compile_support import COMPILE_LEVEL
 from .torch_aten_kernel import TorchAtenLinear
 
 
@@ -107,6 +108,13 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     SUPPORTS_DTYPES = [torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
+
+    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
+    # builds and the fused BF16 forward runs, but it inherits
+    # TorchAtenLinear's RLock-guarded forward, which dynamo cannot enter:
+    # EAGER. CPU-only, so no CUDA-graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     QUANT_TYPE = "torch_cpu_avx512"
 

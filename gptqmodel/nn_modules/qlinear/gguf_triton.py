@@ -14,6 +14,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch, gguf_tensor_qtype
 
@@ -1730,6 +1731,12 @@ def fused_q6_k_matmul(
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo breaks on
+    # `tensor.is_inference()` plus the raw Triton launches: EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
@@ -1841,7 +1848,8 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 in_features=self.padded_in_features,
                 out_features=scale.shape[1],
             ):
-                sign_bytes = blocks[..., 2:].permute(1, 2, 0).contiguous()
+                # Strided view of the packed sign bits (no second copy, #4748).
+                sign_bytes = blocks[..., 2:].permute(1, 2, 0)
                 sign_words_src = sign_bytes.to(torch.int32)
                 sign_words = (
                     sign_words_src[:, 0::4, :]
@@ -1857,7 +1865,8 @@ class GGUFTritonKernel(GGUFTorchLinear):
                     "use_u32": True,
                 }
 
-            sign_bytes = blocks[..., 2:].permute(1, 2, 0).contiguous()
+            # Strided view of the packed sign bits (no second copy, #4748).
+            sign_bytes = blocks[..., 2:].permute(1, 2, 0)
             return {
                 "fixed_decode_config": _select_q1_0_g128_fixed_launch_config(
                     capability=capability,
@@ -1877,7 +1886,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
             scale = (d.unsqueeze(-1) * sc.to(scale_dtype)).permute(1, 2, 0).contiguous()
             min_value = (dmin.unsqueeze(-1) * mins.to(scale_dtype)).permute(1, 2, 0).contiguous()
-            qs = blocks[..., 16:].permute(1, 2, 0).contiguous()
+            # Packed code bytes are a strided view into `qweight`; the
+            # fused kernels index the block layout through the strides
+            # passed to them. Materializing this used to keep a second
+            # full copy of every packed weight resident (#4748).
+            qs = blocks[..., 16:].permute(1, 2, 0)
             return {
                 "qs": qs,
                 "scale": scale,
@@ -1891,8 +1904,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             sc, mins = _unpack_q4_k_scale_min_torch(blocks[..., 4:16])
             scale = (d.unsqueeze(-1) * sc.to(scale_dtype)).permute(1, 2, 0).contiguous()
             min_value = (dmin.unsqueeze(-1) * mins.to(scale_dtype)).permute(1, 2, 0).contiguous()
-            qh = blocks[..., 16:48].permute(1, 2, 0).contiguous()
-            qs = blocks[..., 48:].permute(1, 2, 0).contiguous()
+            # Packed code bytes are a strided view into `qweight`; the
+            # fused kernels index the block layout through the strides
+            # passed to them. Materializing this used to keep a second
+            # full copy of every packed weight resident (#4748).
+            qh = blocks[..., 16:48].permute(1, 2, 0)
+            qs = blocks[..., 48:].permute(1, 2, 0)
             return {
                 "qs": qs,
                 "qh": qh,
@@ -1901,8 +1918,12 @@ class GGUFTritonKernel(GGUFTorchLinear):
             }
 
         if self.gguf_tensor_qtype == "Q6_K":
-            ql = blocks[..., :128].permute(1, 2, 0).contiguous()
-            qh = blocks[..., 128:192].permute(1, 2, 0).contiguous()
+            # Packed code bytes are a strided view into `qweight`; the
+            # fused kernels index the block layout through the strides
+            # passed to them. Materializing this used to keep a second
+            # full copy of every packed weight resident (#4748).
+            ql = blocks[..., :128].permute(1, 2, 0)
+            qh = blocks[..., 128:192].permute(1, 2, 0)
             subscales = blocks[..., 192:208].contiguous().view(torch.int8).to(torch.float32)
             d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).to(torch.float32)
             scale = d.unsqueeze(-1) * subscales

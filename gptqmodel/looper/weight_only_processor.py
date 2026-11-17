@@ -14,7 +14,6 @@ import torch
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
     LoopProcessor,
@@ -40,6 +39,7 @@ from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization.config import (
     METHOD,
     BitsAndBytesConfig,
+    CalibrationConfig,
     FP8Config,
     GGUFConfig,
     NF12Config,

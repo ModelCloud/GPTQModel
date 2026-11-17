@@ -20,7 +20,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import pytest
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingBypass, MoEConfig
@@ -75,10 +75,12 @@ def test_awq_bypass_replay_scales_every_expert(tmp_path: Path, monkeypatch, capl
     )
     with caplog.at_level(logging.WARNING):
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
         )
 
     assert raised == []

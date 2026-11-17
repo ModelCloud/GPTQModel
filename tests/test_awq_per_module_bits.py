@@ -16,10 +16,9 @@ import pytest
 import torch
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization.config import FORMAT, AWQConfig
+from gptqmodel.quantization.config import FORMAT, AWQConfig, CalibrationConfig
 
 
 def _stub(bits=4, dynamic=None):

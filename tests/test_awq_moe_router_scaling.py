@@ -28,13 +28,12 @@ from transformers import (
 )
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.models.base import NON_QUANTIZE_FLAGS
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
 from gptqmodel.quantization.awq.utils.module import get_op_name
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
 
 def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:

@@ -32,7 +32,7 @@ from tokenizers.trainers import WordLevelTrainer
 from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQScaleGroupError
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -146,10 +146,12 @@ def test_tiny_qwen3_moe_quantization_smoke(tmp_path: Path):
     )
     assert_model_tensors_contiguous(model.model, label="post-load")
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     # Kernels and the P2P peer-copy path both assume contiguous weights; a
     # packing step that left a strided view behind would silently take the slow
@@ -225,10 +227,12 @@ def test_tiny_qwen3_moe_awq_routing_override_scales_every_expert(tmp_path: Path,
     )
     with caplog.at_level(logging.WARNING):
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
         )
 
     assert raised == []

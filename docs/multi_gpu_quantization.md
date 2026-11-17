@@ -19,7 +19,7 @@ Inside `quantize_deepseek.py`, configure the pool using the logical CUDA
 indices visible to that process (`cuda:0` and `cuda:1` in this example):
 
 ```python
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization.config import VramStrategy
 
 model_id = "MODEL_REPO_OR_LOCAL_PATH"
@@ -32,11 +32,11 @@ quant_config = QuantizeConfig(
 )
 
 model = GPTQModel.load(model_id, quant_config, dtype="bfloat16")
-model.quantize(calibration_dataset)
+model.quantize(CalibrationConfig(dataset=calibration_dataset))
 model.save("DeepSeek-GPTQ-4bit")
 ```
 
-Provide `calibration_dataset` using the normal `model.quantize()` input format.
+Provide `calibration_dataset` in any format `CalibrationConfig.dataset` accepts.
 The dense model modules remain on the default exclusive strategy; balanced
 MoE placement distributes expert work across the selected devices. The Python
 runtime must be a free-threaded build and the GIL must actually be disabled;
@@ -182,7 +182,7 @@ flowchart TD
 
 | Mechanism | Before | After |
 | --- | --- | --- |
-| `torch_sync()` (`gptqmodel/utils/torch.py:564`) | `torch.cuda.synchronize(idx)` for every visible index | Skips indices whose primary context this process never created |
+| `torch_sync()` (`gptqmodel/utils/torch.py:611`) | `torch.cuda.synchronize(idx)` for every visible index | Skips indices whose primary context this process never created |
 | Warmup pool (`gptqmodel/models/auto.py:_prebuild_device_thread_pool`) | Derived only from the `device=` kwarg | Derived from `compute_device_filter` too, via `_quantize_warmup_devices` |
 | Prewarm target (`gptqmodel/models/auto.py:_resolve_prewarm_device`) | Same `device=`-only resolution | First device of the filtered pool |
 | Janitor sweep (`gptqmodel/utils/threadx.py:_janitor_loop`) | `empty_cache` on every pool device | Only devices with a live context |

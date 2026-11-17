@@ -15,7 +15,7 @@ import pytest
 import torch
 from torch import nn
 
-from gptqmodel import NormConfig, NormType
+from gptqmodel import CalibrationConfig, NormConfig, NormType
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.norm_tuning import _probe_gain_offset, resolve_norm_params, tune_norm_params
 
@@ -270,4 +270,4 @@ def test_norm_module_names_skips_unsupported_head_norm():
 def test_requantize_requires_a_target():
     model = _bare(BaseQModel, nn.Module())
     with pytest.raises(ValueError, match="requires"):
-        model.requantize(calibration=["sample"])
+        model.requantize(CalibrationConfig(dataset=["sample"]))

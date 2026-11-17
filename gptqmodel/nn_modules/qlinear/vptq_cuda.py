@@ -14,6 +14,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.rocm import IS_ROCM
 from ...utils.vptq_cuda import vptq_cuda_runtime_available, vptq_cuda_runtime_error
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import bias_narrows_losslessly, linear_fp32_reduce, linear_needs_wide_bias
 from .vptq_torch import VPTQLinear
 
@@ -28,6 +29,12 @@ def _vptq_cuda_fused_max_rows(module: VPTQLinear) -> int:
 
 class VPTQCudaLinear(VPTQLinear):
     """VPTQ layer using native CUDA ops, following upstream quant_gemm dispatch."""
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. Dynamo stops
+    # at EAGER on the lazy ``import_module`` in the op loader.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_CUDA]
     SUPPORTS_METHODS = [METHOD.VPTQ]

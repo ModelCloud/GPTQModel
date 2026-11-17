@@ -5,7 +5,7 @@
 
 `ModuleLooper` used to copy a processor's log into `model.quant_log` only when
 the processor name was one of `gptq/gptaq/awq/exl3/macaq`, so FOEM, QQQ, VPTQ,
-ParoQuant and FP8-GSQ runs ended with an empty log and the writer skipped
+Paro and FP8-GSQ runs ended with an empty log and the writer skipped
 `quant_log.csv` (issue #4321). The model-level log is now assembled in one place
 from the first log-owning processor, and both loopers use it.
 """
@@ -16,6 +16,7 @@ import os
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.loop_processor import record_quant_log
 
 
@@ -25,7 +26,7 @@ _LOGGING_PROCESSORS = (
     "foem",
     "qqq",
     "vptq",
-    "paroquant",
+    "paro",
     "fp8_gsq",
     "weight_only_rtn",
 )
@@ -154,7 +155,7 @@ def _configs():
         "vptq": lambda: VPTQConfig(vector_lens=[-1, 4], num_centroids=[-1, 4],
                                    num_res_centroids=[-1, 2], kmeans_iters=2,
                                    enable_norm=True, enable_perm=True, group_size=-1),
-        "paroquant": lambda: ParoConfig(bits=4, group_size=32, opt_rotation_epochs=1,
+        "paro": lambda: ParoConfig(bits=4, group_size=32, opt_rotation_epochs=1,
                                         opt_finetune_epochs=0, opt_train_samples=4,
                                         opt_validation_samples=4, opt_batch_size=2),
         "fp8_gsq": lambda: FP8Config(gsq=GSQConfig(enabled=True, steps=1, candidates=2),
@@ -164,7 +165,7 @@ def _configs():
     }
 
 
-@pytest.mark.parametrize("method", ["gptq", "rtn", "qqq", "vptq", "paroquant", "fp8_gsq", "foem"])
+@pytest.mark.parametrize("method", ["gptq", "rtn", "qqq", "vptq", "paro", "fp8_gsq", "foem"])
 def test_every_quantizer_writes_quant_log_csv(method, tmp_path):
     """Fail-before/pass-after coverage for #4321 (the log used to be empty)."""
 
@@ -176,7 +177,7 @@ def test_every_quantizer_writes_quant_log_csv(method, tmp_path):
 
     source = _tiny_llama(tmp_path / "source")
     model = GPTQModel.load(source, quantize_config=_configs()[method](), device=device)
-    model.quantize([{"input_ids": list(range(1, 33))}], calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=[{"input_ids": list(range(1, 33))}], min_length=1))
 
     assert len(model.quant_log) > 0, f"{method}: quant_log is empty"
     for entry in model.quant_log:

@@ -49,7 +49,7 @@ butterfly, so a gradient path never depends on which forward backend ran.
 | Mechanism | Before | After |
 | --- | --- | --- |
 | Backend selection | `import_fast_hadamard_transform` picked `_FastHadamardTransform` once per process whenever `hadamard_available()` (`gptqmodel/quantization/rotation/hadamard_utils.py:245` on `main`) | `_transform_for` selects per call from `x.device.type` (`hadamard_utils.py:232`) |
-| Forward call | `transform = fast_hadamard_transform.hadamard_transform` regardless of device (`hadamard_utils.py:226` on `main`) | same symbol, but resolved for the tensor's device inside `_hadamard_with_grad` (`hadamard_utils.py:225`) |
+| Forward call | `transform = fast_hadamard_transform.hadamard_transform` regardless of device (`hadamard_utils.py:226` on `main`) | same symbol, but resolved for the tensor's device inside `_hadamard_with_grad` (`hadamard_utils.py:244`) |
 | Weight placement | `W_ = W_.float().cuda()` and `b_ = b_.float().cuda()` (`hadamard_utils.py:327,336` on `main`) | `W_ = W_.float().to(dev)`, `b_ = b_.float().to(dev)` where `dev = module.weight.device` (`hadamard_utils.py:345,354`) |
 | Head-dim branch | called `fast_hadamard_transform.hadamard_transform` directly (`hadamard_utils.py:353,363,372` on `main`) | routes through `_hadamard_with_grad`, so it follows the same dispatch (`hadamard_utils.py:371,381,390`) |
 

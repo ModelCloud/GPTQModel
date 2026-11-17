@@ -54,7 +54,13 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
-from ..quantization import AutoModuleDecoderConfig, METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
+from ..quantization import (  # noqa: E402
+    METHOD,
+    QUANT_CONFIG_FILENAME,
+    AutoModuleDecoderConfig,
+    CalibrationConfig,
+    QuantizeConfig,
+)
 from ..utils import BACKEND, PROFILE  # noqa: E402
 from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
 from ..utils.env import env_flag  # noqa: E402
@@ -1288,7 +1294,7 @@ class GPTQModel:
         elif normalized_method == METHOD.AWQ.value:
             backend = BACKEND.AWQ_TORCH
         elif normalized_method == METHOD.PARO.value:
-            backend = BACKEND.PAROQUANT_CUDA
+            backend = BACKEND.PARO_CUDA
         elif normalized_method == METHOD.FP8.value:
             backend = BACKEND.FP8_TORCH
         elif normalized_method == METHOD.NF12.value:
@@ -1342,12 +1348,9 @@ class GPTQModel:
             adapter: Adapter,
             model_id_or_path: str, # native model
             quantized_model_id_or_path: str, # gptqmodel quantized model
-            calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-            calibration_dataset_concat_size: Optional[int] = None,
-            calibration_dataset_sort: Optional[str] = None,
-            batch_size: Optional[int] = 1,
+            calibration: CalibrationConfig,
+            *,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
-            calibration_concat_separator: Optional[str] = None,
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
@@ -1355,6 +1358,11 @@ class GPTQModel:
         ):
             if not adapter or not isinstance(adapter, Lora):
                 raise ValueError(f"Adapter: expected `adapter` type to be `Lora`: actual = `{adapter}`.")
+            if not isinstance(calibration, CalibrationConfig):
+                raise TypeError(
+                    "GPTQModel.adapter.generate(calibration=...) must be a CalibrationConfig, "
+                    f"got {type(calibration).__name__}."
+                )
 
             adapter.validate_path(local=True)
 
@@ -1388,11 +1396,7 @@ class GPTQModel:
             model._eora_generate(
                 adapter=adapter,
                 quantized_modules=qModules,
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
-                calibration_dataset_sort=calibration_dataset_sort,
-                batch_size=batch_size,
+                calibration=calibration,
                 tokenizer=tokenizer,
-                calibration_concat_separator=calibration_concat_separator,
             )
             return

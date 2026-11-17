@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from module_tree.test_subset import _StubAWQProcessor
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -184,10 +185,12 @@ def test_dynamic_fallback_override_survives_a_real_quantize(tmp_path, monkeypatc
     )
     model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
 
     down_proj = "model.layers.0.mlp.down_proj"
@@ -239,8 +242,9 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     override at all.
     """
 
-    from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+    from gptqmodel.looper.loop_processor import LoopProcessor
     from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.quantization.config import CalibrationConfig
 
     monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
 
@@ -254,10 +258,7 @@ def test_processor_merges_the_processor_fallback_under_the_override(method, monk
     processor = processor_cls(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=[{"input_ids": [0], "attention_mask": [1]}],
-            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
-        ),
+        calibration=CalibrationConfig(dataset=[{"input_ids": [0], "attention_mask": [1]}]).bind(lambda calibration_dataset, **_kwargs: calibration_dataset),
     )
     processor_fallback = Fallback(strategy="rtn", threshold="5%")
 
@@ -292,8 +293,9 @@ def test_vptq_and_macaq_apply_the_processor_fallback_without_dynamic_overrides(m
     processor-level fallback must still land on the task.
     """
 
-    from gptqmodel.looper.loop_processor import CalibrationConfig, LoopProcessor
+    from gptqmodel.looper.loop_processor import LoopProcessor
     from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.quantization.config import CalibrationConfig
 
     monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
 
@@ -306,10 +308,7 @@ def test_vptq_and_macaq_apply_the_processor_fallback_without_dynamic_overrides(m
     processor = processor_cls(
         tokenizer=None,
         qcfg=qcfg,
-        calibration=CalibrationConfig(
-            dataset=[{"input_ids": [0], "attention_mask": [1]}],
-            prepare_dataset=lambda calibration_dataset, **_kwargs: calibration_dataset,
-        ),
+        calibration=CalibrationConfig(dataset=[{"input_ids": [0], "attention_mask": [1]}]).bind(lambda calibration_dataset, **_kwargs: calibration_dataset),
     )
     module = NamedModule(
         nn.Linear(32, 32, bias=False), name="proj", full_name="model.proj", layer_index=0

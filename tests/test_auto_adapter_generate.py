@@ -1,6 +1,7 @@
 # GPU=-1
 from types import SimpleNamespace
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.models import auto
 
@@ -41,7 +42,7 @@ def _run_adapter_generate(tmp_path, monkeypatch, *, device):
         "adapter": adapter,
         "model_id_or_path": "native",
         "quantized_model_id_or_path": "quantized",
-        "calibration_dataset": ["sample"],
+        "calibration": CalibrationConfig(dataset=["sample"]),
     }
     if device is not None:
         kwargs["device"] = device

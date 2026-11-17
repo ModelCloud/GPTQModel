@@ -30,7 +30,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import WordLevelTrainer
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.utils.model import convert_gptq_v2_to_v1_format
@@ -321,10 +321,12 @@ def _quantized_nll(tmp_path, fmt):
         dtype=torch.float16,
     )
     model.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     module = model.model.get_submodule(QPROJ)
     assert module.qzero_format() == 2

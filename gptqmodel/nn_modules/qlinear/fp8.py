@@ -31,6 +31,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, matmul_fp32_reduce
 
 
@@ -215,12 +216,28 @@ def quantize_fp8_weight(
 
 
 class TorchFP8Linear(WeightOnlyQuantLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
+    # capture succeeds with output matching eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
     SUPPORTS_FORMATS = {FORMAT.FP8: 15}
     SUPPORTS_BITS = [8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # Trace-clean: ``forward`` branches only on host-visible constants (device
+    # type, dtypes, shapes, config strings) and its lazy decoded-weight bound is
+    # a load-time cache warmed by the first call, so
+    # ``torch.compile(fullgraph=True)`` traces without a break. Measured on
+    # sm_121 (tiny Llama, 4 prompts x 32 greedy tokens): static-cache decode
+    # 0.126 s eager -> 0.055 s compiled (2.3x, 1 graph, 0 breaks); the reporter
+    # of #4669 measured 0.77 s -> 0.175 s on a 4090. FP8 is the format that
+    # gains the most from the static-cache auto-compile, so opting out was a
+    # 4x regression (#4739).
+    SUPPORTS_COMPILE = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]

@@ -15,6 +15,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
+from ._compile_support import COMPILE_LEVEL
 from .bitblas import (
     BITBLAS_OPTIMIZE_FEATURES,
     BITBLAS_PROPAGATE_WEIGHTS,
@@ -45,6 +46,12 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     QUANT_TYPE = "awq_bitblas"
+
+    # bitblas is not installed here. The inherited BitBLAS forward reads
+    # `data_ptr()` on the host (so no CUDA-graph capture) and dispatches a
+    # generated matmul without a fake/meta kernel, so dynamo breaks.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     def __init__(
         self,

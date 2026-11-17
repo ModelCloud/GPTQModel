@@ -154,9 +154,9 @@ _EXTENSION_SPECS = (
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.swordfish", "swordfish_runtime_error")(),
     ),
     _ExtensionSpec(
-        name="paroquant",
-        aliases=("paroquant_rotation",),
-        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),
+        name="paro",
+        aliases=("paro_rotation",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paro", "_PARO_ROTATION_EXTENSION"),
     ),
     _ExtensionSpec(
         name="hadamard",

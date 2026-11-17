@@ -23,7 +23,7 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, OlmoeConfig, OlmoeForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.quantization.config import AWQConfig
 
@@ -71,10 +71,12 @@ def awq_checkpoint(tmp_path_factory):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        _calibration(),
-        batch_size=1,
+        CalibrationConfig(
+            dataset=_calibration(),
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(str(destination))
     assert json.loads((destination / "config.json").read_text())[

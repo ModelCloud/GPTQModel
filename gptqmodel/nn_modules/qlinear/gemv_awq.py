@@ -18,6 +18,7 @@ from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 from ...utils.packing_math import scale_to_storage_dtype
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -84,6 +85,13 @@ class AwqGEMVLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv"
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The native
+    # ``awq.gemv_forward`` op has no fake/meta kernel, so ``torch.compile``
+    # stops at EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate(
@@ -380,6 +388,12 @@ class AwqGEMVTritonLinear(AwqGEMVLinear):
 
     QUANT_TYPE = "awq_gemv_triton"
 
+    # Measured on NVIDIA GB10 (sm_121), torch 2.11.0+cu130: dynamo, aot_eager,
+    # inductor and reduce-overhead all pass, and an explicit CUDA-graph capture
+    # of the eager forward succeeds.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
+
     @classmethod
     def validate(cls, bits, group_size=-1, desc_act=False, sym=True, in_features=None,
                  out_features=None, pack_dtype=None, dtype=None, dynamic=None,
@@ -501,6 +515,12 @@ class AwqGEMVTorchLinear(AwqGEMVLinear):
     QUANT_TYPE = "awq_gemv_torch"
     # Consumed by select_quant_linear() when AUTO has no CPU kernel for GEMV.
     PORTABLE_CPU_FALLBACK = True
+
+    # Measured on NVIDIA GB10 (sm_121) and on CPU, torch 2.11.0+cu130: every
+    # compile level including reduce-overhead passes; the eager forward also
+    # captures into a CUDA graph on the GPU probe.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.AWQ_TORCH)

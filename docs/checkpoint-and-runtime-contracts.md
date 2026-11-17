@@ -184,7 +184,7 @@ at BF16 and checks every buffer against the safetensors bytes.
 | FP8 `TorchFP8Linear` | `weight` float8, `weight_scale_inv` FP32 | restored by loader lists | unchanged |
 | GGUF `GGUFTorchLinear` | none besides `bias` | n/a | n/a |
 | EXL3 `ExllamaV3TorchLinear` | `suh`, `svh`, `bias` | restored (EXL3 flag) | restored (declaration) |
-| ParoQuant `ParoLinear` | `scales`, `theta`, `channel_scales` | `theta`/`channel_scales` **rounded** | restored |
+| Paro `ParoLinear` | `scales`, `theta`, `channel_scales` | `theta`/`channel_scales` **rounded** | restored |
 | MACaQ `MacaqLinear` | `BH`, `pre_scale` | model dtype | model dtype (declared) |
 | VPTQ `VPTQLinear` | `weight_scale`, `weight_bias` | **rounded** | restored |
 | BitsAndBytes 8-bit | `weight_scb` FP32 | **rounded to BF16** | restored |

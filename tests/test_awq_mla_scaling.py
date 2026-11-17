@@ -28,7 +28,7 @@ from tokenizers.trainers import WordLevelTrainer
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV2ForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models.base import NON_QUANTIZE_FLAGS
 from gptqmodel.models.definitions.deepseek_v2 import DeepSeekV2QModel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -145,7 +145,7 @@ def test_mla_awq_quantization_completes(tmp_path: Path):
         device="cpu",
     )
     model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
 
     modules = dict(model.model.named_modules())
     for expert_index in range(config.n_routed_experts):

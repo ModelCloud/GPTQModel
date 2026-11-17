@@ -21,14 +21,13 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.qqq_processor import QQQProcessor
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.quantization.config import QQQConfig, QuantizeConfig
+from gptqmodel.quantization.config import CalibrationConfig, QQQConfig, QuantizeConfig
 
 
 # The Mamba `x_proj` width from the issue: 8192 -> 288 (dt_rank + 2*d_state).
@@ -166,10 +165,12 @@ def test_awq_pack_step_resolves_the_kernel_from_the_module_geometry(tmp_path, mo
         str(tmp_path / "native"), quantize_config=qcfg, backend=BACKEND.TORCH
     )
     model.quantize(
-        _build_calibration_dataset(model.tokenizer),
-        batch_size=1,
+        CalibrationConfig(
+            dataset=_build_calibration_dataset(model.tokenizer),
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
 
     # `q_proj` is 96 -> 96: the width the CUDA GEMM kernel rejects.

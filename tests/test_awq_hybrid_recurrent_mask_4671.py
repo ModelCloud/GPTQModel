@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.awq_processor import (
     AWQProcessor,
     _is_recurrent_attention_layer_type,
@@ -154,10 +155,12 @@ def test_awq_batch_size_one_quantizes_a_mamba_hybrid(tmp_path):
         dtype=torch.bfloat16,
     )
     quantized.quantize(
-        calibration,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.AWQ_TORCH,
-        calibration_data_min_length=1,
     )
 
     # The recurrent mixer must have been packed, not silently skipped.

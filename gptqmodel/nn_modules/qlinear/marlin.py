@@ -53,6 +53,7 @@ from ...utils.marlin import (
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -107,6 +108,13 @@ class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the eager forward and an explicit
+    # ``torch.cuda.graph`` capture both run, and the replayed output matches
+    # eager. ``apply_gptq_marlin_linear`` has no fake/meta implementation, so
+    # ``torch.compile`` still stops at EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # The Marlin evaluator adds the bias to its FP32 accumulator before the
     # visible cast, so the buffer keeps its checkpoint width instead of

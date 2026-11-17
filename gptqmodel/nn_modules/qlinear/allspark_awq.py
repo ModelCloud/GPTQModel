@@ -57,6 +57,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.packing_math import scale_to_storage_dtype
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -91,6 +92,14 @@ class AllSparkAwqLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "allspark"
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The packed
+    # layout is derived in ``post_init``, so a capture does not cross the
+    # ``packed_ready()`` data-pointer check; dynamo stops at EAGER on
+    # ``tensor.is_inference()``.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_device(cls, device):

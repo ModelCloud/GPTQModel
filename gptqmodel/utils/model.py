@@ -1732,6 +1732,12 @@ def simple_dispatch_model(model, device_map):
 # public/stable api exposed to transformer/optimum
 def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
+    # Optimum calls this after ``convert_model``. Retrying here keeps the
+    # package-init probe from caching a partially initialized ``optimum.gptq``
+    # as "Optimum not installed" (#4749).
+    from gptqmodel import _ensure_optimum_gptqmodel_load_bridge
+
+    _ensure_optimum_gptqmodel_load_bridge()
     return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
 
 

@@ -13,7 +13,7 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.quantization import GPTQ
 from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
@@ -95,7 +95,7 @@ def _quantize_patched(model_dir: str, dedup: bool, monkeypatch) -> Tuple[List[Tu
         hessian=HessianConfig(dedup_shared_inputs=dedup),
     )
     model = GPTQModel.load(model_dir, quantize_config=qcfg, backend=BACKEND.TORCH)
-    model.quantize(_calibration(), batch_size=1, backend=BACKEND.GPTQ_TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=_calibration(), batch_size=1, min_length=1), backend=BACKEND.GPTQ_TORCH)
     return elections, weights, captured
 
 

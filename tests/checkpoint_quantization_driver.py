@@ -82,6 +82,7 @@ def main():
         }
         for _ in range(4)
     ]
+    from gptqmodel import CalibrationConfig
     from gptqmodel.adapter.adapter import Lora
     from gptqmodel.quantization import FORMAT, METHOD
     from gptqmodel.quantization.config import (
@@ -144,7 +145,7 @@ def main():
         "gguf": BACKEND.GGUF_TORCH,
         "bitsandbytes": BACKEND.BITSANDBYTES,
         "qqq": BACKEND.QQQ,
-        "paro": BACKEND.PAROQUANT_TRITON,
+        "paro": BACKEND.PARO_TRITON,
         "exl3": BACKEND.EXL3_EXLLAMA_V3,
     }.get(args.method, BACKEND.TORCH)
     if args.format in {"gemv", "gemv_fast"}:
@@ -317,10 +318,12 @@ def main():
     CheckpointExtension.on_boundary = boundary
     try:
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=backend,
-            calibration_data_min_length=1,
             checkpoint=None
             if args.mode == "baseline"
             else CheckpointConfig(args.checkpoint),

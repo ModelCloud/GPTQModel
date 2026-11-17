@@ -500,14 +500,21 @@ __global__ void Marlin(
         cp_async4(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr], B_ptr[i]);
         B_ptr[i] += b_gl_rd_delta_o;
       }
-      // Only fetch scales if this tile starts a new group
+      // Stage the group scale in the same pipeline slot as the tile that
+      // consumes it. A tile owns a stage for `stages` fetches, so its scale
+      // must share that stage: fetching the scale only once per group (when
+      // `thread_k_blocks < group_blocks`) would issue the next group's fetch
+      // into a slot that the second tile of the current group is still
+      // reading in this same pipe iteration, with no barrier in between.
+      // Every tile of a group reads the same global scale row, so the row
+      // pointer only advances after the last tile of the group.
       if constexpr (group_blocks != -1) {
-        if (pipe % (group_blocks / thread_k_blocks) == 0) {
-          int4* sh_s3_stage = sh_s3 + s3_sh_stage * pipe;
-          if (s3_sh_wr_pred)
-            cp_async4(&sh_s3_stage[s3_sh_wr], &s3[s3_gl_rd]);
+        constexpr int s3_tiles_per_group = group_blocks / thread_k_blocks;
+        int4* sh_s3_stage = sh_s3 + s3_sh_stage * pipe;
+        if (s3_sh_wr_pred)
+          cp_async4(&sh_s3_stage[s3_sh_wr], &s3[s3_gl_rd]);
+        if (pipe % s3_tiles_per_group == s3_tiles_per_group - 1)
           s3_gl_rd += s3_gl_rd_delta;
-        }
       }
     }
     // Insert a fence even when we are winding down the pipeline to ensure that waiting is also correct at this point.
@@ -528,7 +535,7 @@ __global__ void Marlin(
     // significant bottleneck, while some theoretically better attempts have lead to bad instruction ordering by the
     // compiler and correspondingly a noticable drop in performance.
     if constexpr (group_blocks != -1) {
-      int4* sh_s3_stage = sh_s3 + s3_sh_stage * ((group_blocks / thread_k_blocks) * (pipe / (group_blocks / thread_k_blocks)));
+      int4* sh_s3_stage = sh_s3 + s3_sh_stage * pipe;
       reinterpret_cast<int4*>(&frag_s3[k % 2])[0] = sh_s3_stage[s3_sh_rd];
     }
     int4* sh_a_stage = sh_a + a_sh_stage * pipe;
@@ -569,6 +576,11 @@ __global__ void Marlin(
   // dimension of a tile reasonable, we have multiple warps that accumulate their partial sums of the same output
   // location; which we have to reduce over in the end. We do in shared memory.
   auto thread_block_reduce = [&] () {
+    // The reduction reuses `sh`, which aliases the A fetch stages, as scratch.
+    // The last sub-tile load of the main loop is not followed by a barrier, so
+    // wait for every warp to finish reading the A stages before overwriting
+    // them.
+    __syncthreads();
     constexpr int red_off = threads / b_sh_stride / 2;
     if (red_off >= 1) {
       int red_idx = threadIdx.x / b_sh_stride;
@@ -1075,6 +1087,20 @@ void qqq_gemm(
   int sms = -1,
   int max_par = 8
 ) {
+  // ``qqq_cuda`` indexes A/B/C/D through their data_ptr with no stride
+  // argument, so every operand must be densely packed. A strided INT8
+  // activation (a transposed prefill view) used to be read row-major and
+  // multiplied as garbage instead of failing here (#4740).
+  if (A.dim() != 2)
+    AT_ERROR("A must be 2-D, but got ", A.dim(), " dimensions.");
+  if (A.scalar_type() != torch::kChar)
+    AT_ERROR("A dtype must be int8, but got ", A.scalar_type(), ".");
+  if (!A.is_contiguous())
+    AT_ERROR("A must be contiguous; pack the quantized activation before the GEMM.");
+  if (D.scalar_type() != torch::kFloat16)
+    AT_ERROR("D dtype must be float16, but got ", D.scalar_type(), ".");
+  if (!D.is_contiguous())
+    AT_ERROR("D must be contiguous.");
   int prob_m = A.size(0);
   int prob_n = C.size(1);
   int prob_k = A.size(1);

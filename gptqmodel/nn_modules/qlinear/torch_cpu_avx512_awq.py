@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import avx512_bf16_error, has_avx512_bf16
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import capture_fused_train_state
 from ._numerics import matmul_fp32_reduce
 from .torch_aten_kernel import TorchAtenLinear
@@ -58,6 +59,13 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "torch_cpu_avx512_awq"
+
+    # Measured on an x86-64 AVX512-BF16 host (torch 2.15): the extension
+    # builds and the fused BF16 forward runs, but `forward` holds
+    # `_cpu_transform_lock` (RLock), which dynamo cannot enter: EAGER.
+    # CPU-only, so no CUDA-graph capture applies.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_awq_int4_kernel = None

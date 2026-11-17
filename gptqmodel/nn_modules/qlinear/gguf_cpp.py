@@ -23,6 +23,7 @@ from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.kernel import get_kernel_config
 from ...utils.logger import setup_logger
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
@@ -1516,6 +1517,11 @@ def _finish_ggml_output(
 
 
 class GGUFCppKernel(GGUFTorchLinear):
+    # `llama-cpp-python` is not installed on this host, so the ggml CPU bridge
+    # cannot build; the CPU-only forward also rejects CUDA input. Static: EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CPU]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 25}
@@ -1710,6 +1716,12 @@ class GGUFCppKernel(GGUFTorchLinear):
         return output.reshape(original_shape)
 
 class GGUFCudaKernel(GGUFTorchLinear):
+    # `llama-cpp-python` is not installed on this host, so the ggml CUDA bridge
+    # cannot build. The forward also takes a device lock and mutates the plan
+    # cache on the host. Static: EAGER, no capture.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
+
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CUDA]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 35}
@@ -1922,6 +1934,17 @@ class GGUFCudaKernel(GGUFTorchLinear):
             evicted.close()
 
     def forward(self, x: torch.Tensor):
+        # A zero-row input (an MoE expert that received no tokens, an empty
+        # batch slice) has no matmul to run: return an empty output before the
+        # device check, the weight upload and the plan cache. A zero-sized ggml
+        # plan is refused by the arena ("GGML plan has no scratch tensors",
+        # #4743) and would grow the shared arena for nothing. Every other kernel
+        # takes this path through `input_rows()`/`empty_linear_output()`, and
+        # the empty output is allocated on the input's own device, so no CUDA
+        # context is needed here.
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         if x_flat.device.type != "cuda":

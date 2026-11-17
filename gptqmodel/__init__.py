@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import atexit
+import importlib.util
 import os
 import sys
 import threading
@@ -113,24 +114,24 @@ _RETIRED_KERNEL_ENV_VARS = {
     "GPTQMODEL_MAX_PACKERS": "RuntimeConfig.max_packers",
     "GPTQMODEL_NO_ROCM_LLC": "KernelConfig.rocm_llc",
     "GPTQMODEL_NPU_CHOLESKY_BLOCK_SIZE": "KernelConfig.npu_cholesky_block_size",
-    "GPTQMODEL_PAROQUANT_AFFINE_STE_TRITON": "KernelConfig.paroquant_affine_ste_triton",
-    "GPTQMODEL_PAROQUANT_AFFINE_STE_TRITON_BACKWARD": "KernelConfig.paroquant_affine_ste_triton_backward",
-    "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE": "KernelConfig.paroquant_autotune_cache",
-    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE": "KernelConfig.paroquant_auto_cache_bf16_rotation_dtype",
-    "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_RUNTIME_DTYPE": "KernelConfig.paroquant_auto_cache_bf16_runtime_dtype",
-    "GPTQMODEL_PAROQUANT_CACHE_ROTATION_DTYPE": "KernelConfig.paroquant_cache_rotation_dtype",
-    "GPTQMODEL_PAROQUANT_CACHE_RUNTIME_DTYPE": "KernelConfig.paroquant_cache_runtime_dtype",
-    "GPTQMODEL_PAROQUANT_CPU_AVX512": "KernelConfig.paroquant_cpu_avx512",
-    "GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION": "QuantizeConfig.opt_fused_rotation",
-    "GPTQMODEL_PAROQUANT_ROTATE_AUTOTUNE": "KernelConfig.paroquant_rotate_autotune",
-    "GPTQMODEL_PAROQUANT_ROTATE_CTA_M": "KernelConfig.paroquant_rotate_cta_m",
-    "GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD": "KernelConfig.paroquant_rotate_row_pad",
-    "GPTQMODEL_PAROQUANT_SYM_STE_TRITON": "KernelConfig.paroquant_sym_ste_triton",
-    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE": "KernelConfig.paroquant_triton_autotune",
-    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_ITERS": "KernelConfig.paroquant_triton_autotune_iters",
-    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_MARGIN": "KernelConfig.paroquant_triton_autotune_margin",
-    "GPTQMODEL_PAROQUANT_TRITON_AUTOTUNE_WARMUP": "KernelConfig.paroquant_triton_autotune_warmup",
-    "GPTQMODEL_PAROQUANT_TRITON_DECODE_MAX_ROWS": "KernelConfig.paroquant_triton_decode_max_rows",
+    "GPTQMODEL_PARO_AFFINE_STE_TRITON": "KernelConfig.paro_affine_ste_triton",
+    "GPTQMODEL_PARO_AFFINE_STE_TRITON_BACKWARD": "KernelConfig.paro_affine_ste_triton_backward",
+    "GPTQMODEL_PARO_AUTOTUNE_CACHE": "KernelConfig.paro_autotune_cache",
+    "GPTQMODEL_PARO_AUTO_CACHE_BF16_ROTATION_DTYPE": "KernelConfig.paro_auto_cache_bf16_rotation_dtype",
+    "GPTQMODEL_PARO_AUTO_CACHE_BF16_RUNTIME_DTYPE": "KernelConfig.paro_auto_cache_bf16_runtime_dtype",
+    "GPTQMODEL_PARO_CACHE_ROTATION_DTYPE": "KernelConfig.paro_cache_rotation_dtype",
+    "GPTQMODEL_PARO_CACHE_RUNTIME_DTYPE": "KernelConfig.paro_cache_runtime_dtype",
+    "GPTQMODEL_PARO_CPU_AVX512": "KernelConfig.paro_cpu_avx512",
+    "GPTQMODEL_PARO_OPT_FUSED_ROTATION": "QuantizeConfig.opt_fused_rotation",
+    "GPTQMODEL_PARO_ROTATE_AUTOTUNE": "KernelConfig.paro_rotate_autotune",
+    "GPTQMODEL_PARO_ROTATE_CTA_M": "KernelConfig.paro_rotate_cta_m",
+    "GPTQMODEL_PARO_ROTATE_ROW_PAD": "KernelConfig.paro_rotate_row_pad",
+    "GPTQMODEL_PARO_SYM_STE_TRITON": "KernelConfig.paro_sym_ste_triton",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE": "KernelConfig.paro_triton_autotune",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE_ITERS": "KernelConfig.paro_triton_autotune_iters",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE_MARGIN": "KernelConfig.paro_triton_autotune_margin",
+    "GPTQMODEL_PARO_TRITON_AUTOTUNE_WARMUP": "KernelConfig.paro_triton_autotune_warmup",
+    "GPTQMODEL_PARO_TRITON_DECODE_MAX_ROWS": "KernelConfig.paro_triton_decode_max_rows",
     "GPTQMODEL_RESUME": "CheckpointConfig(path=...)",
     "GPTQMODEL_ROCM_QUANT_BLAS": "KernelConfig.rocm_quant_blas",
     "GPTQ_TORCH_CACHE_WEIGHTS": "KernelConfig.torch_cache_weights",
@@ -294,25 +295,49 @@ def _patch_transformers_refusing_quantizers():
         # suffix. That branch runs before the mapping lookup, so the refusing
         # quantizer registered above is never constructed and GPT-QModel's
         # layout raises a generic TypeError instead of the actionable error
-        # (#4664). Intercept the plain name only: `bitsandbytes_4bit` /
-        # `bitsandbytes_8bit` are genuine transformers names and must keep
-        # loading real HF bnb checkpoints.
+        # (#4664). Refuse only GPT-QModel's layout: transformers' own
+        # `BitsAndBytesConfig` carries the same plain `quant_method`, so
+        # refusing every occurrence broke all genuine HF bnb loads (QLoRA, any
+        # Hub bnb checkpoint) in a process that imported GPT-QModel (#4731).
         original_from_config = hf_quant_auto.AutoHfQuantizer.__dict__["from_config"]
         if not getattr(original_from_config, "_gptqmodel_refusal_guard", False):
 
             @classmethod
             def _refusing_from_config(cls, quantization_config, **kwargs):
-                method = (
-                    quantization_config.get("quant_method")
-                    if isinstance(quantization_config, dict)
-                    else getattr(quantization_config, "quant_method", None)
-                )
-                if method == "bitsandbytes":
-                    raise ValueError(refusal_message(method))
+                if _is_gptqmodel_bitsandbytes_layout(quantization_config):
+                    raise ValueError(refusal_message("bitsandbytes"))
                 return original_from_config.__func__(cls, quantization_config, **kwargs)
 
             _refusing_from_config._gptqmodel_refusal_guard = True
             hf_quant_auto.AutoHfQuantizer.from_config = _refusing_from_config
+
+
+def _is_gptqmodel_bitsandbytes_layout(quantization_config) -> bool:
+    """Whether a ``bitsandbytes`` config is GPT-QModel's layout, not HF's own.
+
+    transformers' ``BitsAndBytesConfig`` and GPT-QModel's checkpoint layout
+    share ``quant_method == "bitsandbytes"``. Only the GPT-QModel layout must
+    be refused: HF's config is loadable and must keep working (#4731).
+
+    A dict is GPT-QModel's layout only when it carries neither ``load_in_4bit``
+    nor ``load_in_8bit``; ``AutoQuantizationConfig.from_dict`` maps a dict with
+    either flag to a real ``BitsAndBytesConfig`` through the
+    ``bitsandbytes_4bit``/``bitsandbytes_8bit`` names. An already-built object
+    is GPT-QModel's layout when it is not a real ``BitsAndBytesConfig``.
+    """
+
+    if isinstance(quantization_config, dict):
+        if quantization_config.get("quant_method") != "bitsandbytes":
+            return False
+        return not (
+            quantization_config.get("load_in_4bit", False)
+            or quantization_config.get("load_in_8bit", False)
+        )
+    if getattr(quantization_config, "quant_method", None) != "bitsandbytes":
+        return False
+    from transformers import BitsAndBytesConfig
+
+    return not isinstance(quantization_config, BitsAndBytesConfig)
 
 
 def _patch_transformers_save_pretrained_runtime_layout_guard():
@@ -440,6 +465,32 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
 
 
+def _hf_quantizer_backend(quantizer):
+    """Return the caller's backend from an HF quantizer, wherever it lives.
+
+    Optimum's ``GPTQQuantizer`` stores it on the quantizer itself
+    (``.backend``). transformers' ``AwqQuantizer`` is a plain ``HfQuantizer``
+    with no such attribute: the choice lives on
+    ``quantization_config.backend``. Reading only ``.backend`` therefore
+    dropped every explicit AWQ backend and resolved AUTO (#4729). Prefer the
+    quantizer's own value, then the config's, so both bridges forward the
+    caller's choice and an impossible one (e.g. marlin on CPU) still raises.
+    """
+
+    backend = getattr(quantizer, "backend", None)
+    if backend is not None:
+        return backend
+    return getattr(getattr(quantizer, "quantization_config", None), "backend", None)
+
+
+# Optimum's GPTQ bridge install state. ``optimum.gptq`` imports ``gptqmodel``
+# while it is still executing, so the package-init probe can observe a
+# partially initialized module; that is a *deferred* failure, never "Optimum is
+# not installed". These flags keep the retry cheap and idempotent (#4749).
+_OPTIMUM_GPTQ_BRIDGE_INSTALLED = False
+_OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE = False
+
+
 def _patch_optimum_gptqmodel_load_bridge():
     """Route Optimum's GPTQ loading through GPTQModel's native bridge.
 
@@ -454,21 +505,27 @@ def _patch_optimum_gptqmodel_load_bridge():
     bridge returns ``None`` for them.
     """
 
+    global _OPTIMUM_GPTQ_BRIDGE_INSTALLED
+
     try:
         from functools import wraps
 
         from optimum.gptq import GPTQQuantizer
     except ImportError:
-        # Optimum is an optional dependency of Transformers' GPTQ loader.
-        return
+        # Either Optimum is not installed (optional dependency of Transformers'
+        # GPTQ loader) or ``optimum.gptq`` is importing ``gptqmodel`` right now
+        # and has not defined ``GPTQQuantizer`` yet. The caller decides which;
+        # ``_ensure_optimum_gptqmodel_load_bridge`` retries the deferred case.
+        return False
     except Exception:
         log.warning("Optimum GPTQ load-bridge compat probe failed", exc_info=True)
-        return
+        return False
 
     with _MONKEY_PATCH_LOCK:
         original_convert_model = GPTQQuantizer.convert_model
         if getattr(original_convert_model, "_gptqmodel_load_bridge", False):
-            return
+            _OPTIMUM_GPTQ_BRIDGE_INSTALLED = True
+            return True
         original_post_init_model = GPTQQuantizer.post_init_model
 
         @wraps(original_convert_model)
@@ -483,8 +540,10 @@ def _patch_optimum_gptqmodel_load_bridge():
                 # it `_resolve_backend_for_checkpoint` always sees `None` and
                 # resolves AUTO, so a documented PEFT/trainable-kernel choice (or
                 # a deliberately incompatible one, e.g. marlin on CPU) was
-                # silently ignored for native checkpoints (#4680).
-                backend=getattr(self, "backend", None),
+                # silently ignored for native checkpoints (#4680). Optimum keeps
+                # it on the quantizer; fall back to the config so a bridge that
+                # loses `.backend` still forwards it (#4729).
+                backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:
@@ -505,6 +564,94 @@ def _patch_optimum_gptqmodel_load_bridge():
         _post_init_model_with_gptqmodel_bridge._gptqmodel_load_bridge = True
         GPTQQuantizer.convert_model = _convert_model_with_gptqmodel_bridge
         GPTQQuantizer.post_init_model = _post_init_model_with_gptqmodel_bridge
+        _OPTIMUM_GPTQ_BRIDGE_INSTALLED = True
+        return True
+
+
+def _ensure_optimum_gptqmodel_load_bridge():
+    """Install the Optimum GPTQ bridge at the first moment it can succeed.
+
+    ``optimum.gptq`` imports ``gptqmodel`` mid-import, so the package-init
+    attempt legitimately fails with a partially initialized module and must not
+    be cached as "Optimum not installed" (#4749). Everything Transformers or
+    Optimum calls after that import completes retries through here: the
+    ``GptqHfQuantizer`` hooks and the ``hf_select_quant_linear_v2`` /
+    ``hf_gptqmodel_post_init`` entry points Optimum resolves from this package.
+
+    The retry is cheap and idempotent: one module-level flag after success, one
+    after a genuine absence, and no import attempt while ``optimum.gptq`` is
+    visibly still initializing.
+    """
+
+    global _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE
+
+    if _OPTIMUM_GPTQ_BRIDGE_INSTALLED:
+        return True
+    if _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE:
+        return False
+
+    optimum_gptq = sys.modules.get("optimum.gptq")
+    if optimum_gptq is None:
+        try:
+            spec = importlib.util.find_spec("optimum.gptq")
+        except (AttributeError, ImportError, ValueError):
+            spec = None
+        if spec is None:
+            # Optimum is genuinely absent; do not retry the failed import.
+            _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE = True
+            return False
+    elif not hasattr(optimum_gptq, "GPTQQuantizer"):
+        # ``optimum.gptq`` is the import that is currently importing us. The
+        # class does not exist yet, so importing it again cannot succeed.
+        return False
+
+    if _patch_optimum_gptqmodel_load_bridge():
+        return True
+    _OPTIMUM_GPTQ_BRIDGE_UNAVAILABLE = True
+    return False
+
+
+def _patch_transformers_gptq_quantizer_bridge():
+    """Retry the Optimum GPTQ bridge from Transformers' GPTQ quantizer.
+
+    Transformers is fully imported before ``GptqHfQuantizer`` touches Optimum,
+    so its pre/post weight-loading hooks always run after ``optimum.gptq`` has
+    finished importing. That gives the deferred bridge install a slot before
+    Optimum's ``convert_model`` replaces any layer, independent of whether the
+    user imported ``gptqmodel`` first (#4749).
+    """
+
+    try:
+        from functools import wraps
+
+        from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
+    except ImportError:
+        # Older Transformers vendors its own GPTQ loader without Optimum.
+        return
+    except Exception:
+        log.warning("transformers GPTQ load-bridge compat probe failed", exc_info=True)
+        return
+
+    with _MONKEY_PATCH_LOCK:
+        original_before = GptqHfQuantizer._process_model_before_weight_loading
+        if getattr(original_before, "_gptqmodel_load_bridge", False):
+            return
+        original_after = GptqHfQuantizer._process_model_after_weight_loading
+
+        @wraps(original_before)
+        def _before_with_gptqmodel_bridge(self, model, **kwargs):
+            _ensure_optimum_gptqmodel_load_bridge()
+            return original_before(self, model, **kwargs)
+
+        @wraps(original_after)
+        def _after_with_gptqmodel_bridge(self, model, **kwargs):
+            _ensure_optimum_gptqmodel_load_bridge()
+            return original_after(self, model, **kwargs)
+
+        _before_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        _after_with_gptqmodel_bridge._gptqmodel_load_bridge = True
+        GptqHfQuantizer._process_model_before_weight_loading = _before_with_gptqmodel_bridge
+        GptqHfQuantizer._process_model_after_weight_loading = _after_with_gptqmodel_bridge
 
 
 def _patch_transformers_awq_gptqmodel_load_bridge():
@@ -558,8 +705,10 @@ def _patch_transformers_awq_gptqmodel_load_bridge():
                 device_map=kwargs.get("device_map"),
                 # Same forwarding as the GPTQ bridge: an explicit
                 # `quantization_config["backend"]` must not be replaced by AUTO
-                # (#4680).
-                backend=getattr(self, "backend", None),
+                # (#4680). transformers' `AwqQuantizer` has no `.backend`; the
+                # choice is on its `quantization_config`, so reading only the
+                # quantizer dropped every AWQ backend (#4729).
+                backend=_hf_quantizer_backend(self),
                 dtype=kwargs.get("dtype"),
             )
             if context is None:
@@ -828,8 +977,8 @@ from .backend import (  # noqa: F401
     GGUFCUDAConfig,
     GGUFTorchConfig,
     MarlinConfig,
-    ParoQuantConfig,
-    ParoQuantTritonConfig,
+    ParoCUDAConfig,
+    ParoTritonConfig,
     RuntimeConfig,
     SwordfishConfig,
     TorchConfig,
@@ -851,6 +1000,7 @@ from .quantization import (
     AutoDtypeCast,
     AWQConfig,
     BaseQuantizeConfig,
+    CalibrationConfig,
     FOEMConfig,
     GGUFConfig,
     GPTAQConfig,
@@ -894,7 +1044,11 @@ if ensure_modelscope_available():
 
 
 # Installed last: `optimum.gptq` imports `gptqmodel` (BACKEND, QuantizeConfig)
-# while it loads, so the bridge can only be wrapped once this package has
-# finished defining its public names.
+# while it loads, so this eager attempt can only succeed once the package has
+# finished defining its public names. When it runs *during* that import the
+# probe sees a partially initialized `optimum.gptq`; `_ensure_...` then retries
+# from Transformers' GPTQ hooks and from the entry points Optimum calls, so the
+# bridge no longer depends on the user importing `gptqmodel` first (#4749).
 _patch_optimum_gptqmodel_load_bridge()
+_patch_transformers_gptq_quantizer_bridge()
 _patch_transformers_awq_gptqmodel_load_bridge()

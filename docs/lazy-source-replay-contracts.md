@@ -30,10 +30,10 @@ flowchart TD
 
 | Before this extraction layer | Carried implementation |
 |---|---|
-| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/auto.py:538`: `_uses_auto_module_decoder` |
-| Previous stack layer: `gptqmodel/models/loader.py:535` | `gptqmodel/models/loader.py:535`: `_convert_model_with_defuser` |
-| Previous stack layer: `gptqmodel/utils/structure.py:845` | `gptqmodel/utils/structure.py:846`: `LazyTurtle` |
-| Previous stack layer: `gptqmodel/models/base.py:312` | `gptqmodel/models/base.py:312`: `BaseQModel` |
+| API absent in the previous stack layer (path/symbol checked) | `gptqmodel/models/auto.py:553`: `_uses_auto_module_decoder` |
+| Previous stack layer: `gptqmodel/models/loader.py:535` | `gptqmodel/models/loader.py:1080`: `_convert_model_with_defuser` |
+| Previous stack layer: `gptqmodel/utils/structure.py:845` | `gptqmodel/utils/structure.py:1129`: `LazyTurtle` |
+| Previous stack layer: `gptqmodel/models/base.py:312` | `gptqmodel/models/base.py:775`: `BaseQModel` |
 
 The previous stack layer supplies dependencies. Standalone store/policy APIs are connected by the later processor, looper and model layers rather than being enabled implicitly here.
 

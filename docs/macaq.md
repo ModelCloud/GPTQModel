@@ -232,7 +232,7 @@ extends the same registration.
 | `gptqmodel_gguf` | packed GGUF | `GPTQModelGGUFHfQuantizer` refuses |
 | `exl3` | EXL3 trellis | `GPTQModelRefusingHfQuantizer` refuses |
 | `macaq` | MACaQ MXFP4 | `GPTQModelRefusingHfQuantizer` refuses |
-| `paroquant` | ParoQuant | `GPTQModelRefusingHfQuantizer` refuses |
+| `paro` | Paro | `GPTQModelRefusingHfQuantizer` refuses |
 | `qqq` | QQQ | `GPTQModelRefusingHfQuantizer` refuses |
 | `nf12` | NF12 | `GPTQModelRefusingHfQuantizer` refuses |
 | `tt-blockfloat` | Tenstorrent block-float | `GPTQModelRefusingHfQuantizer` refuses |
@@ -405,7 +405,7 @@ python scripts/benchmark_macaq_quantization.py \
 
 ```python
 import torch
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import MacaqConfig
 
 model = GPTQModel.load(
@@ -419,7 +419,7 @@ model = GPTQModel.load(
     device="cuda:0",
     dtype=torch.bfloat16,
 )
-model.quantize(calibration_texts, batch_size=1, backend=BACKEND.AUTO)
+model.quantize(CalibrationConfig(dataset=calibration_texts, batch_size=1), backend=BACKEND.AUTO)
 model.save("./llama-3.2-1b-macaq")
 
 quantized = GPTQModel.load("./llama-3.2-1b-macaq", backend=BACKEND.MACAQ_TRITON)

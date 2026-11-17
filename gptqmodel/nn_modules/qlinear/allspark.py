@@ -48,6 +48,7 @@ from ...utils.allspark_hip import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 
 
@@ -82,6 +83,13 @@ class AllSparkLinear(GPTQQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): the repacked layout is built in
+    # ``post_init``, so the eager forward and an explicit ``torch.cuda.graph``
+    # capture both run with matching output. Dynamo stops at EAGER on
+    # ``tensor.is_inference()`` in the repack guard.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     @classmethod
     def validate_device(cls, device):

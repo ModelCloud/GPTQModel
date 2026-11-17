@@ -1335,6 +1335,35 @@ def _offload_disk_locked(
     # print("offload_disk: list item tree")
     # print_module_tree(module)
 
+
+def _materialize_meta_nonpersistent_buffers(module: nn.Module) -> List[str]:
+    """Replace non-persistent buffers that are still on meta with real tensors.
+
+    ``disk_offload`` builds its index from ``state_dict()``, which excludes
+    non-persistent buffers by definition. A module rebuilt on ``meta`` for a
+    checkpoint resume (#4562) therefore keeps, for example,
+    ``QQQLinear.workspace`` on meta with no stored value, and accelerate's hook
+    init raises ``ValueError: workspace is on the meta device`` (#4777). Those
+    buffers are runtime scratch and never checkpoint state, so allocate them
+    here instead of trying to load them. Returns the qualified names that were
+    materialized.
+    """
+
+    materialized: List[str] = []
+    for prefix, submodule in module.named_modules():
+        for name, tensor in list(submodule._buffers.items()):
+            if tensor is None or not tensor.is_meta:
+                continue
+            if name not in submodule._non_persistent_buffers_set:
+                # Persistent: the offload index carries it and the hook loads it.
+                continue
+            submodule._buffers[name] = torch.zeros(
+                tensor.shape, dtype=tensor.dtype, device=CPU
+            )
+            materialized.append(f"{prefix}.{name}" if prefix else name)
+    return materialized
+
+
 # undo offload
 def attach_disk_offload_hook(
     module: nn.Module,
@@ -1365,6 +1394,15 @@ def attach_disk_offload_hook(
         raise RuntimeError(
             f"Offload: no offload index for `{offload_dir}`; the resumed packed "
             "module cannot be materialized after quantization"
+        )
+    # The index is built from ``state_dict()``, so a non-persistent buffer (for
+    # example QQQ's split-K ``workspace``) has no stored value and would still
+    # be meta when accelerate initializes the hook (#4777).
+    materialized = _materialize_meta_nonpersistent_buffers(module)
+    if materialized:
+        log.debug(
+            "Offload: materialized non-persistent buffers for resumed module: %s",
+            ", ".join(materialized),
         )
     disk_offload(
         module,

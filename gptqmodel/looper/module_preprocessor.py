@@ -10,7 +10,6 @@ import torch
 import transformers
 
 from ..looper.loop_processor import (
-    CalibrationConfig,
     ForwardConfig,
     LoopProcessor,
     ProcessorLifecycleConfig,
@@ -18,6 +17,7 @@ from ..looper.loop_processor import (
 from ..looper.named_module import NamedModule
 from ..quantization.config import (
     AutoModuleDecoderConfig,
+    CalibrationConfig,
     QuantizeConfig,
     SmootherConfig,
     TensorParallelPadderConfig,

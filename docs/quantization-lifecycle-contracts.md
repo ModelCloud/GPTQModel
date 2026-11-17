@@ -18,9 +18,9 @@ The redesign follows two rules:
 
 | Shared contract | Consumers | Why it is shared |
 | --- | --- | --- |
-| `QuantizationRunPlan.processors` | `BaseQModel`, `ModuleLooper`, checkpoint preflight | GPTQ, QQQ, AWQ, ParoQuant, EXL3, weight-only, native, and EoRA runs need one ordered chain. |
+| `QuantizationRunPlan.processors` | `BaseQModel`, `ModuleLooper`, checkpoint preflight | GPTQ, QQQ, AWQ, Paro, EXL3, weight-only, native, and EoRA runs need one ordered chain. |
 | `ProcessorLifecycleConfig.forward` | subset planning, layer replay, capture hooks | Multiple calibrated methods use the same replay decisions. |
-| `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, ParoQuant, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
+| `ProcessorLifecycleConfig.calibration` | GPTQ, QQQ, AWQ, Paro, VPTQ, subset planning | Those methods require calibration traffic before quantizing a module. |
 | `ProcessorLifecycleConfig.checkpointing` | checkpoint adapter and checkpoint preflight | Primary and EoRA adapter processors compose in the same continuation chain. |
 | `ResolvedModuleConfig` | quantization and packing | Multiple methods consume the same first-match dynamic rule, and both stages must see one snapshot. |
 | `ModuleConstructorConfig` | `create_quant_module`, checkpoint capture, checkpoint restore | Packing and restore must agree on bits, group size, symmetry, packing dtype, format, kernel, and method-specific options. |
@@ -59,9 +59,10 @@ flowchart TD
 The run plan is immutable after preflight. `BaseQModel.quantization_run_plan` exposes it for diagnostics:
 
 ```python
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.models import ProcessorStep, QuantizationRunPlan
 
-model.quantize(calibration, backend=BACKEND.AUTO)
+model.quantize(CalibrationConfig(dataset=calibration), backend=BACKEND.AUTO)
 print(model.quantization_run_plan.describe())
 
 assert ProcessorStep.GPTQ in model.quantization_run_plan.processors
@@ -90,8 +91,8 @@ Exact backend values depend on the method and device. The plan reports the value
 Processors declare lifecycle behavior instead of being recognized through class lists:
 
 ```python
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.loop_processor import (
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -130,12 +131,11 @@ Processor constructors accept one complete `ForwardConfig` and one complete `Cal
 ```python
 calibration = CalibrationConfig(
     dataset=dataset,
-    prepare_dataset=model.prepare_dataset,
     concat_size=2048,
     sort="desc",
     concat_separator=None,
     batch_size=1,
-)
+).bind(model.prepare_dataset)
 
 processor = ExampleProcessor(
     tokenizer=model.tokenizer,
@@ -150,6 +150,8 @@ processor = ExampleProcessor(
 ```
 
 `ForwardConfig` contains all forward controls: whether a forward is required, when the authoritative replay runs, combined-pass replay, subset early stopping, activation capture, and layer-context capture. `CalibrationConfig` contains the dataset and its preparation policy. `CalibrationTypes.EACH_MODULE_NEEDS_INPUT` makes uncovered modules fail or be pruned according to the existing fallback policy; a pruned module is handed to `LoopProcessor.prune_uncovered_module`, which a processor that tracks per-layer state beyond `tasks` (AWQ) must extend so the module neither gates layer completion nor reaches `submodule_finalize` ([uncovered-module prune](quantizer-moe.md#5-uncovered-module-prune-with-fallbacknone)). `CheckpointSupport.PRIMARY` permits the processor as the first checkpoint owner; `CheckpointSupport.SECONDARY` permits an EoRA-style second processor.
+
+`subset_early_stop` is a per-forward control, not a per-subset-stage one. The pending-member set and the `forward_hook_last` flag describe one calibration batch: the stage refills the set and clears the flag on every batch, because routing and module call order change from batch to batch. A flag left over from the previous batch stops the next forward at the first member that fires, so only one module of the subset captures that batch ([#4738](https://github.com/ModelCloud/GPTQModel/issues/4738)).
 
 The checkpoint adapter accepts `(PRIMARY,)` and `(PRIMARY, SECONDARY)`. Other chains raise `NotImplementedError` before the quantization loop starts.
 
@@ -240,6 +242,9 @@ flowchart TD
 `ModuleLooper` builds one `LoopPlan` and passes it, with the extension cursor, into `run_layer_stage()`. The stage iterates the planned steps, maps each step to its display index, and publishes that exact step object to extensions. The plan therefore decides which layers run and where observers see boundaries; the stage no longer recomputes its own stopping condition. The resume cursor is a plan position, distinct from the model-layer index used by layer-boundary recovery.
 
 ```python
+from gptqmodel.looper.extension import LoopContext, LoopPlan, LoopStep
+from gptqmodel.looper.stage_layer import run_layer_stage
+
 plan = LoopPlan((
     LoopStep("input_embeddings", -1, "input_embeddings"),
     LoopStep("layer", 0, "model.layers.0"),
@@ -255,7 +260,7 @@ run_layer_stage(..., plan=plan, cursor=cursor)
 | Decision | Before | After |
 | --- | --- | --- |
 | Processor selection | `_quantize_with_calibration` branched over methods and imported processors inline (`base.py:2161-2260` in the parent revision). | `QuantizationRunPlan.build` returns an ordered `ProcessorStep` tuple; `processor_class` loads only the selected processor. |
-| Calibration input requirement | `stage_subset.py:233-235` matched a hard-coded processor class tuple. | `stage_subset.py:222` reads `ProcessorLifecycleConfig.calibration`. |
+| Calibration input requirement | `stage_subset.py:233-235` matched a hard-coded processor class tuple. | `stage_subset.py:271` reads `ProcessorLifecycleConfig.calibration`. |
 | Checkpoint admission | `gptq_checkpoint.py:249-265` matched a hard-coded processor-type set. | `gptq_checkpoint.py:244` validates declared `checkpointing` values. |
 | Per-module settings | GPTQ repeated `dynamic_get` for each field (`gptq_processor.py:129-164` in the parent revision). | `resolve_module_config` caches the first ordered match and returns one immutable snapshot (`config.py:3238`). |
 | Pack settings | Packing called `create_quant_module` with the base dynamic mapping and re-resolved rules. | `create_quant_module(..., resolved_module_config=snapshot)` uses the quantization snapshot (`utils/model.py:609`). |

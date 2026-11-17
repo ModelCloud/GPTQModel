@@ -30,7 +30,7 @@ plan = model.fuse(overrides={"model.layers.0.mlp": False})
 
 # Optional opt-in at loading or quantization finalization.
 model = GPTQModel.load("/path/to/quantized-llama", fuse=True)
-# source_model.quantize(calibration, fuse=True)
+# source_model.quantize(CalibrationConfig(dataset=calibration), fuse=True)
 # plan = model.fuse()                      # Reapply and receive the current plan
 ```
 
@@ -511,9 +511,9 @@ execution performs neither collection nor compiler-cache resets.
 | Execution concern | Fusion disabled | Fusion enabled | Implementation |
 | --- | --- | --- | --- |
 | Projection launches | Original separate calls | One native packed call; split outputs feed the original continuation | `gptqmodel/models/fusion.py:58` (`_parent_template`) |
-| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:435` (`_share_operands`) |
-| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:637` (`FusionPlanner`) |
-| Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:683` (`BaseQModel.fuse`) |
+| Persistent packed operands | Independent source allocations | One contiguous fused allocation with disjoint source views | `gptqmodel/models/fusion.py:444` (`_share_operands`) |
+| Group selection | No fusion execution installed | Validated definition policy plus compiled-tree roles and live parents | `gptqmodel/models/fusion.py:711` (`FusionPlanner`) |
+| Model lifecycle | Ordinary model execution | Explicit apply/remove; failed admission preserves the installed plan | `gptqmodel/models/base.py:1173` (`BaseQModel.fuse`) |
 
 Fusion preserves registered state-dict keys and tensor values. Saving serializes
 each projection view under its checkpoint key; loading rebuilds the ordinary modules and
@@ -739,7 +739,7 @@ calibration fixture for comparing execution, not a model-quality claim:
 
 ```python
 import torch
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.quantization import AWQConfig
 from gptqmodel.utils.backend import BACKEND
 
@@ -749,7 +749,7 @@ model = GPTQModel.load("/path/to/Llama-3.2-1B-Instruct", qcfg, device="cuda:0",
                        dtype=torch.float16, fuse=False, attn_implementation="eager")
 text = ("The capital of France is Paris. Science and mathematics explain the "
         "natural world. Good software tests verify every important result. ")
-model.quantize([text * 12 for _ in range(16)], batch_size=1,
+model.quantize(CalibrationConfig(dataset=[text * 12 for _ in range(16)], batch_size=1),
                backend=BACKEND.AWQ_TORCH)
 model.save("/path/to/symmetric-llama32-awq")
 ```

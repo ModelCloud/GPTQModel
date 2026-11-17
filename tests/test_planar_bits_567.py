@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.planar_packing import (
     PLANAR_BITS,
@@ -290,7 +291,7 @@ def test_tiny_model_quantize_save_load_generate(bits: int, tmp_path: Path):
     )
 
     model = GPTQModel.load(str(model_dir), quantize_config=quantize_config, backend=BACKEND.TORCH)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     model.save(quantized_dir)
 
     quantized_model = GPTQModel.load(str(quantized_dir), backend=BACKEND.TORCH, device="cpu")

@@ -20,7 +20,7 @@ import torch
 from tokenizers import Tokenizer, models
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.models import base as base_module
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.quantization import FORMAT
@@ -161,10 +161,12 @@ def test_quantize_refuses_before_rotating_or_fusing(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="only supported for the GPTQ"):
         qmodel.quantize(
-            CALIBRATION,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=CALIBRATION,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.AWQ_TORCH,
-            calibration_data_min_length=1,
         )
 
     for name, parameter in qmodel.model.named_parameters():

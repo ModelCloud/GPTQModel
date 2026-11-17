@@ -38,6 +38,7 @@ from ...utils.marlin import (
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -78,6 +79,13 @@ class AwqMarlinLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_marlin"
+
+    # Measured on sm_80 (A100-class, torch 2.15.0.dev20260928+cu130): eager and an explicit
+    # ``torch.cuda.graph`` capture both run with matching output. The Marlin
+    # custom op reached through ``apply_awq_marlin_linear`` has no fake/meta
+    # kernel, so ``torch.compile`` stops at EAGER.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
 
     # num_bits -> type
     TYPE_MAP = {

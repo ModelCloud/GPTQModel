@@ -59,9 +59,9 @@ flowchart LR
 
 | Previous mechanism | Current mechanism |
 | --- | --- |
-| `gptqmodel/utils/nf12.py:173` tried `_load_installed` before `_build_and_load` at `:187` | `gptqmodel/utils/nf12.py:25` delegates to `gptqmodel_nf12.load` |
+| `gptqmodel/utils/nf12.py` tried `_load_installed` before `_build_and_load` | `gptqmodel/utils/nf12.py:25` delegates to `gptqmodel_nf12.load` |
 | An external `nf12` wheel could own the operator registration | `gptqmodel_nf12/_library.py:39` loads GPT-QModel's vendored CUDA source build, or reuses a complete registered operator set |
-| Legacy CUDA runtime exposed BF16 `linear` at `gptqmodel/utils/nf12.py:318` | `gptqmodel_nf12/api.py:131` provides BF16 linear and `:142` adds `linear_fp32` for FP32 routing and score projections |
+| Legacy CUDA runtime exposed BF16 `linear` | `gptqmodel_nf12/api.py:131` provides BF16 linear and `:142` adds `linear_fp32` for FP32 routing and score projections |
 
 The native CUDA API supports NVIDIA SM80 or newer. GPT-QModel's separate HIP
 runtime and CPU codec remain the fallbacks for the existing quantizer and

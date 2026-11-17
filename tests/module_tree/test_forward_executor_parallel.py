@@ -66,8 +66,8 @@ class _StubLooper:
     def _batch_row_count(self, batch_inputs):
         return int(batch_inputs[0].shape[0])
 
-    def _set_processor_mask(self, processor, mask):
-        del processor, mask
+    def _set_processor_mask(self, processor, mask, padding_mask=None):
+        del processor, mask, padding_mask
 
 
 def _run_parallel(worker, *, num_batches: int = 2, need_outputs: bool = True):

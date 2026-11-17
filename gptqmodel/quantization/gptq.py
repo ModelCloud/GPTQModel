@@ -845,8 +845,8 @@ class GPTQ:
         if not self._hessian_capture_enabled:
             return
         if isinstance(self.module, nn.Embedding):
-            del out, batch_index
-            token_count, counts, device = self.process_batch(inp)
+            del out
+            token_count, counts, device = self.process_batch(inp, batch_index=batch_index)
             if token_count == 0 or counts is None:
                 return
 
@@ -865,7 +865,7 @@ class GPTQ:
                 self._hessian_dirty = True
             return
 
-        batch_token_size, xtx, device = self.process_batch(inp)
+        batch_token_size, xtx, device = self.process_batch(inp, batch_index=batch_index)
         if batch_token_size == 0 or xtx is None:
             return
 
@@ -1111,11 +1111,12 @@ class GPTQ:
     def process_batch(
         self, inp: torch.Tensor, batch_index: Optional[int] = None
     ) -> Tuple[int, Optional[torch.Tensor], torch.device]:
-        # `batch_index` keeps the override chain (GPTAQ/FOEM pair a native input
-        # per batch) signature-compatible; the plain Hessian path is order-free.
+        """Return ``(token_count, xtx_or_counts, device)`` for one calibration batch.
+
+        ``batch_index`` is the native-input pairing hook used by GPTAQ/FOEM;
+        plain GPTQ does not use it.
+        """
         del batch_index
-        # print(f"inp = {inp}")
-        # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
 
         if isinstance(self.module, nn.Embedding):

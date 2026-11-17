@@ -13,7 +13,6 @@ import torch
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor, clone_gptq_config_for_module
 from gptqmodel.looper.loop_processor import (
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -27,7 +26,7 @@ from gptqmodel.models.quantization_run_plan import (
     processor_class,
 )
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, CalibrationConfig, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import create_quant_module
 
@@ -161,15 +160,12 @@ def test_processor_constructor_accepts_forward_config():
 
 
 def test_calibration_config_groups_dataset_pipeline_settings():
-    prepare = object()
+    def prepare(**kwargs):
+        return []
+
     config = CalibrationConfig(
-        dataset=["sample"],
-        prepare_dataset=prepare,
-        concat_size=2048,
-        sort="desc",
-        concat_separator="\n",
-        batch_size=4,
-    )
+        dataset=["sample"], concat_size=2048, sort="desc", concat_separator="\n", batch_size=4
+    ).bind(prepare)
 
     assert config.dataset == ["sample"]
     assert config.prepare_dataset is prepare

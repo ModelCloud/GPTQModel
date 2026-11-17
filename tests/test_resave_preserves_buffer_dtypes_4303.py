@@ -17,7 +17,7 @@ import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import QuantizeConfig
 
 
@@ -68,10 +68,12 @@ def _tiny_source(directory):
 def _quantize(source, save_dir, qcfg, backend):
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=backend)
     model.quantize(
-        CALIBRATION,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=CALIBRATION,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=backend,
-        calibration_data_min_length=1,
     )
     model.save(str(save_dir))
     del model

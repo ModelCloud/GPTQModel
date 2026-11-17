@@ -20,6 +20,7 @@ from .cpp import (
     TorchOpsJitExtension,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    resolve_cuda_library,
 )
 
 
@@ -66,6 +67,20 @@ def _allspark_cuda_cflags() -> list[str]:
     return flags
 
 
+def _allspark_ldflags() -> list[str]:
+    """Link cuBLAS by absolute path when the host has no development symlink.
+
+    The kernel calls ``cublasHgemm`` for its cuBLAS fallback. ``-lcublas`` is
+    correct on a full toolkit install, but a CUDA 13 wheel host ships only
+    ``libcublas.so.13`` and the link then fails with "cannot find -lcublas".
+    """
+
+    resolved = resolve_cuda_library("cublas")
+    if resolved is not None:
+        return [resolved]
+    return ["-lcublas"]
+
+
 _ALLSPARK_EXTENSION = TorchOpsJitExtension(
     name=_ALLSPARK_OPS_NAME,
     namespace=_ALLSPARK_NAMESPACE,
@@ -75,7 +90,7 @@ _ALLSPARK_EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("allspark"),
     display_name="AllSpark W8A16",
     extra_cuda_cflags=_allspark_cuda_cflags,
-    extra_ldflags=lambda: ["-lcublas"],
+    extra_ldflags=_allspark_ldflags,
     force_rebuild_env="GPTQMODEL_ALLSPARK_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,

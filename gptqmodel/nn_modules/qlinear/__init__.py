@@ -34,6 +34,7 @@ from ...utils.planar_packing import (
 )
 from ...utils.safe import threadpool_limits
 from ..compiled_state import compiled_module_getstate
+from ._compile_support import COMPILE_LEVEL
 from ._fused_train_state import QZEROS_FORMAT_BUFFER, _materialize_snapshot_entry
 from ._runtime_cache import tensor_cache_key
 
@@ -173,9 +174,10 @@ def input_rows(x: t.Tensor) -> int:
     batch dimension, so a 4D input has ``B * S * T`` matrix rows.
     """
 
-    if x.ndim == 0:
+    shape = x.shape
+    if len(shape) == 0:
         raise ValueError("Linear input must have at least one dimension")
-    return math.prod(x.shape[:-1])
+    return math.prod(shape[:-1])
 
 
 def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
@@ -336,6 +338,32 @@ class BaseQuantLinear(nn.Module):
 
     # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
     SUPPORTS_TRAINING_USE_TORCH_KERNEL: bool = False
+
+    # Whether a compiled generation path (transformers' static-cache
+    # auto-compile, a CUDA-graph decode loop) beats this kernel's eager
+    # forward. The bar is *trace-clean*: ``torch.compile(fullgraph=True)`` must
+    # trace the forward with zero graph breaks **and** a compiled decode must
+    # measure faster on the hardware the declaration claims. Either half alone
+    # is not enough: a graph-breaking kernel pays for dozens of graph fragments
+    # and guard checks per decode step (#4669), and a clean trace of a forward
+    # whose eager path is already fast is a wash. A single timing on one
+    # architecture does not qualify a kernel (#4739). The default is False: no
+    # measurement, no opt-in.
+    SUPPORTS_COMPILE: bool = False
+
+    # Highest `torch.compile` level this kernel's `forward` reaches, measured
+    # with the probes in `_compile_support.LEVEL_PROBES`. Every concrete kernel
+    # must declare it explicitly (no silent inheritance), because the answer
+    # differs per kernel and a wrong `CUDAGRAPH` claim turns a decode loop into
+    # a capture failure. See docs/kernel-compile-matrix.md.
+    SUPPORTS_COMPILE_LEVEL: COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+
+    # Whether the eager `forward` may run inside `torch.cuda.graph(...)`:
+    # no host sync, no tensor->host transfer, no Python allocation or device
+    # decision, no data-dependent branch. Independent of dynamo tracing: a
+    # custom op without a fake implementation can be capture-safe and still
+    # fail to trace. Every concrete kernel declares it explicitly.
+    SUPPORTS_GRAPH_CAPTURE: bool = False
 
     SUPPORTS_AUTO_PADDING: bool = None
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY: List[int] = None
@@ -1316,19 +1344,27 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
                 destination[prefix + name] = tensor if keep_vars else tensor.detach()
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        if self._is_runtime_layout():
-            from ...utils.checkpoint_state import is_checkpoint_serialization
+        # The first forward rewrites `_buffers` (register_buffer for the fused
+        # snapshot, rebinding `qweight`/`qzeros`, and popping the clone in
+        # `finalize_fused_train_state`). Serialize with that transform: without
+        # the lock `nn.Module._save_to_state_dict` iterates a dict that is being
+        # resized ("dictionary changed size during iteration"), and under
+        # free-threading it can also emit the runtime int4pack words under the
+        # checkpoint `qweight` key or drop tensors (issue #4788).
+        with self._cpu_transform_lock:
+            if self._is_runtime_layout():
+                from ...utils.checkpoint_state import is_checkpoint_serialization
 
-            if is_checkpoint_serialization():
-                raise RuntimeError(
-                    f"{self.__class__.__name__} rewrites packed tensors into a "
-                    "kernel-private runtime layout; the original checkpoint tensors "
-                    "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
-                    "for a loadable checkpoint, or reload the original checkpoint."
-                )
-        super()._save_to_state_dict(destination, prefix, keep_vars)
-        self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
-        self._write_state_dict_layout_marker(destination, prefix, keep_vars)
+                if is_checkpoint_serialization():
+                    raise RuntimeError(
+                        f"{self.__class__.__name__} rewrites packed tensors into a "
+                        "kernel-private runtime layout; the original checkpoint tensors "
+                        "cannot be reconstructed. Use `GPTQModel.save()`/`save_quantized()` "
+                        "for a loadable checkpoint, or reload the original checkpoint."
+                    )
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+            self._write_fused_train_state_snapshot(destination, prefix, keep_vars)
+            self._write_state_dict_layout_marker(destination, prefix, keep_vars)
 
     def _write_state_dict_layout_marker(self, destination, prefix: str, keep_vars: bool) -> None:
         """Emit the layout code as a tensor so in-process transports keep it.
@@ -1367,6 +1403,14 @@ class PackedGroupedQuantLinear(GroupedQuantLinear):
         )
 
     def _load_from_state_dict(self, *args, **kwargs):
+        # `restore_fused_train_state` rebinds `qweight`/`qzeros` and the fused
+        # snapshot buffers, so a concurrent first forward must not interleave
+        # with it (issue #4788). The lock is re-entrant, so a nested call from a
+        # save path or from `load_state_dict` is safe.
+        with self._cpu_transform_lock:
+            return self._load_from_state_dict_locked(*args, **kwargs)
+
+    def _load_from_state_dict_locked(self, *args, **kwargs):
         state_dict = args[0] if args else kwargs.get("state_dict")
         prefix = args[1] if len(args) > 1 else kwargs.get("prefix", "")
         missing_keys = args[4] if len(args) > 4 else kwargs.get("missing_keys")
