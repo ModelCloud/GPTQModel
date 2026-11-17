@@ -85,6 +85,11 @@ from ..utils.model import (
     streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
+from ..utils.tied_weights import (
+    lm_head_is_tied,
+    retie_tied_weights,
+    word_embeddings_tied,
+)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
@@ -783,8 +788,13 @@ def _save_module_replacement_safetensors(
         raise ValueError("Module replacement save requires at least one module prefix.")
 
     config = getattr(model, "config", None)
-    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
-    if not tie_word_embeddings:
+    # The loaded model's snapshot already resolved tying from the decoder config
+    # and the checkpoint (#4799); the config.json flag is only a fallback.
+    resolved_tie = lm_head_is_tied(model)
+    tie_word_embeddings = word_embeddings_tied(config)
+    if resolved_tie is not None:
+        tie_word_embeddings = resolved_tie
+    elif not tie_word_embeddings:
         source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
         if os.path.exists(source_config_path):
             try:
@@ -1034,7 +1044,7 @@ def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activa
         if result.unexpected_keys:
             raise ValueError(f"Unrecognized native W4A tensors: {result.unexpected_keys}")
         seen.update(values)
-    model.tie_weights()
+    retie_tied_weights(model)
     # A tied tensor can legitimately be omitted from safetensors. Every other
     # parameter/buffer must have been loaded, including the calibration bits.
     state = model.state_dict()

@@ -23,7 +23,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -84,6 +84,7 @@ from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_corre
 from .p2p import safe_module_to, safe_move_to
 from .packing import _auto_pack_impl
 from .tensor import tensor_buffer
+from .tied_weights import tied_weights_keys
 from .torch import HAS_CUDA, as_torch_device, release_pinned_host_cache, torch_empty_cache
 
 
@@ -2762,12 +2763,28 @@ def get_state_dict_for_save(
             key = ("other", id(source))
         ptrs[key].append(name)
 
+    # Only a pair the checkpoint really ties may be collapsed to one tensor.
+    # `_tied_weights_keys` is derived from the model config alone, and a
+    # composite wrapper can leave its top-level `tie_word_embeddings` at the
+    # default `True` while the checkpoint stores a distinct `lm_head` (#4799).
+    # The stamped snapshot records what the checkpoint really ties.
+    snapshot = tied_weights_keys(model)
+    tied_targets = set(snapshot) if snapshot is not None else None
+
     shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
     warn_names = set()
+    separated_names = set()
     for names in shared_ptrs.values():
         # Removing the keys which are declared as known duplicates on
         # load. This allows to make sure the name which is kept is consistent.
-        if model._tied_weights_keys is not None:
+        if tied_targets is not None:
+            found = 0
+            for name in sorted(names):
+                if name in tied_targets and name in state_dict:
+                    found += 1
+                    if found < len(names):
+                        del state_dict[name]
+        elif model._tied_weights_keys is not None:
             found = 0
             for name in sorted(names):
                 matches_pattern = any(pcre.compile(pat).search(name) for pat in model._tied_weights_keys)
@@ -2786,11 +2803,29 @@ def get_state_dict_for_save(
             if name in state_dict:
                 found += 1
                 if found > 1:
+                    entry = state_dict[name]
+                    if (
+                        tied_targets is not None
+                        and name not in tied_targets
+                        and isinstance(entry.source, torch.Tensor)
+                    ):
+                        # The checkpoint does not tie this tensor, so it must
+                        # not be dropped: give it its own storage and keep it.
+                        state_dict[name] = replace(
+                            entry, source=entry.source.clone()
+                        )
+                        separated_names.add(name)
+                        continue
                     del state_dict[name]
                     warn_names.add(name)
     if len(warn_names) > 0:
         log.warn.once(
             f"Removed shared tensor {warn_names} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading",
+        )
+    if len(separated_names) > 0:
+        log.warn.once(
+            f"Separated shared storage for {separated_names} while saving: the checkpoint does "
+            "not tie these tensors, so both are written.",
         )
     return state_dict
 
