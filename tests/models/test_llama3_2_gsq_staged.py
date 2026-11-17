@@ -34,7 +34,7 @@ import pytest
 import torch
 from model_test import ModelTest
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -77,8 +77,14 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
     calibration_rows = int(os.environ.get("GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS", "128"))
     calibration = ModelTest.load_dataset(rows=calibration_rows)
     assert len(calibration) == calibration_rows, "Calibration dataset has fewer records than requested"
-    result = model.quantize(calibration, calibration_concat_size=2048,
-                            calibration_sort="desc", backend=BACKEND.TORCH)
+    result = model.quantize(
+        CalibrationConfig(
+            dataset=calibration,
+            concat_size=2048,
+            sort="desc",
+        ),
+        backend=BACKEND.TORCH,
+    )
     assert model.quantized
     assert len(model.model.model.layers) == 16
     for layer in model.model.model.layers:

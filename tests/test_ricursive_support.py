@@ -26,7 +26,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models import auto
 from gptqmodel.models.definitions.ricursive import RicursiveQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -348,7 +348,7 @@ def test_tiny_ricursive_gptq_quantization_smoke(tmp_path: Path):
         trust_remote_code=True,
     )
     calibration = [{"input_ids": torch.randint(0, 256, (64,))} for _ in range(8)]
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     model.save(str(quantized_dir))
 
     quantized = GPTQModel.load(

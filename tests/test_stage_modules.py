@@ -15,7 +15,7 @@ from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.loop_processor import ForwardConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.paro_processor import ParoProcessor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import (
     _capture_pristine_group_context,
@@ -390,7 +390,7 @@ def _make_forward_executor_looper(
     return types.SimpleNamespace(
         _resolve_batch_total=lambda _num_batches, layer_inputs: len(layer_inputs),
         _collect_row_counts=lambda layer_inputs: [int(batch[0].shape[0]) for batch in layer_inputs],
-        _set_processor_mask=lambda _processor, _mask: None,
+        _set_processor_mask=lambda _processor, _mask, padding_mask=None: None,
         _batch_row_count=lambda batch_inputs: int(batch_inputs[0].shape[0]),
         support_batch_quantize=False,
         gptq_model=types.SimpleNamespace(
@@ -468,7 +468,7 @@ def _run_executor_parallel(executor, processor, *, apply_moe_config):
     )
 
 
-def test_stage_layer_forces_sync_finalizers_for_paroquant():
+def test_stage_layer_forces_sync_finalizers_for_paro():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -478,7 +478,7 @@ def test_stage_layer_forces_sync_finalizers_for_paroquant():
             )
         )
     )
-    paro_processor = object.__new__(ParoQuantProcessor)
+    paro_processor = object.__new__(ParoProcessor)
 
     assert _should_drain_finalize_futures_synchronously(
         looper,
@@ -486,7 +486,7 @@ def test_stage_layer_forces_sync_finalizers_for_paroquant():
     ) is True
 
 
-def test_stage_layer_keeps_async_finalizers_for_non_paroquant_when_unset():
+def test_stage_layer_keeps_async_finalizers_for_non_paro_when_unset():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -653,7 +653,7 @@ def test_stage_layer_keeps_async_finalizers_for_single_device_awq():
     ) is False
 
 
-def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offload():
+def test_stage_layer_empties_cache_after_sync_paro_finalize_only_with_offload():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -663,7 +663,7 @@ def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offlo
             )
         )
     )
-    paro_processor = object.__new__(ParoQuantProcessor)
+    paro_processor = object.__new__(ParoProcessor)
 
     assert _should_empty_cache_after_sync_finalize(
         looper,
@@ -676,15 +676,15 @@ def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offlo
         finalize_tasks=[(paro_processor, None, None, None, None)],
     ) is False
 
-def test_stage_layer_paroquant_layer_scope_skips_pristine_group_clone():
-    processor = object.__new__(ParoQuantProcessor)
+def test_stage_layer_paro_layer_scope_skips_pristine_group_clone():
+    processor = object.__new__(ParoProcessor)
     processor.qcfg = types.SimpleNamespace(opt_scope="layer")
 
     assert _processor_needs_pristine_group_clone(processor) is False
 
 
-def test_stage_layer_paroquant_compute_block_scope_keeps_pristine_group_clone():
-    processor = object.__new__(ParoQuantProcessor)
+def test_stage_layer_paro_compute_block_scope_keeps_pristine_group_clone():
+    processor = object.__new__(ParoProcessor)
     processor.qcfg = types.SimpleNamespace(opt_scope="compute_block")
 
     assert _processor_needs_pristine_group_clone(processor) is True

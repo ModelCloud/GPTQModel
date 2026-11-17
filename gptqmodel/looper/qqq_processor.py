@@ -13,7 +13,6 @@ from torch.nn import Module
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -36,7 +35,13 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.qqq import QQQ_ROCM_UNSUPPORTED, QQQLinear, QQQTorchLinear
-from ..quantization.config import METHOD, QuantizeConfig, apply_scalar_module_overrides, resolve_quant_format
+from ..quantization.config import (
+    METHOD,
+    CalibrationConfig,
+    QuantizeConfig,
+    apply_scalar_module_overrides,
+    resolve_quant_format,
+)
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback

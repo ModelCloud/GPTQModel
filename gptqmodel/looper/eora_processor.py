@@ -19,7 +19,6 @@ from ..eora.eora import (
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CheckpointSupport,
     ForwardConfig,
     InlineConfig,
@@ -37,7 +36,7 @@ from ..models.writer import (
     PROCESS_LOG_TIME,
     PROCESS_USED_MEMORY,
 )
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import CalibrationConfig, QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to

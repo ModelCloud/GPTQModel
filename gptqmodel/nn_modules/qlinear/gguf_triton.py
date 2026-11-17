@@ -14,6 +14,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 from ._runtime_cache import tensor_cache_key
 from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch, gguf_tensor_qtype
 
@@ -1730,6 +1731,12 @@ def fused_q6_k_matmul(
 
 
 class GGUFTritonKernel(GGUFTorchLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager runs and an explicit
+    # torch.cuda.graph capture succeeds, but dynamo breaks on
+    # `tensor.is_inference()` plus the raw Triton launches: EAGER only.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 45}

@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.awq_processor import AWQProcessor
 
 
@@ -222,7 +223,7 @@ def test_variable_length_awq_runs_on_remote_family(family, tmp_path):
     ]
     # Sorted descending: the 48-token capture is replayed with the 20-token
     # activation, which is exactly what crashed before the fix.
-    model.quantize(calibration, batch_size=1, calibration_sort="desc")
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, sort="desc"))
 
     q_proj = model.model.get_submodule(q_proj_path)
     assert not isinstance(q_proj, nn.Linear)

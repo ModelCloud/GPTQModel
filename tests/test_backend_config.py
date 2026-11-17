@@ -77,7 +77,7 @@ def test_enum_and_string_compatibility(selector):
     (configs.AwqTritonConfig, {"schedule": "typo"}),
     (configs.SwordfishConfig, {"dense_m": -1}),
     (configs.GGUFCPPConfig, {"threads": False}),
-    (configs.ParoQuantTritonConfig, {"decode_max_rows": 0}),
+    (configs.ParoTritonConfig, {"decode_max_rows": 0}),
     (RuntimeConfig, {"max_packers": 0}),
 ])
 def test_invalid_options_fail_at_construction(config_cls, options):

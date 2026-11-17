@@ -20,13 +20,14 @@ import sys
 import time
 from pathlib import Path
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from gptqmodel import GPTQModel
+from gptqmodel import CalibrationConfig, GPTQModel
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig, VPTQConfig
 from gptqmodel.utils.backend import BACKEND
 
@@ -121,9 +122,11 @@ def _load_model(model_path: str, name: str, output_path: Path, args, tokenizer, 
             device_map={"": str(args.device)},
         )
         model.quantize(
-            calibration,
-            calibration_concat_size=args.calibration_concat_size,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                concat_size=args.calibration_concat_size,
+                batch_size=1,
+            ),
             backend=backend,
         )
         output_path.mkdir(parents=True, exist_ok=True)

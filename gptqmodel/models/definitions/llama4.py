@@ -29,6 +29,38 @@ class Llama4QModel(BaseQModel):
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
+    @staticmethod
+    def _decoder_config(config):
+        """The text decoder config: ``Llama4Config`` nests it under ``text_config``."""
+
+        return getattr(config, "text_config", config)
+
+    @classmethod
+    def _drop_dense_feed_forward(cls, tree):
+        """Remove the dense ``feed_forward`` fallback from every tree variant."""
+
+        for variant in cls._iter_module_tree_variants(tree):
+            for item in variant:
+                if not isinstance(item, dict):
+                    continue
+                branch = item.get("feed_forward:moe")
+                if isinstance(branch, dict):
+                    branch.pop("", None)
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        tree = super()._resolve_effective_module_tree(model, quantize_config, detector=detector)
+        config = cls._decoder_config(getattr(model, "config", None))
+        num_layers = getattr(config, "num_hidden_layers", None)
+        moe_layers = getattr(config, "moe_layers", None)
+        if num_layers and moe_layers is not None and set(range(num_layers)) <= set(moe_layers):
+            # Llama-4 Scout (`interleave_moe_layer_step=1`) has no dense MLP in
+            # any decoder layer, so the dense fallback #4245 declared for
+            # Maverick's interleaved layers cannot resolve. Drop it instead of
+            # relaxing `layer_modules_strict` for the whole family (#4689).
+            cls._drop_dense_feed_forward(tree)
+        return tree
+
     module_tree = [
         "language_model",
         "model",

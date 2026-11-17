@@ -37,7 +37,7 @@ def _quantized_checkpoint(tmp_path):
     model = GPTQModel.load(
         str(dense), quantize_config=RTNConfig(bits=4, group_size=32, device="cpu")
     )
-    model.quantize(calibration=None, backend="auto")
+    model.quantize(backend="auto")
     checkpoint = tmp_path / "quantized"
     model.save(str(checkpoint))
     return checkpoint

@@ -205,7 +205,7 @@ def test_rocm_awq_gemv_triton_matches_independent_oracle(
     # truth after the one mandatory output cast.  FP16 stays inside 2e-3; BF16 is
     # limited by its ~3 decimal digits, so it is checked as <=1 ULP of the
     # already-rounded truth rather than a flat relative bound (docs/rocm-rdna4.md
-    # records the same 1.25-ULP floor for the ParoQuant BF16 output).
+    # records the same 1.25-ULP floor for the Paro BF16 output).
     delta = (first.to(torch.float64) - rounded).abs()
     ulp = torch.finfo(dtype).eps * rounded.abs()
     assert torch.all(delta <= ulp * 1.25 + 1e-6), (

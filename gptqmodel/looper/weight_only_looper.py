@@ -25,7 +25,7 @@ from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
-from ..looper.loop_processor import CalibrationConfig, record_quant_log
+from ..looper.loop_processor import record_quant_log
 from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.module_preprocessor import ModulePreProcessor
 from ..looper.named_module import NamedModule
@@ -36,6 +36,7 @@ from ..models.module_plan import _model_module_plan
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
+    CalibrationConfig,
     FP8Config,
     GGUFConfig,
     NF12Config,

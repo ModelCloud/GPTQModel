@@ -90,7 +90,7 @@ from .awq_processor import AWQProcessor
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
-from .paroquant_processor import ParoQuantProcessor
+from .paro_processor import ParoProcessor
 from .processor_fusion import plan_processor_fusion
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
@@ -2226,15 +2226,15 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
             )
 
         for processor in self.processors:
-            # Pre-build ParoQuant's optional fused rotation extension before the
+            # Pre-build Paro's optional fused rotation extension before the
             # first timed layer so layer 0 does not absorb a one-time JIT cost.
-            if isinstance(processor, ParoQuantProcessor):
+            if isinstance(processor, ParoProcessor):
                 processor.prewarm_runtime()
 
         if region_timer is not None:
             region_timer.flush()
 
-        is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
+        is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoProcessor)) for proc in self.processors)
         # Capture-only layer groups are driven by processor forward config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(
@@ -2489,7 +2489,7 @@ class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
         best_variant = best[0][2]
 
         is_awq_quantize = any(
-            isinstance(proc, (AWQProcessor, ParoQuantProcessor))
+            isinstance(proc, (AWQProcessor, ParoProcessor))
             for proc in self.processors
         )
         include_capture_only = any(

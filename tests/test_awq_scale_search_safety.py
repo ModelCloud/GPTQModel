@@ -13,10 +13,9 @@ from torch import nn
 from torch.nn import functional as F
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState, _AWQScaleGroupError
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
-from gptqmodel.quantization.config import AWQConfig, ExpertsRoutingOverride, MoEConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig, ExpertsRoutingOverride, MoEConfig
 
 
 class _RoutedBlock(nn.Module):

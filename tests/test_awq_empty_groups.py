@@ -15,9 +15,8 @@ import torch
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
 
 def _processor(model):

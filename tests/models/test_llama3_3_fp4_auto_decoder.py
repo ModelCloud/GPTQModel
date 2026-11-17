@@ -4,7 +4,7 @@
 import torch
 from model_test import ModelTest
 
-from gptqmodel import BACKEND
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.models import auto
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -100,12 +100,14 @@ class TestLlama3_3FP4AutoDecoder(ModelTest):
 
             try:
                 model.quantize(
-                    dataset,
-                    calibration_concat_size=self.DATASET_CONCAT_SIZE,
-                    calibration_concat_separator=self.DATASET_CONCAT_SEPARATOR,
-                    calibration_sort=self.DATASET_SORT,
+                    CalibrationConfig(
+                        dataset=dataset,
+                        concat_size=self.DATASET_CONCAT_SIZE,
+                        concat_separator=self.DATASET_CONCAT_SEPARATOR,
+                        sort=self.DATASET_SORT,
+                        batch_size=self.QUANT_BATCH_SIZE,
+                    ),
                     backend=self.QUANT_BACKEND,
-                    batch_size=self.QUANT_BATCH_SIZE,
                 )
             except StopMainLoop:
                 # The layer callback intentionally stops after layer 0 once the FP4 decode path is observed.

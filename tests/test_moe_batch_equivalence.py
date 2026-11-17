@@ -25,7 +25,7 @@ from tokenizers.trainers import WordLevelTrainer
 from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 
 
 pytestmark = [pytest.mark.cpu, pytest.mark.slow]
@@ -94,10 +94,12 @@ def _quantize(
     if patch_model is not None:
         patch_model(model.model)
     model.quantize(
-        calibration,
-        batch_size=batch_size,
+        CalibrationConfig(
+            dataset=calibration,
+            batch_size=batch_size,
+            min_length=1,
+        ),
         backend=BACKEND.TORCH,
-        calibration_data_min_length=1,
     )
     model.save(output)
     # Compare dequantized weights: packed codes are discrete, so one flipped code

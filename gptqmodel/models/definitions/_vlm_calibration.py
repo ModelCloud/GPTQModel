@@ -251,9 +251,9 @@ def pop_conversation_calibration_options(
 ) -> tuple[Optional[str], Optional[int]]:
     """Extract the calibration options the conversation path can honour.
 
-    ``calibration_concat_size`` is rejected: concatenating token ids would break
-    the image/token alignment the processor produced. ``calibration_sort`` and
-    ``calibration_data_min_length`` are returned so the conversation path can
+    ``CalibrationConfig.concat_size`` is rejected: concatenating token ids would break
+    the image/token alignment the processor produced. ``CalibrationConfig.sort`` and
+    ``CalibrationConfig.min_length`` are returned so the conversation path can
     apply them to the prepared batches.
     """
 
@@ -264,7 +264,7 @@ def pop_conversation_calibration_options(
 
     if concat_size is not None:
         raise ValueError(
-            f"{label}: `calibration_concat_size` is not supported for conversation "
+            f"{label}: `CalibrationConfig.concat_size` is not supported for conversation "
             f"calibration data (got {concat_size}) because concatenating token ids "
             "would break the image/token alignment. Pass pre-tokenized `input_ids` "
             "rows to use it."
@@ -311,7 +311,7 @@ def finalize_conversation_batches(
             log.warn(
                 f"{label}: {dropped} calibration conversation(s) with input_ids length "
                 f"<= {min_length} were removed. Use "
-                "quantize(calibration_data_min_length=...) to set a custom minimum length."
+                "CalibrationConfig(min_length=...) to set a custom minimum length."
             )
         batches = kept
 
@@ -356,8 +356,8 @@ def prepare_vlm_calibration_dataset(
     contract cannot drift per model again:
 
     * pre-tokenized rows (and columnar mappings) take the base text path;
-    * ``calibration_concat_size`` is rejected for conversations;
-    * ``calibration_dataset_sort`` / ``calibration_data_min_length`` are applied;
+    * ``CalibrationConfig.concat_size`` is rejected for conversations;
+    * ``CalibrationConfig.sort`` / ``CalibrationConfig.min_length`` are applied;
     * rows that mix token ids with conversations are rejected.
 
     ``prepare_batch(processor, conversations)`` prepares one processor batch and

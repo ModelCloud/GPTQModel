@@ -12,7 +12,10 @@ import time  # noqa: E402
 
 from models.model_test import ModelTest  # noqa: E402
 
-from gptqmodel import GPTQModel  # noqa: E402
+from gptqmodel import (
+    CalibrationConfig,
+    GPTQModel,  # noqa: E402
+)
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 
 
@@ -39,9 +42,10 @@ class TestQuantTime(ModelTest):
 
         start = time.time()
         model.quantize(
-            calibration=datasets,
-            # calibration_dataset_concat_size=2048,
-            batch_size=4,
+            CalibrationConfig(
+                dataset=datasets,
+                batch_size=4,
+            ),
         )
         end_time = time.time()
 

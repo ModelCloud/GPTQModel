@@ -720,7 +720,19 @@ def _resolve_default_layerwise_device(device, backend: BACKEND):
         # chip. The native TTNN backend opens its own mesh and never consumes an
         # ``xla:N`` ordinal, so keep the abstract family unexpanded here.
         return selected
-    return expand_selector_device_family(selected)
+    # The default placement stays inside one compute-capability group so a host
+    # that mixes GPU generations still loads with no placement arguments (#4705).
+    resolved = expand_selector_device_family(selected, single_capability_group=True)
+    # Keep the resolved group explicit even when it holds one card. A scalar
+    # reads as an abstract family downstream: ``_layerwise_device_count`` then
+    # falls back to ``torch.cuda.device_count()`` and the map builder places
+    # layers on every visible GPU, including the generation the group excluded
+    # (#4734). The multi-device case already returns a tuple, so a one-card
+    # group must too, or the mixed-capability guard is bypassed instead of
+    # honored.
+    if isinstance(resolved, torch.device) and resolved.index is not None and resolved.type != "cpu":
+        return (resolved,)
+    return resolved
 
 
 _ACCELERATE_DEVICE_MAP_STRINGS = frozenset({"auto", "balanced", "sequential"})
@@ -3346,7 +3358,7 @@ def ModelLoader(cls):
             load_extra_kwargs["offload_buffers"] = kwargs["offload_buffers"]
 
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
+        if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PARO]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

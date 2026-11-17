@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.looper.awq_processor import AWQProcessor
 
 
@@ -241,7 +242,7 @@ def test_tiny_qwen2_vl_quantizes_with_awq_and_gptq(method, tmp_path, monkeypatch
         }
         for length in (48, 20)
     ]
-    model.quantize(calibration, batch_size=1, calibration_sort="desc")
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, sort="desc"))
 
     q_proj = model.model.get_submodule(
         "model.language_model.layers.0.self_attn.q_proj"

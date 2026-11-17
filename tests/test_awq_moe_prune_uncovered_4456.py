@@ -21,10 +21,9 @@ from torch import nn
 
 import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.looper.loop_processor import CalibrationConfig
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan
-from gptqmodel.quantization.config import AWQConfig
+from gptqmodel.quantization.config import AWQConfig, CalibrationConfig
 
 
 class _ImmediateFuture:
@@ -295,7 +294,7 @@ def test_tiny_qwen3_moe_awq_fallback_none_keeps_uncovered_experts_dense(tmp_path
     qcfg = AWQConfig(bits=4, group_size=32, fallback=None)
 
     model = GPTQModel.load(str(model_dir), quantize_config=qcfg, dtype=torch.float16)
-    model.quantize(calibration, batch_size=4, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=4, min_length=1))
 
     excluded = {
         pattern[2:].replace("\\", "")

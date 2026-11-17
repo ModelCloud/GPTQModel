@@ -23,7 +23,6 @@ from .._alloc_conf import clamp_budget_below_allocator_split
 from ..looper.loop_processor import (
     DTYPE_SIZE_COLUMN,
     MODULE_FEATURE_COLUMN,
-    CalibrationConfig,
     CalibrationTypes,
     CheckpointSupport,
     ForwardConfig,
@@ -51,7 +50,7 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
-from ..quantization.config import FORMAT, METHOD, MSEConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import FORMAT, METHOD, CalibrationConfig, MSEConfig, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import exclude_attention_sinks, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
@@ -2429,6 +2428,89 @@ class AWQProcessor(LoopProcessor):
 
         self._module_forward_kwargs = refreshed
 
+    def _starved_group_members(
+        self,
+        layer_names: List[str],
+        input_feat: Dict[str, torch.Tensor],
+    ) -> List[str]:
+        """Returns the scaling-group members that lack enough activations.
+
+        Coverage is evaluated per layer. Summing retained tokens over the
+        group's siblings let q/k/v (3x) and gate/up (2x) pass a percentage
+        threshold while a lone down_proj fell below it and silently became
+        RTN (#4063).
+
+        The members are returned instead of a single verdict because a group
+        does not always have to be all-or-nothing. ``_search_best_scale`` reads
+        one captured input per group, and a member's own captured rows only
+        reach the objective through the replayed block. A member with no (or
+        too few) rows therefore contributes nothing to the scale search, yet
+        the norm it reads is still divided by ``s``, so its weights must still
+        be multiplied by ``s``. Callers fold the scale into these members and
+        quantize them with the fallback strategy while the well-covered
+        members keep AWQ (#4675).
+        """
+
+        from ..utils.fallback import should_use_fallback
+
+        expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
+        expected = float(expected_tokens) if expected_tokens else None
+        starved = []
+        for name in layer_names:
+            feat = input_feat.get(name)
+            if feat is None or feat.numel() == 0:
+                starved.append(name)
+                continue
+            if should_use_fallback(self.fallback, float(self._captured_tokens(name, feat)), expected):
+                starved.append(name)
+
+        return starved
+
+    def _captured_tokens(self, name: str, feat: torch.Tensor) -> int:
+        """Rows of calibration data the scale search would see for one module."""
+
+        feature_stat = self._feature_stats.get(name, {})
+        if feature_stat.get("mode") == "token_rows" and "raw_tokens" in feature_stat:
+            # Fallback asks "did enough of the calibration corpus route to
+            # this module", so compare the raw routed token count against
+            # the expected corpus total. Token-row retention is a deliberate
+            # sampling bound and must not trigger low-coverage fallback.
+            return int(feature_stat["raw_tokens"])
+        if "retained_tokens" in feature_stat:
+            # Other modes must measure the rows that scale search actually
+            # receives. In particular, latest-batch aggregation discards
+            # earlier variable-length captures.
+            return int(feature_stat["retained_tokens"])
+        hidden = feat.shape[-1] if feat.dim() >= 1 else 1
+        return feat.numel() // max(hidden, 1)
+
+    def _group_coverage_is_sufficient(
+        self,
+        layer_names: List[str],
+        input_feat: Dict[str, torch.Tensor],
+    ) -> bool:
+        """Whether the group as a whole has enough routed rows to search with.
+
+        Each member of a routed-expert gate/up group can fall below the
+        per-module threshold while the layer still has thousands of routed
+        tokens. Only a group with no usable data at all has to fall back
+        wholesale (#4675).
+        """
+
+        from ..utils.fallback import should_use_fallback
+
+        expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
+        expected = float(expected_tokens) if expected_tokens else None
+        total = 0.0
+        for name in layer_names:
+            feat = input_feat.get(name)
+            if feat is None or feat.numel() == 0:
+                continue
+            total += float(self._captured_tokens(name, feat))
+        if total <= 0:
+            return False
+        return not should_use_fallback(self.fallback, total, expected)
+
     def _should_fallback_group(
         self,
         layer_names: List[str],
@@ -2436,42 +2518,12 @@ class AWQProcessor(LoopProcessor):
     ) -> bool:
         """Returns whether any layer in a scaling group lacks enough activations.
 
-        Coverage is evaluated per layer. Summing retained tokens over the
-        group's siblings let q/k/v (3x) and gate/up (2x) pass a percentage
-        threshold while a lone down_proj fell below it and silently became
-        RTN (#4063). A group shares one scale vector, so one starved member
-        still has to fall back.
+        A group shares one scale vector, so a starved member always has to fall
+        back. Callers that can fold the scale into the starved member and keep
+        AWQ for its siblings use ``_starved_group_members`` instead (#4675).
         """
 
-        from ..utils.fallback import should_use_fallback
-
-        expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
-        expected = float(expected_tokens) if expected_tokens else None
-        for name in layer_names:
-            feat = input_feat.get(name)
-            if feat is None or feat.numel() == 0:
-                return True
-
-            feature_stat = self._feature_stats.get(name, {})
-            if feature_stat.get("mode") == "token_rows" and "raw_tokens" in feature_stat:
-                # Fallback asks "did enough of the calibration corpus route to
-                # this module", so compare the raw routed token count against
-                # the expected corpus total. Token-row retention is a deliberate
-                # sampling bound and must not trigger low-coverage fallback.
-                captured_tokens = int(feature_stat["raw_tokens"])
-            elif "retained_tokens" in feature_stat:
-                # Other modes must measure the rows that scale search actually
-                # receives. In particular, latest-batch aggregation discards
-                # earlier variable-length captures.
-                captured_tokens = int(feature_stat["retained_tokens"])
-            else:
-                hidden = feat.shape[-1] if feat.dim() >= 1 else 1
-                captured_tokens = feat.numel() // max(hidden, 1)
-
-            if should_use_fallback(self.fallback, float(captured_tokens), expected):
-                return True
-
-        return False
+        return bool(self._starved_group_members(layer_names, input_feat))
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         """Runs the AWQ scaling, clipping, and quantization flow for one layer."""
@@ -2567,9 +2619,52 @@ class AWQProcessor(LoopProcessor):
                 get_op_name(layer_module_ref, layer) if isinstance(layer, torch.nn.Module) else str(layer)
                 for layer in layers_sample
             ]
+            search_layer_names = layer_names
+            # The split below is only sound when the search reads a captured
+            # input that is not one of the group's members: routed-expert
+            # gate/up groups replay the MoE root capture, and native routing may
+            # leave a member unexecuted without the group being broken.
+            shared_search_input = cfg.get("_input_feature_name") not in layer_names
+            if shared_search_input:
+                cfg["_awq_allow_partial_replay"] = True
             if self.fallback and self._should_fallback_group(layer_names, input_feat):
-                fallback_names.update(layer_names)
-                continue
+                starved_names = self._starved_group_members(layer_names, input_feat)
+                covered_names = [name for name in layer_names if name not in starved_names]
+                if not shared_search_input or not starved_names:
+                    # A caller-level veto or a dense group: the whole group
+                    # still falls back.
+                    fallback_names.update(layer_names)
+                    continue
+                if covered_names:
+                    # One starved expert must not send its whole MoE gate/up
+                    # group to RTN (#4675). The starved members contribute no
+                    # rows to the scale search, but the norm they read is still
+                    # divided by the folded scale, so keep them in the fold and
+                    # quantize them with the fallback strategy after it.
+                    search_layer_names = covered_names
+                    fallback_names.update(starved_names)
+                    log.warning(
+                        "AWQProcessor: layer %s keeps AWQ for %d of %d members of a scaling group; "
+                        "%d starved member(s) are scale-folded then plain-quantized: %s",
+                        layer_index,
+                        len(covered_names),
+                        len(layer_names),
+                        len(starved_names),
+                        starved_names[:6],
+                    )
+                elif self._group_coverage_is_sufficient(layer_names, input_feat):
+                    # Every member is individually below the threshold, but the
+                    # group as a whole has routed data: search the members that
+                    # the replay executes and fold the rest.
+                    log.warning(
+                        "AWQProcessor: layer %s has no individually-covered member in a "
+                        "scaling group, but the group's routed tokens pass the threshold; "
+                        "searching the executed members instead of falling back the group",
+                        layer_index,
+                    )
+                else:
+                    fallback_names.update(layer_names)
+                    continue
 
             first_layer_module = layers_sample[0] if layers_sample else None
             # Some configs alias prev_op to the first layer (e.g. gate_proj); treat that as valid
@@ -2598,10 +2693,21 @@ class AWQProcessor(LoopProcessor):
                 )
                 continue
 
-            missing_layers = [name for name in layer_names if name not in input_feat]
+            missing_layers = [name for name in search_layer_names if name not in input_feat]
             if missing_layers:
                 skipped_groups.append((layer_names, missing_layers))
                 continue
+            if search_layer_names is not layer_names:
+                covered = set(search_layer_names)
+                cfg["_awq_search_layers"] = [
+                    layer
+                    for layer in layers_sample
+                    if (
+                        get_op_name(layer_module_ref, layer)
+                        if isinstance(layer, nn.Module)
+                        else str(layer)
+                    ) in covered
+                ]
             filtered_module_config.append(cfg)
 
         if skipped_groups:
@@ -2678,9 +2784,19 @@ class AWQProcessor(LoopProcessor):
 
         scales_list = []
         for layer, scale_consumers in zip(sanitized_module_config, scale_consumers_by_group):
+            search_layers = layer.pop("_awq_search_layers", None)
+            allow_partial_replay = bool(layer.pop("_awq_allow_partial_replay", False))
+            call_kwargs = dict(layer)
+            if search_layers is not None:
+                # Search with the covered members only; fold into every member.
+                call_kwargs["fold_layers"] = layer["layers"]
+                call_kwargs["layers"] = search_layers
             try:
                 scales_list.append(self._search_best_scale(
-                    layer_module_ref, scale_consumers=scale_consumers, **layer,
+                    layer_module_ref,
+                    scale_consumers=scale_consumers,
+                    allow_partial_replay=allow_partial_replay,
+                    **call_kwargs,
                 ))
             except _AWQScaleGroupError as exc:
                 if not self.fallback:
@@ -2824,8 +2940,15 @@ class AWQProcessor(LoopProcessor):
                 targets.add(target_key)
 
     @staticmethod
-    def _validate_scale_group(module, prev_op, layers, inp, module2inspect, scale_consumers):
-        """Check exact bindings, widths and the existing replay boundary."""
+    def _validate_scale_group(
+        module, prev_op, layers, inp, module2inspect, scale_consumers, extra_layers=None,
+    ):
+        """Check exact bindings, widths and the existing replay boundary.
+
+        ``extra_layers`` are fold-only members: they must still bind, match the
+        source width, and live inside the replay boundary, but the search does
+        not score them, so they are not replayed targets.
+        """
 
         try:
             source_name = get_op_name(module, prev_op)
@@ -2838,7 +2961,14 @@ class AWQProcessor(LoopProcessor):
             raise _AWQScaleGroupError(f"AWQ: source `{source_name}` requires targets and nonempty replay features.")
         width = inp.shape[-1]
         weights = set()
-        for name, target in targets + consumers:
+        seen = {id(layer) for layer in layers}
+        extra = []
+        for layer in extra_layers or ():
+            if id(layer) in seen:
+                continue
+            seen.add(id(layer))
+            extra.append((get_op_name(module, layer), layer))
+        for name, target in targets + extra + consumers:
             weight = getattr(target, "weight", None)
             if not isinstance(weight, torch.Tensor) or weight.ndim != 2 or weight.shape[1] != width:
                 raise _AWQScaleGroupError(f"AWQ: target `{name}` does not accept the {width}-channel source input.")
@@ -2850,7 +2980,7 @@ class AWQProcessor(LoopProcessor):
             if source_weight.ndim in (1, 2) and source_weight.shape[0] != width:
                 raise _AWQScaleGroupError(f"AWQ: source `{source_name}` cannot produce {width} channels.")
         inspection_modules = {id(child) for child in module2inspect.modules()}
-        outside = [name for name, target in targets + consumers if id(target) not in inspection_modules]
+        outside = [name for name, target in targets + extra + consumers if id(target) not in inspection_modules]
         if outside:
             raise _AWQScaleGroupError(
                 f"AWQ: replay boundary `{inspect_name}` does not contain targets {outside} for source "
@@ -3039,6 +3169,8 @@ class AWQProcessor(LoopProcessor):
             kwargs={},
             bits: Optional[int] = None,
             scale_consumers: Optional[List[str]] = None,
+            fold_layers: Optional[List[nn.Linear]] = None,
+            allow_partial_replay: bool = False,
     ):
         """Searches the best per-channel AWQ scale for a module group.
 
@@ -3048,14 +3180,29 @@ class AWQProcessor(LoopProcessor):
         normed input (MoE router, ``shared_expert_gate``). Search replays the
         original input with ``Q(W * s) / s`` weights, so these consumers stay
         unchanged until the final fold compensates the scaled source.
+
+        ``fold_layers`` names every member that must receive the folded scale
+        even though only ``layers`` is scored. Starved members of a MoE gate/up
+        group are folded but excluded from the search (#4675): they have no
+        rows in the objective, yet the norm they read is still divided by
+        ``s``, so their weights must still be multiplied by it.
+
+        ``allow_partial_replay`` permits a member to be missing from the
+        reference replay. Routed-expert groups set it because native routing
+        only executes the experts it selects; a dense group keeps failing
+        closed, since a member that does not run there is a broken replay.
         """
 
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
 
+        # Every member that must receive the folded scale, including members the
+        # search drops below. Defaults to the searched members themselves.
+        fold_layers = list(fold_layers) if fold_layers is not None else list(layers)
         replay_targets = self._validate_scale_group(
             module, prev_op, layers, inp, module2inspect, scale_consumers,
+            extra_layers=fold_layers,
         )
         kwargs = dict(kwargs)
         if "use_cache" in kwargs:
@@ -3154,10 +3301,36 @@ class AWQProcessor(LoopProcessor):
                     handle.remove()
             unobserved = [name for name, target in replay_targets if id(target) not in observed]
             if unobserved:
-                raise _AWQScaleGroupError(
-                    f"AWQ: reference replay did not execute targets {unobserved}; "
-                    "the scale objective would not score the complete group."
+                # Native routing only executes the experts it routes to. The
+                # replay input is one captured tensor, so an expert that the
+                # corpus routed to can still be unrouted in this sample and
+                # never run (#4675). Score the members that did run and keep the
+                # rest in the fold: their weights are still multiplied by ``s``
+                # because the norm they read is divided by it.
+                if not allow_partial_replay:
+                    raise _AWQScaleGroupError(
+                        f"AWQ: reference replay did not execute targets {unobserved}; "
+                        "the scale objective would not score the complete group."
+                    )
+                executed = {id(target) for _name, target in replay_targets if id(target) in observed}
+                executed_layers = [layer for layer in layers if id(layer) in executed]
+                if not executed_layers:
+                    raise _AWQScaleGroupError(
+                        f"AWQ: reference replay did not execute targets {unobserved}; "
+                        "the scale objective would not score the complete group."
+                    )
+                log.warning(
+                    "AWQProcessor: reference replay did not execute %d of %d scaling-group targets "
+                    "(%s); scoring only the executed members. Every member still receives the folded "
+                    "scale (#4675).",
+                    len(unobserved),
+                    len(layers),
+                    unobserved[:6],
                 )
+                layers = executed_layers
+                group_sizes = [self._group_size_for(module, layer) for layer in layers]
+                formats = [self._format_for(module, layer) for layer in layers]
+                w_mean = _compute_awq_weight_mean(layers, group_sizes)
 
             # [STEP 4]: Compute loss
             best_scale_kwargs = {
@@ -3189,7 +3362,7 @@ class AWQProcessor(LoopProcessor):
 
         return (
             get_op_name(module, prev_op),
-            tuple([get_op_name(module, m) for m in layers]),
+            tuple([get_op_name(module, m) for m in (fold_layers or layers)]),
             best_scales,
             loss
         )
@@ -4139,11 +4312,26 @@ class AWQProcessor(LoopProcessor):
                     module_kwargs["position_ids"] = pos_for_rotary
 
             x_for_rotary = x if rotary_device is None else x.to(rotary_device)
-            module_kwargs["position_embeddings"] = rotary(
+            rotary_kwargs = self._rotary_layer_type_kwargs(rotary, module)
+            built_embeddings = self._build_position_embeddings(
+                rotary,
                 x_for_rotary,
                 pos_for_rotary,
-                **self._rotary_layer_type_kwargs(rotary, module),
+                rotary_kwargs,
+                module_kwargs.get("position_embeddings"),
             )
+            if built_embeddings is None:
+                # This rotary keys its buffers by a label the attention does not
+                # expose (DeepSeek V4 decouples architecture layer types from its
+                # `main`/`compress` rope types). Keep captured embeddings only
+                # when they describe this sample; never call the rotary with a
+                # label it cannot resolve.
+                if not self._position_embeddings_match(
+                    module_kwargs.get("position_embeddings"), seq_len
+                ):
+                    module_kwargs.pop("position_embeddings", None)
+            else:
+                module_kwargs["position_embeddings"] = built_embeddings
         elif supports_position_ids and seq_len is not None and stale_position_ids:
             # Rebuild whenever the captured ids describe a different sample.
             # The old code only filled a *missing* key, so kwargs captured from
@@ -4178,14 +4366,25 @@ class AWQProcessor(LoopProcessor):
 
         if position_embeddings is None or seq_len is None:
             return True
-        values = (
-            position_embeddings
-            if isinstance(position_embeddings, (tuple, list))
-            else (position_embeddings,)
-        )
+        if isinstance(position_embeddings, Mapping):
+            values = tuple(position_embeddings.values())
+        elif isinstance(position_embeddings, (tuple, list)):
+            values = tuple(position_embeddings)
+        else:
+            values = (position_embeddings,)
+        # Some families (DeepSeek V4) keep one cos/sin pair per rope type in a
+        # mapping of tuples; flatten one level so the sample length is checked.
+        flattened = []
+        for value in values:
+            if isinstance(value, Mapping):
+                flattened.extend(value.values())
+            elif isinstance(value, (tuple, list)):
+                flattened.extend(value)
+            else:
+                flattened.append(value)
         lengths = {
             int(value.shape[-2])
-            for value in values
+            for value in flattened
             if torch.is_tensor(value) and value.dim() >= 2
         }
         if len(lengths) != 1:
@@ -4194,9 +4393,75 @@ class AWQProcessor(LoopProcessor):
         return lengths.pop() == seq_len
 
     @staticmethod
+    def _rotary_layer_type_parameter(rotary: nn.Module) -> Optional[str]:
+        """Name of the per-layer-type selector ``rotary.forward`` accepts."""
+
+        try:
+            parameters = inspect.signature(rotary.forward).parameters
+        except (TypeError, ValueError):
+            return None
+        for name in ("layer_type", "attention_type"):
+            if name in parameters:
+                return name
+        return None
+
+    @staticmethod
+    def _rotary_layer_types(rotary: nn.Module) -> Tuple[str, ...]:
+        """Layer-type labels a typed rotary owns, when it declares them."""
+
+        layer_types = getattr(rotary, "layer_types", None)
+        if isinstance(layer_types, (list, tuple, set, frozenset)):
+            labels = tuple(value for value in layer_types if isinstance(value, str))
+            if labels:
+                return labels
+        rope_type = getattr(rotary, "rope_type", None)
+        if isinstance(rope_type, Mapping):
+            return tuple(key for key in rope_type if isinstance(key, str))
+        return ()
+
+    @classmethod
+    def _build_position_embeddings(
+            cls,
+            rotary: nn.Module,
+            x: torch.Tensor,
+            position_ids: torch.Tensor,
+            selector_kwargs: Optional[Dict[str, Any]],
+            captured,
+    ):
+        """Rebuild the cos/sin scaffolding without changing its container.
+
+        Typed rotaries take a layer-type label; a mapping-shaped
+        ``position_embeddings`` (DeepSeek V4's ``{"main": ..., "compress": ...}``)
+        must stay a mapping so the attention can index its own rope type. When
+        the selector cannot be resolved and the container is not a mapping,
+        return ``None`` and let the caller keep or drop the captured value.
+        """
+
+        parameter_name = cls._rotary_layer_type_parameter(rotary)
+        if isinstance(captured, Mapping):
+            keys = [key for key in captured if isinstance(key, str)]
+            if keys:
+                if parameter_name is not None:
+                    valid_types = set(cls._rotary_layer_types(rotary))
+                    if valid_types and not all(key in valid_types for key in keys):
+                        # Captured keys are not labels this rotary can resolve;
+                        # keep the captured mapping instead of guessing one.
+                        return None
+                built = {}
+                for key in keys:
+                    kwargs = dict(selector_kwargs or {})
+                    if parameter_name is not None:
+                        kwargs[parameter_name] = key
+                    built[key] = rotary(x, position_ids, **kwargs)
+                return built
+        if selector_kwargs is None:
+            return None
+        return rotary(x, position_ids, **selector_kwargs)
+
+    @classmethod
     def _rotary_layer_type_kwargs(
-            rotary: nn.Module, module: torch.nn.Module
-    ) -> Dict[str, Any]:
+            cls, rotary: nn.Module, module: torch.nn.Module
+    ) -> Optional[Dict[str, Any]]:
         """Return the per-layer-type selector a typed rotary needs.
 
         Gemma 3/4 and OLMo 3 rotary embeddings take a required ``layer_type``
@@ -4204,12 +4469,18 @@ class AWQProcessor(LoopProcessor):
         own cos/sin pair. AWQ scales one decoder layer at a time, so the
         selector comes from the attention module being inspected. Rotaries
         without that parameter get an empty mapping and are called as before.
+
+        DeepSeek V4 decouples its architecture layer types
+        (``sliding_attention``/``compressed_sparse_attention``) from the rope
+        labels it indexes (``main``/``compress``). Prefer the attention's own
+        ``rope_layer_type`` selector and only pass a value the rotary declares.
+        Returns ``None`` when no valid selector can be resolved.
         """
 
-        try:
-            parameters = inspect.signature(rotary.forward).parameters
-        except (TypeError, ValueError):
+        parameter_name = cls._rotary_layer_type_parameter(rotary)
+        if parameter_name is None:
             return {}
+        valid_types = set(cls._rotary_layer_types(rotary))
         # `module` is normally the attention block, but a later AWQ group whose
         # root was already consumed (for example `o_proj`) falls back to the
         # decoder layer. Look through both shapes.
@@ -4218,22 +4489,19 @@ class AWQProcessor(LoopProcessor):
             getattr(module, "self_attn", None),
             getattr(module, "attention", None),
         )
-        for name in ("layer_type", "attention_type"):
-            if name not in parameters:
-                continue
+        # `rope_layer_type` is the decoupled rope label (DeepSeek V4); the
+        # architecture selectors remain the fallback for Gemma 3/4 and OLMo 3.
+        for attribute in ("rope_layer_type", "layer_type", "attention_type"):
             for candidate in candidates:
                 if candidate is None:
                     continue
-                value = getattr(candidate, name, None)
-                if value is None:
-                    value = getattr(
-                        candidate,
-                        "attention_type" if name == "layer_type" else "layer_type",
-                        None,
-                    )
-                if isinstance(value, str):
-                    return {name: value}
-        return {}
+                value = getattr(candidate, attribute, None)
+                if not isinstance(value, str):
+                    continue
+                if valid_types and value not in valid_types:
+                    continue
+                return {parameter_name: value}
+        return None
 
     def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
         """Rows per scale-search replay forward.
@@ -4312,6 +4580,11 @@ class AWQProcessor(LoopProcessor):
                 if val.ndim > 0 and val.shape[0] == full_batch_size:
                     return val[start:start + length]
                 return val
+            if isinstance(val, Mapping):
+                return {
+                    key: _slice_value(item, start, length)
+                    for key, item in val.items()
+                }
             if isinstance(val, (list, tuple)):
                 sliced = [_slice_value(item, start, length) for item in val]
                 return type(val)(sliced)
@@ -4448,6 +4721,7 @@ class AWQProcessor(LoopProcessor):
                 named_module.state["gsq_diagnostics"] = {
                     "objective": "weight_mse", "before": fitted.before,
                     "after": fitted.after, "learn_scales": gsq.learn_scales,
+                    "skipped": fitted.skipped,
                 }
 
             if pad_cols:
@@ -4729,6 +5003,12 @@ class AWQProcessor(LoopProcessor):
         # these locks in the opposite order during EoRA finalization.
         if self.calculate_w_wq_diff:
             module.weight.data = module.state.pop("wq").to(CPU)
+        else:
+            # The dense fake-quantized weight only feeds the diff above. Dropping
+            # it here keeps the last layer's projection out of the
+            # ``ModuleLooper -> processors`` cycle, where it waited for a cyclic
+            # GC after ``quantize()`` returned (#4747).
+            module.state.pop("wq", None)
 
         with self.lock:
             module.state.pop("w", None)  #

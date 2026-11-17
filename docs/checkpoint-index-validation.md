@@ -2,7 +2,7 @@
 
 Quantized checkpoints carry integer tensors that are used as *indices*, not as
 weights: GPTQ act-order `g_idx`, NF12 escape indices and MoE escape offsets,
-ParoQuant rotation pairs, VPTQ outlier codes, and the EXL3 trellis `K`. A
+Paro rotation pairs, VPTQ outlier codes, and the EXL3 trellis `K`. A
 crafted checkpoint can put any value in them. Native kernels previously used
 those values directly, so a bad value read or wrote past a histogram, an
 escape table, a codebook, shared memory, or a function-pointer table.
@@ -66,7 +66,7 @@ flowchart TD
 | NF12 escape index (CUDA) | `format.cuh:78,107` `__ldg(escapes + g.lo0)`; `gemv.cu:159`, `mma.cuh:523,720,868,1034`, `sm100/large_m_tc_kernel.cuh:670` | `format.cuh:72-88` and `:106-113` take `num_escapes` and check `g.lo0 < num_escapes`; every linear/decode kernel passes its count |
 | NF12 escape index (HIP) | `nf12_format_hip.cuh:134-145` `escapes[g.lo0]` | `nf12_format_hip.cuh:134-141` checks `g.lo0 < num_escapes`; decode/WMMA/MoE pass the count |
 | NF12 MoE `escape_offsets` | `nf12/csrc/torch/ops.cpp:484-517` checked only contiguity/int64/E+1 | `nf12/csrc/torch/ops.cpp:508-524` checks `>= 0`, monotone, `offsets[E] <= escapes.size(0)` |
-| ParoQuant `pairs` | `rotation.cu:1003-1030` checked device/dtype/rank; `rotation.cuh:73-81,148-160` used int16 pairs as shared-memory rows | `rotation.cu:1028-1040` checks `idx.size(1) == h`, theta/scale geometry; `rotation.cuh` masks pairs into `GROUP_SIZE` |
+| Paro `pairs` | `rotation.cu:1003-1030` checked device/dtype/rank; `rotation.cuh:73-81,148-160` used int16 pairs as shared-memory rows | `rotation.cu:1028-1040` checks `idx.size(1) == h`, theta/scale geometry; `rotation.cuh` masks pairs into `GROUP_SIZE` |
 | VPTQ `outlier_indices` | `vptq_kernel.cu:428,491` passed any int32 to `:73` `code * outlier_vector_len`; loader checked only shape | `vptq_torch.py:334-342` range check; `vptq_kernel.cu:431-444` op-entry check |
 | EXL3 trellis `K` | `reconstruct.cu:100` checked only `packed.size(2)`; `:124-130` indexed a 24-entry `std::array` | `reconstruct.cu:116-122` `TORCH_CHECK(1 <= K && K <= 8 && !(mcg && mul1))`; loader checks in `exl3.py:78` and `exllamav3.py:_stored_features` |
 | FloatX empty scale | `floatx_cpu.cpp:205,237,244,261` took `% count` with `count == 0` → SIGFPE | `floatx_cpu.cpp:201,236,256` reject an empty scale with `TORCH_CHECK` |
@@ -125,5 +125,5 @@ flowchart LR
   The op-entry checks are deliberately cheap shape/range checks; the NF12 MoE
   offset check copies `E + 1` integers, and the VPTQ outlier check scans the
   outlier codes.
-- **Kernels keep a bound.** `g.lo0 < num_escapes` and the ParoQuant pair mask
+- **Kernels keep a bound.** `g.lo0 < num_escapes` and the Paro pair mask
   remain in device code so a missed caller cannot read or write out of bounds.

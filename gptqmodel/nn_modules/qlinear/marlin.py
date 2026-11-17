@@ -53,6 +53,7 @@ from ...utils.marlin import (
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+from ._compile_support import COMPILE_LEVEL
 
 
 log = setup_logger()
@@ -107,6 +108,12 @@ class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
+
+    # Not buildable here: the Marlin torch.ops JIT extension needs CUDA_HOME/nvcc
+    # (both absent), and apply_gptq_marlin_linear has no fake/meta impl, so
+    # dynamo would break. Conservative EAGER; no capture measured.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.EAGER
+    SUPPORTS_GRAPH_CAPTURE = False
 
     # The Marlin evaluator adds the bias to its FP32 accumulator before the
     # visible cast, so the buffer keeps its checkpoint width instead of

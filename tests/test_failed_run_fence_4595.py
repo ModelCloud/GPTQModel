@@ -22,7 +22,7 @@ import pytest
 from tokenizers import Tokenizer, models
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND
+from gptqmodel import BACKEND, CalibrationConfig
 from gptqmodel.looper import module_looper as module_looper_module
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.models.definitions.llama import LlamaQModel
@@ -203,10 +203,12 @@ def test_failed_quantize_does_not_leak_offload_bundles(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="user layer callback error"):
         qmodel.quantize(
-            CALIBRATION,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=CALIBRATION,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.GPTQ_TORCH,
-            calibration_data_min_length=1,
         )
 
     # Any finalizer still running at the raise must have been fenced before

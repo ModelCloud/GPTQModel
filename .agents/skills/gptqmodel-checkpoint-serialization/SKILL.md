@@ -1,9 +1,19 @@
 ---
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-checkpoint-serialization
 description: Choose the on-disk container for converted or quantized model checkpoints in GPT-QModel. Use when writing a new checkpoint writer, converter, or export path; when adding a payload file to a published artifact; when changing how existing weights, scales, zero points, codebooks, or embeddings are stored; or when reviewing a save path that calls torch.save, pickle, or writes .pt/.bin/.pth files.
 ---
 
 # GPT-QModel checkpoint serialization
+
+## At a glance
+
+- **What:** every published tensor payload is safetensors; legacy pickle (`.pt`/`.bin`) stays readable but is never written.
+- **Why:** pickle loading executes code, cannot be memory-mapped or header-inspected, and a mixed-container checkpoint doubles every reader.
+- **When:** writing or changing a checkpoint writer, converter, export path, or a payload uploaded to a model repository.
+- **Where:** `gptqmodel/models/writer.py`, `gptqmodel/utils/model_dequant.py`, `gptqmodel/utils/tt_blockfloat_quant.py`, `gptqmodel/reshard.py`.
+- **How:** `safetensors.torch.save_file` with dispatch metadata, one resolver for reads, atomic rename on publish, round-trip tests.
 
 ## Rule
 
@@ -93,8 +103,7 @@ Read old formats, never write them.
 If a user asks for a specific container, honour it and nothing more:
 
 1. Add one named option on the writer (for example `format="safetensors"` as
-   the default). Do not add a `GPTQMODEL_*` environment variable; runtime
-   behavior belongs in the config object.
+   the default), never an environment variable.
 2. Validate the value and fail closed on anything unrecognised. Do not fall
    back silently to pickle.
 3. Keep the override on the writer only. Readers sniff the payload; they must

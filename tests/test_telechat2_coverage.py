@@ -20,6 +20,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.telechat2 import TeleChat2QModel
 
 
@@ -138,7 +139,7 @@ def test_telechat2_awq_quantizes_attention_projections(tmp_path, monkeypatch):
         }
         for _ in range(2)
     ]
-    model.quantize(calibration, batch_size=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
 
     attention = model.model.transformer.h[0].self_attention
     for name in ("query", "key_value", "dense"):

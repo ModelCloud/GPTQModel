@@ -31,6 +31,7 @@ from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
+from ._compile_support import COMPILE_LEVEL
 from ._numerics import autocast_active, matmul_fp32_reduce
 
 
@@ -215,12 +216,28 @@ def quantize_fp8_weight(
 
 
 class TorchFP8Linear(WeightOnlyQuantLinear):
+    # Measured on GB10 (sm_121), torch 2.11.0+cu130: eager, dynamo, aot_eager,
+    # inductor and reduce-overhead pass, and an explicit torch.cuda.graph
+    # capture succeeds with output matching eager.
+    SUPPORTS_COMPILE_LEVEL = COMPILE_LEVEL.CUDAGRAPH
+    SUPPORTS_GRAPH_CAPTURE = True
+
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
     SUPPORTS_FORMATS = {FORMAT.FP8: 15}
     SUPPORTS_BITS = [8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
+    # Trace-clean: ``forward`` branches only on host-visible constants (device
+    # type, dtypes, shapes, config strings) and its lazy decoded-weight bound is
+    # a load-time cache warmed by the first call, so
+    # ``torch.compile(fullgraph=True)`` traces without a break. Measured on
+    # sm_121 (tiny Llama, 4 prompts x 32 greedy tokens): static-cache decode
+    # 0.126 s eager -> 0.055 s compiled (2.3x, 1 graph, 0 breaks); the reporter
+    # of #4669 measured 0.77 s -> 0.175 s on a 4090. FP8 is the format that
+    # gains the most from the static-cache auto-compile, so opting out was a
+    # 4x regression (#4739).
+    SUPPORTS_COMPILE = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
@@ -734,21 +751,36 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         bound = self._decoded_weight_absmax_bound()
         return bound is not None and bound <= float(torch.finfo(torch.float16).max)
 
+    def _native_gemm_eligible(
+        self, x_flat: torch.Tensor, device_type: str | None = None
+    ) -> bool:
+        """Whether the decoded weight can stay in the activation dtype.
+
+        A bias stored wider than the activation dtype is deliberately not part
+        of this decision: ``matmul_fp32_reduce`` keeps such a bias in the FP32
+        epilogue, so a biased layer gets the same native GEMM as a bias-free
+        one (#4681). ``device_type`` is overridable for tests; callers pass the
+        real tensor device.
+        """
+
+        device_type = x_flat.device.type if device_type is None else device_type
+        return (
+            x_flat.dtype in (torch.float16, torch.bfloat16)
+            and device_type == "cuda"
+            and not autocast_active(device_type)
+            and self._weights_fit_activation_dtype(x_flat.dtype)
+        )
+
     def _forward_dequant_matmul(
         self, x_flat: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if x_flat.dtype in (torch.float16, torch.bfloat16) and (
-            x_flat.device.type != "cuda"
-            or autocast_active(x_flat.device.type)
-            or (bias is not None and bias.dtype != x_flat.dtype)
-            or not self._weights_fit_activation_dtype(x_flat.dtype)
-        ):
+        if not self._native_gemm_eligible(x_flat):
             # Decode into temporary FP32 storage only when narrowing is not
             # range-safe: a decoded FP8 weight above the activation dtype's
             # finite range (for example 65536 under FP16) becomes inf and turns
-            # a finite dot product into NaN, and a wide bias can cancel a sum
-            # outside that range. In-range weights take the native GEMM with an
-            # FP32 reduction below, which also keeps a same-dtype bias wide.
+            # a finite dot product into NaN. In-range weights take the native
+            # GEMM with an FP32 reduction below, which also keeps a wide bias
+            # wide.
             with torch.autocast(device_type=x_flat.device.type, enabled=False):
                 weight = self.dequantize_weight(device=x_flat.device, dtype=torch.float32)
                 output = torch.matmul(x_flat.float(), weight)

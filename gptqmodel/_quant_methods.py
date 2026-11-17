@@ -13,6 +13,11 @@ import it before the quantization package finishes initializing.
 # `quant_method: "gguf"` (plus `method: "gguf"`) keep loading in GPT-QModel.
 GGUF_EXPORT_QUANT_METHOD = "gptqmodel_gguf"
 
+# Checkpoints written before the rename store this method and format name. It
+# is accepted on load so those checkpoints keep working; new checkpoints only
+# ever publish ``paro``.
+LEGACY_PARO_QUANT_METHOD = "paroquant"
+
 # Other published `quant_method` names that transformers does not implement.
 # In transformers 5.x an unknown name only emits "Unknown quantization type"
 # and returns a model whose packed weights were randomly initialized, so
@@ -29,7 +34,8 @@ REFUSED_HF_QUANT_METHODS = {
     "bitsandbytes": "BitsAndBytes",
     "exl3": "EXL3",
     "macaq": "MACaQ MXFP4",
-    "paroquant": "ParoQuant",
+    "paro": "Paro",
+    LEGACY_PARO_QUANT_METHOD: "Paro",
     "qqq": "QQQ",
     "nf12": "NF12",
     "tt-blockfloat": "Tenstorrent block-float",
@@ -46,7 +52,8 @@ REFUSED_HF_QUANT_METHOD_REMEDIES = {
     "bitsandbytes": "`GPTQModel.load`",
     "exl3": "`GPTQModel.load` with the ExLlamaV3 backend",
     "macaq": "`GPTQModel.load`",
-    "paroquant": "`GPTQModel.load`",
+    "paro": "`GPTQModel.load`",
+    LEGACY_PARO_QUANT_METHOD: "`GPTQModel.load`",
     "qqq": "`GPTQModel.load`",
     "nf12": "`GPTQModel.load`",
     "tt-blockfloat": "`GPTQModel.load`",
@@ -59,7 +66,8 @@ REFUSED_HF_QUANT_METHOD_SUPPORT_ROWS = {
     "bitsandbytes": "BitsAndBytes",
     "exl3": "Exllama V3 / EXL3",
     "macaq": "MACaQ (MXFP4 W4A4)",
-    "paroquant": "ParoQuant",
+    "paro": "Paro",
+    LEGACY_PARO_QUANT_METHOD: "Paro",
     "qqq": "QQQ",
     "nf12": "NF12",
 }

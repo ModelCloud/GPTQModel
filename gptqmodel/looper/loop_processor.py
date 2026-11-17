@@ -37,7 +37,7 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..quantization.config import QuantizeConfig
+from ..quantization.config import CalibrationConfig, QuantizeConfig
 from ..utils.attn_mask import bos_token_positions, exclude_attention_sinks
 from ..utils.calibration import calibration_input_row_count
 from ..utils.colors import ANSIColor, color_text
@@ -308,7 +308,7 @@ class ForwardConfig:
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
     | GPTQ          | yes      | yes                    | no                        | yes        | no                 |
     | AWQ           | yes      | yes                    | no                        | yes        | yes                |
-    | ParoQuant     | yes      | yes                    | no                        | yes        | yes                |
+    | Paro     | yes      | yes                    | no                        | yes        | yes                |
     | Native        | yes      | no                     | yes                       | no         | no                 |
     | WeightOnly    | no       | no                     | no/default                | no/default | no                 |
     +--------------+----------+------------------------+---------------------------+------------+--------------------+
@@ -334,34 +334,6 @@ class ForwardConfig:
     # quantization task restores that dense source; a forward-only capture must
     # keep the module in the tree so the next processor can wrap it.
     allow_auto_dtype_cast: bool = True
-
-
-@dataclass(frozen=True)
-class CalibrationConfig:
-    """Describe the data and preparation policy for one calibration run."""
-
-    dataset: Any = None
-    prepare_dataset: Optional[Callable] = None
-    concat_size: Optional[int] = None
-    sort: Optional[str] = None
-    concat_separator: Optional[str] = None
-    batch_size: int = 1
-    # Drop attention-sink tokens (every attended BOS token: the leading one
-    # and each document-boundary BOS of concatenated calibration) from every
-    # calibration statistic (issue #4393). Tokenizers without a BOS token have
-    # no sink to drop, so nothing changes for them (issue #4459). The tokens
-    # still run through the forward, so later tokens keep attending to them;
-    # only the per-token rows each processor accumulates (Hessians, AWQ
-    # features, sample counts) skip them. Applied once, by
-    # ``LoopProcessor.calibration_keep_mask``.
-    exclude_attention_sinks: bool = False
-
-    def __post_init__(self):
-        if not isinstance(self.exclude_attention_sinks, bool):
-            raise TypeError(
-                "CalibrationConfig.exclude_attention_sinks must be a bool, "
-                f"got {type(self.exclude_attention_sinks).__name__}."
-            )
 
 
 class CalibrationTypes(str, Enum):
@@ -399,7 +371,7 @@ def record_quant_log(model, processors) -> list:
     row for every module (#4367).
 
     Selecting the first owning log rather than a hard-coded processor name keeps
-    every quantizer's rows publishable (FOEM, QQQ, VPTQ, ParoQuant, FP8-GSQ, RTN,
+    every quantizer's rows publishable (FOEM, QQQ, VPTQ, Paro, FP8-GSQ, RTN,
     ...; issue #4321). When no owning processor recorded rows, an existing
     ``model.quant_log`` is preserved: the standalone EoRA-generation loop has no
     primary quantizer, so it cannot replace a restored quantization log with
@@ -598,13 +570,17 @@ class LoopProcessor:
                                f"Current: {raw_calibration_size}.")
 
             if self.calibration.prepare_dataset is None:
-                raise ValueError("CalibrationConfig.prepare_dataset must be provided when calibration data is supplied.")
+                raise ValueError(
+                    "CalibrationConfig.prepare_dataset must be bound (CalibrationConfig.bind()) "
+                    "when calibration data is supplied."
+                )
 
             calibration_dataset = self.calibration.prepare_dataset(
                 calibration_dataset=calibration_dataset,
                 calibration_dataset_concat_size=self.calibration.concat_size,
                 calibration_dataset_sort=self.calibration.sort,
                 batch_size=self.calibration.batch_size,
+                calibration_data_min_length=self.calibration.min_length,
                 calibration_concat_separator=self.calibration.concat_separator,
             )
 
@@ -618,7 +594,7 @@ class LoopProcessor:
                 raise ValueError(
                     "Calibration dataset is empty after CalibrationConfig.prepare_dataset removed "
                     "all samples (for example, every input_ids was shorter than "
-                    "calibration_data_min_length). Lower calibration_data_min_length "
+                    "CalibrationConfig.min_length). Lower CalibrationConfig.min_length "
                     "or provide longer calibration samples."
                 )
 
@@ -699,7 +675,7 @@ class LoopProcessor:
             bos_token_id = self._attention_sink_bos_token_id()
             if bos_token_id is None:
                 log.warn(
-                    "Calibration: `calibration_exclude_attention_sinks` is enabled but the "
+                    "Calibration: `CalibrationConfig.exclude_attention_sinks` is enabled but the "
                     "tokenizer has no BOS token, so there is no attention sink to exclude; "
                     "calibration statistics are unchanged."
                 )

@@ -23,8 +23,12 @@ import pcre
 import torch
 
 from ..utils.gemv import awq_gemv_codes
+from ..utils.logger import setup_logger
 from ..utils.packing_math import awq_packed_codes, awq_storage_dtype
 from .config import normalize_gsq_config
+
+
+log = setup_logger()
 
 
 # Sweep cap for the hard code search. Real layers converge within a handful of
@@ -58,6 +62,37 @@ class ScalarGSQResult:
     before: float | None
     after: float | None
     history: list[float]
+    #: True when the search was provably unable to beat the baseline and was
+    #: skipped (calibration-free weight MSE with fixed scales, #4691).
+    skipped: bool = False
+
+
+def _match_inference_mode(result: ScalarGSQResult, source: torch.Tensor) -> ScalarGSQResult:
+    """Return ``result`` in the inference mode its caller is using (#4690).
+
+    The search runs under ``torch.inference_mode(False)`` so autograd works.
+    Callers that hand it inference tensors (the AWQ staging path runs inside
+    ``torch.inference_mode()``) assign the result through ``Parameter.data``;
+    handing back a normal tensor flips that Parameter out of inference mode and
+    the next calibration replay raises
+    ``RuntimeError: Inference tensors do not track version counter``. Re-create
+    the outputs under inference mode when the inputs were inference tensors so
+    the Parameter keeps the mode it was created in.
+    """
+
+    if not source.is_inference():
+        return result
+    with torch.inference_mode():
+        return ScalarGSQResult(
+            result.weight.clone(),
+            result.scales.clone(),
+            result.zeros.clone(),
+            result.g_idx.clone(),
+            result.before,
+            result.after,
+            list(result.history),
+            result.skipped,
+        )
 
 
 def asymmetric_error_term(weight_error, teacher, cross_moment, alpha=1.0):
@@ -453,13 +488,18 @@ def refine_affine_scalar(
     Hard checkpoints are scored after weight casting, code reconstruction by the
     selected packer convention, and scale casting to the checkpoint dtype.
     The original baseline tensors are returned unchanged unless that score improves.
+    A calibration-free objective with fixed scales is skipped outright: nearest
+    rounding already minimizes it, so the search could only reproduce the baseline.
     An optional native-minus-current cross moment adds the asymmetric linear
     term. Scores then omit a candidate-independent constant and can be negative;
     they are not absolute normalized reconstruction errors.
     """
     config = normalize_gsq_config(config)
     if config is None or not config.enabled:
-        return ScalarGSQResult(weight.clone(), scales.clone(), zeros.clone(), g_idx.clone(), None, None, [])
+        return _match_inference_mode(
+            ScalarGSQResult(weight.clone(), scales.clone(), zeros.clone(), g_idx.clone(), None, None, []),
+            weight,
+        )
     if isinstance(bits, bool) or not isinstance(bits, int) or not 1 <= bits <= 8:
         raise ValueError("scalar GSQ bits must be an integer in [1,8]")
     if packing in ("awq_gemm", "awq_gemv", "awq_gemv_fast"):
@@ -527,13 +567,17 @@ def refine_affine_scalar(
                 normalizers.append(energy if energy > torch.finfo(torch.float32).eps else 1.0)
                 results.append(part)
             total = sum(normalizers)
-            return ScalarGSQResult(
-                torch.cat([part.weight for part in results]),
-                torch.cat([part.scales for part in results]), zeros.detach().clone(), g_idx.detach().clone(),
-                sum(part.before * norm for part, norm in zip(results, normalizers)) / total,
-                sum(part.after * norm for part, norm in zip(results, normalizers)) / total,
-                [sum(part.history[step] * norm for part, norm in zip(results, normalizers)) / total
-                 for step in range(config.steps + 1)],
+            return _match_inference_mode(
+                ScalarGSQResult(
+                    torch.cat([part.weight for part in results]),
+                    torch.cat([part.scales for part in results]), zeros.detach().clone(), g_idx.detach().clone(),
+                    sum(part.before * norm for part, norm in zip(results, normalizers)) / total,
+                    sum(part.after * norm for part, norm in zip(results, normalizers)) / total,
+                    [sum(part.history[step] * norm for part, norm in zip(results, normalizers)) / total
+                     for step in range(len(results[0].history))],
+                    skipped=results[0].skipped,
+                ),
+                weight,
             )
 
     with torch.inference_mode(False), torch.enable_grad():
@@ -623,6 +667,25 @@ def refine_affine_scalar(
             raise ValueError("non-finite scalar GSQ baseline objective")
         best, best_weight, best_scales = before, baseline, scales.detach().clone()
         history = [before]
+        if hessian is None and inputs is None and cross_moment is None and not config.learn_scales:
+            # The objective is plain weight MSE and the scales are fixed, so it
+            # is separable per element: the nearest-rounding code RTN/AWQ
+            # already produced is the exact minimizer, and no candidate this
+            # loop can export scores strictly better. Skipping keeps the
+            # checkpoint bit-identical while dropping the whole step budget
+            # (RTN+GSQ was 6.7x slower for 0 changed tensors, #4691).
+            log.info(
+                "GSQ: weight-MSE objective with fixed scales cannot improve nearest "
+                "rounding; skipping the code search for this module."
+            )
+            return _match_inference_mode(
+                ScalarGSQResult(
+                    best_weight.detach().to(weight.dtype), best_scales.detach().to(scales.dtype),
+                    zeros.detach().clone(), g_idx.detach().clone(), before, best, history,
+                    skipped=True,
+                ),
+                weight,
+            )
         for step in range(config.steps):
             tau = config.temperature_start * (config.temperature_end / config.temperature_start) ** (
                 step / max(config.steps-1, 1))
@@ -655,5 +718,8 @@ def refine_affine_scalar(
                 history.append(score)
                 if score < best:
                     best, best_weight, best_scales = score, candidate.clone(), hard_scales.clone()
-        return ScalarGSQResult(best_weight.detach().to(weight.dtype), best_scales.detach().to(scales.dtype),
-                               zeros.detach().clone(), g_idx.detach().clone(), before, best, history)
+        return _match_inference_mode(
+            ScalarGSQResult(best_weight.detach().to(weight.dtype), best_scales.detach().to(scales.dtype),
+                            zeros.detach().clone(), g_idx.detach().clone(), before, best, history),
+            weight,
+        )

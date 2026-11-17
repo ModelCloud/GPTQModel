@@ -12,7 +12,7 @@ from tokenizers.models import WordLevel
 from torch import nn
 from transformers import PreTrainedTokenizerFast, Qwen2_5OmniConfig, Qwen2_5OmniForConditionalGeneration
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import FORMAT, RTNConfig
@@ -178,7 +178,7 @@ def test_omni_lm_head_quantize_save_reload(tiny_omni_checkpoint, tmp_path, metho
         str(tiny_omni_checkpoint), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16,
     )
     inputs = {"input_ids": torch.arange(4, 36).unsqueeze(0), "attention_mask": torch.ones(1, 32, dtype=torch.long)}
-    model.quantize([inputs], backend=BACKEND.TORCH)
+    model.quantize(CalibrationConfig(dataset=[inputs]), backend=BACKEND.TORCH)
     head = model.model.thinker.lm_head
     assert isinstance(head, TorchLinear)
     assert head.bits == head_bits
@@ -220,7 +220,7 @@ def test_omni_lm_head_rejects_shared_weights(tiny_omni_checkpoint, method):
     inputs = {"input_ids": torch.arange(4, 36).unsqueeze(0), "attention_mask": torch.ones(1, 32, dtype=torch.long)}
 
     with pytest.raises(NotImplementedError, match="tied weights"):
-        model.quantize([inputs], backend=BACKEND.TORCH)
+        model.quantize(CalibrationConfig(dataset=[inputs]), backend=BACKEND.TORCH)
 
     assert model.model.thinker.lm_head.weight is embedding.weight
     assert not any(isinstance(module, TorchLinear) for module in model.model.modules())

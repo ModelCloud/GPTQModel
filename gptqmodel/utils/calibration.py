@@ -901,14 +901,14 @@ def prepare_calibration_dataset(
         log.warn(
             f"Quantize: {too_short_calibration_data_count} calibration items were removed because every row was "
             f"empty, all-padding, or <= {calibration_data_min_length} non-padding tokens. "
-            f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
+            f"Use CalibrationConfig(min_length=...) to set a custom minimum length."
         )
 
     if too_short_row_count > 0:
         log.warn(
             f"Quantize: {too_short_row_count} calibration rows with <= {calibration_data_min_length} "
             "non-padding tokens were removed. "
-            f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
+            f"Use CalibrationConfig(min_length=...) to set a custom minimum length."
         )
 
     if message_examples > 0 and message_template_name is not None:

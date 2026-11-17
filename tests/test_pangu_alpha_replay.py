@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel import CalibrationConfig
 from gptqmodel.models.definitions.pangu_alpha import PanguAlphaQModel
 
 
@@ -170,7 +171,7 @@ def test_pangu_last_layer_gptq_beats_rtn(tmp_path):
             trust_remote_code=True,
             dtype=torch.float32,
         )
-        model.quantize(calibration, batch_size=1)
+        model.quantize(CalibrationConfig(dataset=calibration, batch_size=1))
         save_path = tmp_path / label
         model.save(str(save_path))
         del model

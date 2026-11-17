@@ -27,7 +27,7 @@ from tokenizers.trainers import WordLevelTrainer
 from torch import nn
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, QuantizeConfig
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.quantization.config import AWQConfig, NF12Config
 from gptqmodel.utils import auto_dtype_cast
@@ -131,7 +131,7 @@ def _quantize_and_save(native: Path, output: Path, pattern: str, method: str, ca
         quantize_config=_quantize_config(pattern, method, cast),
         backend=BACKEND.TORCH,
     )
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     model.save(str(output))
     return output
 
@@ -294,9 +294,7 @@ def test_post_quant_eora_generation_survives_auto_nf12_and_dynamic(
         adapter=Lora(path=str(adapter_dir), rank=4),
         model_id_or_path=str(native_llama),
         quantized_model_id_or_path=str(checkpoint),
-        calibration_dataset=_CALIBRATION_TEXTS,
-        calibration_dataset_concat_size=0,
-        batch_size=1,
+        calibration=CalibrationConfig(dataset=_CALIBRATION_TEXTS, concat_size=None, batch_size=1),
     )
     assert (adapter_dir / "adapter_model.safetensors").is_file()
     assert (adapter_dir / "adapter_config.json").is_file()

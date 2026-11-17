@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel GIL=0 Safety"
+  short_description: "Free-threaded PyTorch safety"
+  default_prompt: "Use $gptqmodel-pytorch-gil0 before writing or reviewing PyTorch code that runs on more than one thread."

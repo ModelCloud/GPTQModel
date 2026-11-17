@@ -30,7 +30,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from gptqmodel import BACKEND, QuantizeConfig
+from gptqmodel import BACKEND, CalibrationConfig, QuantizeConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
@@ -297,10 +297,12 @@ def _quantize(
         ]
     try:
         model.quantize(
-            _calibration(tokenizer, include_pixel_values=include_pixel_values),
-            batch_size=1,
+            CalibrationConfig(
+                dataset=_calibration(tokenizer, include_pixel_values=include_pixel_values),
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
         )
     finally:
         text_handle.remove()
@@ -430,10 +432,12 @@ def test_single_branch_replay_context_is_unchanged(tmp_path):
     )
     try:
         model.quantize(
-            calibration,
-            batch_size=1,
+            CalibrationConfig(
+                dataset=calibration,
+                batch_size=1,
+                min_length=1,
+            ),
             backend=BACKEND.TORCH,
-            calibration_data_min_length=1,
         )
     finally:
         handle.remove()

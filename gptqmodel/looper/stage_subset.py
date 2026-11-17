@@ -1019,6 +1019,32 @@ def _run_single_subset_pass(
     if execute_forward and moe_block is not None and moe_block_name is not None:
         processor.register_moe_root_capture_hook(moe_block, moe_block_name, handle)
 
+    # AWQ's routed-expert gate/up scaling group reads the shared pre-router
+    # input of the declared MoE root. Resolve that root from the module plan so
+    # a definition without routing-lifecycle hooks still captures it: the root
+    # input is a plain pre-forward hook and does not need routing control.
+    # Without this, the root task stays empty and `awq_get_modules_for_scaling`
+    # silently drops the whole group (#4697).
+    if execute_forward and is_awq_processor:
+        registered_roots = {id(moe_block)} if moe_block is not None else set()
+        module_plan = _model_module_plan(looper.gptq_model)
+        if module_plan is not None and any(module_plan.is_expert(name) for name in full):
+            for spec in module_plan.moe_roots():
+                template = spec.template
+                # Only a layer-level root is addressable from this hook. A
+                # nested root keeps its existing fallback feature because the
+                # group builder reads a layer-level root feature.
+                if "." in template or "#" in template or "{" in template:
+                    continue
+                try:
+                    root = module.get_submodule(template)
+                except AttributeError:
+                    continue
+                if id(root) in registered_roots:
+                    continue
+                registered_roots.add(id(root))
+                processor.register_moe_root_capture_hook(root, template, handle)
+
     shared_input_leaders: Dict[str, str] = {}
     if execute_forward:
         # Explicit `:in=<tag>` groups collect the Hessian once (leader) and copy it
@@ -1048,6 +1074,20 @@ def _run_single_subset_pass(
         forward.replay_after_process or forward.subset_early_stop
     ):
         pending_members = set(subset_names)
+        # The pending set and the stop flag describe one forward pass, not the
+        # whole subset stage. The member that completes the subset keeps
+        # ``forward_hook_last`` set until the stage ends, and the set stays
+        # empty, so from the second calibration batch on the first member to
+        # fire stopped the forward and every sibling lost that batch (#4738).
+        # Refill both at the start of each batch: the layer module is forwarded
+        # once per batch before any of its subset members.
+        def _reset_subset_early_stop(_module, _inputs):
+            pending_members.clear()
+            pending_members.update(subset_names)
+            for member_name in subset_names:
+                subset[member_name].forward_hook_last = False
+
+        handle.append(module.register_forward_pre_hook(_reset_subset_early_stop))
 
     if execute_forward:
         for idx, name in enumerate(subset_names):

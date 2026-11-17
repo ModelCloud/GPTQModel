@@ -309,8 +309,45 @@ def selector_device_family(device: Optional[SelectorDevices]) -> Optional[DEVICE
     return _device_family(targets[0])
 
 
-def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | tuple[SelectorDevice, ...]:
-    """Expand one abstract accelerator family to all visible physical devices."""
+def _compute_capability_group(
+    devices: tuple[SelectorDevice, ...],
+) -> tuple[SelectorDevice, ...]:
+    """Devices that share the first entry's compute capability.
+
+    Kernel selection needs one capability, so a default placement that expands
+    to every visible GPU refuses the whole load on a host that mixes
+    generations (a 4090 next to a 5090) even when the model fits on one card
+    (#4705). Entries whose capability cannot be queried are kept.
+    """
+
+    if len(devices) < 2:
+        return devices
+    first = devices[0]
+    if _device_family(first) not in (DEVICE.CUDA, DEVICE.ROCM):
+        return devices
+    capability = _device_capability(first)
+    if capability is None:
+        return devices
+    kept = tuple(
+        device
+        for device in devices
+        if _device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM)
+        or _device_capability(device) in (None, capability)
+    )
+    return kept or devices
+
+
+def expand_selector_device_family(
+    device: SelectorDevices, *, single_capability_group: bool = False
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    """Expand one abstract accelerator family to all visible physical devices.
+
+    ``single_capability_group`` keeps the expansion inside the first device's
+    compute-capability group. The default placement uses it: without a
+    placement argument a mixed-generation host must still load, and the caller
+    can always ask for the full span with ``device``/``device_map``/
+    ``max_memory`` (#4705).
+    """
     targets = _selector_devices(device)
     assert targets is not None
     if len(targets) != 1:
@@ -346,6 +383,8 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
         return family
 
     devices = tuple(torch.device(f"{runtime_type}:{index}") for index in range(count))
+    if single_capability_group:
+        devices = _compute_capability_group(devices)
     _validate_selector_device_families(devices)
     return devices[0] if len(devices) == 1 else devices
 
@@ -1027,7 +1066,9 @@ def _validate_selector_device_families(devices: Sequence[SelectorDevice]) -> Non
         )
         raise ValueError(
             "Quantized kernel selection does not support a device map spanning "
-            f"different GPU compute capabilities: {rendered}."
+            f"different GPU compute capabilities: {rendered}. Place the model on "
+            "one capability group with `device=\"cuda:N\"`, a `max_memory` budget "
+            "that names one card, or a `CUDA_VISIBLE_DEVICES` list."
         )
 
 

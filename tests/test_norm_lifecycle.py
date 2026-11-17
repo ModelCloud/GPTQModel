@@ -12,7 +12,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel, NormConfig, NormType, QuantizeConfig, QuantizeEmbed
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel, NormConfig, NormType, QuantizeConfig, QuantizeEmbed
 from gptqmodel.quantization import FORMAT
 
 
@@ -66,11 +66,16 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
     qcfg = QuantizeConfig(bits=4, group_size=16, desc_act=False, device="cpu",
         format=format, pack_impl="original")  # Exercise the default disk-offload lifecycle.
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     assert any(t.is_meta or torch.is_inference(t) for t in model.model.parameters())
     with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-        model.requantize(calibration, norm=NormConfig(teacher="must-not-load", steps=1),
-            calibration_data_min_length=1)
+        model.requantize(
+            CalibrationConfig(
+                dataset=calibration,
+                min_length=1,
+            ),
+            norm=NormConfig(teacher="must-not-load", steps=1),
+        )
     model.save(str(packed))
     basename = "model" if layout == "canonical" else "gptq_model-4bit-16g"
     if layout == "legacy":
@@ -99,16 +104,21 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
     resolved.rename(unavailable)
     try:
         with pytest.raises(FileNotFoundError):
-            model.requantize(calibration, norm=NormConfig(teacher="must-not-load", steps=2),
-                calibration_data_min_length=1)
+            model.requantize(
+                CalibrationConfig(
+                    dataset=calibration,
+                    min_length=1,
+                ),
+                norm=NormConfig(teacher="must-not-load", steps=2),
+            )
         assert all(torch.equal(v, before[k]) for k, v in model.model.state_dict().items())
         assert not getattr(model, "_module_replacement_prefixes", set())
     finally:
         unavailable.rename(resolved)
 
     tune = NormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0)
-    args = {"calibration": calibration, "embed_quant_mode": QuantizeEmbed.OUTPUT,
-        "backend": BACKEND.TORCH, "calibration_data_min_length": 1}
+    args = {"calibration": CalibrationConfig(dataset=calibration, min_length=1),
+        "embed_quant_mode": QuantizeEmbed.OUTPUT, "backend": BACKEND.TORCH}
     if format == FORMAT.GPTQ:
         before = {k: v.clone() for k, v in model.model.state_dict().items()}
         with pytest.raises(ValueError, match="Requantize embeddings separately"):
@@ -118,7 +128,7 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
         assert model.model.lm_head.qzero_format() == 2
         # A fresh GPTQ pack now keeps the v2 runtime qzero layout in memory
         # (#4063), so the reload-only norm-tuning guard no longer applies.
-        model.requantize(calibration, norm=tune, calibration_data_min_length=1)
+        model.requantize(CalibrationConfig(dataset=calibration, min_length=1), norm=tune)
         model.save(str(embedded))
         model = GPTQModel.load(str(embedded), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
     else:
@@ -129,7 +139,7 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
         model = GPTQModel.load(str(embedded), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
 
     # The documented save/reload recovery must really train and remain serializable.
-    result = model.requantize(calibration, norm=tune, calibration_data_min_length=1)
+    result = model.requantize(CalibrationConfig(dataset=calibration, min_length=1), norm=tune)
     assert result["norm"]["skipped_steps"] == 0
     with torch.inference_mode():
         logits = model.model(**calibration[0], use_cache=False).logits.clone()
@@ -160,7 +170,7 @@ def test_layer_norm_tuning_through_requantize_on_quantized_gpt2(tmp_path, monkey
     qcfg = QuantizeConfig(bits=4, group_size=16, desc_act=False, device="cpu",
         format=FORMAT.GPTQ_V2, pack_impl="original")
     model = GPTQModel.load(str(source), quantize_config=qcfg, backend=BACKEND.TORCH, dtype=torch.float16)
-    model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    model.quantize(CalibrationConfig(dataset=calibration, batch_size=1, min_length=1), backend=BACKEND.TORCH)
     model.save(str(packed))
     model = GPTQModel.load(str(packed), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
 
@@ -168,12 +178,23 @@ def test_layer_norm_tuning_through_requantize_on_quantized_gpt2(tmp_path, monkey
     assert names == ["transformer.h.0.ln_1", "transformer.h.0.ln_2", "transformer.ln_f"]
     # The first-release default stays RMSNorm-only, so this definition has nothing to tune.
     with pytest.raises(ValueError, match="declares no `:norm` modules matching"):
-        model.requantize(calibration, norm=NormConfig(teacher=teacher, steps=1),
-            calibration_data_min_length=1)
+        model.requantize(
+            CalibrationConfig(
+                dataset=calibration,
+                min_length=1,
+            ),
+            norm=NormConfig(teacher=teacher, steps=1),
+        )
 
     before = _checkpoint_tensors(packed, "model")
-    result = model.requantize(calibration, norm=NormConfig(teacher=teacher, types=(NormType.LAYERNORM,),
-        steps=2, lr=1e-2, reg=0.0), calibration_data_min_length=1)
+    result = model.requantize(
+        CalibrationConfig(
+            dataset=calibration,
+            min_length=1,
+        ),
+        norm=NormConfig(teacher=teacher, types=(NormType.LAYERNORM,),
+        steps=2, lr=1e-2, reg=0.0),
+    )
     assert result["norm"]["types"] == ["layernorm"]
     assert result["norm"]["skipped_steps"] == 0
     expected = {f"{name}.{kind}" for name in names for kind in ("weight", "bias")}

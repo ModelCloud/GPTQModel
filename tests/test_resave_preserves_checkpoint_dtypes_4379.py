@@ -19,7 +19,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND, CalibrationConfig, GPTQModel
 from gptqmodel.models.writer import _quantization_config_for_model_config
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.quantization import FORMAT
@@ -121,10 +121,12 @@ def test_gptq_resave_preserves_fp16_biases_under_bf16_config(tmp_path):
         backend=BACKEND.TORCH,
     )
     model.quantize(
-        CALIBRATION,
-        batch_size=1,
+        CalibrationConfig(
+            dataset=CALIBRATION,
+            batch_size=1,
+            min_length=1,
+        ),
         backend=BACKEND.GPTQ_TORCH,
-        calibration_data_min_length=1,
     )
     model.save(str(quantized))
     del model

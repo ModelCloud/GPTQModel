@@ -5,7 +5,7 @@
 
 #4228/#4308 gave the vision-language overrides one contract in
 ``models/definitions/_vlm_calibration.py``: pre-tokenized rows and columnar
-mappings take the base text path, ``calibration_concat_size`` is rejected for
+mappings take the base text path, ``CalibrationConfig.concat_size`` is rejected for
 conversations, and the processor path only sees chat conversations. Definitions
 added afterwards copied the conversation loop and silently bypassed it, so a
 documented ``[{"input_ids": ...}]`` dataset was rendered as an empty chat
@@ -164,7 +164,7 @@ def test_columnar_mapping_is_unpacked_not_rendered_as_key_names(cls, monkeypatch
 def test_conversation_path_rejects_concat_size(cls):
     model = _make_model(cls)
 
-    with pytest.raises(ValueError, match="calibration_concat_size"):
+    with pytest.raises(ValueError, match=r"CalibrationConfig\.concat_size"):
         model.prepare_dataset(
             [_conversation("hello")],
             batch_size=1,
