@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
-import torchvision.transforms as T
 from PIL import Image, ImageOps
 from torch.nn.utils.rnn import pad_sequence
 from transformers import LlamaTokenizerFast
@@ -108,6 +107,13 @@ class ImageTransform(object):
         std: Optional[Tuple[float, float, float]] = (0.5, 0.5, 0.5),
         normalize: bool = True,
     ):
+        try:
+            import torchvision.transforms as T
+        except ImportError as exc:
+            raise ImportError(
+                "DeepSeek-VL2 image processing requires torchvision; install with `pip install 'gptqmodel[vision]'` "
+                "using a torchvision build compatible with your PyTorch installation."
+            ) from exc
         self.mean = mean
         self.std = std
         self.normalize = normalize

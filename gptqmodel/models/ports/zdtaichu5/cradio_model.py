@@ -36,8 +36,11 @@ from transformers import PreTrainedModel
 
 try:
     from timm.models import VisionTransformer, checkpoint_seq
-except ImportError as exc:  # pragma: no cover - import-time dependency guard
-    raise ImportError("cradio_model.py requires timm to build the C-RADIO ViT tower") from exc
+except ImportError as exc:
+    raise ImportError(
+        "ZDTaichu C-RADIO vision requires timm; install with `pip install 'gptqmodel[vision]'` "
+        "using a torchvision build compatible with your PyTorch installation."
+    ) from exc
 
 from .cradio_config import RADIOConfig
 

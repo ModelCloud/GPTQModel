@@ -43,6 +43,10 @@ dependencies = { file = ["requirements.txt"] }
 
 
 [project.optional-dependencies]
+vision = [
+    "timm>=1.0.22",
+    "einops>=0.8.1",
+]
 test = [
     "pytest>=9.1.1",
     "pytest-timeout>=2.4.0",

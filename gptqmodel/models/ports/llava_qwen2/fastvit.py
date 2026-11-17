@@ -7,10 +7,18 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from timm.layers import DropPath, SqueezeExcite
 from torch import Tensor
 from torch.nn import functional as F
 from torch.nn.init import normal_
+
+
+try:
+    from timm.layers import DropPath, SqueezeExcite
+except ImportError as exc:
+    raise ImportError(
+        "LLaVA-Qwen2 MobileCLIP vision requires timm; install with `pip install 'gptqmodel[vision]'` "
+        "using a torchvision build compatible with your PyTorch installation."
+    ) from exc
 
 
 class SEBlock(nn.Module):
